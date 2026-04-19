@@ -45,6 +45,8 @@ private:
     };
     
 public:
+    static Option none() { return Option(None); }
+
     // Constructors
     Option() : has_value(false), dummy(0) {}
     
@@ -142,6 +144,8 @@ public:
     // Check if Option contains a value
     bool is_some() const { return has_value; }
     bool is_none() const { return !has_value; }
+    bool is_ok() const { return has_value; }
+    bool is_err() const { return !has_value; }
 
     // Clone the Option (explicit copy) - Rust style
     // Requires T to be copyable
@@ -253,6 +257,14 @@ public:
             return f(value);
         }
         return ResultType(None);
+    }
+
+    // Rust parity: Option::or(self, optb) -> Option<T>
+    Option or_(Option other) {
+        if (has_value) {
+            return Option(std::move(value));
+        }
+        return other;
     }
 
     // ok_or_else: convert Option<T> to Result<T, E> using closure for error
@@ -367,6 +379,8 @@ private:
     T* ptr;  // nullptr if None, otherwise points to the value
 
 public:
+    static Option none() { return Option(None); }
+
     // Constructors
     Option() : ptr(nullptr) {}
 
@@ -409,6 +423,8 @@ public:
     // Check if Option contains a value
     bool is_some() const { return ptr != nullptr; }
     bool is_none() const { return !ptr; }
+    bool is_ok() const { return ptr != nullptr; }
+    bool is_err() const { return !ptr; }
 
     // Clone the Option (explicit copy) - Rust style
     // @lifetime: owned
@@ -537,6 +553,13 @@ public:
         return Option<U>(None);
     }
 
+    Option or_(Option other) const {
+        if (ptr) {
+            return Option(*ptr);
+        }
+        return other;
+    }
+
     // as_ref() for Option<T&> returns itself (already a reference)
     // @lifetime: (&'a) -> &'a self
     Option<T&> as_ref() & {
@@ -583,6 +606,8 @@ private:
     const T* ptr;  // nullptr if None, otherwise points to the value
 
 public:
+    static Option none() { return Option(None); }
+
     // Constructors
     Option() : ptr(nullptr) {}
 
@@ -637,6 +662,8 @@ public:
     // Check if Option contains a value
     bool is_some() const { return ptr != nullptr; }
     bool is_none() const { return !ptr; }
+    bool is_ok() const { return ptr != nullptr; }
+    bool is_err() const { return !ptr; }
 
     // Clone the Option (explicit copy) - Rust style
     // @lifetime: owned
@@ -711,6 +738,13 @@ public:
         return Option<U>(None);
     }
 
+    Option or_(Option other) const {
+        if (ptr) {
+            return Option(*ptr);
+        }
+        return other;
+    }
+
     // as_ref() for Option<const T&> returns itself (already a const reference)
     // @lifetime: (&'a) -> &'a self
     Option<const T&> as_ref() const & {
@@ -743,8 +777,17 @@ public:
 
 template<typename T>
 // @lifetime: owned
-Option<T> Some(T value) {
-    return Option<T>(std::move(value));
+Option<std::decay_t<T>> Some(T&& value) {
+    using value_type = std::decay_t<T>;
+    // Rust `Some(x)` moves `x`. For non-copyable lvalue payloads, mimic
+    // move semantics to avoid forcing an invalid copy in generated code.
+    if constexpr (std::is_lvalue_reference_v<T&&>
+                  && !std::is_copy_constructible_v<value_type>
+                  && std::is_move_constructible_v<value_type>) {
+        return Option<value_type>(std::move(value));
+    } else {
+        return Option<value_type>(std::forward<T>(value));
+    }
 }
 
 // Helper function to create Some variant (mutable reference)
@@ -813,6 +856,26 @@ bool operator==(const Option<T>& lhs, std::nullopt_t) {
 template<typename T>
 bool operator==(std::nullopt_t, const Option<T>& rhs) {
     return rhs.is_none();
+}
+
+template<typename T>
+bool operator==(const Option<T>& lhs, None_t) {
+    return lhs.is_none();
+}
+
+template<typename T>
+bool operator==(None_t, const Option<T>& rhs) {
+    return rhs.is_none();
+}
+
+template<typename T>
+bool operator!=(const Option<T>& lhs, None_t) {
+    return lhs.is_some();
+}
+
+template<typename T>
+bool operator!=(None_t, const Option<T>& rhs) {
+    return rhs.is_some();
 }
 
 template<typename T>

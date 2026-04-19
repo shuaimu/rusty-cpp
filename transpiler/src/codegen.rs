@@ -28,6 +28,7 @@ struct ExtensionImplMethod {
     self_ty: syn::Type,
     method: syn::ImplItemFn,
     callable_param_metadata: HashMap<String, CallableParamBoundMetadata>,
+    associated_type_bindings: HashMap<String, syn::Type>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,9 +221,20 @@ pub struct CodeGen {
     /// Stack of in-scope generic parameter names (type + const).
     /// Used for dependent-type emission and generic-argument recovery.
     type_param_scopes: Vec<HashSet<String>>,
+    /// Ordered in-scope type parameter names per pushed generic scope.
+    /// Preserves declaration order for omitted-generic recovery fallbacks.
+    type_param_scope_order: Vec<Vec<String>>,
     /// Trait default static methods (no receiver) keyed by trait name.
     /// Used to inject these methods into implementing types.
     trait_static_default_methods: HashMap<String, Vec<syn::ImplItemFn>>,
+    /// Trait method receiver shape keyed by `Trait::method` (scoped + unscoped).
+    /// Used to safely rewrite UFCS-style trait calls with by-value receivers.
+    trait_method_has_receiver: HashMap<String, bool>,
+    /// Local trait names (scoped + unscoped) for which module-mode runtime
+    /// helper structs were emitted. UFCS calls to these helpers must stay as
+    /// associated calls (`Trait::method(self, ...)`) to avoid self-recursive
+    /// method rewrite loops.
+    module_runtime_helper_traits: HashSet<String>,
     /// Generic type parameters declared by enum name.
     /// Used to recover variant template arguments in pattern lowering.
     enum_type_params: HashMap<String, Vec<String>>,
@@ -239,6 +251,17 @@ pub struct CodeGen {
     /// Local type aliases that resolve to numeric scalar types.
     /// Used to lower `Alias::MAX` to `std::numeric_limits<Alias>::max()`.
     numeric_type_aliases: HashMap<String, String>,
+    /// Local type aliases that resolve to tuple types.
+    /// Used to lower tuple-style field access (`a._0`) through `std::get`.
+    tuple_type_aliases: HashMap<String, usize>,
+    /// Local tuple-type aliases with concrete element types.
+    /// Used to recover field/index element typing for aliases like
+    /// `type SizeHint = (usize, Option<usize>)`.
+    tuple_type_alias_elem_types: HashMap<String, Vec<syn::Type>>,
+    /// Local type-alias target types keyed by alias name (scoped + unscoped).
+    /// Used to resolve expected-type context through aliases (for example
+    /// `MapInto<I, R>` -> `MapSpecialCase<I, MapSpecialCaseFnInto<R>>`).
+    type_alias_targets: HashMap<String, syn::Type>,
     /// Scoped type aliases already emitted in this file.
     /// Used so alias forward declarations can be emitted once and later
     /// item emission does not duplicate them.
@@ -260,6 +283,9 @@ pub struct CodeGen {
     /// also route through `rusty_ext::...` unless a method is a known runtime
     /// helper (`size_hint`, `left`, `right`, `write_hex`).
     local_extension_method_names: HashSet<String>,
+    /// Module scopes (`""` for root, otherwise `a::b`) where extension
+    /// free-function forward declarations were already emitted.
+    emitted_extension_forward_decl_scopes: HashSet<String>,
     /// Cross-source extension method names supplied by higher-level orchestrators
     /// (for example parity multi-target transpilation).
     external_extension_method_hints: HashSet<String>,
@@ -276,6 +302,13 @@ pub struct CodeGen {
     /// These are emitted as standalone constants since enum class can't
     /// have static members; path references are rewritten accordingly.
     c_like_enum_consts: HashSet<String>,
+    /// Scoped C-like enum names fully emitted during forward-declaration pass.
+    /// Prevents duplicate enum class definitions in the main item pass.
+    forward_emitted_c_like_enums: HashSet<String>,
+    /// True only while emitting module-local forward declarations from `emit_mod`.
+    /// Used to avoid duplicate full C-like enum definitions from the global
+    /// recursive forward-declaration pass.
+    module_body_forward_decl_pass: bool,
     /// Depth counter for type argument nesting.  When > 0, `impl Trait` maps
     /// to a concept/facade name instead of `const auto&` (which is invalid
     /// inside generic argument lists like `SafeFn<T(auto)>`).
@@ -393,6 +426,9 @@ pub struct CodeGen {
     /// block scope. C++ does not support local class templates, so local type
     /// references must not recover/emit template arguments.
     local_type_bindings: Vec<HashSet<String>>,
+    /// Hoisted local generic type names temporarily visible while emitting the
+    /// corresponding block after local generic item stripping.
+    hoisted_local_type_name_scopes: Vec<HashSet<String>>,
     /// Scoped local bindings initialized from `ManuallyDrop::new(...)` /
     /// `manually_drop_new(...)`.
     /// Used to preserve Rust auto-deref method resolution for `as_ptr`/`as_mut_ptr`
@@ -467,6 +503,10 @@ pub struct CodeGen {
     /// Used so `Some(...)` lowering can preserve expected Option inner typing when alias names
     /// (for example `Option2<T>`) are used instead of the literal `Option<T>`.
     option_type_aliases: HashSet<String>,
+    /// `use ... as ...` aliases that rename constructor-like variant symbols
+    /// (for example `Option::{None as ProductEnded, Some as ProductInProgress}`).
+    /// Maps alias name to canonical constructor name (`None`, `Some`, `Ok`, `Err`, ...).
+    variant_constructor_aliases: HashMap<String, String>,
     /// Alias names introduced by `use ... as Alias`.
     /// Used to avoid alias-order-sensitive non-void forward declarations.
     import_alias_names: HashSet<String>,
@@ -614,23 +654,32 @@ impl CodeGen {
             drop_trait_methods: HashSet::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
+            type_param_scope_order: Vec::new(),
             trait_static_default_methods: HashMap::new(),
+            trait_method_has_receiver: HashMap::new(),
+            module_runtime_helper_traits: HashSet::new(),
             enum_type_params: HashMap::new(),
             declared_type_params: HashMap::new(),
             declared_type_param_kinds: HashMap::new(),
             declared_type_param_defaults: HashMap::new(),
             numeric_type_aliases: HashMap::new(),
+            tuple_type_aliases: HashMap::new(),
+            tuple_type_alias_elem_types: HashMap::new(),
+            type_alias_targets: HashMap::new(),
             emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
             unit_struct_types: HashSet::new(),
             extension_trait_impl_methods: HashMap::new(),
             extension_method_names: HashSet::new(),
             local_extension_method_names: HashSet::new(),
+            emitted_extension_forward_decl_scopes: HashSet::new(),
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             data_enum_unit_variants: HashSet::new(),
             data_enum_variants_by_enum: HashMap::new(),
             c_like_enum_consts: HashSet::new(),
+            forward_emitted_c_like_enums: HashSet::new(),
+            module_body_forward_decl_pass: false,
             type_arg_nesting: std::cell::Cell::new(0),
             iflet_result_counter: 0,
             struct_field_types: HashMap::new(),
@@ -664,6 +713,7 @@ impl CodeGen {
             delayed_init_locals: Vec::new(),
             local_function_bindings: Vec::new(),
             local_type_bindings: Vec::new(),
+            hoisted_local_type_name_scopes: Vec::new(),
             local_manually_drop_bindings: Vec::new(),
             param_bindings: Vec::new(),
             callable_param_bound_scopes: Vec::new(),
@@ -686,6 +736,7 @@ impl CodeGen {
             emitted_top_level_functions: HashSet::new(),
             macro_rules_names: HashSet::new(),
             option_type_aliases: HashSet::new(),
+            variant_constructor_aliases: HashMap::new(),
             import_alias_names: HashSet::new(),
             cpp_module_import_bindings: HashMap::new(),
             cpp_module_import_paths: Vec::new(),
@@ -790,6 +841,7 @@ impl CodeGen {
         self.emitted_top_level_functions.clear();
         self.macro_rules_names.clear();
         self.option_type_aliases.clear();
+        self.variant_constructor_aliases.clear();
         self.import_alias_names.clear();
         self.cpp_module_import_bindings.clear();
         self.cpp_module_import_paths.clear();
@@ -812,15 +864,24 @@ impl CodeGen {
         self.declared_type_params.clear();
         self.declared_type_param_kinds.clear();
         self.declared_type_param_defaults.clear();
+        self.trait_method_has_receiver.clear();
+        self.module_runtime_helper_traits.clear();
         self.numeric_type_aliases.clear();
+        self.tuple_type_aliases.clear();
+        self.tuple_type_alias_elem_types.clear();
+        self.type_alias_targets.clear();
         self.local_declared_types.clear();
         self.unit_struct_types.clear();
         self.extension_trait_impl_methods.clear();
         self.extension_method_names.clear();
         self.local_extension_method_names.clear();
+        self.emitted_extension_forward_decl_scopes.clear();
         self.data_enum_types.clear();
         self.data_enum_unit_variants.clear();
         self.data_enum_variants_by_enum.clear();
+        self.c_like_enum_consts.clear();
+        self.forward_emitted_c_like_enums.clear();
+        self.module_body_forward_decl_pass = false;
         self.struct_field_types.clear();
         self.struct_field_order.clear();
         self.struct_field_cpp_names.clear();
@@ -835,6 +896,8 @@ impl CodeGen {
         self.owner_method_arg_expected_types.clear();
         self.owner_method_arg_expected_type_variants.clear();
         self.owner_method_has_receiver.clear();
+        self.type_param_scopes.clear();
+        self.type_param_scope_order.clear();
         self.reassigned_vars.clear();
         self.consuming_method_receiver_vars.clear();
         self.mutable_pointer_aliased_vars.clear();
@@ -853,6 +916,7 @@ impl CodeGen {
         self.delayed_init_locals.clear();
         self.local_function_bindings.clear();
         self.local_type_bindings.clear();
+        self.hoisted_local_type_name_scopes.clear();
         self.self_receiver_ref_scopes.clear();
         self.pattern_ref_bindings.clear();
         self.deref_method_scopes.clear();
@@ -893,6 +957,8 @@ impl CodeGen {
             .extend(self.external_extension_method_hints.iter().cloned());
         // Pass 1e2: collect crate-root `pub use module::Name` re-exports.
         self.collect_crate_reexports(&file.items);
+        // Pass 1f: collect trait method receiver shapes for UFCS rewriting.
+        self.collect_trait_method_receiver_shapes(&file.items, &[]);
         // Pass 1f: collect trait static default methods before impl blocks.
         self.collect_trait_static_default_methods(&file.items);
         // Pass 1g: collect all impl blocks (including inline-module nested ones)
@@ -984,6 +1050,10 @@ impl CodeGen {
         // Pre-scan: detect module names that collide with function names
         // in the same scope, and register renames to avoid C++ namespace shadowing.
         self.detect_namespace_function_collisions(&file.items, &[]);
+
+        if self.emit_extension_trait_forward_decls_for_scope(&[]) {
+            self.newline();
+        }
 
         if self.emit_item_forward_decls(&file.items, 0) {
             self.newline();
@@ -1274,6 +1344,18 @@ impl CodeGen {
         // emitted before the types that contain them.  Forward declarations are
         // not enough when a type is used as a by-value field.
         Self::topological_sort_structs(&mut final_ordered);
+
+        // Run the C-like enum hoist once more after struct/data-enum topo sorting.
+        // The topo pass only reorders struct/data-enum slots, but this second pass
+        // guarantees C-like enums still stay ahead of method bodies that reference
+        // enumerators (e.g., `Position::First`) in all mixed ordering layouts.
+        let (early_enums, rest): (Vec<&syn::Item>, Vec<&syn::Item>) =
+            final_ordered.into_iter().partition(|item| {
+                matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()))
+            });
+        let mut final_ordered = Vec::with_capacity(early_enums.len() + rest.len());
+        final_ordered.extend(early_enums);
+        final_ordered.extend(rest);
         final_ordered
     }
 
@@ -2847,8 +2929,25 @@ impl CodeGen {
                         continue;
                     }
                     if enum_is_c_like(e) {
-                        self.emit_template_prefix_without_type_defaults(&e.generics);
-                        self.writeln(&format!("enum class {};", name));
+                        if self.module_body_forward_decl_pass {
+                            self.emit_template_prefix_without_type_defaults(&e.generics);
+                            self.writeln(&format!("enum class {} {{", name));
+                            self.indent += 1;
+                            let variants: Vec<String> =
+                                e.variants.iter().map(|v| v.ident.to_string()).collect();
+                            self.writeln(&variants.join(",\n    "));
+                            self.indent -= 1;
+                            self.writeln("};");
+                            self.forward_emitted_c_like_enums
+                                .insert(self.scoped_type_key(&name));
+                            self.forward_emitted_c_like_enums.insert(name.clone());
+                        } else {
+                            // The global recursive forward-declaration pass may visit nested
+                            // modules before the module body emits. Keep this pass to a plain
+                            // declaration to avoid duplicate full enum definitions.
+                            self.emit_template_prefix_without_type_defaults(&e.generics);
+                            self.writeln(&format!("enum class {};", name));
+                        }
                     } else if self.enum_uses_struct_wrapper(e) {
                         self.emit_template_prefix_without_type_defaults(&e.generics);
                         self.writeln(&format!("struct {};", name));
@@ -3457,6 +3556,47 @@ impl CodeGen {
         }
     }
 
+    fn collect_trait_method_receiver_shapes(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    let trait_name = t.ident.to_string();
+                    let scoped_trait_name = if module_path.is_empty() {
+                        trait_name.clone()
+                    } else {
+                        format!("{}::{}", module_path.join("::"), trait_name)
+                    };
+                    for trait_item in &t.items {
+                        let syn::TraitItem::Fn(method) = trait_item else {
+                            continue;
+                        };
+                        let method_name = method.sig.ident.to_string();
+                        let has_receiver =
+                            matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_)));
+                        self.trait_method_has_receiver
+                            .insert(format!("{}::{}", trait_name, method_name), has_receiver);
+                        self.trait_method_has_receiver.insert(
+                            format!("{}::{}", scoped_trait_name, method_name),
+                            has_receiver,
+                        );
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_trait_method_receiver_shapes(nested_items, &nested_path);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn collect_trait_static_default_methods(&mut self, items: &[syn::Item]) {
         for item in items {
             match item {
@@ -3806,6 +3946,7 @@ impl CodeGen {
                         &t.ident.to_string(),
                         &t.generics,
                     );
+                    self.record_type_alias_target(module_path, t);
                 }
                 syn::Item::Mod(m) => {
                     if let Some((_, nested_items)) = &m.content {
@@ -3824,6 +3965,18 @@ impl CodeGen {
         if !module_path.is_empty() {
             self.local_declared_types
                 .insert(format!("{}::{}", module_path.join("::"), type_name));
+        }
+    }
+
+    fn record_type_alias_target(&mut self, module_path: &[String], alias: &syn::ItemType) {
+        let alias_name = alias.ident.to_string();
+        self.type_alias_targets
+            .insert(alias_name.clone(), (*alias.ty).clone());
+        if !module_path.is_empty() {
+            self.type_alias_targets.insert(
+                format!("{}::{}", module_path.join("::"), alias_name),
+                (*alias.ty).clone(),
+            );
         }
     }
 
@@ -3912,6 +4065,64 @@ impl CodeGen {
                                 format!("{}::{}", module_path.join("::"), struct_name),
                                 arity,
                             );
+                        }
+
+                        let unnamed_field_types: HashMap<String, syn::Type> = fields
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, field)| (format!("_{}", idx), field.ty.clone()))
+                            .collect();
+                        let unnamed_field_order: Vec<String> = (0..fields.unnamed.len())
+                            .map(|idx| format!("_{}", idx))
+                            .collect();
+                        let unnamed_field_cpp_names: HashMap<String, String> =
+                            (0..fields.unnamed.len())
+                                .map(|idx| {
+                                    let rust_name = format!("_{}", idx);
+                                    (rust_name.clone(), escape_cpp_keyword(&rust_name))
+                                })
+                                .collect();
+                        let reference_fields: HashSet<String> = fields
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, field)| {
+                                matches!(field.ty, syn::Type::Reference(_))
+                                    .then_some(format!("_{}", idx))
+                            })
+                            .collect();
+                        if !unnamed_field_types.is_empty() {
+                            self.struct_field_types
+                                .insert(struct_name.clone(), unnamed_field_types.clone());
+                            self.struct_field_order
+                                .insert(struct_name.clone(), unnamed_field_order.clone());
+                            self.struct_field_cpp_names
+                                .insert(struct_name.clone(), unnamed_field_cpp_names.clone());
+                            if !reference_fields.is_empty() {
+                                self.struct_reference_fields
+                                    .insert(struct_name.clone(), reference_fields.clone());
+                            }
+                            if !module_path.is_empty() {
+                                self.struct_field_types.insert(
+                                    format!("{}::{}", module_path.join("::"), struct_name),
+                                    unnamed_field_types,
+                                );
+                                self.struct_field_order.insert(
+                                    format!("{}::{}", module_path.join("::"), struct_name),
+                                    unnamed_field_order,
+                                );
+                                self.struct_field_cpp_names.insert(
+                                    format!("{}::{}", module_path.join("::"), struct_name),
+                                    unnamed_field_cpp_names,
+                                );
+                                if !reference_fields.is_empty() {
+                                    self.struct_reference_fields.insert(
+                                        format!("{}::{}", module_path.join("::"), struct_name),
+                                        reference_fields,
+                                    );
+                                }
+                            }
                         }
                     }
 
@@ -4379,10 +4590,9 @@ impl CodeGen {
         out.push(joined.clone());
 
         if !self.module_stack.is_empty()
-            && path
-                .segments
-                .first()
-                .is_some_and(|seg| !matches!(seg.ident.to_string().as_str(), "crate" | "self" | "super"))
+            && path.segments.first().is_some_and(|seg| {
+                !matches!(seg.ident.to_string().as_str(), "crate" | "self" | "super")
+            })
         {
             out.push(format!("{}::{}", self.module_stack.join("::"), joined));
         }
@@ -4579,7 +4789,9 @@ impl CodeGen {
         &self,
         call: &syn::ExprCall,
     ) -> Option<HashMap<String, syn::Type>> {
-        let mut substitutions = self.call_owner_type_arg_substitutions(call).unwrap_or_default();
+        let mut substitutions = self
+            .call_owner_type_arg_substitutions(call)
+            .unwrap_or_default();
 
         if let Some(type_params) = self.lookup_function_type_param_names(call.func.as_ref()) {
             if !type_params.is_empty() {
@@ -4587,14 +4799,16 @@ impl CodeGen {
                 if let syn::Expr::Path(path_expr) = call.func.as_ref() {
                     if let Some(last_seg) = path_expr.path.segments.last() {
                         if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
-                            provided_type_args.extend(args.args.iter().filter_map(|arg| match arg {
-                                syn::GenericArgument::Type(ty)
-                                    if !matches!(ty, syn::Type::Infer(_)) =>
-                                {
-                                    Some(ty.clone())
-                                }
-                                _ => None,
-                            }));
+                            provided_type_args.extend(args.args.iter().filter_map(
+                                |arg| match arg {
+                                    syn::GenericArgument::Type(ty)
+                                        if !matches!(ty, syn::Type::Infer(_)) =>
+                                    {
+                                        Some(ty.clone())
+                                    }
+                                    _ => None,
+                                },
+                            ));
                         }
                     }
                 }
@@ -4634,7 +4848,8 @@ impl CodeGen {
         };
         let expected_owner_seg = expected_tp.path.segments.last()?;
         let expected_owner_name = expected_owner_seg.ident.to_string();
-        let syn::PathArguments::AngleBracketed(expected_args) = &expected_owner_seg.arguments else {
+        let syn::PathArguments::AngleBracketed(expected_args) = &expected_owner_seg.arguments
+        else {
             return None;
         };
         let expected_type_args: Vec<syn::Type> = expected_args
@@ -4956,7 +5171,10 @@ impl CodeGen {
     fn expr_looks_array_like_for_overload_resolution(&self, expr: &syn::Expr) -> bool {
         let expr = self.peel_paren_group_expr(expr);
         if let Some(ty) = self.infer_simple_expr_type(expr)
-            && matches!(self.peel_reference_paren_group_type(&ty), syn::Type::Array(_))
+            && matches!(
+                self.peel_reference_paren_group_type(&ty),
+                syn::Type::Array(_)
+            )
         {
             return true;
         }
@@ -4975,14 +5193,20 @@ impl CodeGen {
         expected_ty: &syn::Type,
     ) -> bool {
         if self.type_is_reference_to_slice(expected_ty)
-            || matches!(self.peel_reference_paren_group_type(expected_ty), syn::Type::Slice(_))
+            || matches!(
+                self.peel_reference_paren_group_type(expected_ty),
+                syn::Type::Slice(_)
+            )
         {
             return self.expr_looks_slice_like_for_overload_resolution(arg_expr);
         }
         if self.type_is_vec_like_expected_type(expected_ty) {
             return self.expr_looks_vec_like_for_overload_resolution(arg_expr);
         }
-        if matches!(self.peel_reference_paren_group_type(expected_ty), syn::Type::Array(_)) {
+        if matches!(
+            self.peel_reference_paren_group_type(expected_ty),
+            syn::Type::Array(_)
+        ) {
             return self.expr_looks_array_like_for_overload_resolution(arg_expr);
         }
         false
@@ -5029,11 +5253,8 @@ impl CodeGen {
                 return Some(ty.clone());
             }
             if let Some(variants) = self.owner_method_arg_expected_type_variants.get(&key)
-                && let Some(ty) = self.select_owner_method_arg_expected_type_variant(
-                    variants,
-                    arg_idx,
-                    arg_expr,
-                )
+                && let Some(ty) =
+                    self.select_owner_method_arg_expected_type_variant(variants, arg_idx, arg_expr)
             {
                 return Some(ty);
             }
@@ -5090,10 +5311,9 @@ impl CodeGen {
                 break;
             }
         }
-        let receiver_info = call
-            .args
-            .first()
-            .and_then(|receiver_expr| self.receiver_owner_name_and_type_substitutions(receiver_expr));
+        let receiver_info = call.args.first().and_then(|receiver_expr| {
+            self.receiver_owner_name_and_type_substitutions(receiver_expr)
+        });
         if ret_ty.is_none()
             && let Some((receiver_owner, _)) = receiver_info.as_ref()
         {
@@ -5227,8 +5447,21 @@ impl CodeGen {
         callable_type_param_fallback: bool,
         callable_bound_arg_intent: Option<CallableArgPassIntent>,
     ) -> String {
+        let arg_is_closure = matches!(self.peel_paren_group_expr(arg), syn::Expr::Closure(_));
+        let suppress_placeholder_expected_for_closure = arg_is_closure
+            && expected_ty.is_some_and(|expected| {
+                self.type_is_bare_generic_param_like(expected)
+                    && self
+                        .extract_callable_return_type_from_type(expected)
+                        .is_none()
+            });
+        let effective_expected_ty = if suppress_placeholder_expected_for_closure {
+            None
+        } else {
+            expected_ty
+        };
         if let syn::Expr::Reference(_) = self.peel_paren_group_expr(arg) {
-            if let Some(expected) = expected_ty {
+            if let Some(expected) = effective_expected_ty {
                 if self.type_is_reference_to_slice(expected) {
                     return self.emit_expr_to_string_with_expected(arg, Some(expected));
                 }
@@ -5242,12 +5475,12 @@ impl CodeGen {
                 // Preserve explicit borrow shape for callable-bound callbacks
                 // (for example `F: FnOnce(&mut Self)`), so closure params that
                 // dereference their argument keep pointer-like call semantics.
-                return self.emit_explicit_reference_call_arg(r, expected_ty);
+                return self.emit_explicit_reference_call_arg(r, effective_expected_ty);
             }
             if matches!(style, Some(ArgPassStyle::Reference))
                 || (style.is_none() && callable_type_param_fallback && r.mutability.is_none())
             {
-                return self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
+                return self.emit_expr_to_string_with_expected(&r.expr, effective_expected_ty);
             }
         }
         // Member method reference: `Type::method` used as a function argument.
@@ -5256,6 +5489,14 @@ impl CodeGen {
         // so emit a forwarding lambda wrapper that accepts explicit receiver
         // plus any additional arguments.
         if let syn::Expr::Path(path_expr) = arg {
+            if let Some(lambda) = self.try_emit_variant_constructor_callable(&path_expr.path) {
+                return lambda;
+            }
+            if let Some(lambda) =
+                self.try_emit_expected_constructor_callable(&path_expr.path, effective_expected_ty)
+            {
+                return lambda;
+            }
             if let Some(lambda) = self.try_emit_method_reference_lambda(&path_expr.path) {
                 return lambda;
             }
@@ -5268,7 +5509,50 @@ impl CodeGen {
                 }
             }
         }
-        self.emit_expr_to_string_with_expected_and_move_if_needed(arg, expected_ty)
+        self.emit_expr_to_string_with_expected_and_move_if_needed(arg, effective_expected_ty)
+    }
+
+    fn try_emit_expected_constructor_callable(
+        &self,
+        path: &syn::Path,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let method = path.segments.last()?.ident.to_string();
+        if !matches!(method.as_str(), "new" | "new_" | "default" | "default_") {
+            return None;
+        }
+        if !matches!(
+            path.segments.last().map(|seg| &seg.arguments),
+            Some(syn::PathArguments::None)
+        ) {
+            return None;
+        }
+        let ret_ty = self.extract_callable_return_type_from_type(expected_ty?)?;
+        if self.type_contains_unresolved_placeholder_like(&ret_ty)
+            || self.type_contains_unbound_single_letter_generic(&ret_ty)
+            || self.type_contains_in_scope_type_param(&ret_ty)
+        {
+            return None;
+        }
+        let ret_cpp = self.map_type(&ret_ty);
+        if ret_cpp == "auto"
+            || ret_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&ret_cpp)
+        {
+            return None;
+        }
+        match method.as_str() {
+            "new" => Some(format!("[&]() {{ return {}::new(); }}", ret_cpp)),
+            "new_" => Some(format!("[&]() {{ return {}::new_(); }}", ret_cpp)),
+            "default" | "default_" => Some(format!(
+                "[&]() {{ return rusty::default_value<{}>(); }}",
+                ret_cpp
+            )),
+            _ => None,
+        }
     }
 
     fn try_emit_tuple_struct_constructor_callable(&self, path: &syn::Path) -> Option<String> {
@@ -5355,7 +5639,8 @@ impl CodeGen {
             return None;
         }
         // Check if Type is a known declared type
-        let is_known_runtime_method_ref_type = matches!(type_name.as_str(), "String");
+        let is_known_runtime_method_ref_type =
+            matches!(type_name.as_str(), "String" | "Display" | "Debug");
         if !self.local_declared_types.contains(&type_name)
             && !self.is_local_type_name_in_scope(&type_name)
             && !is_known_runtime_method_ref_type
@@ -5452,6 +5737,13 @@ impl CodeGen {
                         .extension_trait_impl_methods
                         .entry(trait_scoped_key)
                         .or_default();
+                    let mut associated_type_bindings: HashMap<String, syn::Type> = HashMap::new();
+                    for impl_item in &impl_block.items {
+                        if let syn::ImplItem::Type(assoc) = impl_item {
+                            associated_type_bindings
+                                .insert(assoc.ident.to_string(), assoc.ty.clone());
+                        }
+                    }
 
                     for impl_item in &impl_block.items {
                         let syn::ImplItem::Fn(method) = impl_item else {
@@ -5471,6 +5763,7 @@ impl CodeGen {
                             self_ty: (*impl_block.self_ty).clone(),
                             method: merged,
                             callable_param_metadata,
+                            associated_type_bindings: associated_type_bindings.clone(),
                         });
                     }
                 }
@@ -6179,8 +6472,7 @@ impl CodeGen {
             return None;
         }
         let first_expected = self.lookup_function_arg_expected_type(call.func.as_ref(), 0)?;
-        let pointee_ident =
-            self.extract_pointer_like_expected_type_param_name(first_expected)?;
+        let pointee_ident = self.extract_pointer_like_expected_type_param_name(first_expected)?;
         if pointee_ident != type_params[0] {
             return None;
         }
@@ -6301,9 +6593,84 @@ impl CodeGen {
     /// captureless callables by default. If a nested function references a
     /// sibling nested function (lowered to another local callable), use a local
     /// capture to keep the emitted C++ valid.
+    fn type_contains_named_type_params(&self, ty: &syn::Type, names: &HashSet<String>) -> bool {
+        let ty = self.peel_paren_group_type(ty);
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && names.contains(&tp.path.segments[0].ident.to_string())
+                {
+                    return true;
+                }
+                tp.path.segments.iter().any(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().any(|arg| match arg {
+                            syn::GenericArgument::Type(inner) => {
+                                self.type_contains_named_type_params(inner, names)
+                            }
+                            _ => false,
+                        })
+                    } else {
+                        false
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.type_contains_named_type_params(&r.elem, names),
+            syn::Type::Ptr(p) => self.type_contains_named_type_params(&p.elem, names),
+            syn::Type::Slice(s) => self.type_contains_named_type_params(&s.elem, names),
+            syn::Type::Array(a) => self.type_contains_named_type_params(&a.elem, names),
+            syn::Type::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .any(|elem| self.type_contains_named_type_params(elem, names)),
+            syn::Type::Paren(p) => self.type_contains_named_type_params(&p.elem, names),
+            syn::Type::Group(g) => self.type_contains_named_type_params(&g.elem, names),
+            _ => false,
+        }
+    }
+
+    fn nested_generic_param_fallback_cpp_type(ty: &syn::Type) -> String {
+        let mut current = ty;
+        loop {
+            match current {
+                syn::Type::Paren(p) => current = &p.elem,
+                syn::Type::Group(g) => current = &g.elem,
+                _ => break,
+            }
+        }
+        match current {
+            syn::Type::Reference(r) => {
+                if r.mutability.is_some() {
+                    "auto&".to_string()
+                } else {
+                    "const auto&".to_string()
+                }
+            }
+            syn::Type::Ptr(p) => {
+                if p.mutability.is_some() {
+                    "auto*".to_string()
+                } else {
+                    "const auto*".to_string()
+                }
+            }
+            _ => "auto".to_string(),
+        }
+    }
+
     fn emit_nested_function(&mut self, f: &syn::ItemFn) {
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
         let return_type = self.map_return_type(&f.sig.output);
+        let nested_type_params: HashSet<String> = f
+            .sig
+            .generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
         let mut params_vec: Vec<String> = Vec::new();
         let mut param_types: Vec<String> = Vec::new();
         for (const_name, const_ty) in self.nested_fn_const_generic_params(&f.sig.generics) {
@@ -6312,7 +6679,13 @@ impl CodeGen {
         }
         for arg in &f.sig.inputs {
             if let syn::FnArg::Typed(pat_type) = arg {
-                let ty = self.map_type(&pat_type.ty);
+                let ty = if !nested_type_params.is_empty()
+                    && self.type_contains_named_type_params(&pat_type.ty, &nested_type_params)
+                {
+                    Self::nested_generic_param_fallback_cpp_type(&pat_type.ty)
+                } else {
+                    self.map_type(&pat_type.ty)
+                };
                 let name = match pat_type.pat.as_ref() {
                     syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                     _ => "_".to_string(),
@@ -6324,14 +6697,17 @@ impl CodeGen {
         let params = params_vec.join(", ");
         let needs_sibling_capture = self.nested_function_needs_sibling_capture(f);
 
-        let ret_annotation = if return_type == "void" {
+        let return_type_is_concrete = return_type != "auto"
+            && !return_type.contains("/* TODO:")
+            && !type_string_has_auto_placeholder(&return_type)
+            && !self.mapped_assoc_type_contains_unbound_placeholder(&return_type);
+        let ret_annotation = if return_type == "void" || !return_type_is_concrete {
             String::new()
         } else {
             format!(" -> {}", return_type)
         };
 
-        let can_emit_safe_fn = return_type != "auto"
-            && !return_type.contains("/* TODO:")
+        let can_emit_safe_fn = return_type_is_concrete
             && !param_types
                 .iter()
                 .any(|ty| ty == "auto" || ty.contains("auto") || ty.contains("/* TODO:"));
@@ -6396,11 +6772,13 @@ impl CodeGen {
     ) -> syn::Block {
         let mut filtered = block.clone();
         filtered.stmts.retain(|stmt| match stmt {
-            syn::Stmt::Item(syn::Item::Struct(s)) => !hoisted_type_names.contains(&s.ident.to_string()),
-            syn::Stmt::Item(syn::Item::Impl(impl_block)) => Self::local_impl_target_type_name(
-                impl_block,
-            )
-            .map_or(true, |name| !hoisted_type_names.contains(&name)),
+            syn::Stmt::Item(syn::Item::Struct(s)) => {
+                !hoisted_type_names.contains(&s.ident.to_string())
+            }
+            syn::Stmt::Item(syn::Item::Impl(impl_block)) => {
+                Self::local_impl_target_type_name(impl_block)
+                    .map_or(true, |name| !hoisted_type_names.contains(&name))
+            }
             _ => true,
         });
         filtered
@@ -6414,8 +6792,10 @@ impl CodeGen {
         if hoisted_structs.is_empty() {
             return;
         }
-        let hoisted_type_names: HashSet<String> =
-            hoisted_structs.iter().map(|s| s.ident.to_string()).collect();
+        let hoisted_type_names: HashSet<String> = hoisted_structs
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
         let (
             local_impl_overrides,
             local_drop_overrides,
@@ -6459,7 +6839,8 @@ impl CodeGen {
         }
         for (type_name, prev) in prev_inherent_overrides {
             if let Some(prev_names) = prev {
-                self.inherent_impl_method_names.insert(type_name, prev_names);
+                self.inherent_impl_method_names
+                    .insert(type_name, prev_names);
             } else {
                 self.inherent_impl_method_names.remove(&type_name);
             }
@@ -6809,15 +7190,21 @@ impl CodeGen {
                     let alias_name = escape_cpp_keyword(&t.ident.to_string());
                     let alias_cpp_type = self.map_type(&t.ty);
                     self.emit_impl_item(impl_item);
+                    // Even when constrained mode skips emitting the alias as a C++ member,
+                    // keep its mapped type available for subsequent method return/projection
+                    // resolution in this struct emission pass.
+                    early_assoc_type_cpp_types
+                        .entry(alias_rust_name.clone())
+                        .or_insert(alias_cpp_type.clone());
+                    early_assoc_type_cpp_types
+                        .entry(alias_name.clone())
+                        .or_insert(alias_cpp_type.clone());
                     let alias_was_emitted = self
                         .emitted_non_method_member_names
                         .last()
                         .is_some_and(|scope| scope.contains(&alias_name));
                     if alias_was_emitted {
                         early_emitted_type_aliases.insert(alias_name);
-                        early_assoc_type_cpp_types.insert(alias_rust_name, alias_cpp_type.clone());
-                        early_assoc_type_cpp_types
-                            .insert(escape_cpp_keyword(&t.ident.to_string()), alias_cpp_type);
                     }
                 }
             }
@@ -7185,7 +7572,8 @@ impl CodeGen {
                 .push(non_method_member_names);
             self.current_struct_assoc_cpp_types
                 .push(early_assoc_type_cpp_types.clone());
-            self.current_struct_method_output_types.push(method_output_types);
+            self.current_struct_method_output_types
+                .push(method_output_types);
 
             // Collect source modules for using-namespace inside method bodies
             let current_module = self.module_stack.join("::");
@@ -7205,6 +7593,15 @@ impl CodeGen {
             // E.g., `const ABC = A.bits() | B.bits()` must come after `const A`, `const B`.
             let reordered = Self::reorder_const_members_by_dependency(&methods);
             for impl_item in &reordered {
+                if let syn::ImplItem::Type(t) = impl_item {
+                    let alias_rust_name = t.ident.to_string();
+                    let alias_name = escape_cpp_keyword(&alias_rust_name);
+                    let alias_cpp_type = self.map_type(&t.ty);
+                    if let Some(scope) = self.current_struct_assoc_cpp_types.last_mut() {
+                        scope.insert(alias_rust_name, alias_cpp_type.clone());
+                        scope.insert(alias_name, alias_cpp_type);
+                    }
+                }
                 self.emit_impl_item(impl_item);
             }
             self.merged_method_using_namespaces.clear();
@@ -7279,15 +7676,12 @@ impl CodeGen {
                     .operator_renames
                     .keys()
                     .any(|(type_key, _)| *type_key == name_str || *type_key == scoped_key);
-                let has_bitand_operator = self.operator_renames.iter().any(
-                    |((type_key, _), op)| {
+                let has_bitand_operator =
+                    self.operator_renames.iter().any(|((type_key, _), op)| {
                         (*type_key == name_str || *type_key == scoped_key) && op == "operator&"
-                    },
-                );
+                    });
                 let should_emit_bitflags_synthetic = has_operators
-                    && (has_bitflags_flags_const
-                        || has_bitflags_api_signal
-                        || has_bitand_operator);
+                    && (has_bitflags_flags_const || has_bitflags_api_signal || has_bitand_operator);
                 if should_emit_bitflags_synthetic {
                     let n = name.to_string();
                     // Use the saved emitted method names from before the pop.
@@ -7571,6 +7965,31 @@ impl CodeGen {
             self.writeln("// Algebraic data type");
             for variant in &e.variants {
                 let vname = &variant.ident;
+                let variant_struct_name = format!("{}_{}", name, vname);
+                self.local_declared_types
+                    .insert(variant_struct_name.clone());
+                self.declared_type_params
+                    .insert(variant_struct_name.clone(), type_params.clone());
+                self.declared_type_param_kinds.insert(
+                    variant_struct_name.clone(),
+                    vec![GenericParamKind::Type; type_params.len()],
+                );
+                self.declared_type_param_defaults
+                    .insert(variant_struct_name.clone(), vec![None; type_params.len()]);
+                if !self.module_stack.is_empty() {
+                    let scoped_variant_struct_name =
+                        format!("{}::{}", self.module_stack.join("::"), variant_struct_name);
+                    self.local_declared_types
+                        .insert(scoped_variant_struct_name.clone());
+                    self.declared_type_params
+                        .insert(scoped_variant_struct_name.clone(), type_params.clone());
+                    self.declared_type_param_kinds.insert(
+                        scoped_variant_struct_name.clone(),
+                        vec![GenericParamKind::Type; type_params.len()],
+                    );
+                    self.declared_type_param_defaults
+                        .insert(scoped_variant_struct_name, vec![None; type_params.len()]);
+                }
                 match &variant.fields {
                     syn::Fields::Named(fields) => {
                         if has_generics {
@@ -7845,12 +8264,27 @@ impl CodeGen {
             }
         } else {
             // C-like enum → enum class
-            self.writeln(&format!("enum class {} {{", name));
-            self.indent += 1;
-            let variants: Vec<String> = e.variants.iter().map(|v| v.ident.to_string()).collect();
-            self.writeln(&variants.join(",\n    "));
-            self.indent -= 1;
-            self.writeln("};");
+            let enum_name = name.to_string();
+            let scoped_enum_name = self.scoped_type_key(&enum_name);
+            let enum_decl_marker = format!("enum class {} {{", name);
+            // Local Rust enums can reuse identifiers across function scopes.
+            // Global duplicate-suppression is only valid for non-local emission.
+            let is_local_scope = self.block_depth > 0;
+            let already_defined = !is_local_scope
+                && (self
+                    .forward_emitted_c_like_enums
+                    .contains(&scoped_enum_name)
+                    || self.forward_emitted_c_like_enums.contains(&enum_name)
+                    || self.output.contains(&enum_decl_marker));
+            if !already_defined {
+                self.writeln(&format!("enum class {} {{", name));
+                self.indent += 1;
+                let variants: Vec<String> =
+                    e.variants.iter().map(|v| v.ident.to_string()).collect();
+                self.writeln(&variants.join(",\n    "));
+                self.indent -= 1;
+                self.writeln("};");
+            }
 
             // Emit associated constants and display helpers from impl blocks for C-like enums.
             // C++ enum class can't have static members, so emit as standalone
@@ -8000,6 +8434,23 @@ impl CodeGen {
             }),
             syn::Type::Reference(r) => self.type_references_name(&r.elem, name),
             syn::Type::Ptr(p) => self.type_references_name(&p.elem, name),
+            syn::Type::Slice(s) => self.type_references_name(&s.elem, name),
+            syn::Type::Array(a) => self.type_references_name(&a.elem, name),
+            syn::Type::Tuple(t) => t
+                .elems
+                .iter()
+                .any(|elem| self.type_references_name(elem, name)),
+            syn::Type::Paren(p) => self.type_references_name(&p.elem, name),
+            syn::Type::Group(g) => self.type_references_name(&g.elem, name),
+            syn::Type::BareFn(bf) => {
+                bf.inputs
+                    .iter()
+                    .any(|arg| self.type_references_name(&arg.ty, name))
+                    || match &bf.output {
+                        syn::ReturnType::Type(_, ret) => self.type_references_name(ret, name),
+                        syn::ReturnType::Default => false,
+                    }
+            }
             _ => false,
         }
     }
@@ -8007,18 +8458,19 @@ impl CodeGen {
     fn type_contains_unbound_single_letter_generic(&self, ty: &syn::Type) -> bool {
         match ty {
             syn::Type::Path(tp) => {
-                if tp.qself.is_none() && tp.path.segments.len() == 1 {
-                    let ident = tp.path.segments[0].ident.to_string();
-                    let is_unbound_generic_like = ident.len() == 1
-                        && ident
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.is_ascii_uppercase())
-                        && !self.is_type_param_in_scope(&ident)
-                        && !self.is_local_type_name_in_scope(&ident)
-                        && !self.declared_item_names.contains(&ident)
-                        && types::map_primitive_type(&ident).is_none();
-                    if is_unbound_generic_like {
+                let is_unbound_generic_like = |ident: &str| {
+                    ident.len() == 1
+                        && ident.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                        && !self.is_type_param_in_scope(ident)
+                        && !self.is_local_type_name_in_scope(ident)
+                        && !self.declared_item_names.contains(ident)
+                        && types::map_primitive_type(ident).is_none()
+                };
+
+                if tp.qself.is_none() && !tp.path.segments.is_empty() {
+                    let first_ident = tp.path.segments[0].ident.to_string();
+                    // Catch both bare `A` and dependent projections like `A::Item`.
+                    if is_unbound_generic_like(&first_ident) {
                         return true;
                     }
                 }
@@ -8056,18 +8508,17 @@ impl CodeGen {
                     }
             }
             syn::Type::ImplTrait(it) => it.bounds.iter().any(|bound| match bound {
-                syn::TypeParamBound::Trait(tb) => tb.path.segments.iter().any(|seg| {
-                    match &seg.arguments {
+                syn::TypeParamBound::Trait(tb) => {
+                    tb.path.segments.iter().any(|seg| match &seg.arguments {
                         syn::PathArguments::Parenthesized(args) => {
-                            args.inputs
-                                .iter()
-                                .any(|arg_ty| self.type_contains_unbound_single_letter_generic(arg_ty))
-                                || match &args.output {
-                                    syn::ReturnType::Type(_, ret_ty) => {
-                                        self.type_contains_unbound_single_letter_generic(ret_ty)
-                                    }
-                                    syn::ReturnType::Default => false,
+                            args.inputs.iter().any(|arg_ty| {
+                                self.type_contains_unbound_single_letter_generic(arg_ty)
+                            }) || match &args.output {
+                                syn::ReturnType::Type(_, ret_ty) => {
+                                    self.type_contains_unbound_single_letter_generic(ret_ty)
                                 }
+                                syn::ReturnType::Default => false,
+                            }
                         }
                         syn::PathArguments::AngleBracketed(args) => args.args.iter().any(|arg| {
                             if let syn::GenericArgument::Type(inner_ty) = arg {
@@ -8077,23 +8528,22 @@ impl CodeGen {
                             }
                         }),
                         _ => false,
-                    }
-                }),
+                    })
+                }
                 _ => false,
             }),
             syn::Type::TraitObject(to) => to.bounds.iter().any(|bound| match bound {
-                syn::TypeParamBound::Trait(tb) => tb.path.segments.iter().any(|seg| {
-                    match &seg.arguments {
+                syn::TypeParamBound::Trait(tb) => {
+                    tb.path.segments.iter().any(|seg| match &seg.arguments {
                         syn::PathArguments::Parenthesized(args) => {
-                            args.inputs
-                                .iter()
-                                .any(|arg_ty| self.type_contains_unbound_single_letter_generic(arg_ty))
-                                || match &args.output {
-                                    syn::ReturnType::Type(_, ret_ty) => {
-                                        self.type_contains_unbound_single_letter_generic(ret_ty)
-                                    }
-                                    syn::ReturnType::Default => false,
+                            args.inputs.iter().any(|arg_ty| {
+                                self.type_contains_unbound_single_letter_generic(arg_ty)
+                            }) || match &args.output {
+                                syn::ReturnType::Type(_, ret_ty) => {
+                                    self.type_contains_unbound_single_letter_generic(ret_ty)
                                 }
+                                syn::ReturnType::Default => false,
+                            }
                         }
                         syn::PathArguments::AngleBracketed(args) => args.args.iter().any(|arg| {
                             if let syn::GenericArgument::Type(inner_ty) = arg {
@@ -8103,8 +8553,8 @@ impl CodeGen {
                             }
                         }),
                         _ => false,
-                    }
-                }),
+                    })
+                }
                 _ => false,
             }),
             syn::Type::Paren(p) => self.type_contains_unbound_single_letter_generic(&p.elem),
@@ -8124,10 +8574,7 @@ impl CodeGen {
                     return true;
                 }
                 let is_unbound_generic_like = token.len() == 1
-                    && token
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_uppercase())
+                    && token.chars().next().is_some_and(|c| c.is_ascii_uppercase())
                     && !self.is_type_param_in_scope(token)
                     && !self.is_local_type_name_in_scope(token)
                     && !self.declared_item_names.contains(token)
@@ -8147,7 +8594,10 @@ impl CodeGen {
     fn emit_type_alias_once(&mut self, t: &syn::ItemType) -> bool {
         let name = escape_cpp_keyword(&t.ident.to_string());
         let scoped_key = self.scoped_alias_key(&name);
-        if !self.emitted_scoped_type_aliases.insert(scoped_key) {
+        // Block-local `type` aliases are scoped per block in Rust and may reuse
+        // the same alias name across different functions/blocks.
+        // Keep global de-dup only for top-level/module aliases.
+        if self.block_depth == 0 && !self.emitted_scoped_type_aliases.insert(scoped_key) {
             return false;
         }
 
@@ -8157,13 +8607,26 @@ impl CodeGen {
         self.pop_type_param_scope();
         self.writeln(&format!("using {} = {};", name, target));
 
-        // Numeric alias tracking only applies to concrete (non-generic) aliases.
-        if t.generics.params.is_empty() && is_numeric_cpp_scalar_type(&target) {
+        // Alias tracking only applies to concrete (non-generic) aliases.
+        if t.generics.params.is_empty() {
             let alias = name.to_string();
-            self.numeric_type_aliases
-                .insert(alias.clone(), target.clone());
-            self.numeric_type_aliases
-                .insert(self.scoped_type_key(&alias), target);
+            if is_numeric_cpp_scalar_type(&target) {
+                self.numeric_type_aliases
+                    .insert(alias.clone(), target.clone());
+                self.numeric_type_aliases
+                    .insert(self.scoped_type_key(&alias), target.clone());
+            }
+            if let syn::Type::Tuple(tuple_ty) = self.peel_paren_group_type(&t.ty) {
+                let arity = tuple_ty.elems.len();
+                self.tuple_type_aliases.insert(alias.clone(), arity);
+                self.tuple_type_aliases
+                    .insert(self.scoped_type_key(&alias), arity);
+                let elem_tys: Vec<syn::Type> = tuple_ty.elems.iter().cloned().collect();
+                self.tuple_type_alias_elem_types
+                    .insert(alias.clone(), elem_tys.clone());
+                self.tuple_type_alias_elem_types
+                    .insert(self.scoped_type_key(&alias), elem_tys);
+            }
         }
         true
     }
@@ -8305,6 +8768,9 @@ impl CodeGen {
         // otherwise keep trait emission Rust-only to avoid unresolved `pro::*` symbols.
         if self.module_name.is_some() || self.expanded_libtest_mode {
             if self.emit_module_mode_trait_runtime_helper(t) {
+                self.module_runtime_helper_traits
+                    .insert(trait_name.to_string());
+                self.module_runtime_helper_traits.insert(scoped.clone());
                 self.skipped_module_traits.remove(&scoped);
                 return;
             }
@@ -8671,24 +9137,114 @@ impl CodeGen {
         self.writeln("}");
     }
 
-    fn emit_extension_trait_free_function(&mut self, method_spec: &ExtensionImplMethod) {
+    fn module_scope_key(module_path: &[String]) -> String {
+        module_path.join("::")
+    }
+
+    fn trait_key_matches_module_scope(trait_key: &str, module_path: &[String]) -> bool {
+        let mut parts: Vec<&str> = trait_key.split("::").collect();
+        if parts.is_empty() {
+            return module_path.is_empty();
+        }
+        let _ = parts.pop();
+        if parts.len() != module_path.len() {
+            return false;
+        }
+        parts
+            .iter()
+            .zip(module_path.iter())
+            .all(|(lhs, rhs)| *lhs == rhs)
+    }
+
+    fn emit_extension_trait_forward_decls_for_scope(&mut self, module_path: &[String]) -> bool {
+        let scope_key = Self::module_scope_key(module_path);
+        if !self
+            .emitted_extension_forward_decl_scopes
+            .insert(scope_key.clone())
+        {
+            return false;
+        }
+
+        let mut trait_keys: Vec<String> = self
+            .extension_trait_impl_methods
+            .keys()
+            .filter(|key| Self::trait_key_matches_module_scope(key, module_path))
+            .cloned()
+            .collect();
+        trait_keys.sort();
+        trait_keys.dedup();
+        if trait_keys.is_empty() {
+            return false;
+        }
+
+        let mut methods_to_emit: Vec<ExtensionImplMethod> = Vec::new();
+        for key in trait_keys {
+            if let Some(methods) = self.extension_trait_impl_methods.get(&key) {
+                methods_to_emit.extend(methods.clone());
+            }
+        }
+        if methods_to_emit.is_empty() {
+            return false;
+        }
+
+        self.writeln("// Extension trait free-function forward declarations");
+        self.writeln("namespace rusty_ext {");
+        self.indent += 1;
+        let mut seen = HashSet::new();
+        let mut emitted_any = false;
+        for method in &methods_to_emit {
+            let key = format!(
+                "{}|{}|{}",
+                method.method.sig.ident,
+                method.self_ty.to_token_stream(),
+                method.method.sig.to_token_stream()
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            if self.emit_extension_trait_free_function_declaration(method) {
+                self.newline();
+                emitted_any = true;
+            }
+        }
+        self.indent -= 1;
+        self.writeln("}");
+        emitted_any
+    }
+
+    fn emit_extension_trait_free_function_declaration(
+        &mut self,
+        method_spec: &ExtensionImplMethod,
+    ) -> bool {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
         let escaped_method_name = escape_cpp_keyword(&method_name);
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
-            self.writeln(&format!(
-                "// Rust-only extension method skipped (no receiver): {}",
-                method_name
-            ));
-            return;
+            return false;
         };
 
-        let free_generics = self.extension_free_function_generics(method, &method_spec.self_ty);
+        let free_generics = self.extension_free_function_generics(
+            method,
+            &method_spec.self_ty,
+            Some(&method_spec.associated_type_bindings),
+        );
+        let prev_forward_decl_signature = self.in_forward_decl_signature;
+        self.in_forward_decl_signature = true;
+        let self_cpp_ty =
+            self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty));
+        if self.extension_self_type_mapping_is_unsupported(&self_cpp_ty) {
+            self.in_forward_decl_signature = prev_forward_decl_signature;
+            return false;
+        }
         self.emit_template_prefix(&free_generics);
         self.push_type_param_scope(&free_generics);
 
-        let self_cpp_ty = self.map_type(&method_spec.self_ty);
+        let mut associated_type_cpp_bindings: HashMap<String, String> = HashMap::new();
+        for (name, ty) in &method_spec.associated_type_bindings {
+            associated_type_cpp_bindings.insert(name.clone(), self.map_type(ty));
+        }
+
         let receiver_param = if receiver.reference.is_some() {
             if receiver.mutability.is_some() {
                 format!("{}& self_", self_cpp_ty)
@@ -8704,7 +9260,13 @@ impl CodeGen {
             let syn::FnArg::Typed(pat_type) = arg else {
                 continue;
             };
-            let ty = self.map_type(&pat_type.ty);
+            let ty = self.rewrite_cpp_import_bound_type_spelling(
+                &self.map_extension_impl_type_with_self_assoc(
+                    &pat_type.ty,
+                    &self_cpp_ty,
+                    &associated_type_cpp_bindings,
+                ),
+            );
             let param_name = match pat_type.pat.as_ref() {
                 syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 _ => format!("_arg{}", idx),
@@ -8712,8 +9274,90 @@ impl CodeGen {
             params.push(format!("{} {}", ty, param_name));
         }
 
-        let return_type =
-            self.map_extension_impl_return_type(&method.sig.output, &method_spec.self_ty);
+        let return_type = self.rewrite_cpp_import_bound_type_spelling(
+            &self.map_extension_impl_return_type(
+                &method.sig.output,
+                &method_spec.self_ty,
+                &self_cpp_ty,
+                &associated_type_cpp_bindings,
+            ),
+        );
+        self.in_forward_decl_signature = prev_forward_decl_signature;
+        self.writeln(&format!(
+            "{} {}({});",
+            return_type,
+            escaped_method_name,
+            params.join(", ")
+        ));
+        self.pop_type_param_scope();
+        true
+    }
+
+    fn emit_extension_trait_free_function(&mut self, method_spec: &ExtensionImplMethod) {
+        let method = &method_spec.method;
+        let method_name = method.sig.ident.to_string();
+        let escaped_method_name = escape_cpp_keyword(&method_name);
+
+        let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
+            self.writeln(&format!(
+                "// Rust-only extension method skipped (no receiver): {}",
+                method_name
+            ));
+            return;
+        };
+
+        let free_generics = self.extension_free_function_generics(
+            method,
+            &method_spec.self_ty,
+            Some(&method_spec.associated_type_bindings),
+        );
+        let self_cpp_ty = self.map_type(&method_spec.self_ty);
+        if self.extension_self_type_mapping_is_unsupported(&self_cpp_ty) {
+            self.writeln(&format!(
+                "// Rust-only extension method skipped (unsupported self type mapping): {} ({})",
+                method_name, self_cpp_ty
+            ));
+            return;
+        }
+        self.emit_template_prefix(&free_generics);
+        self.push_type_param_scope(&free_generics);
+        let mut associated_type_cpp_bindings: HashMap<String, String> = HashMap::new();
+        for (name, ty) in &method_spec.associated_type_bindings {
+            associated_type_cpp_bindings.insert(name.clone(), self.map_type(ty));
+        }
+        let receiver_param = if receiver.reference.is_some() {
+            if receiver.mutability.is_some() {
+                format!("{}& self_", self_cpp_ty)
+            } else {
+                format!("const {}& self_", self_cpp_ty)
+            }
+        } else {
+            format!("{} self_", self_cpp_ty)
+        };
+
+        let mut params = vec![receiver_param];
+        for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
+            let syn::FnArg::Typed(pat_type) = arg else {
+                continue;
+            };
+            let ty = self.map_extension_impl_type_with_self_assoc(
+                &pat_type.ty,
+                &self_cpp_ty,
+                &associated_type_cpp_bindings,
+            );
+            let param_name = match pat_type.pat.as_ref() {
+                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                _ => format!("_arg{}", idx),
+            };
+            params.push(format!("{} {}", ty, param_name));
+        }
+
+        let return_type = self.map_extension_impl_return_type(
+            &method.sig.output,
+            &method_spec.self_ty,
+            &self_cpp_ty,
+            &associated_type_cpp_bindings,
+        );
         self.writeln(&format!(
             "{} {}({}) {{",
             return_type,
@@ -8721,9 +9365,13 @@ impl CodeGen {
             params.join(", ")
         ));
         self.indent += 1;
+        // Extension methods can mention `Self::Assoc` in bodies; define a local
+        // alias so dependent associated paths remain valid in free-function form.
+        self.writeln("using Self = std::remove_reference_t<decltype(self_)>;");
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&method.sig.output);
         self.push_param_bindings(&method.sig.inputs);
+        self.override_current_param_self_binding_with_type(&method_spec.self_ty, receiver);
         self.push_callable_param_bound_scope(method_spec.callable_param_metadata.clone());
         self.push_self_receiver_ref_scope(&method.sig.inputs);
         self.push_self_path_override(Some("self_".to_string()));
@@ -8739,31 +9387,50 @@ impl CodeGen {
         self.pop_type_param_scope();
     }
 
+    fn extension_self_type_mapping_is_unsupported(&self, mapped: &str) -> bool {
+        matches!(
+            mapped,
+            ty if ty.contains("std::str::")
+                || ty.contains("core::str::")
+                || ty.contains("std::option::")
+                || ty.contains("core::option::")
+                || ty.contains("std::result::")
+                || ty.contains("core::result::")
+                || ty.contains("rusty::collections::")
+        )
+    }
+
     fn extension_free_function_generics(
         &self,
         method: &syn::ImplItemFn,
         self_ty: &syn::Type,
+        associated_type_bindings: Option<&HashMap<String, syn::Type>>,
     ) -> syn::Generics {
         let mut generics = method.sig.generics.clone();
-        let used_type_params: HashSet<String> = generics
+        generics.params = generics
             .params
-            .iter()
-            .filter_map(|param| {
-                if let syn::GenericParam::Type(tp) = param {
-                    Some(tp.ident.to_string())
-                } else {
-                    None
-                }
-            })
-            .filter(|name| self.extension_method_type_param_is_used(method, self_ty, name))
+            .into_iter()
+            .filter(|param| !matches!(param, syn::GenericParam::Lifetime(_)))
             .collect();
-
+        let assoc_binding_mentions_type_param = |type_param_name: &str| {
+            associated_type_bindings.is_some_and(|bindings| {
+                bindings
+                    .values()
+                    .any(|ty| self.type_references_name(ty, type_param_name))
+            })
+        };
         generics.params = generics
             .params
             .into_iter()
             .filter(|param| match param {
-                syn::GenericParam::Type(tp) => used_type_params.contains(&tp.ident.to_string()),
-                syn::GenericParam::Const(cp) => used_type_params.contains(&cp.ident.to_string()),
+                syn::GenericParam::Type(tp) => {
+                    self.extension_method_type_param_is_used(
+                        method,
+                        self_ty,
+                        &tp.ident.to_string(),
+                    ) || assoc_binding_mentions_type_param(&tp.ident.to_string())
+                }
+                syn::GenericParam::Const(_) => true,
                 syn::GenericParam::Lifetime(_) => false,
             })
             .collect();
@@ -8773,8 +9440,68 @@ impl CodeGen {
                 tp.bounds.clear();
                 tp.default = None;
             }
+            if let syn::GenericParam::Const(cp) = param {
+                cp.default = None;
+            }
         }
         generics.where_clause = None;
+
+        let mut existing_param_names: HashSet<String> = generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
+                syn::GenericParam::Lifetime(_) => None,
+            })
+            .collect();
+
+        let mut discovered_type_param_names = HashSet::new();
+        self.collect_single_char_type_param_names_in_type(
+            self_ty,
+            &mut discovered_type_param_names,
+        );
+        for input in method.sig.inputs.iter().skip(1) {
+            if let syn::FnArg::Typed(pat_type) = input {
+                self.collect_single_char_type_param_names_in_type(
+                    &pat_type.ty,
+                    &mut discovered_type_param_names,
+                );
+            }
+        }
+        if let syn::ReturnType::Type(_, ret_ty) = &method.sig.output
+            && !Self::is_plain_self_type(ret_ty)
+        {
+            self.collect_single_char_type_param_names_in_type(
+                ret_ty,
+                &mut discovered_type_param_names,
+            );
+        }
+        if let Some(bindings) = associated_type_bindings {
+            for ty in bindings.values() {
+                self.collect_single_char_type_param_names_in_type(
+                    ty,
+                    &mut discovered_type_param_names,
+                );
+                self.collect_assoc_binding_type_param_candidates_in_type(
+                    ty,
+                    &mut discovered_type_param_names,
+                );
+            }
+        }
+
+        let mut discovered_sorted: Vec<String> = discovered_type_param_names
+            .into_iter()
+            .filter(|name| !existing_param_names.contains(name))
+            .collect();
+        discovered_sorted.sort();
+        for name in discovered_sorted {
+            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            let param: syn::GenericParam = parse_quote!(#ident);
+            existing_param_names.insert(name);
+            generics.params.push(param);
+        }
+
         generics
     }
 
@@ -8806,18 +9533,90 @@ impl CodeGen {
     fn map_extension_impl_return_type(
         &self,
         output: &syn::ReturnType,
-        self_ty: &syn::Type,
+        _self_ty: &syn::Type,
+        self_cpp_ty: &str,
+        associated_type_cpp_bindings: &HashMap<String, String>,
     ) -> String {
         match output {
             syn::ReturnType::Default => "void".to_string(),
             syn::ReturnType::Type(_, ty) => {
                 if Self::is_plain_self_type(ty) {
-                    self.map_type(self_ty)
+                    self_cpp_ty.to_string()
                 } else {
-                    self.map_type(ty)
+                    self.map_extension_impl_type_with_self_assoc(
+                        ty,
+                        self_cpp_ty,
+                        associated_type_cpp_bindings,
+                    )
                 }
             }
         }
+    }
+
+    fn map_extension_impl_type_with_self_assoc(
+        &self,
+        ty: &syn::Type,
+        self_cpp_ty: &str,
+        associated_type_cpp_bindings: &HashMap<String, String>,
+    ) -> String {
+        let mapped = if Self::is_plain_self_type(ty) {
+            self_cpp_ty.to_string()
+        } else {
+            self.map_type(ty)
+        };
+        self.rewrite_extension_self_assoc_cpp_type(
+            mapped,
+            self_cpp_ty,
+            associated_type_cpp_bindings,
+        )
+    }
+
+    fn rewrite_extension_self_assoc_cpp_type(
+        &self,
+        mut mapped: String,
+        self_cpp_ty: &str,
+        associated_type_cpp_bindings: &HashMap<String, String>,
+    ) -> String {
+        if mapped.is_empty() || self_cpp_ty.is_empty() {
+            return mapped;
+        }
+
+        let mut assoc_names: Vec<&String> = associated_type_cpp_bindings.keys().collect();
+        assoc_names.sort_by_key(|name| Reverse(name.len()));
+
+        for _ in 0..6 {
+            let mut changed = false;
+
+            for assoc_name in &assoc_names {
+                if let Some(assoc_ty) = associated_type_cpp_bindings.get(*assoc_name) {
+                    let typed_pat = format!("typename Self::{}", assoc_name);
+                    if mapped.contains(&typed_pat) {
+                        mapped = mapped.replace(&typed_pat, assoc_ty);
+                        changed = true;
+                    }
+                    let raw_pat = format!("Self::{}", assoc_name);
+                    if mapped.contains(&raw_pat) {
+                        mapped = mapped.replace(&raw_pat, assoc_ty);
+                        changed = true;
+                    }
+                }
+            }
+
+            if mapped.contains("typename Self::") {
+                mapped = mapped.replace("typename Self::", &format!("typename {}::", self_cpp_ty));
+                changed = true;
+            }
+            if mapped.contains("Self::") {
+                mapped = mapped.replace("Self::", &format!("{}::", self_cpp_ty));
+                changed = true;
+            }
+
+            if !changed {
+                break;
+            }
+        }
+
+        mapped
     }
 
     fn is_plain_self_type(ty: &syn::Type) -> bool {
@@ -8873,6 +9672,10 @@ impl CodeGen {
                 self.writeln(&format!("namespace {} {{", mod_cpp_name));
                 self.indent += 1;
                 self.module_stack.push(mod_name.to_string());
+                let scope_path = self.module_stack.clone();
+                if self.emit_extension_trait_forward_decls_for_scope(&scope_path) {
+                    self.newline();
+                }
                 let ordered_items = self.order_items_for_emission(items, true);
                 for item in ordered_items {
                     match item {
@@ -8901,7 +9704,16 @@ impl CodeGen {
                 self.writeln(&format!("namespace {} {{", mod_cpp_name));
                 self.indent += 1;
                 self.module_stack.push(mod_name.to_string());
-                if self.emit_item_forward_decls(items, self.module_stack.len()) {
+                let scope_path = self.module_stack.clone();
+                if self.emit_extension_trait_forward_decls_for_scope(&scope_path) {
+                    self.newline();
+                }
+                let prev_module_body_forward_decl_pass = self.module_body_forward_decl_pass;
+                self.module_body_forward_decl_pass = true;
+                let emitted_forward_decls =
+                    self.emit_item_forward_decls(items, self.module_stack.len());
+                self.module_body_forward_decl_pass = prev_module_body_forward_decl_pass;
+                if emitted_forward_decls {
                     self.newline();
                 }
                 let ordered_items = self.order_items_for_emission(items, true);
@@ -8974,7 +9786,16 @@ impl CodeGen {
             }
             let resolved_path = self.resolve_unqualified_local_import_path(path);
             let resolved_path = self.strip_current_crate_prefix_from_import_path(&resolved_path);
+            let resolved_path = self.resolve_nested_local_reexport_path(&resolved_path);
             self.record_option_alias_import(&resolved_path);
+            self.record_variant_constructor_alias_import(&resolved_path);
+            if self.is_variant_constructor_alias_import(&resolved_path) {
+                self.writeln(&format!(
+                    "// Rust-only constructor alias import: using {};",
+                    resolved_path
+                ));
+                continue;
+            }
             if is_pub
                 && self.module_name.is_some()
                 && is_module_linkage_sensitive_reexport(normalize_use_import_path(&resolved_path))
@@ -9026,7 +9847,8 @@ impl CodeGen {
                         let variant = *parts.last().unwrap_or(&"");
                         let parent = parts[parts.len() - 2];
                         let is_atomic_ordering = parent == "Ordering"
-                            && matches!(variant,
+                            && matches!(
+                                variant,
                                 "SeqCst" | "Acquire" | "Release" | "AcqRel" | "Relaxed"
                             );
                         if is_atomic_ordering {
@@ -9065,6 +9887,7 @@ impl CodeGen {
                     // Apply module namespace renames (e.g., sync → sync_mod)
                     // to using declaration paths.
                     let using_path = self.apply_module_renames_to_path(&using_path);
+                    let using_path = self.rewrite_global_using_path_for_local_alias_root(&using_path);
                     // Check if this is an enum variant import (e.g., Ordering::SeqCst).
                     // C++ enum class values can't be imported with `using`.
                     // Emit `constexpr auto SeqCst = ...::Ordering::SeqCst;` instead.
@@ -9074,9 +9897,11 @@ impl CodeGen {
                         let parent = using_segments[using_segments.len() - 2];
                         let key = format!("{}_{}", parent, variant);
                         self.c_like_enum_consts.contains(&key)
-                            || (parent == "Ordering" && matches!(variant,
-                                "SeqCst" | "Acquire" | "Release" | "AcqRel" | "Relaxed"
-                            ))
+                            || (parent == "Ordering"
+                                && matches!(
+                                    variant,
+                                    "SeqCst" | "Acquire" | "Release" | "AcqRel" | "Relaxed"
+                                ))
                     } else {
                         false
                     };
@@ -9095,6 +9920,8 @@ impl CodeGen {
                     if self.data_enum_types.contains(imported_name) {
                         if let Some(ns) = mapped_path.rsplit_once("::").map(|(ns, _)| ns) {
                             let ns_path = make_using_path_cpp_legal(ns);
+                            let ns_path =
+                                self.rewrite_global_using_path_for_local_alias_root(&ns_path);
                             self.writeln(&format!("using namespace {};", ns_path));
                         }
                     }
@@ -9108,6 +9935,31 @@ impl CodeGen {
                 }
             }
         }
+    }
+
+    fn is_local_import_alias_name(&self, name: &str) -> bool {
+        if self.import_alias_names.contains(name) {
+            return true;
+        }
+        self.import_alias_names
+            .iter()
+            .any(|alias| escape_cpp_keyword(alias) == name)
+    }
+
+    fn rewrite_global_using_path_for_local_alias_root(&self, using_path: &str) -> String {
+        let trimmed = using_path.trim();
+        if !trimmed.starts_with("::") || trimmed.contains(" = ") {
+            return using_path.to_string();
+        }
+        let without_global = trimmed.trim_start_matches("::");
+        if !without_global.contains("::") {
+            return using_path.to_string();
+        }
+        let root = without_global.split("::").next().unwrap_or("");
+        if root.is_empty() || !self.is_local_import_alias_name(root) {
+            return using_path.to_string();
+        }
+        without_global.to_string()
     }
 
     fn template_alias_import_statement(&mut self, mapped_path: &str) -> Option<String> {
@@ -9221,6 +10073,8 @@ impl CodeGen {
             return;
         }
         let alias = escape_cpp_keyword(trimmed.rsplit("::").next().unwrap_or(trimmed));
+        self.declared_item_names.insert(alias.clone());
+        self.import_alias_names.insert(alias.clone());
         let target = self.escape_and_rename_qualified_name(trimmed);
         self.writeln(&format!("namespace {} = ::{};", alias, target));
     }
@@ -9240,9 +10094,61 @@ impl CodeGen {
         let Some((alias, target)) = split_use_import_alias(normalized) else {
             return;
         };
-        if target == "std::option::Option" {
+        if matches!(
+            target,
+            "std::option::Option" | "core::option::Option" | "Option"
+        ) {
             self.option_type_aliases.insert(alias.to_string());
         }
+    }
+
+    fn canonical_constructor_name_for_import_target(target: &str) -> Option<&'static str> {
+        match target {
+            "None"
+            | "Option::None"
+            | "std::option::Option::None"
+            | "core::option::Option::None" => Some("None"),
+            "Some"
+            | "Option::Some"
+            | "std::option::Option::Some"
+            | "core::option::Option::Some" => Some("Some"),
+            "Ok" | "Result::Ok" | "std::result::Result::Ok" | "core::result::Result::Ok" => {
+                Some("Ok")
+            }
+            "Err" | "Result::Err" | "std::result::Result::Err" | "core::result::Result::Err" => {
+                Some("Err")
+            }
+            "Left" | "Either::Left" => Some("Left"),
+            "Right" | "Either::Right" => Some("Right"),
+            _ => None,
+        }
+    }
+
+    fn record_variant_constructor_alias_import(&mut self, path: &str) {
+        let normalized = normalize_use_import_path(path);
+        let Some((alias, target)) = split_use_import_alias(normalized) else {
+            return;
+        };
+        let Some(canonical) = Self::canonical_constructor_name_for_import_target(target) else {
+            return;
+        };
+        self.variant_constructor_aliases
+            .insert(alias.to_string(), canonical.to_string());
+    }
+
+    fn is_variant_constructor_alias_import(&self, path: &str) -> bool {
+        let normalized = normalize_use_import_path(path);
+        let Some((_, target)) = split_use_import_alias(normalized) else {
+            return false;
+        };
+        Self::canonical_constructor_name_for_import_target(target).is_some()
+    }
+
+    fn canonical_variant_name<'a>(&'a self, name: &'a str) -> &'a str {
+        self.variant_constructor_aliases
+            .get(name)
+            .map(|s| s.as_str())
+            .unwrap_or(name)
     }
 
     fn record_cpp_module_use_import(&mut self, import: &CppModuleUseImport) {
@@ -9351,6 +10257,64 @@ impl CodeGen {
         }
 
         path.to_string()
+    }
+
+    fn resolve_nested_local_reexport_path(&self, path: &str) -> String {
+        if path.starts_with("namespace ") {
+            return path.to_string();
+        }
+        if let Some((alias, target)) = split_use_import_alias(path) {
+            if let Some(resolved) = self.try_resolve_nested_local_type_path(target) {
+                return format!("{} = {}", alias, resolved);
+            }
+            return path.to_string();
+        }
+        self.try_resolve_nested_local_type_path(path)
+            .unwrap_or_else(|| path.to_string())
+    }
+
+    fn try_resolve_nested_local_type_path(&self, path: &str) -> Option<String> {
+        let normalized = path.trim_start_matches("::");
+        if normalized.is_empty() || normalized.contains(" = ") {
+            return None;
+        }
+        if self.local_declared_types.contains(normalized) {
+            return None;
+        }
+
+        let parts: Vec<&str> = normalized.split("::").collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        let leaf = *parts.last()?;
+        if !leaf
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            return None;
+        }
+
+        let parent = parts[..parts.len() - 1].join("::");
+        let prefix = format!("{}::", parent);
+        let suffix = format!("::{}", leaf);
+        let mut candidates: Vec<String> = self
+            .local_declared_types
+            .iter()
+            .filter(|candidate| candidate.starts_with(&prefix) && candidate.ends_with(&suffix))
+            .cloned()
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        if candidates.len() != 1 {
+            return None;
+        }
+        let resolved = candidates.pop()?;
+        if path.starts_with("::") {
+            Some(format!("::{}", resolved))
+        } else {
+            Some(resolved)
+        }
     }
 
     fn is_skipped_module_trait_import(&self, path: &str) -> bool {
@@ -9590,6 +10554,12 @@ impl CodeGen {
             }
             syn::UseTree::Name(n) => {
                 let name = n.ident.to_string();
+                if name == "self" {
+                    if prefix.is_empty() {
+                        return Vec::new();
+                    }
+                    return vec![prefix.to_string()];
+                }
                 let full = if prefix.is_empty() {
                     // Check if this name was re-exported from a module
                     if let Some(source_module) = self.crate_reexports.get(&name) {
@@ -9603,8 +10573,11 @@ impl CodeGen {
                 vec![full]
             }
             syn::UseTree::Rename(r) => {
+                let target_ident = r.ident.to_string();
                 let target = if prefix.is_empty() {
                     r.ident.to_string()
+                } else if target_ident == "self" {
+                    prefix.to_string()
                 } else {
                     format!("{}::{}", prefix, r.ident)
                 };
@@ -9853,17 +10826,57 @@ impl CodeGen {
         let syn::ReturnType::Type(_, ty) = output else {
             return false;
         };
+        self.type_current_struct_assoc_aliases_emitted(ty)
+    }
+
+    fn type_current_struct_assoc_aliases_emitted(&self, ty: &syn::Type) -> bool {
         let mut assoc_names = HashSet::new();
         self.collect_current_struct_assoc_projection_names(ty, &mut assoc_names);
         if assoc_names.is_empty() {
             return false;
         }
-        let Some(scope) = self.emitted_non_method_member_names.last() else {
-            return false;
+        assoc_names.into_iter().all(|name| {
+            self.emitted_non_method_member_names
+                .last()
+                .is_some_and(|scope| scope.contains(&escape_cpp_keyword(&name)))
+                || self
+                .resolve_current_struct_assoc_cpp_type_if_concrete(&name)
+                .is_some()
+        })
+    }
+
+    fn type_references_current_struct_assoc_projection(&self, ty: &syn::Type) -> bool {
+        let mut assoc_names = HashSet::new();
+        self.collect_current_struct_assoc_projection_names(ty, &mut assoc_names);
+        !assoc_names.is_empty()
+    }
+
+    fn expected_lambda_return_annotation(
+        &self,
+        expected_ty: Option<&syn::Type>,
+        reject_tuple_placeholder_marker: bool,
+    ) -> String {
+        let Some(ty) = expected_ty else {
+            return String::new();
         };
-        assoc_names
-            .into_iter()
-            .all(|name| scope.contains(&escape_cpp_keyword(&name)))
+        if reject_tuple_placeholder_marker && self.type_contains_tuple_placeholder_marker(ty) {
+            return String::new();
+        }
+        if self.should_soften_dependent_assoc_mode()
+            && self.type_references_current_struct_assoc_projection(ty)
+            && !self.type_current_struct_assoc_aliases_emitted(ty)
+        {
+            return String::new();
+        }
+        let mapped = self.map_type(ty);
+        if mapped == "auto"
+            || mapped.contains("/* TODO")
+            || type_string_has_auto_placeholder(&mapped)
+            || self.mapped_assoc_type_contains_unbound_placeholder(&mapped)
+        {
+            return String::new();
+        }
+        format!(" -> {}", mapped)
     }
 
     fn resolve_current_struct_assoc_cpp_type(&self, assoc_name: &str) -> Option<String> {
@@ -9877,6 +10890,18 @@ impl CodeGen {
         }
         let struct_name = self.current_struct.as_ref()?;
         self.resolve_assoc_type_from_impl_blocks(struct_name, assoc_name)
+    }
+
+    fn resolve_current_struct_assoc_cpp_type_if_concrete(
+        &self,
+        assoc_name: &str,
+    ) -> Option<String> {
+        let resolved = self.resolve_current_struct_assoc_cpp_type(assoc_name)?;
+        if self.mapped_assoc_type_contains_unbound_placeholder(&resolved) {
+            None
+        } else {
+            Some(resolved)
+        }
     }
 
     fn path_is_current_struct_assoc_projection(&self, path: &syn::Path) -> bool {
@@ -10102,11 +11127,20 @@ impl CodeGen {
         let block_for_emission = filtered_method_block.as_ref().unwrap_or(&method.block);
 
         let method_ident = method.sig.ident.to_string();
-        let deduced_return_aliases = self.deduced_callable_return_type_aliases_for_function(
-            &method.sig.generics,
-            &method.sig.inputs,
-            &method.sig.output,
-        );
+        let deduced_return_aliases = self
+            .deduced_callable_return_type_aliases_for_function(
+                &method.sig.generics,
+                &method.sig.inputs,
+                &method.sig.output,
+            )
+            .into_iter()
+            .filter(|(alias_name, alias_expr)| {
+                // Defensive guard against self-referential aliases in specialized impls.
+                // Example bad emission:
+                // `using T = std::remove_cvref_t<std::invoke_result_t<F&, T, T>>;`
+                !Self::cpp_type_expr_mentions_identifier(alias_expr, alias_name)
+            })
+            .collect::<Vec<_>>();
         let deduced_return_alias_names: HashSet<String> = deduced_return_aliases
             .iter()
             .map(|(name, _)| name.clone())
@@ -10125,10 +11159,8 @@ impl CodeGen {
                 .collect();
         }
         let emitted_template_key = self.emitted_template_signature_key(&emitted_generics);
+        let method_template_prefix_lines = self.template_prefix_lines(&emitted_generics, true);
 
-        // Emit template prefix for generic methods (excluding names already
-        // bound by outer type/impl scopes to avoid shadowing).
-        self.emit_template_prefix(&emitted_generics);
         self.push_type_param_scope(&method.sig.generics);
 
         let mut is_drop_destructor = false;
@@ -10195,27 +11227,23 @@ impl CodeGen {
             return_type = "decltype(auto)".to_string();
         }
         // For Deref/DerefMut implementations where Target resolves to a view-like
-        // runtime type (`std::span`/`std::string_view`), returning `Target&` creates
+        // runtime type (`std::span`/`std::string_view`), returning references creates
         // dangling references when body helpers synthesize temporaries. Return
         // view targets by value instead.
         if (is_deref_method || is_deref_mut_method)
-            && return_type.contains("::Target&")
-            && self
-                .resolve_current_struct_assoc_cpp_type("Target")
-                .is_some_and(|ty| Self::is_view_like_cpp_type(&ty))
+            && method_returns_reference
+            && let Some(target_ty) = self.resolve_current_struct_assoc_cpp_type("Target")
+            && Self::is_view_like_cpp_type(&target_ty)
         {
-            if let Some(target_ty) = self.resolve_current_struct_assoc_cpp_type("Target") {
-                return_type = if is_deref_mut_method {
-                    Self::to_mutable_view_cpp_type(&target_ty)
-                } else {
-                    target_ty
-                };
-            }
+            return_type = if is_deref_mut_method {
+                Self::to_mutable_view_cpp_type(&target_ty)
+            } else {
+                target_ty
+            };
         }
         let should_force_typed_option_ctor = return_type == "auto"
             && self.should_soften_dependent_assoc_mode()
-            && self.return_type_is_option_like(&method.sig.output)
-            && self.block_contains_option_some_and_none_exprs(block_for_emission);
+            && self.return_type_is_option_like(&method.sig.output);
 
         // Analyze receiver to determine method kind
         let (mut qualifier, mut is_static) = match method.sig.inputs.first() {
@@ -10251,22 +11279,24 @@ impl CodeGen {
         }
 
         // Build params list (skip self receiver)
-        let params: Vec<String> = method
-            .sig
-            .inputs
-            .iter()
-            .filter_map(|arg| match arg {
-                syn::FnArg::Receiver(_) => None,
-                syn::FnArg::Typed(pat_type) => {
-                    let ty = self.map_type(&pat_type.ty);
-                    let param_name = match pat_type.pat.as_ref() {
-                        syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
-                        _ => "_".to_string(),
-                    };
-                    Some(format!("{} {}", ty, param_name))
+        let mut params: Vec<String> = Vec::new();
+        let mut param_pattern_bindings: Vec<(syn::Pat, String)> = Vec::new();
+        for (idx, arg) in method.sig.inputs.iter().enumerate() {
+            let syn::FnArg::Typed(pat_type) = arg else {
+                continue;
+            };
+            let ty = self.map_type(&pat_type.ty);
+            let param_name = match pat_type.pat.as_ref() {
+                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                syn::Pat::Wild(_) => format!("_arg{}", idx),
+                _ => {
+                    let generated = format!("_arg{}", idx);
+                    param_pattern_bindings.push(((*pat_type.pat).clone(), generated.clone()));
+                    generated
                 }
-            })
-            .collect();
+            };
+            params.push(format!("{} {}", ty, param_name));
+        }
 
         if self.should_skip_recursive_bitflags_forwarder(&name, method, is_static) {
             self.pop_type_param_scope();
@@ -10284,6 +11314,9 @@ impl CodeGen {
         if !self.mark_emitted_method_conflict_key(conflict_key) {
             self.pop_type_param_scope();
             return;
+        }
+        for line in &method_template_prefix_lines {
+            self.writeln(line);
         }
         let mut hoisted_impl_override_state = Some({
             let (
@@ -10325,6 +11358,12 @@ impl CodeGen {
         let mut hoisted_local_generic_param_metadata = Some(
             self.push_hoisted_local_generic_type_param_metadata(&hoisted_local_generic_structs),
         );
+        let mut hoisted_local_type_scope_pushed = false;
+        if !hoisted_local_type_names.is_empty() {
+            self.hoisted_local_type_name_scopes
+                .push(hoisted_local_type_names.clone());
+            hoisted_local_type_scope_pushed = true;
+        }
         if is_drop_destructor {
             self.writeln(&format!(
                 "{}({}) noexcept(false) {{",
@@ -10363,9 +11402,27 @@ impl CodeGen {
         self.push_self_receiver_ref_scope(&method.sig.inputs);
         self.push_deref_method_scope(is_deref_method);
         self.push_deref_mut_method_scope(is_deref_mut_method);
+        self.push_transient_statement_scope();
         // Emit using-namespace for methods merged from sibling modules
         for ns in &self.merged_method_using_namespaces.clone() {
             self.writeln(&format!("using namespace {};", ns));
+        }
+        for (pat, param_name) in &param_pattern_bindings {
+            let mut binding_stmts = Vec::new();
+            let mut binding_map = HashMap::new();
+            if self.collect_pattern_binding_stmts_with_cpp_name_map(
+                pat,
+                param_name,
+                &mut binding_stmts,
+                &mut binding_map,
+            ) {
+                for stmt in binding_stmts {
+                    self.writeln(&stmt);
+                }
+                self.register_statement_scope_binding_map(&binding_map);
+            } else {
+                self.writeln("// TODO: complex method parameter pattern binding");
+            }
         }
         // For operator methods from const _ blocks whose body calls a
         // known bitwise helper (union, intersection, etc.), emit the
@@ -10374,6 +11431,7 @@ impl CodeGen {
         if name.starts_with("operator") && !is_drop_destructor {
             if let Some(inline_body) = self.try_inline_operator_body(&name, method) {
                 self.writeln(&inline_body);
+                self.pop_transient_statement_scope();
                 self.pop_deref_mut_method_scope();
                 self.pop_deref_method_scope();
                 self.pop_self_receiver_ref_scope();
@@ -10399,7 +11457,8 @@ impl CodeGen {
                     }
                     for (type_name, prev) in prev_inherent_overrides {
                         if let Some(prev_names) = prev {
-                            self.inherent_impl_method_names.insert(type_name, prev_names);
+                            self.inherent_impl_method_names
+                                .insert(type_name, prev_names);
                         } else {
                             self.inherent_impl_method_names.remove(&type_name);
                         }
@@ -10420,11 +11479,15 @@ impl CodeGen {
                 if let Some(metadata) = hoisted_local_generic_param_metadata.take() {
                     self.restore_hoisted_local_generic_type_param_metadata(metadata);
                 }
+                if hoisted_local_type_scope_pushed {
+                    self.hoisted_local_type_name_scopes.pop();
+                }
                 self.pop_type_param_scope();
                 return;
             }
         }
         self.emit_block(block_for_emission);
+        self.pop_transient_statement_scope();
         self.pop_deref_mut_method_scope();
         self.pop_deref_method_scope();
         self.pop_self_receiver_ref_scope();
@@ -10454,7 +11517,8 @@ impl CodeGen {
             }
             for (type_name, prev) in prev_inherent_overrides {
                 if let Some(prev_names) = prev {
-                    self.inherent_impl_method_names.insert(type_name, prev_names);
+                    self.inherent_impl_method_names
+                        .insert(type_name, prev_names);
                 } else {
                     self.inherent_impl_method_names.remove(&type_name);
                 }
@@ -10474,6 +11538,9 @@ impl CodeGen {
         }
         if let Some(metadata) = hoisted_local_generic_param_metadata.take() {
             self.restore_hoisted_local_generic_type_param_metadata(metadata);
+        }
+        if hoisted_local_type_scope_pushed {
+            self.hoisted_local_type_name_scopes.pop();
         }
         self.pop_type_param_scope();
     }
@@ -10671,11 +11738,81 @@ impl CodeGen {
                     context_expected_ty,
                     hints,
                 );
-                for arg in &call.args {
+                let mut merged_substitutions = self
+                    .function_call_type_arg_substitutions(call)
+                    .unwrap_or_default();
+                if let Some(expected_substitutions) = self
+                    .call_owner_type_arg_substitutions_from_expected_type(call, context_expected_ty)
+                {
+                    merged_substitutions.extend(expected_substitutions);
+                }
+                let substitutions =
+                    (!merged_substitutions.is_empty()).then_some(merged_substitutions);
+                for (idx, arg) in call.args.iter().enumerate() {
+                    let mut arg_expected = self.lookup_function_arg_expected_type_for_call(
+                        call,
+                        idx,
+                        substitutions.as_ref(),
+                    );
+                    let expected_needs_owner_recovery =
+                        arg_expected.as_ref().is_some_and(|expected| {
+                            self.type_contains_infer(expected)
+                                || self.type_contains_in_scope_type_param(expected)
+                                || self.type_contains_unresolved_placeholder_like(expected)
+                                || self.type_contains_unbound_single_letter_generic(expected)
+                                || matches!(
+                                    self.peel_reference_paren_group_type(expected),
+                                    syn::Type::Path(tp)
+                                        if tp.qself.is_none()
+                                            && tp.path.segments.len() == 1
+                                            && tp.path.segments[0]
+                                                .ident
+                                                .to_string()
+                                                .chars()
+                                                .next()
+                                                .is_some_and(|c| c.is_ascii_uppercase())
+                                )
+                        });
+                    if (arg_expected.is_none() || expected_needs_owner_recovery)
+                        && let Some(fallback) = self.lookup_associated_call_arg_expected_type_fallback(
+                            call,
+                            idx,
+                            Some(arg),
+                        )
+                    {
+                        let fallback = if let Some(substitutions) = substitutions.as_ref() {
+                            self.substitute_type_params_in_type(&fallback, substitutions)
+                        } else {
+                            fallback
+                        };
+                        arg_expected = Some(fallback);
+                    }
+                    if arg_expected.is_none()
+                        && let Some(fallback) =
+                            self.infer_associated_call_arg_expected_type_from_call_expected_owner(
+                                call,
+                                context_expected_ty,
+                                idx,
+                            )
+                    {
+                        let fallback = if let Some(substitutions) = substitutions.as_ref() {
+                            self.substitute_type_params_in_type(&fallback, substitutions)
+                        } else {
+                            fallback
+                        };
+                        arg_expected = Some(fallback);
+                    }
+                    if arg_expected.is_none() {
+                        arg_expected = self.infer_tuple_struct_constructor_call_arg_expected_type(
+                            call,
+                            context_expected_ty,
+                            idx,
+                        );
+                    }
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         arg,
                         candidate_owner_targets,
-                        context_expected_ty,
+                        arg_expected.as_ref().or(context_expected_ty),
                         hints,
                     );
                 }
@@ -10702,20 +11839,23 @@ impl CodeGen {
                                     }
                                 })
                             }
-                            "set" | "push" => {
-                                method_call.args.first().and_then(|arg| {
-                                    self.infer_local_binding_type_from_initializer(arg)
-                                })
-                            }
+                            "set" | "push" => method_call.args.first().and_then(|arg| {
+                                self.infer_local_binding_type_from_initializer(arg)
+                            }),
+                            "extend" => method_call
+                                .args
+                                .first()
+                                .and_then(|arg| self.infer_iter_item_type_from_expr(arg)),
                             _ => None,
                         };
                         if let Some(ty) = inferred {
                             // Placeholder hints store the missing generic argument(s),
                             // not the fully wrapped owner type. The owner wrapper is
                             // reconstructed later from the initializer path.
-                            let normalized =
-                                normalize_placeholder_hint_for_owner(owner_target, ty);
-                            if self.type_is_concrete_hint_candidate(&normalized) {
+                            let normalized = normalize_placeholder_hint_for_owner(owner_target, ty);
+                            if self.type_is_placeholder_hint_candidate_allow_scoped_generics(
+                                &normalized,
+                            ) {
                                 hints.insert(receiver_name, normalized);
                             }
                         }
@@ -10734,6 +11874,21 @@ impl CodeGen {
                         context_expected_ty,
                         hints,
                     );
+                }
+            }
+            syn::Expr::Path(path_expr) => {
+                if path_expr.path.segments.len() == 1
+                    && let Some(expected_ty) = context_expected_ty
+                {
+                    let name = path_expr.path.segments[0].ident.to_string();
+                    if !hints.contains_key(&name)
+                        && let Some(owner_target) = candidate_owner_targets.get(&name)
+                        && let Some(hint_ty) = self
+                            .placeholder_hint_from_expected_argument_type(owner_target, expected_ty)
+                        && self.type_is_placeholder_hint_candidate_allow_scoped_generics(&hint_ty)
+                    {
+                        hints.insert(name, hint_ty);
+                    }
                 }
             }
             syn::Expr::Assign(assign) => {
@@ -10847,10 +12002,18 @@ impl CodeGen {
             }
             syn::Expr::Struct(struct_expr) => {
                 for field in &struct_expr.fields {
+                    let field_expected = match &field.member {
+                        syn::Member::Named(ident) => self.lookup_struct_literal_field_type(
+                            struct_expr,
+                            &ident.to_string(),
+                            context_expected_ty,
+                        ),
+                        syn::Member::Unnamed(_) => None,
+                    };
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         &field.expr,
                         candidate_owner_targets,
-                        context_expected_ty,
+                        field_expected.as_ref().or(context_expected_ty),
                         hints,
                     );
                 }
@@ -10918,10 +12081,11 @@ impl CodeGen {
             }
             syn::Expr::Return(return_expr) => {
                 if let Some(value) = &return_expr.expr {
+                    let return_expected = self.current_return_type_hint().or(context_expected_ty);
                     self.collect_local_generic_placeholder_function_call_hints_in_expr(
                         value,
                         candidate_owner_targets,
-                        context_expected_ty,
+                        return_expected,
                         hints,
                     );
                 }
@@ -10990,7 +12154,8 @@ impl CodeGen {
         let syn::Expr::Path(_) = call.func.as_ref() else {
             return;
         };
-        let mut merged_substitutions = self.function_call_type_arg_substitutions(call)
+        let mut merged_substitutions = self
+            .function_call_type_arg_substitutions(call)
             .unwrap_or_default();
         if let Some(expected_substitutions) =
             self.call_owner_type_arg_substitutions_from_expected_type(call, context_expected_ty)
@@ -10999,7 +12164,7 @@ impl CodeGen {
         }
         let substitutions = (!merged_substitutions.is_empty()).then_some(merged_substitutions);
         for (idx, arg) in call.args.iter().enumerate() {
-            let Some(name) = extract_simple_local_ident(arg) else {
+            let Some(name) = extract_value_consumed_local_ident(arg) else {
                 continue;
             };
             if hints.contains_key(&name) {
@@ -11008,16 +12173,65 @@ impl CodeGen {
             let Some(owner_target) = candidate_owner_targets.get(&name) else {
                 continue;
             };
-            let expected_ty = self
-                .lookup_function_arg_expected_type_for_call(call, idx, substitutions.as_ref())
-                .or_else(|| {
-                    let fallback =
-                        self.lookup_associated_call_arg_expected_type_fallback(call, idx, Some(arg))?;
-                    if let Some(substitutions) = substitutions.as_ref() {
-                        return Some(self.substitute_type_params_in_type(&fallback, substitutions));
-                    }
-                    Some(fallback)
-                });
+            let mut expected_ty =
+                self.lookup_function_arg_expected_type_for_call(call, idx, substitutions.as_ref());
+            let expected_needs_owner_recovery = expected_ty.as_ref().is_some_and(|expected| {
+                self.type_contains_infer(expected)
+                    || self.type_contains_in_scope_type_param(expected)
+                    || self.type_contains_unresolved_placeholder_like(expected)
+                    || self.type_contains_unbound_single_letter_generic(expected)
+                    || matches!(
+                        self.peel_reference_paren_group_type(expected),
+                        syn::Type::Path(tp)
+                            if tp.qself.is_none()
+                                && tp.path.segments.len() == 1
+                                && tp.path.segments[0]
+                                    .ident
+                                    .to_string()
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_ascii_uppercase())
+                    )
+            });
+            if (expected_ty.is_none() || expected_needs_owner_recovery)
+                && let Some(fallback) = self.lookup_associated_call_arg_expected_type_fallback(
+                    call,
+                    idx,
+                    Some(arg),
+                )
+            {
+                let fallback = if let Some(substitutions) = substitutions.as_ref() {
+                    self.substitute_type_params_in_type(&fallback, substitutions)
+                } else {
+                    fallback
+                };
+                expected_ty = Some(fallback);
+            }
+            if expected_ty.is_none()
+                && let Some(fallback) =
+                    self.infer_associated_call_arg_expected_type_from_call_expected_owner(
+                        call,
+                        context_expected_ty,
+                        idx,
+                    )
+            {
+                let fallback = if let Some(substitutions) = substitutions.as_ref() {
+                    self.substitute_type_params_in_type(&fallback, substitutions)
+                } else {
+                    fallback
+                };
+                expected_ty = Some(fallback);
+            }
+            if expected_ty.is_none() {
+                expected_ty = self.infer_tuple_struct_constructor_call_arg_expected_type(
+                    call,
+                    context_expected_ty,
+                    idx,
+                );
+            }
+            if expected_ty.is_none() {
+                expected_ty = context_expected_ty.cloned();
+            }
             let Some(expected_ty) = expected_ty else {
                 continue;
             };
@@ -11026,7 +12240,7 @@ impl CodeGen {
             else {
                 continue;
             };
-            if self.type_is_concrete_hint_candidate(&hint_ty) {
+            if self.type_is_placeholder_hint_candidate_allow_scoped_generics(&hint_ty) {
                 hints.insert(name, hint_ty);
             }
         }
@@ -11037,6 +12251,7 @@ impl CodeGen {
         stmts: &[syn::Stmt],
         hints: &mut HashMap<String, syn::Type>,
     ) {
+        let reassigned = collect_reassigned_vars(stmts);
         let mut candidates: HashSet<String> = HashSet::new();
         for stmt in stmts {
             let syn::Stmt::Local(local) = stmt else {
@@ -11051,26 +12266,42 @@ impl CodeGen {
             // Uninitialized locals (let x;) are always candidates.
             // Initialized locals are candidates only when the initializer is a
             // generic constructor call whose type args could not be resolved
-            // (e.g., `let cell = OnceCell::new();` where T is unknown).
+            // (e.g., `let cell = OnceCell::new();` where T is unknown), or
+            // when they start as `None` and are later assigned `Some(...)`, or
+            // when they are mutable unsuffixed integer seeds (e.g. `let mut c = 1;`)
+            // and later assignments provide a stronger type.
             if let Some(init) = &local.init {
-                let Some(owner_target) = call_owner_placeholder_target(&init.expr) else {
-                    continue;
-                };
-                // Only include if the inferred type was not already resolved
-                // (i.e., the initializer still has an unbound type param).
-                    if let Some(inferred) = self.infer_local_binding_type_from_initializer(&init.expr)
+                let is_option_none_init = expr_is_option_none_constructor(&init.expr);
+                let is_mut_unsuffixed_int_seed = self.local_binding_is_mutable(local)
+                    && Self::is_unsuffixed_int_literal_expr(self.peel_paren_group_expr(&init.expr));
+                let is_mut_reassigned_numeric_seed = self.local_binding_is_mutable(local)
+                    && reassigned.contains(&name)
+                    && self.expr_contains_unsuffixed_int_literal(&init.expr);
+                if !is_option_none_init
+                    && !is_mut_unsuffixed_int_seed
+                    && !is_mut_reassigned_numeric_seed
+                {
+                    let Some(owner_target) = call_owner_placeholder_target(&init.expr) else {
+                        continue;
+                    };
+                    // Only include if the inferred type was not already resolved
+                    // (i.e., the initializer still has an unbound type param).
+                    if let Some(inferred) =
+                        self.infer_local_binding_type_from_initializer(&init.expr)
                     {
-                        let inferred_still_unresolved = !self.type_is_concrete_hint_candidate(&inferred);
+                        let inferred_still_unresolved =
+                            !self.type_is_concrete_hint_candidate(&inferred);
                         if !inferred_still_unresolved {
                             continue; // T was already resolved, not a candidate
                         }
                     }
-                // Double-check: if a placeholder hint was already collected for
-                // this name during an earlier scan pass, skip it.
-                if self.lookup_local_placeholder_type_hint(&name).is_some() {
-                    continue;
+                    // Double-check: if a placeholder hint was already collected for
+                    // this name during an earlier scan pass, skip it.
+                    if self.lookup_local_placeholder_type_hint(&name).is_some() {
+                        continue;
+                    }
+                    let _ = owner_target; // used above for filtering
                 }
-                let _ = owner_target; // used above for filtering
             }
             candidates.insert(name);
         }
@@ -11082,10 +12313,474 @@ impl CodeGen {
         }
     }
 
-    fn collect_oncecell_fallback_inner_type_hint(
+    fn local_binding_is_mutable(&self, local: &syn::Local) -> bool {
+        match &local.pat {
+            syn::Pat::Ident(pi) => pi.mutability.is_some(),
+            syn::Pat::Type(pt) => match pt.pat.as_ref() {
+                syn::Pat::Ident(pi) => pi.mutability.is_some(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn augment_option_none_placeholder_hints_from_return_context(
         &self,
         stmts: &[syn::Stmt],
-    ) -> Option<syn::Type> {
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let Some(return_ty) = self.current_return_type_hint() else {
+            return;
+        };
+        let Some(option_inner_ty) = self.expected_option_type_arg(Some(return_ty)).cloned() else {
+            return;
+        };
+
+        let mut option_none_candidates: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            if get_local_type(local).is_some() {
+                continue;
+            }
+            let Some(name) = local_binding_name(local) else {
+                continue;
+            };
+            if hints.contains_key(&name) {
+                continue;
+            }
+            if local
+                .init
+                .as_ref()
+                .is_some_and(|init| expr_is_option_none_constructor(&init.expr))
+            {
+                option_none_candidates.insert(name);
+            }
+        }
+        if option_none_candidates.is_empty() {
+            return;
+        }
+
+        let Some(tail_expr) = stmts.iter().rev().find_map(|stmt| match stmt {
+            syn::Stmt::Expr(expr, None) => Some(expr),
+            _ => None,
+        }) else {
+            return;
+        };
+        let Some(tail_name) = extract_simple_local_ident(tail_expr) else {
+            return;
+        };
+        if option_none_candidates.contains(&tail_name) && !hints.contains_key(&tail_name) {
+            hints.insert(tail_name, option_inner_ty);
+        }
+    }
+
+    fn option_some_payload_local_name(&self, expr: &syn::Expr) -> Option<String> {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Call(call) = expr else {
+            return None;
+        };
+        if call.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if matches!(
+            joined.as_str(),
+            "Some" | "Option::Some" | "core::option::Option::Some" | "std::option::Option::Some"
+        ) {
+            return extract_simple_local_ident(&call.args[0]);
+        }
+        None
+    }
+
+    fn collect_mut_unsuffixed_seed_option_return_hints_in_stmt(
+        &self,
+        stmt: &syn::Stmt,
+        candidates: &HashSet<String>,
+        option_inner_ty: &syn::Type,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        &init.expr,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Stmt::Expr(expr, _) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    expr,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+        }
+    }
+
+    fn collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+        &self,
+        expr: &syn::Expr,
+        candidates: &HashSet<String>,
+        option_inner_ty: &syn::Type,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        if let Some(name) = self.option_some_payload_local_name(expr)
+            && candidates.contains(&name)
+            && !hints.contains_key(&name)
+        {
+            hints.insert(name, option_inner_ty.clone());
+        }
+
+        match expr {
+            syn::Expr::Return(ret) => {
+                if let Some(value) = &ret.expr {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        value,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Call(call) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &call.func,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+                for arg in &call.args {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        arg,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::MethodCall(mc) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &mc.receiver,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+                for arg in &mc.args {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        arg,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Assign(assign) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &assign.left,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &assign.right,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            syn::Expr::Block(block) => {
+                for stmt in &block.block.stmts {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_stmt(
+                        stmt,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::If(if_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &if_expr.cond,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+                for stmt in &if_expr.then_branch.stmts {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_stmt(
+                        stmt,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        else_expr,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::While(while_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &while_expr.cond,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+                for stmt in &while_expr.body.stmts {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_stmt(
+                        stmt,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Loop(loop_expr) => {
+                for stmt in &loop_expr.body.stmts {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_stmt(
+                        stmt,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::ForLoop(for_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &for_expr.expr,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+                for stmt in &for_expr.body.stmts {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_stmt(
+                        stmt,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Match(match_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &match_expr.expr,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+                for arm in &match_expr.arms {
+                    if let Some((_, guard)) = &arm.guard {
+                        self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                            guard,
+                            candidates,
+                            option_inner_ty,
+                            hints,
+                        );
+                    }
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        &arm.body,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Struct(struct_expr) => {
+                for field in &struct_expr.fields {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        &field.expr,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+                if let Some(rest) = &struct_expr.rest {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        rest,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Array(array_expr) => {
+                for elem in &array_expr.elems {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        elem,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Tuple(tuple_expr) => {
+                for elem in &tuple_expr.elems {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        elem,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Unsafe(unsafe_expr) => {
+                for stmt in &unsafe_expr.block.stmts {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_stmt(
+                        stmt,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Closure(closure_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &closure_expr.body,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            syn::Expr::Await(await_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &await_expr.base,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            syn::Expr::Try(try_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &try_expr.expr,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            syn::Expr::Break(break_expr) => {
+                if let Some(value) = &break_expr.expr {
+                    self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                        value,
+                        candidates,
+                        option_inner_ty,
+                        hints,
+                    );
+                }
+            }
+            syn::Expr::Reference(reference_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &reference_expr.expr,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            syn::Expr::Unary(unary_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &unary_expr.expr,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            syn::Expr::Paren(paren_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &paren_expr.expr,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            syn::Expr::Group(group_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &group_expr.expr,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            syn::Expr::Let(let_expr) => {
+                self.collect_mut_unsuffixed_seed_option_return_hints_in_expr(
+                    &let_expr.expr,
+                    candidates,
+                    option_inner_ty,
+                    hints,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn augment_mut_unsuffixed_int_seed_hints_from_option_return_context(
+        &self,
+        stmts: &[syn::Stmt],
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let Some(return_ty) = self.current_return_type_hint() else {
+            return;
+        };
+        let Some(option_inner_ty) = self.expected_option_type_arg(Some(return_ty)).cloned() else {
+            return;
+        };
+        if !self.type_is_concrete_hint_candidate(&option_inner_ty) {
+            return;
+        }
+
+        let mut candidates: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            if get_local_type(local).is_some() {
+                continue;
+            }
+            let Some(name) = local_binding_name(local) else {
+                continue;
+            };
+            if hints.contains_key(&name) || !self.local_binding_is_mutable(local) {
+                continue;
+            }
+            let Some(init) = &local.init else {
+                continue;
+            };
+            if Self::is_unsuffixed_int_literal_expr(self.peel_paren_group_expr(&init.expr)) {
+                candidates.insert(name);
+            }
+        }
+        if candidates.is_empty() {
+            return;
+        }
+
+        for stmt in stmts {
+            self.collect_mut_unsuffixed_seed_option_return_hints_in_stmt(
+                stmt,
+                &candidates,
+                &option_inner_ty,
+                hints,
+            );
+        }
+    }
+
+    fn collect_oncecell_fallback_inner_type_hint(&self, stmts: &[syn::Stmt]) -> Option<syn::Type> {
         let mut enumerate_index_names: HashSet<String> = HashSet::new();
         for stmt in stmts {
             self.collect_enumerate_index_binding_names_in_stmt(stmt, &mut enumerate_index_names);
@@ -11251,10 +12946,7 @@ impl CodeGen {
         }
     }
 
-    fn for_loop_enumerate_index_binding_name(
-        &self,
-        for_expr: &syn::ExprForLoop,
-    ) -> Option<String> {
+    fn for_loop_enumerate_index_binding_name(&self, for_expr: &syn::ExprForLoop) -> Option<String> {
         if !self.expr_is_enumerate_like(&for_expr.expr) {
             return None;
         }
@@ -11670,7 +13362,8 @@ impl CodeGen {
         arg: &syn::Expr,
         enumerate_index_names: &HashSet<String>,
     ) -> Option<syn::Type> {
-        let ret_ty = self.infer_oncecell_inner_type_from_get_or_init_arg(arg, enumerate_index_names)?;
+        let ret_ty =
+            self.infer_oncecell_inner_type_from_get_or_init_arg(arg, enumerate_index_names)?;
         let ret_ty = self.peel_reference_paren_group_type(&ret_ty);
         let syn::Type::Path(tp) = ret_ty else {
             return None;
@@ -11717,7 +13410,9 @@ impl CodeGen {
         match stmt {
             syn::Stmt::Local(local) => {
                 if let Some(init) = &local.init {
-                    self.collect_uninitialized_local_type_hints_in_expr(&init.expr, candidates, hints);
+                    self.collect_uninitialized_local_type_hints_in_expr(
+                        &init.expr, candidates, hints,
+                    );
                 }
             }
             syn::Stmt::Expr(expr, _) => {
@@ -11762,6 +13457,10 @@ impl CodeGen {
                         if let Some(rhs_ty) = self
                             .infer_local_binding_type_from_initializer(&assign.right)
                             .or_else(|| self.infer_simple_expr_type(&assign.right))
+                            .or_else(|| {
+                                extract_simple_local_ident(&assign.right)
+                                    .and_then(|rhs_name| self.lookup_local_binding_type(&rhs_name))
+                            })
                         {
                             if self.type_is_concrete_hint_candidate(&rhs_ty) {
                                 hints.insert(name, rhs_ty);
@@ -11769,7 +13468,11 @@ impl CodeGen {
                         }
                     }
                 }
-                self.collect_uninitialized_local_type_hints_in_expr(&assign.left, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &assign.left,
+                    candidates,
+                    hints,
+                );
                 self.collect_uninitialized_local_type_hints_in_expr(
                     &assign.right,
                     candidates,
@@ -11782,12 +13485,18 @@ impl CodeGen {
                 }
             }
             syn::Expr::If(if_expr) => {
-                self.collect_uninitialized_local_type_hints_in_expr(&if_expr.cond, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &if_expr.cond,
+                    candidates,
+                    hints,
+                );
                 for stmt in &if_expr.then_branch.stmts {
                     self.collect_uninitialized_local_type_hints_in_stmt(stmt, candidates, hints);
                 }
                 if let Some((_, else_expr)) = &if_expr.else_branch {
-                    self.collect_uninitialized_local_type_hints_in_expr(else_expr, candidates, hints);
+                    self.collect_uninitialized_local_type_hints_in_expr(
+                        else_expr, candidates, hints,
+                    );
                 }
             }
             syn::Expr::While(while_expr) => {
@@ -11806,7 +13515,11 @@ impl CodeGen {
                 }
             }
             syn::Expr::ForLoop(for_expr) => {
-                self.collect_uninitialized_local_type_hints_in_expr(&for_expr.expr, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &for_expr.expr,
+                    candidates,
+                    hints,
+                );
                 for stmt in &for_expr.body.stmts {
                     self.collect_uninitialized_local_type_hints_in_stmt(stmt, candidates, hints);
                 }
@@ -11819,14 +13532,22 @@ impl CodeGen {
                 );
                 for arm in &match_expr.arms {
                     if let Some((_, guard)) = &arm.guard {
-                        self.collect_uninitialized_local_type_hints_in_expr(guard, candidates, hints);
+                        self.collect_uninitialized_local_type_hints_in_expr(
+                            guard, candidates, hints,
+                        );
                     }
-                    self.collect_uninitialized_local_type_hints_in_expr(&arm.body, candidates, hints);
+                    self.collect_uninitialized_local_type_hints_in_expr(
+                        &arm.body, candidates, hints,
+                    );
                 }
             }
             syn::Expr::Struct(struct_expr) => {
                 for field in &struct_expr.fields {
-                    self.collect_uninitialized_local_type_hints_in_expr(&field.expr, candidates, hints);
+                    self.collect_uninitialized_local_type_hints_in_expr(
+                        &field.expr,
+                        candidates,
+                        hints,
+                    );
                 }
                 if let Some(rest) = &struct_expr.rest {
                     self.collect_uninitialized_local_type_hints_in_expr(rest, candidates, hints);
@@ -11838,9 +13559,26 @@ impl CodeGen {
                 }
             }
             syn::Expr::Tuple(tuple_expr) => {
+                self.collect_uninitialized_local_type_hints_from_tuple(
+                    tuple_expr,
+                    candidates,
+                    hints,
+                );
                 for elem in &tuple_expr.elems {
                     self.collect_uninitialized_local_type_hints_in_expr(elem, candidates, hints);
                 }
+            }
+            syn::Expr::Index(index_expr) => {
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &index_expr.expr,
+                    candidates,
+                    hints,
+                );
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &index_expr.index,
+                    candidates,
+                    hints,
+                );
             }
             syn::Expr::Unsafe(unsafe_expr) => {
                 for stmt in &unsafe_expr.block.stmts {
@@ -11862,7 +13600,11 @@ impl CodeGen {
                 );
             }
             syn::Expr::Try(try_expr) => {
-                self.collect_uninitialized_local_type_hints_in_expr(&try_expr.expr, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &try_expr.expr,
+                    candidates,
+                    hints,
+                );
             }
             syn::Expr::Return(return_expr) => {
                 if let Some(value) = &return_expr.expr {
@@ -11882,18 +13624,99 @@ impl CodeGen {
                 );
             }
             syn::Expr::Unary(unary_expr) => {
-                self.collect_uninitialized_local_type_hints_in_expr(&unary_expr.expr, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &unary_expr.expr,
+                    candidates,
+                    hints,
+                );
             }
             syn::Expr::Paren(paren_expr) => {
-                self.collect_uninitialized_local_type_hints_in_expr(&paren_expr.expr, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &paren_expr.expr,
+                    candidates,
+                    hints,
+                );
             }
             syn::Expr::Group(group_expr) => {
-                self.collect_uninitialized_local_type_hints_in_expr(&group_expr.expr, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &group_expr.expr,
+                    candidates,
+                    hints,
+                );
             }
             syn::Expr::Let(let_expr) => {
-                self.collect_uninitialized_local_type_hints_in_expr(&let_expr.expr, candidates, hints);
+                self.collect_uninitialized_local_type_hints_in_expr(
+                    &let_expr.expr,
+                    candidates,
+                    hints,
+                );
             }
             _ => {}
+        }
+    }
+
+    fn extract_candidate_local_name_for_hint_expr(&self, expr: &syn::Expr) -> Option<String> {
+        let expr = self.peel_paren_group_expr(expr);
+        if let syn::Expr::Reference(reference) = expr {
+            return self.extract_candidate_local_name_for_hint_expr(&reference.expr);
+        }
+        if let syn::Expr::Cast(cast_expr) = expr {
+            return self.extract_candidate_local_name_for_hint_expr(&cast_expr.expr);
+        }
+        if let Some(name) = extract_simple_local_ident(expr) {
+            return Some(name);
+        }
+        if let Some(name) = extract_index_base_ident(expr) {
+            return Some(name);
+        }
+        if let syn::Expr::Unary(unary) = expr {
+            return self.extract_candidate_local_name_for_hint_expr(&unary.expr);
+        }
+        None
+    }
+
+    fn infer_concrete_hint_type_from_peer_expr(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let inferred = self
+            .infer_local_binding_type_from_initializer(expr)
+            .or_else(|| self.infer_simple_expr_type(expr))?;
+        let inferred = self.peel_reference_paren_group_type(&inferred).clone();
+        if self.type_is_concrete_hint_candidate(&inferred) {
+            Some(inferred)
+        } else {
+            None
+        }
+    }
+
+    fn collect_uninitialized_local_type_hints_from_tuple(
+        &self,
+        tuple_expr: &syn::ExprTuple,
+        candidates: &HashSet<String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        if tuple_expr.elems.len() < 2 {
+            return;
+        }
+
+        for (idx, elem) in tuple_expr.elems.iter().enumerate() {
+            let Some(name) = self.extract_candidate_local_name_for_hint_expr(elem) else {
+                continue;
+            };
+            if !candidates.contains(&name) || hints.contains_key(&name) {
+                continue;
+            }
+            let mut peer_hint = None;
+            for (peer_idx, peer_expr) in tuple_expr.elems.iter().enumerate() {
+                if idx == peer_idx {
+                    continue;
+                }
+                if let Some(inferred) = self.infer_concrete_hint_type_from_peer_expr(peer_expr) {
+                    peer_hint = Some(inferred);
+                    break;
+                }
+            }
+            if let Some(inferred) = peer_hint {
+                hints.insert(name, inferred);
+            }
         }
     }
 
@@ -11905,7 +13728,7 @@ impl CodeGen {
     ) {
         let substitutions = self.function_call_type_arg_substitutions(call);
         for (idx, arg) in call.args.iter().enumerate() {
-            let Some(name) = extract_simple_local_ident(arg) else {
+            let Some(name) = extract_value_consumed_local_ident(arg) else {
                 continue;
             };
             if !candidates.contains(&name) {
@@ -11969,7 +13792,7 @@ impl CodeGen {
             self.lookup_owner_method_arg_expected_type(&owner, &method, arg_idx, arg_expr);
         if expected.is_none() {
             return self.infer_associated_call_arg_expected_type_from_owner(
-                owner_seg, &owner, &method, arg_idx,
+                owner_seg, &owner, &method, arg_idx, arg_expr,
             );
         }
         let mut expected = expected?;
@@ -11995,10 +13818,7 @@ impl CodeGen {
             );
         if expected_needs_owner_recovery
             && let Some(owner_expected) = self.infer_associated_call_arg_expected_type_from_owner(
-                owner_seg,
-                &owner,
-                &method,
-                arg_idx,
+                owner_seg, &owner, &method, arg_idx, arg_expr,
             )
         {
             return Some(owner_expected);
@@ -12012,74 +13832,75 @@ impl CodeGen {
         owner_name: &str,
         method_name: &str,
         arg_idx: usize,
+        arg_expr: Option<&syn::Expr>,
     ) -> Option<syn::Type> {
         let owner_inner_ty = match &owner_seg.arguments {
             syn::PathArguments::AngleBracketed(owner_args) => owner_args
                 .args
                 .iter()
                 .find_map(|arg| match arg {
-                    syn::GenericArgument::Type(t) if !self.type_contains_infer(t) => Some(t.clone()),
+                    syn::GenericArgument::Type(t) if !self.type_contains_infer(t) => {
+                        Some(t.clone())
+                    }
                     _ => None,
                 })
-                .or_else(|| self.infer_owner_inner_type_from_in_progress_placeholder_hint(owner_name)),
-            syn::PathArguments::None => {
-                self.infer_owner_inner_type_from_in_progress_placeholder_hint(owner_name)
-                    .or_else(|| {
-                        self.lookup_local_placeholder_type_hint(ONCECELL_FALLBACK_INNER_HINT_KEY)
-                            .cloned()
-                            .map(|ty| {
-                                normalize_placeholder_hint_for_owner(
-                                    Some(owner_name),
-                                    ty,
-                                )
-                            })
-                            .filter(|ty| {
-                                !self.type_contains_infer(ty)
-                                    && !self.type_contains_in_scope_type_param(ty)
-                                    && !self.type_contains_unbound_single_letter_generic(ty)
-                                    && !self.type_contains_unresolved_placeholder_like(ty)
-                            })
-                    })
-                    .or_else(|| {
-                        let owner_key = if owner_name == "Self" {
-                            self.current_struct
-                                .as_ref()
-                                .map(|name| self.scoped_type_key(name))
-                        } else {
-                            Some(self.scoped_type_key(owner_name))
-                        };
-                        owner_key
+                .or_else(|| {
+                    self.infer_owner_inner_type_from_in_progress_placeholder_hint(owner_name)
+                }),
+            syn::PathArguments::None => self
+                .infer_owner_inner_type_from_in_progress_placeholder_hint(owner_name)
+                .or_else(|| {
+                    self.lookup_local_placeholder_type_hint(ONCECELL_FALLBACK_INNER_HINT_KEY)
+                        .cloned()
+                        .map(|ty| normalize_placeholder_hint_for_owner(Some(owner_name), ty))
+                        .filter(|ty| {
+                            !self.type_contains_infer(ty)
+                                && !self.type_contains_in_scope_type_param(ty)
+                                && !self.type_contains_unbound_single_letter_generic(ty)
+                                && !self.type_contains_unresolved_placeholder_like(ty)
+                        })
+                })
+                .or_else(|| {
+                    let owner_key = if owner_name == "Self" {
+                        self.current_struct
                             .as_ref()
-                            .and_then(|key| self.declared_type_params.get(key))
-                            .or_else(|| {
-                                if owner_name == "Self" {
-                                    self.current_struct
-                                        .as_ref()
-                                        .and_then(|name| self.declared_type_params.get(name))
-                                } else {
-                                    self.declared_type_params.get(owner_name)
-                                }
+                            .map(|name| self.scoped_type_key(name))
+                    } else {
+                        Some(self.scoped_type_key(owner_name))
+                    };
+                    owner_key
+                        .as_ref()
+                        .and_then(|key| self.declared_type_params.get(key))
+                        .or_else(|| {
+                            if owner_name == "Self" {
+                                self.current_struct
+                                    .as_ref()
+                                    .and_then(|name| self.declared_type_params.get(name))
+                            } else {
+                                self.declared_type_params.get(owner_name)
+                            }
+                        })
+                        .zip(
+                            owner_key
+                                .as_ref()
+                                .and_then(|key| self.declared_type_param_kinds.get(key))
+                                .or_else(|| {
+                                    if owner_name == "Self" {
+                                        self.current_struct.as_ref().and_then(|name| {
+                                            self.declared_type_param_kinds.get(name)
+                                        })
+                                    } else {
+                                        self.declared_type_param_kinds.get(owner_name)
+                                    }
+                                }),
+                        )
+                        .and_then(|(params, kinds)| {
+                            params.iter().zip(kinds.iter()).find_map(|(param, kind)| {
+                                matches!(kind, GenericParamKind::Type).then_some(param.clone())
                             })
-                            .zip(owner_key.as_ref().and_then(|key| self.declared_type_param_kinds.get(key)).or_else(|| {
-                                if owner_name == "Self" {
-                                    self.current_struct
-                                        .as_ref()
-                                        .and_then(|name| self.declared_type_param_kinds.get(name))
-                                } else {
-                                    self.declared_type_param_kinds.get(owner_name)
-                                }
-                            }))
-                            .and_then(|(params, kinds)| {
-                                params
-                                    .iter()
-                                    .zip(kinds.iter())
-                                    .find_map(|(param, kind)| {
-                                        matches!(kind, GenericParamKind::Type).then_some(param.clone())
-                                    })
-                            })
-                            .and_then(|param| syn::parse_str::<syn::Type>(&param).ok())
-                    })
-            }
+                        })
+                        .and_then(|param| syn::parse_str::<syn::Type>(&param).ok())
+                }),
             _ => None,
         }?;
         match (owner_name, method_name, arg_idx) {
@@ -12092,8 +13913,9 @@ impl CodeGen {
                 Some(callable_ty)
             }
             ("OnceCell", "get_or_try_init", 0) => {
+                let err_ty = self.inferred_try_init_error_type_or_unit(arg_expr);
                 let callable_ty: syn::Type =
-                    parse_quote!(impl FnOnce() -> Result<#owner_inner_ty, _>);
+                    parse_quote!(impl FnOnce() -> Result<#owner_inner_ty, #err_ty>);
                 Some(callable_ty)
             }
             ("OnceBox", "with_value" | "from", 0) => {
@@ -12101,13 +13923,15 @@ impl CodeGen {
                 Some(boxed_ty)
             }
             ("Box", "new" | "new_" | "make", 0) => Some(owner_inner_ty),
+            (_, "new" | "new_", 0) => Some(owner_inner_ty),
             ("OnceBox", "get_or_init", 0) => {
                 let callable_ty: syn::Type = parse_quote!(impl FnOnce() -> Box<#owner_inner_ty>);
                 Some(callable_ty)
             }
             ("OnceBox", "get_or_try_init", 0) => {
+                let err_ty = self.inferred_try_init_error_type_or_unit(arg_expr);
                 let callable_ty: syn::Type =
-                    parse_quote!(impl FnOnce() -> Result<Box<#owner_inner_ty>, _>);
+                    parse_quote!(impl FnOnce() -> Result<Box<#owner_inner_ty>, #err_ty>);
                 Some(callable_ty)
             }
             _ => None,
@@ -12159,6 +13983,7 @@ impl CodeGen {
             syn::GenericArgument::Type(t) => Some(t.clone()),
             _ => None,
         })?;
+        let arg_expr = call.args.get(arg_idx);
 
         match (owner_name.as_str(), method_name.as_str(), arg_idx) {
             ("Lazy", "new" | "new_", 0) => {
@@ -12170,8 +13995,9 @@ impl CodeGen {
                 Some(callable_ty)
             }
             ("OnceCell", "get_or_try_init", 0) => {
+                let err_ty = self.inferred_try_init_error_type_or_unit(arg_expr);
                 let callable_ty: syn::Type =
-                    parse_quote!(impl FnOnce() -> Result<#owner_inner_ty, _>);
+                    parse_quote!(impl FnOnce() -> Result<#owner_inner_ty, #err_ty>);
                 Some(callable_ty)
             }
             ("OnceBox", "with_value" | "from", 0) => {
@@ -12179,17 +14005,128 @@ impl CodeGen {
                 Some(boxed_ty)
             }
             ("Box", "new" | "new_" | "make", 0) => Some(owner_inner_ty),
+            (_, "new" | "new_", 0) => Some(owner_inner_ty),
             ("OnceBox", "get_or_init", 0) => {
                 let callable_ty: syn::Type = parse_quote!(impl FnOnce() -> Box<#owner_inner_ty>);
                 Some(callable_ty)
             }
             ("OnceBox", "get_or_try_init", 0) => {
+                let err_ty = self.inferred_try_init_error_type_or_unit(arg_expr);
                 let callable_ty: syn::Type =
-                    parse_quote!(impl FnOnce() -> Result<Box<#owner_inner_ty>, _>);
+                    parse_quote!(impl FnOnce() -> Result<Box<#owner_inner_ty>, #err_ty>);
                 Some(callable_ty)
             }
             _ => None,
         }
+    }
+
+    fn tuple_struct_ctor_type_arg_substitutions_from_expected_type(
+        &self,
+        ctor_struct_name: &str,
+        call_expected_ty: Option<&syn::Type>,
+    ) -> Option<HashMap<String, syn::Type>> {
+        let expected_ty = call_expected_ty?;
+        let expected_ty = self.peel_reference_paren_group_type(expected_ty);
+        let syn::Type::Path(expected_tp) = expected_ty else {
+            return None;
+        };
+        let expected_last = expected_tp.path.segments.last()?;
+        let expected_owner_name = expected_last.ident.to_string();
+        if expected_owner_name != ctor_struct_name
+            && !(expected_owner_name == "Self"
+                && self
+                    .current_struct
+                    .as_deref()
+                    .is_some_and(|name| name == ctor_struct_name))
+        {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(expected_args) = &expected_last.arguments else {
+            return None;
+        };
+        let expected_type_args: Vec<syn::Type> = expected_args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                _ => None,
+            })
+            .collect();
+        if expected_type_args.is_empty() {
+            return None;
+        }
+
+        let scoped_key = self.scoped_type_key(ctor_struct_name);
+        let params = self
+            .declared_type_params
+            .get(ctor_struct_name)
+            .or_else(|| self.declared_type_params.get(&scoped_key))?;
+        if params.is_empty() {
+            return None;
+        }
+        let param_kinds = self
+            .declared_type_param_kinds
+            .get(ctor_struct_name)
+            .or_else(|| self.declared_type_param_kinds.get(&scoped_key));
+
+        let mut substitutions = HashMap::new();
+        let mut expected_iter = expected_type_args.into_iter();
+        for (idx, param) in params.iter().enumerate() {
+            let is_type_param = param_kinds
+                .and_then(|kinds| kinds.get(idx))
+                .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
+            if !is_type_param {
+                continue;
+            }
+            let Some(expected_arg_ty) = expected_iter.next() else {
+                break;
+            };
+            substitutions.insert(param.clone(), expected_arg_ty);
+        }
+
+        if substitutions.is_empty() {
+            None
+        } else {
+            Some(substitutions)
+        }
+    }
+
+    fn infer_tuple_struct_constructor_call_arg_expected_type(
+        &self,
+        call: &syn::ExprCall,
+        call_expected_ty: Option<&syn::Type>,
+        arg_idx: usize,
+    ) -> Option<syn::Type> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let ctor_seg_idx = path_expr.path.segments.len().checked_sub(1)?;
+        let ctor_seg = path_expr.path.segments.iter().nth(ctor_seg_idx)?;
+        let ctor_name = ctor_seg.ident.to_string();
+        let ctor_struct_name = if ctor_name == "Self" {
+            self.current_struct.clone()?
+        } else {
+            ctor_name
+        };
+
+        let field_name = format!("_{}", arg_idx);
+        let mut field_ty = self.lookup_struct_field_type(&ctor_struct_name, &field_name)?;
+        let mut substitutions = self
+            .owner_segment_type_arg_substitutions(&path_expr.path, ctor_seg_idx)
+            .unwrap_or_default();
+        if substitutions.is_empty()
+            && let Some(expected_substitutions) = self
+                .tuple_struct_ctor_type_arg_substitutions_from_expected_type(
+                    &ctor_struct_name,
+                    call_expected_ty,
+                )
+        {
+            substitutions = expected_substitutions;
+        }
+        if !substitutions.is_empty() {
+            field_ty = self.substitute_type_params_in_type(&field_ty, &substitutions);
+        }
+        Some(field_ty)
     }
 
     fn infer_owner_inner_type_from_in_progress_placeholder_hint(
@@ -12232,7 +14169,7 @@ impl CodeGen {
 
         // Phase 1: check if any argument is a candidate (existing logic)
         for (idx, arg) in method_call.args.iter().enumerate() {
-            let Some(name) = extract_simple_local_ident(arg) else {
+            let Some(name) = extract_value_consumed_local_ident(arg) else {
                 continue;
             };
             if !candidates.contains(&name) {
@@ -12245,6 +14182,7 @@ impl CodeGen {
                     &method_name,
                     idx,
                     declared_expected,
+                    Some(arg),
                 )
                 .or_else(|| declared_expected.cloned());
             let Some(expected_ty) = expected_ty else {
@@ -12437,9 +14375,7 @@ impl CodeGen {
                         }
                     }
                 }
-                if let syn::Expr::Struct(struct_expr) =
-                    self.peel_paren_group_expr(&closure.body)
-                {
+                if let syn::Expr::Struct(struct_expr) = self.peel_paren_group_expr(&closure.body) {
                     return Some(syn::Type::Path(syn::TypePath {
                         qself: None,
                         path: struct_expr.path.clone(),
@@ -12496,10 +14432,7 @@ impl CodeGen {
         ) {
             return None;
         }
-        if !matches!(
-            owner_seg.arguments,
-            syn::PathArguments::AngleBracketed(_)
-        ) {
+        if !matches!(owner_seg.arguments, syn::PathArguments::AngleBracketed(_)) {
             return None;
         }
         let mut owner_path = syn::Path {
@@ -12527,7 +14460,16 @@ impl CodeGen {
         owner_target: &str,
         expected_ty: &syn::Type,
     ) -> Option<syn::Type> {
-        match owner_target {
+        self.placeholder_hint_from_expected_argument_type_with_depth(owner_target, expected_ty, 4)
+    }
+
+    fn placeholder_hint_from_expected_argument_type_with_depth(
+        &self,
+        owner_target: &str,
+        expected_ty: &syn::Type,
+        depth: usize,
+    ) -> Option<syn::Type> {
+        let direct = match owner_target {
             "Vec" => extract_vec_element_type_for_hint(expected_ty)
                 .or_else(|| extract_sequence_element_type_for_hint(expected_ty)),
             "Array" => extract_sequence_element_type_for_hint(expected_ty),
@@ -12535,8 +14477,79 @@ impl CodeGen {
                 let array_ty = extract_smallvec_array_type_for_hint(expected_ty)?;
                 Some(parse_quote!(SmallVec<#array_ty>))
             }
-            _ => None,
+            _ => {
+                let expected_ty = self.peel_reference_paren_group_type(expected_ty);
+                let syn::Type::Path(tp) = expected_ty else {
+                    return None;
+                };
+                let last = tp.path.segments.last()?;
+                let expected_owner = last.ident.to_string();
+                let owner_tail = owner_target
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(owner_target)
+                    .to_string();
+                if expected_owner == owner_tail {
+                    Some(expected_ty.clone())
+                } else {
+                    None
+                }
+            }
+        };
+        if direct.is_some() {
+            return direct;
         }
+
+        if depth == 0 {
+            return None;
+        }
+        for inner in self.expected_wrapper_inner_type_candidates(expected_ty) {
+            if let Some(hint) = self.placeholder_hint_from_expected_argument_type_with_depth(
+                owner_target,
+                &inner,
+                depth - 1,
+            ) {
+                return Some(hint);
+            }
+        }
+        None
+    }
+
+    fn expected_wrapper_inner_type_candidates(&self, expected_ty: &syn::Type) -> Vec<syn::Type> {
+        let expected_ty = self.peel_reference_paren_group_type(expected_ty);
+        let syn::Type::Path(tp) = expected_ty else {
+            return Vec::new();
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return Vec::new();
+        };
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return Vec::new();
+        };
+        let type_args: Vec<syn::Type> = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                _ => None,
+            })
+            .collect();
+        if type_args.is_empty() {
+            return Vec::new();
+        }
+
+        let owner = last.ident.to_string();
+        if matches!(
+            owner.as_str(),
+            "Option" | "Cell" | "RefCell" | "Rc" | "Arc" | "Box" | "Pin" | "ManuallyDrop"
+        ) || self.option_type_aliases.contains(&owner)
+        {
+            return type_args.into_iter().take(1).collect();
+        }
+        if owner == "Result" {
+            return type_args.into_iter().take(1).collect();
+        }
+        Vec::new()
     }
 
     fn collect_consuming_method_receiver_vars_with_signature_hints(
@@ -12869,7 +14882,8 @@ impl CodeGen {
         let prev_multi_use = std::mem::replace(&mut self.multi_use_vars, multi_use);
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
-        let consuming = self.collect_consuming_method_receiver_vars_with_signature_hints(&block.stmts);
+        let consuming =
+            self.collect_consuming_method_receiver_vars_with_signature_hints(&block.stmts);
         let mutable_pointer_aliased = collect_mutable_pointer_aliased_locals(&block.stmts);
         let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
         let mut placeholder_hints = collect_local_generic_placeholder_hints(&block.stmts);
@@ -12892,6 +14906,14 @@ impl CodeGen {
             &mut placeholder_hints,
         );
         self.augment_uninitialized_local_type_hints_from_usage(
+            &block.stmts,
+            &mut placeholder_hints,
+        );
+        self.augment_option_none_placeholder_hints_from_return_context(
+            &block.stmts,
+            &mut placeholder_hints,
+        );
+        self.augment_mut_unsuffixed_int_seed_hints_from_option_return_context(
             &block.stmts,
             &mut placeholder_hints,
         );
@@ -12946,7 +14968,7 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
-        let local_types: HashSet<String> = block
+        let mut local_types: HashSet<String> = block
             .stmts
             .iter()
             .filter_map(|stmt| match stmt {
@@ -12956,6 +14978,9 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
+        for hoisted in &self.hoisted_local_type_name_scopes {
+            local_types.extend(hoisted.iter().cloned());
+        }
         let (
             local_impl_overrides,
             local_drop_overrides,
@@ -13051,7 +15076,8 @@ impl CodeGen {
         }
         for (type_name, prev) in prev_inherent_overrides {
             if let Some(prev_names) = prev {
-                self.inherent_impl_method_names.insert(type_name, prev_names);
+                self.inherent_impl_method_names
+                    .insert(type_name, prev_names);
             } else {
                 self.inherent_impl_method_names.remove(&type_name);
             }
@@ -13331,19 +15357,22 @@ impl CodeGen {
         let mut arm_plans = Vec::with_capacity(match_expr.arms.len());
         for arm in &match_expr.arms {
             let mut arm_bindings = Vec::new();
-            let Some(arm_condition) = self.collect_runtime_match_binding_stmts_and_condition(
-                &arm.pat,
-                "_m_tuple",
-                &mut arm_bindings,
-                None,
-            ) else {
+            let mut binding_map = HashMap::new();
+            let Some(arm_condition) = self
+                .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                    &arm.pat,
+                    "_m_tuple",
+                    &mut arm_bindings,
+                    &mut binding_map,
+                    None,
+                )
+            else {
                 return false;
             };
-            let guard_condition = arm.guard.as_ref().map(|(_, g)| self.emit_expr_to_string(g));
             arm_plans.push((
                 arm_condition.unwrap_or_else(|| "true".to_string()),
                 arm_bindings,
-                guard_condition,
+                binding_map,
             ));
         }
 
@@ -13358,7 +15387,7 @@ impl CodeGen {
             tuple_value_names.join(", ")
         ));
         self.writeln("bool _m_matched = false;");
-        for (arm, (arm_condition, arm_bindings, guard_condition)) in
+        for (arm, (arm_condition, arm_bindings, binding_map)) in
             match_expr.arms.iter().zip(arm_plans.into_iter())
         {
             self.writeln(&format!("if (!_m_matched && ({})) {{", arm_condition));
@@ -13366,7 +15395,9 @@ impl CodeGen {
             for binding in arm_bindings {
                 self.writeln(&binding);
             }
-            if let Some(guard_condition) = guard_condition {
+            let pushed_binding_scope = self.push_local_cpp_binding_scope(&binding_map);
+            if let Some((_, guard)) = &arm.guard {
+                let guard_condition = self.emit_expr_to_string(guard);
                 self.writeln(&format!("if ({}) {{", guard_condition));
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
@@ -13377,6 +15408,7 @@ impl CodeGen {
                 self.emit_arm_body(&arm.body);
                 self.writeln("_m_matched = true;");
             }
+            self.pop_local_cpp_binding_scope(pushed_binding_scope);
             self.indent -= 1;
             self.writeln("}");
         }
@@ -13395,14 +15427,19 @@ impl CodeGen {
         } else {
             "_m"
         };
-        let mut arm_plans: Vec<(String, Vec<String>, Option<String>, Vec<String>, Option<String>)> =
-            Vec::with_capacity(match_expr.arms.len());
+        let mut arm_plans: Vec<(
+            String,
+            Vec<String>,
+            Option<String>,
+            Vec<String>,
+            HashMap<String, String>,
+        )> = Vec::with_capacity(match_expr.arms.len());
 
         for (idx, arm) in match_expr.arms.iter().enumerate() {
             let mut arm_pre_lines = Vec::new();
             let mut arm_payload_condition = None;
             let mut arm_binding_lines = Vec::new();
-            let mut arm_guard_condition = None;
+            let mut arm_binding_map = HashMap::new();
             let arm_condition = match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let Some((cond_method, unwrap_method)) =
@@ -13416,10 +15453,11 @@ impl CodeGen {
                     let matched_value = format!("_mv{}", idx);
                     let mut binding_stmts = Vec::new();
                     let Some(payload_condition) = self
-                        .collect_runtime_match_binding_stmts_and_condition(
+                        .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                             &ts.elems[0],
                             &matched_value,
                             &mut binding_stmts,
+                            &mut arm_binding_map,
                             variant_ctx,
                         )
                     else {
@@ -13429,11 +15467,12 @@ impl CodeGen {
                         || payload_condition.is_some()
                         || arm.guard.is_some();
                     if needs_payload_materialization {
-                        let payload_value_source = if payload_condition.is_some() || arm.guard.is_some() {
-                            "std::as_const(_m)"
-                        } else {
-                            payload_source
-                        };
+                        let payload_value_source =
+                            if payload_condition.is_some() || arm.guard.is_some() {
+                                "std::as_const(_m)"
+                            } else {
+                                payload_source
+                            };
                         arm_binding_lines.push(format!(
                             "auto&& {} = {}.{}();",
                             matched_value, payload_value_source, unwrap_method
@@ -13459,7 +15498,16 @@ impl CodeGen {
                         format!("_m.{}()", cond_method)
                     } else {
                         if pi.ident != "_" {
-                            let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
+                            let rust_name = pi.ident.to_string();
+                            let cpp_name = self
+                                .lookup_local_binding_cpp_name(&rust_name)
+                                .unwrap_or_else(|| {
+                                    self.fallback_pattern_binding_cpp_name(
+                                        &rust_name,
+                                        &arm_binding_map,
+                                    )
+                                });
+                            arm_binding_map.insert(rust_name, cpp_name.clone());
                             arm_binding_lines.push(format!("const auto& {} = _m;", cpp_name));
                         }
                         "true".to_string()
@@ -13495,11 +15543,13 @@ impl CodeGen {
                                 }
 
                                 let mut case_binding_stmts = Vec::new();
+                                let mut case_binding_map = HashMap::new();
                                 let Some(case_condition) = self
-                                    .collect_runtime_match_binding_stmts_and_condition(
+                                    .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                                         &ts_case.elems[0],
                                         &tuple_matched_value,
                                         &mut case_binding_stmts,
+                                        &mut case_binding_map,
                                         variant_ctx,
                                     )
                                 else {
@@ -13581,16 +15631,12 @@ impl CodeGen {
                 }
                 _ => return false,
             };
-
-            if let Some((_, guard)) = &arm.guard {
-                arm_guard_condition = Some(self.emit_expr_to_string(guard));
-            }
             arm_plans.push((
                 arm_condition,
                 arm_pre_lines,
                 arm_payload_condition,
                 arm_binding_lines,
-                arm_guard_condition,
+                arm_binding_map,
             ));
         }
 
@@ -13608,10 +15654,9 @@ impl CodeGen {
                 arm_pre_lines,
                 arm_payload_condition,
                 arm_binding_lines,
-                arm_guard_condition,
+                arm_binding_map,
             ),
-        ) in
-            match_expr.arms.iter().zip(arm_plans.into_iter())
+        ) in match_expr.arms.iter().zip(arm_plans.into_iter())
         {
             for pre_line in arm_pre_lines {
                 self.writeln(&pre_line);
@@ -13625,8 +15670,10 @@ impl CodeGen {
                 self.writeln(&format!("if ({}) {{", payload_condition));
                 self.indent += 1;
             }
+            let pushed_binding_scope = self.push_local_cpp_binding_scope(&arm_binding_map);
 
-            if let Some(guard_condition) = arm_guard_condition {
+            if let Some((_, guard)) = &arm.guard {
+                let guard_condition = self.emit_expr_to_string(guard);
                 self.writeln(&format!("if ({}) {{", guard_condition));
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
@@ -13637,6 +15684,7 @@ impl CodeGen {
                 self.emit_arm_body(&arm.body);
                 self.writeln("break;");
             }
+            self.pop_local_cpp_binding_scope(pushed_binding_scope);
 
             if arm_payload_condition.is_some() {
                 self.indent -= 1;
@@ -13672,6 +15720,37 @@ impl CodeGen {
             }),
             _ => false,
         })
+    }
+
+    fn pattern_requires_runtime_switch_helper(
+        &self,
+        pat: &syn::Pat,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        match pat {
+            syn::Pat::Path(pp) => self
+                .runtime_path_match_condition_method(&pp.path, variant_ctx)
+                .is_some(),
+            syn::Pat::Ident(pi) => self.runtime_ident_match_condition_method(pi, variant_ctx).is_some(),
+            syn::Pat::Or(or_pat) => or_pat
+                .cases
+                .iter()
+                .any(|case| self.pattern_requires_runtime_switch_helper(case, variant_ctx)),
+            _ => false,
+        }
+    }
+
+    fn switch_match_can_use_value_lowering(
+        &self,
+        match_expr: &syn::ExprMatch,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        self.all_arms_are_switch_compatible(&match_expr.arms, variant_ctx)
+            && match_expr.arms.iter().all(|arm| arm.guard.is_none())
+            && !match_expr
+                .arms
+                .iter()
+                .any(|arm| self.pattern_requires_runtime_switch_helper(&arm.pat, variant_ctx))
     }
 
     fn path_pattern_requires_visit(
@@ -13744,22 +15823,20 @@ impl CodeGen {
                                 matches!(operand, syn::Expr::Path(_) | syn::Expr::Field(_))
                                     && !self.is_expr_raw_pointer_like(&un.expr);
                             let operand_ty = self.infer_simple_expr_type(&un.expr);
-                            let operand_is_reference_like = operand_ty
-                                .as_ref()
-                                .is_some_and(|ty| {
-                                    matches!(
-                                        self.peel_reference_paren_group_type(ty),
-                                        syn::Type::Reference(_) | syn::Type::Ptr(_)
-                                    )
-                                });
+                            let operand_is_reference_like = operand_ty.as_ref().is_some_and(|ty| {
+                                matches!(
+                                    self.peel_reference_paren_group_type(ty),
+                                    syn::Type::Reference(_) | syn::Type::Ptr(_)
+                                )
+                            });
                             let operand_type_unknown = operand_ty.is_none();
                             let operand_is_local_path = matches!(operand, syn::Expr::Path(path)
-                                if path.path.segments.len() == 1
-                                    && {
-                                        let name = path.path.segments[0].ident.to_string();
-                                        self.is_local_binding_in_scope(&name)
-                                            || self.lookup_local_binding_type(&name).is_some()
-                                    });
+                            if path.path.segments.len() == 1
+                                && {
+                                    let name = path.path.segments[0].ident.to_string();
+                                    self.is_local_binding_in_scope(&name)
+                                        || self.lookup_local_binding_type(&name).is_some()
+                                });
                             if is_simple_non_pointer_surface
                                 && (operand_is_reference_like
                                     || (operand_type_unknown && operand_is_local_path))
@@ -13806,10 +15883,8 @@ impl CodeGen {
                         // downstream `*right_val` compares stay string-like instead of scalar.
                         inner_raw = string_view_expr;
                     }
-                    inner_raw = self.materialize_unit_rvalue_expr_if_needed(
-                        reference_target,
-                        inner_raw,
-                    );
+                    inner_raw =
+                        self.materialize_unit_rvalue_expr_if_needed(reference_target, inner_raw);
 
                     let reference_target_raw = self.emit_expr_to_string(reference_target);
                     let is_index_reference_target =
@@ -13867,8 +15942,7 @@ impl CodeGen {
                         elem_expr_raw,
                         tuple_elem_expected_ty,
                     );
-                    let elem_expr =
-                        self.materialize_unit_rvalue_expr_if_needed(elem, elem_expr);
+                    let elem_expr = self.materialize_unit_rvalue_expr_if_needed(elem, elem_expr);
                     self.writeln(&format!("auto {} = {};", elem_name, elem_expr));
                 }
             }
@@ -14018,8 +16092,10 @@ impl CodeGen {
             &call.args[0],
             expected_ctor_arg_ty,
         );
-        let explicit_ref_arg =
-            matches!(self.peel_paren_group_expr(&call.args[0]), syn::Expr::Reference(_));
+        let explicit_ref_arg = matches!(
+            self.peel_paren_group_expr(&call.args[0]),
+            syn::Expr::Reference(_)
+        );
         if explicit_ref_arg {
             return Some(format!(
                 "[&]() {{ using _ResultCtorCtx = std::remove_cvref_t<decltype(({}))>; using _ResultCtorArg = {}; if constexpr (std::is_reference_v<_ResultCtorArg>) {{ using _ResultCtorStorage = std::remove_cvref_t<_ResultCtorArg>; auto _result_ctor_value = ({}); thread_local std::optional<_ResultCtorStorage> _result_ctor_tmp; _result_ctor_tmp.reset(); _result_ctor_tmp.emplace(static_cast<_ResultCtorStorage>(std::move(_result_ctor_value))); return _ResultCtorCtx::{}(static_cast<_ResultCtorArg>(*_result_ctor_tmp)); }} else {{ return _ResultCtorCtx::{}({}); }} }}()",
@@ -14038,7 +16114,10 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(expected_ty) = expected_ty {
-            if matches!(self.peel_paren_group_type(expected_ty), syn::Type::Reference(_)) {
+            if matches!(
+                self.peel_paren_group_type(expected_ty),
+                syn::Type::Reference(_)
+            ) {
                 return self.emit_result_ref_constructor_arg(arg, expected_ty);
             }
         }
@@ -14098,14 +16177,20 @@ impl CodeGen {
                         .iter()
                         .all(|elem| self.is_binding_only_pattern(elem))
             }
-            syn::Pat::Wild(_) | syn::Pat::Ident(_) => true,
+            syn::Pat::Wild(_) => true,
+            syn::Pat::Ident(pi) => {
+                pi.ident == "_" || !self.pattern_ident_is_const_value(&pi.ident.to_string())
+            }
             _ => false,
         }
     }
 
     fn is_binding_only_pattern(&self, pat: &syn::Pat) -> bool {
         match pat {
-            syn::Pat::Ident(_) | syn::Pat::Wild(_) => true,
+            syn::Pat::Ident(pi) => {
+                pi.ident == "_" || !self.pattern_ident_is_const_value(&pi.ident.to_string())
+            }
+            syn::Pat::Wild(_) => true,
             syn::Pat::Tuple(tuple_pat) => tuple_pat
                 .elems
                 .iter()
@@ -14588,6 +16673,27 @@ impl CodeGen {
         Some(stmts)
     }
 
+    fn peel_pat_type_ref_paren<'a>(&self, mut pat: &'a syn::Pat) -> &'a syn::Pat {
+        loop {
+            match pat {
+                syn::Pat::Type(pt) => pat = &pt.pat,
+                syn::Pat::Reference(r) => pat = &r.pat,
+                syn::Pat::Paren(p) => pat = &p.pat,
+                _ => return pat,
+            }
+        }
+    }
+
+    fn pat_is_slice_rest_like(&self, pat: &syn::Pat) -> bool {
+        match self.peel_pat_type_ref_paren(pat) {
+            syn::Pat::Rest(_) => true,
+            syn::Pat::Ident(pi) => pi.subpat.as_ref().is_some_and(|(_, subpat)| {
+                matches!(self.peel_pat_type_ref_paren(subpat), syn::Pat::Rest(_))
+            }),
+            _ => false,
+        }
+    }
+
     fn collect_pattern_binding_stmts(
         &self,
         pat: &syn::Pat,
@@ -14597,7 +16703,15 @@ impl CodeGen {
         match pat {
             syn::Pat::Ident(pi) => {
                 if pi.ident != "_" {
-                    let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
+                    let rust_name = pi.ident.to_string();
+                    if pi.by_ref.is_none()
+                        && pi.mutability.is_none()
+                        && pi.subpat.is_none()
+                        && self.pattern_ident_is_const_value(&rust_name)
+                    {
+                        return true;
+                    }
+                    let cpp_name = escape_cpp_keyword(&rust_name);
                     let binding_prefix = if pi.by_ref.is_some() && pi.mutability.is_some() {
                         "auto&"
                     } else if pi.by_ref.is_some() {
@@ -14627,6 +16741,64 @@ impl CodeGen {
                 }
                 true
             }
+            syn::Pat::TupleStruct(tuple_struct_pat) => {
+                let base_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                for (i, elem) in tuple_struct_pat.elems.iter().enumerate() {
+                    let field_expr = format!("{}._{}", base_expr, i);
+                    if !self.collect_pattern_binding_stmts(elem, &field_expr, out) {
+                        return false;
+                    }
+                }
+                true
+            }
+            syn::Pat::Slice(slice_pat) => {
+                let base_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                let len_expr = format!("rusty::len({})", base_expr);
+                let rest_pos = slice_pat
+                    .elems
+                    .iter()
+                    .position(|elem| self.pat_is_slice_rest_like(elem));
+                if let Some(rest_pos) = rest_pos {
+                    let suffix_count = slice_pat.elems.len().saturating_sub(rest_pos + 1);
+                    for (i, elem) in slice_pat.elems.iter().take(rest_pos).enumerate() {
+                        let elem_expr = format!("{}[{}]", base_expr, i);
+                        if !self.collect_pattern_binding_stmts(elem, &elem_expr, out) {
+                            return false;
+                        }
+                    }
+                    let rest_pat = match slice_pat.elems.iter().nth(rest_pos) {
+                        Some(pat) => pat,
+                        None => return false,
+                    };
+                    if !matches!(self.peel_pat_type_ref_paren(rest_pat), syn::Pat::Rest(_)) {
+                        let rest_end = if suffix_count == 0 {
+                            len_expr.clone()
+                        } else {
+                            format!("({} - {})", len_expr, suffix_count)
+                        };
+                        let rest_expr =
+                            format!("rusty::slice({}, {}, {})", base_expr, rest_pos, rest_end);
+                        if !self.collect_pattern_binding_stmts(rest_pat, &rest_expr, out) {
+                            return false;
+                        }
+                    }
+                    for (offset, elem) in slice_pat.elems.iter().skip(rest_pos + 1).enumerate() {
+                        let idx_expr = format!("({} - {})", len_expr, suffix_count - offset);
+                        let elem_expr = format!("{}[{}]", base_expr, idx_expr);
+                        if !self.collect_pattern_binding_stmts(elem, &elem_expr, out) {
+                            return false;
+                        }
+                    }
+                } else {
+                    for (i, elem) in slice_pat.elems.iter().enumerate() {
+                        let elem_expr = format!("{}[{}]", base_expr, i);
+                        if !self.collect_pattern_binding_stmts(elem, &elem_expr, out) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
             syn::Pat::Struct(struct_pat) => {
                 for field_pat in &struct_pat.fields {
                     let field_name = match &field_pat.member {
@@ -14641,7 +16813,10 @@ impl CodeGen {
                 true
             }
             syn::Pat::Type(pt) => self.collect_pattern_binding_stmts(&pt.pat, source_expr, out),
-            syn::Pat::Reference(r) => self.collect_pattern_binding_stmts(&r.pat, source_expr, out),
+            syn::Pat::Reference(r) => {
+                let deref_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                self.collect_pattern_binding_stmts(&r.pat, &deref_expr, out)
+            }
             syn::Pat::Paren(p) => self.collect_pattern_binding_stmts(&p.pat, source_expr, out),
             _ => false,
         }
@@ -14663,15 +16838,13 @@ impl CodeGen {
                 }
             }
             syn::Pat::Ident(pi) => {
-                if let Some(cond_method) = self.runtime_ident_match_condition_method(pi, variant_ctx)
+                if let Some(cond_method) =
+                    self.runtime_ident_match_condition_method(pi, variant_ctx)
                 {
                     Some(Some(format!("{}.{}()", source_expr, cond_method)))
                 } else if pi.by_ref.is_none() && pi.mutability.is_none() && pi.subpat.is_none() {
                     let ident_name = pi.ident.to_string();
-                    let looks_like_const = ident_name
-                        .chars()
-                        .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit());
-                    if self.is_const_local_binding_in_scope(&ident_name) || looks_like_const {
+                    if self.pattern_ident_is_const_value(&ident_name) {
                         Some(Some(format!(
                             "{} == {}",
                             source_expr,
@@ -14704,22 +16877,132 @@ impl CodeGen {
                 }
                 Some(Self::combine_runtime_match_conditions(conditions))
             }
-            syn::Pat::TupleStruct(tuple_struct_pat) => {
-                let (cond_method, unwrap_method) =
-                    self.runtime_tuple_struct_match_methods(&tuple_struct_pat.path, variant_ctx)?;
-                if tuple_struct_pat.elems.len() != 1 {
-                    return None;
+            syn::Pat::Slice(slice_pat) => {
+                let mut conditions = Vec::new();
+                let base_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                let len_expr = format!("rusty::len({})", base_expr);
+                let rest_pos = slice_pat
+                    .elems
+                    .iter()
+                    .position(|elem| self.pat_is_slice_rest_like(elem));
+                if let Some(rest_pos) = rest_pos {
+                    let suffix_count = slice_pat.elems.len().saturating_sub(rest_pos + 1);
+                    conditions.push(format!("{} >= {}", len_expr, rest_pos + suffix_count));
+                    for (i, elem_pat) in slice_pat.elems.iter().take(rest_pos).enumerate() {
+                        let elem_expr = format!("{}[{}]", base_expr, i);
+                        let elem_condition = self
+                            .collect_runtime_match_binding_stmts_and_condition(
+                                elem_pat,
+                                &elem_expr,
+                                out,
+                                variant_ctx,
+                            )?;
+                        if let Some(cond) = elem_condition {
+                            conditions.push(cond);
+                        }
+                    }
+                    let rest_pat = slice_pat.elems.iter().nth(rest_pos)?;
+                    if !matches!(self.peel_pat_type_ref_paren(rest_pat), syn::Pat::Rest(_)) {
+                        let rest_end = if suffix_count == 0 {
+                            len_expr.clone()
+                        } else {
+                            format!("({} - {})", len_expr, suffix_count)
+                        };
+                        let rest_expr =
+                            format!("rusty::slice({}, {}, {})", base_expr, rest_pos, rest_end);
+                        let rest_condition = self
+                            .collect_runtime_match_binding_stmts_and_condition(
+                                rest_pat,
+                                &rest_expr,
+                                out,
+                                variant_ctx,
+                            )?;
+                        if let Some(cond) = rest_condition {
+                            conditions.push(cond);
+                        }
+                    }
+                    for (offset, elem_pat) in slice_pat.elems.iter().skip(rest_pos + 1).enumerate()
+                    {
+                        let idx_expr = format!("({} - {})", len_expr, suffix_count - offset);
+                        let elem_expr = format!("{}[{}]", base_expr, idx_expr);
+                        let elem_condition = self
+                            .collect_runtime_match_binding_stmts_and_condition(
+                                elem_pat,
+                                &elem_expr,
+                                out,
+                                variant_ctx,
+                            )?;
+                        if let Some(cond) = elem_condition {
+                            conditions.push(cond);
+                        }
+                    }
+                } else {
+                    conditions.push(format!("{} == {}", len_expr, slice_pat.elems.len()));
+                    for (i, elem_pat) in slice_pat.elems.iter().enumerate() {
+                        let elem_expr = format!("{}[{}]", base_expr, i);
+                        let elem_condition = self
+                            .collect_runtime_match_binding_stmts_and_condition(
+                                elem_pat,
+                                &elem_expr,
+                                out,
+                                variant_ctx,
+                            )?;
+                        if let Some(cond) = elem_condition {
+                            conditions.push(cond);
+                        }
+                    }
                 }
-                let matched_value = format!("std::as_const({}).{}()", source_expr, unwrap_method);
-                let mut conditions = vec![format!("{}.{}()", source_expr, cond_method)];
-                let payload_condition = self.collect_runtime_match_binding_stmts_and_condition(
-                    tuple_struct_pat.elems.first()?,
-                    &matched_value,
-                    out,
-                    variant_ctx,
-                )?;
-                if let Some(payload_condition) = payload_condition {
-                    conditions.push(payload_condition);
+                Some(Self::combine_runtime_match_conditions(conditions))
+            }
+            syn::Pat::TupleStruct(tuple_struct_pat) => {
+                if let Some((cond_method, unwrap_method)) =
+                    self.runtime_tuple_struct_match_methods(&tuple_struct_pat.path, variant_ctx)
+                {
+                    if tuple_struct_pat.elems.len() != 1 {
+                        return None;
+                    }
+                    let matched_value =
+                        format!("std::as_const({}).{}()", source_expr, unwrap_method);
+                    let mut conditions = vec![format!("{}.{}()", source_expr, cond_method)];
+                    let payload_condition = self
+                        .collect_runtime_match_binding_stmts_and_condition(
+                            tuple_struct_pat.elems.first()?,
+                            &matched_value,
+                            out,
+                            variant_ctx,
+                        )?;
+                    if let Some(payload_condition) = payload_condition {
+                        conditions.push(payload_condition);
+                    }
+                    return Some(Self::combine_runtime_match_conditions(conditions));
+                }
+
+                let variant_cpp = self.variant_pattern_cpp_type(&tuple_struct_pat.path, None);
+                let is_data_enum_variant = self
+                    .extract_variant_pattern_enum_name(&tuple_struct_pat.path, &variant_cpp)
+                    .is_some_and(|name| self.data_enum_types.contains(&name));
+                let scrutinee_base = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                let mut conditions = Vec::new();
+                let payload_base_expr = if is_data_enum_variant {
+                    conditions.push(format!(
+                        "std::holds_alternative<{}>({})",
+                        variant_cpp, scrutinee_base
+                    ));
+                    format!("std::get<{}>({})", variant_cpp, scrutinee_base)
+                } else {
+                    scrutinee_base
+                };
+                for (idx, elem_pat) in tuple_struct_pat.elems.iter().enumerate() {
+                    let field_expr = format!("{}._{}", payload_base_expr, idx);
+                    let field_condition = self.collect_runtime_match_binding_stmts_and_condition(
+                        elem_pat,
+                        &field_expr,
+                        out,
+                        variant_ctx,
+                    )?;
+                    if let Some(cond) = field_condition {
+                        conditions.push(cond);
+                    }
                 }
                 Some(Self::combine_runtime_match_conditions(conditions))
             }
@@ -14799,12 +17082,15 @@ impl CodeGen {
                 out,
                 variant_ctx,
             ),
-            syn::Pat::Reference(r) => self.collect_runtime_match_binding_stmts_and_condition(
-                &r.pat,
-                source_expr,
-                out,
-                variant_ctx,
-            ),
+            syn::Pat::Reference(r) => {
+                let deref_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                self.collect_runtime_match_binding_stmts_and_condition(
+                    &r.pat,
+                    &deref_expr,
+                    out,
+                    variant_ctx,
+                )
+            }
             syn::Pat::Paren(p) => self.collect_runtime_match_binding_stmts_and_condition(
                 &p.pat,
                 source_expr,
@@ -14837,15 +17123,13 @@ impl CodeGen {
                 }
             }
             syn::Pat::Ident(pi) => {
-                if let Some(cond_method) = self.runtime_ident_match_condition_method(pi, variant_ctx)
+                if let Some(cond_method) =
+                    self.runtime_ident_match_condition_method(pi, variant_ctx)
                 {
                     Some(Some(format!("{}.{}()", source_expr, cond_method)))
                 } else if pi.by_ref.is_none() && pi.mutability.is_none() && pi.subpat.is_none() {
                     let ident_name = pi.ident.to_string();
-                    let looks_like_const = ident_name
-                        .chars()
-                        .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit());
-                    if self.is_const_local_binding_in_scope(&ident_name) || looks_like_const {
+                    if self.pattern_ident_is_const_value(&ident_name) {
                         Some(Some(format!(
                             "{} == {}",
                             source_expr,
@@ -14890,24 +17174,139 @@ impl CodeGen {
                 }
                 Some(Self::combine_runtime_match_conditions(conditions))
             }
-            syn::Pat::TupleStruct(tuple_struct_pat) => {
-                let (cond_method, unwrap_method) =
-                    self.runtime_tuple_struct_match_methods(&tuple_struct_pat.path, variant_ctx)?;
-                if tuple_struct_pat.elems.len() != 1 {
-                    return None;
+            syn::Pat::Slice(slice_pat) => {
+                let mut conditions = Vec::new();
+                let base_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                let len_expr = format!("rusty::len({})", base_expr);
+                let rest_pos = slice_pat
+                    .elems
+                    .iter()
+                    .position(|elem| self.pat_is_slice_rest_like(elem));
+                if let Some(rest_pos) = rest_pos {
+                    let suffix_count = slice_pat.elems.len().saturating_sub(rest_pos + 1);
+                    conditions.push(format!("{} >= {}", len_expr, rest_pos + suffix_count));
+                    for (i, elem_pat) in slice_pat.elems.iter().take(rest_pos).enumerate() {
+                        let elem_expr = format!("{}[{}]", base_expr, i);
+                        let elem_condition = self
+                            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                                elem_pat,
+                                &elem_expr,
+                                out,
+                                rust_to_cpp,
+                                variant_ctx,
+                            )?;
+                        if let Some(cond) = elem_condition {
+                            conditions.push(cond);
+                        }
+                    }
+                    let rest_pat = slice_pat.elems.iter().nth(rest_pos)?;
+                    if !matches!(self.peel_pat_type_ref_paren(rest_pat), syn::Pat::Rest(_)) {
+                        let rest_end = if suffix_count == 0 {
+                            len_expr.clone()
+                        } else {
+                            format!("({} - {})", len_expr, suffix_count)
+                        };
+                        let rest_expr =
+                            format!("rusty::slice({}, {}, {})", base_expr, rest_pos, rest_end);
+                        let rest_condition = self
+                            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                                rest_pat,
+                                &rest_expr,
+                                out,
+                                rust_to_cpp,
+                                variant_ctx,
+                            )?;
+                        if let Some(cond) = rest_condition {
+                            conditions.push(cond);
+                        }
+                    }
+                    for (offset, elem_pat) in slice_pat.elems.iter().skip(rest_pos + 1).enumerate()
+                    {
+                        let idx_expr = format!("({} - {})", len_expr, suffix_count - offset);
+                        let elem_expr = format!("{}[{}]", base_expr, idx_expr);
+                        let elem_condition = self
+                            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                                elem_pat,
+                                &elem_expr,
+                                out,
+                                rust_to_cpp,
+                                variant_ctx,
+                            )?;
+                        if let Some(cond) = elem_condition {
+                            conditions.push(cond);
+                        }
+                    }
+                } else {
+                    conditions.push(format!("{} == {}", len_expr, slice_pat.elems.len()));
+                    for (i, elem_pat) in slice_pat.elems.iter().enumerate() {
+                        let elem_expr = format!("{}[{}]", base_expr, i);
+                        let elem_condition = self
+                            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                                elem_pat,
+                                &elem_expr,
+                                out,
+                                rust_to_cpp,
+                                variant_ctx,
+                            )?;
+                        if let Some(cond) = elem_condition {
+                            conditions.push(cond);
+                        }
+                    }
                 }
-                let matched_value = format!("std::as_const({}).{}()", source_expr, unwrap_method);
-                let mut conditions = vec![format!("{}.{}()", source_expr, cond_method)];
-                let payload_condition = self
-                    .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
-                        tuple_struct_pat.elems.first()?,
-                        &matched_value,
-                        out,
-                        rust_to_cpp,
-                        variant_ctx,
-                    )?;
-                if let Some(payload_condition) = payload_condition {
-                    conditions.push(payload_condition);
+                Some(Self::combine_runtime_match_conditions(conditions))
+            }
+            syn::Pat::TupleStruct(tuple_struct_pat) => {
+                if let Some((cond_method, unwrap_method)) =
+                    self.runtime_tuple_struct_match_methods(&tuple_struct_pat.path, variant_ctx)
+                {
+                    if tuple_struct_pat.elems.len() != 1 {
+                        return None;
+                    }
+                    let matched_value =
+                        format!("std::as_const({}).{}()", source_expr, unwrap_method);
+                    let mut conditions = vec![format!("{}.{}()", source_expr, cond_method)];
+                    let payload_condition = self
+                        .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                            tuple_struct_pat.elems.first()?,
+                            &matched_value,
+                            out,
+                            rust_to_cpp,
+                            variant_ctx,
+                        )?;
+                    if let Some(payload_condition) = payload_condition {
+                        conditions.push(payload_condition);
+                    }
+                    return Some(Self::combine_runtime_match_conditions(conditions));
+                }
+
+                let variant_cpp = self.variant_pattern_cpp_type(&tuple_struct_pat.path, None);
+                let is_data_enum_variant = self
+                    .extract_variant_pattern_enum_name(&tuple_struct_pat.path, &variant_cpp)
+                    .is_some_and(|name| self.data_enum_types.contains(&name));
+                let scrutinee_base = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                let mut conditions = Vec::new();
+                let payload_base_expr = if is_data_enum_variant {
+                    conditions.push(format!(
+                        "std::holds_alternative<{}>({})",
+                        variant_cpp, scrutinee_base
+                    ));
+                    format!("std::get<{}>({})", variant_cpp, scrutinee_base)
+                } else {
+                    scrutinee_base
+                };
+                for (idx, elem_pat) in tuple_struct_pat.elems.iter().enumerate() {
+                    let field_expr = format!("{}._{}", payload_base_expr, idx);
+                    let field_condition = self
+                        .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                            elem_pat,
+                            &field_expr,
+                            out,
+                            rust_to_cpp,
+                            variant_ctx,
+                        )?;
+                    if let Some(cond) = field_condition {
+                        conditions.push(cond);
+                    }
                 }
                 Some(Self::combine_runtime_match_conditions(conditions))
             }
@@ -14994,14 +17393,16 @@ impl CodeGen {
                     rust_to_cpp,
                     variant_ctx,
                 ),
-            syn::Pat::Reference(r) => self
-                .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+            syn::Pat::Reference(r) => {
+                let deref_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                self.collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                     &r.pat,
-                    source_expr,
+                    &deref_expr,
                     out,
                     rust_to_cpp,
                     variant_ctx,
-                ),
+                )
+            }
             syn::Pat::Paren(p) => self
                 .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                     &p.pat,
@@ -15024,6 +17425,29 @@ impl CodeGen {
         }
     }
 
+    fn fallback_pattern_binding_cpp_name(
+        &self,
+        rust_name: &str,
+        rust_to_cpp: &HashMap<String, String>,
+    ) -> String {
+        let escaped = escape_cpp_keyword(rust_name);
+        let name_is_unsafe = self.is_type_param_in_scope(rust_name)
+            || self.is_local_type_name_in_scope(rust_name)
+            || self.declared_item_names.contains(rust_name);
+        if !name_is_unsafe && !rust_to_cpp.values().any(|existing| existing == &escaped) {
+            return escaped;
+        }
+
+        let mut idx = 1usize;
+        loop {
+            let candidate = escape_cpp_keyword(&format!("{}_shadow{}", rust_name, idx));
+            if !rust_to_cpp.values().any(|existing| existing == &candidate) {
+                return candidate;
+            }
+            idx += 1;
+        }
+    }
+
     fn collect_pattern_binding_stmts_with_cpp_name_map(
         &self,
         pat: &syn::Pat,
@@ -15035,13 +17459,26 @@ impl CodeGen {
             syn::Pat::Ident(pi) => {
                 if pi.ident != "_" {
                     let rust_name = pi.ident.to_string();
-                    let cpp_name = rust_to_cpp
-                        .entry(rust_name.clone())
-                        .or_insert_with(|| {
-                            self.lookup_local_binding_cpp_name(&rust_name)
-                                .unwrap_or_else(|| escape_cpp_keyword(&rust_name))
-                        })
-                        .clone();
+                    if pi.by_ref.is_none()
+                        && pi.mutability.is_none()
+                        && pi.subpat.is_none()
+                        && self.pattern_ident_is_const_value(&rust_name)
+                    {
+                        // Constant-like identifiers in patterns (e.g. None, Equal) are
+                        // value matches, not new bindings.
+                        return true;
+                    }
+                    let cpp_name = if let Some(existing) = rust_to_cpp.get(&rust_name) {
+                        existing.clone()
+                    } else {
+                        let resolved = self
+                            .lookup_local_binding_cpp_name(&rust_name)
+                            .unwrap_or_else(|| {
+                                self.fallback_pattern_binding_cpp_name(&rust_name, rust_to_cpp)
+                            });
+                        rust_to_cpp.insert(rust_name.clone(), resolved.clone());
+                        resolved
+                    };
                     let binding_prefix = if pi.by_ref.is_some() && pi.mutability.is_some() {
                         "auto&"
                     } else if pi.by_ref.is_some() {
@@ -15076,6 +17513,89 @@ impl CodeGen {
                 }
                 true
             }
+            syn::Pat::TupleStruct(tuple_struct_pat) => {
+                let base_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                for (i, elem) in tuple_struct_pat.elems.iter().enumerate() {
+                    let field_expr = format!("{}._{}", base_expr, i);
+                    if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+                        elem,
+                        &field_expr,
+                        out,
+                        rust_to_cpp,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
+            syn::Pat::Slice(slice_pat) => {
+                let base_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                let len_expr = format!("rusty::len({})", base_expr);
+                let rest_pos = slice_pat
+                    .elems
+                    .iter()
+                    .position(|elem| self.pat_is_slice_rest_like(elem));
+                if let Some(rest_pos) = rest_pos {
+                    let suffix_count = slice_pat.elems.len().saturating_sub(rest_pos + 1);
+                    for (i, elem) in slice_pat.elems.iter().take(rest_pos).enumerate() {
+                        let elem_expr = format!("{}[{}]", base_expr, i);
+                        if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+                            elem,
+                            &elem_expr,
+                            out,
+                            rust_to_cpp,
+                        ) {
+                            return false;
+                        }
+                    }
+                    let rest_pat = match slice_pat.elems.iter().nth(rest_pos) {
+                        Some(pat) => pat,
+                        None => return false,
+                    };
+                    if !matches!(self.peel_pat_type_ref_paren(rest_pat), syn::Pat::Rest(_)) {
+                        let rest_end = if suffix_count == 0 {
+                            len_expr.clone()
+                        } else {
+                            format!("({} - {})", len_expr, suffix_count)
+                        };
+                        let rest_expr =
+                            format!("rusty::slice({}, {}, {})", base_expr, rest_pos, rest_end);
+                        if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+                            rest_pat,
+                            &rest_expr,
+                            out,
+                            rust_to_cpp,
+                        ) {
+                            return false;
+                        }
+                    }
+                    for (offset, elem) in slice_pat.elems.iter().skip(rest_pos + 1).enumerate() {
+                        let idx_expr = format!("({} - {})", len_expr, suffix_count - offset);
+                        let elem_expr = format!("{}[{}]", base_expr, idx_expr);
+                        if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+                            elem,
+                            &elem_expr,
+                            out,
+                            rust_to_cpp,
+                        ) {
+                            return false;
+                        }
+                    }
+                } else {
+                    for (i, elem) in slice_pat.elems.iter().enumerate() {
+                        let elem_expr = format!("{}[{}]", base_expr, i);
+                        if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+                            elem,
+                            &elem_expr,
+                            out,
+                            rust_to_cpp,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
             syn::Pat::Struct(struct_pat) => {
                 for field_pat in &struct_pat.fields {
                     let field_name = match &field_pat.member {
@@ -15100,12 +17620,15 @@ impl CodeGen {
                 out,
                 rust_to_cpp,
             ),
-            syn::Pat::Reference(r) => self.collect_pattern_binding_stmts_with_cpp_name_map(
-                &r.pat,
-                source_expr,
-                out,
-                rust_to_cpp,
-            ),
+            syn::Pat::Reference(r) => {
+                let deref_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                self.collect_pattern_binding_stmts_with_cpp_name_map(
+                    &r.pat,
+                    &deref_expr,
+                    out,
+                    rust_to_cpp,
+                )
+            }
             syn::Pat::Paren(p) => self.collect_pattern_binding_stmts_with_cpp_name_map(
                 &p.pat,
                 source_expr,
@@ -15369,10 +17892,11 @@ impl CodeGen {
                             &fmt_literal,
                             parts.len().saturating_sub(1),
                         );
-                        pretty_debug_arg_positions = self.format_literal_pretty_debug_arg_positions(
-                            &fmt_literal,
-                            parts.len().saturating_sub(1),
-                        );
+                        pretty_debug_arg_positions = self
+                            .format_literal_pretty_debug_arg_positions(
+                                &fmt_literal,
+                                parts.len().saturating_sub(1),
+                            );
                         native_arg_conversions = self.format_literal_native_arg_conversions(
                             &fmt_literal,
                             parts.len().saturating_sub(1),
@@ -15818,7 +18342,7 @@ impl CodeGen {
     fn convert_macro_tokens(&self, tokens: &str) -> String {
         let mut result = tokens.to_string();
         // Replace Rust Option/Result constructors in token context
-        result = result.replace("None", "std::nullopt");
+        result = result.replace("None", "rusty::None");
         // Replace Some(x) or Some (x) → std::make_optional(x)
         // Normalize "Some (" to "Some(" first
         result = result.replace("Some (", "Some(");
@@ -16141,6 +18665,133 @@ impl CodeGen {
         )
     }
 
+    fn stmt_contains_unsuffixed_int_literal(&self, stmt: &syn::Stmt) -> bool {
+        match stmt {
+            syn::Stmt::Local(local) => local
+                .init
+                .as_ref()
+                .is_some_and(|init| self.expr_contains_unsuffixed_int_literal(&init.expr)),
+            syn::Stmt::Expr(expr, _) => self.expr_contains_unsuffixed_int_literal(expr),
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => false,
+        }
+    }
+
+    fn expr_contains_unsuffixed_int_literal(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        if Self::is_unsuffixed_int_literal_expr(expr) {
+            return true;
+        }
+        match expr {
+            syn::Expr::Call(call) => {
+                self.expr_contains_unsuffixed_int_literal(&call.func)
+                    || call
+                        .args
+                        .iter()
+                        .any(|arg| self.expr_contains_unsuffixed_int_literal(arg))
+            }
+            syn::Expr::MethodCall(method_call) => {
+                self.expr_contains_unsuffixed_int_literal(&method_call.receiver)
+                    || method_call
+                        .args
+                        .iter()
+                        .any(|arg| self.expr_contains_unsuffixed_int_literal(arg))
+            }
+            syn::Expr::Binary(binary) => {
+                self.expr_contains_unsuffixed_int_literal(&binary.left)
+                    || self.expr_contains_unsuffixed_int_literal(&binary.right)
+            }
+            syn::Expr::Unary(unary) => self.expr_contains_unsuffixed_int_literal(&unary.expr),
+            syn::Expr::Reference(reference) => {
+                self.expr_contains_unsuffixed_int_literal(&reference.expr)
+            }
+            syn::Expr::Assign(assign) => {
+                self.expr_contains_unsuffixed_int_literal(&assign.left)
+                    || self.expr_contains_unsuffixed_int_literal(&assign.right)
+            }
+            syn::Expr::If(if_expr) => {
+                self.expr_contains_unsuffixed_int_literal(&if_expr.cond)
+                    || if_expr
+                        .then_branch
+                        .stmts
+                        .iter()
+                        .any(|stmt| self.stmt_contains_unsuffixed_int_literal(stmt))
+                    || if_expr.else_branch.as_ref().is_some_and(|(_, else_expr)| {
+                        self.expr_contains_unsuffixed_int_literal(else_expr)
+                    })
+            }
+            syn::Expr::Match(match_expr) => {
+                self.expr_contains_unsuffixed_int_literal(&match_expr.expr)
+                    || match_expr.arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(|(_, guard)| {
+                            self.expr_contains_unsuffixed_int_literal(guard)
+                        }) || self.expr_contains_unsuffixed_int_literal(&arm.body)
+                    })
+            }
+            syn::Expr::Block(block_expr) => block_expr
+                .block
+                .stmts
+                .iter()
+                .any(|stmt| self.stmt_contains_unsuffixed_int_literal(stmt)),
+            syn::Expr::While(while_expr) => {
+                self.expr_contains_unsuffixed_int_literal(&while_expr.cond)
+                    || while_expr
+                        .body
+                        .stmts
+                        .iter()
+                        .any(|stmt| self.stmt_contains_unsuffixed_int_literal(stmt))
+            }
+            syn::Expr::Loop(loop_expr) => loop_expr
+                .body
+                .stmts
+                .iter()
+                .any(|stmt| self.stmt_contains_unsuffixed_int_literal(stmt)),
+            syn::Expr::ForLoop(for_expr) => {
+                self.expr_contains_unsuffixed_int_literal(&for_expr.expr)
+                    || for_expr
+                        .body
+                        .stmts
+                        .iter()
+                        .any(|stmt| self.stmt_contains_unsuffixed_int_literal(stmt))
+            }
+            syn::Expr::Array(array) => array
+                .elems
+                .iter()
+                .any(|elem| self.expr_contains_unsuffixed_int_literal(elem)),
+            syn::Expr::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .any(|elem| self.expr_contains_unsuffixed_int_literal(elem)),
+            syn::Expr::Struct(struct_expr) => {
+                struct_expr
+                    .fields
+                    .iter()
+                    .any(|field| self.expr_contains_unsuffixed_int_literal(&field.expr))
+                    || struct_expr.rest.as_ref().is_some_and(|rest| {
+                        self.expr_contains_unsuffixed_int_literal(rest)
+                    })
+            }
+            syn::Expr::Index(index) => {
+                self.expr_contains_unsuffixed_int_literal(&index.expr)
+                    || self.expr_contains_unsuffixed_int_literal(&index.index)
+            }
+            syn::Expr::Await(await_expr) => {
+                self.expr_contains_unsuffixed_int_literal(&await_expr.base)
+            }
+            syn::Expr::Try(try_expr) => self.expr_contains_unsuffixed_int_literal(&try_expr.expr),
+            syn::Expr::Closure(closure) => {
+                self.expr_contains_unsuffixed_int_literal(&closure.body)
+            }
+            syn::Expr::Return(ret) => ret.expr.as_ref().is_some_and(|value| {
+                self.expr_contains_unsuffixed_int_literal(value)
+            }),
+            syn::Expr::Break(brk) => brk.expr.as_ref().is_some_and(|value| {
+                self.expr_contains_unsuffixed_int_literal(value)
+            }),
+            syn::Expr::Let(let_expr) => self.expr_contains_unsuffixed_int_literal(&let_expr.expr),
+            _ => false,
+        }
+    }
+
     /// Emit a variant match as expression body (returns string for visit lambdas).
     fn emit_match_expr_visit(
         &self,
@@ -16153,6 +18804,7 @@ impl CodeGen {
         // pattern-ref scope so unary deref lowering can collapse reference layers.
         let mut scoped = self.clone();
         let mut parts = Vec::new();
+        let lambda_return_annotation = scoped.expected_lambda_return_annotation(expected_ty, false);
         for arm in arms {
             scoped.push_pattern_ref_binding_scope(&arm.pat);
             let body = {
@@ -16190,15 +18842,15 @@ impl CodeGen {
                         let needs_mut_param = binding_stmts.iter().any(|s| s.starts_with("auto& "))
                             || scoped.pattern_requires_mut_ref_binding(&arm.pat)
                             || scoped.expected_type_contains_mut_reference(expected_ty);
-                        let visit_param = if needs_mut_param
-                        {
+                        let visit_param = if needs_mut_param {
                             format!("{}& _v", cpp_type)
                         } else {
                             format!("const {}& _v", cpp_type)
                         };
                         parts.push(format!(
-                            "[&]({}) {{ {} if ({}) return {}; return {}; }}",
+                            "[&]({}){} {{ {} if ({}) return {}; return {}; }}",
                             visit_param,
+                            lambda_return_annotation,
                             binding_stmts.join(" "),
                             guard_str,
                             arm_value,
@@ -16208,15 +18860,15 @@ impl CodeGen {
                         let needs_mut_param = binding_stmts.iter().any(|s| s.starts_with("auto& "))
                             || scoped.pattern_requires_mut_ref_binding(&arm.pat)
                             || scoped.expected_type_contains_mut_reference(expected_ty);
-                        let visit_param = if needs_mut_param
-                        {
+                        let visit_param = if needs_mut_param {
                             format!("{}& _v", cpp_type)
                         } else {
                             format!("const {}& _v", cpp_type)
                         };
                         parts.push(format!(
-                            "[&]({}) {{ {} return {}; }}",
+                            "[&]({}){} {{ {} return {}; }}",
                             visit_param,
+                            lambda_return_annotation,
                             binding_stmts.join(" "),
                             arm_value
                         ));
@@ -16227,16 +18879,17 @@ impl CodeGen {
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = scoped.emit_expr_to_string(guard);
                         parts.push(format!(
-                            "[&](const {}& _v) {{ if ({}) return {}; return {}; }}",
+                            "[&](const {}& _v){} {{ if ({}) return {}; return {}; }}",
                             cpp_type,
+                            lambda_return_annotation,
                             guard_str,
                             arm_value,
                             scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
                         parts.push(format!(
-                            "[&](const {}&) {{ return {}; }}",
-                            cpp_type, arm_value
+                            "[&](const {}&){} {{ return {}; }}",
+                            cpp_type, lambda_return_annotation, arm_value
                         ));
                     }
                 }
@@ -16262,7 +18915,8 @@ impl CodeGen {
                     }
                     if !supported {
                         parts.push(format!(
-                            "[&](const auto&) {{ return {}; }}",
+                            "[&](const auto&){} {{ return {}; }}",
+                            lambda_return_annotation,
                             scoped.match_expr_unreachable_fallback_with_expected(expected_ty)
                         ));
                         scoped.pop_pattern_ref_binding_scope();
@@ -16278,8 +18932,9 @@ impl CodeGen {
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = scoped.emit_expr_to_string(guard);
                         parts.push(format!(
-                            "[&]({}) {{ {} if ({}) return {}; return {}; }}",
+                            "[&]({}){} {{ {} if ({}) return {}; return {}; }}",
                             visit_param,
+                            lambda_return_annotation,
                             binding_stmts.join(" "),
                             guard_str,
                             arm_value,
@@ -16287,26 +18942,31 @@ impl CodeGen {
                         ));
                     } else {
                         parts.push(format!(
-                            "[&]({}) {{ {} return {}; }}",
+                            "[&]({}){} {{ {} return {}; }}",
                             visit_param,
+                            lambda_return_annotation,
                             binding_stmts.join(" "),
                             arm_value
                         ));
                     }
                 }
                 syn::Pat::Wild(_) => {
-                    parts.push(format!("[&](const auto&) {{ return {}; }}", arm_value));
+                    parts.push(format!(
+                        "[&](const auto&){} {{ return {}; }}",
+                        lambda_return_annotation, arm_value
+                    ));
                 }
                 syn::Pat::Ident(pi) => {
                     let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                     parts.push(format!(
-                        "[&](const auto& {}) {{ return {}; }}",
-                        cpp_name, arm_value
+                        "[&](const auto& {}){} {{ return {}; }}",
+                        cpp_name, lambda_return_annotation, arm_value
                     ));
                 }
                 _ => {
                     parts.push(format!(
-                        "[&](const auto&) {{ return {}; }}",
+                        "[&](const auto&){} {{ return {}; }}",
+                        lambda_return_annotation,
                         scoped.match_expr_unreachable_fallback_with_expected(expected_ty)
                     ));
                 }
@@ -16331,7 +18991,7 @@ impl CodeGen {
         &self,
         variant_name: &str,
     ) -> Option<RuntimeMatchEnumKind> {
-        match variant_name {
+        match self.canonical_variant_name(variant_name) {
             "Some" | "None" => Some(RuntimeMatchEnumKind::Option),
             "Ok" | "Err" => Some(RuntimeMatchEnumKind::Result),
             _ => None,
@@ -16369,7 +19029,9 @@ impl CodeGen {
         variant_ctx: Option<&VariantTypeContext>,
     ) -> Option<(&'static str, &'static str)> {
         let kind = self.runtime_match_enum_kind_for_path(path, variant_ctx)?;
-        let variant_name = path.segments.last()?.ident.to_string();
+        let variant_name = self
+            .canonical_variant_name(&path.segments.last()?.ident.to_string())
+            .to_string();
         match (kind, variant_name.as_str()) {
             (RuntimeMatchEnumKind::Option, "Some") => Some(("is_some", "unwrap")),
             (RuntimeMatchEnumKind::Result, "Ok") => Some(("is_ok", "unwrap")),
@@ -16384,7 +19046,9 @@ impl CodeGen {
         variant_ctx: Option<&VariantTypeContext>,
     ) -> Option<&'static str> {
         let kind = self.runtime_match_enum_kind_for_path(path, variant_ctx)?;
-        let variant_name = path.segments.last()?.ident.to_string();
+        let variant_name = self
+            .canonical_variant_name(&path.segments.last()?.ident.to_string())
+            .to_string();
         match (kind, variant_name.as_str()) {
             (RuntimeMatchEnumKind::Option, "None") => Some("is_none"),
             _ => None,
@@ -16399,7 +19063,9 @@ impl CodeGen {
         if ident.by_ref.is_some() || ident.mutability.is_some() || ident.subpat.is_some() {
             return None;
         }
-        let variant_name = ident.ident.to_string();
+        let variant_name = self
+            .canonical_variant_name(&ident.ident.to_string())
+            .to_string();
         let kind = variant_ctx
             .and_then(|ctx| self.runtime_match_enum_kind_by_name(&ctx.enum_name))
             .or_else(|| self.runtime_match_enum_kind_by_variant_name(&variant_name))?;
@@ -16492,11 +19158,12 @@ impl CodeGen {
                         || payload_match_condition.is_some()
                         || arm.guard.is_some();
                     if needs_payload_materialization {
-                        let payload_value_source = if payload_match_condition.is_some() || arm.guard.is_some() {
-                            "std::as_const(_m)"
-                        } else {
-                            payload_source
-                        };
+                        let payload_value_source =
+                            if payload_match_condition.is_some() || arm.guard.is_some() {
+                                "std::as_const(_m)"
+                            } else {
+                                payload_source
+                            };
                         out.push_str(&format!(
                             "auto&& {} = {}.{}(); ",
                             matched_value, payload_value_source, unwrap_method
@@ -16529,8 +19196,7 @@ impl CodeGen {
                     let body_trimmed = body.trim_start();
                     let body_is_return_expr = body_trimmed.starts_with("return ");
                     let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife)
-                    {
+                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
                         ""
                     } else {
                         "return "
@@ -16551,14 +19217,19 @@ impl CodeGen {
                     }
                     out.push_str("} ");
                 }
-                syn::Pat::Path(pp) => {
-                    let Some(cond_method) =
-                        self.runtime_path_match_condition_method(&pp.path, variant_ctx)
-                    else {
-                        return None;
-                    };
+                syn::Pat::Path(_) => {
+                    let mut binding_stmts = Vec::new();
+                    let mut binding_map = HashMap::new();
+                    let cond = self
+                        .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                            &arm.pat,
+                            "_m",
+                            &mut binding_stmts,
+                            &mut binding_map,
+                            variant_ctx,
+                        )?;
                     saw_runtime_pattern = true;
-                    let binding_map = HashMap::new();
+                    let cond_expr = cond.unwrap_or_else(|| "true".to_string());
                     let body = {
                         let emitted = self.emit_expr_with_try_style_binding_scope(
                             &arm.body,
@@ -16575,13 +19246,16 @@ impl CodeGen {
                     let body_trimmed = body.trim_start();
                     let body_is_return_expr = body_trimmed.starts_with("return ");
                     let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife)
-                    {
+                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
                         ""
                     } else {
                         "return "
                     };
-                    out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
+                    out.push_str(&format!("if ({}) {{ ", cond_expr));
+                    for stmt in binding_stmts {
+                        out.push_str(&stmt);
+                        out.push(' ');
+                    }
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str =
                             self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
@@ -16612,8 +19286,7 @@ impl CodeGen {
                     let body_trimmed = body.trim_start();
                     let body_is_return_expr = body_trimmed.starts_with("return ");
                     let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife)
-                    {
+                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
                         ""
                     } else {
                         "return "
@@ -16660,12 +19333,136 @@ impl CodeGen {
                     let body_trimmed = body.trim_start();
                     let body_is_return_expr = body_trimmed.starts_with("return ");
                     let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
-                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife)
-                    {
+                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
                         ""
                     } else {
                         "return "
                     };
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str =
+                            self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
+                        out.push_str(&format!(
+                            "if ({}) {{ {}{}; }} ",
+                            guard_str, ret_prefix, body
+                        ));
+                    } else {
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
+                    }
+                    out.push_str("} ");
+                }
+                syn::Pat::Struct(_)
+                | syn::Pat::Reference(_)
+                | syn::Pat::Type(_)
+                | syn::Pat::Paren(_) => {
+                    let mut binding_stmts = Vec::new();
+                    let mut binding_map = HashMap::new();
+                    let cond = self
+                        .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                            &arm.pat,
+                            "_m",
+                            &mut binding_stmts,
+                            &mut binding_map,
+                            variant_ctx,
+                        )?;
+                    saw_runtime_pattern = true;
+                    let cond_expr = cond.unwrap_or_else(|| "true".to_string());
+                    let body = {
+                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                            &arm.body,
+                            expected_ty,
+                            &binding_map,
+                        );
+                        self.maybe_wrap_variant_constructor_with_expected_enum(
+                            &arm.body,
+                            emitted,
+                            expected_ty,
+                        )
+                    };
+                    let diverging = self.is_expr_diverging(&arm.body);
+                    let body_trimmed = body.trim_start();
+                    let body_is_return_expr = body_trimmed.starts_with("return ");
+                    let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
+                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
+                        ""
+                    } else {
+                        "return "
+                    };
+                    out.push_str(&format!("if ({}) {{ ", cond_expr));
+                    for stmt in binding_stmts {
+                        out.push_str(&stmt);
+                        out.push(' ');
+                    }
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str =
+                            self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
+                        out.push_str(&format!(
+                            "if ({}) {{ {}{}; }} ",
+                            guard_str, ret_prefix, body
+                        ));
+                    } else {
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
+                    }
+                    out.push_str("} ");
+                }
+                syn::Pat::Or(or_pat) => {
+                    let mut conditions = Vec::new();
+                    for case in &or_pat.cases {
+                        let mut case_bindings = Vec::new();
+                        let mut case_binding_map = HashMap::new();
+                        let case_condition = self
+                            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                                case,
+                                "_m",
+                                &mut case_bindings,
+                                &mut case_binding_map,
+                                variant_ctx,
+                            )?;
+                        // Runtime expression lowering only supports OR arms without
+                        // branch-local bindings today; binding OR patterns require
+                        // branch-scoped synthesis to keep names coherent.
+                        if !case_bindings.is_empty() || !case_binding_map.is_empty() {
+                            return None;
+                        }
+                        if let Some(case_condition) = case_condition {
+                            conditions.push(case_condition);
+                        } else {
+                            conditions.clear();
+                            conditions.push("true".to_string());
+                            break;
+                        }
+                    }
+                    if conditions.is_empty() {
+                        return None;
+                    }
+                    saw_runtime_pattern = true;
+                    let cond_expr = if conditions.len() == 1 {
+                        conditions.remove(0)
+                    } else {
+                        format!("({})", conditions.join(" || "))
+                    };
+                    let binding_map = HashMap::new();
+                    let body = {
+                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                            &arm.body,
+                            expected_ty,
+                            &binding_map,
+                        );
+                        self.maybe_wrap_variant_constructor_with_expected_enum(
+                            &arm.body,
+                            emitted,
+                            expected_ty,
+                        )
+                    };
+                    let diverging = self.is_expr_diverging(&arm.body);
+                    let body_trimmed = body.trim_start();
+                    let body_is_return_expr = body_trimmed.starts_with("return ");
+                    let body_is_typed_iife = body_trimmed.starts_with("[&]() -> ");
+                    let ret_prefix = if body_is_return_expr || (diverging && !body_is_typed_iife) {
+                        ""
+                    } else {
+                        "return "
+                    };
+                    out.push_str(&format!("if ({}) {{ ", cond_expr));
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str =
                             self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
@@ -16791,10 +19588,37 @@ impl CodeGen {
 
     fn tuple_match_can_lower_as_value_conditions(&self, arms: &[syn::Arm], arity: usize) -> bool {
         arms.iter().all(|arm| match &arm.pat {
-            syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == arity => tuple_pat
-                .elems
-                .iter()
-                .all(|elem| self.tuple_pattern_elem_supports_value_match(elem)),
+            syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == arity => {
+                tuple_pat.elems.iter().enumerate().all(|(idx, elem_pat)| {
+                    let source_expr = format!("_m{}", idx);
+                    let mut bindings = Vec::new();
+                    self.collect_runtime_match_binding_stmts_and_condition(
+                        elem_pat,
+                        &source_expr,
+                        &mut bindings,
+                        None,
+                    )
+                    .is_some()
+                })
+            }
+            syn::Pat::Or(or_pat) => or_pat.cases.iter().all(|case| match case {
+                syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == arity => {
+                    tuple_pat.elems.iter().enumerate().all(|(idx, elem_pat)| {
+                        let source_expr = format!("_m{}", idx);
+                        let mut bindings = Vec::new();
+                        let cond = self.collect_runtime_match_binding_stmts_and_condition(
+                            elem_pat,
+                            &source_expr,
+                            &mut bindings,
+                            None,
+                        );
+                        cond.is_some() && bindings.is_empty()
+                    })
+                }
+                syn::Pat::Wild(_) => true,
+                syn::Pat::Ident(pi) if pi.ident == "_" => true,
+                _ => false,
+            }),
             syn::Pat::Wild(_) => true,
             _ => false,
         })
@@ -16811,11 +19635,9 @@ impl CodeGen {
                 value_expr,
                 self.emit_lit(&lit_pat.lit)
             ))),
-            syn::Pat::Path(path_pat) => {
-                Some(Some(
-                    self.path_pattern_value_condition(&path_pat.path, value_expr),
-                ))
-            }
+            syn::Pat::Path(path_pat) => Some(Some(
+                self.path_pattern_value_condition(&path_pat.path, value_expr),
+            )),
             syn::Pat::Range(range_pat) => {
                 let mut range_conds = Vec::new();
                 if let Some(start) = &range_pat.start {
@@ -16847,6 +19669,16 @@ impl CodeGen {
             syn::Pat::Ident(pi) => {
                 if pi.ident == "_" {
                     Some(None)
+                } else if let Some(cond_method) =
+                    self.runtime_ident_match_condition_method(pi, None)
+                {
+                    Some(Some(format!("{}.{}()", value_expr, cond_method)))
+                } else if self.pattern_ident_is_const_value(&pi.ident.to_string()) {
+                    Some(Some(format!(
+                        "{} == {}",
+                        value_expr,
+                        escape_cpp_keyword(&pi.ident.to_string())
+                    )))
                 } else {
                     Some(None)
                 }
@@ -16867,8 +19699,9 @@ impl CodeGen {
                             ));
                         }
                         syn::Pat::Path(path_pat) => {
-                            sub_conds
-                                .push(self.path_pattern_value_condition(&path_pat.path, value_expr));
+                            sub_conds.push(
+                                self.path_pattern_value_condition(&path_pat.path, value_expr),
+                            );
                         }
                         syn::Pat::Range(range_pat) => {
                             let mut range_conds = Vec::new();
@@ -16933,53 +19766,70 @@ impl CodeGen {
         arms: &[syn::Arm],
         expected_ty: Option<&syn::Type>,
     ) -> String {
-        let mut out = String::from("[&]() { ");
-        let tuple_values: Vec<String> = tuple_scrutinee
-            .elems
-            .iter()
-            .map(|expr| self.emit_expr_to_string(expr))
-            .collect();
-        for (idx, value) in tuple_values.iter().enumerate() {
+        let concrete_expected_ty = expected_ty.filter(|ty| {
+            !self
+                .expected_lambda_return_annotation(Some(*ty), true)
+                .is_empty()
+        });
+        let inferred_match_ty = if concrete_expected_ty.is_none() {
+            self.infer_match_arms_common_type_with_tuple_scrutinee(tuple_scrutinee, arms)
+                .or_else(|| self.infer_match_arms_common_type(arms))
+        } else {
+            None
+        }
+        .and_then(|ty| {
+            if self.type_contains_tuple_placeholder_marker(&ty) {
+                None
+            } else {
+                Some(ty)
+            }
+        });
+        let match_expected_ty = concrete_expected_ty.or(inferred_match_ty.as_ref());
+        let lambda_return_annotation =
+            self.expected_lambda_return_annotation(match_expected_ty, true);
+        let mut out = format!("[&](){} {{ ", lambda_return_annotation);
+        for (idx, expr) in tuple_scrutinee.elems.iter().enumerate() {
+            if let syn::Expr::Reference(reference_expr) = self.peel_paren_group_expr(expr) {
+                let reference_target = self.peel_paren_group_expr(&reference_expr.expr);
+                if !self.is_stable_reference_lvalue_expr(reference_target) {
+                    let tmp_name = format!("_m{}_tmp", idx);
+                    let target_value = self.emit_expr_to_string(reference_target);
+                    out.push_str(&format!("auto {} = {}; ", tmp_name, target_value));
+                    out.push_str(&format!("auto&& _m{} = &{}; ", idx, tmp_name));
+                    continue;
+                }
+            }
+            let value = self.emit_expr_to_string(expr);
             out.push_str(&format!("auto&& _m{} = {}; ", idx, value));
         }
 
         for arm in arms {
-            let body = {
-                let emitted = self.emit_expr_to_string_with_expected(&arm.body, expected_ty);
-                self.maybe_wrap_variant_constructor_with_expected_enum(
-                    &arm.body,
-                    emitted,
-                    expected_ty,
-                )
-            };
-            let diverging = self.is_expr_diverging(&arm.body);
-            let body_is_return_expr = body.trim_start().starts_with("return ");
-            let ret_prefix = if diverging || body_is_return_expr {
-                ""
-            } else {
-                "return "
-            };
             match &arm.pat {
-                syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == tuple_values.len() => {
+                syn::Pat::Tuple(tuple_pat)
+                    if tuple_pat.elems.len() == tuple_scrutinee.elems.len() =>
+                {
                     let mut conditions = Vec::new();
                     let mut bindings = Vec::new();
+                    let mut binding_map = HashMap::new();
                     let mut supported = true;
                     for (idx, elem_pat) in tuple_pat.elems.iter().enumerate() {
                         let value_name = format!("_m{}", idx);
-                        let Some(cond) =
-                            self.tuple_pattern_elem_value_condition(elem_pat, &value_name)
+                        let mut elem_bindings = Vec::new();
+                        let Some(cond) = self
+                            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                                elem_pat,
+                                &value_name,
+                                &mut elem_bindings,
+                                &mut binding_map,
+                                None,
+                            )
                         else {
                             supported = false;
                             break;
                         };
+                        bindings.extend(elem_bindings);
                         if let Some(cond_expr) = cond {
                             conditions.push(cond_expr);
-                        }
-                        if let syn::Pat::Ident(pi) = elem_pat {
-                            if pi.ident != "_" {
-                                let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
-                                bindings.push(format!("const auto& {} = {};", cpp_name, value_name));
-                            }
                         }
                     }
                     if !supported {
@@ -16990,13 +19840,33 @@ impl CodeGen {
                     } else {
                         conditions.join(" && ")
                     };
+                    let body = {
+                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                            &arm.body,
+                            match_expected_ty,
+                            &binding_map,
+                        );
+                        self.maybe_wrap_variant_constructor_with_expected_enum(
+                            &arm.body,
+                            emitted,
+                            match_expected_ty,
+                        )
+                    };
+                    let diverging = self.is_expr_diverging(&arm.body);
+                    let body_is_return_expr = body.trim_start().starts_with("return ");
+                    let ret_prefix = if diverging || body_is_return_expr {
+                        ""
+                    } else {
+                        "return "
+                    };
                     out.push_str(&format!("if ({}) {{ ", cond_expr));
                     for binding in bindings {
                         out.push_str(&binding);
                         out.push(' ');
                     }
                     if let Some((_, guard)) = &arm.guard {
-                        let guard_str = self.emit_expr_to_string(guard);
+                        let guard_str =
+                            self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
                         out.push_str(&format!(
                             "if ({}) {{ {}{}; }} ",
                             guard_str, ret_prefix, body
@@ -17007,9 +19877,128 @@ impl CodeGen {
                     out.push_str("} ");
                 }
                 syn::Pat::Wild(_) => {
+                    let binding_map = HashMap::new();
+                    let body = {
+                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                            &arm.body,
+                            match_expected_ty,
+                            &binding_map,
+                        );
+                        self.maybe_wrap_variant_constructor_with_expected_enum(
+                            &arm.body,
+                            emitted,
+                            match_expected_ty,
+                        )
+                    };
+                    let diverging = self.is_expr_diverging(&arm.body);
+                    let body_is_return_expr = body.trim_start().starts_with("return ");
+                    let ret_prefix = if diverging || body_is_return_expr {
+                        ""
+                    } else {
+                        "return "
+                    };
                     out.push_str("if (true) { ");
                     if let Some((_, guard)) = &arm.guard {
-                        let guard_str = self.emit_expr_to_string(guard);
+                        let guard_str =
+                            self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
+                        out.push_str(&format!(
+                            "if ({}) {{ {}{}; }} ",
+                            guard_str, ret_prefix, body
+                        ));
+                    } else {
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
+                    }
+                    out.push_str("} ");
+                }
+                syn::Pat::Or(or_pat) => {
+                    let mut case_conditions = Vec::new();
+                    let mut supported = true;
+                    for case in &or_pat.cases {
+                        match case {
+                            syn::Pat::Tuple(tuple_pat)
+                                if tuple_pat.elems.len() == tuple_scrutinee.elems.len() =>
+                            {
+                                let mut tuple_case_conditions = Vec::new();
+                                for (idx, elem_pat) in tuple_pat.elems.iter().enumerate() {
+                                    let value_name = format!("_m{}", idx);
+                                    let mut elem_bindings = Vec::new();
+                                    let Some(cond) = self
+                                        .collect_runtime_match_binding_stmts_and_condition(
+                                            elem_pat,
+                                            &value_name,
+                                            &mut elem_bindings,
+                                            None,
+                                        )
+                                    else {
+                                        supported = false;
+                                        break;
+                                    };
+                                    if !elem_bindings.is_empty() {
+                                        supported = false;
+                                        break;
+                                    }
+                                    if let Some(cond_expr) = cond {
+                                        tuple_case_conditions.push(cond_expr);
+                                    }
+                                }
+                                if !supported {
+                                    break;
+                                }
+                                let case_cond = if tuple_case_conditions.is_empty() {
+                                    "true".to_string()
+                                } else {
+                                    tuple_case_conditions.join(" && ")
+                                };
+                                case_conditions.push(case_cond);
+                            }
+                            syn::Pat::Wild(_) => {
+                                case_conditions.clear();
+                                case_conditions.push("true".to_string());
+                                break;
+                            }
+                            syn::Pat::Ident(pi) if pi.ident == "_" => {
+                                case_conditions.clear();
+                                case_conditions.push("true".to_string());
+                                break;
+                            }
+                            _ => {
+                                supported = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !supported || case_conditions.is_empty() {
+                        continue;
+                    }
+                    let cond_expr = if case_conditions.len() == 1 {
+                        case_conditions.remove(0)
+                    } else {
+                        format!("({})", case_conditions.join(" || "))
+                    };
+                    let binding_map = HashMap::new();
+                    let body = {
+                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                            &arm.body,
+                            match_expected_ty,
+                            &binding_map,
+                        );
+                        self.maybe_wrap_variant_constructor_with_expected_enum(
+                            &arm.body,
+                            emitted,
+                            match_expected_ty,
+                        )
+                    };
+                    let diverging = self.is_expr_diverging(&arm.body);
+                    let body_is_return_expr = body.trim_start().starts_with("return ");
+                    let ret_prefix = if diverging || body_is_return_expr {
+                        ""
+                    } else {
+                        "return "
+                    };
+                    out.push_str(&format!("if ({}) {{ ", cond_expr));
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str =
+                            self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
                         out.push_str(&format!(
                             "if ({}) {{ {}{}; }} ",
                             guard_str, ret_prefix, body
@@ -17023,15 +20012,10 @@ impl CodeGen {
             }
         }
 
-        if expected_ty.is_some() {
+        if let Some(match_expected_ty) = match_expected_ty {
             out.push_str(&format!(
                 "return {}; }}()",
-                self.match_expr_unreachable_fallback_with_expected(expected_ty)
-            ));
-        } else if let Some(inferred) = self.infer_match_arms_common_type(arms) {
-            out.push_str(&format!(
-                "return {}; }}()",
-                self.match_expr_unreachable_fallback_with_expected(Some(&inferred))
+                self.match_expr_unreachable_fallback_with_expected(Some(match_expected_ty))
             ));
         } else {
             out.push_str("rusty::intrinsics::unreachable(); }()");
@@ -17043,10 +20027,153 @@ impl CodeGen {
         self.infer_match_arms_common_type(&match_expr.arms)
     }
 
-    fn infer_match_arms_common_type(&self, arms: &[syn::Arm]) -> Option<syn::Type> {
+    fn expr_is_option_some_integer_literal(&self, expr: &syn::Expr) -> bool {
+        let Some(some_arg) = self.extract_option_some_call_arg(expr) else {
+            return false;
+        };
+        match self.peel_paren_group_expr(some_arg) {
+            syn::Expr::Lit(lit) => matches!(lit.lit, syn::Lit::Int(_)),
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => {
+                matches!(
+                    self.peel_paren_group_expr(&unary.expr),
+                    syn::Expr::Lit(lit) if matches!(lit.lit, syn::Lit::Int(_))
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn infer_match_arm_type_with_tuple_scrutinee_bindings(
+        &self,
+        arm: &syn::Arm,
+        scrutinee_elem_tys: &[Option<syn::Type>],
+    ) -> Option<syn::Type> {
+        let mut inner = self.new_inner_for_block();
+        if inner.local_bindings.is_empty() {
+            inner.local_bindings.push(HashMap::new());
+            inner.local_shadowed_binding_types.push(HashMap::new());
+            inner.local_const_bindings.push(HashMap::new());
+            inner.local_reference_bindings.push(HashSet::new());
+            inner.local_cpp_bindings.push(HashMap::new());
+        }
+
+        let mut bind_tuple_pat = |tuple_pat: &syn::PatTuple| {
+            for (idx, pat_elem) in tuple_pat.elems.iter().enumerate() {
+                let Some(Some(elem_ty)) = scrutinee_elem_tys.get(idx) else {
+                    continue;
+                };
+                let mut env = HashMap::new();
+                inner.bind_pattern_types_into_env(pat_elem, elem_ty, &mut env);
+                for (name, ty) in env {
+                    inner.register_local_binding(name, Some(ty));
+                }
+            }
+        };
+
+        match &arm.pat {
+            syn::Pat::Tuple(tuple_pat) => bind_tuple_pat(tuple_pat),
+            syn::Pat::Or(or_pat) => {
+                for case in &or_pat.cases {
+                    if let syn::Pat::Tuple(tuple_pat) = case {
+                        bind_tuple_pat(tuple_pat);
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        inner
+            .infer_local_binding_type_from_initializer(&arm.body)
+            .or_else(|| inner.infer_simple_expr_type(&arm.body))
+    }
+
+    fn infer_match_arms_common_type_with_tuple_scrutinee(
+        &self,
+        tuple_scrutinee: &syn::ExprTuple,
+        arms: &[syn::Arm],
+    ) -> Option<syn::Type> {
+        let scrutinee_elem_tys: Vec<Option<syn::Type>> = tuple_scrutinee
+            .elems
+            .iter()
+            .map(|expr| self.infer_simple_expr_type(expr))
+            .collect();
+        if scrutinee_elem_tys.iter().all(Option::is_none) {
+            return None;
+        }
+
         let mut common: Option<syn::Type> = None;
+        let mut common_from_option_some_int_lit = false;
+        let mut saw_option_none_arm = false;
+
         for arm in arms {
             if self.is_expr_diverging(&arm.body) {
+                continue;
+            }
+            if self.expr_is_option_none_value(&arm.body) {
+                saw_option_none_arm = true;
+                continue;
+            }
+
+            let arm_ty = self
+                .infer_match_arm_type_with_tuple_scrutinee_bindings(arm, &scrutinee_elem_tys)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&arm.body))
+                .or_else(|| self.infer_simple_expr_type(&arm.body))?;
+            let arm_from_option_some_int_lit = self.expr_is_option_some_integer_literal(&arm.body);
+
+            if let Some(existing) = &common {
+                if Self::types_equivalent_by_tokens(existing, &arm_ty) {
+                    continue;
+                }
+                let both_option_like =
+                    self.is_option_like_syn_type(existing) && self.is_option_like_syn_type(&arm_ty);
+                if both_option_like {
+                    if common_from_option_some_int_lit && !arm_from_option_some_int_lit {
+                        common = Some(arm_ty);
+                        common_from_option_some_int_lit = false;
+                        continue;
+                    }
+                    if arm_from_option_some_int_lit && !common_from_option_some_int_lit {
+                        continue;
+                    }
+                }
+                return None;
+            } else {
+                common = Some(arm_ty);
+                common_from_option_some_int_lit = arm_from_option_some_int_lit;
+            }
+        }
+
+        if saw_option_none_arm {
+            let common_ty = common?;
+            if self.expected_option_type_arg(Some(&common_ty)).is_some()
+                || self.map_type(&common_ty).starts_with("rusty::Option<")
+            {
+                return Some(common_ty);
+            }
+            return None;
+        }
+        common
+    }
+
+    fn expr_is_option_none_value(&self, expr: &syn::Expr) -> bool {
+        let value_expr = self.extract_value_expr(expr).unwrap_or(expr);
+        let value_expr = self.peel_paren_group_expr(value_expr);
+        let syn::Expr::Path(path_expr) = value_expr else {
+            return false;
+        };
+        self.is_option_none_path(&path_expr.path)
+    }
+
+    fn infer_match_arms_common_type(&self, arms: &[syn::Arm]) -> Option<syn::Type> {
+        let mut common: Option<syn::Type> = None;
+        let mut saw_option_none_arm = false;
+        for arm in arms {
+            if self.is_expr_diverging(&arm.body) {
+                continue;
+            }
+            if self.expr_is_option_none_value(&arm.body) {
+                saw_option_none_arm = true;
                 continue;
             }
             let arm_ty = self
@@ -17059,6 +20186,15 @@ impl CodeGen {
             } else {
                 common = Some(arm_ty);
             }
+        }
+        if saw_option_none_arm {
+            let common_ty = common?;
+            if self.expected_option_type_arg(Some(&common_ty)).is_some()
+                || self.map_type(&common_ty).starts_with("rusty::Option<")
+            {
+                return Some(common_ty);
+            }
+            return None;
         }
         common
     }
@@ -17109,12 +20245,26 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         if let Some(expected) = expected_ty {
+            if self.type_contains_unresolved_self_type_path(expected) {
+                return self.match_expr_unreachable_fallback().to_string();
+            }
             let fallback_ty = self
                 .extract_callable_return_type_from_type(expected)
                 .unwrap_or_else(|| expected.clone());
+            if self.type_contains_unresolved_self_type_path(&fallback_ty) {
+                return self.match_expr_unreachable_fallback().to_string();
+            }
+            let fallback_cpp = self.map_type(&fallback_ty);
+            if fallback_cpp == "auto"
+                || fallback_cpp.contains("/* TODO")
+                || fallback_cpp.contains("Self::")
+                || type_string_has_auto_placeholder(&fallback_cpp)
+            {
+                return self.match_expr_unreachable_fallback().to_string();
+            }
             return format!(
                 "[&]() -> {} {{ rusty::intrinsics::unreachable(); }}()",
-                self.map_type(&fallback_ty)
+                fallback_cpp
             );
         }
         self.match_expr_unreachable_fallback().to_string()
@@ -17322,6 +20472,9 @@ impl CodeGen {
                     let name = path.path.segments[0].ident.to_string();
                     if name == "self" {
                         if let Some(enum_name) = &self.current_struct {
+                            if !self.type_supports_variant_context(enum_name) {
+                                return None;
+                            }
                             let template_args = self
                                 .enum_type_params
                                 .get(enum_name)
@@ -17396,12 +20549,24 @@ impl CodeGen {
         }
     }
 
+    fn type_supports_variant_context(&self, type_name: &str) -> bool {
+        self.data_enum_types.contains(type_name)
+            || self.runtime_match_enum_kind_by_name(type_name).is_some()
+            || (type_name == "Either"
+                && !self.is_local_type_name_in_scope("Either")
+                && !self.local_declared_types.contains("Either"))
+            || (type_name == "Bound" && !self.data_enum_types.contains("Bound"))
+    }
+
     fn infer_variant_type_context_from_type(&self, ty: &syn::Type) -> Option<VariantTypeContext> {
         let syn::Type::Path(tp) = ty else {
             return None;
         };
         let last = tp.path.segments.last()?;
         let enum_name = last.ident.to_string();
+        if !self.type_supports_variant_context(&enum_name) {
+            return None;
+        }
         let mut template_args = if let syn::PathArguments::AngleBracketed(args) = &last.arguments {
             args.args
                 .iter()
@@ -17537,6 +20702,80 @@ impl CodeGen {
             syn::Expr::Reference(r) => self.if_let_requires_single_eval_scrutinee(&r.expr),
             _ => true,
         }
+    }
+
+    fn emit_if_let_runtime_pattern(
+        &mut self,
+        pat: &syn::Pat,
+        scrutinee_expr: &syn::Expr,
+        scrutinee_cpp: &str,
+        then_branch: &syn::Block,
+        else_branch: &Option<(syn::token::Else, Box<syn::Expr>)>,
+        first: bool,
+    ) -> bool {
+        let scrutinee_var = "_iflet_scrutinee";
+        let use_scrutinee_storage = self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
+        let source_expr = if use_scrutinee_storage {
+            scrutinee_var
+        } else {
+            scrutinee_cpp
+        };
+        let variant_ctx = self.infer_variant_type_context_from_expr(scrutinee_expr);
+        let mut binding_stmts = Vec::new();
+        let mut binding_map = HashMap::new();
+        let Some(cond_opt) = self
+            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                pat,
+                source_expr,
+                &mut binding_stmts,
+                &mut binding_map,
+                variant_ctx.as_ref(),
+            )
+        else {
+            return false;
+        };
+        let cond = cond_opt.unwrap_or_else(|| "true".to_string());
+        let if_header = if use_scrutinee_storage {
+            format!(
+                "if (auto&& {} = {}; {}) {{",
+                scrutinee_var, scrutinee_cpp, cond
+            )
+        } else {
+            format!("if ({}) {{", cond)
+        };
+        if first {
+            self.writeln(&if_header);
+        } else {
+            self.output.push_str(&format!("{}\n", if_header));
+        }
+        self.indent += 1;
+        for stmt in binding_stmts {
+            self.writeln(&stmt);
+        }
+        if binding_map.is_empty() {
+            self.emit_block(then_branch);
+        } else {
+            self.local_cpp_bindings.push(binding_map.clone());
+            let mut local_types = HashMap::new();
+            let mut local_consts = HashMap::new();
+            for rust_name in binding_map.keys() {
+                local_types.insert(rust_name.clone(), None);
+                local_consts.insert(rust_name.clone(), false);
+            }
+            self.local_bindings.push(local_types);
+            self.local_shadowed_binding_types.push(HashMap::new());
+            self.local_const_bindings.push(local_consts);
+            self.local_reference_bindings.push(HashSet::new());
+            self.emit_block(then_branch);
+            self.local_reference_bindings.pop();
+            self.local_const_bindings.pop();
+            self.local_shadowed_binding_types.pop();
+            self.local_bindings.pop();
+            self.local_cpp_bindings.pop();
+        }
+        self.indent -= 1;
+        self.emit_if_let_else(else_branch);
+        true
     }
 
     /// Emit `if let Pattern = expr { ... } else { ... }` as C++ code.
@@ -17675,58 +20914,25 @@ impl CodeGen {
                         );
                     }
                     _ => {
-                        // Generic enum variant: if let Variant(x) = val
-                        // → if (std::holds_alternative<Variant>(val)) { ... }
-                        let cpp_type = path_str.replace("::", "_");
-                        let binding = self.extract_tuple_struct_bindings(&ts.elems);
-                        let scrutinee_var = "_iflet_scrutinee";
-                        let use_scrutinee_storage =
-                            self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
-                        let cond_scrutinee = if use_scrutinee_storage {
-                            scrutinee_var
-                        } else {
-                            &scrutinee
-                        };
-                        let body_scrutinee = if use_scrutinee_storage {
-                            scrutinee_var
-                        } else {
-                            &scrutinee
-                        };
-                        let cond =
-                            format!("std::holds_alternative<{}>({})", cpp_type, cond_scrutinee);
-
-                        if first {
-                            if use_scrutinee_storage {
-                                self.writeln(&format!(
-                                    "if (auto&& {} = {}; {}) {{",
-                                    scrutinee_var, scrutinee, cond
-                                ));
+                        if !self.emit_if_let_runtime_pattern(
+                            &let_expr.pat,
+                            scrutinee_expr,
+                            &scrutinee,
+                            then_branch,
+                            else_branch,
+                            first,
+                        ) {
+                            if first {
+                                self.writeln("if (/* TODO: if let tuple struct */) {");
                             } else {
-                                self.writeln(&format!("if ({}) {{", cond));
+                                self.output
+                                    .push_str("if (/* TODO: if let tuple struct */) {\n");
                             }
-                        } else {
-                            if use_scrutinee_storage {
-                                self.output.push_str(&format!(
-                                    "if (auto&& {} = {}; {}) {{\n",
-                                    scrutinee_var, scrutinee, cond
-                                ));
-                            } else {
-                                self.output.push_str(&format!("if ({}) {{\n", cond));
-                            }
+                            self.indent += 1;
+                            self.emit_block(then_branch);
+                            self.indent -= 1;
+                            self.emit_if_let_else(else_branch);
                         }
-                        self.indent += 1;
-                        // Emit bindings
-                        for (i, name) in binding.iter().enumerate() {
-                            if name != "_" {
-                                self.writeln(&format!(
-                                    "const auto& {} = std::get<{}>({})._{};",
-                                    name, cpp_type, body_scrutinee, i
-                                ));
-                            }
-                        }
-                        self.emit_block(then_branch);
-                        self.indent -= 1;
-                        self.emit_if_let_else(else_branch);
                     }
                 }
             }
@@ -17781,6 +20987,16 @@ impl CodeGen {
                         self.format_option_like_pattern_condition(scrutinee_expr, &scrutinee, false)
                     }
                     _ => {
+                        if self.emit_if_let_runtime_pattern(
+                            &let_expr.pat,
+                            scrutinee_expr,
+                            &scrutinee,
+                            then_branch,
+                            else_branch,
+                            first,
+                        ) {
+                            return;
+                        }
                         let cpp_type = path_str.replace("::", "_");
                         format!("std::holds_alternative<{}>({})", cpp_type, scrutinee)
                     }
@@ -17796,16 +21012,24 @@ impl CodeGen {
                 self.emit_if_let_else(else_branch);
             }
             _ => {
-                // Fallback
-                if first {
-                    self.writeln("if (/* TODO: if let pattern */) {");
-                } else {
-                    self.output.push_str("if (/* TODO: if let pattern */) {\n");
+                if !self.emit_if_let_runtime_pattern(
+                    &let_expr.pat,
+                    scrutinee_expr,
+                    &scrutinee,
+                    then_branch,
+                    else_branch,
+                    first,
+                ) {
+                    if first {
+                        self.writeln("if (/* TODO: if let pattern */) {");
+                    } else {
+                        self.output.push_str("if (/* TODO: if let pattern */) {\n");
+                    }
+                    self.indent += 1;
+                    self.emit_block(then_branch);
+                    self.indent -= 1;
+                    self.emit_if_let_else(else_branch);
                 }
-                self.indent += 1;
-                self.emit_block(then_branch);
-                self.indent -= 1;
-                self.emit_if_let_else(else_branch);
             }
         }
     }
@@ -17939,9 +21163,7 @@ impl CodeGen {
             return false;
         };
         let unwrap_name = match unwrap_method {
-            "unwrap" | "unwrap_err" | "unwrap_unchecked" | "expect" | "expect_err" => {
-                unwrap_method
-            }
+            "unwrap" | "unwrap_err" | "unwrap_unchecked" | "expect" | "expect_err" => unwrap_method,
             _ => return false,
         };
         self.infer_unwrap_like_method_return_type_from_receiver_type(&receiver_ty, unwrap_name)
@@ -18415,11 +21637,22 @@ impl CodeGen {
     }
 
     fn expr_is_unlabeled_break_without_value(&self, expr: &syn::Expr) -> bool {
-        matches!(
-            self.extract_value_expr(expr),
-            Some(syn::Expr::Break(break_expr))
-                if break_expr.label.is_none() && break_expr.expr.is_none()
-        )
+        match self.peel_paren_group_expr(expr) {
+            syn::Expr::Break(break_expr) => break_expr.label.is_none() && break_expr.expr.is_none(),
+            syn::Expr::Block(block_expr) => match block_expr.block.stmts.last() {
+                Some(syn::Stmt::Expr(tail_expr, _)) => {
+                    self.expr_is_unlabeled_break_without_value(tail_expr)
+                }
+                _ => false,
+            },
+            syn::Expr::Group(group_expr) => {
+                self.expr_is_unlabeled_break_without_value(&group_expr.expr)
+            }
+            syn::Expr::Paren(paren_expr) => {
+                self.expr_is_unlabeled_break_without_value(&paren_expr.expr)
+            }
+            _ => false,
+        }
     }
 
     fn try_emit_local_match_break_initializer(
@@ -18460,15 +21693,44 @@ impl CodeGen {
         let Some(success_arm) = success_arm else {
             return false;
         };
+        let break_arm_prefix_stmts: Vec<syn::Stmt> =
+            match self.peel_paren_group_expr(&break_arm.body) {
+                syn::Expr::Block(block_expr) => {
+                    if block_expr.block.stmts.is_empty() {
+                        return false;
+                    }
+                    let Some(syn::Stmt::Expr(tail_expr, _)) = block_expr.block.stmts.last() else {
+                        return false;
+                    };
+                    if !self.expr_is_unlabeled_break_without_value(tail_expr) {
+                        return false;
+                    }
+                    block_expr.block.stmts[..block_expr.block.stmts.len() - 1].to_vec()
+                }
+                _ => Vec::new(),
+            };
 
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
-        let Some((success_cond, success_bindings, success_binding_map, _)) =
-            self.runtime_try_pattern_details(&success_arm.pat, variant_ctx.as_ref(), "_mv")
+        let scrutinee_var = self.allocate_local_cpp_name("_m");
+        let success_matched_var = self.allocate_local_cpp_name("_mv");
+        let break_matched_var = self.allocate_local_cpp_name("_mv_break");
+        let Some((success_cond, success_bindings, success_binding_map, success_unwrap_method)) =
+            self.runtime_try_pattern_details(
+                &success_arm.pat,
+                variant_ctx.as_ref(),
+                &scrutinee_var,
+                &success_matched_var,
+            )
         else {
             return false;
         };
-        let Some((break_cond, break_bindings, break_binding_map, _)) =
-            self.runtime_try_pattern_details(&break_arm.pat, variant_ctx.as_ref(), "_mv_break")
+        let Some((break_cond, break_bindings, break_binding_map, _)) = self
+            .runtime_try_pattern_details(
+                &break_arm.pat,
+                variant_ctx.as_ref(),
+                &scrutinee_var,
+                &break_matched_var,
+            )
         else {
             return false;
         };
@@ -18505,8 +21767,40 @@ impl CodeGen {
 
         let scrutinee =
             self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
-        self.writeln(&format!("auto&& _m = {};", scrutinee));
-        self.writeln(&format!("if ({}) {{ break; }}", break_cond));
+        let match_value_cpp_type = if let Some(unwrap_method) = success_unwrap_method {
+            Some(format!(
+                "std::remove_cvref_t<decltype(({}.{}()))>",
+                scrutinee_var, unwrap_method
+            ))
+        } else if let Some(expected_ty) = expected_ty {
+            let mapped = self.map_type(expected_ty);
+            if mapped.contains("/* TODO") || type_string_has_auto_placeholder(&mapped) {
+                None
+            } else {
+                Some(format!("std::remove_cvref_t<{}>", mapped))
+            }
+        } else {
+            None
+        };
+        let Some(match_value_cpp_type) = match_value_cpp_type else {
+            return false;
+        };
+        let match_value_name = self.allocate_local_cpp_name("_match_value");
+        self.writeln(&format!("auto&& {} = {};", scrutinee_var, scrutinee));
+        self.writeln(&format!(
+            "std::optional<{}> {};",
+            match_value_cpp_type, match_value_name
+        ));
+        self.writeln("{");
+        self.indent += 1;
+        self.writeln(&format!("if ({}) {{", break_cond));
+        self.indent += 1;
+        for stmt in &break_arm_prefix_stmts {
+            self.emit_stmt(stmt, false);
+        }
+        self.writeln("break;");
+        self.indent -= 1;
+        self.writeln("}");
         if success_cond != "true" {
             self.writeln(&format!(
                 "if (!({})) {{ rusty::intrinsics::unreachable(); }}",
@@ -18516,7 +21810,13 @@ impl CodeGen {
         for binding in success_bindings {
             self.writeln(&binding);
         }
-        self.writeln(&format!("{} {} = {};", decl_type, cpp_name, success_expr));
+        self.writeln(&format!("{}.emplace({});", match_value_name, success_expr));
+        self.indent -= 1;
+        self.writeln("}");
+        self.writeln(&format!(
+            "{} {} = std::move({}).value();",
+            decl_type, cpp_name, match_value_name
+        ));
         true
     }
 
@@ -18580,7 +21880,10 @@ impl CodeGen {
                     .and_then(|init| self.infer_local_binding_type_from_initializer(&init.expr));
                 if inferred_binding_ty.is_none()
                     && let Some(init) = local.init.as_ref()
-                    && matches!(self.peel_paren_group_expr(&init.expr), syn::Expr::Reference(_))
+                    && matches!(
+                        self.peel_paren_group_expr(&init.expr),
+                        syn::Expr::Reference(_)
+                    )
                 {
                     inferred_binding_ty = self.infer_simple_expr_type(&init.expr);
                 }
@@ -18597,12 +21900,18 @@ impl CodeGen {
                     // Check placeholder hints from forward-looking analysis.
                     // For uninitialized locals AND for `Type::new_()` calls
                     // where T was inferred from later usage (e.g., get_or_init).
-                    let has_generic_ctor_init = local.init.as_ref().is_some_and(|init| {
-                        call_owner_placeholder_target(&init.expr).is_some()
-                    });
-                    if local.init.is_none() || has_generic_ctor_init {
-                        inferred_binding_ty =
-                            self.lookup_local_placeholder_type_hint(&name_str).cloned();
+                    let has_generic_ctor_init = local
+                        .init
+                        .as_ref()
+                        .is_some_and(|init| call_owner_placeholder_target(&init.expr).is_some());
+                    if local.init.is_none()
+                        || has_generic_ctor_init
+                        || inferred_binding_ty.is_none()
+                    {
+                        if inferred_binding_ty.is_none() {
+                            inferred_binding_ty =
+                                self.lookup_local_placeholder_type_hint(&name_str).cloned();
+                        }
                         if inferred_binding_ty.is_none()
                             && has_generic_ctor_init
                             && let Some(owner_target) = local
@@ -18622,9 +21931,8 @@ impl CodeGen {
                             );
                             if !self.type_contains_infer(&normalized_inner)
                                 && !self.type_contains_in_scope_type_param(&normalized_inner)
-                                && !self.type_contains_unbound_single_letter_generic(
-                                    &normalized_inner,
-                                )
+                                && !self
+                                    .type_contains_unbound_single_letter_generic(&normalized_inner)
                                 && !self
                                     .type_contains_unresolved_placeholder_like(&normalized_inner)
                             {
@@ -18673,6 +21981,10 @@ impl CodeGen {
                             .expect("checked Some in condition"),
                     )
                 } else if self.should_emit_inferred_sum_type_for_local(
+                    local,
+                    &name_str,
+                    inferred_binding_ty.as_ref(),
+                ) || self.should_emit_inferred_numeric_seed_type_for_local(
                     local,
                     &name_str,
                     inferred_binding_ty.as_ref(),
@@ -18757,7 +22069,10 @@ impl CodeGen {
                     if self
                         .infer_local_binding_type_from_initializer(&init.expr)
                         .as_ref()
-                        .is_some_and(|ty| self.type_is_reference_like(ty))
+                        .is_some_and(|ty| {
+                            self.type_is_reference_like(ty)
+                                && !self.reference_type_lowers_to_value_cpp(ty)
+                        })
                     {
                         return true;
                     }
@@ -18775,54 +22090,65 @@ impl CodeGen {
                         ) {
                             return true;
                         }
-                        self
-                            .infer_method_call_result_type_for_local(mc)
+                        self.infer_method_call_result_type_for_local(mc)
                             .as_ref()
-                            .is_some_and(|ty| self.type_is_reference_like(ty))
+                            .is_some_and(|ty| {
+                                self.type_is_reference_like(ty)
+                                    && !self.reference_type_lowers_to_value_cpp(ty)
+                            })
                     } else if let syn::Expr::Call(call) = init.expr.as_ref() {
                         self.lookup_associated_call_return_type(call)
                             .as_ref()
-                            .is_some_and(|ty| self.type_is_reference_like(ty))
+                            .is_some_and(|ty| {
+                                self.type_is_reference_like(ty)
+                                    && !self.reference_type_lowers_to_value_cpp(ty)
+                            })
                             || self.associated_call_is_reference_like_by_shape(call)
                     } else {
                         false
                     }
                 });
                 if init_returns_reference {
-                    let inferred_ref_from_init = local
-                        .init
-                        .as_ref()
-                        .and_then(|init| match init.expr.as_ref() {
-                            syn::Expr::MethodCall(mc) => self
-                                .infer_method_call_result_type_for_local(mc)
-                                .filter(|ty| self.type_is_reference_like(ty)),
-                            syn::Expr::Call(call) => self
-                                .lookup_associated_call_return_type(call)
-                                .or_else(|| self.lookup_function_return_type(call.func.as_ref()).cloned())
-                                .filter(|ty| self.type_is_reference_like(ty)),
-                            _ => None,
-                        });
-                    let promoted_ref_ty = inferred_ref_from_init.or_else(|| {
-                        self.lookup_local_binding_type(&name_str).and_then(|ty| {
-                            if self.type_is_reference_like(&ty) {
-                                Some(ty)
-                            } else {
-                                let promoted: syn::Type = if is_mut {
-                                    parse_quote!(&mut #ty)
+                    let inferred_ref_from_init =
+                        local
+                            .init
+                            .as_ref()
+                            .and_then(|init| match init.expr.as_ref() {
+                                syn::Expr::MethodCall(mc) => self
+                                    .infer_method_call_result_type_for_local(mc)
+                                    .filter(|ty| self.type_is_reference_like(ty)),
+                                syn::Expr::Call(call) => self
+                                    .lookup_associated_call_return_type(call)
+                                    .or_else(|| {
+                                        self.lookup_function_return_type(call.func.as_ref())
+                                            .cloned()
+                                    })
+                                    .filter(|ty| self.type_is_reference_like(ty)),
+                                _ => None,
+                            });
+                    let promoted_ref_ty = inferred_ref_from_init
+                        .or_else(|| {
+                            self.lookup_local_binding_type(&name_str).and_then(|ty| {
+                                if self.type_is_reference_like(&ty) {
+                                    Some(ty)
                                 } else {
-                                    parse_quote!(&#ty)
-                                };
-                                Some(promoted)
-                            }
+                                    let promoted: syn::Type = if is_mut {
+                                        parse_quote!(&mut #ty)
+                                    } else {
+                                        parse_quote!(&#ty)
+                                    };
+                                    Some(promoted)
+                                }
+                            })
                         })
-                    }).or_else(|| {
-                        let placeholder_ref: syn::Type = if is_mut {
-                            parse_quote!(&mut _)
-                        } else {
-                            parse_quote!(&_)
-                        };
-                        Some(placeholder_ref)
-                    });
+                        .or_else(|| {
+                            let placeholder_ref: syn::Type = if is_mut {
+                                parse_quote!(&mut _)
+                            } else {
+                                parse_quote!(&_)
+                            };
+                            Some(placeholder_ref)
+                        });
                     if let Some(promoted_ref_ty) = promoted_ref_ty {
                         self.update_local_binding_type(name_str.clone(), promoted_ref_ty);
                     }
@@ -18839,12 +22165,12 @@ impl CodeGen {
                 let local_decl_is_reference = ref_suffix == "&"
                     || init_is_ref_binding
                     || type_str.contains('&')
-                    || inferred_binding_ty
-                        .as_ref()
-                        .is_some_and(|ty| self.type_is_reference_like(ty));
-                let needs_rebind_pointer_local = is_mut
-                    && self.reassigned_vars.contains(&name_str)
-                    && local_decl_is_reference;
+                    || inferred_binding_ty.as_ref().is_some_and(|ty| {
+                        self.type_is_reference_like(ty)
+                            && !self.reference_type_lowers_to_value_cpp(ty)
+                    });
+                let needs_rebind_pointer_local =
+                    is_mut && self.reassigned_vars.contains(&name_str) && local_decl_is_reference;
                 let rebind_pointer_decl_type = if needs_rebind_pointer_local {
                     get_local_type(local)
                         .and_then(|ty| self.map_reference_type_to_pointer_cpp_type(ty))
@@ -19120,7 +22446,10 @@ impl CodeGen {
                         if self_ref && shadows_outer {
                             // Emit: auto _tmp = init; auto name = _tmp;
                             self.writeln(&format!("{} _self_ref_tmp = {};", decl_type, expr_str));
-                            self.writeln(&format!("{} {} = std::move(_self_ref_tmp);", decl_type, cpp_name));
+                            self.writeln(&format!(
+                                "{} {} = std::move(_self_ref_tmp);",
+                                decl_type, cpp_name
+                            ));
                         } else {
                             self.writeln(&format!("{} {} = {};", decl_type, cpp_name, expr_str));
                         }
@@ -19185,10 +22514,7 @@ impl CodeGen {
                     .init
                     .as_ref()
                     .and_then(|init| self.infer_local_binding_type_from_initializer(&init.expr))
-                    .and_then(|ty| match self.peel_reference_paren_group_type(&ty) {
-                        syn::Type::Tuple(tuple_ty) => Some(tuple_ty.clone()),
-                        _ => None,
-                    });
+                    .and_then(|ty| self.resolve_tuple_type_from_type(&ty));
                 let expr_str = if let Some(init) = &local.init {
                     Some(self.emit_expr_to_string(&init.expr))
                 } else {
@@ -19207,7 +22533,9 @@ impl CodeGen {
                 for (idx, p) in tuple.elems.iter().enumerate() {
                     let raw = self.emit_pat_to_string(p);
                     if raw == "_" {
-                        tuple_binding_names.push(raw);
+                        tuple_binding_names.push(
+                            self.reserve_synthetic_cpp_name(&format!("_tuple_ignore{}", idx)),
+                        );
                         continue;
                     }
                     let cpp_name = self.allocate_local_cpp_name(&raw);
@@ -19232,6 +22560,10 @@ impl CodeGen {
                     }
                 }
                 if let Some(expr_str) = expr_str {
+                    if tuple_binding_names.is_empty() {
+                        self.writeln(&format!("static_cast<void>({});", expr_str));
+                        return;
+                    }
                     // Check if this is a constructor call without template args that would
                     // cause CTAD failure. These have incomplete types and can't be used in
                     // structured bindings. Fall back to static_cast<void> to preserve side
@@ -19288,9 +22620,17 @@ impl CodeGen {
                 let has_rest = slice
                     .elems
                     .iter()
-                    .any(|elem| matches!(elem, syn::Pat::Rest(_)));
+                    .any(|elem| self.pat_is_slice_rest_like(elem));
                 if has_rest {
-                    self.writeln("// TODO: complex slice pattern binding");
+                    if let Some(init) = &local.init {
+                        if !self.emit_complex_local_pattern_binding_from_init(
+                            &local.pat, &init.expr, None,
+                        ) {
+                            self.writeln("// TODO: complex slice pattern binding");
+                        }
+                    } else {
+                        self.writeln("// TODO: complex slice pattern binding");
+                    }
                     return;
                 }
 
@@ -19302,10 +22642,11 @@ impl CodeGen {
                 let names: Vec<String> = slice
                     .elems
                     .iter()
-                    .map(|p| {
+                    .enumerate()
+                    .map(|(idx, p)| {
                         let raw = self.emit_pat_to_string(p);
                         if raw == "_" {
-                            raw
+                            self.reserve_synthetic_cpp_name(&format!("_slice_ignore{}", idx))
                         } else {
                             self.allocate_local_cpp_name(&raw)
                         }
@@ -19316,6 +22657,10 @@ impl CodeGen {
                     return;
                 }
                 if let Some(expr_str) = expr_str {
+                    if names.is_empty() {
+                        self.writeln(&format!("static_cast<void>({});", expr_str));
+                        return;
+                    }
                     let is_incomplete_constructor = local.init.as_ref().is_some_and(|init| {
                         self.init_expr_is_incomplete_constructor_call(&init.expr)
                     });
@@ -19357,7 +22702,8 @@ impl CodeGen {
                     if shadows_outer {
                         if let Some(scope) = self.local_cpp_bindings.last_mut() {
                             scope.remove(&name_str);
-                            if let Some(previous_cpp_name) = previous_cpp_name_in_current_scope.clone()
+                            if let Some(previous_cpp_name) =
+                                previous_cpp_name_in_current_scope.clone()
                             {
                                 scope.insert(name_str.clone(), previous_cpp_name);
                             }
@@ -19398,8 +22744,7 @@ impl CodeGen {
                     } else {
                         self.map_type(&resolved_ty)
                     };
-                    let resolved_mut_reference_binding =
-                        Self::is_mut_reference_type(&resolved_ty);
+                    let resolved_mut_reference_binding = Self::is_mut_reference_type(&resolved_ty);
                     let is_consumed = self
                         .consuming_method_receiver_vars
                         .contains(&name.to_string());
@@ -19425,17 +22770,16 @@ impl CodeGen {
                         &name_str,
                         qualifier == "const " && local.init.is_some(),
                     );
-                    let local_decl_is_reference =
-                        Self::is_mut_reference_type(&resolved_ty)
-                            || local
-                                .init
-                                .as_ref()
-                                .is_some_and(|init| self.is_ref_init(&init.expr))
-                            || matches!(
-                                self.peel_paren_group_type(&resolved_ty),
-                                syn::Type::Reference(_)
-                            )
-                            || ty.contains('&');
+                    let local_decl_is_reference = Self::is_mut_reference_type(&resolved_ty)
+                        || local
+                            .init
+                            .as_ref()
+                            .is_some_and(|init| self.is_ref_init(&init.expr))
+                        || matches!(
+                            self.peel_paren_group_type(&resolved_ty),
+                            syn::Type::Reference(_)
+                        )
+                        || ty.contains('&');
                     let needs_rebind_pointer_local = is_mut
                         && self.reassigned_vars.contains(&name_str)
                         && local_decl_is_reference;
@@ -19498,7 +22842,8 @@ impl CodeGen {
                                 )
                             };
                             let expr_str = if needs_rebind_pointer_local {
-                                let init_ref_like_by_binding = self.type_is_reference_like(&resolved_ty);
+                                let init_ref_like_by_binding =
+                                    self.type_is_reference_like(&resolved_ty);
                                 if expr_str.starts_with('&') {
                                     expr_str
                                 } else if self.expr_is_reference_yielding(&init.expr)
@@ -19543,13 +22888,78 @@ impl CodeGen {
                         self.writeln(&format!("static_cast<void>({});", expr_str));
                     }
                 } else {
-                    self.writeln("// TODO: complex typed pattern binding");
+                    if let Some(init) = &local.init {
+                        if !self.emit_complex_local_pattern_binding_from_init(
+                            &pat_type.pat,
+                            &init.expr,
+                            Some(&pat_type.ty),
+                        ) {
+                            self.writeln("// TODO: complex typed pattern binding");
+                        }
+                    } else {
+                        self.writeln("// TODO: complex typed pattern binding");
+                    }
                 }
             }
             _ => {
-                self.writeln("// TODO: complex pattern binding");
+                if let Some(init) = &local.init {
+                    if !self
+                        .emit_complex_local_pattern_binding_from_init(&local.pat, &init.expr, None)
+                    {
+                        self.writeln("// TODO: complex pattern binding");
+                    }
+                } else {
+                    self.writeln("// TODO: complex pattern binding");
+                }
             }
         }
+    }
+
+    fn emit_complex_local_pattern_binding_from_init(
+        &mut self,
+        pat: &syn::Pat,
+        init_expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> bool {
+        let pat_tmp = self.reserve_synthetic_cpp_name("_let_pat");
+        let init_str = self.emit_expr_to_string_with_expected(init_expr, expected_ty);
+        self.writeln(&format!("auto&& {} = {};", pat_tmp, init_str));
+
+        let mut rust_binding_names = HashSet::new();
+        self.collect_pattern_binding_names(pat, &mut rust_binding_names);
+        let mut binding_map: HashMap<String, String> = HashMap::new();
+        let mut sorted_binding_names: Vec<String> = rust_binding_names
+            .into_iter()
+            .filter(|name| name != "_")
+            .collect();
+        sorted_binding_names.sort();
+        for rust_name in sorted_binding_names {
+            let cpp_name = self.allocate_local_cpp_name(&rust_name);
+            binding_map.insert(rust_name, cpp_name);
+        }
+        self.register_statement_scope_binding_map(&binding_map);
+
+        let mut binding_stmts = Vec::new();
+        if !self.collect_pattern_binding_stmts_with_cpp_name_map(
+            pat,
+            &pat_tmp,
+            &mut binding_stmts,
+            &mut binding_map,
+        ) {
+            return false;
+        }
+        for stmt in binding_stmts {
+            self.writeln(&stmt);
+        }
+
+        if let Some(value_ty) = self.infer_local_binding_type_from_initializer(init_expr) {
+            let mut env = HashMap::new();
+            self.bind_pattern_types_into_env(pat, &value_ty, &mut env);
+            for (name, ty) in env {
+                self.update_local_binding_type(name, ty);
+            }
+        }
+        true
     }
 
     fn is_mut_raw_pointer_type(ty: &syn::Type) -> bool {
@@ -19574,12 +22984,8 @@ impl CodeGen {
         if !self.reassigned_vars.contains(name) {
             return false;
         }
-        self.lookup_local_binding_type(name).is_some_and(|ty| {
-            matches!(
-                self.peel_paren_group_type(&ty),
-                syn::Type::Reference(_)
-            )
-        })
+        self.lookup_local_binding_type(name)
+            .is_some_and(|ty| matches!(self.peel_paren_group_type(&ty), syn::Type::Reference(_)))
     }
 
     fn is_raw_pointer_type(ty: &syn::Type) -> bool {
@@ -19816,6 +23222,9 @@ impl CodeGen {
             && !used.contains(&escaped_name)
             && !param_scope_has_rust_name
             && !param_cpp_names.contains(&escaped_name)
+            && !self.is_type_param_in_scope(rust_name)
+            && !self.is_local_type_name_in_scope(rust_name)
+            && !self.declared_item_names.contains(rust_name)
             && !self.local_binding_name_conflicts_with_scope_function(rust_name)
             && !outer_same_rust_cpp_name
                 .as_ref()
@@ -19830,6 +23239,9 @@ impl CodeGen {
                 let candidate = escape_cpp_keyword(&format!("{}_shadow{}", rust_name, idx));
                 if !used.contains(&candidate)
                     && !param_cpp_names.contains(&candidate)
+                    && !self.is_type_param_in_scope(&candidate)
+                    && !self.is_local_type_name_in_scope(&candidate)
+                    && !self.declared_item_names.contains(&candidate)
                     && !self.local_binding_name_conflicts_with_scope_function(&candidate)
                     && !outer_same_rust_cpp_name
                         .as_ref()
@@ -19993,6 +23405,43 @@ impl CodeGen {
             .unwrap_or(false)
     }
 
+    fn pattern_ident_is_const_value(&self, name: &str) -> bool {
+        if self.lookup_item_const_type(name).is_some() {
+            return true;
+        }
+        // Immutable `let`/parameter bindings are still pattern binders in Rust.
+        // Only treat a local const-like name as a value pattern when there is no
+        // local binding of that name in scope (for example `const FOO: ...`).
+        if self.is_const_local_binding_in_scope(name) && !self.is_local_binding_in_scope(name) {
+            return true;
+        }
+        if !self.is_local_binding_in_scope(name)
+            && !self.is_type_param_in_scope(name)
+            && !self.is_local_type_name_in_scope(name)
+        {
+            if self.runtime_match_enum_kind_by_variant_name(name).is_some()
+                || self
+                    .data_enum_unit_variants
+                    .iter()
+                    .any(|key| key.ends_with(&format!("_{}", name)))
+                || self
+                    .c_like_enum_consts
+                    .iter()
+                    .any(|key| key.ends_with(&format!("_{}", name)))
+            {
+                return true;
+            }
+        }
+        let looks_like_const = name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit());
+        looks_like_const
+            && !self.is_type_param_in_scope(name)
+            && !self.is_local_type_name_in_scope(name)
+            && !self.declared_item_names.contains(name)
+            && !self.is_local_binding_in_scope(name)
+    }
+
     fn update_local_binding_type(&mut self, name: String, ty: syn::Type) {
         for scope in self.local_bindings.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(&name) {
@@ -20143,6 +23592,30 @@ impl CodeGen {
         let syn::ReturnType::Type(_, expected_ty) = expected_output else {
             return output.clone();
         };
+        if self.type_is_bare_generic_param_like(expected_ty) {
+            // Bare placeholder-like callable/type parameters (e.g. FI/FO/T)
+            // are not concrete closure return types.
+            return output.clone();
+        }
+        let expected_peeled = self.peel_reference_paren_group_type(expected_ty);
+        if let syn::Type::Path(tp) = expected_peeled
+            && tp.qself.is_none()
+            && tp.path.segments.len() == 1
+        {
+            let ident = tp.path.segments[0].ident.to_string();
+            if self.is_type_param_in_scope(&ident) || self.is_struct_type_param(&ident) {
+                // Do not resolve closure `-> _` to a bare callable/type parameter
+                // such as `FI`/`FO`; that parameter denotes the callable type, not
+                // the closure return type.
+                return output.clone();
+            }
+        }
+        if self.type_contains_infer(expected_ty)
+            || self.type_contains_in_scope_type_param(expected_ty)
+            || self.type_contains_unresolved_placeholder_like(expected_ty)
+        {
+            return output.clone();
+        }
         syn::ReturnType::Type(
             Default::default(),
             Box::new(self.resolve_type_infers_from_expected(out_ty, expected_ty)),
@@ -20169,7 +23642,8 @@ impl CodeGen {
                     // For example, `A` from an enclosing struct's generic context
                     // leaking into a free test function.
                     // Only flag single-letter names that are NOT known concrete types.
-                    if name.len() == 1 && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                    if name.len() == 1
+                        && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
                         && !self.local_declared_types.contains(&name)
                         && !self.declared_item_names.contains(&name)
                     {
@@ -20193,23 +23667,20 @@ impl CodeGen {
             syn::Type::Ptr(p) => self.type_contains_in_scope_type_param(&p.elem),
             syn::Type::Paren(p) => self.type_contains_in_scope_type_param(&p.elem),
             syn::Type::Group(g) => self.type_contains_in_scope_type_param(&g.elem),
-            syn::Type::Tuple(t) => {
-                t.elems.iter().any(|elem| self.type_contains_in_scope_type_param(elem))
-            }
+            syn::Type::Tuple(t) => t
+                .elems
+                .iter()
+                .any(|elem| self.type_contains_in_scope_type_param(elem)),
             syn::Type::Array(a) => self.type_contains_in_scope_type_param(&a.elem),
             syn::Type::Slice(s) => self.type_contains_in_scope_type_param(&s.elem),
             syn::Type::ImplTrait(it) => it.bounds.iter().any(|bound| match bound {
                 syn::TypeParamBound::Trait(tb) => {
-                    if tb.path
-                        .segments
-                        .iter()
-                        .any(|seg| self.type_contains_in_scope_type_param(&syn::Type::Path(
-                            syn::TypePath {
-                                qself: None,
-                                path: syn::Path::from(seg.ident.clone()),
-                            },
-                        )))
-                    {
+                    if tb.path.segments.iter().any(|seg| {
+                        self.type_contains_in_scope_type_param(&syn::Type::Path(syn::TypePath {
+                            qself: None,
+                            path: syn::Path::from(seg.ident.clone()),
+                        }))
+                    }) {
                         return true;
                     }
                     tb.path.segments.iter().any(|seg| match &seg.arguments {
@@ -20238,28 +23709,30 @@ impl CodeGen {
                 _ => false,
             }),
             syn::Type::TraitObject(obj) => obj.bounds.iter().any(|bound| match bound {
-                syn::TypeParamBound::Trait(tb) => tb.path.segments.iter().any(|seg| match &seg.arguments {
-                    syn::PathArguments::AngleBracketed(args) => {
-                        args.args.iter().any(|arg| match arg {
-                            syn::GenericArgument::Type(inner) => {
-                                self.type_contains_in_scope_type_param(inner)
-                            }
-                            _ => false,
-                        })
-                    }
-                    syn::PathArguments::Parenthesized(args) => {
-                        args.inputs
-                            .iter()
-                            .any(|inner| self.type_contains_in_scope_type_param(inner))
-                            || match &args.output {
-                                syn::ReturnType::Type(_, ty) => {
-                                    self.type_contains_in_scope_type_param(ty)
+                syn::TypeParamBound::Trait(tb) => {
+                    tb.path.segments.iter().any(|seg| match &seg.arguments {
+                        syn::PathArguments::AngleBracketed(args) => {
+                            args.args.iter().any(|arg| match arg {
+                                syn::GenericArgument::Type(inner) => {
+                                    self.type_contains_in_scope_type_param(inner)
                                 }
-                                syn::ReturnType::Default => false,
-                            }
-                    }
-                    syn::PathArguments::None => false,
-                }),
+                                _ => false,
+                            })
+                        }
+                        syn::PathArguments::Parenthesized(args) => {
+                            args.inputs
+                                .iter()
+                                .any(|inner| self.type_contains_in_scope_type_param(inner))
+                                || match &args.output {
+                                    syn::ReturnType::Type(_, ty) => {
+                                        self.type_contains_in_scope_type_param(ty)
+                                    }
+                                    syn::ReturnType::Default => false,
+                                }
+                        }
+                        syn::PathArguments::None => false,
+                    })
+                }
                 _ => false,
             }),
             syn::Type::BareFn(bare_fn) => {
@@ -20268,9 +23741,7 @@ impl CodeGen {
                     .iter()
                     .any(|arg| self.type_contains_in_scope_type_param(&arg.ty))
                     || match &bare_fn.output {
-                        syn::ReturnType::Type(_, ty) => {
-                            self.type_contains_in_scope_type_param(ty)
-                        }
+                        syn::ReturnType::Type(_, ty) => self.type_contains_in_scope_type_param(ty),
                         syn::ReturnType::Default => false,
                     }
             }
@@ -20284,7 +23755,9 @@ impl CodeGen {
     fn is_struct_type_param(&self, name: &str) -> bool {
         if let Some(struct_name) = &self.current_struct {
             let key = self.scoped_type_key(struct_name);
-            if let Some(params) = self.declared_type_params.get(struct_name)
+            if let Some(params) = self
+                .declared_type_params
+                .get(struct_name)
                 .or_else(|| self.declared_type_params.get(&key))
             {
                 return params.iter().any(|p| p == name);
@@ -20353,6 +23826,9 @@ impl CodeGen {
         let init = local.init.as_ref()?;
 
         let init_expr = self.peel_paren_group_expr(&init.expr);
+        if Self::is_unsuffixed_int_literal_expr(init_expr) {
+            return Some(hint.clone());
+        }
         if let Some(cap_expr) = self.infer_array_capacity_arg_for_expr(init_expr) {
             let elem_ty = extract_array_element_type_for_hint(hint)
                 .or_else(|| extract_sequence_element_type_for_hint(hint))
@@ -20360,6 +23836,14 @@ impl CodeGen {
             if let Ok(cap_expr) = syn::parse_str::<syn::Expr>(&cap_expr) {
                 return Some(parse_quote!([#elem_ty; #cap_expr]));
             }
+        }
+
+        if expr_is_option_none_constructor(init_expr) {
+            let normalized_hint =
+                normalize_placeholder_hint_for_owner(Some("Option"), hint.clone());
+            let option_inner_hint =
+                extract_option_inner_type_for_hint(&normalized_hint).unwrap_or(normalized_hint);
+            return Some(parse_quote!(Option<#option_inner_hint>));
         }
 
         let call = match init_expr {
@@ -20382,6 +23866,18 @@ impl CodeGen {
                 | "into_vec"
                 | "alloc::boxed::into_vec"
                 | "std::boxed::into_vec"
+        ) {
+            let elem_ty = extract_vec_element_type_for_hint(hint)
+                .or_else(|| extract_sequence_element_type_for_hint(hint))
+                .unwrap_or_else(|| hint.clone());
+            return Some(parse_quote!(Vec<#elem_ty>));
+        }
+        if matches!(
+            joined.as_str(),
+            "alloc::vec::from_elem"
+                | "std::vec::from_elem"
+                | "core::vec::from_elem"
+                | "vec::from_elem"
         ) {
             let elem_ty = extract_vec_element_type_for_hint(hint)
                 .or_else(|| extract_sequence_element_type_for_hint(hint))
@@ -20440,6 +23936,37 @@ impl CodeGen {
                         gt_token: syn::token::Gt::default(),
                     });
                 replaced = true;
+            } else if owner_name == "ArrayBuilder" {
+                let elem_ty = extract_array_element_type_for_hint(&normalized_hint)
+                    .or_else(|| extract_sequence_element_type_for_hint(&normalized_hint))
+                    .unwrap_or(normalized_hint.clone());
+                let cap_expr = self
+                    .current_return_type_hint()
+                    .and_then(|ret_ty| {
+                        self.expected_option_type_arg(Some(ret_ty))
+                            .and_then(|inner_ty| {
+                                let inner_ty = self.peel_reference_paren_group_type(inner_ty);
+                                if let syn::Type::Array(array) = inner_ty {
+                                    Some(array.len.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                    })
+                    .or_else(|| self.is_type_param_in_scope("N").then(|| parse_quote!(N)));
+                if let Some(cap_expr) = cap_expr {
+                    let mut args = syn::punctuated::Punctuated::new();
+                    args.push(syn::GenericArgument::Type(elem_ty));
+                    args.push(syn::GenericArgument::Const(cap_expr));
+                    owner_seg.arguments =
+                        syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                            colon2_token: None,
+                            lt_token: syn::token::Lt::default(),
+                            args,
+                            gt_token: syn::token::Gt::default(),
+                        });
+                    replaced = true;
+                }
             } else if owner_name == "ArrayVec" {
                 let method_name = path_expr
                     .path
@@ -20586,9 +24113,7 @@ impl CodeGen {
                 syn::Lit::Bool(_) => Some(syn::parse_quote!(bool)),
                 _ => None,
             },
-            syn::Expr::Call(_call) => {
-                self.infer_local_binding_type_from_initializer(&closure.body)
-            }
+            syn::Expr::Call(_call) => self.infer_local_binding_type_from_initializer(&closure.body),
             syn::Expr::MethodCall(mc) => {
                 let method = mc.method.to_string();
                 if method == "to_string" || method == "to_owned" {
@@ -20597,26 +24122,22 @@ impl CodeGen {
                     None
                 }
             }
-            syn::Expr::Block(block) => {
-                block.block.stmts.last().and_then(|stmt| match stmt {
-                    syn::Stmt::Expr(expr, _) => self.infer_type_from_closure_body(
-                        &syn::ExprClosure {
-                            attrs: vec![],
-                            lifetimes: None,
-                            constness: None,
-                            movability: None,
-                            asyncness: None,
-                            capture: None,
-                            or1_token: Default::default(),
-                            inputs: Default::default(),
-                            or2_token: Default::default(),
-                            output: syn::ReturnType::Default,
-                            body: Box::new(expr.clone()),
-                        },
-                    ),
-                    _ => None,
-                })
-            }
+            syn::Expr::Block(block) => block.block.stmts.last().and_then(|stmt| match stmt {
+                syn::Stmt::Expr(expr, _) => self.infer_type_from_closure_body(&syn::ExprClosure {
+                    attrs: vec![],
+                    lifetimes: None,
+                    constness: None,
+                    movability: None,
+                    asyncness: None,
+                    capture: None,
+                    or1_token: Default::default(),
+                    inputs: Default::default(),
+                    or2_token: Default::default(),
+                    output: syn::ReturnType::Default,
+                    body: Box::new(expr.clone()),
+                }),
+                _ => None,
+            }),
             _ => None,
         }
     }
@@ -20635,7 +24156,8 @@ impl CodeGen {
             // local inference so downstream method/expected-type inference sees
             // the pointee type (not the raw pointer wrapper type).
             syn::Expr::Reference(reference_expr) => {
-                if let syn::Expr::Unary(unary_expr) = self.peel_paren_group_expr(&reference_expr.expr)
+                if let syn::Expr::Unary(unary_expr) =
+                    self.peel_paren_group_expr(&reference_expr.expr)
                     && matches!(unary_expr.op, syn::UnOp::Deref(_))
                     && let Some(ptr_ty) = self.infer_simple_expr_type(&unary_expr.expr)
                     && self.is_type_raw_pointer_like(&ptr_ty)
@@ -20649,6 +24171,24 @@ impl CodeGen {
                         return Some(parse_quote!(&#pointee_ty));
                     }
                     return Some(ptr_ty);
+                }
+                if let syn::Expr::Index(index_expr) =
+                    self.peel_paren_group_expr(&reference_expr.expr)
+                    && matches!(
+                        self.peel_paren_group_expr(&index_expr.index),
+                        syn::Expr::Range(_)
+                    )
+                    && let Some(base_ty) = self.infer_simple_expr_type(&index_expr.expr)
+                {
+                    let base_ty = self.peel_reference_paren_group_type(&base_ty).clone();
+                    if let Some(elem_ty) = extract_sequence_element_type_for_hint(&base_ty)
+                        .or_else(|| self.extract_iter_item_type_from_type(&base_ty))
+                    {
+                        if reference_expr.mutability.is_some() {
+                            return Some(parse_quote!(&mut [#elem_ty]));
+                        }
+                        return Some(parse_quote!(&[#elem_ty]));
+                    }
                 }
                 None
             }
@@ -20687,16 +24227,44 @@ impl CodeGen {
                     }
                     if matches!(
                         joined.as_str(),
+                        "cmp::max"
+                            | "cmp::min"
+                            | "core::cmp::max"
+                            | "core::cmp::min"
+                            | "std::cmp::max"
+                            | "std::cmp::min"
+                    ) && !call.args.is_empty()
+                    {
+                        if let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                            return Some(arg_ty);
+                        }
+                    }
+                    if matches!(
+                        joined.as_str(),
+                        "replace"
+                            | "mem::replace"
+                            | "rusty::mem::replace"
+                            | "std::mem::replace"
+                            | "core::mem::replace"
+                    ) && !call.args.is_empty()
+                    {
+                        if let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                            let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
+                            if let syn::Type::Reference(reference_ty) = arg_ty {
+                                return Some((*reference_ty.elem).clone());
+                            }
+                            return Some(arg_ty.clone());
+                        }
+                    }
+                    if matches!(
+                        joined.as_str(),
                         "Some" | "Option::Some" | "core::option::Option::Some"
                     ) && call.args.len() == 1
                     {
                         if let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0]) {
                             return Some(parse_quote!(Option<#arg_ty>));
                         }
-                        // Preserve optional-like receiver normalization even when payload
-                        // inference is unresolved (e.g., associated constructors with no
-                        // direct local type evidence).
-                        return Some(parse_quote!(Option<std::tuple>));
+                        return None;
                     }
                     if let Some(ret_ty) = self.lookup_associated_call_return_type(call) {
                         return Some(ret_ty);
@@ -20747,9 +24315,8 @@ impl CodeGen {
                                     });
                                     if !self.type_contains_infer(&owner_ty)
                                         && !self.type_contains_in_scope_type_param(&owner_ty)
-                                        && !self.type_contains_unbound_single_letter_generic(
-                                            &owner_ty,
-                                        )
+                                        && !self
+                                            .type_contains_unbound_single_letter_generic(&owner_ty)
                                     {
                                         return Some(owner_ty);
                                     }
@@ -20840,18 +24407,17 @@ impl CodeGen {
                                         .infer_hint_type_from_expr(arg)
                                         .or_else(|| self.infer_simple_expr_type(arg))
                                 {
-                                    let boxed_inner = self
-                                        .peel_reference_paren_group_type(&arg_ty)
-                                        .clone();
+                                    let boxed_inner =
+                                        self.peel_reference_paren_group_type(&arg_ty).clone();
                                     if let syn::Type::Path(tp) = &boxed_inner
                                         && let Some(last) = tp.path.segments.last()
                                         && last.ident == "Box"
                                         && let syn::PathArguments::AngleBracketed(args) =
                                             &last.arguments
-                                        && let Some(syn::GenericArgument::Type(inner)) =
-                                            args.args.iter().find(|a| {
-                                                matches!(a, syn::GenericArgument::Type(_))
-                                            })
+                                        && let Some(syn::GenericArgument::Type(inner)) = args
+                                            .args
+                                            .iter()
+                                            .find(|a| matches!(a, syn::GenericArgument::Type(_)))
                                     {
                                         return Some(parse_quote!(OnceBox<#inner>));
                                     }
@@ -20925,10 +24491,10 @@ impl CodeGen {
                                         && last.ident == "Lazy"
                                         && let syn::PathArguments::AngleBracketed(args) =
                                             &last.arguments
-                                        && let Some(syn::GenericArgument::Type(inner_ty)) =
-                                            args.args.iter().find(|a| {
-                                                matches!(a, syn::GenericArgument::Type(_))
-                                            })
+                                        && let Some(syn::GenericArgument::Type(inner_ty)) = args
+                                            .args
+                                            .iter()
+                                            .find(|a| matches!(a, syn::GenericArgument::Type(_)))
                                     {
                                         return Some(parse_quote!(Lazy<#inner_ty>));
                                     }
@@ -20995,6 +24561,89 @@ impl CodeGen {
                                     ) {
                                         return Some(inferred);
                                     }
+                                }
+                            }
+                            if owner_name == "ArrayBuilder"
+                                && matches!(method_name.as_str(), "new" | "new_")
+                            {
+                                let mut elem_ty: Option<syn::Type> = None;
+                                let mut cap_expr: Option<syn::Expr> = None;
+                                if let syn::PathArguments::AngleBracketed(owner_args) =
+                                    &owner_seg.arguments
+                                {
+                                    for arg in &owner_args.args {
+                                        match arg {
+                                            syn::GenericArgument::Type(t)
+                                                if !matches!(t, syn::Type::Infer(_)) =>
+                                            {
+                                                elem_ty = Some(t.clone());
+                                            }
+                                            syn::GenericArgument::Const(c)
+                                                if !matches!(c, syn::Expr::Infer(_)) =>
+                                            {
+                                                cap_expr = Some(c.clone());
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                if (elem_ty.is_none() || cap_expr.is_none())
+                                    && let Some(ret_ty) = self.current_return_type_hint()
+                                    && let Some(inner_ty) =
+                                        self.expected_option_type_arg(Some(ret_ty))
+                                {
+                                    let inner_ty = self.peel_reference_paren_group_type(inner_ty);
+                                    if let syn::Type::Array(arr) = inner_ty {
+                                        if elem_ty.is_none() {
+                                            elem_ty = Some((*arr.elem).clone());
+                                        }
+                                        if cap_expr.is_none() {
+                                            cap_expr = Some(arr.len.clone());
+                                        }
+                                    }
+                                }
+                                if cap_expr.is_none() {
+                                    let fallback_const = self
+                                        .ordered_type_params_in_scope()
+                                        .into_iter()
+                                        .find(|name| {
+                                            self.declared_type_param_kinds.values().any(|kinds| {
+                                                kinds.iter().enumerate().any(|(idx, kind)| {
+                                                    matches!(kind, GenericParamKind::Const)
+                                                        && self.declared_type_params.values().any(
+                                                            |params| {
+                                                                params
+                                                                    .get(idx)
+                                                                    .is_some_and(|p| p == name)
+                                                            },
+                                                        )
+                                                })
+                                            })
+                                        })
+                                        .or_else(|| {
+                                            self.is_type_param_in_scope("N")
+                                                .then_some("N".to_string())
+                                        })
+                                        .or_else(|| {
+                                            self.is_type_param_in_scope("K")
+                                                .then_some("K".to_string())
+                                        })
+                                        .or_else(|| {
+                                            self.is_type_param_in_scope("CAP")
+                                                .then_some("CAP".to_string())
+                                        });
+                                    if let Some(param) = fallback_const
+                                        && let Ok(parsed) = syn::parse_str::<syn::Expr>(&param)
+                                    {
+                                        cap_expr = Some(parsed);
+                                    }
+                                }
+                                if let (Some(elem_ty), Some(cap_expr)) = (elem_ty, cap_expr)
+                                    && let Ok(inferred) = syn::parse2::<syn::Type>(
+                                        quote!(ArrayBuilder<#elem_ty, #cap_expr>),
+                                    )
+                                {
+                                    return Some(inferred);
                                 }
                             }
                             if owner_name == "ArrayString"
@@ -21307,6 +24956,35 @@ impl CodeGen {
             return Some(parse_quote!(bool));
         }
 
+        if matches!(
+            method.as_str(),
+            "checked_add"
+                | "checked_sub"
+                | "checked_mul"
+                | "checked_div"
+                | "checked_rem"
+                | "checked_shl"
+                | "checked_shr"
+                | "checked_pow"
+        ) && mc.args.len() == 1
+        {
+            if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
+                return Some(parse_quote!(Option<#receiver_ty>));
+            }
+        }
+
+        if matches!(
+            method.as_str(),
+            "saturating_add" | "saturating_sub" | "saturating_mul" | "saturating_pow"
+        ) && mc.args.len() == 1
+        {
+            if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
+                let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
+                return Some(receiver_ty);
+            }
+        }
+
         if matches!(method.as_str(), "add" | "offset" | "sub") && mc.args.len() == 1 {
             if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
                 let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty).clone();
@@ -21345,9 +25023,7 @@ impl CodeGen {
 
         if matches!(method.as_str(), "next" | "next_back") && mc.args.is_empty() {
             if self.is_iterator_like_receiver_expr(&mc.receiver) {
-                let item_ty = self
-                    .infer_iter_item_type_from_expr(&mc.receiver)
-                    .unwrap_or_else(|| parse_quote!(std::tuple));
+                let item_ty = self.infer_iter_item_type_from_expr(&mc.receiver)?;
                 return Some(parse_quote!(Option<#item_ty>));
             }
             let receiver = self.peel_paren_group_expr(&mc.receiver);
@@ -21361,7 +25037,7 @@ impl CodeGen {
                                 && self
                                     .is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
                             {
-                                return Some(parse_quote!(std::optional<std::tuple>));
+                                return None;
                             }
                         }
                     }
@@ -21404,10 +25080,9 @@ impl CodeGen {
             && let Some(ret_ty) =
                 self.lookup_owner_method_return_type_from_receiver_type(&receiver_ty, &method)
         {
-            return Some(self.substitute_single_unbound_return_type_param_from_call_args(
-                ret_ty,
-                &mc.args,
-            ));
+            return Some(
+                self.substitute_single_unbound_return_type_param_from_call_args(ret_ty, &mc.args),
+            );
         }
 
         None
@@ -21453,10 +25128,7 @@ impl CodeGen {
                 if tp.qself.is_none() && tp.path.segments.len() == 1 {
                     let ident = tp.path.segments[0].ident.to_string();
                     if ident.len() == 1
-                        && ident
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.is_ascii_uppercase())
+                        && ident.chars().next().is_some_and(|c| c.is_ascii_uppercase())
                     {
                         out.insert(ident);
                     }
@@ -21484,6 +25156,66 @@ impl CodeGen {
             }
             syn::Type::Paren(p) => self.collect_single_char_type_param_names_in_type(&p.elem, out),
             syn::Type::Group(g) => self.collect_single_char_type_param_names_in_type(&g.elem, out),
+            _ => {}
+        }
+    }
+
+    fn collect_assoc_binding_type_param_candidates_in_type(
+        &self,
+        ty: &syn::Type,
+        out: &mut HashSet<String>,
+    ) {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none() && tp.path.segments.len() == 1 {
+                    let seg = &tp.path.segments[0];
+                    if matches!(seg.arguments, syn::PathArguments::None) {
+                        let ident = seg.ident.to_string();
+                        let looks_like_type_param =
+                            ident.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                                && ident != "Self"
+                                && !self.is_type_param_in_scope(&ident)
+                                && !self.is_local_type_name_in_scope(&ident)
+                                && !self.declared_item_names.contains(&ident)
+                                && types::map_primitive_type(&ident).is_none();
+                        if looks_like_type_param {
+                            out.insert(ident);
+                        }
+                    }
+                }
+                for seg in &tp.path.segments {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        for arg in &args.args {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                self.collect_assoc_binding_type_param_candidates_in_type(inner, out);
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Type::Reference(r) => {
+                self.collect_assoc_binding_type_param_candidates_in_type(&r.elem, out)
+            }
+            syn::Type::Ptr(p) => {
+                self.collect_assoc_binding_type_param_candidates_in_type(&p.elem, out)
+            }
+            syn::Type::Slice(s) => {
+                self.collect_assoc_binding_type_param_candidates_in_type(&s.elem, out)
+            }
+            syn::Type::Array(a) => {
+                self.collect_assoc_binding_type_param_candidates_in_type(&a.elem, out)
+            }
+            syn::Type::Tuple(t) => {
+                for elem in &t.elems {
+                    self.collect_assoc_binding_type_param_candidates_in_type(elem, out);
+                }
+            }
+            syn::Type::Paren(p) => {
+                self.collect_assoc_binding_type_param_candidates_in_type(&p.elem, out)
+            }
+            syn::Type::Group(g) => {
+                self.collect_assoc_binding_type_param_candidates_in_type(&g.elem, out)
+            }
             _ => {}
         }
     }
@@ -21538,7 +25270,8 @@ impl CodeGen {
         let mut dedup = HashSet::new();
         owner_candidates.retain(|candidate| dedup.insert(candidate.clone()));
         for owner in owner_candidates {
-            if let Some(ret_ty) = self.lookup_method_return_type_for_owner_key(&owner, method_name) {
+            if let Some(ret_ty) = self.lookup_method_return_type_for_owner_key(&owner, method_name)
+            {
                 return Some(ret_ty);
             }
         }
@@ -21668,8 +25401,7 @@ impl CodeGen {
         let mut arg_ty = owner_candidates.into_iter().find_map(|owner| {
             self.lookup_method_arg_type_for_owner_key(&owner, method_name, arg_idx)
         })?;
-        if let Some((_, substitutions)) =
-            self.receiver_owner_name_and_type_substitutions(receiver)
+        if let Some((_, substitutions)) = self.receiver_owner_name_and_type_substitutions(receiver)
             && !substitutions.is_empty()
         {
             arg_ty = self.substitute_type_params_in_type(&arg_ty, &substitutions);
@@ -21897,6 +25629,12 @@ impl CodeGen {
             return false;
         };
 
+        if expr_is_option_none_constructor(expr)
+            && inferred_binding_ty.is_some_and(|ty| self.is_option_like_syn_type(ty))
+        {
+            return true;
+        }
+
         if self.extract_constructor_call_expr(expr).is_some() {
             return true;
         }
@@ -21908,6 +25646,30 @@ impl CodeGen {
                 .is_some(),
             _ => false,
         }
+    }
+
+    fn should_emit_inferred_numeric_seed_type_for_local(
+        &self,
+        local: &syn::Local,
+        binding_name: &str,
+        inferred_binding_ty: Option<&syn::Type>,
+    ) -> bool {
+        if get_local_type(local).is_some() {
+            return false;
+        }
+        if !self.reassigned_vars.contains(binding_name) {
+            return false;
+        }
+        if !self.local_binding_is_mutable(local) {
+            return false;
+        }
+        let Some(init) = &local.init else {
+            return false;
+        };
+        if !Self::is_unsuffixed_int_literal_expr(self.peel_paren_group_expr(&init.expr)) {
+            return false;
+        }
+        inferred_binding_ty.is_some_and(|ty| self.type_is_concrete_hint_candidate(ty))
     }
 
     fn infer_constructor_expected_type_from_if(&self, if_expr: &syn::ExprIf) -> Option<syn::Type> {
@@ -22123,21 +25885,51 @@ impl CodeGen {
                         }
                     })
             }
-            syn::Expr::Reference(reference) => {
-                let inner_ty = self
-                    .infer_simple_expr_type(&reference.expr)
-                    .or_else(|| {
-                        let deref_inner = self.peel_paren_group_expr(&reference.expr);
-                        if let syn::Expr::Unary(unary) = deref_inner
-                            && matches!(unary.op, syn::UnOp::Deref(_))
-                            && let Some(ptr_ty) = self.infer_simple_expr_type(&unary.expr)
-                            && let Some((pointee_ty, _)) =
-                                self.extract_pointer_pointee_info_from_type(&ptr_ty)
-                        {
-                            return Some(pointee_ty);
+            syn::Expr::Binary(binary) => match binary.op {
+                syn::BinOp::Eq(_)
+                | syn::BinOp::Ne(_)
+                | syn::BinOp::Lt(_)
+                | syn::BinOp::Le(_)
+                | syn::BinOp::Gt(_)
+                | syn::BinOp::Ge(_)
+                | syn::BinOp::And(_)
+                | syn::BinOp::Or(_) => syn::parse_str::<syn::Type>("bool").ok(),
+                _ => {
+                    let lhs = self.infer_simple_expr_type(&binary.left);
+                    let rhs = self.infer_simple_expr_type(&binary.right);
+                    match (lhs, rhs) {
+                        (Some(lhs_ty), Some(rhs_ty)) => {
+                            let lhs_peel = self.peel_reference_paren_group_type(&lhs_ty).clone();
+                            let rhs_peel = self.peel_reference_paren_group_type(&rhs_ty).clone();
+                            if Self::types_equivalent_by_tokens(&lhs_peel, &rhs_peel) {
+                                Some(lhs_peel)
+                            } else {
+                                Some(lhs_peel)
+                            }
                         }
-                        None
-                    })?;
+                        (Some(lhs_ty), None) => {
+                            Some(self.peel_reference_paren_group_type(&lhs_ty).clone())
+                        }
+                        (None, Some(rhs_ty)) => {
+                            Some(self.peel_reference_paren_group_type(&rhs_ty).clone())
+                        }
+                        (None, None) => None,
+                    }
+                }
+            },
+            syn::Expr::Reference(reference) => {
+                let inner_ty = self.infer_simple_expr_type(&reference.expr).or_else(|| {
+                    let deref_inner = self.peel_paren_group_expr(&reference.expr);
+                    if let syn::Expr::Unary(unary) = deref_inner
+                        && matches!(unary.op, syn::UnOp::Deref(_))
+                        && let Some(ptr_ty) = self.infer_simple_expr_type(&unary.expr)
+                        && let Some((pointee_ty, _)) =
+                            self.extract_pointer_pointee_info_from_type(&ptr_ty)
+                    {
+                        return Some(pointee_ty);
+                    }
+                    None
+                })?;
                 if reference.mutability.is_some() {
                     Some(parse_quote!(&mut #inner_ty))
                 } else {
@@ -22151,6 +25943,20 @@ impl CodeGen {
                     elems.push(self.infer_simple_expr_type(elem)?);
                 }
                 Some(parse_quote!((#(#elems),*)))
+            }
+            syn::Expr::Array(array_expr) => {
+                let first = array_expr.elems.first()?;
+                let elem_ty = self.infer_simple_expr_type(first)?;
+                let len = syn::LitInt::new(
+                    &array_expr.elems.len().to_string(),
+                    proc_macro2::Span::call_site(),
+                );
+                Some(parse_quote!([#elem_ty; #len]))
+            }
+            syn::Expr::Repeat(repeat_expr) => {
+                let elem_ty = self.infer_simple_expr_type(&repeat_expr.expr)?;
+                let len_expr = (*repeat_expr.len).clone();
+                Some(parse_quote!([#elem_ty; #len_expr]))
             }
             syn::Expr::Call(call) => {
                 if let syn::Expr::Path(path) = call.func.as_ref() {
@@ -22177,12 +25983,37 @@ impl CodeGen {
                         .or_else(|| self.infer_simple_expr_type(inner))
                 }),
             syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
-            syn::Expr::Field(field) => {
-                let member = match &field.member {
-                    syn::Member::Named(ident) => ident.to_string(),
-                    syn::Member::Unnamed(_) => return None,
-                };
-                self.lookup_field_type_for_expr_base(&field.base, &member)
+            syn::Expr::Field(field) => match &field.member {
+                syn::Member::Named(ident) => {
+                    self.lookup_field_type_for_expr_base(&field.base, &ident.to_string())
+                }
+                syn::Member::Unnamed(index) => {
+                    let base_ty = self.infer_simple_expr_type(&field.base)?;
+                    self.resolve_tuple_field_type_from_type(&base_ty, index.index as usize)
+                }
+            },
+            syn::Expr::Index(index_expr) => {
+                let base_ty = self.infer_simple_expr_type(&index_expr.expr)?;
+                let base_ty = self.peel_reference_paren_group_type(&base_ty);
+                match base_ty {
+                    syn::Type::Array(array_ty) => Some((*array_ty.elem).clone()),
+                    syn::Type::Slice(slice_ty) => Some((*slice_ty.elem).clone()),
+                    syn::Type::Path(tp) => {
+                        let last = tp.path.segments.last()?;
+                        let owner = last.ident.to_string();
+                        if !matches!(owner.as_str(), "Vec" | "VecDeque" | "ArrayVec" | "SmallVec") {
+                            return None;
+                        }
+                        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                            return None;
+                        };
+                        args.args.iter().find_map(|arg| match arg {
+                            syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                }
             }
             _ => None,
         }
@@ -22191,7 +26022,9 @@ impl CodeGen {
     fn expr_base_is_tuple_like_for_field_access(&self, base: &syn::Expr) -> bool {
         if let Some(inferred_ty) = self.infer_simple_expr_type(base) {
             let inferred_ty = self.peel_reference_paren_group_type(&inferred_ty);
-            if matches!(inferred_ty, syn::Type::Tuple(_)) {
+            if matches!(inferred_ty, syn::Type::Tuple(_))
+                || self.type_resolves_to_tuple_alias(inferred_ty)
+            {
                 return true;
             }
         }
@@ -22205,10 +26038,126 @@ impl CodeGen {
         if !receiver_is_self {
             return false;
         }
-        let Some(ret_ty) = self.lookup_current_struct_method_return_type(&mc.method.to_string()) else {
+        let Some(ret_ty) = self.lookup_current_struct_method_return_type(&mc.method.to_string())
+        else {
             return false;
         };
-        matches!(self.peel_reference_paren_group_type(&ret_ty), syn::Type::Tuple(_))
+        let ret_ty = self.peel_reference_paren_group_type(&ret_ty);
+        matches!(ret_ty, syn::Type::Tuple(_)) || self.type_resolves_to_tuple_alias(ret_ty)
+    }
+
+    fn type_resolves_to_tuple_alias(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        if tp.path.segments.is_empty() {
+            return false;
+        }
+        let joined = tp
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if self.tuple_type_aliases.contains_key(&joined) {
+            return true;
+        }
+        tp.path
+            .segments
+            .last()
+            .is_some_and(|seg| self.tuple_type_aliases.contains_key(&seg.ident.to_string()))
+    }
+
+    fn resolve_tuple_field_type_from_type(
+        &self,
+        ty: &syn::Type,
+        index: usize,
+    ) -> Option<syn::Type> {
+        self.resolve_tuple_type_from_type(ty)
+            .and_then(|tuple_ty| tuple_ty.elems.iter().nth(index).cloned())
+    }
+
+    fn resolve_tuple_type_from_type(&self, ty: &syn::Type) -> Option<syn::TypeTuple> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::Tuple(tuple_ty) => Some(tuple_ty.clone()),
+            syn::Type::Path(tp) => {
+                let joined = tp
+                    .path
+                    .segments
+                    .iter()
+                    .map(|seg| seg.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                let elems = if let Some(elems) = self.tuple_type_alias_elem_types.get(&joined) {
+                    Some(elems.clone())
+                } else {
+                    let last = tp.path.segments.last()?.ident.to_string();
+                    self.tuple_type_alias_elem_types.get(&last).cloned()
+                }?;
+                let mut punctuated = syn::punctuated::Punctuated::new();
+                for elem in elems {
+                    punctuated.push(elem);
+                }
+                Some(syn::TypeTuple {
+                    paren_token: syn::token::Paren::default(),
+                    elems: punctuated,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn type_is_range_with_private_end_field(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return false;
+        };
+        let last_name = last.ident.to_string();
+        if matches!(
+            last_name.as_str(),
+            "range" | "Range" | "range_inclusive" | "RangeInclusive"
+        ) {
+            return true;
+        }
+        if last_name == "Self"
+            && let Some(current_struct) = self.current_struct.as_ref()
+        {
+            let tail = current_struct
+                .rsplit("::")
+                .next()
+                .unwrap_or(current_struct.as_str());
+            return matches!(
+                tail,
+                "range" | "Range" | "range_inclusive" | "RangeInclusive"
+            );
+        }
+        false
+    }
+
+    fn expr_base_is_range_with_private_end_field(&self, base: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(base)
+            .is_some_and(|ty| self.type_is_range_with_private_end_field(&ty))
+    }
+
+    fn receiver_is_range_inclusive_like(&self, receiver: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(receiver).is_some_and(|ty| {
+            let ty = self.peel_reference_paren_group_type(&ty);
+            let syn::Type::Path(tp) = ty else {
+                return false;
+            };
+            tp.path.segments.last().is_some_and(|seg| {
+                matches!(
+                    seg.ident.to_string().as_str(),
+                    "range_inclusive" | "RangeInclusive"
+                )
+            })
+        })
     }
 
     fn lookup_current_struct_method_return_type(&self, method_name: &str) -> Option<syn::Type> {
@@ -22257,8 +26206,10 @@ impl CodeGen {
                     };
                 }
                 if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if matches!(seg_name.as_str(), "SafeFn" | "UnsafeFn" | "Function" | "function")
-                    {
+                    if matches!(
+                        seg_name.as_str(),
+                        "SafeFn" | "UnsafeFn" | "Function" | "function"
+                    ) {
                         let sig_ty = args.args.iter().find_map(|arg| match arg {
                             syn::GenericArgument::Type(t) => Some(t),
                             _ => None,
@@ -23126,6 +27077,29 @@ impl CodeGen {
                 }
             }
             syn::Pat::TupleStruct(tuple_struct_pat) => {
+                if tuple_struct_pat.elems.len() == 1 {
+                    let ctor_name = tuple_struct_pat
+                        .path
+                        .segments
+                        .last()
+                        .map(|seg| seg.ident.to_string())
+                        .unwrap_or_default();
+                    let canonical_ctor_name = self.canonical_variant_name(&ctor_name);
+                    if let Some((owner, type_args)) = self.option_or_result_type_args(&peeled_ty) {
+                        let payload_ty = match (owner.as_str(), canonical_ctor_name) {
+                            ("Option", "Some") => type_args.first().cloned(),
+                            ("Result", "Ok") => type_args.first().cloned(),
+                            ("Result", "Err") => type_args.get(1).cloned(),
+                            _ => None,
+                        };
+                        if let Some(payload_ty) = payload_ty
+                            && let Some(single_pat) = tuple_struct_pat.elems.first()
+                        {
+                            self.bind_pattern_types_into_env(single_pat, &payload_ty, env);
+                            return;
+                        }
+                    }
+                }
                 let tuple_ty = self.peel_reference_paren_group_type(&peeled_ty);
                 let syn::Type::Tuple(tuple_type) = tuple_ty else {
                     return;
@@ -23565,6 +27539,24 @@ impl CodeGen {
                     .get(&scoped)
                     .and_then(|fields| fields.get(field_name).cloned())
             })
+            .or_else(|| {
+                let mut tail_matches = self
+                    .struct_field_types
+                    .iter()
+                    .filter_map(|(key, fields)| {
+                        key.rsplit("::")
+                            .next()
+                            .is_some_and(|tail| tail == struct_name)
+                            .then_some(fields)
+                    })
+                    .collect::<Vec<_>>();
+                tail_matches.dedup_by(|a, b| std::ptr::eq(*a, *b));
+                if tail_matches.len() == 1 {
+                    tail_matches[0].get(field_name).cloned()
+                } else {
+                    None
+                }
+            })
     }
 
     fn lookup_struct_field_cpp_name(&self, struct_name: &str, field_name: &str) -> Option<String> {
@@ -23632,13 +27624,47 @@ impl CodeGen {
     ) {
         let mut scope = HashMap::new();
         for input in inputs {
-            if let syn::FnArg::Typed(pat_type) = input {
-                if let syn::Pat::Ident(pi) = pat_type.pat.as_ref() {
-                    scope.insert(pi.ident.to_string(), (*pat_type.ty).clone());
+            match input {
+                syn::FnArg::Typed(pat_type) => {
+                    if let syn::Pat::Ident(pi) = pat_type.pat.as_ref() {
+                        scope.insert(pi.ident.to_string(), (*pat_type.ty).clone());
+                    }
+                }
+                syn::FnArg::Receiver(recv) => {
+                    let self_ty: syn::Type = if recv.reference.is_some() {
+                        if recv.mutability.is_some() {
+                            parse_quote!(&mut Self)
+                        } else {
+                            parse_quote!(&Self)
+                        }
+                    } else {
+                        parse_quote!(Self)
+                    };
+                    scope.insert("self".to_string(), self_ty);
                 }
             }
         }
         self.param_bindings.push(scope);
+    }
+
+    fn override_current_param_self_binding_with_type(
+        &mut self,
+        self_ty: &syn::Type,
+        receiver: &syn::Receiver,
+    ) {
+        let Some(scope) = self.param_bindings.last_mut() else {
+            return;
+        };
+        let binding_ty: syn::Type = if receiver.reference.is_some() {
+            if receiver.mutability.is_some() {
+                parse_quote!(&mut #self_ty)
+            } else {
+                parse_quote!(&#self_ty)
+            }
+        } else {
+            self_ty.clone()
+        };
+        scope.insert("self".to_string(), binding_ty);
     }
 
     fn pop_param_bindings(&mut self) {
@@ -23948,7 +27974,13 @@ impl CodeGen {
             let inner_method = inner.method.to_string();
             return matches!(
                 inner_method.as_str(),
-                "get" | "get_mut" | "as_ref" | "as_mut" | "first" | "first_mut" | "last"
+                "get"
+                    | "get_mut"
+                    | "as_ref"
+                    | "as_mut"
+                    | "first"
+                    | "first_mut"
+                    | "last"
                     | "last_mut"
             );
         }
@@ -24005,15 +28037,17 @@ impl CodeGen {
             .is_some_and(|fields| fields.contains(&field_name))
             || self
                 .struct_reference_fields
-            .get(&self.scoped_type_key(struct_name))
-            .is_some_and(|fields| fields.contains(&field_name))
+                .get(&self.scoped_type_key(struct_name))
+                .is_some_and(|fields| fields.contains(&field_name))
     }
 
     fn expr_base_needs_explicit_deref_for_field_access(&self, expr: &syn::Expr) -> bool {
         let expr = self.peel_paren_group_expr(expr);
         if let syn::Expr::MethodCall(mc) = expr {
-            if matches!(mc.method.to_string().as_str(), "unwrap" | "unwrap_unchecked")
-                && let syn::Expr::MethodCall(inner) = self.peel_paren_group_expr(&mc.receiver)
+            if matches!(
+                mc.method.to_string().as_str(),
+                "unwrap" | "unwrap_unchecked"
+            ) && let syn::Expr::MethodCall(inner) = self.peel_paren_group_expr(&mc.receiver)
                 && matches!(
                     inner.method.to_string().as_str(),
                     "lock" | "try_lock" | "read" | "write"
@@ -24030,7 +28064,10 @@ impl CodeGen {
             return false;
         };
         tp.path.segments.last().is_some_and(|seg| {
-            matches!(seg.ident.to_string().as_str(), "MutexGuard" | "Ref" | "RefMut")
+            matches!(
+                seg.ident.to_string().as_str(),
+                "MutexGuard" | "Ref" | "RefMut"
+            )
         })
     }
 
@@ -24052,12 +28089,11 @@ impl CodeGen {
                 }
             }
             syn::Expr::If(if_expr) => {
-                let then_diverges = self
-                    .is_expr_diverging(&syn::Expr::Block(syn::ExprBlock {
-                        attrs: Vec::new(),
-                        label: None,
-                        block: if_expr.then_branch.clone(),
-                    }));
+                let then_diverges = self.is_expr_diverging(&syn::Expr::Block(syn::ExprBlock {
+                    attrs: Vec::new(),
+                    label: None,
+                    block: if_expr.then_branch.clone(),
+                }));
                 let else_diverges = if let Some((_, else_expr)) = &if_expr.else_branch {
                     self.is_expr_diverging(else_expr)
                 } else {
@@ -24176,12 +28212,7 @@ impl CodeGen {
                 }
                 if matches!(
                     method.as_str(),
-                    "add"
-                        | "offset"
-                        | "sub"
-                        | "wrapping_add"
-                        | "wrapping_sub"
-                        | "wrapping_offset"
+                    "add" | "offset" | "sub" | "wrapping_add" | "wrapping_sub" | "wrapping_offset"
                 ) {
                     return self.is_expr_raw_pointer_like(&mc.receiver);
                 }
@@ -24373,6 +28404,20 @@ impl CodeGen {
         }
     }
 
+    fn should_lower_integer_rotate_method_call(&self, receiver: &syn::Expr) -> bool {
+        let peeled = self.peel_paren_group_expr(receiver);
+        if let Some(ty) = self.infer_simple_expr_type(peeled) {
+            return self.is_known_integer_like_type(&ty);
+        }
+        matches!(
+            peeled,
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(_),
+                ..
+            })
+        )
+    }
+
     fn is_known_scalar_like_type(&self, ty: &syn::Type) -> bool {
         if self.is_known_integer_like_type(ty) {
             return true;
@@ -24397,6 +28442,15 @@ impl CodeGen {
         )
     }
 
+    fn reference_type_lowers_to_value_cpp(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_paren_group_type(ty);
+        if !matches!(ty, syn::Type::Reference(_)) {
+            return false;
+        }
+        let mapped = self.map_type(ty);
+        !mapped.contains('&')
+    }
+
     fn is_known_alloc_layout_type(&self, ty: &syn::Type) -> bool {
         let canonical = self.canonical_into_target_cpp_type(&self.map_type(ty));
         if canonical == "rusty::alloc::Layout" {
@@ -24406,13 +28460,16 @@ impl CodeGen {
         let syn::Type::Path(tp) = ty else {
             return false;
         };
-        let segs: Vec<String> = tp.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let segs: Vec<String> = tp
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
         match segs.as_slice() {
             [single] => single == "Layout",
             [root, module, leaf, ..] => {
-                matches!(root.as_str(), "std" | "core")
-                    && module == "alloc"
-                    && leaf == "Layout"
+                matches!(root.as_str(), "std" | "core") && module == "alloc" && leaf == "Layout"
             }
             [root, leaf] => root == "alloc" && leaf == "Layout",
             _ => false,
@@ -24912,8 +28969,17 @@ impl CodeGen {
     fn lazy_wrapper_method_is_inherent(method_name: &str) -> bool {
         matches!(
             method_name,
-            "new" | "new_" | "force" | "force_mut" | "get" | "get_mut" | "into_value"
-                | "default" | "default_" | "clone" | "clone_from"
+            "new"
+                | "new_"
+                | "force"
+                | "force_mut"
+                | "get"
+                | "get_mut"
+                | "into_value"
+                | "default"
+                | "default_"
+                | "clone"
+                | "clone_from"
         )
     }
 
@@ -25036,14 +29102,18 @@ impl CodeGen {
     fn receiver_owner_cpp_type_for_method_call(&self, receiver_expr: &syn::Expr) -> Option<String> {
         let owner_cpp = if self.expr_is_deref_of_self_path(receiver_expr) {
             let owner = self.current_struct.clone()?;
-            if let Some(params) = self.declared_type_params.iter().find_map(|(type_key, params)| {
-                (type_key
-                    .rsplit("::")
-                    .next()
-                    .is_some_and(|tail| tail == owner)
-                    && !params.is_empty())
-                .then_some(params.clone())
-            }) {
+            if let Some(params) = self
+                .declared_type_params
+                .iter()
+                .find_map(|(type_key, params)| {
+                    (type_key
+                        .rsplit("::")
+                        .next()
+                        .is_some_and(|tail| tail == owner)
+                        && !params.is_empty())
+                    .then_some(params.clone())
+                })
+            {
                 format!("{}<{}>", owner, params.join(", "))
             } else {
                 owner
@@ -25063,7 +29133,11 @@ impl CodeGen {
         Some(owner_cpp)
     }
 
-    fn typed_self_param_matches_receiver(&self, self_param_ty: &syn::Type, receiver_expr: &syn::Expr) -> bool {
+    fn typed_self_param_matches_receiver(
+        &self,
+        self_param_ty: &syn::Type,
+        receiver_expr: &syn::Expr,
+    ) -> bool {
         let self_param_ty = self.peel_reference_paren_group_type(self_param_ty);
         if let syn::Type::Path(tp) = self_param_ty
             && tp.qself.is_none()
@@ -25074,7 +29148,8 @@ impl CodeGen {
         }
         if self.expr_is_deref_of_self_path(receiver_expr) {
             if let (Some(current), syn::Type::Path(tp)) = (&self.current_struct, self_param_ty)
-                && tp.path
+                && tp
+                    .path
                     .segments
                     .last()
                     .is_some_and(|seg| seg.ident.to_string() == *current)
@@ -25155,7 +29230,12 @@ impl CodeGen {
             return None;
         }
         let first_expected = self
-            .lookup_method_arg_expected_type_from_receiver_owner(receiver_expr, method_name, 0, None)
+            .lookup_method_arg_expected_type_from_receiver_owner(
+                receiver_expr,
+                method_name,
+                0,
+                None,
+            )
             .or_else(|| {
                 self.lookup_owner_method_arg_expected_type(&owner_name, method_name, 0, None)
             });
@@ -25266,6 +29346,37 @@ impl CodeGen {
             .is_some_and(|seg| matches!(seg.ident.to_string().as_str(), "char" | "char32_t"))
     }
 
+    fn receiver_is_hashmap_like_expr(&self, receiver: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(receiver).is_some_and(|ty| {
+            let ty = self.peel_reference_paren_group_type(&ty);
+            let syn::Type::Path(tp) = ty else {
+                return false;
+            };
+            tp.path.segments.last().is_some_and(|seg| {
+                matches!(
+                    seg.ident.to_string().as_str(),
+                    "HashMap" | "BTreeMap" | "HashbrownMap"
+                )
+            })
+        })
+    }
+
+    fn expr_is_default_constructor_callable(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(expr) else {
+            return false;
+        };
+        let Some(last) = path_expr.path.segments.last() else {
+            return false;
+        };
+        if !matches!(
+            last.ident.to_string().as_str(),
+            "new" | "new_" | "default" | "default_"
+        ) {
+            return false;
+        }
+        matches!(last.arguments, syn::PathArguments::None)
+    }
+
     fn emit_method_call_expr_to_string(
         &self,
         mc: &syn::ExprMethodCall,
@@ -25282,6 +29393,19 @@ impl CodeGen {
         }
         if let Some(then_with_call) = self.try_emit_ordering_then_with_call(mc) {
             return then_with_call;
+        }
+        if mc.method == "or_insert_with" && mc.args.len() == 1 {
+            if let syn::Expr::MethodCall(entry_mc) = self.peel_paren_group_expr(&mc.receiver) {
+                if entry_mc.method == "entry"
+                    && entry_mc.args.len() == 1
+                    && self.expr_is_default_constructor_callable(&mc.args[0])
+                {
+                    // `map.entry(k).or_insert_with(Vec::new_)` is equivalent
+                    // to `map.entry(k)` on rusty::HashMap, which inserts a
+                    // default-constructed value for missing keys.
+                    return self.emit_method_call_expr_to_string(entry_mc, None);
+                }
+            }
         }
         if mc.method == "assume_init" && mc.args.is_empty() {
             if let Some(expected) = expected_ty {
@@ -25313,6 +29437,25 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::len({})", receiver);
+        }
+        if matches!(mc.method.to_string().as_str(), "min" | "max") && mc.args.len() == 1 {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let helper = if mc.method == "min" {
+                "rusty::min"
+            } else {
+                "rusty::max"
+            };
+            return format!(
+                "{}({}, {})",
+                helper,
+                receiver,
+                self.emit_expr_maybe_move(&mc.args[0])
+            );
         }
         if matches!(mc.method.to_string().as_str(), "size" | "align")
             && mc.args.is_empty()
@@ -25346,6 +29489,31 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::as_bytes({})", receiver);
         }
+        // Rust `RangeInclusive::start/end` methods return references to the
+        // bounds. Map to the runtime field storage to avoid colliding with the
+        // C++ iterator `end()` member surface.
+        if matches!(mc.method.to_string().as_str(), "start" | "end")
+            && mc.args.is_empty()
+            && self.receiver_is_range_inclusive_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let member_op = if self.method_receiver_uses_pointer_member_access(&mc.receiver) {
+                "->"
+            } else {
+                "."
+            };
+            let field = if mc.method == "start" {
+                "start"
+            } else {
+                "end_"
+            };
+            return format!("&({}{}{})", receiver, member_op, field);
+        }
         // Rust `value.to_string()` (Display trait) → `rusty::to_string(value)`.
         // C++ user-defined types don't have a `.to_string()` member; dispatch
         // through a SFINAE helper that tries `.to_string()`, then `std::to_string()`.
@@ -25373,12 +29541,12 @@ impl CodeGen {
             };
             let lhs_idx = self.emit_expr_to_string(&mc.args[0]);
             let rhs_idx = self.emit_expr_to_string(&mc.args[1]);
-            let swap_view_expr = if self.should_lower_swap_method_call_via_deref_mut_view(&mc.receiver)
-            {
-                "rusty::deref_mut(_swap_recv)"
-            } else {
-                "_swap_recv"
-            };
+            let swap_view_expr =
+                if self.should_lower_swap_method_call_via_deref_mut_view(&mc.receiver) {
+                    "rusty::deref_mut(_swap_recv)"
+                } else {
+                    "_swap_recv"
+                };
             return format!(
                 "[&]() {{ auto&& _swap_recv = {}; auto&& _swap_view = {}; const auto _swap_i = {}; const auto _swap_j = {}; const auto _swap_len = rusty::len(_swap_view); if (!(_swap_i < _swap_len && _swap_j < _swap_len)) {{ rusty::panicking::panic(\"index out of bounds\"); }} rusty::mem::swap(_swap_view[_swap_i], _swap_view[_swap_j]); }}()",
                 receiver, swap_view_expr, lhs_idx, rhs_idx
@@ -25390,6 +29558,10 @@ impl CodeGen {
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::to_vec({})", receiver);
+        }
+        if mc.method == "into_boxed_slice" && mc.args.is_empty() {
+            let receiver = self.emit_expr_maybe_move(&mc.receiver);
+            return format!("rusty::into_boxed_slice({})", receiver);
         }
         if let Some(description_call) = self.try_emit_error_description_dispatch_call(mc) {
             return description_call;
@@ -25456,7 +29628,22 @@ impl CodeGen {
                     && !type_string_has_auto_placeholder(&collect_type)
                     && self.collect_target_supports_from_iter(&collect_type)
                 {
-                    return format!("{}::from_iter({})", collect_type, receiver);
+                    let receiver_for_collect = if collect_type.starts_with("rusty::Vec<") {
+                        self.expected_vec_element_type(Some(turbofish_ty))
+                            .cloned()
+                            .map(|item_ty| {
+                                let iter_expected: syn::Type =
+                                    parse_quote!(impl Iterator<Item = #item_ty>);
+                                self.emit_expr_to_string_with_expected(
+                                    &mc.receiver,
+                                    Some(&iter_expected),
+                                )
+                            })
+                            .unwrap_or_else(|| receiver.clone())
+                    } else {
+                        receiver.clone()
+                    };
+                    return format!("{}::from_iter({})", collect_type, receiver_for_collect);
                 }
             }
             if let Some(expected) = expected_ty {
@@ -25473,7 +29660,22 @@ impl CodeGen {
                     && !type_string_has_auto_placeholder(&expected_cpp)
                     && self.collect_target_supports_from_iter(&expected_cpp)
                 {
-                    return format!("{}::from_iter({})", expected_cpp, receiver);
+                    let receiver_for_collect = if expected_cpp.starts_with("rusty::Vec<") {
+                        self.expected_vec_element_type(Some(&resolved_expected))
+                            .cloned()
+                            .map(|item_ty| {
+                                let iter_expected: syn::Type =
+                                    parse_quote!(impl Iterator<Item = #item_ty>);
+                                self.emit_expr_to_string_with_expected(
+                                    &mc.receiver,
+                                    Some(&iter_expected),
+                                )
+                            })
+                            .unwrap_or_else(|| receiver.clone())
+                    } else {
+                        receiver.clone()
+                    };
+                    return format!("{}::from_iter({})", expected_cpp, receiver_for_collect);
                 }
             }
             if unresolved_vec_placeholder_collect {
@@ -25487,6 +29689,7 @@ impl CodeGen {
             {
                 return format!("rusty::collect_range({})", receiver);
             }
+            return format!("rusty::collect_range({})", receiver);
         }
         if mc.method == "by_ref"
             && mc.args.is_empty()
@@ -25501,6 +29704,19 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             let count = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::take({}, {})", receiver, count);
+        }
+        if mc.method == "chain" && mc.args.len() == 1 {
+            if let Some(item_ty) = expected_ty
+                .and_then(|ty| self.extract_iter_item_type_from_type(ty))
+                .filter(|ty| self.type_is_concrete_hint_candidate(ty))
+            {
+                let receiver = self.emit_chain_arg_with_item_hint(&mc.receiver, &item_ty);
+                let rhs = self.emit_chain_arg_with_item_hint(&mc.args[0], &item_ty);
+                return format!("rusty::chain({}, {})", receiver, rhs);
+            }
+            let receiver = self.emit_expr_maybe_move(&mc.receiver);
+            let rhs = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!("rusty::chain({}, {})", receiver, rhs);
         }
         if mc.method == "skip"
             && mc.args.len() == 1
@@ -25632,8 +29848,25 @@ impl CodeGen {
         if let Some(filter_map_call) = self.try_emit_iter_filter_map_call(mc) {
             return filter_map_call;
         }
+        if let Some(array_map_call) = self.try_emit_fixed_array_map_call(mc, expected_ty) {
+            return array_map_call;
+        }
         if let Some(map_call) = self.try_emit_iter_map_call(mc) {
             return map_call;
+        }
+        if mc.method == "map"
+            && mc.args.len() == 1
+            && !self.receiver_is_option_or_result_like_expr(&mc.receiver)
+            && (self.receiver_is_fixed_array_like_expr(&mc.receiver)
+                || self.expr_lowers_to_slice_or_span_view(&mc.receiver)
+                || self.should_lower_swap_method_call_to_index_swap(&mc.receiver))
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let mapper = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!("rusty::map({}, {})", receiver, mapper);
+        }
+        if let Some(try_fold_call) = self.try_emit_iter_try_fold_call(mc) {
+            return try_fold_call;
         }
         if let Some(fold_call) = self.try_emit_iter_fold_call(mc) {
             return fold_call;
@@ -25674,6 +29907,7 @@ impl CodeGen {
                     &method_name,
                     idx,
                     declared_expected,
+                    Some(arg),
                 );
             let inferred_expected = if declared_expected.is_none()
                 && inferred_expected_from_receiver.is_none()
@@ -25694,11 +29928,14 @@ impl CodeGen {
             if method_name == "get_or_try_init" && idx == 0 {
                 let call_ok_ty = self.expected_result_type_arg(expected_ty, 0);
                 let call_err_ty = self.expected_result_type_arg(expected_ty, 1);
-                let receiver_owner_name = self
-                    .infer_simple_expr_type(&mc.receiver)
-                    .and_then(|ty| match self.peel_reference_paren_group_type(&ty) {
-                        syn::Type::Path(tp) => tp.path.segments.last().map(|seg| seg.ident.to_string()),
-                        _ => None,
+                let receiver_owner_name =
+                    self.infer_simple_expr_type(&mc.receiver).and_then(|ty| {
+                        match self.peel_reference_paren_group_type(&ty) {
+                            syn::Type::Path(tp) => {
+                                tp.path.segments.last().map(|seg| seg.ident.to_string())
+                            }
+                            _ => None,
+                        }
                     });
                 let call_err_conflicts_with_ok =
                     call_ok_ty.zip(call_err_ty).is_some_and(|(ok_ty, err_ty)| {
@@ -25731,13 +29968,13 @@ impl CodeGen {
                         .as_ref()
                         .cloned()
                         .or_else(|| {
-                            owner_expected_ty
-                                .as_ref()
-                                .and_then(|owner| self.extract_callable_return_type_from_type(owner))
+                            owner_expected_ty.as_ref().and_then(|owner| {
+                                self.extract_callable_return_type_from_type(owner)
+                            })
                         });
                     if let Some(inferred_ret) = inferred_initializer_result {
-                        resolved_from_call_expected =
-                            self.resolve_result_error_slot_from_expected(&inferred_ret, call_err_ty);
+                        resolved_from_call_expected = self
+                            .resolve_result_error_slot_from_expected(&inferred_ret, call_err_ty);
                     }
                 }
                 if resolved_from_call_expected.is_none() && !call_err_conflicts_with_ok {
@@ -25762,10 +29999,10 @@ impl CodeGen {
                 .as_ref()
                 .or(inferred_expected_from_call_expected_return.as_ref())
                 .or(inferred_expected_from_receiver
-                .as_ref()
-                .or(owner_expected_ty.as_ref())
-                .or(method_expected_ty)
-                .or(inferred_expected.as_ref()));
+                    .as_ref()
+                    .or(owner_expected_ty.as_ref())
+                    .or(method_expected_ty)
+                    .or(inferred_expected.as_ref()));
             let mut emitted_arg =
                 self.emit_call_arg_with_pass_style(arg, style, arg_expected, false, None);
             if self.method_arg_prefers_value_move_heuristic(&method_name, idx)
@@ -25982,6 +30219,22 @@ impl CodeGen {
                 raw_receiver
             };
             return format!("rusty::is_ascii_digit({})", receiver);
+        }
+        if method_name == "fill" && args.len() == 1 {
+            let receiver_ty = self.infer_simple_expr_type(&mc.receiver);
+            let receiver_is_span = receiver_ty
+                .as_ref()
+                .and_then(|ty| self.span_element_type(ty))
+                .is_some();
+            if receiver_is_span || self.expr_lowers_to_slice_or_span_view(&mc.receiver) {
+                let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+                let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                    format!("({})", raw_receiver)
+                } else {
+                    raw_receiver
+                };
+                return format!("rusty::fill({}, {})", receiver, args[0]);
+            }
         }
         // Rust slice methods `.first()` and `.get(n)` on std::span.
         // In Rust, &[T]::first() -> Option<&T> and &[T]::get(n) -> Option<&T>.
@@ -26282,8 +30535,7 @@ impl CodeGen {
         if matches!(
             method_name.as_str(),
             "wrapping_add" | "wrapping_sub" | "wrapping_offset"
-        )
-            && args.len() == 1
+        ) && args.len() == 1
             && self.is_expr_raw_pointer_like(&mc.receiver)
         {
             let receiver_expected = expected_ty
@@ -26364,8 +30616,10 @@ impl CodeGen {
             };
             return format!("rusty::ptr::{}({}, {})", method_name, receiver, args[0]);
         }
-        if matches!(method_name.as_str(), "saturating_add" | "saturating_sub")
-            && args.len() == 1
+        if matches!(
+            method_name.as_str(),
+            "saturating_add" | "saturating_sub" | "saturating_mul"
+        ) && args.len() == 1
             && self.should_lower_saturating_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -26374,12 +30628,31 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::{}({}, {})", method_name, receiver, args[0]);
+            let rhs = format!("rusty::detail::deref_if_pointer({})", args[0]);
+            return format!("rusty::{}({}, {})", method_name, receiver, rhs);
+        }
+        if matches!(method_name.as_str(), "rotate_right" | "rotate_left")
+            && args.len() == 1
+            && self.should_lower_swap_method_call_to_index_swap(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let helper = if method_name == "rotate_right" {
+                "rusty::rotate_right"
+            } else {
+                "rusty::rotate_left"
+            };
+            return format!("{}({}, {})", helper, receiver, args[0]);
         }
         // Rust integer intrinsic methods → C++ equivalents
         if matches!(method_name.as_str(), "rotate_right" | "rotate_left")
             && args.len() == 1
             && !self.is_expr_raw_pointer_like(&mc.receiver)
+            && self.should_lower_integer_rotate_method_call(&mc.receiver)
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -26431,11 +30704,7 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            // `rusty::checked_*` helpers are `T, T` templates; normalize mixed-width
-            // RHS expressions to receiver type so template deduction stays stable.
-            let receiver_value_ty = format!("std::remove_cvref_t<decltype(({}))>", receiver);
-            let rhs = format!("static_cast<{}>({})", receiver_value_ty, args[0]);
-            return format!("rusty::{}({}, {})", method_name, receiver, rhs);
+            return format!("rusty::{}({}, {})", method_name, receiver, args[0]);
         }
         if method_name == "checked_next_power_of_two"
             && args.is_empty()
@@ -26491,10 +30760,18 @@ impl CodeGen {
                 }
             }
         } else {
+            let receiver_expected_owned = if method_name == "into_iter" && mc.args.is_empty() {
+                self.infer_into_iter_receiver_expected_type_from_call_expected(
+                    &mc.receiver,
+                    expected_ty,
+                )
+            } else {
+                None
+            };
             let receiver_expected = if method_name == "unwrap" && mc.args.is_empty() {
                 expected_ty
             } else {
-                None
+                receiver_expected_owned.as_ref()
             };
             self.emit_receiver_member_call(
                 &mc.receiver,
@@ -26555,7 +30832,9 @@ impl CodeGen {
     ) -> Option<syn::Type> {
         let owner_arg_idx = match method_name {
             "insert_from_slice" if arg_idx == 1 => 0usize,
-            "try_extend_from_slice" | "extend_from_slice" | "copy_from_slice"
+            "try_extend_from_slice"
+            | "extend_from_slice"
+            | "copy_from_slice"
             | "clone_from_slice"
                 if arg_idx == 0 =>
             {
@@ -26677,8 +30956,7 @@ impl CodeGen {
         arg_idx: usize,
         arg_expr: Option<&syn::Expr>,
     ) -> Option<syn::Type> {
-        let (owner, substitutions) =
-            self.receiver_owner_name_and_type_substitutions(receiver)?;
+        let (owner, substitutions) = self.receiver_owner_name_and_type_substitutions(receiver)?;
         let expected =
             self.lookup_owner_method_arg_expected_type(&owner, method_name, arg_idx, arg_expr)?;
         if substitutions.is_empty() {
@@ -26694,6 +30972,7 @@ impl CodeGen {
         method_name: &str,
         arg_idx: usize,
         declared_expected: Option<&syn::Type>,
+        arg_expr: Option<&syn::Expr>,
     ) -> Option<syn::Type> {
         let force_receiver_closure_infer =
             arg_idx == 0 && matches!(method_name, "init" | "get_or_init" | "get_or_try_init");
@@ -26704,18 +30983,20 @@ impl CodeGen {
         });
         let allow_infer = match declared_expected {
             None => true,
-            Some(declared_expected) => matches!(
-                declared_expected,
-                syn::Type::Path(tp)
-                    if tp.path.segments.len() == 1
-                        && (self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
-                            || tp.path.segments[0]
-                                .ident
-                                .to_string()
-                                .chars()
-                                .next()
-                                .is_some_and(|c| c.is_ascii_uppercase()))
-            ) || declared_expected_assoc_like,
+            Some(declared_expected) => {
+                matches!(
+                    declared_expected,
+                    syn::Type::Path(tp)
+                        if tp.path.segments.len() == 1
+                            && (self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+                                || tp.path.segments[0]
+                                    .ident
+                                    .to_string()
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|c| c.is_ascii_uppercase()))
+                ) || declared_expected_assoc_like
+            }
         };
         if !allow_infer && !force_receiver_closure_infer {
             return None;
@@ -26764,7 +31045,8 @@ impl CodeGen {
                         inner_ty
                     };
                     if is_get_or_try_init {
-                        let result_ty: syn::Type = parse_quote!(Result<#init_value_ty, _>);
+                        let error_ty = self.inferred_try_init_error_type_or_unit(arg_expr);
+                        let result_ty: syn::Type = parse_quote!(Result<#init_value_ty, #error_ty>);
                         return Some(result_ty);
                     }
                     return Some(init_value_ty);
@@ -26784,7 +31066,8 @@ impl CodeGen {
             }
             if is_get_or_try_init {
                 let init_value_ty = self.expected_result_type_arg(Some(&ret_ty), 0)?.clone();
-                let result_ty: syn::Type = parse_quote!(Result<#init_value_ty, _>);
+                let error_ty = self.inferred_try_init_error_type_or_unit(arg_expr);
+                let result_ty: syn::Type = parse_quote!(Result<#init_value_ty, #error_ty>);
                 return Some(result_ty);
             }
             return Some(ret_ty);
@@ -26847,6 +31130,123 @@ impl CodeGen {
         Some(inferred)
     }
 
+    fn inferred_try_init_error_type_or_unit(&self, arg_expr: Option<&syn::Expr>) -> syn::Type {
+        self.infer_try_init_error_type_from_arg_expr(arg_expr)
+            .unwrap_or_else(|| parse_quote!(()))
+    }
+
+    fn infer_try_init_error_type_from_arg_expr(
+        &self,
+        arg_expr: Option<&syn::Expr>,
+    ) -> Option<syn::Type> {
+        let expr = self.peel_paren_group_expr(arg_expr?);
+        let infer_from_ty = |ty: &syn::Type| -> Option<syn::Type> {
+            let err_ty = self.expected_result_type_arg(Some(ty), 1)?;
+            if self.type_is_concrete_hint_candidate(err_ty) {
+                Some(err_ty.clone())
+            } else {
+                None
+            }
+        };
+
+        match expr {
+            syn::Expr::Closure(closure) => {
+                if let syn::ReturnType::Type(_, ty) = &closure.output
+                    && let Some(from_output) = infer_from_ty(ty)
+                {
+                    return Some(from_output);
+                }
+                self.infer_try_init_error_type_from_expr(&closure.body)
+            }
+            _ => self.infer_try_init_error_type_from_expr(expr),
+        }
+    }
+
+    fn infer_try_init_error_type_from_block(&self, block: &syn::Block) -> Option<syn::Type> {
+        for stmt in block.stmts.iter().rev() {
+            match stmt {
+                syn::Stmt::Expr(expr, _) => {
+                    if let Some(err_ty) = self.infer_try_init_error_type_from_expr(expr) {
+                        return Some(err_ty);
+                    }
+                }
+                syn::Stmt::Local(local) => {
+                    if let Some(init) = &local.init
+                        && let Some(err_ty) =
+                            self.infer_try_init_error_type_from_expr(init.expr.as_ref())
+                    {
+                        return Some(err_ty);
+                    }
+                }
+                syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+            }
+        }
+        None
+    }
+
+    fn infer_try_init_error_type_from_expr(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+                    return None;
+                };
+                let ctor = path_expr.path.segments.last()?.ident.to_string();
+                if ctor != "Err" || call.args.len() != 1 {
+                    return None;
+                }
+                let inferred = self
+                    .infer_simple_expr_type(&call.args[0])
+                    .or_else(|| self.infer_hint_type_from_expr(&call.args[0]))?;
+                if self.type_is_concrete_hint_candidate(&inferred) {
+                    Some(inferred)
+                } else {
+                    None
+                }
+            }
+            syn::Expr::Block(block_expr) => self.infer_try_init_error_type_from_block(&block_expr.block),
+            syn::Expr::If(if_expr) => {
+                let then_err = self.infer_try_init_error_type_from_block(&if_expr.then_branch);
+                let else_err = if_expr
+                    .else_branch
+                    .as_ref()
+                    .and_then(|(_, else_expr)| self.infer_try_init_error_type_from_expr(else_expr));
+                match (then_err, else_err) {
+                    (Some(left), Some(right)) => {
+                        if Self::types_equivalent_by_tokens(&left, &right) {
+                            Some(left)
+                        } else {
+                            Some(left)
+                        }
+                    }
+                    (Some(left), None) => Some(left),
+                    (None, Some(right)) => Some(right),
+                    (None, None) => None,
+                }
+            }
+            syn::Expr::Match(match_expr) => {
+                let mut inferred: Option<syn::Type> = None;
+                for arm in &match_expr.arms {
+                    let Some(arm_err) = self.infer_try_init_error_type_from_expr(&arm.body) else {
+                        continue;
+                    };
+                    if let Some(prev) = inferred.as_ref()
+                        && !Self::types_equivalent_by_tokens(prev, &arm_err)
+                    {
+                        return inferred;
+                    }
+                    inferred = Some(arm_err);
+                }
+                inferred
+            }
+            syn::Expr::Return(ret) => ret
+                .expr
+                .as_ref()
+                .and_then(|inner| self.infer_try_init_error_type_from_expr(inner)),
+            _ => None,
+        }
+    }
+
     fn ident_looks_like_unresolved_type_param_name(&self, ident: &str) -> bool {
         if ident == "Self" {
             return false;
@@ -26857,10 +31257,7 @@ impl CodeGen {
         if self.local_declared_types.contains(ident) || self.declared_item_names.contains(ident) {
             return false;
         }
-        ident
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase())
+        ident.chars().next().is_some_and(|c| c.is_ascii_uppercase())
     }
 
     fn collect_type_param_substitutions_from_expected_match(
@@ -26942,20 +31339,18 @@ impl CodeGen {
                     _ => false,
                 }
             }
-            (syn::Type::Reference(template_ref), syn::Type::Reference(concrete_ref)) => {
-                self.collect_type_param_substitutions_from_expected_match(
+            (syn::Type::Reference(template_ref), syn::Type::Reference(concrete_ref)) => self
+                .collect_type_param_substitutions_from_expected_match(
                     &template_ref.elem,
                     &concrete_ref.elem,
                     substitutions,
-                )
-            }
-            (syn::Type::Ptr(template_ptr), syn::Type::Ptr(concrete_ptr)) => {
-                self.collect_type_param_substitutions_from_expected_match(
+                ),
+            (syn::Type::Ptr(template_ptr), syn::Type::Ptr(concrete_ptr)) => self
+                .collect_type_param_substitutions_from_expected_match(
                     &template_ptr.elem,
                     &concrete_ptr.elem,
                     substitutions,
-                )
-            }
+                ),
             (syn::Type::Tuple(template_tuple), syn::Type::Tuple(concrete_tuple)) => {
                 if template_tuple.elems.len() != concrete_tuple.elems.len() {
                     return false;
@@ -26973,48 +31368,42 @@ impl CodeGen {
                 }
                 true
             }
-            (syn::Type::Array(template_arr), syn::Type::Array(concrete_arr)) => {
-                self.collect_type_param_substitutions_from_expected_match(
+            (syn::Type::Array(template_arr), syn::Type::Array(concrete_arr)) => self
+                .collect_type_param_substitutions_from_expected_match(
                     &template_arr.elem,
                     &concrete_arr.elem,
                     substitutions,
-                )
-            }
-            (syn::Type::Slice(template_slice), syn::Type::Slice(concrete_slice)) => {
-                self.collect_type_param_substitutions_from_expected_match(
+                ),
+            (syn::Type::Slice(template_slice), syn::Type::Slice(concrete_slice)) => self
+                .collect_type_param_substitutions_from_expected_match(
                     &template_slice.elem,
                     &concrete_slice.elem,
                     substitutions,
-                )
-            }
-            (syn::Type::Paren(template_paren), _) => {
-                self.collect_type_param_substitutions_from_expected_match(
+                ),
+            (syn::Type::Paren(template_paren), _) => self
+                .collect_type_param_substitutions_from_expected_match(
                     &template_paren.elem,
                     concrete_ty,
                     substitutions,
-                )
-            }
-            (syn::Type::Group(template_group), _) => {
-                self.collect_type_param_substitutions_from_expected_match(
+                ),
+            (syn::Type::Group(template_group), _) => self
+                .collect_type_param_substitutions_from_expected_match(
                     &template_group.elem,
                     concrete_ty,
                     substitutions,
-                )
-            }
-            (_, syn::Type::Paren(concrete_paren)) => {
-                self.collect_type_param_substitutions_from_expected_match(
+                ),
+            (_, syn::Type::Paren(concrete_paren)) => self
+                .collect_type_param_substitutions_from_expected_match(
                     template_ty,
                     &concrete_paren.elem,
                     substitutions,
-                )
-            }
-            (_, syn::Type::Group(concrete_group)) => {
-                self.collect_type_param_substitutions_from_expected_match(
+                ),
+            (_, syn::Type::Group(concrete_group)) => self
+                .collect_type_param_substitutions_from_expected_match(
                     template_ty,
                     &concrete_group.elem,
                     substitutions,
-                )
-            }
+                ),
             _ => false,
         }
     }
@@ -27027,14 +31416,13 @@ impl CodeGen {
         arg_declared_expected_ty: Option<&syn::Type>,
         call_expected_ty: Option<&syn::Type>,
     ) -> Option<syn::Type> {
-        let declared_expected_ty = arg_declared_expected_ty
-            .cloned()
-            .or_else(|| {
-                self.lookup_method_arg_type_from_receiver_type(receiver, method_name, arg_idx)
-            })?;
+        let declared_expected_ty = arg_declared_expected_ty.cloned().or_else(|| {
+            self.lookup_method_arg_type_from_receiver_type(receiver, method_name, arg_idx)
+        })?;
         let declared_expected_ty = &declared_expected_ty;
         let call_expected_ty = call_expected_ty?;
-        let should_resolve_from_call_expected = !self.type_is_concrete_hint_candidate(declared_expected_ty)
+        let should_resolve_from_call_expected = !self
+            .type_is_concrete_hint_candidate(declared_expected_ty)
             || self.type_references_current_struct_assoc(declared_expected_ty)
             || self.type_looks_like_assoc_projection(declared_expected_ty);
         if !should_resolve_from_call_expected {
@@ -27045,12 +31433,12 @@ impl CodeGen {
             Some(ty) => ty,
             None => return None,
         };
-        let mut method_return_ty =
-            match self.lookup_owner_method_return_type_from_receiver_type(&receiver_ty, method_name)
-            {
-                Some(ty) => ty,
-                None => return None,
-            };
+        let mut method_return_ty = match self
+            .lookup_owner_method_return_type_from_receiver_type(&receiver_ty, method_name)
+        {
+            Some(ty) => ty,
+            None => return None,
+        };
         if let Some((_, receiver_substitutions)) =
             self.receiver_owner_name_and_type_substitutions(receiver)
             && !receiver_substitutions.is_empty()
@@ -27091,10 +31479,7 @@ impl CodeGen {
                             .unwrap_or_default();
                         matches!(seg.arguments, syn::PathArguments::None)
                             && (first == "Self"
-                                || first
-                                    .chars()
-                                    .next()
-                                    .is_some_and(|c| c.is_ascii_uppercase()))
+                                || first.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
                     })
                 {
                     return true;
@@ -27179,8 +31564,16 @@ impl CodeGen {
         let mut all_args = Vec::with_capacity(args.len() + 1);
         all_args.push(receiver);
         all_args.extend(args.iter().cloned());
-        let should_prefer_runtime_namespace =
-            matches!(method_name.as_str(), "size_hint" | "left" | "right" | "write_hex");
+        if matches!(method_name.as_str(), "index" | "index_mut") && args.len() == 1 {
+            // Operator traits are emitted as C++ operators on concrete types.
+            // Calling them through `rusty_ext::index(...)` can fail when no local
+            // extension shim exists (e.g. delegating to Vec's Index impl).
+            return Some(format!("{}[{}]", all_args[0], args[0]));
+        }
+        let should_prefer_runtime_namespace = matches!(
+            method_name.as_str(),
+            "size_hint" | "left" | "right" | "write_hex"
+        );
         let is_cross_source_extension_hint =
             self.external_extension_method_hints.contains(&method_name);
         let extension_ns = if should_prefer_runtime_namespace {
@@ -27208,7 +31601,12 @@ impl CodeGen {
         let syn::Type::Path(tp) = receiver_ty else {
             return false;
         };
-        let segments: Vec<String> = tp.path.segments.iter().map(|seg| seg.ident.to_string()).collect();
+        let segments: Vec<String> = tp
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect();
         if segments.is_empty() {
             return false;
         }
@@ -27218,10 +31616,10 @@ impl CodeGen {
         self.inherent_impl_method_names
             .iter()
             .any(|(impl_ty, methods)| {
-            let type_matches = impl_ty == &receiver_path
-                || (receiver_is_single_segment
-                    && (impl_ty == &receiver_leaf
-                        || impl_ty.ends_with(&format!("::{}", receiver_leaf))));
+                let type_matches = impl_ty == &receiver_path
+                    || (receiver_is_single_segment
+                        && (impl_ty == &receiver_leaf
+                            || impl_ty.ends_with(&format!("::{}", receiver_leaf))));
                 type_matches && methods.contains(method_name)
             })
     }
@@ -27312,6 +31710,9 @@ impl CodeGen {
                     self.try_emit_reference_expr_with_expected_span_storage(r, expected_ty)
                 {
                     return span_expr;
+                }
+                if self.expected_type_is_string_view(expected_ty) {
+                    return self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
                 }
                 if let Some(expected_inner) = self.expected_reference_inner_type(expected_ty)
                     && self.expected_type_is_string_view(Some(expected_inner))
@@ -27450,10 +31851,22 @@ impl CodeGen {
                 format!("({})", inner)
             }
             syn::Expr::Group(g) => self.emit_expr_to_string_with_expected(&g.expr, expected_ty),
-            syn::Expr::Tuple(tup) => {
-                if let Some(expected_tuple_ty) = self.expected_tuple_type(expected_ty)
-                    && self.tuple_expected_needs_typed_constructor(expected_tuple_ty)
+            syn::Expr::Cast(cast_expr) => {
+                if matches!(cast_expr.ty.as_ref(), syn::Type::Infer(_))
+                    && let Some(expected) = expected_ty
                 {
+                    let expected = self.peel_reference_paren_group_type(expected);
+                    if !matches!(expected, syn::Type::Infer(_)) {
+                        return self.emit_cast_expr_to_string_with_target_override(
+                            cast_expr,
+                            Some(expected),
+                        );
+                    }
+                }
+                self.emit_cast_expr_to_string_with_target_override(cast_expr, None)
+            }
+            syn::Expr::Tuple(tup) => {
+                if let Some(expected_tuple_ty) = self.expected_tuple_type(expected_ty) {
                     let elems: Vec<String> = tup
                         .elems
                         .iter()
@@ -27465,9 +31878,12 @@ impl CodeGen {
                             )
                         })
                         .collect();
-                    let expected_tuple_cpp =
-                        self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone()));
-                    return format!("{}{{{}}}", expected_tuple_cpp, elems.join(", "));
+                    if self.tuple_expected_needs_typed_constructor(&expected_tuple_ty) {
+                        let expected_tuple_cpp =
+                            self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone()));
+                        return format!("{}{{{}}}", expected_tuple_cpp, elems.join(", "));
+                    }
+                    return format!("std::make_tuple({})", elems.join(", "));
                 }
                 let elems: Vec<String> = tup
                     .elems
@@ -27509,9 +31925,7 @@ impl CodeGen {
                 {
                     return unreachable_expr;
                 }
-                let base = self.emit_expr_to_string(&idx.expr);
-                let index = self.emit_expr_to_string(&idx.index);
-                format!("{}[{}]", base, index)
+                self.emit_index_expr_to_string(idx, expected_ty)
             }
             syn::Expr::Path(path) => {
                 if self.should_coerce_self_path_to_deref(&path.path, expected_ty) {
@@ -27534,6 +31948,11 @@ impl CodeGen {
                     if let Some(inner_cpp) = self.option_ctor_inner_cpp_type(expected_ty) {
                         return format!("rusty::Option<{}>(rusty::None)", inner_cpp);
                     }
+                }
+                if let Some(expected_variant_ctor) =
+                    self.try_emit_data_enum_unit_variant_path_with_expected(&path.path, expected_ty)
+                {
+                    return expected_variant_ctor;
                 }
                 if let Some(expected_ctor) =
                     self.try_emit_path_constructor_with_expected(path, expected_ty)
@@ -27590,12 +32009,9 @@ impl CodeGen {
                 // Create an inner context (for mutability to push hints).
                 let mut inner = self.new_inner_for_block();
                 // Push the expected return type as a syn::ReturnType for the closure body.
-                let expected_body_ty = expected_ty
-                    .and_then(|t| self.extract_callable_return_type_from_type(t))
-                    .or_else(|| expected_ty.cloned());
-                let expected_rt = expected_body_ty.map(|t| {
-                    syn::ReturnType::Type(Default::default(), Box::new(t.clone()))
-                });
+                let expected_body_ty = self.closure_expected_return_type_from_context(expected_ty);
+                let expected_rt = expected_body_ty
+                    .map(|t| syn::ReturnType::Type(Default::default(), Box::new(t)));
                 inner.emit_closure_to_string_with_param_scopes(
                     closure,
                     None,
@@ -27647,6 +32063,10 @@ impl CodeGen {
         let mut target_name = expected_target_name
             .or_else(|| self.try_emit_data_enum_variant_struct_literal_target(&struct_expr.path))
             .unwrap_or_else(|| self.emit_path_to_string(&struct_expr.path));
+        let is_local_declared_struct = struct_expr.path.segments.last().is_some_and(|seg| {
+            let ident = seg.ident.to_string();
+            self.local_declared_types.contains(&ident) || self.is_local_type_name_in_scope(&ident)
+        });
         if !has_expected_target_name
             && !target_name.contains('<')
             && struct_expr
@@ -27662,10 +32082,12 @@ impl CodeGen {
                 )
             {
                 target_name = recovered;
-            } else if let Some(recovered) =
-                self.recover_omitted_local_generic_type_args(&struct_expr.path, &target_name)
-            {
-                target_name = recovered;
+            } else if !is_local_declared_struct {
+                if let Some(recovered) =
+                    self.recover_omitted_local_generic_type_args(&struct_expr.path, &target_name)
+                {
+                    target_name = recovered;
+                }
             }
         }
 
@@ -27723,6 +32145,11 @@ impl CodeGen {
                                     field_name,
                                     expected_ty,
                                 );
+                                let field_ty = field_ty.filter(|ty| {
+                                    !self.type_contains_infer(ty)
+                                        && !self.type_contains_unresolved_placeholder_like(ty)
+                                        && !self.type_contains_unbound_single_letter_generic(ty)
+                                });
                                 let value = self
                                     .emit_expr_to_string_with_expected_and_move_if_needed(
                                         expr,
@@ -27776,8 +32203,16 @@ impl CodeGen {
                 let emitted_member_name = self
                     .lookup_struct_literal_field_cpp_name(struct_expr, &rust_member_name)
                     .unwrap_or_else(|| escape_cpp_keyword(&rust_member_name));
-                let field_ty =
-                    self.lookup_struct_literal_field_type(struct_expr, &rust_member_name, expected_ty);
+                let field_ty = self.lookup_struct_literal_field_type(
+                    struct_expr,
+                    &rust_member_name,
+                    expected_ty,
+                );
+                let field_ty = field_ty.filter(|ty| {
+                    !self.type_contains_infer(ty)
+                        && !self.type_contains_unresolved_placeholder_like(ty)
+                        && !self.type_contains_unbound_single_letter_generic(ty)
+                });
                 let val = self.emit_expr_to_string_with_expected_and_move_if_needed(
                     &f.expr,
                     field_ty.as_ref(),
@@ -27916,17 +32351,43 @@ impl CodeGen {
             .is_some()
     }
 
-    fn expected_tuple_type<'a>(
-        &self,
-        expected_ty: Option<&'a syn::Type>,
-    ) -> Option<&'a syn::TypeTuple> {
+    fn expected_tuple_type(&self, expected_ty: Option<&syn::Type>) -> Option<syn::TypeTuple> {
         let ty = expected_ty?;
-        match ty {
-            syn::Type::Tuple(tuple) => Some(tuple),
-            syn::Type::Paren(p) => self.expected_tuple_type(Some(&p.elem)),
-            syn::Type::Group(g) => self.expected_tuple_type(Some(&g.elem)),
-            _ => None,
+        self.resolve_tuple_type_from_type(ty)
+    }
+
+    fn closure_expected_return_type_from_context(
+        &self,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<syn::Type> {
+        let expected_ty = expected_ty?;
+        if self.type_is_bare_generic_param_like(expected_ty) {
+            return None;
         }
+        if let Some(callable_ret) = self.extract_callable_return_type_from_type(expected_ty) {
+            return Some(callable_ret);
+        }
+
+        let expected_ty = self.peel_reference_paren_group_type(expected_ty);
+        if self.type_contains_infer(expected_ty)
+            || self.type_contains_in_scope_type_param(expected_ty)
+            || self.type_contains_unresolved_placeholder_like(expected_ty)
+            || self.type_contains_unbound_single_letter_generic(expected_ty)
+        {
+            return None;
+        }
+
+        if let syn::Type::Path(tp) = expected_ty
+            && tp.qself.is_none()
+            && tp.path.segments.len() == 1
+        {
+            let ident = tp.path.segments[0].ident.to_string();
+            if self.is_type_param_in_scope(&ident) {
+                return None;
+            }
+        }
+
+        Some(expected_ty.clone())
     }
 
     fn peel_paren_group_type<'a>(&self, ty: &'a syn::Type) -> &'a syn::Type {
@@ -28053,11 +32514,9 @@ impl CodeGen {
         struct_expr: &syn::ExprStruct,
         expected_ty: Option<&syn::Type>,
     ) -> Option<String> {
-        let expected_ty = expected_ty?;
-        if !self.expected_type_matches_struct_literal_path(expected_ty, &struct_expr.path) {
-            return None;
-        }
-        Some(self.map_type(expected_ty))
+        let resolved =
+            self.resolve_expected_type_for_struct_literal(expected_ty, &struct_expr.path)?;
+        Some(self.map_type(&resolved))
     }
 
     fn lookup_struct_literal_field_type(
@@ -28083,12 +32542,10 @@ impl CodeGen {
             }
         }
 
-        if substitutions.is_empty()
-            && expected_ty
-                .is_some_and(|ty| self.expected_type_matches_struct_literal_path(ty, &struct_expr.path))
-        {
-            let expected_ty = expected_ty.map(|ty| self.peel_reference_paren_group_type(ty));
-            if let Some(syn::Type::Path(tp)) = expected_ty {
+        let resolved_expected_ty =
+            self.resolve_expected_type_for_struct_literal(expected_ty, &struct_expr.path);
+        if substitutions.is_empty() {
+            if let Some(syn::Type::Path(tp)) = resolved_expected_ty.as_ref() {
                 if let Some(last_seg) = tp.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
                         let provided_type_args: Vec<syn::Type> = args
@@ -28139,6 +32596,100 @@ impl CodeGen {
         } else {
             Some(self.substitute_type_params_in_type(&base_field_ty, &substitutions))
         }
+    }
+
+    fn resolve_expected_type_for_struct_literal(
+        &self,
+        expected_ty: Option<&syn::Type>,
+        struct_path: &syn::Path,
+    ) -> Option<syn::Type> {
+        let expected_ty = self.peel_reference_paren_group_type(expected_ty?);
+        if self.expected_type_matches_struct_literal_path(expected_ty, struct_path) {
+            return Some(expected_ty.clone());
+        }
+        let mut current = expected_ty.clone();
+        for _ in 0..4 {
+            let Some(next) = self.resolve_type_alias_once(&current) else {
+                break;
+            };
+            if self.expected_type_matches_struct_literal_path(&next, struct_path) {
+                return Some(next);
+            }
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        None
+    }
+
+    fn resolve_type_alias_once(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        if tp.qself.is_some() {
+            return None;
+        }
+        let last = tp.path.segments.last()?;
+        let alias_name = last.ident.to_string();
+        let full_alias_name = tp
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+
+        let alias_key = [
+            full_alias_name.clone(),
+            self.scoped_type_key(&alias_name),
+            alias_name.clone(),
+        ]
+        .into_iter()
+        .find(|key| self.type_alias_targets.contains_key(key))?;
+        let mut resolved = self.type_alias_targets.get(&alias_key)?.clone();
+
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return Some(resolved);
+        };
+        let params = self
+            .declared_type_params
+            .get(&alias_key)
+            .or_else(|| self.declared_type_params.get(&alias_name))?;
+        let param_kinds = self
+            .declared_type_param_kinds
+            .get(&alias_key)
+            .or_else(|| self.declared_type_param_kinds.get(&alias_name));
+        let provided_type_args: Vec<syn::Type> = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                _ => None,
+            })
+            .collect();
+        if provided_type_args.is_empty() {
+            return Some(resolved);
+        }
+        let mut substitutions = HashMap::new();
+        let mut provided_iter = provided_type_args.into_iter();
+        for (idx, param) in params.iter().enumerate() {
+            let is_type_param = param_kinds
+                .and_then(|kinds| kinds.get(idx))
+                .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
+            if !is_type_param {
+                continue;
+            }
+            let Some(provided_ty) = provided_iter.next() else {
+                break;
+            };
+            substitutions.insert(param.clone(), provided_ty);
+        }
+        if !substitutions.is_empty() {
+            resolved = self.substitute_type_params_in_type(&resolved, &substitutions);
+        }
+        Some(resolved)
     }
 
     fn lookup_struct_literal_field_cpp_name(
@@ -28210,6 +32761,52 @@ impl CodeGen {
             return None;
         }
         Some(format!("{}{{}}", self.map_type(expected_ty)))
+    }
+
+    fn expected_type_path<'a>(&self, expected_ty: &'a syn::Type) -> Option<&'a syn::Path> {
+        match expected_ty {
+            syn::Type::Path(tp) => Some(&tp.path),
+            syn::Type::Reference(r) => self.expected_type_path(&r.elem),
+            syn::Type::Paren(p) => self.expected_type_path(&p.elem),
+            syn::Type::Group(g) => self.expected_type_path(&g.elem),
+            _ => None,
+        }
+    }
+
+    fn try_emit_data_enum_unit_variant_path_with_expected(
+        &self,
+        path: &syn::Path,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let expected_ty = expected_ty?;
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let variant_name = path.segments.last()?.ident.to_string();
+        let enum_name = path.segments.iter().nth_back(1)?.ident.to_string();
+        let variant_key = format!("{}_{}", enum_name, variant_name);
+        if !self.data_enum_unit_variants.contains(&variant_key) {
+            return None;
+        }
+
+        let expected_path = self.expected_type_path(expected_ty)?;
+        let expected_last = expected_path.segments.last()?.ident.to_string();
+        let expected_matches = if expected_last == enum_name {
+            true
+        } else if expected_last == "Self" {
+            self.current_struct
+                .as_ref()
+                .and_then(|s| s.rsplit("::").next())
+                .is_some_and(|tail| tail == enum_name)
+        } else {
+            false
+        };
+        if !expected_matches {
+            return None;
+        }
+
+        let variant_ty = self.data_enum_variant_struct_type_name(expected_path, &variant_name);
+        Some(format!("{}{{}}", variant_ty))
     }
 
     fn expected_type_last_ident(&self, expected_ty: &syn::Type) -> Option<String> {
@@ -28330,11 +32927,10 @@ impl CodeGen {
                 let arg_is_closure =
                     matches!(self.peel_paren_group_expr(arg), syn::Expr::Closure(_));
                 let expected_closure_return_unknown = arg_is_closure
-                    && arg_expected_ty
-                        .as_ref()
-                        .is_some_and(|expected| {
-                            self.extract_callable_return_type_from_type(expected).is_none()
-                        });
+                    && arg_expected_ty.as_ref().is_some_and(|expected| {
+                        self.extract_callable_return_type_from_type(expected)
+                            .is_none()
+                    });
                 if (arg_expected_ty.is_none()
                     || expected_needs_owner_recovery
                     || expected_closure_return_unknown)
@@ -28351,6 +32947,15 @@ impl CodeGen {
                         fallback
                     };
                     arg_expected_ty = Some(fallback);
+                }
+                if arg_expected_ty.is_none()
+                    && owner_cpp.starts_with("rusty::Vec<")
+                    && rust_method_name == "from_iter"
+                    && idx == 0
+                    && let Some(item_ty) = self.expected_vec_element_type(Some(expected_ty)).cloned()
+                {
+                    let iter_expected: syn::Type = parse_quote!(impl Iterator<Item = #item_ty>);
+                    arg_expected_ty = Some(iter_expected);
                 }
                 self.emit_call_arg_with_pass_style(
                     arg,
@@ -28557,7 +33162,10 @@ impl CodeGen {
         let elem_expected = self.expected_array_element_type(expected_ty);
         if array_expr.elems.is_empty() {
             if let Some(elem_ty) = elem_expected {
-                return format!("std::array<{}, 0>{{}}", self.map_array_element_type(elem_ty));
+                return format!(
+                    "std::array<{}, 0>{{}}",
+                    self.map_array_element_type(elem_ty)
+                );
             }
             return "std::array<int, 0>{}".to_string();
         }
@@ -28708,8 +33316,10 @@ impl CodeGen {
             } else {
                 "const auto _slice_ref_tmp".to_string()
             };
-            let inner = self
-                .emit_expr_to_string_with_expected(&reference.expr, Some(expected_ref.elem.as_ref()));
+            let inner = self.emit_expr_to_string_with_expected(
+                &reference.expr,
+                Some(expected_ref.elem.as_ref()),
+            );
             let span_decl = if is_mut { "auto" } else { "const auto" };
             let capture = if self.block_depth == 0 { "[]" } else { "[&]" };
             return Some(format!(
@@ -28772,9 +33382,17 @@ impl CodeGen {
             // unreachable lambdas compatible with std::visit return unification.
             syn::BinOp::And(_) | syn::BinOp::Or(_) => {
                 let bool_ty: syn::Type = parse_quote!(bool);
-                let left = self.emit_binary_operand_expr_with_expected(&bin.left, Some(&bool_ty));
+                let left = self.autoderef_binary_value_operand_if_needed(
+                    &bin.left,
+                    &bin.op,
+                    self.emit_binary_operand_expr_with_expected(&bin.left, Some(&bool_ty)),
+                );
                 let op = self.emit_binop(&bin.op);
-                let right = self.emit_binary_operand_expr_with_expected(&bin.right, Some(&bool_ty));
+                let right = self.autoderef_binary_value_operand_if_needed(
+                    &bin.right,
+                    &bin.op,
+                    self.emit_binary_operand_expr_with_expected(&bin.right, Some(&bool_ty)),
+                );
                 format!("{} {} {}", left, op, right)
             }
             syn::BinOp::Eq(_) | syn::BinOp::Ne(_) => {
@@ -28784,20 +33402,90 @@ impl CodeGen {
                 let right_ty = self
                     .infer_simple_expr_type(&bin.right)
                     .or_else(|| self.infer_owner_type_from_constructor_expr(&bin.right));
-                let left =
-                    self.emit_binary_operand_expr_with_expected(&bin.left, right_ty.as_ref());
+                let left = self.autoderef_binary_value_operand_if_needed(
+                    &bin.left,
+                    &bin.op,
+                    self.emit_binary_operand_expr_with_expected(&bin.left, right_ty.as_ref()),
+                );
                 let op = self.emit_binop(&bin.op);
-                let right =
-                    self.emit_binary_operand_expr_with_expected(&bin.right, left_ty.as_ref());
+                let right = self.autoderef_binary_value_operand_if_needed(
+                    &bin.right,
+                    &bin.op,
+                    self.emit_binary_operand_expr_with_expected(&bin.right, left_ty.as_ref()),
+                );
                 format!("{} {} {}", left, op, right)
             }
             _ => {
-                let left = self.emit_binary_operand_expr(&bin.left);
+                let left = self.autoderef_binary_value_operand_if_needed(
+                    &bin.left,
+                    &bin.op,
+                    self.emit_binary_operand_expr(&bin.left),
+                );
                 let op = self.emit_binop(&bin.op);
-                let right = self.emit_binary_operand_expr(&bin.right);
+                let right = self.autoderef_binary_value_operand_if_needed(
+                    &bin.right,
+                    &bin.op,
+                    self.emit_binary_operand_expr(&bin.right),
+                );
                 format!("{} {} {}", left, op, right)
             }
         }
+    }
+
+    fn binary_operator_prefers_value_operands(&self, op: &syn::BinOp) -> bool {
+        matches!(
+            op,
+            syn::BinOp::Add(_)
+                | syn::BinOp::Sub(_)
+                | syn::BinOp::Mul(_)
+                | syn::BinOp::Div(_)
+                | syn::BinOp::Rem(_)
+                | syn::BinOp::BitXor(_)
+                | syn::BinOp::BitAnd(_)
+                | syn::BinOp::BitOr(_)
+                | syn::BinOp::Shl(_)
+                | syn::BinOp::Shr(_)
+                | syn::BinOp::Eq(_)
+                | syn::BinOp::Lt(_)
+                | syn::BinOp::Le(_)
+                | syn::BinOp::Ne(_)
+                | syn::BinOp::Ge(_)
+                | syn::BinOp::Gt(_)
+                | syn::BinOp::And(_)
+                | syn::BinOp::Or(_)
+        )
+    }
+
+    fn expr_is_range_inclusive_bound_ref_method(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::MethodCall(mc) = expr else {
+            return false;
+        };
+        matches!(mc.method.to_string().as_str(), "start" | "end")
+            && mc.args.is_empty()
+            && self.receiver_is_range_inclusive_like(&mc.receiver)
+    }
+
+    fn autoderef_binary_value_operand_if_needed(
+        &self,
+        expr: &syn::Expr,
+        op: &syn::BinOp,
+        emitted: String,
+    ) -> String {
+        if !self.binary_operator_prefers_value_operands(op) {
+            return emitted;
+        }
+        let looks_like_reference_surface = emitted.trim_start().starts_with('&');
+        if !looks_like_reference_surface {
+            return emitted;
+        }
+        let inferred_reference_like = self
+            .infer_simple_expr_type(expr)
+            .is_some_and(|ty| self.type_is_reference_like(&ty));
+        if !(inferred_reference_like || self.expr_is_range_inclusive_bound_ref_method(expr)) {
+            return emitted;
+        }
+        format!("*({})", emitted)
     }
 
     fn emit_binary_operand_expr(&self, expr: &syn::Expr) -> String {
@@ -28820,10 +33508,7 @@ impl CodeGen {
     fn binary_operand_needs_parentheses(&self, expr: &syn::Expr) -> bool {
         matches!(
             self.peel_paren_group_expr(expr),
-            syn::Expr::Binary(_)
-                | syn::Expr::Assign(_)
-                | syn::Expr::Range(_)
-                | syn::Expr::Cast(_)
+            syn::Expr::Binary(_) | syn::Expr::Assign(_) | syn::Expr::Range(_) | syn::Expr::Cast(_)
         )
     }
 
@@ -28850,10 +33535,15 @@ impl CodeGen {
         let is_dependent_assoc_inner = self.type_contains_dependent_assoc(inner_ty)
             || self.type_references_current_struct_assoc(inner_ty);
         if self.should_soften_dependent_assoc_mode() && is_dependent_assoc_inner {
+            if let Some(inner_cpp) =
+                self.resolve_option_inner_cpp_type_for_forced_softened_scope(inner_ty)
+            {
+                return Some(inner_cpp);
+            }
             if !self.should_force_typed_option_ctor_in_current_scope() {
                 return None;
             }
-            return self.resolve_option_inner_cpp_type_for_forced_softened_scope(inner_ty);
+            return None;
         }
         let mapped_inner_cpp = self.map_type(inner_ty);
 
@@ -28864,7 +33554,8 @@ impl CodeGen {
         if !needs_explicit_ctor {
             return None;
         }
-        if mapped_inner_cpp.contains("/* TODO") || type_string_has_auto_placeholder(&mapped_inner_cpp)
+        if mapped_inner_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&mapped_inner_cpp)
         {
             return None;
         }
@@ -28891,12 +33582,15 @@ impl CodeGen {
         let is_dependent_assoc_inner = self.type_contains_dependent_assoc(inner_ty)
             || self.type_references_current_struct_assoc(inner_ty);
         if self.should_soften_dependent_assoc_mode() && is_dependent_assoc_inner {
+            if let Some(inner_cpp) =
+                self.resolve_option_inner_cpp_type_for_forced_softened_scope(inner_ty)
+            {
+                return Some(format!("rusty::Option<{}>", inner_cpp));
+            }
             if !self.should_force_typed_option_ctor_in_current_scope() {
                 return None;
             }
-            let inner_cpp =
-                self.resolve_option_inner_cpp_type_for_forced_softened_scope(inner_ty)?;
-            return Some(format!("rusty::Option<{}>", inner_cpp));
+            return None;
         }
 
         let expected_cpp = self.map_type(ty);
@@ -28914,6 +33608,9 @@ impl CodeGen {
         if inner_cpp.contains("/* TODO") || type_string_has_auto_placeholder(inner_cpp) {
             return false;
         }
+        if self.mapped_assoc_type_contains_unbound_placeholder(inner_cpp) {
+            return false;
+        }
         let trimmed = inner_cpp.trim();
         if trimmed == "Item" || trimmed.starts_with("Item::") {
             return false;
@@ -28921,12 +33618,48 @@ impl CodeGen {
         true
     }
 
+    fn type_contains_tuple_placeholder_marker(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::Path(tp) => {
+                let Some(last) = tp.path.segments.last() else {
+                    return false;
+                };
+                if last.ident == "tuple" && matches!(last.arguments, syn::PathArguments::None) {
+                    return true;
+                }
+                if let syn::PathArguments::AngleBracketed(args) = &last.arguments {
+                    return args.args.iter().any(|arg| match arg {
+                        syn::GenericArgument::Type(inner) => {
+                            self.type_contains_tuple_placeholder_marker(inner)
+                        }
+                        _ => false,
+                    });
+                }
+                false
+            }
+            syn::Type::Tuple(tuple) => tuple
+                .elems
+                .iter()
+                .any(|elem| self.type_contains_tuple_placeholder_marker(elem)),
+            syn::Type::Reference(reference) => {
+                self.type_contains_tuple_placeholder_marker(&reference.elem)
+            }
+            syn::Type::Paren(paren) => self.type_contains_tuple_placeholder_marker(&paren.elem),
+            syn::Type::Group(group) => self.type_contains_tuple_placeholder_marker(&group.elem),
+            syn::Type::Slice(slice) => self.type_contains_tuple_placeholder_marker(&slice.elem),
+            syn::Type::Array(array) => self.type_contains_tuple_placeholder_marker(&array.elem),
+            _ => false,
+        }
+    }
+
     fn resolve_option_inner_cpp_type_for_forced_softened_scope(
         &self,
         inner_ty: &syn::Type,
     ) -> Option<String> {
         let mut inner_cpp = self.map_type(inner_ty);
-        if let Some(resolved_inner_cpp) = self.resolve_current_struct_assoc_projection_cpp_type(inner_ty)
+        if let Some(resolved_inner_cpp) =
+            self.resolve_current_struct_assoc_projection_cpp_type(inner_ty)
         {
             inner_cpp = resolved_inner_cpp;
         }
@@ -28998,10 +33731,7 @@ impl CodeGen {
             .join("::");
         matches!(
             joined.as_str(),
-            "Some"
-                | "Option::Some"
-                | "core::option::Option::Some"
-                | "std::option::Option::Some"
+            "Some" | "Option::Some" | "core::option::Option::Some" | "std::option::Option::Some"
         )
     }
 
@@ -29014,10 +33744,7 @@ impl CodeGen {
             .join("::");
         matches!(
             joined.as_str(),
-            "fmt::Display"
-                | "core::fmt::Display"
-                | "std::fmt::Display"
-                | "rusty::fmt::Display"
+            "fmt::Display" | "core::fmt::Display" | "std::fmt::Display" | "rusty::fmt::Display"
         )
     }
 
@@ -29045,7 +33772,21 @@ impl CodeGen {
     }
 
     fn is_option_none_path(&self, path: &syn::Path) -> bool {
-        Self::path_is_option_none(path)
+        if Self::path_is_option_none(path) {
+            return true;
+        }
+        path.segments
+            .last()
+            .is_some_and(|seg| self.canonical_variant_name(&seg.ident.to_string()) == "None")
+    }
+
+    fn is_option_some_path(&self, path: &syn::Path) -> bool {
+        if Self::path_is_option_some(path) {
+            return true;
+        }
+        path.segments
+            .last()
+            .is_some_and(|seg| self.canonical_variant_name(&seg.ident.to_string()) == "Some")
     }
 
     fn expected_result_type_arg<'a>(
@@ -29128,18 +33869,14 @@ impl CodeGen {
             syn::Type::Slice(s) => self.type_contains_unresolved_self_type_path(&s.elem),
             syn::Type::ImplTrait(it) => it.bounds.iter().any(|bound| match bound {
                 syn::TypeParamBound::Trait(tb) => {
-                    if tb.path
-                        .segments
-                        .iter()
-                        .any(|seg| {
-                            self.type_contains_unresolved_self_type_path(&syn::Type::Path(
-                                syn::TypePath {
-                                    qself: None,
-                                    path: syn::Path::from(seg.ident.clone()),
-                                },
-                            ))
-                        })
-                    {
+                    if tb.path.segments.iter().any(|seg| {
+                        self.type_contains_unresolved_self_type_path(&syn::Type::Path(
+                            syn::TypePath {
+                                qself: None,
+                                path: syn::Path::from(seg.ident.clone()),
+                            },
+                        ))
+                    }) {
                         return true;
                     }
                     tb.path.segments.iter().any(|seg| match &seg.arguments {
@@ -29217,6 +33954,13 @@ impl CodeGen {
             && !self.type_contains_in_scope_type_param(ty)
             && !self.type_contains_unbound_single_letter_generic(ty)
             && !self.type_contains_unresolved_placeholder_like(ty)
+    }
+
+    fn type_is_placeholder_hint_candidate_allow_scoped_generics(&self, ty: &syn::Type) -> bool {
+        !self.type_contains_infer(ty)
+            && !self.type_contains_unbound_single_letter_generic(ty)
+            && !self.type_contains_unresolved_self_type_path(ty)
+            && !self.type_maps_to_auto_placeholder_like(ty)
     }
 
     fn type_maps_to_auto_placeholder_like(&self, ty: &syn::Type) -> bool {
@@ -29400,6 +34144,81 @@ impl CodeGen {
             syn::Type::Group(g) => self.expected_type_generic_args(&g.elem),
             _ => None,
         }
+    }
+
+    fn expected_type_generic_args_for_owner(
+        &self,
+        expected_ty: &syn::Type,
+        owner_name: &str,
+    ) -> Option<Vec<String>> {
+        match expected_ty {
+            syn::Type::Path(tp) => {
+                let last = tp.path.segments.last()?;
+                let expected_owner = last.ident.to_string();
+                if expected_owner != owner_name
+                    && !(owner_name == "Self"
+                        && self
+                            .current_struct
+                            .as_deref()
+                            .is_some_and(|current| current == expected_owner))
+                {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                let mapped: Vec<String> = args
+                    .args
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                        syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                        _ => None,
+                    })
+                    .collect();
+                if mapped.is_empty() {
+                    None
+                } else {
+                    Some(mapped)
+                }
+            }
+            syn::Type::Reference(r) => {
+                self.expected_type_generic_args_for_owner(&r.elem, owner_name)
+            }
+            syn::Type::Paren(p) => self.expected_type_generic_args_for_owner(&p.elem, owner_name),
+            syn::Type::Group(g) => self.expected_type_generic_args_for_owner(&g.elem, owner_name),
+            _ => None,
+        }
+    }
+
+    fn type_is_bare_generic_param_like(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return false;
+        }
+        let ident = tp.path.segments[0].ident.to_string();
+        if self.is_type_param_in_scope(&ident) || self.is_struct_type_param(&ident) {
+            return true;
+        }
+        if self.is_local_type_name_in_scope(&ident)
+            || self.local_declared_types.contains(&ident)
+            || self.declared_item_names.contains(&ident)
+            || types::map_primitive_type(&ident).is_some()
+        {
+            return false;
+        }
+        let mut has_alpha = false;
+        ident.chars().all(|c| {
+            if c.is_ascii_alphabetic() {
+                has_alpha = true;
+                c.is_ascii_uppercase()
+            } else {
+                c.is_ascii_digit() || c == '_'
+            }
+        }) && has_alpha
     }
 
     /// Returns true if `ty` looks like a type parameter (e.g., `T`, `F`, `E`).
@@ -29645,12 +34464,15 @@ impl CodeGen {
                 let elems: Vec<String> = arr
                     .elems
                     .iter()
-                    .map(|elem| self.emit_expr_to_string_with_expected(elem, Some(expected_elem_ty)))
+                    .map(|elem| {
+                        self.emit_expr_to_string_with_expected(elem, Some(expected_elem_ty))
+                    })
                     .collect();
                 Some(format!("std::array{{{}}}", elems.join(", ")))
             }
             syn::Expr::Repeat(repeat) => {
-                let value = self.emit_expr_to_string_with_expected(&repeat.expr, Some(expected_elem_ty));
+                let value =
+                    self.emit_expr_to_string_with_expected(&repeat.expr, Some(expected_elem_ty));
                 let len = self.emit_expr_to_string(&repeat.len);
                 Some(format!("rusty::array_repeat({}, {})", value, len))
             }
@@ -29830,8 +34652,10 @@ impl CodeGen {
         if !use_boxed_helper && !use_box_ctor {
             return None;
         }
-        let payload =
-            self.try_emit_boxed_array_expr_with_expected_elem_type(&box_call.args[0], expected_elem_ty)?;
+        let payload = self.try_emit_boxed_array_expr_with_expected_elem_type(
+            &box_call.args[0],
+            expected_elem_ty,
+        )?;
         let ctor = if use_box_ctor {
             "rusty::Box::new_"
         } else {
@@ -30058,13 +34882,29 @@ impl CodeGen {
                             return Some(ret);
                         }
                         if let Some(source_item_ty) = source_item_ty.as_ref()
-                            && let Some(ret) =
-                                self.infer_map_closure_item_type_from_source(closure, source_item_ty)
+                            && let Some(ret) = self
+                                .infer_map_closure_item_type_from_source(closure, source_item_ty)
                         {
                             return Some(ret);
                         }
                     }
                     return source_item_ty;
+                }
+                if method == "filter_map" && mc.args.len() == 1 {
+                    if let syn::Expr::Closure(closure) = self.peel_paren_group_expr(&mc.args[0]) {
+                        if let Some(ret_ty) =
+                            self.infer_hint_type_from_expr(&closure.body).or_else(|| {
+                                self.infer_local_binding_type_from_initializer(&closure.body)
+                            })
+                        {
+                            if let Some(option_inner) = self.expected_option_type_arg(Some(&ret_ty))
+                            {
+                                return Some(option_inner.clone());
+                            }
+                            return Some(ret_ty);
+                        }
+                    }
+                    return self.infer_iter_item_type_from_expr(&mc.receiver);
                 }
                 if method == "drain" {
                     if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
@@ -30152,11 +34992,10 @@ impl CodeGen {
                                     return Some(ret);
                                 }
                                 if let Some(source_item_ty) = source_item_ty.as_ref()
-                                    && let Some(ret) = self
-                                        .infer_map_closure_item_type_from_source(
-                                            closure,
-                                            source_item_ty,
-                                        )
+                                    && let Some(ret) = self.infer_map_closure_item_type_from_source(
+                                        closure,
+                                        source_item_ty,
+                                    )
                                 {
                                     return Some(ret);
                                 }
@@ -30170,8 +35009,7 @@ impl CodeGen {
                     if (joined == "scan" || joined == "rusty::scan") && !call.args.is_empty() {
                         return self.infer_iter_item_type_from_expr(&call.args[0]);
                     }
-                    if (joined == "filter" || joined == "rusty::filter") && !call.args.is_empty()
-                    {
+                    if (joined == "filter" || joined == "rusty::filter") && !call.args.is_empty() {
                         return self.infer_iter_item_type_from_expr(&call.args[0]);
                     }
                 }
@@ -30215,8 +35053,7 @@ impl CodeGen {
             return None;
         };
         let param_name = param_ident.ident.to_string();
-        let deref_depth =
-            self.expr_deref_chain_depth_for_ident(&closure.body, &param_name)?;
+        let deref_depth = self.expr_deref_chain_depth_for_ident(&closure.body, &param_name)?;
         // Keep inference aligned with map closure emission:
         // for untyped iterator-map params, collapse one deref layer.
         let effective_deref_depth = deref_depth.saturating_sub(1);
@@ -30412,6 +35249,57 @@ impl CodeGen {
                     None
                 }
             }
+            "ArrayBuilder" => {
+                if matches!(method_name, "new" | "new_") && call.args.is_empty() {
+                    let mut elem: Option<String> = None;
+                    if let Some(local_name) = self.in_progress_local_initializers.last()
+                        && let Some(hint_ty) = self.lookup_local_placeholder_type_hint(local_name)
+                    {
+                        let normalized = normalize_placeholder_hint_for_owner(
+                            Some("ArrayBuilder"),
+                            hint_ty.clone(),
+                        );
+                        let elem_hint = extract_array_element_type_for_hint(&normalized)
+                            .or_else(|| extract_sequence_element_type_for_hint(&normalized))
+                            .unwrap_or(normalized);
+                        let mapped = self.map_type(&elem_hint);
+                        if mapped != "auto"
+                            && !mapped.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(&mapped)
+                        {
+                            elem = Some(mapped);
+                        }
+                    }
+                    let mut cap: Option<String> = None;
+                    if let Some(ret_ty) = self.current_return_type_hint()
+                        && let Some(inner_ty) = self.expected_option_type_arg(Some(ret_ty))
+                    {
+                        let inner_ty = self.peel_reference_paren_group_type(inner_ty);
+                        if let syn::Type::Array(array_ty) = inner_ty {
+                            if elem.is_none() {
+                                let mapped = self.map_type(array_ty.elem.as_ref());
+                                if mapped != "auto"
+                                    && !mapped.contains("/* TODO")
+                                    && !type_string_has_auto_placeholder(&mapped)
+                                {
+                                    elem = Some(mapped);
+                                }
+                            }
+                            cap = Some(self.emit_expr_to_string(&array_ty.len));
+                        }
+                    }
+                    if cap.is_none() {
+                        cap = ["N", "K", "CAP"]
+                            .into_iter()
+                            .find(|name| self.is_type_param_in_scope(name))
+                            .map(|name| name.to_string());
+                    }
+                    if elem.is_some() || cap.is_some() {
+                        return Some(vec![elem, cap]);
+                    }
+                }
+                None
+            }
             "Cell" => {
                 if matches!(method_name, "new" | "new_") {
                     let inferred = call
@@ -30447,10 +35335,12 @@ impl CodeGen {
                         .args
                         .first()
                         .and_then(|arg| self.infer_hint_type_from_expr(arg))
-                        .and_then(|arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
-                            syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
-                            _ => None,
-                        });
+                        .and_then(
+                            |arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
+                                syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
+                                _ => None,
+                            },
+                        );
                     let inferred_from_decltype = call.args.first().map(|arg| {
                         let arg_cpp = self.emit_expr_to_string(arg);
                         format!(
@@ -30490,10 +35380,12 @@ impl CodeGen {
                         .args
                         .first()
                         .and_then(|arg| self.infer_hint_type_from_expr(arg))
-                        .and_then(|arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
-                            syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
-                            _ => None,
-                        });
+                        .and_then(
+                            |arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
+                                syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
+                                _ => None,
+                            },
+                        );
                     let inferred_from_decltype = call.args.first().map(|arg| {
                         let arg_cpp = self.emit_expr_to_string(arg);
                         format!(
@@ -30574,6 +35466,27 @@ impl CodeGen {
                     None
                 }
             }
+            "MaybeUninit" => {
+                if matches!(method_name, "new" | "new_") {
+                    let inferred = call
+                        .args
+                        .first()
+                        .and_then(|arg| {
+                            self.infer_hint_type_from_expr(arg)
+                                .or_else(|| self.infer_simple_expr_type(arg))
+                        })
+                        .map(|ty| self.map_type(&ty))
+                        .or_else(|| {
+                            call.args.first().map(|arg| {
+                                let arg_cpp = self.emit_expr_to_string(arg);
+                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
+                            })
+                        });
+                    inferred.map(|inner| vec![Some(inner)])
+                } else {
+                    None
+                }
+            }
             "OnceCell" => {
                 if let Some(inferred_owner) = call
                     .args
@@ -30626,7 +35539,8 @@ impl CodeGen {
                         let inferred_from_hint = if let syn::Type::Path(tp) = hint_ty {
                             if let Some(last) = tp.path.segments.last() {
                                 if (last.ident == "Box" || last.ident == "OnceBox")
-                                    && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                                    && let syn::PathArguments::AngleBracketed(args) =
+                                        &last.arguments
                                     && let Some(syn::GenericArgument::Type(inner_ty)) = args
                                         .args
                                         .iter()
@@ -30651,21 +35565,21 @@ impl CodeGen {
                         }
                     }
                     if self.current_struct.as_deref() == Some("OnceBox") {
-                        let scoped_inner = self
-                            .declared_type_params
-                            .iter()
-                            .find_map(|(type_key, params)| {
-                                if type_key
-                                    .rsplit("::")
-                                    .next()
-                                    .is_some_and(|tail| tail == "OnceBox")
-                                    && !params.is_empty()
-                                {
-                                    Some(params[0].clone())
-                                } else {
-                                    None
-                                }
-                            });
+                        let scoped_inner =
+                            self.declared_type_params
+                                .iter()
+                                .find_map(|(type_key, params)| {
+                                    if type_key
+                                        .rsplit("::")
+                                        .next()
+                                        .is_some_and(|tail| tail == "OnceBox")
+                                        && !params.is_empty()
+                                    {
+                                        Some(params[0].clone())
+                                    } else {
+                                        None
+                                    }
+                                });
                         if let Some(inner) = scoped_inner {
                             return Some(vec![Some(inner)]);
                         }
@@ -30690,23 +35604,23 @@ impl CodeGen {
                             self.infer_hint_type_from_expr(arg)
                                 .or_else(|| self.infer_simple_expr_type(arg))
                                 .and_then(|arg_ty| {
-                                let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
-                                let syn::Type::Path(tp) = arg_ty else {
-                                    return None;
-                                };
-                                let last = tp.path.segments.last()?;
-                                if last.ident != "Box" {
-                                    return None;
-                                }
-                                let syn::PathArguments::AngleBracketed(args) = &last.arguments
-                                else {
-                                    return None;
-                                };
-                                args.args.iter().find_map(|arg| match arg {
-                                    syn::GenericArgument::Type(t) => Some(self.map_type(t)),
-                                    _ => None,
+                                    let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
+                                    let syn::Type::Path(tp) = arg_ty else {
+                                        return None;
+                                    };
+                                    let last = tp.path.segments.last()?;
+                                    if last.ident != "Box" {
+                                        return None;
+                                    }
+                                    let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                                    else {
+                                        return None;
+                                    };
+                                    args.args.iter().find_map(|arg| match arg {
+                                        syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                                        _ => None,
+                                    })
                                 })
-                            })
                         })
                         .or_else(|| {
                             if self.current_struct.as_deref() != Some("OnceBox") {
@@ -30788,13 +35702,10 @@ impl CodeGen {
                         None
                     }
                 } else if method_name == "into_value" {
-                    let arg_ty = call
-                        .args
-                        .first()
-                        .and_then(|arg| {
-                            self.infer_hint_type_from_expr(arg)
-                                .or_else(|| self.infer_simple_expr_type(arg))
-                        })?;
+                    let arg_ty = call.args.first().and_then(|arg| {
+                        self.infer_hint_type_from_expr(arg)
+                            .or_else(|| self.infer_simple_expr_type(arg))
+                    })?;
                     let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
                     let syn::Type::Path(tp) = arg_ty else {
                         return None;
@@ -30846,15 +35757,35 @@ impl CodeGen {
                 }
             }
             "Vec" => {
+                if matches!(method_name, "new" | "new_" | "with_capacity")
+                    && call.args.len() <= 1
+                    && let Some(local_name) = self.in_progress_local_initializers.last()
+                    && let Some(hint_ty) = self.lookup_local_placeholder_type_hint(local_name)
+                {
+                    let normalized =
+                        normalize_placeholder_hint_for_owner(Some("Vec"), hint_ty.clone());
+                    let elem_hint = extract_vec_element_type_for_hint(&normalized)
+                        .or_else(|| extract_sequence_element_type_for_hint(&normalized))
+                        .unwrap_or(normalized);
+                    let mapped = self.map_type(&elem_hint);
+                    if mapped != "auto"
+                        && !mapped.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(&mapped)
+                    {
+                        return Some(vec![Some(mapped)]);
+                    }
+                }
                 if matches!(method_name, "from_raw_parts" | "from_raw_parts_in") {
                     let inferred_from_type = call
                         .args
                         .first()
                         .and_then(|arg| self.infer_hint_type_from_expr(arg))
-                        .and_then(|arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
-                            syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
-                            _ => None,
-                        });
+                        .and_then(
+                            |arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
+                                syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
+                                _ => None,
+                            },
+                        );
                     let inferred_from_decltype = call.args.first().map(|arg| {
                         let arg_cpp = self.emit_expr_to_string(arg);
                         format!(
@@ -30902,6 +35833,14 @@ impl CodeGen {
             return base_func;
         };
         let path = &path_expr.path;
+        if path.segments.len() == 1 {
+            if let Some(recovered) =
+                self.recover_single_segment_constructor_type_args_from_call(path, call)
+            {
+                return recovered;
+            }
+            return base_func;
+        }
         if path.segments.len() < 2 {
             return base_func;
         }
@@ -30922,6 +35861,20 @@ impl CodeGen {
         let owner_has_explicit_args =
             matches!(owner_seg.arguments, syn::PathArguments::AngleBracketed(_));
         let owner_args_omitted = matches!(owner_seg.arguments, syn::PathArguments::None);
+        let mut owner_path = syn::Path {
+            leading_colon: path.leading_colon,
+            segments: syn::punctuated::Punctuated::new(),
+        };
+        for seg in path.segments.iter().take(owner_idx + 1) {
+            owner_path.segments.push(seg.clone());
+        }
+        let owner_has_declared_generics = self
+            .declared_type_params_for_path(&owner_path)
+            .is_some_and(|params| !params.is_empty());
+        let owner_declared_arity = self
+            .declared_type_params_for_path(&owner_path)
+            .map(|params| params.len())
+            .filter(|arity| *arity > 0);
         let method_name = path
             .segments
             .last()
@@ -30945,7 +35898,9 @@ impl CodeGen {
                 | "OnceCell"
                 | "OnceBox"
                 | "Lazy"
-        ) || (owner_name == "Box" && box_owner_recovery_enabled);
+        ) || (owner_name == "Box"
+            && box_owner_recovery_enabled)
+            || owner_has_declared_generics;
         let owner_is_supported_omitted_recovery_target = matches!(
             owner_name.as_str(),
             "ArrayVec"
@@ -30961,7 +35916,9 @@ impl CodeGen {
                 | "OnceBox"
                 | "Lazy"
                 | "Box"
-        ) || (owner_name == "Box" && box_owner_recovery_enabled);
+        ) || (owner_name == "Box"
+            && box_owner_recovery_enabled)
+            || owner_has_declared_generics;
         if !owner_has_placeholder_arg
             && !(owner_has_explicit_args && owner_is_supported_explicit_recovery_target)
             && !vec_from_raw_parts_explicit_recovery
@@ -30970,21 +35927,24 @@ impl CodeGen {
         {
             return base_func;
         }
-        let expected_owner_args = expected_ty.and_then(|ty| self.expected_type_generic_args(ty));
+        let expected_owner_args = expected_ty
+            .and_then(|ty| self.expected_type_generic_args_for_owner(ty, &owner_name))
+            .or_else(|| {
+                self.current_return_type_hint()
+                    .and_then(|ty| self.expected_type_generic_args_for_owner(ty, &owner_name))
+            });
         let inferred_owner_args =
             self.infer_owner_template_args_for_call(&owner_name, &method_name, call);
-        let mut owner_path = syn::Path {
-            leading_colon: path.leading_colon,
-            segments: syn::punctuated::Punctuated::new(),
-        };
-        for seg in path.segments.iter().take(owner_idx + 1) {
-            owner_path.segments.push(seg.clone());
-        }
         let scoped_owner_args = self.recover_omitted_owner_generic_args_from_scope(&owner_path);
 
         let mut rendered: Vec<String> = Vec::with_capacity(path.segments.len());
         for (idx, seg) in path.segments.iter().enumerate() {
-            let mut seg_text = escape_cpp_keyword(&seg.ident.to_string());
+            let mut seg_text = if idx == owner_idx && owner_idx == 0 && owner_name == "IterEither"
+            {
+                "iterator::IterEither".to_string()
+            } else {
+                escape_cpp_keyword(&seg.ident.to_string())
+            };
             if idx == owner_idx {
                 if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                     let mapped_args: Vec<String> = args
@@ -31093,6 +36053,7 @@ impl CodeGen {
                         .map(|args| args.len())
                         .or_else(|| inferred_owner_args.as_ref().map(|args| args.len()))
                         .or_else(|| scoped_owner_args.as_ref().map(|args| args.len()))
+                        .or(owner_declared_arity)
                         .or_else(|| {
                             // If all inference sources failed but this is a supported omitted-owner
                             // target, use a default arity based on known type shapes.
@@ -31100,6 +36061,9 @@ impl CodeGen {
                             // defaulted callable type), etc.
                             if owner_args_omitted && owner_is_supported_omitted_recovery_target {
                                 Some(match owner_name.as_str() {
+                                    "ArrayVec" => 2,
+                                    "HashMap" => 2,
+                                    "SmallVecData" => 2,
                                     "OnceCell" | "OnceBox" | "NonNull" => 1,
                                     "Lazy" => 1,
                                     _ => 1,
@@ -31109,7 +36073,8 @@ impl CodeGen {
                             }
                         });
                     if let Some(owner_arity) = owner_arity.as_mut()
-                        && owner_name == "Lazy" && *owner_arity > 1
+                        && owner_name == "Lazy"
+                        && *owner_arity > 1
                     {
                         // `Lazy<T, F = ...>` default-calls its callable parameter.
                         // Keep omitted-owner recovery anchored to `T` only.
@@ -31119,33 +36084,32 @@ impl CodeGen {
                         if owner_arity > 0 {
                             let mut recovered = Vec::with_capacity(owner_arity);
                             let mut complete = true;
-                            let owner_first_arg_fallback = if matches!(
-                                owner_name.as_str(),
-                                "OnceCell" | "OnceBox" | "Lazy"
-                            ) && owner_arity >= 1
-                            {
-                                self.lookup_local_placeholder_type_hint(
-                                    ONCECELL_FALLBACK_INNER_HINT_KEY,
-                                )
-                                .filter(|ty| {
-                                    !self.type_contains_infer(ty)
-                                        && !self.type_contains_in_scope_type_param(ty)
-                                })
-                                .map(|ty| {
-                                    let normalized_hint = normalize_placeholder_hint_for_owner(
-                                        Some(owner_name.as_str()),
-                                        ty.clone(),
-                                    );
-                                    self.map_type(&normalized_hint)
-                                })
-                                .filter(|mapped| {
-                                    mapped != "auto"
-                                        && !mapped.contains("/* TODO")
-                                        && !type_string_has_auto_placeholder(mapped)
-                                })
-                            } else {
-                                None
-                            };
+                            let owner_first_arg_fallback =
+                                if matches!(owner_name.as_str(), "OnceCell" | "OnceBox" | "Lazy")
+                                    && owner_arity >= 1
+                                {
+                                    self.lookup_local_placeholder_type_hint(
+                                        ONCECELL_FALLBACK_INNER_HINT_KEY,
+                                    )
+                                    .filter(|ty| {
+                                        !self.type_contains_infer(ty)
+                                            && !self.type_contains_in_scope_type_param(ty)
+                                    })
+                                    .map(|ty| {
+                                        let normalized_hint = normalize_placeholder_hint_for_owner(
+                                            Some(owner_name.as_str()),
+                                            ty.clone(),
+                                        );
+                                        self.map_type(&normalized_hint)
+                                    })
+                                    .filter(|mapped| {
+                                        mapped != "auto"
+                                            && !mapped.contains("/* TODO")
+                                            && !type_string_has_auto_placeholder(mapped)
+                                    })
+                                } else {
+                                    None
+                                };
                             for arg_idx in 0..owner_arity {
                                 let expected = expected_owner_args
                                     .as_ref()
@@ -31177,7 +36141,9 @@ impl CodeGen {
                                 } else {
                                     seg_text = format!("{}<{}>", seg_text, recovered.join(", "));
                                 }
-                            } else if owner_args_omitted && owner_is_supported_omitted_recovery_target {
+                            } else if owner_args_omitted
+                                && owner_is_supported_omitted_recovery_target
+                            {
                                 let scoped_tail_recovery = self
                                     .declared_type_params
                                     .iter()
@@ -31195,9 +36161,9 @@ impl CodeGen {
                                             && params.len() == owner_arity
                                             && (owner_is_current_struct
                                                 || allow_owner_param_name_fallback
-                                                || params
-                                                    .iter()
-                                                    .all(|param| self.is_type_param_in_scope(param)))
+                                                || params.iter().all(|param| {
+                                                    self.is_type_param_in_scope(param)
+                                                }))
                                         {
                                             Some(params.clone())
                                         } else {
@@ -31206,9 +36172,11 @@ impl CodeGen {
                                     });
                                 if let Some(scoped_args) = scoped_tail_recovery {
                                     if owner_name == "Box" {
-                                        seg_text = format!("rusty::Box<{}>", scoped_args.join(", "));
+                                        seg_text =
+                                            format!("rusty::Box<{}>", scoped_args.join(", "));
                                     } else {
-                                        seg_text = format!("{}<{}>", seg_text, scoped_args.join(", "));
+                                        seg_text =
+                                            format!("{}<{}>", seg_text, scoped_args.join(", "));
                                     }
                                     continue;
                                 }
@@ -31234,6 +36202,45 @@ impl CodeGen {
             rendered.push(seg_text);
         }
         rendered.join("::")
+    }
+
+    fn recover_single_segment_constructor_type_args_from_call(
+        &self,
+        path: &syn::Path,
+        call: &syn::ExprCall,
+    ) -> Option<String> {
+        if path.segments.len() != 1 {
+            return None;
+        }
+        let seg = path.segments.first()?;
+        if !matches!(seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+
+        let type_name = seg.ident.to_string();
+        if self.is_local_function_name_in_scope(&type_name) {
+            return None;
+        }
+
+        let type_key = self.declared_type_key_for_path(path).or_else(|| {
+            self.lookup_declared_type_key_for_base(&type_name, &type_name)
+        })?;
+        let params = self.declared_type_params.get(&type_key)?;
+        if params.len() != 1 {
+            return None;
+        }
+
+        let arg0 = call.args.first()?;
+        let arg0_cpp = self.emit_expr_to_string(arg0);
+        let arg0_is_raw_pointer = self.is_expr_raw_pointer_like(arg0);
+        if !arg0_is_raw_pointer {
+            return None;
+        }
+        let deduced_arg_cpp = format!(
+            "std::remove_pointer_t<std::remove_cvref_t<decltype(({}))>>",
+            arg0_cpp
+        );
+        Some(format!("{}<{}>", escape_cpp_keyword(&type_name), deduced_arg_cpp))
     }
 
     fn resolve_try_into_target_type(
@@ -31342,15 +36349,14 @@ impl CodeGen {
             return None;
         }
         let receiver = self.emit_expr_maybe_move(&mc.receiver);
-        let receiver_is_string_like =
-            self.classify_into_receiver_expr(&mc.receiver) == Some(IntoReceiverKind::StringLike)
-                || self
-                    .infer_simple_expr_type(&mc.receiver)
-                    .as_ref()
-                    .is_some_and(|ty| {
-                        self.is_known_string_like_type(ty)
-                            || self.map_type(ty) == "std::string_view"
-                    });
+        let receiver_is_string_like = self.classify_into_receiver_expr(&mc.receiver)
+            == Some(IntoReceiverKind::StringLike)
+            || self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| {
+                    self.is_known_string_like_type(ty) || self.map_type(ty) == "std::string_view"
+                });
         if receiver_is_string_like {
             return Some(format!("rusty::String::from({})", receiver));
         }
@@ -31374,6 +36380,74 @@ impl CodeGen {
             );
         }
         expected_ty.clone()
+    }
+
+    fn infer_into_iter_receiver_expected_type_from_call_expected(
+        &self,
+        receiver: &syn::Expr,
+        call_expected_ty: Option<&syn::Type>,
+    ) -> Option<syn::Type> {
+        let call_expected_ty = call_expected_ty?;
+        let item_ty = self.extract_iter_item_type_from_type(call_expected_ty)?;
+        let receiver = self.peel_paren_group_expr(receiver);
+        let syn::Expr::Call(call) = receiver else {
+            return None;
+        };
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        if path_expr.path.segments.len() < 2 {
+            return None;
+        }
+        let owner = path_expr
+            .path
+            .segments
+            .iter()
+            .nth_back(1)?
+            .ident
+            .to_string();
+        match owner.as_str() {
+            "Vec" => Some(parse_quote!(Vec<#item_ty>)),
+            "VecDeque" => Some(parse_quote!(VecDeque<#item_ty>)),
+            _ => None,
+        }
+    }
+
+    fn call_expr_is_once_like(&self, call: &syn::ExprCall) -> bool {
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return false;
+        };
+        for candidate in self.call_path_candidates(&path_expr.path) {
+            let mapped = types::map_function_path(&candidate).unwrap_or(candidate.as_str());
+            if matches!(
+                mapped,
+                "once" | "rusty::once" | "std::iter::once" | "core::iter::once"
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn expr_is_once_with_unsuffixed_numeric_seed(&self, expr: &syn::Expr) -> bool {
+        let syn::Expr::Call(call) = self.peel_paren_group_expr(expr) else {
+            return false;
+        };
+        self.call_expr_is_once_like(call)
+            && call.args.len() == 1
+            && self.expr_contains_unsuffixed_int_literal(&call.args[0])
+    }
+
+    fn emit_chain_arg_with_item_hint(&self, arg: &syn::Expr, item_ty: &syn::Type) -> String {
+        let syn::Expr::Call(call) = self.peel_paren_group_expr(arg) else {
+            return self.emit_expr_maybe_move(arg);
+        };
+        if !self.call_expr_is_once_like(call) || call.args.len() != 1 {
+            return self.emit_expr_maybe_move(arg);
+        }
+        let once_func = self.emit_call_func_with_owner_template_recovery(call, None);
+        let once_value = self.emit_expr_to_string_with_expected(&call.args[0], Some(item_ty));
+        format!("{}({})", once_func, once_value)
     }
 
     fn try_emit_arrayvec_from_repeat_with_fixed_array_arg(
@@ -31485,6 +36559,37 @@ impl CodeGen {
         Some(format!("{}({})", func, fixed_array_arg))
     }
 
+    fn try_emit_array_from_fn_call_with_expected(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let mut segments = path_expr.path.segments.iter().rev();
+        let method = segments.next()?.ident.to_string();
+        let owner = segments.next()?.ident.to_string();
+        if method != "from_fn" || owner != "array" {
+            return None;
+        }
+        if call.args.len() != 1 {
+            return None;
+        }
+        let cap_expr = self
+            .expected_fixed_array_type(expected_ty)
+            .map(|(_, len)| self.emit_expr_to_string(len))
+            .or_else(|| {
+                ["N", "K", "CAP"]
+                    .into_iter()
+                    .find(|name| self.is_type_param_in_scope(name))
+                    .map(|name| name.to_string())
+            })?;
+        let cap_expr = self.maybe_sanitize_array_capacity_cpp_len(&cap_expr);
+        let mapper = self.emit_expr_maybe_move(&call.args[0]);
+        Some(format!("rusty::array_from_fn<{}>({})", cap_expr, mapper))
+    }
+
     /// Emit a call expression, optionally using expected type context from parent.
     fn emit_call_expr_to_string(
         &self,
@@ -31499,6 +36604,9 @@ impl CodeGen {
         if let Some(emitted) =
             self.try_emit_arrayvec_from_repeat_with_fixed_array_arg(call, expected_ty)
         {
+            return emitted;
+        }
+        if let Some(emitted) = self.try_emit_array_from_fn_call_with_expected(call, expected_ty) {
             return emitted;
         }
         if let Some(ty) = expected_ty {
@@ -31533,59 +36641,60 @@ impl CodeGen {
             }
         });
         let resolved_hint = resolved_hint_owned.as_ref();
-        let result_ctor_with_infer_turbofish = if let syn::Expr::Path(path_expr) = call.func.as_ref() {
-            path_expr.path.segments.last().and_then(|last| {
-                let ctor_name = last.ident.to_string();
-                if !matches!(ctor_name.as_str(), "Ok" | "Err") {
-                    return None;
-                }
-                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-                    return None;
-                };
-                let has_infer_placeholder = args.args.iter().any(|arg| match arg {
-                    syn::GenericArgument::Type(t) => self.type_contains_infer(t),
-                    syn::GenericArgument::Const(c) => matches!(c, syn::Expr::Infer(_)),
-                    _ => false,
-                });
-                if has_infer_placeholder {
-                    Some((ctor_name, args.clone()))
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
-        let resolved_ctor_hint_owned = result_ctor_with_infer_turbofish
-            .as_ref()
-            .and_then(|(_, ctor_args)| {
-                let mut type_args: Vec<syn::Type> = ctor_args
-                    .args
-                    .iter()
-                    .filter_map(|arg| match arg {
-                        syn::GenericArgument::Type(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                if type_args.len() != 2 {
-                    return None;
-                }
-                for (idx, ty) in type_args.iter_mut().enumerate() {
-                    if matches!(ty, syn::Type::Infer(_)) {
-                        let replacement = resolved_hint
-                            .and_then(|hint| self.expected_result_type_arg(Some(hint), idx))
-                            .cloned()?;
-                        *ty = replacement;
+        let result_ctor_with_infer_turbofish =
+            if let syn::Expr::Path(path_expr) = call.func.as_ref() {
+                path_expr.path.segments.last().and_then(|last| {
+                    let ctor_name = last.ident.to_string();
+                    if !matches!(ctor_name.as_str(), "Ok" | "Err") {
+                        return None;
                     }
-                }
-                let ok_ty = type_args.first()?.clone();
-                let err_ty = type_args.get(1)?.clone();
-                Some(parse_quote!(Result<#ok_ty, #err_ty>))
-            });
+                    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                        return None;
+                    };
+                    let has_infer_placeholder = args.args.iter().any(|arg| match arg {
+                        syn::GenericArgument::Type(t) => self.type_contains_infer(t),
+                        syn::GenericArgument::Const(c) => matches!(c, syn::Expr::Infer(_)),
+                        _ => false,
+                    });
+                    if has_infer_placeholder {
+                        Some((ctor_name, args.clone()))
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+        let resolved_ctor_hint_owned =
+            result_ctor_with_infer_turbofish
+                .as_ref()
+                .and_then(|(_, ctor_args)| {
+                    let mut type_args: Vec<syn::Type> = ctor_args
+                        .args
+                        .iter()
+                        .filter_map(|arg| match arg {
+                            syn::GenericArgument::Type(t) => Some(t.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if type_args.len() != 2 {
+                        return None;
+                    }
+                    for (idx, ty) in type_args.iter_mut().enumerate() {
+                        if matches!(ty, syn::Type::Infer(_)) {
+                            let replacement = resolved_hint
+                                .and_then(|hint| self.expected_result_type_arg(Some(hint), idx))
+                                .cloned()?;
+                            *ty = replacement;
+                        }
+                    }
+                    let ok_ty = type_args.first()?.clone();
+                    let err_ty = type_args.get(1)?.clone();
+                    Some(parse_quote!(Result<#ok_ty, #err_ty>))
+                });
         let effective_resolved_hint = resolved_ctor_hint_owned.as_ref().or(resolved_hint);
-        let can_resolve_result_ctor_infer = result_ctor_with_infer_turbofish
-            .as_ref()
-            .is_some_and(|_| {
+        let can_resolve_result_ctor_infer =
+            result_ctor_with_infer_turbofish.as_ref().is_some_and(|_| {
                 effective_resolved_hint
                     .is_some_and(|hint| !self.type_contains_unresolved_placeholder_like(hint))
             });
@@ -31598,10 +36707,8 @@ impl CodeGen {
                 ctor_name
             );
         }
-        if expected_ty.is_none() {
-            if let Some(emitted) = self.try_emit_variant_constructor_call_with_recovered_hints(call) {
-                return emitted;
-            }
+        if let Some(emitted) = self.try_emit_variant_constructor_call_with_recovered_hints(call) {
+            return emitted;
         }
 
         // General data enum variant constructor: `EnumName::VariantName(args)`
@@ -31614,6 +36721,9 @@ impl CodeGen {
         // (including `std::move(arg)` from expanded derive code) that the
         // main UFCS handler below won't catch (it requires `&receiver`).
         if let Some(trait_call) = self.try_emit_known_trait_ufcs_call(call) {
+            return trait_call;
+        }
+        if let Some(trait_call) = self.try_emit_trait_ufcs_by_value_receiver_call(call) {
             return trait_call;
         }
 
@@ -31813,7 +36923,10 @@ impl CodeGen {
                 && call.args.is_empty()
                 && func_path.path.segments.len() == 2
                 && func_path.path.segments[1].ident == "size"
-                && matches!(func_path.path.segments[0].arguments, syn::PathArguments::None)
+                && matches!(
+                    func_path.path.segments[0].arguments,
+                    syn::PathArguments::None
+                )
             {
                 let owner_name = func_path.path.segments[0].ident.to_string();
                 if self.is_type_param_in_scope(&owner_name) {
@@ -31922,6 +37035,11 @@ impl CodeGen {
             return format!("{}({}, {})", func, ptr_arg, offset_arg);
         }
         if func == "rusty::mem::replace" && !call.args.is_empty() {
+            let replace_value_expected_ty = call
+                .args
+                .first()
+                .and_then(|arg0| self.infer_simple_expr_type(arg0))
+                .and_then(|arg0_ty| self.expected_reference_inner_type(Some(&arg0_ty)).cloned());
             let args: Vec<String> = call
                 .args
                 .iter()
@@ -31931,6 +37049,12 @@ impl CodeGen {
                         if let syn::Expr::Reference(r) = self.peel_paren_group_expr(arg) {
                             return self.emit_expr_to_string(&r.expr);
                         }
+                    }
+                    if idx == 1 {
+                        return self.emit_expr_to_string_with_expected_and_move_if_needed(
+                            arg,
+                            replace_value_expected_ty.as_ref(),
+                        );
                     }
                     self.emit_expr_maybe_move(arg)
                 })
@@ -31991,6 +37115,14 @@ impl CodeGen {
                     .map(|a| self.emit_expr_maybe_move(a))
                     .collect();
                 let expected_cpp = self.map_type(expected);
+                if expected_cpp == "auto"
+                    || expected_cpp.contains("/* TODO")
+                    || expected_cpp.contains("Self::")
+                    || type_string_has_auto_placeholder(&expected_cpp)
+                    || self.type_contains_unresolved_self_type_path(expected)
+                {
+                    return format!("{}({})", func, args.join(", "));
+                }
                 return format!(
                     "[&]() -> {} {{ {}({}); }}()",
                     expected_cpp,
@@ -32015,6 +37147,43 @@ impl CodeGen {
                 arg, arg
             );
         }
+        if matches!(func.as_str(), "RefCell::new_" | "rusty::RefCell::new_") && call.args.len() == 1
+        {
+            let expected_inner_ty = expected_ty.and_then(|ty| {
+                let ty = self.peel_reference_paren_group_type(ty);
+                let syn::Type::Path(tp) = ty else {
+                    return None;
+                };
+                let last = tp.path.segments.last()?;
+                if last.ident != "RefCell" {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(inner) => Some(inner.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(expected) = expected_ty {
+                let expected_cpp = self.map_type(expected);
+                if expected_cpp.starts_with("rusty::RefCell<")
+                    && !type_string_has_auto_placeholder(&expected_cpp)
+                {
+                    let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                        &call.args[0],
+                        expected_inner_ty.as_ref(),
+                    );
+                    return format!("{}::new_({})", expected_cpp, arg);
+                }
+            }
+            let arg = self.emit_expr_maybe_move(&call.args[0]);
+            return format!(
+                "rusty::RefCell<std::remove_cvref_t<decltype(({}))>>::new_({})",
+                arg, arg
+            );
+        }
 
         if matches!(func.as_str(), "Vec::new_" | "rusty::Vec::new_") && call.args.is_empty() {
             if let Some(expected) = expected_ty {
@@ -32036,7 +37205,10 @@ impl CodeGen {
         }
         if matches!(
             func.as_str(),
-            "rusty::boxed::into_vec" | "into_vec" | "alloc::boxed::into_vec" | "std::boxed::into_vec"
+            "rusty::boxed::into_vec"
+                | "into_vec"
+                | "alloc::boxed::into_vec"
+                | "std::boxed::into_vec"
         ) && call.args.len() == 1
         {
             if let Some(specialized_arg) =
@@ -32055,14 +37227,14 @@ impl CodeGen {
                     if let Some(specialized_arg) = self
                         .try_emit_into_vec_box_new_with_expected_tuple_payload(
                             &call.args[0],
-                            expected_tuple_ty,
+                            &expected_tuple_ty,
                         )
                     {
                         return format!("{}({})", func, specialized_arg);
                     }
                 }
-                if let Some(specialized_arg) =
-                    self.try_emit_into_vec_box_new_with_expected_elem_payload(&call.args[0], elem_ty)
+                if let Some(specialized_arg) = self
+                    .try_emit_into_vec_box_new_with_expected_elem_payload(&call.args[0], elem_ty)
                 {
                     return format!("{}({})", func, specialized_arg);
                 }
@@ -32100,10 +37272,51 @@ impl CodeGen {
         }
 
         if func == "rusty::array_repeat" && call.args.len() == 2 {
-            if let Some(elem_ty) = self.expected_array_element_type(expected_ty) {
+            // `alloc::vec::from_elem` is lowered to `rusty::array_repeat`.
+            // Preserve expected `Vec<T>` element typing so unsuffixed literals
+            // inside `Some(0)` become `Some(size_t)` when context requires it.
+            let elem_ty = self
+                .expected_array_element_type(expected_ty)
+                .or_else(|| self.expected_vec_element_type(expected_ty));
+            if let Some(elem_ty) = elem_ty {
                 let value = self.emit_expr_to_string_with_expected(&call.args[0], Some(elem_ty));
                 let count = self.emit_expr_to_string(&call.args[1]);
                 return format!("rusty::array_repeat({}, {})", value, count);
+            }
+        }
+
+        if (func == "chain" || func.ends_with("::chain") || func.starts_with("rusty::chain"))
+            && call.args.len() == 2
+        {
+            let expected_item_ty = expected_ty
+                .and_then(|ty| self.extract_iter_item_type_from_type(ty))
+                .filter(|ty| self.type_is_concrete_hint_candidate(ty));
+            let chain_item_ty = expected_item_ty.or_else(|| {
+                let left_seed = self.expr_is_once_with_unsuffixed_numeric_seed(&call.args[0]);
+                let right_seed = self.expr_is_once_with_unsuffixed_numeric_seed(&call.args[1]);
+                let left_item = self.infer_iter_item_type_from_expr(&call.args[0])?;
+                let right_item = self.infer_iter_item_type_from_expr(&call.args[1])?;
+                if Self::types_equivalent_by_tokens(&left_item, &right_item) {
+                    return None;
+                }
+                if left_seed
+                    && !right_seed
+                    && self.type_is_concrete_hint_candidate(&right_item)
+                {
+                    return Some(right_item);
+                }
+                if right_seed
+                    && !left_seed
+                    && self.type_is_concrete_hint_candidate(&left_item)
+                {
+                    return Some(left_item);
+                }
+                None
+            });
+            if let Some(item_ty) = chain_item_ty {
+                let left = self.emit_chain_arg_with_item_hint(&call.args[0], &item_ty);
+                let right = self.emit_chain_arg_with_item_hint(&call.args[1], &item_ty);
+                return format!("{}({}, {})", func, left, right);
             }
         }
 
@@ -32119,15 +37332,13 @@ impl CodeGen {
         {
             let expected_inner_ty = self.expected_option_type_arg(expected_ty);
             let expected_inner_is_ref = expected_inner_ty.is_some_and(|ty| {
-                matches!(
-                    self.peel_paren_group_type(ty),
-                    syn::Type::Reference(_)
-                )
+                matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
             });
             if let Some(inner_cpp) = self.option_ctor_inner_cpp_type(expected_ty) {
                 if expected_inner_is_ref {
-                    let inner_cpp_is_pointer = inner_cpp.trim_start().starts_with("std::add_pointer_t<")
-                        || inner_cpp.trim_end().ends_with('*');
+                    let inner_cpp_is_pointer =
+                        inner_cpp.trim_start().starts_with("std::add_pointer_t<")
+                            || inner_cpp.trim_end().ends_with('*');
                     if inner_cpp_is_pointer {
                         let arg_peeled = self.peel_single_expr_through_unsafe(&call.args[0]);
                         if let syn::Expr::Unary(unary) = arg_peeled
@@ -32151,8 +37362,7 @@ impl CodeGen {
                         &call.args[0],
                         Some(&inner_cpp),
                         expected_inner_ty,
-                    )
-                    {
+                    ) {
                         return format!("rusty::Option<{}>({})", inner_cpp, ref_arg);
                     }
                     let arg_peeled = self.peel_single_expr_through_unsafe(&call.args[0]);
@@ -32180,7 +37390,8 @@ impl CodeGen {
                         {
                             return format!("rusty::Option<{}>({})", inner_cpp, coerced_arg);
                         }
-                        let arg = self.emit_expr_to_string_with_expected(&call.args[0], expected_inner_ty);
+                        let arg = self
+                            .emit_expr_to_string_with_expected(&call.args[0], expected_inner_ty);
                         return format!("rusty::Option<{}>({})", inner_cpp, arg);
                     }
                 } else {
@@ -32231,9 +37442,14 @@ impl CodeGen {
             }
             if let Some(inner_ty) = expected_inner_ty
                 && !expected_inner_is_ref
-                && self.option_inner_needs_typed_make_optional(inner_ty)
             {
-                return format!("rusty::Option<{}>({})", self.map_type(inner_ty), arg);
+                let mapped_inner = self.map_type(inner_ty);
+                if mapped_inner != "auto"
+                    && !mapped_inner.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&mapped_inner)
+                {
+                    return format!("rusty::Option<{}>({})", mapped_inner, arg);
+                }
             }
             return format!("rusty::Some({})", arg);
         }
@@ -32299,8 +37515,9 @@ impl CodeGen {
             } else {
                 None
             };
-        let mut ctor_expected_hint_owned =
-            if matches!(func_leaf_base, "Ok" | "Err") && call.args.len() == 1 {
+        let mut ctor_expected_hint_owned = if matches!(func_leaf_base, "Ok" | "Err")
+            && call.args.len() == 1
+        {
             let ctor_idx = if func_leaf_base == "Ok" { 0 } else { 1 };
             effective_resolved_hint.and_then(|hint| {
                 self.resolve_result_ctor_expected_type_from_ctor_arg(hint, ctor_idx, &call.args[0])
@@ -32321,13 +37538,13 @@ impl CodeGen {
             let fallback_err_ty: syn::Type = parse_quote!(());
             if let Some(resolved_hint) = ctor_expected_hint_owned
                 .as_ref()
-                .and_then(|hint| self.resolve_result_error_slot_from_expected(hint, &fallback_err_ty))
+                .and_then(|hint| {
+                    self.resolve_result_error_slot_from_expected(hint, &fallback_err_ty)
+                })
                 .or_else(|| {
-                    explicit_ctor_hint_owned
-                        .as_ref()
-                        .and_then(|hint| {
-                            self.resolve_result_error_slot_from_expected(hint, &fallback_err_ty)
-                        })
+                    explicit_ctor_hint_owned.as_ref().and_then(|hint| {
+                        self.resolve_result_error_slot_from_expected(hint, &fallback_err_ty)
+                    })
                 })
                 .or_else(|| {
                     effective_resolved_hint.and_then(|hint| {
@@ -32350,25 +37567,13 @@ impl CodeGen {
             })
             .or(ctor_expected_hint_owned.as_ref())
             .or(effective_resolved_hint);
-        if matches!(func_leaf_base, "Ok" | "Err")
-            && call.args.len() == 1
-            && let Some(hint) = ctor_expected_hint
-            && !explicit_ctor_hint_usable
-            && self.type_contains_infer(hint)
-        {
-            panic!(
-                "unresolved Result constructor type for {} call without concrete context",
-                func
-            );
-        }
         if func_leaf_base == "Ok" && call.args.len() == 1 {
             let ok_expected_ty = self.expected_result_type_arg(ctor_expected_hint, 0);
             let arg = if let Some(expected_ok) = ok_expected_ty
                 && matches!(
                     self.peel_paren_group_type(expected_ok),
                     syn::Type::Reference(_)
-                )
-            {
+                ) {
                 self.emit_result_ref_constructor_arg(&call.args[0], expected_ok)
             } else {
                 self.emit_expr_to_string_with_expected_and_move_if_needed(
@@ -32404,7 +37609,10 @@ impl CodeGen {
                             && !type_string_has_auto_placeholder(&t_mapped)
                             && !type_string_has_auto_placeholder(&e_mapped)
                         {
-                            return format!("rusty::Result<{}, {}>::Ok({})", t_mapped, e_mapped, arg);
+                            return format!(
+                                "rusty::Result<{}, {}>::Ok({})",
+                                t_mapped, e_mapped, arg
+                            );
                         }
                     }
                 }
@@ -32428,8 +37636,7 @@ impl CodeGen {
                 && matches!(
                     self.peel_paren_group_type(expected_err),
                     syn::Type::Reference(_)
-                )
-            {
+                ) {
                 self.emit_result_ref_constructor_arg(&call.args[0], expected_err)
             } else {
                 self.emit_expr_to_string_with_expected_and_move_if_needed(
@@ -32465,7 +37672,10 @@ impl CodeGen {
                             && !type_string_has_auto_placeholder(&t_mapped)
                             && !type_string_has_auto_placeholder(&e_mapped)
                         {
-                            return format!("rusty::Result<{}, {}>::Err({})", t_mapped, e_mapped, arg);
+                            return format!(
+                                "rusty::Result<{}, {}>::Err({})",
+                                t_mapped, e_mapped, arg
+                            );
                         }
                     }
                 }
@@ -32490,8 +37700,9 @@ impl CodeGen {
         }
 
         let callable_type_param_fallback = self.call_targets_callable_type_param(&call.func);
-        let mut call_type_substitutions =
-            self.function_call_type_arg_substitutions(call).unwrap_or_default();
+        let mut call_type_substitutions = self
+            .function_call_type_arg_substitutions(call)
+            .unwrap_or_default();
         if let Some(expected_substitutions) =
             self.call_owner_type_arg_substitutions_from_expected_type(call, expected_ty)
         {
@@ -32516,39 +37727,35 @@ impl CodeGen {
                 );
                 let expected_needs_owner_recovery =
                     arg_expected_ty.as_ref().is_some_and(|expected| {
-                    self.type_contains_infer(expected)
-                        || self.type_contains_in_scope_type_param(expected)
-                        || self.type_contains_unresolved_placeholder_like(expected)
-                        || self.type_contains_unbound_single_letter_generic(expected)
-                        || matches!(
-                            self.peel_reference_paren_group_type(expected),
-                            syn::Type::Path(tp)
-                                if tp.qself.is_none()
-                                    && tp.path.segments.len() == 1
-                                    && tp.path.segments[0]
-                                        .ident
-                                        .to_string()
-                                        .chars()
-                                        .next()
-                                        .is_some_and(|c| c.is_ascii_uppercase())
-                        )
-                });
+                        self.type_contains_infer(expected)
+                            || self.type_contains_in_scope_type_param(expected)
+                            || self.type_contains_unresolved_placeholder_like(expected)
+                            || self.type_contains_unbound_single_letter_generic(expected)
+                            || matches!(
+                                self.peel_reference_paren_group_type(expected),
+                                syn::Type::Path(tp)
+                                    if tp.qself.is_none()
+                                        && tp.path.segments.len() == 1
+                                        && tp.path.segments[0]
+                                            .ident
+                                            .to_string()
+                                            .chars()
+                                            .next()
+                                            .is_some_and(|c| c.is_ascii_uppercase())
+                            )
+                    });
                 let arg_is_closure =
                     matches!(self.peel_paren_group_expr(arg), syn::Expr::Closure(_));
                 let expected_closure_return_unknown = arg_is_closure
-                    && arg_expected_ty
-                        .as_ref()
-                        .is_some_and(|expected| {
-                            self.extract_callable_return_type_from_type(expected).is_none()
-                        });
+                    && arg_expected_ty.as_ref().is_some_and(|expected| {
+                        self.extract_callable_return_type_from_type(expected)
+                            .is_none()
+                    });
                 if (arg_expected_ty.is_none()
                     || expected_needs_owner_recovery
                     || expected_closure_return_unknown)
-                    && let Some(fallback) = self.lookup_associated_call_arg_expected_type_fallback(
-                        call,
-                        idx,
-                        Some(arg),
-                    )
+                    && let Some(fallback) =
+                        self.lookup_associated_call_arg_expected_type_fallback(call, idx, Some(arg))
                 {
                     let fallback = if let Some(substitutions) = call_type_substitutions.as_ref() {
                         self.substitute_type_params_in_type(&fallback, substitutions)
@@ -32571,6 +37778,13 @@ impl CodeGen {
                         fallback
                     };
                     arg_expected_ty = Some(fallback);
+                }
+                if arg_expected_ty.is_none() {
+                    arg_expected_ty = self.infer_tuple_struct_constructor_call_arg_expected_type(
+                        call,
+                        call_expected_ty,
+                        idx,
+                    );
                 }
                 let callable_bound_arg_intent =
                     self.lookup_callable_param_bound_arg_intent(&call.func, idx);
@@ -32653,7 +37867,10 @@ impl CodeGen {
         current
     }
 
-    fn option_reference_storage_cpp_type(&self, expected_inner_cpp: Option<&str>) -> Option<String> {
+    fn option_reference_storage_cpp_type(
+        &self,
+        expected_inner_cpp: Option<&str>,
+    ) -> Option<String> {
         let mut storage = expected_inner_cpp?.trim().to_string();
         while storage.ends_with('&') {
             storage.pop();
@@ -32725,21 +37942,16 @@ impl CodeGen {
         let arg = self.peel_single_expr_through_unsafe(arg);
         let expected_ref_ty = self.peel_paren_group_type(expected_ref_ty);
         let syn::Type::Reference(expected_ref) = expected_ref_ty else {
-            return self.emit_expr_to_string_with_expected_and_move_if_needed(
-                arg,
-                Some(expected_ref_ty),
-            );
+            return self
+                .emit_expr_to_string_with_expected_and_move_if_needed(arg, Some(expected_ref_ty));
         };
 
-        let arg_is_reference_typed = self
-            .infer_simple_expr_type(arg)
-            .as_ref()
-            .is_some_and(|ty| {
-                matches!(
-                    self.peel_reference_paren_group_type(ty),
-                    syn::Type::Reference(_)
-                )
-            });
+        let arg_is_reference_typed = self.infer_simple_expr_type(arg).as_ref().is_some_and(|ty| {
+            matches!(
+                self.peel_reference_paren_group_type(ty),
+                syn::Type::Reference(_)
+            )
+        });
         if self.is_expr_reference_like(arg)
             || self.is_stable_reference_lvalue_expr(arg)
             || self.expr_is_probable_reference_yielding_value(arg)
@@ -32845,7 +38057,13 @@ impl CodeGen {
         let owner = last.ident.to_string();
         if !matches!(
             owner.as_str(),
-            "Box" | "Rc" | "Arc" | "Ref" | "RefMut" | "MutexGuard" | "RwLockReadGuard"
+            "Box"
+                | "Rc"
+                | "Arc"
+                | "Ref"
+                | "RefMut"
+                | "MutexGuard"
+                | "RwLockReadGuard"
                 | "RwLockWriteGuard"
         ) {
             return None;
@@ -32874,10 +38092,86 @@ impl CodeGen {
         if matches!(first.as_str(), "crate" | "self" | "super") {
             return Some(last);
         }
+        if let Some(owner) = path.segments.iter().nth_back(1) {
+            let owner_name = owner.ident.to_string();
+            if matches!(owner_name.as_str(), "Either" | "EitherOrBoth")
+                || self.data_enum_types.contains(&owner_name)
+            {
+                return Some(last);
+            }
+        }
         None
     }
 
-    fn data_enum_variant_struct_type_name(&self, enum_path: &syn::Path, variant_name: &str) -> String {
+    fn try_emit_variant_constructor_callable(&self, path: &syn::Path) -> Option<String> {
+        let ctor_name = self.variant_ctor_name_from_path(path)?;
+        if !matches!(
+            path.segments.last().map(|seg| &seg.arguments),
+            Some(syn::PathArguments::None)
+        ) {
+            return None;
+        }
+
+        let mut recovered_args = self.lookup_constructor_template_args(&ctor_name);
+        if recovered_args.is_none() && path.segments.len() >= 2 {
+            if let Some(owner_seg) = path.segments.iter().nth_back(1)
+                && let syn::PathArguments::AngleBracketed(owner_args) = &owner_seg.arguments
+            {
+                let mapped_owner_args: Vec<String> = owner_args
+                    .args
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        syn::GenericArgument::Type(ty) => Some(self.map_type(ty)),
+                        syn::GenericArgument::Const(expr) => Some(self.emit_expr_to_string(expr)),
+                        _ => None,
+                    })
+                    .collect();
+                if !mapped_owner_args.is_empty() {
+                    recovered_args = Some(mapped_owner_args);
+                }
+            }
+        }
+        if recovered_args.is_none() && path.segments.len() >= 2 {
+            let mut owner_path = syn::Path {
+                leading_colon: path.leading_colon,
+                segments: syn::punctuated::Punctuated::new(),
+            };
+            for seg in path
+                .segments
+                .iter()
+                .take(path.segments.len().saturating_sub(1))
+            {
+                owner_path.segments.push(seg.clone());
+            }
+            recovered_args = self.recover_omitted_owner_generic_args_from_scope(&owner_path);
+        }
+        let recovered_args = recovered_args?;
+        if recovered_args.len() < 2 {
+            return None;
+        }
+
+        let owner_name = path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let ctor_cpp = if owner_name == "Either" {
+            format!("rusty::either::{}", ctor_name)
+        } else {
+            ctor_name
+        };
+        Some(format!(
+            "[](auto&& _v) {{ return {}<{}, {}>(std::forward<decltype(_v)>(_v)); }}",
+            ctor_cpp, recovered_args[0], recovered_args[1]
+        ))
+    }
+
+    fn data_enum_variant_struct_type_name(
+        &self,
+        enum_path: &syn::Path,
+        variant_name: &str,
+    ) -> String {
         let mut enum_base_path = enum_path.clone();
         if let Some(last) = enum_base_path.segments.last_mut() {
             last.arguments = syn::PathArguments::None;
@@ -32915,6 +38209,21 @@ impl CodeGen {
             self.recover_omitted_local_generic_type_args(&enum_base_path, &variant_base)
         {
             return recovered;
+        }
+        if let Some(type_key) = self.declared_type_key_for_path(&enum_base_path)
+            && let Some(params) = self.declared_type_params.get(&type_key)
+            && !params.is_empty()
+        {
+            let ordered_scope_params = self.ordered_type_params_in_scope();
+            if ordered_scope_params.len() >= params.len() {
+                let recovered_args: Vec<String> = ordered_scope_params
+                    .into_iter()
+                    .take(params.len())
+                    .collect();
+                if !recovered_args.is_empty() {
+                    return format!("{}<{}>", variant_base, recovered_args.join(", "));
+                }
+            }
         }
         variant_base
     }
@@ -33097,7 +38406,9 @@ impl CodeGen {
             if self.lookup_local_binding_cpp_name(&last).is_some() {
                 return None;
             }
-            if self.lookup_local_binding_type(&last).is_some() || self.is_local_type_name_in_scope(&last) {
+            if self.lookup_local_binding_type(&last).is_some()
+                || self.is_local_type_name_in_scope(&last)
+            {
                 return None;
             }
             self.is_local_function_name_in_scope(&last)
@@ -33294,14 +38605,46 @@ impl CodeGen {
             return None;
         }
 
-        let args = self.lookup_constructor_template_args(&ctor_name)?;
+        let args = self
+            .lookup_constructor_template_args(&ctor_name)
+            .or_else(|| {
+                if func_path.segments.len() < 2 {
+                    return None;
+                }
+                let mut owner_path = syn::Path {
+                    leading_colon: func_path.leading_colon,
+                    segments: syn::punctuated::Punctuated::new(),
+                };
+                for seg in func_path
+                    .segments
+                    .iter()
+                    .take(func_path.segments.len().saturating_sub(1))
+                {
+                    owner_path.segments.push(seg.clone());
+                }
+                self.recover_omitted_owner_generic_args_from_scope(&owner_path)
+            })?;
+        if args.len() < 2 {
+            return None;
+        }
         let target_cpp_ty = if ctor_name == "Left" {
             args[0].as_str()
         } else {
             args[1].as_str()
         };
         let arg = self.emit_from_conversion_to_target(&call.args[0], target_cpp_ty);
-        Some(format!("{}<{}, {}>({})", ctor_name, args[0], args[1], arg))
+        let owner_name = func_path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let ctor_cpp = if owner_name == "Either" {
+            format!("rusty::either::{}", ctor_name)
+        } else {
+            ctor_name
+        };
+        Some(format!("{}<{}, {}>({})", ctor_cpp, args[0], args[1], arg))
     }
 
     fn try_emit_variant_constructor_call_with_template_args(
@@ -33412,6 +38755,82 @@ impl CodeGen {
             })
             .collect();
         Some(format!("{}({})", emit_fn, args.join(", ")))
+    }
+
+    fn try_emit_trait_ufcs_by_value_receiver_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let func_path = match call.func.as_ref() {
+            syn::Expr::Path(path) => &path.path,
+            _ => return None,
+        };
+        if func_path.segments.len() < 2 || call.args.is_empty() {
+            return None;
+        }
+        if matches!(call.args.first(), Some(syn::Expr::Reference(_))) {
+            return None;
+        }
+
+        let method_name = func_path.segments.last()?.ident.to_string();
+        let owner_segments: Vec<String> = func_path
+            .segments
+            .iter()
+            .take(func_path.segments.len().saturating_sub(1))
+            .map(|seg| seg.ident.to_string())
+            .collect();
+        let owner_leaf = owner_segments.last()?.to_string();
+        let owner_path = owner_segments.join("::");
+
+        // In module/expanded modes, local trait runtime helpers are emitted as
+        // concrete helper structs. Keep UFCS calls targeting those helpers in
+        // associated-call form (`Trait::method(self, ...)`) to avoid rewriting
+        // into self-recursive receiver calls (`self.method(...)`).
+        let key_scoped = format!("{}::{}", owner_path, method_name);
+        let key_unscoped = format!("{}::{}", owner_leaf, method_name);
+        let is_runtime_helper_method = (self.module_name.is_some() || self.expanded_libtest_mode)
+            && (self.module_runtime_helper_traits.contains(&owner_leaf)
+                || self.module_runtime_helper_traits.contains(&owner_path))
+            && (self.trait_method_has_receiver.contains_key(&key_scoped)
+                || self.trait_method_has_receiver.contains_key(&key_unscoped));
+        if is_runtime_helper_method {
+            return None;
+        }
+
+        if self.local_declared_types.contains(&owner_leaf) {
+            return None;
+        }
+        if matches!(
+            self.lookup_owner_method_has_receiver(&owner_leaf, &method_name),
+            Some(false)
+        ) {
+            return None;
+        }
+        let has_receiver = self
+            .trait_method_has_receiver
+            .get(&key_scoped)
+            .copied()
+            .or_else(|| self.trait_method_has_receiver.get(&key_unscoped).copied())
+            .unwrap_or(false);
+        if !has_receiver {
+            return None;
+        }
+
+        // Constructor-like/static methods should stay associated calls.
+        if matches!(method_name.as_str(), "new" | "new_" | "from" | "try_from") {
+            return None;
+        }
+
+        let receiver = self.emit_expr_maybe_move(call.args.first()?);
+        let method = escape_cpp_keyword(&method_name);
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .skip(1)
+            .map(|arg| self.emit_expr_maybe_move(arg))
+            .collect();
+        if args.is_empty() {
+            Some(format!("({}).{}()", receiver, method))
+        } else {
+            Some(format!("({}).{}({})", receiver, method, args.join(", ")))
+        }
     }
 
     /// Detect UFCS trait method calls in the form `Trait::method(&self, args...)`
@@ -33525,7 +38944,27 @@ impl CodeGen {
             return None;
         }
 
-        let expected_args = self.expected_type_template_args(expected_ty)?;
+        let mut expected_args = self
+            .expected_type_template_args(expected_ty)
+            .unwrap_or_default();
+        if expected_args.is_empty() {
+            let mut owner_path = syn::Path {
+                leading_colon: func_path.leading_colon,
+                segments: syn::punctuated::Punctuated::new(),
+            };
+            for seg in func_path
+                .segments
+                .iter()
+                .take(func_path.segments.len().saturating_sub(1))
+            {
+                owner_path.segments.push(seg.clone());
+            }
+            if let Some(recovered) = self.recover_omitted_owner_generic_args_from_scope(&owner_path)
+                && !recovered.is_empty()
+            {
+                expected_args = recovered;
+            }
+        }
         if expected_args.is_empty() {
             return None;
         }
@@ -33533,6 +38972,9 @@ impl CodeGen {
             func_path.segments.last().map(|s| &s.arguments),
             Some(syn::PathArguments::None)
         ) {
+            return None;
+        }
+        if expected_args.len() < 2 {
             return None;
         }
         let target_cpp_ty = if ctor_name == "Left" {
@@ -33548,13 +38990,12 @@ impl CodeGen {
             .map(|a| self.emit_from_conversion_to_target(a, target_cpp_ty))
             .collect();
 
-        let ctor_cpp = if is_left_or_right_ctor
-            && self.map_type(expected_ty).starts_with("rusty::Either<")
-        {
-            format!("rusty::either::{}", ctor_name)
-        } else {
-            ctor_name.clone()
-        };
+        let ctor_cpp =
+            if is_left_or_right_ctor && self.map_type(expected_ty).starts_with("rusty::Either<") {
+                format!("rusty::either::{}", ctor_name)
+            } else {
+                ctor_name.clone()
+            };
 
         Some(format!(
             "{}<{}>({})",
@@ -33662,8 +39103,10 @@ impl CodeGen {
                         return mapped;
                     }
                     if let Some(local_ty) = self.lookup_local_binding_type(&name) {
-                        if matches!(self.peel_paren_group_type(&local_ty), syn::Type::Reference(_))
-                        {
+                        if matches!(
+                            self.peel_paren_group_type(&local_ty),
+                            syn::Type::Reference(_)
+                        ) {
                             return format!("&{}", mapped);
                         }
                         return mapped;
@@ -33674,10 +39117,7 @@ impl CodeGen {
                     return escape_cpp_keyword(&name);
                 }
                 if self.lookup_local_binding_type(&name).is_some_and(|ty| {
-                    matches!(
-                        self.peel_paren_group_type(&ty),
-                        syn::Type::Reference(_)
-                    )
+                    matches!(self.peel_paren_group_type(&ty), syn::Type::Reference(_))
                 }) {
                     return format!("&{}", escape_cpp_keyword(&name));
                 }
@@ -33686,6 +39126,79 @@ impl CodeGen {
             syn::Expr::Paren(paren) => self.emit_rebind_reference_assignment_rhs(&paren.expr),
             syn::Expr::Group(group) => self.emit_rebind_reference_assignment_rhs(&group.expr),
             _ => self.emit_expr_to_string(rhs),
+        }
+    }
+
+    fn emit_cast_expr_to_string_with_target_override(
+        &self,
+        cast: &syn::ExprCast,
+        target_ty_override: Option<&syn::Type>,
+    ) -> String {
+        let expr = self.emit_expr_to_string(&cast.expr);
+        let ty = target_ty_override
+            .map(|ty| self.map_type(ty))
+            .unwrap_or_else(|| self.map_type(&cast.ty));
+        let target_is_pointer_type =
+            matches!(target_ty_override, Some(syn::Type::Ptr(_)))
+                || matches!(cast.ty.as_ref(), syn::Type::Ptr(_))
+                || ty.ends_with('*');
+        let target_normalized = ty.trim_start_matches("const ").trim_end_matches('&').trim();
+        let target_is_numeric_scalar = is_numeric_cpp_scalar_type(target_normalized);
+        let source_is_raw_pointer_type = self.is_expr_raw_pointer_like(&cast.expr);
+        let source_is_explicit_reference =
+            matches!(self.peel_paren_group_expr(&cast.expr), syn::Expr::Reference(_));
+        let source_is_reference_like = self.is_expr_reference_like(&cast.expr);
+        if type_string_has_auto_placeholder(&ty) {
+            if target_is_pointer_type
+                && self.is_expr_reference_like(&cast.expr)
+                && !source_is_explicit_reference
+            {
+                format!("&{}", expr)
+            } else {
+                expr
+            }
+        } else if target_is_pointer_type && source_is_raw_pointer_type && !source_is_explicit_reference
+        {
+            let target_is_mut_ptr = match target_ty_override {
+                Some(syn::Type::Ptr(p)) => p.mutability.is_some(),
+                _ => matches!(cast.ty.as_ref(), syn::Type::Ptr(p) if p.mutability.is_some()),
+            };
+            let target_pointee_str = ty.trim_end_matches('*').trim();
+            if target_is_mut_ptr
+                && let Some(const_ty) = Self::pointer_const_cast_target_cpp_type(&ty)
+            {
+                format!(
+                    "const_cast<{}>(reinterpret_cast<{}>({}))",
+                    ty, const_ty, expr
+                )
+            } else if target_is_mut_ptr && !target_pointee_str.starts_with("const ") {
+                let const_ty = format!("const {}*", target_pointee_str);
+                format!(
+                    "const_cast<{}>(reinterpret_cast<{}>({}))",
+                    ty, const_ty, expr
+                )
+            } else {
+                format!("reinterpret_cast<{}>({})", ty, expr)
+            }
+        } else if target_is_pointer_type
+            && self.is_expr_reference_like(&cast.expr)
+            && !source_is_explicit_reference
+        {
+            format!("static_cast<{}>(&{})", ty, expr)
+        } else if target_is_pointer_type && !source_is_raw_pointer_type && !source_is_reference_like
+        {
+            format!(
+                "reinterpret_cast<{}>(static_cast<std::uintptr_t>({}))",
+                ty, expr
+            )
+        } else if target_is_numeric_scalar && (source_is_raw_pointer_type || source_is_reference_like)
+        {
+            format!(
+                "static_cast<{}>(reinterpret_cast<std::uintptr_t>({}))",
+                ty, expr
+            )
+        } else {
+            format!("static_cast<{}>({})", ty, expr)
         }
     }
 
@@ -33815,10 +39328,19 @@ impl CodeGen {
                     let emitted_member = match &f.member {
                         syn::Member::Named(ident) => {
                             let rust_name = ident.to_string();
-                            self.current_struct
+                            let mut emitted = self
+                                .current_struct
                                 .as_ref()
                                 .and_then(|s| self.lookup_struct_field_cpp_name(s, &rust_name))
-                                .unwrap_or_else(|| escape_cpp_keyword(&rust_name))
+                                .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                            if rust_name == "end"
+                                && self.lookup_local_binding_type("self").is_some_and(|ty| {
+                                    self.type_is_range_with_private_end_field(&ty)
+                                })
+                            {
+                                emitted = "end_".to_string();
+                            }
+                            emitted
                         }
                         syn::Member::Unnamed(idx) => format!("_{}", idx.index),
                     };
@@ -33831,21 +39353,27 @@ impl CodeGen {
                     }
                 } else {
                     let base = self.emit_expr_to_string(&f.base);
-                    let base_for_field = if self.expr_base_needs_explicit_deref_for_field_access(&f.base) {
-                        if self.method_receiver_needs_parentheses(&f.base) {
-                            format!("(*({}))", base)
+                    let base_for_field =
+                        if self.expr_base_needs_explicit_deref_for_field_access(&f.base) {
+                            if self.method_receiver_needs_parentheses(&f.base) {
+                                format!("(*({}))", base)
+                            } else {
+                                format!("(*{})", base)
+                            }
                         } else {
-                            format!("(*{})", base)
-                        }
-                    } else {
-                        base.clone()
-                    };
+                            base.clone()
+                        };
                     match &f.member {
                         syn::Member::Named(ident) => {
                             let rust_name = ident.to_string();
-                            let emitted = self
+                            let mut emitted = self
                                 .lookup_field_cpp_name_for_expr_base(&f.base, &rust_name)
                                 .unwrap_or_else(|| escape_cpp_keyword(&rust_name));
+                            if rust_name == "end"
+                                && self.expr_base_is_range_with_private_end_field(&f.base)
+                            {
+                                emitted = "end_".to_string();
+                            }
                             format!("{}.{}", base_for_field, emitted)
                         }
                         syn::Member::Unnamed(idx) => {
@@ -33930,20 +39458,20 @@ impl CodeGen {
                         if self.is_delayed_init_local(&name) {
                             delayed_init_local = Some(name.clone());
                         }
-                        self.lookup_local_binding_type(&name)
+                        self.lookup_local_binding_type(&name).map(|local_ty| {
+                            self.expected_reference_inner_type(Some(&local_ty))
+                                .cloned()
+                                .unwrap_or(local_ty)
+                        })
                     }
-                    syn::Expr::Field(field_expr) => {
-                        match &field_expr.member {
-                            syn::Member::Named(member) => self
-                                .lookup_field_type_for_expr_base(
-                                    &field_expr.base,
-                                    &member.to_string(),
-                                ),
-                            syn::Member::Unnamed(_) => None,
-                        }
-                    }
+                    syn::Expr::Field(field_expr) => match &field_expr.member {
+                        syn::Member::Named(member) => self
+                            .lookup_field_type_for_expr_base(&field_expr.base, &member.to_string()),
+                        syn::Member::Unnamed(_) => None,
+                    },
                     _ => None,
-                };
+                }
+                .or_else(|| self.infer_simple_expr_type(&a.left));
                 let right = self.emit_expr_to_string_with_expected(&a.right, expected_ty.as_ref());
                 if let Some(name) = delayed_init_local {
                     let left = self
@@ -33960,83 +39488,7 @@ impl CodeGen {
                 let inner = self.emit_expr_to_string(&p.expr);
                 format!("({})", inner)
             }
-            syn::Expr::Cast(c) => {
-                let expr = self.emit_expr_to_string(&c.expr);
-                let ty = self.map_type(&c.ty);
-                let target_is_pointer_type =
-                    matches!(c.ty.as_ref(), syn::Type::Ptr(_)) || ty.ends_with('*');
-                let target_normalized =
-                    ty.trim_start_matches("const ").trim_end_matches('&').trim();
-                let target_is_numeric_scalar = is_numeric_cpp_scalar_type(target_normalized);
-                let source_is_raw_pointer_type = self.is_expr_raw_pointer_like(&c.expr);
-                let source_is_explicit_reference =
-                    matches!(self.peel_paren_group_expr(&c.expr), syn::Expr::Reference(_));
-                let source_is_reference_like = self.is_expr_reference_like(&c.expr);
-                if type_string_has_auto_placeholder(&ty) {
-                    if target_is_pointer_type
-                        && self.is_expr_reference_like(&c.expr)
-                        && !source_is_explicit_reference
-                    {
-                        format!("&{}", expr)
-                    } else {
-                        expr
-                    }
-                } else if target_is_pointer_type
-                    && source_is_raw_pointer_type
-                    && !source_is_explicit_reference
-                {
-                    // Detect `*const T as *mut T` pattern: Rust allows casting away
-                    // const on raw pointers, but C++ reinterpret_cast cannot.
-                    // Use const_cast to strip const when target is a mutable pointer.
-                    let target_is_mut_ptr =
-                        matches!(c.ty.as_ref(), syn::Type::Ptr(p) if p.mutability.is_some());
-                    let target_pointee_str = ty.trim_end_matches('*').trim();
-                    if target_is_mut_ptr
-                        && let Some(const_ty) = Self::pointer_const_cast_target_cpp_type(&ty)
-                    {
-                        // E.g. `*const u8 as *mut u8`:
-                        // `ty = uint8_t*` -> const target `const uint8_t*`.
-                        // For hardened pointer aliases (e.g. `std::add_pointer_t<T>`),
-                        // use `std::add_pointer_t<std::add_const_t<T>>` instead of
-                        // adding an extra `*` layer.
-                        format!(
-                            "const_cast<{}>(reinterpret_cast<{}>({}))",
-                            ty, const_ty, expr
-                        )
-                    } else if target_is_mut_ptr && !target_pointee_str.starts_with("const ") {
-                        // Fallback for plain pointer spellings.
-                        let const_ty = format!("const {}*", target_pointee_str);
-                        format!(
-                            "const_cast<{}>(reinterpret_cast<{}>({}))",
-                            ty, const_ty, expr
-                        )
-                    } else {
-                        format!("reinterpret_cast<{}>({})", ty, expr)
-                    }
-                } else if target_is_pointer_type
-                    && self.is_expr_reference_like(&c.expr)
-                    && !source_is_explicit_reference
-                {
-                    format!("static_cast<{}>(&{})", ty, expr)
-                } else if target_is_pointer_type
-                    && !source_is_raw_pointer_type
-                    && !source_is_reference_like
-                {
-                    format!(
-                        "reinterpret_cast<{}>(static_cast<std::uintptr_t>({}))",
-                        ty, expr
-                    )
-                } else if target_is_numeric_scalar
-                    && (source_is_raw_pointer_type || source_is_reference_like)
-                {
-                    format!(
-                        "static_cast<{}>(reinterpret_cast<std::uintptr_t>({}))",
-                        ty, expr
-                    )
-                } else {
-                    format!("static_cast<{}>({})", ty, expr)
-                }
-            }
+            syn::Expr::Cast(c) => self.emit_cast_expr_to_string_with_target_override(c, None),
             syn::Expr::Index(idx) => {
                 if let Some(slice_expr) = self.try_emit_slice_index_expr_to_string(idx, None) {
                     return slice_expr;
@@ -34046,9 +39498,7 @@ impl CodeGen {
                 {
                     return unreachable_expr;
                 }
-                let base = self.emit_expr_to_string(&idx.expr);
-                let index = self.emit_expr_to_string(&idx.index);
-                format!("{}[{}]", base, index)
+                self.emit_index_expr_to_string(idx, None)
             }
             syn::Expr::Tuple(tup) => {
                 let tuple_expected_ty = self.infer_expected_type_from_tuple_elements(&tup.elems);
@@ -35151,55 +40601,9 @@ impl CodeGen {
 
     /// Emit a single statement as a string (for use inside IIFE blocks).
     fn emit_stmt_to_string(&self, stmt: &syn::Stmt) -> String {
-        match stmt {
-            syn::Stmt::Expr(expr, Some(_semi)) => {
-                let expr_str = self.emit_expr_to_string(expr);
-                format!("{};", expr_str)
-            }
-            syn::Stmt::Expr(expr, None) => {
-                // Tail expression — emit as return
-                let expr_str = self.emit_expr_to_string(expr);
-                format!("return {};", expr_str)
-            }
-            syn::Stmt::Local(local) => {
-                // let binding
-                let mut result = String::new();
-                let pat_name = match &local.pat {
-                    syn::Pat::Ident(pi) => {
-                        let name = escape_cpp_keyword(&pi.ident.to_string());
-                        if pi.mutability.is_some() {
-                            format!("auto {}", name)
-                        } else {
-                            format!("const auto {}", name)
-                        }
-                    }
-                    syn::Pat::Tuple(pt) => {
-                        let bindings: Vec<String> = pt
-                            .elems
-                            .iter()
-                            .map(|p| match p {
-                                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
-                                _ => "_".to_string(),
-                            })
-                            .collect();
-                        format!("auto [{}]", bindings.join(", "))
-                    }
-                    _ => "auto _".to_string(),
-                };
-                if let Some(init) = &local.init {
-                    let init_str = self.emit_expr_to_string(&init.expr);
-                    result.push_str(&format!("{} = {};", pat_name, init_str));
-                } else {
-                    result.push_str(&format!("{};", pat_name));
-                }
-                result
-            }
-            syn::Stmt::Item(_) => String::new(), // Skip items inside expression blocks
-            syn::Stmt::Macro(m) => {
-                let mac_str = self.emit_macro_expr(&m.mac);
-                format!("{};", mac_str)
-            }
-        }
+        let mut inner = self.new_inner_for_block();
+        inner.emit_stmt(stmt, false);
+        inner.output.trim().to_string()
     }
 
     fn emit_if_let_expr_to_string(
@@ -35214,8 +40618,16 @@ impl CodeGen {
         };
         let then_expr = self.extract_single_expr_from_block(then_branch)?;
         let else_expr = self.extract_single_value_expr(else_expr_box.as_ref())?;
-        let (cond_expr, binding_name, unwrap_method) =
-            self.if_let_expr_condition_parts(let_expr)?;
+        let Some((cond_expr, binding_name, unwrap_method)) =
+            self.if_let_expr_condition_parts(let_expr)
+        else {
+            return self.emit_if_let_expr_runtime_pattern_to_string(
+                let_expr,
+                then_expr,
+                else_expr,
+                expected_ty,
+            );
+        };
 
         let inferred_expected_ty = if expected_ty.is_none() && binding_name.is_none() {
             self.infer_constructor_expected_type_from_pair(then_expr, else_expr)
@@ -35261,6 +40673,78 @@ impl CodeGen {
         Some(format!(
             "[&]() {{ auto&& _iflet = {}; return ({} ? {} : {}); }}()",
             scrutinee, cond_expr, then_value, else_value
+        ))
+    }
+
+    fn emit_if_let_expr_runtime_pattern_to_string(
+        &self,
+        let_expr: &syn::ExprLet,
+        then_expr: &syn::Expr,
+        else_expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let scrutinee = self.emit_expr_to_string(&let_expr.expr);
+        let variant_ctx = self.infer_variant_type_context_from_expr(&let_expr.expr);
+        let mut binding_stmts = Vec::new();
+        let mut binding_map = HashMap::new();
+        let cond_expr = self
+            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                &let_expr.pat,
+                "_iflet",
+                &mut binding_stmts,
+                &mut binding_map,
+                variant_ctx.as_ref(),
+            )?
+            .unwrap_or_else(|| "true".to_string());
+
+        let inferred_expected_ty = if expected_ty.is_none() {
+            self.infer_constructor_expected_type_from_pair(then_expr, else_expr)
+        } else {
+            None
+        };
+        let branch_expected_ty = expected_ty.or(inferred_expected_ty.as_ref());
+
+        let then_value = if binding_map.is_empty() {
+            self.emit_expr_to_string_with_expected(then_expr, branch_expected_ty)
+        } else {
+            let mut inner = self.new_inner_for_block();
+            inner.local_cpp_bindings.push(binding_map.clone());
+            let mut local_types = HashMap::new();
+            let mut local_consts = HashMap::new();
+            for rust_name in binding_map.keys() {
+                local_types.insert(rust_name.clone(), None);
+                local_consts.insert(rust_name.clone(), false);
+            }
+            inner.local_bindings.push(local_types);
+            inner.local_shadowed_binding_types.push(HashMap::new());
+            inner.local_const_bindings.push(local_consts);
+            inner.local_reference_bindings.push(HashSet::new());
+            let emitted = inner.emit_expr_to_string_with_expected(then_expr, branch_expected_ty);
+            inner.local_reference_bindings.pop();
+            inner.local_const_bindings.pop();
+            inner.local_shadowed_binding_types.pop();
+            inner.local_bindings.pop();
+            inner.local_cpp_bindings.pop();
+            emitted
+        };
+
+        let else_value = match else_expr {
+            syn::Expr::If(else_if) => self.emit_if_expr_to_string(else_if, branch_expected_ty),
+            _ => self.emit_expr_to_string_with_expected(else_expr, branch_expected_ty),
+        };
+
+        let lambda_return_annotation =
+            self.expected_lambda_return_annotation(branch_expected_ty, false);
+
+        let bindings_prefix = if binding_stmts.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", binding_stmts.join(" "))
+        };
+
+        Some(format!(
+            "[&](){} {{ auto&& _iflet = {}; if ({}) {{ {}return {}; }} return {}; }}()",
+            lambda_return_annotation, scrutinee, cond_expr, bindings_prefix, then_value, else_value
         ))
     }
 
@@ -35435,6 +40919,7 @@ impl CodeGen {
             &method,
             0,
             declared_expected,
+            mc.args.first(),
         );
         let inferred_expected =
             if declared_expected.is_none() && inferred_expected_from_receiver.is_none() {
@@ -35647,6 +41132,9 @@ impl CodeGen {
     }
 
     fn should_bridge_into_iter_receiver_to_iter(&self, receiver: &syn::Expr) -> bool {
+        if self.receiver_is_fixed_array_like_expr(receiver) {
+            return true;
+        }
         if self.is_iterator_like_receiver_expr(receiver)
             || self.is_probably_iterator_receiver_expr(receiver)
         {
@@ -35667,6 +41155,9 @@ impl CodeGen {
     }
 
     fn should_bridge_direct_into_iter_receiver_to_iter(&self, receiver: &syn::Expr) -> bool {
+        if self.receiver_is_fixed_array_like_expr(receiver) {
+            return true;
+        }
         if self.is_iterator_like_receiver_expr(receiver)
             || self.is_probably_iterator_receiver_expr(receiver)
         {
@@ -35683,6 +41174,60 @@ impl CodeGen {
             return false;
         }
         self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+    }
+
+    fn receiver_is_fixed_array_like_expr(&self, receiver: &syn::Expr) -> bool {
+        match self.peel_paren_group_expr(receiver) {
+            syn::Expr::Array(_) | syn::Expr::Repeat(_) => true,
+            syn::Expr::Reference(reference) => {
+                self.receiver_is_fixed_array_like_expr(&reference.expr)
+            }
+            syn::Expr::Paren(paren) => self.receiver_is_fixed_array_like_expr(&paren.expr),
+            syn::Expr::Group(group) => self.receiver_is_fixed_array_like_expr(&group.expr),
+            _ => self.infer_simple_expr_type(receiver).is_some_and(|ty| {
+                matches!(
+                    self.peel_reference_paren_group_type(&ty),
+                    syn::Type::Array(_)
+                )
+            }),
+        }
+    }
+
+    fn try_emit_fixed_array_map_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if mc.method != "map" || mc.args.len() != 1 {
+            return None;
+        }
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
+            return None;
+        }
+        let expected_array = self.expected_fixed_array_type(expected_ty);
+        if !self.receiver_is_fixed_array_like_expr(&mc.receiver) && expected_array.is_none() {
+            return None;
+        }
+
+        let receiver_expected_owned = self.infer_simple_expr_type(&mc.receiver);
+        let receiver =
+            self.emit_expr_to_string_with_expected(&mc.receiver, receiver_expected_owned.as_ref());
+        let mapper_arg = self.peel_paren_group_expr(mc.args.first()?);
+        let expected_return_ty = expected_array.map(|(elem_ty, _)| (*elem_ty).clone());
+        let expected_return_rt =
+            expected_return_ty.map(|ty| syn::ReturnType::Type(Default::default(), Box::new(ty)));
+        let mapper = if let syn::Expr::Closure(closure) = mapper_arg {
+            let map_param_scope = self.collect_closure_param_names_for_scope(closure);
+            self.emit_closure_to_string_with_param_scopes(
+                closure,
+                Some(map_param_scope),
+                None,
+                expected_return_rt.as_ref(),
+            )
+        } else {
+            self.emit_call_arg_with_pass_style(mc.args.first()?, None, None, false, None)
+        };
+        Some(format!("rusty::map({}, {})", receiver, mapper))
     }
 
     fn try_emit_iter_map_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
@@ -35725,7 +41270,7 @@ impl CodeGen {
         let mapper = if let syn::Expr::Closure(closure) = mapper_arg {
             self.emit_closure_to_string_with_iterator_map_context(closure)
         } else {
-            self.emit_expr_maybe_move(mc.args.first()?)
+            self.emit_call_arg_with_pass_style(mc.args.first()?, None, None, false, None)
         };
         Some(format!("rusty::map({}, {})", receiver, mapper))
     }
@@ -35764,6 +41309,19 @@ impl CodeGen {
         let init = self.emit_expr_maybe_move(mc.args.first()?);
         let reducer = self.emit_expr_maybe_move(mc.args.iter().nth(1)?);
         Some(format!("rusty::fold({}, {}, {})", receiver, init, reducer))
+    }
+
+    fn try_emit_iter_try_fold_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "try_fold" || mc.args.len() != 2 {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let init = self.emit_expr_maybe_move(mc.args.first()?);
+        let reducer = self.emit_expr_maybe_move(mc.args.iter().nth(1)?);
+        Some(format!(
+            "rusty::try_fold({}, {}, {})",
+            receiver, init, reducer
+        ))
     }
 
     fn try_emit_iter_all_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
@@ -35809,8 +41367,10 @@ impl CodeGen {
             syn::Expr::Path(path)
                 if path.path.segments.len() == 1 && path.path.segments[0].ident == "self"
         );
-        let receiver_is_self_iterator =
-            receiver_is_self_path && self.lookup_current_struct_method_return_type("next").is_some();
+        let receiver_is_self_iterator = receiver_is_self_path
+            && self
+                .lookup_current_struct_method_return_type("next")
+                .is_some();
         if !receiver_is_self_iterator
             && !self.is_iterator_like_receiver_expr(&mc.receiver)
             && !self.is_probably_iterator_receiver_expr(&mc.receiver)
@@ -35903,7 +41463,10 @@ impl CodeGen {
             return None;
         }
         let expected_ty = expected_ty?;
-        if self.expected_array_element_type(Some(expected_ty)).is_none() {
+        if self
+            .expected_array_element_type(Some(expected_ty))
+            .is_none()
+        {
             return None;
         }
         let syn::Expr::Path(path_expr) = call.func.as_ref() else {
@@ -36028,6 +41591,25 @@ impl CodeGen {
         Some(self.match_expr_unreachable_fallback_with_expected(expected_ty))
     }
 
+    fn expr_indexes_fixed_array(&self, expr: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(expr)
+            .is_some_and(|ty| matches!(self.peel_reference_paren_group_type(&ty), syn::Type::Array(_)))
+    }
+
+    fn emit_index_expr_to_string(
+        &self,
+        idx: &syn::ExprIndex,
+        _expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let base = self.emit_expr_to_string(&idx.expr);
+        let index = self.emit_expr_to_string(&idx.index);
+        if self.expr_indexes_fixed_array(&idx.expr) {
+            format!("{}.at({})", base, index)
+        } else {
+            format!("{}[{}]", base, index)
+        }
+    }
+
     fn is_range_expression(expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Range(_) => true,
@@ -36053,22 +41635,22 @@ impl CodeGen {
             }
         }
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
+        if self.switch_match_can_use_value_lowering(match_expr, variant_ctx.as_ref()) {
+            let scrutinee =
+                self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
+            return format!(
+                "[&]() {{ auto&& _m = {}; {} }}()",
+                scrutinee,
+                self.emit_match_expr_switch(&match_expr.arms, expected_ty)
+            );
+        }
         if let Some(runtime_expr) =
             self.emit_runtime_match_expr(match_expr, variant_ctx.as_ref(), expected_ty)
         {
             return runtime_expr;
         }
         // Match as expression → immediately-invoked lambda
-        if self.all_arms_are_switch_compatible(&match_expr.arms, variant_ctx.as_ref()) {
-            let scrutinee =
-                self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
-            // Simple switch-like match → ternary chain or IIFE with switch
-            format!(
-                "[&]() {{ auto&& _m = {}; {} }}()",
-                scrutinee,
-                self.emit_match_expr_switch(&match_expr.arms, expected_ty)
-            )
-        } else if let syn::Expr::Tuple(tuple_scrutinee) = match_expr.expr.as_ref() {
+        if let syn::Expr::Tuple(tuple_scrutinee) = match_expr.expr.as_ref() {
             if self.tuple_match_can_lower_as_value_conditions(
                 &match_expr.arms,
                 tuple_scrutinee.elems.len(),
@@ -36180,15 +41762,48 @@ impl CodeGen {
         inner.local_cpp_bindings.push(binding_map.clone());
         let mut binding_types = HashMap::new();
         let mut binding_consts = HashMap::new();
+        let mut binding_refs = HashSet::new();
         for rust_name in binding_map.keys() {
             binding_types.insert(rust_name.clone(), None);
             binding_consts.insert(rust_name.clone(), false);
+            binding_refs.insert(rust_name.clone());
         }
         inner.local_bindings.push(binding_types);
         inner.local_shadowed_binding_types.push(HashMap::new());
         inner.local_const_bindings.push(binding_consts);
-        inner.local_reference_bindings.push(HashSet::new());
+        inner.local_reference_bindings.push(binding_refs);
         inner
+    }
+
+    fn push_local_cpp_binding_scope(&mut self, binding_map: &HashMap<String, String>) -> bool {
+        if binding_map.is_empty() {
+            return false;
+        }
+        self.local_cpp_bindings.push(binding_map.clone());
+        let mut binding_types = HashMap::new();
+        let mut binding_consts = HashMap::new();
+        let mut binding_refs = HashSet::new();
+        for rust_name in binding_map.keys() {
+            binding_types.insert(rust_name.clone(), None);
+            binding_consts.insert(rust_name.clone(), false);
+            binding_refs.insert(rust_name.clone());
+        }
+        self.local_bindings.push(binding_types);
+        self.local_shadowed_binding_types.push(HashMap::new());
+        self.local_const_bindings.push(binding_consts);
+        self.local_reference_bindings.push(binding_refs);
+        true
+    }
+
+    fn pop_local_cpp_binding_scope(&mut self, pushed: bool) {
+        if !pushed {
+            return;
+        }
+        self.local_reference_bindings.pop();
+        self.local_const_bindings.pop();
+        self.local_shadowed_binding_types.pop();
+        self.local_bindings.pop();
+        self.local_cpp_bindings.pop();
     }
 
     fn emit_try_style_return_flow_block_statement(
@@ -36282,6 +41897,7 @@ impl CodeGen {
         &self,
         pat: &syn::Pat,
         variant_ctx: Option<&VariantTypeContext>,
+        scrutinee_var: &str,
         matched_var: &str,
     ) -> Option<(
         String,
@@ -36297,7 +41913,10 @@ impl CodeGen {
                     return None;
                 }
                 let mut binding_map = HashMap::new();
-                let mut stmts = vec![format!("auto {} = _m.{}();", matched_var, unwrap_method)];
+                let mut stmts = vec![format!(
+                    "auto {} = {}.{}();",
+                    matched_var, scrutinee_var, unwrap_method
+                )];
                 if !self.collect_pattern_binding_stmts_with_cpp_name_map(
                     &ts.elems[0],
                     matched_var,
@@ -36307,7 +41926,7 @@ impl CodeGen {
                     return None;
                 }
                 Some((
-                    format!("_m.{}()", cond_method),
+                    format!("{}.{}()", scrutinee_var, cond_method),
                     stmts,
                     binding_map,
                     Some(unwrap_method),
@@ -36317,7 +41936,7 @@ impl CodeGen {
                 let cond_method =
                     self.runtime_path_match_condition_method(&pp.path, variant_ctx)?;
                 Some((
-                    format!("_m.{}()", cond_method),
+                    format!("{}.{}()", scrutinee_var, cond_method),
                     Vec::new(),
                     HashMap::new(),
                     None,
@@ -36332,7 +41951,7 @@ impl CodeGen {
                     self.runtime_ident_match_condition_method(pi, variant_ctx)
                 {
                     return Some((
-                        format!("_m.{}()", cond_method),
+                        format!("{}.{}()", scrutinee_var, cond_method),
                         Vec::new(),
                         HashMap::new(),
                         None,
@@ -36346,7 +41965,7 @@ impl CodeGen {
                 binding_map.insert(rust_name, cpp_name.clone());
                 Some((
                     "true".to_string(),
-                    vec![format!("const auto& {} = _m;", cpp_name)],
+                    vec![format!("const auto& {} = {};", cpp_name, scrutinee_var)],
                     binding_map,
                     None,
                 ))
@@ -36387,11 +42006,22 @@ impl CodeGen {
         let return_arm = return_arm?;
         let success_arm = success_arm?;
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
+        let scrutinee_var = "_m";
 
-        let (success_cond, success_bindings, success_binding_map, success_unwrap_method) =
-            self.runtime_try_pattern_details(&success_arm.pat, variant_ctx.as_ref(), "_mv")?;
-        let (return_cond, return_bindings, return_binding_map, _) =
-            self.runtime_try_pattern_details(&return_arm.pat, variant_ctx.as_ref(), "_mv")?;
+        let (success_cond, success_bindings, success_binding_map, success_unwrap_method) = self
+            .runtime_try_pattern_details(
+                &success_arm.pat,
+                variant_ctx.as_ref(),
+                scrutinee_var,
+                "_mv",
+            )?;
+        let (return_cond, return_bindings, return_binding_map, _) = self
+            .runtime_try_pattern_details(
+                &return_arm.pat,
+                variant_ctx.as_ref(),
+                scrutinee_var,
+                "_mv",
+            )?;
 
         let mut value_ty = expected_ty.map(|ty| self.map_type(ty));
         if value_ty.as_ref().is_some_and(|ty| {
@@ -36953,13 +42583,19 @@ impl CodeGen {
 
         // Map Rust Option constructors
         if segments.len() == 1 && segments[0] == "None" {
-            return "std::nullopt".to_string();
+            return "rusty::None".to_string();
         }
         if joined == "core::option::Option::None" || joined == "std::option::Option::None" {
-            return "std::nullopt".to_string();
+            return "rusty::None".to_string();
         }
         if joined == "core::option::Option::Some" || joined == "std::option::Option::Some" {
             return "Some".to_string();
+        }
+        if joined == "core::result::Result::Ok" || joined == "std::result::Result::Ok" {
+            return "Ok".to_string();
+        }
+        if joined == "core::result::Result::Err" || joined == "std::result::Result::Err" {
+            return "Err".to_string();
         }
 
         // Expanded either crate commonly references `IterEither` through imports.
@@ -37020,7 +42656,10 @@ impl CodeGen {
             }
             return resolved.join("::");
         }
-        if segments.len() >= 3 && matches!(segments[0].as_str(), "std" | "core") && segments[1] == "fmt" {
+        if segments.len() >= 3
+            && matches!(segments[0].as_str(), "std" | "core")
+            && segments[1] == "fmt"
+        {
             let mut resolved = vec!["rusty".to_string(), "fmt".to_string()];
             resolved.extend(segments[2..].iter().cloned());
             for seg in &mut resolved {
@@ -37236,6 +42875,28 @@ impl CodeGen {
             .join("::");
         if matches!(
             joined.as_str(),
+            "Display::fmt"
+                | "Debug::fmt"
+                | "fmt::Display::fmt"
+                | "fmt::Debug::fmt"
+                | "core::fmt::Display::fmt"
+                | "core::fmt::Debug::fmt"
+                | "std::fmt::Display::fmt"
+                | "std::fmt::Debug::fmt"
+                | "rusty::fmt::Display::fmt"
+                | "rusty::fmt::Debug::fmt"
+        ) {
+            // Rust trait method item paths (e.g. `fmt::Display::fmt`) behave like
+            // callable items. Emit as forwarding lambda so call sites remain valid.
+            return "[](const auto& _v, rusty::fmt::Formatter& _f) { return _v.fmt(_f); }"
+                .to_string();
+        }
+        if joined.ends_with("Iterator::size_hint") {
+            // Trait method item path used as callable: `Iterator::size_hint`.
+            return "[](const auto& _v) { return rusty::size_hint(_v); }".to_string();
+        }
+        if matches!(
+            joined.as_str(),
             "fmt::Error" | "core::fmt::Error" | "std::fmt::Error" | "rusty::fmt::Error"
         ) {
             // Rust `fmt::Error` is a unit-like value; emit an object expression.
@@ -37243,6 +42904,12 @@ impl CodeGen {
         }
         if path.segments.len() == 1 {
             let name = path.segments[0].ident.to_string();
+            if name == "self" {
+                if let Some(override_name) = self.current_self_path_override() {
+                    return override_name.to_string();
+                }
+                return "(*this)".to_string();
+            }
             if let Some(mapped) = self.lookup_local_binding_cpp_name(&name) {
                 if self.is_delayed_init_local(&name) {
                     return format!("{}.value()", mapped);
@@ -37260,7 +42927,52 @@ impl CodeGen {
                 return escape_cpp_keyword(&name);
             }
         }
-        if Self::path_is_option_some(path) {
+        if path.segments.len() == 1 {
+            let canonical = self
+                .canonical_variant_name(&path.segments[0].ident.to_string())
+                .to_string();
+            match canonical.as_str() {
+                "None" => return "rusty::None".to_string(),
+                "Some" => return "rusty::Some".to_string(),
+                "Ok" => return "rusty::Ok".to_string(),
+                "Err" => return "rusty::Err".to_string(),
+                _ => {}
+            }
+        }
+        if path.segments.len() == 2 {
+            let owner = path.segments[0].ident.to_string();
+            let fn_name = path.segments[1].ident.to_string();
+            if owner == "rusty_ext" || owner == "Itertools" {
+                if let Some(qualified) = self.module_qualified_functions.get(&fn_name) {
+                    if !qualified.is_empty() {
+                        let needs_root = self
+                            .module_stack
+                            .iter()
+                            .any(|m| qualified.starts_with(&format!("{}::", m)));
+                        return if needs_root {
+                            format!("::{}", qualified)
+                        } else {
+                            qualified.clone()
+                        };
+                    }
+                }
+            }
+        }
+        if matches!(
+            joined.as_str(),
+            "Result::Ok"
+                | "core::result::Result::Ok"
+                | "std::result::Result::Ok"
+                | "Result::Err"
+                | "core::result::Result::Err"
+                | "std::result::Result::Err"
+        ) {
+            if joined.ends_with("::Ok") {
+                return "rusty::Ok".to_string();
+            }
+            return "rusty::Err".to_string();
+        }
+        if self.is_option_some_path(path) {
             return "rusty::Some".to_string();
         }
         if let Some(mut rewritten) = self.rewrite_cpp_import_bound_expr_path(path) {
@@ -37369,16 +43081,19 @@ impl CodeGen {
             let variant_name = variant_seg.ident.to_string();
             let variant_key = format!("{}_{}", enum_name, variant_name);
             if self.data_enum_unit_variants.contains(&variant_key) {
-                let prefix_segments: Vec<String> = path
-                    .segments
-                    .iter()
-                    .take(path.segments.len() - 2)
-                    .map(|s| escape_cpp_keyword(&s.ident.to_string()))
-                    .collect();
-                if prefix_segments.is_empty() {
-                    return format!("{}{{}}", variant_key);
-                }
-                return format!("{}::{}{{}}", prefix_segments.join("::"), variant_key);
+                let enum_path: syn::Path = {
+                    let segs: Vec<syn::PathSegment> = path
+                        .segments
+                        .iter()
+                        .take(path.segments.len() - 1)
+                        .cloned()
+                        .collect();
+                    let mut p = path.clone();
+                    p.segments = segs.into_iter().collect();
+                    p
+                };
+                let variant_ty = self.data_enum_variant_struct_type_name(&enum_path, &variant_name);
+                return format!("{}{{}}", variant_ty);
             }
             // C-like enum associated const: `Op::DEFAULT` → `Op_DEFAULT`
             if self.c_like_enum_consts.contains(&variant_key) {
@@ -37429,7 +43144,10 @@ impl CodeGen {
         }
         let mut emitted = self.emit_path_to_string(path);
         if path.segments.len() == 1
-            && matches!(path.segments[0].ident.to_string().as_str(), "Left" | "Right")
+            && matches!(
+                path.segments[0].ident.to_string().as_str(),
+                "Left" | "Right"
+            )
             && !emitted.contains("::")
         {
             if let syn::PathArguments::AngleBracketed(args) = &path.segments[0].arguments {
@@ -37484,6 +43202,93 @@ impl CodeGen {
         Some(rewritten)
     }
 
+    fn rewrite_cpp_import_bound_type_spelling(&self, cpp_ty: &str) -> String {
+        if self.cpp_module_import_bindings.is_empty() || cpp_ty.is_empty() {
+            return Self::rewrite_builtin_namespace_aliases_in_type(cpp_ty);
+        }
+        let mut rewritten = cpp_ty.to_string();
+        let mut bindings: Vec<(&String, &String)> = self.cpp_module_import_bindings.iter().collect();
+        bindings.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.len()));
+        for (alias, target) in bindings {
+            let escaped_alias = escape_cpp_keyword(alias);
+            let needle = format!("{}::", escaped_alias);
+            let replacement = format!("{}::", target);
+            rewritten =
+                Self::replace_cpp_path_alias_tokens(&rewritten, &needle, &replacement);
+        }
+        Self::rewrite_builtin_namespace_aliases_in_type(&rewritten)
+    }
+
+    fn replace_cpp_path_alias_tokens(input: &str, needle: &str, replacement: &str) -> String {
+        if needle.is_empty() || !input.contains(needle) {
+            return input.to_string();
+        }
+        let mut out = String::with_capacity(input.len());
+        let mut idx = 0usize;
+        while let Some(rel_pos) = input[idx..].find(needle) {
+            let pos = idx + rel_pos;
+            let boundary_ok = if pos == 0 {
+                true
+            } else {
+                !input
+                    .as_bytes()
+                    .get(pos - 1)
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            };
+            if boundary_ok {
+                out.push_str(&input[idx..pos]);
+                out.push_str(replacement);
+                idx = pos + needle.len();
+            } else {
+                out.push_str(&input[idx..=pos]);
+                idx = pos + 1;
+            }
+        }
+        out.push_str(&input[idx..]);
+        out
+    }
+
+    fn rewrite_builtin_namespace_aliases_in_type(cpp_ty: &str) -> String {
+        const BUILTIN_ALIASES: [(&str, &str); 12] = [
+            ("cmp", "core::cmp"),
+            ("fmt", "rusty::fmt"),
+            ("io", "rusty::io"),
+            ("panic", "rusty::panic"),
+            ("ptr", "rusty::ptr"),
+            ("mem", "rusty::mem"),
+            ("atomic", "rusty::sync::atomic"),
+            ("mpsc", "rusty::sync::mpsc"),
+            ("thread", "rusty::thread"),
+            ("time", "rusty::time"),
+            ("str", "rusty::str_runtime"),
+            ("char_", "rusty::char_runtime"),
+        ];
+        let mut rewritten = cpp_ty.to_string();
+        for (alias, target) in BUILTIN_ALIASES {
+            let needle = format!("{}::", alias);
+            let replacement = format!("{}::", target);
+            rewritten = Self::replace_cpp_path_alias_tokens(&rewritten, &needle, &replacement);
+        }
+        Self::collapse_duplicate_rusty_root_namespaces_in_type(&rewritten)
+    }
+
+    fn collapse_duplicate_rusty_root_namespaces_in_type(cpp_ty: &str) -> String {
+        let mut rewritten = cpp_ty.to_string();
+        while rewritten.contains("rusty::rusty::") {
+            rewritten = rewritten.replace("rusty::rusty::", "rusty::");
+        }
+        while rewritten.contains("std::rusty::") {
+            rewritten = rewritten.replace("std::rusty::", "rusty::");
+        }
+        while rewritten.contains("core::rusty::") {
+            rewritten = rewritten.replace("core::rusty::", "rusty::");
+        }
+        while rewritten.contains("alloc::rusty::") {
+            rewritten = rewritten.replace("alloc::rusty::", "rusty::");
+        }
+        rewritten
+    }
+
     fn extract_simple_type_param_name(&self, ty: &syn::Type) -> Option<String> {
         let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
@@ -37528,14 +43333,6 @@ impl CodeGen {
         let Some(type_name) = path.segments.first().map(|seg| seg.ident.to_string()) else {
             return false;
         };
-        let scoped_key = format!("{}::{}", current_struct, type_name);
-        let Some(expected_params) = self.declared_type_params.get(&scoped_key) else {
-            return false;
-        };
-        if expected_params.is_empty() {
-            return false;
-        }
-
         let mut provided: Vec<String> = Vec::new();
         for arg in &args.args {
             match arg {
@@ -37554,6 +43351,22 @@ impl CodeGen {
                 syn::GenericArgument::Lifetime(_) => {}
                 _ => return false,
             }
+        }
+
+        let all_provided_in_scope = provided
+            .iter()
+            .all(|provided_name| self.is_type_param_in_scope(provided_name));
+        if self.resolve_current_struct_assoc_cpp_type(&type_name).is_some() && all_provided_in_scope
+        {
+            return true;
+        }
+
+        let scoped_key = format!("{}::{}", current_struct, type_name);
+        let Some(expected_params) = self.declared_type_params.get(&scoped_key) else {
+            return false;
+        };
+        if expected_params.is_empty() {
+            return false;
         }
 
         if provided.len() != expected_params.len() {
@@ -37736,9 +43549,7 @@ impl CodeGen {
         params
             .iter()
             .zip(recovered_args.iter())
-            .all(|(param, recovered)| {
-                self.is_type_param_in_scope(param) && param == recovered
-            })
+            .all(|(param, recovered)| self.is_type_param_in_scope(param) && param == recovered)
     }
 
     fn recover_omitted_local_generic_type_args(
@@ -37747,6 +43558,10 @@ impl CodeGen {
         mapped_path: &str,
     ) -> Option<String> {
         let last_seg = path.segments.last()?;
+        if path.segments.len() == 1 && self.is_local_type_name_in_scope(&last_seg.ident.to_string())
+        {
+            return None;
+        }
         if !matches!(last_seg.arguments, syn::PathArguments::None) {
             return None;
         }
@@ -37784,18 +43599,22 @@ impl CodeGen {
             return None;
         }
         let declared_kinds = self.declared_type_param_kinds.get(&type_key);
+        let allow_current_struct_fallback = self
+            .current_struct
+            .as_ref()
+            .is_some_and(|name| type_key == *name || type_key.starts_with(&format!("{}::", name)));
         let fallback_args_from_current_struct = self.current_struct.as_ref().and_then(|name| {
+            if !allow_current_struct_fallback {
+                return None;
+            }
             let current_params = self
                 .declared_type_params
                 .get(name)
                 .or_else(|| self.declared_type_params.get(&self.scoped_type_key(name)))?;
-            let current_kinds = self
-                .declared_type_param_kinds
-                .get(name)
-                .or_else(|| {
-                    self.declared_type_param_kinds
-                        .get(&self.scoped_type_key(name))
-                })?;
+            let current_kinds = self.declared_type_param_kinds.get(name).or_else(|| {
+                self.declared_type_param_kinds
+                    .get(&self.scoped_type_key(name))
+            })?;
             let declared_kinds = declared_kinds?;
             if declared_kinds.len() != params.len()
                 || current_params.len() < params.len()
@@ -37816,13 +43635,23 @@ impl CodeGen {
         });
 
         let mut recovered_args: Vec<String> = Vec::new();
+        let mut resolved_type_defaults: HashMap<String, syn::Type> = HashMap::new();
         for (idx, param) in params.iter().enumerate() {
             if let Some(default) = defaults
                 .and_then(|all| all.get(idx))
                 .and_then(|entry| entry.as_ref())
             {
                 let mapped_default = match default {
-                    GenericParamDefault::Type(t) => self.map_type(t),
+                    GenericParamDefault::Type(t) => {
+                        let substituted = if resolved_type_defaults.is_empty() {
+                            t.clone()
+                        } else {
+                            self.substitute_type_params_in_type(t, &resolved_type_defaults)
+                        };
+                        let mapped = self.map_type(&substituted);
+                        resolved_type_defaults.insert(param.clone(), substituted);
+                        mapped
+                    }
                     GenericParamDefault::Const(c) => self.emit_expr_to_string(c),
                 };
                 recovered_args.push(mapped_default);
@@ -37830,12 +43659,18 @@ impl CodeGen {
             }
             if self.is_type_param_in_scope(param) {
                 recovered_args.push(param.clone());
+                if let Ok(ty) = syn::parse_str::<syn::Type>(param) {
+                    resolved_type_defaults.insert(param.clone(), ty);
+                }
                 continue;
             }
             if let Some(fallback) = fallback_args_from_current_struct.as_ref()
                 && let Some(arg) = fallback.get(idx)
             {
                 recovered_args.push(arg.clone());
+                if let Ok(ty) = syn::parse_str::<syn::Type>(arg) {
+                    resolved_type_defaults.insert(param.clone(), ty);
+                }
                 continue;
             }
             return None;
@@ -37944,13 +43779,10 @@ impl CodeGen {
                 .declared_type_params
                 .get(name)
                 .or_else(|| self.declared_type_params.get(&self.scoped_type_key(name)))?;
-            let current_kinds = self
-                .declared_type_param_kinds
-                .get(name)
-                .or_else(|| {
-                    self.declared_type_param_kinds
-                        .get(&self.scoped_type_key(name))
-                })?;
+            let current_kinds = self.declared_type_param_kinds.get(name).or_else(|| {
+                self.declared_type_param_kinds
+                    .get(&self.scoped_type_key(name))
+            })?;
             if declared_kinds.len() != params.len()
                 || current_params.len() < params.len()
                 || current_kinds.len() < params.len()
@@ -37971,8 +43803,17 @@ impl CodeGen {
 
         let mut recovered_args: Vec<String> = Vec::new();
         for (idx, param) in params.iter().enumerate() {
+            let param_in_scope = self.is_type_param_in_scope(param);
             if let Some(inferred) = inferred_args.get(idx).and_then(|arg| arg.clone()) {
-                recovered_args.push(inferred);
+                if param_in_scope && inferred != *param {
+                    recovered_args.push(param.clone());
+                } else {
+                    recovered_args.push(inferred);
+                }
+                continue;
+            }
+            if param_in_scope {
+                recovered_args.push(param.clone());
                 continue;
             }
             if let Some(default) = defaults
@@ -37984,10 +43825,6 @@ impl CodeGen {
                     GenericParamDefault::Const(c) => self.emit_expr_to_string(c),
                 };
                 recovered_args.push(mapped_default);
-                continue;
-            }
-            if self.is_type_param_in_scope(param) {
-                recovered_args.push(param.clone());
                 continue;
             }
             if let Some(fallback) = fallback_args_from_current_struct.as_ref()
@@ -38057,6 +43894,70 @@ impl CodeGen {
         }
 
         match (declared_ty, inferred_expr_ty) {
+            (syn::Type::Path(lhs), syn::Type::Path(rhs)) => {
+                let matched_shape = if lhs.qself.is_none() && rhs.qself.is_none() {
+                    if lhs.path.segments.len() == rhs.path.segments.len()
+                        && !lhs.path.segments.is_empty()
+                    {
+                        lhs.path
+                            .segments
+                            .iter()
+                            .zip(rhs.path.segments.iter())
+                            .all(|(l, r)| l.ident == r.ident)
+                    } else {
+                        lhs.path
+                            .segments
+                            .last()
+                            .zip(rhs.path.segments.last())
+                            .is_some_and(|(l, r)| l.ident == r.ident)
+                    }
+                } else {
+                    false
+                };
+                if !matched_shape {
+                    return;
+                }
+
+                if lhs.path.segments.len() == rhs.path.segments.len() {
+                    for (lhs_seg, rhs_seg) in lhs.path.segments.iter().zip(rhs.path.segments.iter())
+                    {
+                        if let (
+                            syn::PathArguments::AngleBracketed(lhs_args),
+                            syn::PathArguments::AngleBracketed(rhs_args),
+                        ) = (&lhs_seg.arguments, &rhs_seg.arguments)
+                        {
+                            self.collect_omitted_generic_bindings_from_angle_args(
+                                lhs_args,
+                                rhs_args,
+                                params,
+                                param_kinds,
+                                inferred_args,
+                                conflict,
+                            );
+                        }
+                        if *conflict {
+                            return;
+                        }
+                    }
+                } else if let (Some(lhs_last), Some(rhs_last)) =
+                    (lhs.path.segments.last(), rhs.path.segments.last())
+                {
+                    if let (
+                        syn::PathArguments::AngleBracketed(lhs_args),
+                        syn::PathArguments::AngleBracketed(rhs_args),
+                    ) = (&lhs_last.arguments, &rhs_last.arguments)
+                    {
+                        self.collect_omitted_generic_bindings_from_angle_args(
+                            lhs_args,
+                            rhs_args,
+                            params,
+                            param_kinds,
+                            inferred_args,
+                            conflict,
+                        );
+                    }
+                }
+            }
             (syn::Type::Ptr(lhs), syn::Type::Ptr(rhs)) => {
                 self.collect_omitted_generic_bindings_from_field_types(
                     &lhs.elem,
@@ -38077,7 +43978,139 @@ impl CodeGen {
                     conflict,
                 );
             }
+            (syn::Type::Array(lhs), syn::Type::Array(rhs)) => {
+                self.collect_omitted_generic_bindings_from_field_types(
+                    &lhs.elem,
+                    &rhs.elem,
+                    params,
+                    param_kinds,
+                    inferred_args,
+                    conflict,
+                );
+            }
+            (syn::Type::Slice(lhs), syn::Type::Slice(rhs)) => {
+                self.collect_omitted_generic_bindings_from_field_types(
+                    &lhs.elem,
+                    &rhs.elem,
+                    params,
+                    param_kinds,
+                    inferred_args,
+                    conflict,
+                );
+            }
+            (syn::Type::Tuple(lhs), syn::Type::Tuple(rhs)) => {
+                for (lhs_elem, rhs_elem) in lhs.elems.iter().zip(rhs.elems.iter()) {
+                    self.collect_omitted_generic_bindings_from_field_types(
+                        lhs_elem,
+                        rhs_elem,
+                        params,
+                        param_kinds,
+                        inferred_args,
+                        conflict,
+                    );
+                    if *conflict {
+                        return;
+                    }
+                }
+            }
+            (syn::Type::Paren(lhs), rhs) => {
+                self.collect_omitted_generic_bindings_from_field_types(
+                    &lhs.elem,
+                    rhs,
+                    params,
+                    param_kinds,
+                    inferred_args,
+                    conflict,
+                );
+            }
+            (syn::Type::Group(lhs), rhs) => {
+                self.collect_omitted_generic_bindings_from_field_types(
+                    &lhs.elem,
+                    rhs,
+                    params,
+                    param_kinds,
+                    inferred_args,
+                    conflict,
+                );
+            }
+            (lhs, syn::Type::Paren(rhs)) => {
+                self.collect_omitted_generic_bindings_from_field_types(
+                    lhs,
+                    &rhs.elem,
+                    params,
+                    param_kinds,
+                    inferred_args,
+                    conflict,
+                );
+            }
+            (lhs, syn::Type::Group(rhs)) => {
+                self.collect_omitted_generic_bindings_from_field_types(
+                    lhs,
+                    &rhs.elem,
+                    params,
+                    param_kinds,
+                    inferred_args,
+                    conflict,
+                );
+            }
             _ => {}
+        }
+    }
+
+    fn collect_omitted_generic_bindings_from_angle_args(
+        &self,
+        lhs_args: &syn::AngleBracketedGenericArguments,
+        rhs_args: &syn::AngleBracketedGenericArguments,
+        params: &[String],
+        param_kinds: Option<&Vec<GenericParamKind>>,
+        inferred_args: &mut [Option<String>],
+        conflict: &mut bool,
+    ) {
+        for (lhs_arg, rhs_arg) in lhs_args.args.iter().zip(rhs_args.args.iter()) {
+            match (lhs_arg, rhs_arg) {
+                (syn::GenericArgument::Type(lhs_inner), syn::GenericArgument::Type(rhs_inner)) => {
+                    self.collect_omitted_generic_bindings_from_field_types(
+                        lhs_inner,
+                        rhs_inner,
+                        params,
+                        param_kinds,
+                        inferred_args,
+                        conflict,
+                    );
+                    if *conflict {
+                        return;
+                    }
+                }
+                (
+                    syn::GenericArgument::Const(lhs_const),
+                    syn::GenericArgument::Const(rhs_const),
+                ) => {
+                    let syn::Expr::Path(lhs_path) = lhs_const else {
+                        continue;
+                    };
+                    if lhs_path.path.segments.len() != 1 {
+                        continue;
+                    }
+                    let lhs_ident = lhs_path.path.segments[0].ident.to_string();
+                    let Some(idx) = params.iter().position(|p| p == &lhs_ident) else {
+                        continue;
+                    };
+                    let is_const_param = param_kinds
+                        .and_then(|kinds| kinds.get(idx))
+                        .is_some_and(|kind| matches!(kind, GenericParamKind::Const));
+                    if !is_const_param {
+                        continue;
+                    }
+                    let candidate = self.emit_expr_to_string(rhs_const);
+                    match inferred_args.get_mut(idx) {
+                        Some(slot @ None) => *slot = Some(candidate),
+                        Some(Some(existing)) if existing == &candidate => {}
+                        Some(Some(_)) => *conflict = true,
+                        None => {}
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -38085,27 +44118,70 @@ impl CodeGen {
         &self,
         owner_path: &syn::Path,
     ) -> Option<Vec<String>> {
-        let params = self.declared_type_params_for_path(owner_path)?;
+        let ordered_scope_params = self.ordered_type_params_in_scope();
+        let declared_params = self.declared_type_params_for_path(owner_path);
+        if declared_params.is_none() {
+            let owner_name = owner_path
+                .segments
+                .last()
+                .map(|seg| seg.ident.to_string())
+                .unwrap_or_default();
+            let known_arity = match owner_name.as_str() {
+                "Either" | "EitherOrBoth" => Some(2usize),
+                _ => None,
+            }?;
+            if ordered_scope_params.len() < known_arity {
+                return None;
+            }
+            return Some(ordered_scope_params.into_iter().take(known_arity).collect());
+        }
+
+        let params = declared_params?;
         if params.is_empty() {
             return None;
         }
         let defaults = self.declared_type_param_defaults_for_path(owner_path);
+        let can_use_ordered_scope_fallback = ordered_scope_params.len() >= params.len();
+        let mut ordered_scope_idx = 0usize;
+        let mut resolved_type_defaults: HashMap<String, syn::Type> = HashMap::new();
 
         let mut recovered_args: Vec<String> = Vec::new();
         for (idx, param) in params.iter().enumerate() {
+            if self.is_type_param_in_scope(param) {
+                recovered_args.push(param.clone());
+                if let Ok(ty) = syn::parse_str::<syn::Type>(param) {
+                    resolved_type_defaults.insert(param.clone(), ty);
+                }
+                continue;
+            }
+            if can_use_ordered_scope_fallback
+                && let Some(scope_param) = ordered_scope_params.get(ordered_scope_idx)
+            {
+                recovered_args.push(scope_param.clone());
+                ordered_scope_idx += 1;
+                if let Ok(ty) = syn::parse_str::<syn::Type>(scope_param) {
+                    resolved_type_defaults.insert(param.clone(), ty);
+                }
+                continue;
+            }
             if let Some(default) = defaults
                 .and_then(|all| all.get(idx))
                 .and_then(|entry| entry.as_ref())
             {
                 let mapped_default = match default {
-                    GenericParamDefault::Type(t) => self.map_type(t),
+                    GenericParamDefault::Type(t) => {
+                        let substituted = if resolved_type_defaults.is_empty() {
+                            t.clone()
+                        } else {
+                            self.substitute_type_params_in_type(t, &resolved_type_defaults)
+                        };
+                        let mapped = self.map_type(&substituted);
+                        resolved_type_defaults.insert(param.clone(), substituted);
+                        mapped
+                    }
                     GenericParamDefault::Const(c) => self.emit_expr_to_string(c),
                 };
                 recovered_args.push(mapped_default);
-                continue;
-            }
-            if self.is_type_param_in_scope(param) {
-                recovered_args.push(param.clone());
                 continue;
             }
             return None;
@@ -38278,7 +44354,10 @@ impl CodeGen {
         while !mapped_args.is_empty() {
             let idx = mapped_args.len() - 1;
             let has_default = defaults.get(idx).and_then(|entry| entry.as_ref()).is_some();
-            let from_infer = explicit_type_or_const_infer.get(idx).copied().unwrap_or(false);
+            let from_infer = explicit_type_or_const_infer
+                .get(idx)
+                .copied()
+                .unwrap_or(false);
             if !(has_default && from_infer) {
                 break;
             }
@@ -38316,12 +44395,14 @@ impl CodeGen {
         ) {
             path_idents.remove(0);
         }
-        let normalized_idents: &[String] =
-            if matches!(path_idents.first().map(|s| s.as_str()), Some("std" | "core" | "alloc")) {
-                &path_idents[1..]
-            } else {
-                &path_idents
-            };
+        let normalized_idents: &[String] = if matches!(
+            path_idents.first().map(|s| s.as_str()),
+            Some("std" | "core" | "alloc")
+        ) {
+            &path_idents[1..]
+        } else {
+            &path_idents
+        };
         let first = normalized_idents.first()?.as_str();
         let last = tp.path.segments.last()?;
         let last_ident = last.ident.to_string();
@@ -38335,7 +44416,21 @@ impl CodeGen {
                 ("Enumerate", [iter_ty]) => {
                     Some(format!("decltype(std::declval<{}>().enumerate())", iter_ty))
                 }
+                ("Take", [iter_ty]) => Some(format!(
+                    "decltype(rusty::take(std::declval<{}>(), std::declval<size_t>()))",
+                    iter_ty
+                )),
+                ("Skip", [iter_ty]) => Some(format!(
+                    "decltype(rusty::skip(std::declval<{}>(), std::declval<size_t>()))",
+                    iter_ty
+                )),
+                ("Fuse", [iter_ty]) => {
+                    Some(format!("decltype(std::declval<{}>().fuse())", iter_ty))
+                }
                 ("Rev", [iter_ty]) => Some(format!("decltype(std::declval<{}>().rev())", iter_ty)),
+                ("Cycle", [iter_ty]) => {
+                    Some(format!("decltype(std::declval<{}>().cycle())", iter_ty))
+                }
                 ("Cloned", [iter_ty]) => {
                     Some(format!("decltype(std::declval<{}>().cloned())", iter_ty))
                 }
@@ -38387,10 +44482,13 @@ impl CodeGen {
             };
             let mapped_args = self.map_angle_bracketed_type_args(args);
             if mapped_args.len() == 1 {
-                if normalized_idents
-                    == ["vec".to_string(), "IntoIter".to_string()]
+                if normalized_idents == ["vec".to_string(), "IntoIter".to_string()]
                     || normalized_idents
-                        == ["rusty".to_string(), "vec".to_string(), "IntoIter".to_string()]
+                        == [
+                            "rusty".to_string(),
+                            "vec".to_string(),
+                            "IntoIter".to_string(),
+                        ]
                 {
                     return Some(format!(
                         "decltype(std::declval<rusty::Vec<{}>>().into_iter())",
@@ -38404,12 +44502,12 @@ impl CodeGen {
                         "IntoIter".to_string(),
                     ]
                     || normalized_idents
-                    == [
-                        "rusty".to_string(),
-                        "collections".to_string(),
-                        "vec_deque".to_string(),
-                        "IntoIter".to_string(),
-                    ]
+                        == [
+                            "rusty".to_string(),
+                            "collections".to_string(),
+                            "vec_deque".to_string(),
+                            "IntoIter".to_string(),
+                        ]
                 {
                     return Some(format!(
                         "decltype(std::declval<rusty::VecDeque<{}>>().into_iter())",
@@ -38424,13 +44522,81 @@ impl CodeGen {
                 return None;
             };
             let mapped_args = self.map_angle_bracketed_type_args(args);
+            if last_ident == "Enumerate"
+                && mapped_args.len() == 1
+                && (!self.local_declared_types.contains("Enumerate")
+                    || !self.local_declared_type_has_matching_arity("Enumerate", 1))
+            {
+                return Some(format!(
+                    "decltype(rusty::enumerate(std::declval<{}>()))",
+                    mapped_args[0]
+                ));
+            }
+            if last_ident == "Take"
+                && mapped_args.len() == 1
+                && (!self.local_declared_types.contains("Take")
+                    || !self.local_declared_type_has_matching_arity("Take", 1))
+            {
+                return Some(format!(
+                    "decltype(rusty::take(std::declval<{}>(), std::declval<size_t>()))",
+                    mapped_args[0]
+                ));
+            }
+            if last_ident == "Skip"
+                && mapped_args.len() == 1
+                && (!self.local_declared_types.contains("Skip")
+                    || !self.local_declared_type_has_matching_arity("Skip", 1))
+            {
+                return Some(format!(
+                    "decltype(rusty::skip(std::declval<{}>(), std::declval<size_t>()))",
+                    mapped_args[0]
+                ));
+            }
+            if last_ident == "Fuse"
+                && mapped_args.len() == 1
+                && (!self.local_declared_types.contains("Fuse")
+                    || !self.local_declared_type_has_matching_arity("Fuse", 1))
+            {
+                return Some(format!(
+                    "decltype(std::declval<{}>().fuse())",
+                    mapped_args[0]
+                ));
+            }
+            if last_ident == "Rev"
+                && mapped_args.len() == 1
+                && (!self.local_declared_types.contains("Rev")
+                    || !self.local_declared_type_has_matching_arity("Rev", 1))
+            {
+                return Some(format!(
+                    "decltype(std::declval<{}>().rev())",
+                    mapped_args[0]
+                ));
+            }
+            if last_ident == "Cycle"
+                && mapped_args.len() == 1
+                && (!self.local_declared_types.contains("Cycle")
+                    || !self.local_declared_type_has_matching_arity("Cycle", 1))
+            {
+                return Some(format!(
+                    "decltype(std::declval<{}>().cycle())",
+                    mapped_args[0]
+                ));
+            }
+            if last_ident == "Peekable"
+                && mapped_args.len() == 1
+                && (!self.local_declared_types.contains("Peekable")
+                    || !self.local_declared_type_has_matching_arity("Peekable", 1))
+            {
+                return Some(format!(
+                    "decltype(std::declval<{}>().peekable())",
+                    mapped_args[0]
+                ));
+            }
             if last_ident == "Intersperse"
                 && mapped_args.len() == 1
                 && (!self.local_declared_types.contains("Intersperse")
-                    || !self.local_declared_type_has_matching_arity(
-                        "Intersperse",
-                        mapped_args.len(),
-                    ))
+                    || !self
+                        .local_declared_type_has_matching_arity("Intersperse", mapped_args.len()))
             {
                 return Some(format!(
                     "decltype(std::declval<{}>().intersperse(std::declval<typename {}::Item>()))",
@@ -38453,10 +44619,7 @@ impl CodeGen {
             if last_ident == "Zip"
                 && mapped_args.len() == 2
                 && (!self.local_declared_types.contains("Zip")
-                    || !self.local_declared_type_has_matching_arity(
-                        "Zip",
-                        mapped_args.len(),
-                    ))
+                    || !self.local_declared_type_has_matching_arity("Zip", mapped_args.len()))
             {
                 return Some(format!(
                     "decltype(rusty::zip(std::declval<{}>(), std::declval<{}>()))",
@@ -38478,10 +44641,6 @@ impl CodeGen {
     }
 
     fn try_map_dependent_assoc_item_projection_type(&self, tp: &syn::TypePath) -> Option<String> {
-        if !self.should_soften_dependent_assoc_mode() {
-            return None;
-        }
-
         let owner_ty = if let Some(qself) = &tp.qself {
             let assoc_segments: Vec<String> = tp
                 .path
@@ -38531,8 +44690,54 @@ impl CodeGen {
         Some(format!("rusty::detail::associated_item_t<{}>", owner_cpp))
     }
 
+    fn try_map_std_iter_item_projection_type(&self, tp: &syn::TypePath) -> Option<String> {
+        if tp.qself.is_some() || tp.path.segments.len() < 2 {
+            return None;
+        }
+        let last = tp.path.segments.last()?;
+        if last.ident != "Item" {
+            return None;
+        }
+        let owner_seg = tp.path.segments.iter().nth_back(1)?;
+        let owner_name = owner_seg.ident.to_string();
+        if !matches!(owner_name.as_str(), "Empty" | "Once") {
+            return None;
+        }
+
+        let prefix: Vec<String> = tp
+            .path
+            .segments
+            .iter()
+            .take(tp.path.segments.len().saturating_sub(1))
+            .map(|seg| seg.ident.to_string())
+            .collect();
+        let valid_prefix = match prefix.as_slice() {
+            [owner] if owner == &owner_name => true,
+            [iter, owner] if iter == "iter" && owner == &owner_name => true,
+            [root, iter, owner]
+                if (root == "std" || root == "core") && iter == "iter" && owner == &owner_name =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !valid_prefix {
+            return None;
+        }
+
+        let syn::PathArguments::AngleBracketed(args) = &owner_seg.arguments else {
+            return None;
+        };
+        let mut mapped_args = self.map_angle_bracketed_type_args(args);
+        if mapped_args.len() == 1 {
+            return Some(mapped_args.remove(0));
+        }
+        None
+    }
+
     fn type_path_matches_slice_iter_family(path: &syn::Path, family: &str) -> bool {
-        let mut path_idents: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let mut path_idents: Vec<String> =
+            path.segments.iter().map(|s| s.ident.to_string()).collect();
         while matches!(
             path_idents.first().map(|s| s.as_str()),
             Some("crate" | "self" | "super")
@@ -38553,6 +44758,9 @@ impl CodeGen {
     fn map_type(&self, ty: &syn::Type) -> String {
         match ty {
             syn::Type::Path(tp) => {
+                if let Some(mapped_std_iter_item) = self.try_map_std_iter_item_projection_type(tp) {
+                    return mapped_std_iter_item;
+                }
                 if let Some(mapped_assoc_item) =
                     self.try_map_dependent_assoc_item_projection_type(tp)
                 {
@@ -38579,7 +44787,7 @@ impl CodeGen {
                                 self.resolve_assoc_type_from_impl_blocks(&self_type, assoc_name)
                             {
                                 if !self.mapped_assoc_type_contains_unbound_placeholder(&resolved) {
-                                    return resolved;
+                                    return self.maybe_prefix_typename_for_dependent_path(resolved);
                                 }
                             }
                         }
@@ -38599,6 +44807,16 @@ impl CodeGen {
                 let mut path_str = self.emit_path_to_string(&tp.path);
                 let path_is_current_struct_assoc_projection =
                     self.path_is_current_struct_assoc_projection(&tp.path);
+                if path_is_current_struct_assoc_projection {
+                    let assoc_ty = syn::Type::Path(tp.clone());
+                    if let Some(resolved_assoc) =
+                        self.resolve_current_struct_assoc_projection_cpp_type(&assoc_ty)
+                    {
+                        if !self.mapped_assoc_type_contains_unbound_placeholder(&resolved_assoc) {
+                            return self.maybe_prefix_typename_for_dependent_path(resolved_assoc);
+                        }
+                    }
+                }
                 if self.current_struct.is_some() && path_str.starts_with("Self::") {
                     path_str = path_str.trim_start_matches("Self::").to_string();
                 }
@@ -38626,6 +44844,41 @@ impl CodeGen {
                     && !self.local_declared_types.contains("Range")
                 {
                     path_str = "rusty::range".to_string();
+                }
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "RangeInclusive"
+                    && !self.is_local_type_name_in_scope("RangeInclusive")
+                    && !self.local_declared_types.contains("RangeInclusive")
+                {
+                    path_str = "rusty::range_inclusive".to_string();
+                }
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "RangeFrom"
+                    && !self.is_local_type_name_in_scope("RangeFrom")
+                    && !self.local_declared_types.contains("RangeFrom")
+                {
+                    path_str = "rusty::range_from".to_string();
+                }
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "RangeTo"
+                    && !self.is_local_type_name_in_scope("RangeTo")
+                    && !self.local_declared_types.contains("RangeTo")
+                {
+                    path_str = "rusty::range_to".to_string();
+                }
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "RangeToInclusive"
+                    && !self.is_local_type_name_in_scope("RangeToInclusive")
+                    && !self.local_declared_types.contains("RangeToInclusive")
+                {
+                    path_str = "rusty::range_to_inclusive".to_string();
+                }
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == "RangeFull"
+                    && !self.is_local_type_name_in_scope("RangeFull")
+                    && !self.local_declared_types.contains("RangeFull")
+                {
+                    path_str = "rusty::range_full".to_string();
                 }
                 if tp.path.segments.len() == 1
                     && tp.path.segments[0].ident == "Either"
@@ -38738,7 +44991,11 @@ impl CodeGen {
                             args,
                             &mut generic_args,
                         );
-                        if tp.path.segments.last().is_some_and(|seg| seg.ident == "Lazy")
+                        if tp
+                            .path
+                            .segments
+                            .last()
+                            .is_some_and(|seg| seg.ident == "Lazy")
                             && generic_args.len() > 1
                         {
                             while generic_args.len() > 1 {
@@ -38766,8 +45023,28 @@ impl CodeGen {
                             }
                         }
 
+                        // Box<[T]> maps through `Type::Slice` and would otherwise become
+                        // `rusty::Box<std::span<const T>>`, which blocks mutable slice APIs.
+                        // Owned boxed slices should carry mutable element spans.
+                        if tp
+                            .path
+                            .segments
+                            .last()
+                            .is_some_and(|seg| seg.ident == "Box")
+                            && let Some(inner) = generic_args.first_mut()
+                        {
+                            let trimmed = inner.trim();
+                            if let Some(rest) = trimmed.strip_prefix("std::span<const ") {
+                                *inner = format!("std::span<{}", rest);
+                            }
+                        }
+
                         if !generic_args.is_empty() {
-                            if tp.path.segments.last().is_some_and(|seg| seg.ident == "Zip")
+                            if tp
+                                .path
+                                .segments
+                                .last()
+                                .is_some_and(|seg| seg.ident == "Zip")
                                 && generic_args.len() == 2
                                 && (!self.local_declared_types.contains("Zip")
                                     || !self.local_declared_type_has_matching_arity("Zip", 2))
@@ -38801,8 +45078,7 @@ impl CodeGen {
                     if let Some(recovered) =
                         self.recover_omitted_local_generic_type_args(&tp.path, &path_str)
                     {
-                        return self
-                            .maybe_prefix_typename_for_dependent_type_path(tp, recovered);
+                        return self.maybe_prefix_typename_for_dependent_type_path(tp, recovered);
                     }
                 }
 
@@ -38884,7 +45160,19 @@ impl CodeGen {
                 }
             }
             syn::Type::Ptr(p) => {
-                let inner = self.map_type(&p.elem);
+                let inner = {
+                    let elem_ty = self.peel_paren_group_type(&p.elem);
+                    if let syn::Type::Slice(slice_ty) = elem_ty {
+                        let elem = self.map_type(&slice_ty.elem);
+                        if p.mutability.is_some() {
+                            format!("std::span<{}>", elem)
+                        } else {
+                            format!("std::span<const {}>", elem)
+                        }
+                    } else {
+                        self.map_type(&p.elem)
+                    }
+                };
                 let needs_pointer_trait_hardening =
                     inner.ends_with('&') || self.type_references_in_scope_type_param(&p.elem);
                 let needs_assoc_pointer_hardening = self.type_contains_dependent_assoc(&p.elem)
@@ -39220,6 +45508,19 @@ impl CodeGen {
             !self.should_push_return_type_hint_for_closure(&resolved_closure_output);
         let fallback_expected_return_ty = expected_return_type.and_then(|rt| match rt {
             syn::ReturnType::Type(_, ty) => {
+                if self.type_is_bare_generic_param_like(ty) {
+                    return None;
+                }
+                let expected_peeled = self.peel_reference_paren_group_type(ty);
+                if let syn::Type::Path(tp) = expected_peeled
+                    && tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                {
+                    let ident = tp.path.segments[0].ident.to_string();
+                    if self.is_type_param_in_scope(&ident) || self.is_struct_type_param(&ident) {
+                        return None;
+                    }
+                }
                 if self.type_contains_infer(ty)
                     || self.type_contains_in_scope_type_param(ty)
                     || self.type_contains_unresolved_placeholder_like(ty)
@@ -39235,6 +45536,38 @@ impl CodeGen {
             syn::ReturnType::Type(_, ty) => {
                 if suppress_explicit_return_annotation {
                     String::new()
+                } else if self.type_contains_in_scope_type_param(ty)
+                    || self.type_is_bare_generic_param_like(ty)
+                {
+                    String::new()
+                } else if let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty) {
+                    if tp.qself.is_none() && tp.path.segments.len() == 1 {
+                        let ident = tp.path.segments[0].ident.to_string();
+                        if self.is_type_param_in_scope(&ident) || self.is_struct_type_param(&ident)
+                        {
+                            String::new()
+                        } else {
+                            let mapped = self.map_type(ty);
+                            if mapped == "auto"
+                                || mapped.contains("/* TODO")
+                                || type_string_has_auto_placeholder(&mapped)
+                            {
+                                String::new()
+                            } else {
+                                format!(" -> {}", mapped)
+                            }
+                        }
+                    } else {
+                        let mapped = self.map_type(ty);
+                        if mapped == "auto"
+                            || mapped.contains("/* TODO")
+                            || type_string_has_auto_placeholder(&mapped)
+                        {
+                            String::new()
+                        } else {
+                            format!(" -> {}", mapped)
+                        }
+                    }
                 } else {
                     let mapped = self.map_type(ty);
                     if mapped == "auto"
@@ -39279,7 +45612,9 @@ impl CodeGen {
                 // If we have an additional expected return type from outer context
                 // (e.g. Result<T, E> from get_or_try_init), push it on top only
                 // when closure output is default or still contains unresolved `_`.
-                if let Some(expected_rt) = expected_return_type && push_outer_expected_hint {
+                if let Some(expected_rt) = expected_return_type
+                    && push_outer_expected_hint
+                {
                     if inner.should_push_return_type_hint_for_closure(expected_rt) {
                         inner.push_return_type_hint(expected_rt);
                     }
@@ -39323,7 +45658,9 @@ impl CodeGen {
                 // If we have an additional expected return type from outer context
                 // (e.g. Result<T, E> from get_or_try_init), push it on top only
                 // when closure output is default or still contains unresolved `_`.
-                if let Some(expected_rt) = expected_return_type && push_outer_expected_hint {
+                if let Some(expected_rt) = expected_return_type
+                    && push_outer_expected_hint
+                {
                     if inner.should_push_return_type_hint_for_closure(expected_rt) {
                         inner.push_return_type_hint(expected_rt);
                     }
@@ -39633,7 +45970,10 @@ impl CodeGen {
                 }
             }
             syn::Expr::MethodCall(method_call) => {
-                self.collect_local_binding_names_in_expr_for_move_capture(&method_call.receiver, out);
+                self.collect_local_binding_names_in_expr_for_move_capture(
+                    &method_call.receiver,
+                    out,
+                );
                 for arg in &method_call.args {
                     self.collect_local_binding_names_in_expr_for_move_capture(arg, out);
                 }
@@ -39749,7 +46089,11 @@ impl CodeGen {
         names
     }
 
-    fn collect_untyped_closure_param_names_from_pat(&self, pat: &syn::Pat, out: &mut HashSet<String>) {
+    fn collect_untyped_closure_param_names_from_pat(
+        &self,
+        pat: &syn::Pat,
+        out: &mut HashSet<String>,
+    ) {
         match pat {
             syn::Pat::Ident(pi) => {
                 if pi.ident != "_" {
@@ -39791,20 +46135,66 @@ impl CodeGen {
             syn::Pat::Type(pt) => {
                 if let syn::Pat::Ident(pi) = pt.pat.as_ref() {
                     self.bind_closure_param_name(&pi.ident.to_string(), Some((*pt.ty).clone()));
+                } else {
+                    self.bind_closure_param_for_emission(&pt.pat);
                 }
             }
             syn::Pat::Reference(pr) => {
                 if let syn::Pat::Ident(pi) = pr.pat.as_ref() {
                     self.bind_closure_param_name(&pi.ident.to_string(), None);
+                } else {
+                    self.bind_closure_param_for_emission(&pr.pat);
                 }
+            }
+            syn::Pat::Tuple(tuple_pat) => {
+                for elem in &tuple_pat.elems {
+                    self.bind_closure_param_for_emission(elem);
+                }
+            }
+            syn::Pat::TupleStruct(tuple_struct_pat) => {
+                for elem in &tuple_struct_pat.elems {
+                    self.bind_closure_param_for_emission(elem);
+                }
+            }
+            syn::Pat::Struct(struct_pat) => {
+                for field in &struct_pat.fields {
+                    self.bind_closure_param_for_emission(&field.pat);
+                }
+            }
+            syn::Pat::Slice(slice_pat) => {
+                for elem in &slice_pat.elems {
+                    self.bind_closure_param_for_emission(elem);
+                }
+            }
+            syn::Pat::Paren(paren_pat) => {
+                self.bind_closure_param_for_emission(&paren_pat.pat);
             }
             _ => {}
         }
     }
 
+    fn closure_param_cpp_name(&self, rust_name: &str) -> String {
+        let escaped = escape_cpp_keyword(rust_name);
+        if rust_name == "_" {
+            return escaped;
+        }
+        // C++ rejects local value bindings that shadow active template/type
+        // parameters. Rust macro expansions sometimes bind `A`, `B`, ...
+        // as values alongside type params with the same names.
+        if self.is_type_param_in_scope(rust_name)
+            || self.is_local_type_name_in_scope(rust_name)
+            || self.declared_item_names.contains(rust_name)
+        {
+            format!("{}_shadow1", escaped)
+        } else {
+            escaped
+        }
+    }
+
     fn bind_closure_param_name(&mut self, rust_name: &str, ty: Option<syn::Type>) {
+        let cpp_name = self.closure_param_cpp_name(rust_name);
         if let Some(scope) = self.local_cpp_bindings.last_mut() {
-            scope.insert(rust_name.to_string(), escape_cpp_keyword(rust_name));
+            scope.insert(rust_name.to_string(), cpp_name);
         }
         if let Some(scope) = self.local_bindings.last_mut() {
             scope.insert(rust_name.to_string(), ty);
@@ -39821,13 +46211,16 @@ impl CodeGen {
                 // Untyped param: |x| → forwarding reference.
                 // This preserves Rust call-site ownership/borrow behavior without
                 // forcing eager copies for inferred reference parameters.
-                format!("auto&& {}", escape_cpp_keyword(&pi.ident.to_string()))
+                format!(
+                    "auto&& {}",
+                    self.closure_param_cpp_name(&pi.ident.to_string())
+                )
             }
             syn::Pat::Type(pt) => {
                 // Typed param: |x: i32| → int32_t x
                 let ty = self.map_type(&pt.ty);
                 let name = match pt.pat.as_ref() {
-                    syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                    syn::Pat::Ident(pi) => self.closure_param_cpp_name(&pi.ident.to_string()),
                     _ => "_".to_string(),
                 };
                 format!("{} {}", ty, name)
@@ -39837,11 +46230,16 @@ impl CodeGen {
                 // |&x| → auto& x  or  |&mut x| → auto& x
                 match pr.pat.as_ref() {
                     syn::Pat::Ident(pi) => {
-                        format!("auto& {}", escape_cpp_keyword(&pi.ident.to_string()))
+                        format!(
+                            "auto& {}",
+                            self.closure_param_cpp_name(&pi.ident.to_string())
+                        )
                     }
                     syn::Pat::Type(pt) => {
                         let name = match pt.pat.as_ref() {
-                            syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                            syn::Pat::Ident(pi) => {
+                                self.closure_param_cpp_name(&pi.ident.to_string())
+                            }
                             _ => "_".to_string(),
                         };
                         format!("auto& {}", name)
@@ -39862,32 +46260,82 @@ impl CodeGen {
         )
     }
 
+    fn emit_closure_destructure_pat_to_string(&self, pat: &syn::Pat) -> String {
+        match pat {
+            syn::Pat::Ident(pi) => self.closure_param_cpp_name(&pi.ident.to_string()),
+            syn::Pat::Wild(_) => "_".to_string(),
+            syn::Pat::Tuple(tuple_pat) => {
+                let elems: Vec<String> = tuple_pat
+                    .elems
+                    .iter()
+                    .map(|elem| self.emit_closure_destructure_pat_to_string(elem))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
+            syn::Pat::Slice(slice_pat) => {
+                let elems: Vec<String> = slice_pat
+                    .elems
+                    .iter()
+                    .map(|elem| self.emit_closure_destructure_pat_to_string(elem))
+                    .collect();
+                format!("[{}]", elems.join(", "))
+            }
+            syn::Pat::Reference(ref_pat) => {
+                self.emit_closure_destructure_pat_to_string(&ref_pat.pat)
+            }
+            syn::Pat::Type(type_pat) => self.emit_closure_destructure_pat_to_string(&type_pat.pat),
+            syn::Pat::Paren(paren_pat) => {
+                self.emit_closure_destructure_pat_to_string(&paren_pat.pat)
+            }
+            _ => self.emit_pat_to_string(pat),
+        }
+    }
+
     fn emit_closure_param_with_prelude(
         &self,
         pat: &syn::Pat,
         index: usize,
     ) -> (String, Option<String>) {
+        if matches!(pat, syn::Pat::Wild(_)) {
+            // Rust allows repeated wildcard parameters (`|_, _|`), while C++
+            // lambda parameters require distinct names.
+            return (format!("auto _closure_wild{}", index), None);
+        }
         // Tuple/struct destructuring can't be used in C++ lambda parameters.
         // Emit a temp parameter and destructure in the body.
         if Self::closure_param_needs_body_destructure(pat) {
             let temp_name = format!("_destruct_param{}", index);
-            let binding = self.emit_pat_to_string(pat);
-            return (
-                format!("auto&& {}", temp_name),
-                Some(format!("auto&& {} = {};", binding, temp_name)),
-            );
+            let mut binding_stmts = Vec::new();
+            let mut binding_name_map = HashMap::new();
+            let prelude = if self.collect_pattern_binding_stmts_with_cpp_name_map(
+                pat,
+                &temp_name,
+                &mut binding_stmts,
+                &mut binding_name_map,
+            ) && !binding_stmts.is_empty()
+            {
+                binding_stmts.join("\n")
+            } else {
+                let binding = self.emit_closure_destructure_pat_to_string(pat);
+                if binding.trim() == "[]" {
+                    format!("static_cast<void>({});", temp_name)
+                } else {
+                    format!("auto&& {} = {};", binding, temp_name)
+                }
+            };
+            return (format!("auto&& {}", temp_name), Some(prelude));
         }
         let syn::Pat::Reference(pr) = pat else {
             return (self.emit_closure_param(pat), None);
         };
         let raw_name = format!("_closure_ref_param{}", index);
         let binding_name = match pr.pat.as_ref() {
-            syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+            syn::Pat::Ident(pi) => self.closure_param_cpp_name(&pi.ident.to_string()),
             syn::Pat::Type(pt) => match pt.pat.as_ref() {
-                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
-                _ => self.emit_pat_to_string(&pr.pat),
+                syn::Pat::Ident(pi) => self.closure_param_cpp_name(&pi.ident.to_string()),
+                _ => self.emit_closure_destructure_pat_to_string(&pr.pat),
             },
-            _ => self.emit_pat_to_string(&pr.pat),
+            _ => self.emit_closure_destructure_pat_to_string(&pr.pat),
         };
         (
             format!("auto&& {}", raw_name),
@@ -40115,10 +46563,7 @@ impl CodeGen {
         let expected_unit = expected_ty
             .map(|ty| self.peel_reference_paren_group_type(ty))
             .is_some_and(|ty| self.is_explicit_unit_type(ty));
-        let expr_is_closure = matches!(
-            self.peel_paren_group_expr(expr),
-            syn::Expr::Closure(_)
-        );
+        let expr_is_closure = matches!(self.peel_paren_group_expr(expr), syn::Expr::Closure(_));
         if expected_unit && !expr_is_closure && !self.expr_is_known_unit_value_expr(expr) {
             return format!(
                 "[&]() {{ static_cast<void>({}); return std::make_tuple(); }}()",
@@ -40228,7 +46673,28 @@ impl CodeGen {
 
     /// Check if an initializer expression is a reference (`&expr` or `&mut expr`).
     fn is_ref_init(&self, expr: &syn::Expr) -> bool {
-        matches!(expr, syn::Expr::Reference(_))
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Reference(reference_expr) = expr else {
+            return false;
+        };
+        if self
+            .infer_local_binding_type_from_initializer(expr)
+            .as_ref()
+            .is_some_and(|ty| self.reference_type_lowers_to_value_cpp(ty))
+        {
+            return false;
+        }
+        if let syn::Expr::Index(index_expr) = self.peel_paren_group_expr(&reference_expr.expr)
+            && matches!(
+                self.peel_paren_group_expr(&index_expr.index),
+                syn::Expr::Range(_)
+            )
+        {
+            return false;
+        }
+        // Rust slice borrows (`&arr[..n]`) lower to span-by-value in C++.
+        // Keep these as value locals, not C++ reference bindings to temporaries.
+        !self.expr_lowers_to_slice_or_span_view(&reference_expr.expr)
     }
 
     /// Check if an expression is an rvalue (temporary/function-call result)
@@ -40639,15 +47105,8 @@ impl CodeGen {
             }
         }
 
-        let lambda_return_annotation = expected_ty
-            .map(|ty| self.map_type(ty))
-            .filter(|mapped| {
-                mapped != "auto"
-                    && !mapped.contains("/* TODO")
-                    && !type_string_has_auto_placeholder(mapped)
-            })
-            .map(|mapped| format!(" -> {}", mapped))
-            .unwrap_or_default();
+        let lambda_return_annotation =
+            self.expected_lambda_return_annotation(expected_ty, false);
 
         Some(format!(
             "[&](){} {{ {} }}()",
@@ -40658,10 +47117,13 @@ impl CodeGen {
 
     fn push_type_param_scope(&mut self, generics: &syn::Generics) {
         let mut scope = HashSet::new();
+        let mut ordered_scope = Vec::new();
         for param in &generics.params {
             match param {
                 syn::GenericParam::Type(tp) => {
-                    scope.insert(tp.ident.to_string());
+                    let name = tp.ident.to_string();
+                    scope.insert(name.clone());
+                    ordered_scope.push(name);
                 }
                 syn::GenericParam::Const(cp) => {
                     scope.insert(cp.ident.to_string());
@@ -40670,10 +47132,25 @@ impl CodeGen {
             }
         }
         self.type_param_scopes.push(scope);
+        self.type_param_scope_order.push(ordered_scope);
     }
 
     fn pop_type_param_scope(&mut self) {
         self.type_param_scopes.pop();
+        self.type_param_scope_order.pop();
+    }
+
+    fn ordered_type_params_in_scope(&self) -> Vec<String> {
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+        for scope in self.type_param_scope_order.iter().rev() {
+            for name in scope {
+                if seen.insert(name.clone()) {
+                    ordered.push(name.clone());
+                }
+            }
+        }
+        ordered
     }
 
     fn is_type_param_in_scope(&self, name: &str) -> bool {
@@ -40820,6 +47297,11 @@ impl CodeGen {
         if path.starts_with("typename ") {
             return path;
         }
+        // `typename` is only valid for qualified dependent names (e.g. `T::Item`),
+        // not for a plain type parameter like `T`.
+        if !path.contains("::") {
+            return path;
+        }
         let first = path.split("::").next().unwrap_or_default().trim();
         let current_struct_is_generic = self
             .current_struct
@@ -40831,13 +47313,13 @@ impl CodeGen {
         if first == "Self" || self.is_type_param_in_scope(first) || current_struct_is_generic {
             return format!("typename {}", path);
         }
+        if first.len() == 1 && first.chars().all(|c| c.is_ascii_uppercase()) {
+            return format!("typename {}", path);
+        }
         path
     }
 
-    fn path_arguments_contain_dependent_type_param(
-        &self,
-        args: &syn::PathArguments,
-    ) -> bool {
+    fn path_arguments_contain_dependent_type_param(&self, args: &syn::PathArguments) -> bool {
         match args {
             syn::PathArguments::AngleBracketed(angle) => angle.args.iter().any(|arg| match arg {
                 syn::GenericArgument::Type(inner_ty) => {
@@ -40881,7 +47363,12 @@ impl CodeGen {
 
             // Handles dependent qualified names whose first segment is a namespace
             // (e.g. `rusty::detail::associated_item_t<I>::IntoIter`).
-            for seg in tp.path.segments.iter().take(segment_count.saturating_sub(1)) {
+            for seg in tp
+                .path
+                .segments
+                .iter()
+                .take(segment_count.saturating_sub(1))
+            {
                 if self.path_arguments_contain_dependent_type_param(&seg.arguments) {
                     return true;
                 }
@@ -40909,29 +47396,32 @@ impl CodeGen {
     /// Emit a `template<...>` prefix if generics include type/const params.
     /// Lifetime parameters are erased (skipped).
     /// Trait bounds are emitted as `requires` clauses.
-    fn emit_template_prefix(&mut self, generics: &syn::Generics) {
-        let (params, constraints) = self.collect_emitted_template_parts(generics, true);
+    fn template_prefix_lines(
+        &self,
+        generics: &syn::Generics,
+        include_type_defaults: bool,
+    ) -> Vec<String> {
+        let (params, constraints) =
+            self.collect_emitted_template_parts(generics, include_type_defaults);
         if params.is_empty() {
-            return;
+            return Vec::new();
         }
-
-        self.writeln(&format!("template<{}>", params.join(", ")));
-
+        let mut lines = vec![format!("template<{}>", params.join(", "))];
         if !constraints.is_empty() {
-            self.writeln(&format!("    requires ({})", constraints.join(" && ")));
+            lines.push(format!("    requires ({})", constraints.join(" && ")));
+        }
+        lines
+    }
+
+    fn emit_template_prefix(&mut self, generics: &syn::Generics) {
+        for line in self.template_prefix_lines(generics, true) {
+            self.writeln(&line);
         }
     }
 
     fn emit_template_prefix_without_type_defaults(&mut self, generics: &syn::Generics) {
-        let (params, constraints) = self.collect_emitted_template_parts(generics, false);
-        if params.is_empty() {
-            return;
-        }
-
-        self.writeln(&format!("template<{}>", params.join(", ")));
-
-        if !constraints.is_empty() {
-            self.writeln(&format!("    requires ({})", constraints.join(" && ")));
+        for line in self.template_prefix_lines(generics, false) {
+            self.writeln(&line);
         }
     }
 
@@ -41303,7 +47793,8 @@ impl CodeGen {
         if undeduced_params.is_empty() {
             return Vec::new();
         }
-        let callable_signatures = self.collect_callable_bound_return_signatures_for_function(generics);
+        let callable_signatures =
+            self.collect_callable_bound_return_signatures_for_function(generics);
         if callable_signatures.is_empty() {
             return Vec::new();
         }
@@ -41325,7 +47816,8 @@ impl CodeGen {
                         format!("std::invoke_result_t<{}>", callable_invoke_target)
                     }
                 } else {
-                    let invoke_args: Vec<String> = arg_tys.iter().map(|ty| self.map_type(ty)).collect();
+                    let invoke_args: Vec<String> =
+                        arg_tys.iter().map(|ty| self.map_type(ty)).collect();
                     let callable_invoke_target = format!("{}&", callable_name);
                     format!(
                         "std::invoke_result_t<{}, {}>",
@@ -41333,14 +47825,22 @@ impl CodeGen {
                         invoke_args.join(", ")
                     )
                 };
-                let projected = match self
-                    .callable_bound_return_projection_for_param(return_ty, &param_name)
-                {
-                    Some("direct") => format!("std::remove_cvref_t<{}>", invoke_expr),
-                    Some("result_ok") => format!("rusty::result_ok_t<{}>", invoke_expr),
-                    Some("result_err") => format!("rusty::result_err_t<{}>", invoke_expr),
-                    _ => continue,
-                };
+                let projected =
+                    match self.callable_bound_return_projection_for_param(return_ty, &param_name) {
+                        Some("direct") => format!("std::remove_cvref_t<{}>", invoke_expr),
+                        Some("result_ok") => format!("rusty::result_ok_t<{}>", invoke_expr),
+                        Some("result_err") => format!("rusty::result_err_t<{}>", invoke_expr),
+                        _ => continue,
+                    };
+                // Avoid self-referential aliases like
+                // `using T = std::invoke_result_t<F&, T, T>;`.
+                // These can arise from specialized impl generics and must keep
+                // their declared template parameter instead of auto-deduction.
+                let projected_mentions_param =
+                    Self::cpp_type_expr_mentions_identifier(&projected, &param_name);
+                if projected_mentions_param {
+                    continue;
+                }
                 alias_expr = Some(projected);
                 break;
             }
@@ -41349,6 +47849,14 @@ impl CodeGen {
             }
         }
         aliases
+    }
+
+    fn cpp_type_expr_mentions_identifier(expr: &str, identifier: &str) -> bool {
+        if expr.is_empty() || identifier.is_empty() {
+            return false;
+        }
+        expr.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|token| token == identifier)
     }
 
     fn map_return_type(&self, output: &syn::ReturnType) -> String {
@@ -41686,19 +48194,32 @@ fn merge_impl_type_generics_into_method(
         .iter()
         .filter_map(|p| match p {
             syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+            syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
             _ => None,
         })
         .collect();
 
     for param in &impl_generics.params {
-        if let syn::GenericParam::Type(tp) = param {
-            if existing.insert(tp.ident.to_string()) {
-                method
-                    .sig
-                    .generics
-                    .params
-                    .push(syn::GenericParam::Type(tp.clone()));
+        match param {
+            syn::GenericParam::Type(tp) => {
+                if existing.insert(tp.ident.to_string()) {
+                    method
+                        .sig
+                        .generics
+                        .params
+                        .push(syn::GenericParam::Type(tp.clone()));
+                }
             }
+            syn::GenericParam::Const(cp) => {
+                if existing.insert(cp.ident.to_string()) {
+                    method
+                        .sig
+                        .generics
+                        .params
+                        .push(syn::GenericParam::Const(cp.clone()));
+                }
+            }
+            syn::GenericParam::Lifetime(_) => {}
         }
     }
 
@@ -42623,6 +49144,7 @@ inline std::u32string decode_utf8(std::string_view text) {\n\
     return out;\n\
 }\n\
 struct Chars {\n\
+    using Item = char32_t;\n\
     std::u32string decoded;\n\
     std::size_t index = 0;\n\
 \n\
@@ -42646,6 +49168,49 @@ struct Chars {\n\
 };\n\
 inline Chars chars(std::string_view text) {\n\
     return Chars{decode_utf8(text), 0};\n\
+}\n\
+struct CharIndices {\n\
+    using Item = std::tuple<std::size_t, char32_t>;\n\
+    Chars iter;\n\
+    std::size_t index = 0;\n\
+\n\
+    rusty::Option<Item> next() {\n\
+        auto next_ch = iter.next();\n\
+        if (next_ch.is_none()) {\n\
+            return rusty::Option<Item>(rusty::None);\n\
+        }\n\
+        auto value = std::make_tuple(index++, next_ch.unwrap());\n\
+        return rusty::Option<Item>(std::move(value));\n\
+    }\n\
+};\n\
+inline CharIndices char_indices(std::string_view text) {\n\
+    return CharIndices{chars(text), 0};\n\
+}\n\
+struct Bytes {\n\
+    using Item = uint8_t;\n\
+    std::string bytes;\n\
+    std::size_t index = 0;\n\
+\n\
+    rusty::Option<uint8_t> next() {\n\
+        if (index >= bytes.size()) {\n\
+            return rusty::Option<uint8_t>(rusty::None);\n\
+        }\n\
+        return rusty::Option<uint8_t>(static_cast<uint8_t>(bytes[index++]));\n\
+    }\n\
+\n\
+    Bytes rev() const {\n\
+        Bytes out = *this;\n\
+        std::reverse(out.bytes.begin(), out.bytes.end());\n\
+        out.index = 0;\n\
+        return out;\n\
+    }\n\
+\n\
+    std::size_t count() const {\n\
+        return bytes.size() - std::min(index, bytes.size());\n\
+    }\n\
+};\n\
+inline Bytes bytes(std::string_view text) {\n\
+    return Bytes{std::string(text), 0};\n\
 }\n\
 template<typename S>\n\
 auto chars(const S& value) {\n\
@@ -43190,7 +49755,10 @@ fn make_using_path_cpp_legal(path: &str) -> String {
     }
 
     if path.contains("::") {
-        return escape_cpp_path_segments(path);
+        return format!(
+            "::{}",
+            escape_cpp_path_segments(path.trim_start_matches("::"))
+        );
     }
 
     format!("::{}", escape_cpp_keyword(path))
@@ -43425,6 +49993,15 @@ fn rewrite_std_sync_import(path: &str) -> Option<UseImportAction> {
     if let Some(item) = sync_item.strip_prefix("atomic::") {
         let action = match item {
             "AtomicBool" => UseImportAction::Using("rusty::sync::atomic::AtomicBool".to_string()),
+            "AtomicI8" => UseImportAction::Using("rusty::sync::atomic::AtomicI8".to_string()),
+            "AtomicI16" => UseImportAction::Using("rusty::sync::atomic::AtomicI16".to_string()),
+            "AtomicI32" => UseImportAction::Using("rusty::sync::atomic::AtomicI32".to_string()),
+            "AtomicI64" => UseImportAction::Using("rusty::sync::atomic::AtomicI64".to_string()),
+            "AtomicIsize" => UseImportAction::Using("rusty::sync::atomic::AtomicIsize".to_string()),
+            "AtomicU8" => UseImportAction::Using("rusty::sync::atomic::AtomicU8".to_string()),
+            "AtomicU16" => UseImportAction::Using("rusty::sync::atomic::AtomicU16".to_string()),
+            "AtomicU32" => UseImportAction::Using("rusty::sync::atomic::AtomicU32".to_string()),
+            "AtomicU64" => UseImportAction::Using("rusty::sync::atomic::AtomicU64".to_string()),
             "AtomicPtr" => UseImportAction::Using("rusty::sync::atomic::AtomicPtr".to_string()),
             "AtomicUsize" => UseImportAction::Using("rusty::sync::atomic::AtomicUsize".to_string()),
             "Ordering" => UseImportAction::Using("rusty::sync::atomic::Ordering".to_string()),
@@ -43729,6 +50306,9 @@ fn rewrite_std_slice_import(path: &str) -> Option<UseImportAction> {
 
 fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
     let action = match path {
+        "Option" => UseImportAction::Using("rusty::Option".to_string()),
+        "Option::Some" => UseImportAction::Using("rusty::Some".to_string()),
+        "Option::None" => UseImportAction::Using("rusty::None".to_string()),
         "std::option::Option" | "core::option::Option" => {
             UseImportAction::Using("rusty::Option".to_string())
         }
@@ -43737,6 +50317,18 @@ fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
         }
         "std::option::Option::None" | "core::option::Option::None" => {
             UseImportAction::Using("rusty::None".to_string())
+        }
+        "Result" => UseImportAction::Using("rusty::Result".to_string()),
+        "Result::Ok" => UseImportAction::Using("rusty::Ok".to_string()),
+        "Result::Err" => UseImportAction::Using("rusty::Err".to_string()),
+        "std::result::Result" | "core::result::Result" => {
+            UseImportAction::Using("rusty::Result".to_string())
+        }
+        "std::result::Result::Ok" | "core::result::Result::Ok" => {
+            UseImportAction::Using("rusty::Ok".to_string())
+        }
+        "std::result::Result::Err" | "core::result::Result::Err" => {
+            UseImportAction::Using("rusty::Err".to_string())
         }
         _ => return None,
     };
@@ -43942,7 +50534,9 @@ fn collect_reassigned_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<Str
 
 /// Collect locals whose addresses are cast into mutable raw pointers in the
 /// same block (for example `&node as *const T as *mut T`).
-fn collect_mutable_pointer_aliased_locals(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
+fn collect_mutable_pointer_aliased_locals(
+    stmts: &[syn::Stmt],
+) -> std::collections::HashSet<String> {
     let mut result = std::collections::HashSet::new();
     for stmt in stmts {
         collect_mutable_pointer_aliases_in_stmt(stmt, &mut result);
@@ -44050,7 +50644,10 @@ fn collect_mutable_pointer_aliases_in_expr(
     }
 }
 
-fn collect_referenced_locals_in_expr(expr: &syn::Expr, result: &mut std::collections::HashSet<String>) {
+fn collect_referenced_locals_in_expr(
+    expr: &syn::Expr,
+    result: &mut std::collections::HashSet<String>,
+) {
     match peel_paren_group_expr(expr) {
         syn::Expr::Reference(reference) => {
             if let Some(name) = extract_simple_local_ident(&reference.expr) {
@@ -44259,11 +50856,17 @@ fn collect_local_generic_placeholder_hints(stmts: &[syn::Stmt]) -> HashMap<Strin
             .init
             .as_ref()
             .and_then(|init| call_owner_placeholder_target(&init.expr));
+        let option_none_initializer = local
+            .init
+            .as_ref()
+            .is_some_and(|init| expr_is_option_none_constructor(&init.expr));
         let has_placeholder_owner_call = owner_target.is_some();
-        if has_placeholder_type || has_placeholder_owner_call {
+        if has_placeholder_type || has_placeholder_owner_call || option_none_initializer {
             candidates.insert(name.clone());
             if let Some(owner) = owner_target {
                 candidate_owner_targets.insert(name, owner);
+            } else if option_none_initializer {
+                candidate_owner_targets.insert(name, "Option".to_string());
             }
         }
     }
@@ -44321,12 +50924,10 @@ fn type_contains_trait_object(ty: &syn::Type) -> bool {
     match ty {
         syn::Type::TraitObject(_) => true,
         syn::Type::Path(tp) => tp.path.segments.iter().any(|seg| match &seg.arguments {
-            syn::PathArguments::AngleBracketed(args) => {
-                args.args.iter().any(|arg| match arg {
-                    syn::GenericArgument::Type(inner) => type_contains_trait_object(inner),
-                    _ => false,
-                })
-            }
+            syn::PathArguments::AngleBracketed(args) => args.args.iter().any(|arg| match arg {
+                syn::GenericArgument::Type(inner) => type_contains_trait_object(inner),
+                _ => false,
+            }),
             _ => false,
         }),
         syn::Type::Reference(r) => type_contains_trait_object(&r.elem),
@@ -44373,10 +50974,35 @@ fn replace_type_infer_placeholders(ty: &mut syn::Type, hint: &syn::Type) -> bool
     }
 }
 
+fn expr_is_option_none_constructor(expr: &syn::Expr) -> bool {
+    let expr = peel_paren_group_expr(expr);
+    let syn::Expr::Path(path_expr) = expr else {
+        return false;
+    };
+    let joined = path_expr
+        .path
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    matches!(
+        joined.as_str(),
+        "None" | "Option::None" | "core::option::Option::None" | "std::option::Option::None"
+    )
+}
+
 fn call_owner_placeholder_target(expr: &syn::Expr) -> Option<String> {
     let expr = peel_paren_group_expr(expr);
     if matches!(expr, syn::Expr::Array(_) | syn::Expr::Repeat(_)) {
         return Some("Array".to_string());
+    }
+    if let syn::Expr::Struct(struct_expr) = expr {
+        if let Some(last) = struct_expr.path.segments.last()
+            && matches!(last.arguments, syn::PathArguments::None)
+        {
+            return Some(last.ident.to_string());
+        }
     }
 
     let syn::Expr::Call(call) = expr else {
@@ -44427,7 +51053,7 @@ fn call_owner_placeholder_target(expr: &syn::Expr) -> Option<String> {
                     "new" | "new_" | "from" | "try_from" | "from_iter"
                 ),
                 "Cell" => matches!(method.as_str(), "new" | "new_"),
-                "Vec" => matches!(method.as_str(), "new" | "new_"),
+                "Vec" => matches!(method.as_str(), "new" | "new_" | "with_capacity"),
                 "HashMap" => matches!(method.as_str(), "new" | "new_"),
                 "SmallVec" => matches!(
                     method.as_str(),
@@ -44441,6 +51067,7 @@ fn call_owner_placeholder_target(expr: &syn::Expr) -> Option<String> {
                 "OnceBox" => matches!(method.as_str(), "new" | "new_" | "from" | "with_value"),
                 "Lazy" => matches!(method.as_str(), "new" | "new_" | "force"),
                 "Box" => matches!(method.as_str(), "new" | "new_" | "make"),
+                "ArrayBuilder" => matches!(method.as_str(), "new" | "new_"),
                 _ => false,
             }
             .then_some(owner)
@@ -44622,7 +51249,10 @@ fn infer_known_owner_constructor_type_from_call(call: &syn::ExprCall) -> Option<
     let owner_seg = path_expr.path.segments.iter().nth_back(1)?;
     let method_seg = path_expr.path.segments.last()?;
     let method_name = method_seg.ident.to_string();
-    if !matches!(method_name.as_str(), "default" | "default_" | "new" | "new_") {
+    if !matches!(
+        method_name.as_str(),
+        "default" | "default_" | "new" | "new_"
+    ) {
         return None;
     }
     if matches!(method_name.as_str(), "new" | "new_") && !call.args.is_empty() {
@@ -44988,13 +51618,17 @@ fn collect_local_generic_placeholder_hints_in_expr(
                                             |source_name| hints.get(&source_name).cloned(),
                                         );
                                         if let Some(elem_ty) = inferred_elem.or(source_elem) {
-                                            let normalized =
-                                                normalize_placeholder_hint_for_owner(owner_target, elem_ty);
+                                            let normalized = normalize_placeholder_hint_for_owner(
+                                                owner_target,
+                                                elem_ty,
+                                            );
                                             hints.insert(name, normalized);
                                         }
                                     } else if let Some(inferred) = inferred {
-                                        let normalized =
-                                            normalize_placeholder_hint_for_owner(owner_target, inferred);
+                                        let normalized = normalize_placeholder_hint_for_owner(
+                                            owner_target,
+                                            inferred,
+                                        );
                                         hints.insert(name, normalized);
                                     }
                                 }
@@ -45039,6 +51673,25 @@ fn collect_local_generic_placeholder_hints_in_expr(
             }
         }
         syn::Expr::Assign(assign) => {
+            if let Some(name) = extract_simple_local_ident(&assign.left) {
+                if candidates.contains(&name) && !hints.contains_key(&name) {
+                    let owner_target = candidate_owner_targets.get(&name).map(String::as_str);
+                    if owner_target == Some("Option") {
+                        if let Some(inner_ty) = infer_option_payload_hint_for_placeholder(
+                            &assign.right,
+                            known_local_types,
+                        ) {
+                            hints.insert(name.clone(), inner_ty);
+                        }
+                    } else if let Some(inferred) =
+                        infer_hint_type_for_local_placeholder(&assign.right, known_local_types)
+                    {
+                        let normalized =
+                            normalize_placeholder_hint_for_owner(owner_target, inferred);
+                        hints.insert(name.clone(), normalized);
+                    }
+                }
+            }
             collect_local_generic_placeholder_hints_in_expr(
                 &assign.left,
                 candidates,
@@ -45314,6 +51967,9 @@ fn infer_hint_type_for_local_placeholder(
                 if let Some(ty) = known_local_types.get(&name) {
                     return Some(ty.clone());
                 }
+                if matches!(name.as_str(), "i" | "j" | "k" | "idx" | "index") {
+                    return syn::parse_str::<syn::Type>("usize").ok();
+                }
                 let looks_like_type = name
                     .chars()
                     .next()
@@ -45330,6 +51986,17 @@ fn infer_hint_type_for_local_placeholder(
         syn::Expr::Reference(r) => {
             infer_hint_type_for_local_placeholder(&r.expr, known_local_types)
         }
+        syn::Expr::Tuple(tuple) => {
+            let mut elem_types = Vec::new();
+            for elem in &tuple.elems {
+                elem_types.push(infer_hint_type_for_local_placeholder(
+                    elem,
+                    known_local_types,
+                )?);
+            }
+            Some(parse_quote!((#(#elem_types),*)))
+        }
+        syn::Expr::Binary(bin) => infer_binary_type_for_local_placeholder(bin, known_local_types),
         syn::Expr::Call(call) => {
             if let syn::Expr::Path(path_expr) = call.func.as_ref() {
                 let joined = path_expr
@@ -45339,6 +52006,33 @@ fn infer_hint_type_for_local_placeholder(
                     .map(|s| s.ident.to_string())
                     .collect::<Vec<_>>()
                     .join("::");
+                if matches!(
+                    joined.as_str(),
+                    "Some"
+                        | "Option::Some"
+                        | "core::option::Option::Some"
+                        | "std::option::Option::Some"
+                ) && call.args.len() == 1
+                {
+                    return call.args.first().and_then(|arg| {
+                        infer_hint_type_for_local_placeholder(arg, known_local_types)
+                    });
+                }
+                if matches!(
+                    joined.as_str(),
+                    "Ok" | "Result::Ok"
+                        | "core::result::Result::Ok"
+                        | "std::result::Result::Ok"
+                        | "Err"
+                        | "Result::Err"
+                        | "core::result::Result::Err"
+                        | "std::result::Result::Err"
+                ) && call.args.len() == 1
+                {
+                    return call.args.first().and_then(|arg| {
+                        infer_hint_type_for_local_placeholder(arg, known_local_types)
+                    });
+                }
                 if matches!(
                     joined.as_str(),
                     "rusty::boxed::into_vec"
@@ -45387,6 +52081,97 @@ fn infer_hint_type_for_local_placeholder(
         }
         _ => None,
     }
+}
+
+fn infer_binary_type_for_local_placeholder(
+    binary: &syn::ExprBinary,
+    known_local_types: &HashMap<String, syn::Type>,
+) -> Option<syn::Type> {
+    match binary.op {
+        syn::BinOp::Eq(_)
+        | syn::BinOp::Ne(_)
+        | syn::BinOp::Lt(_)
+        | syn::BinOp::Le(_)
+        | syn::BinOp::Gt(_)
+        | syn::BinOp::Ge(_)
+        | syn::BinOp::And(_)
+        | syn::BinOp::Or(_) => return syn::parse_str::<syn::Type>("bool").ok(),
+        _ => {}
+    }
+
+    let lhs = infer_hint_type_for_local_placeholder(&binary.left, known_local_types);
+    let rhs = infer_hint_type_for_local_placeholder(&binary.right, known_local_types);
+    let peel = |ty: syn::Type| peel_reference_paren_group_type_hint(&ty).clone();
+
+    match (lhs, rhs) {
+        (Some(lhs_ty), Some(rhs_ty)) => {
+            let lhs_peel = peel(lhs_ty.clone());
+            let rhs_peel = peel(rhs_ty.clone());
+            if lhs_peel == rhs_peel {
+                Some(lhs_peel)
+            } else {
+                Some(lhs_peel)
+            }
+        }
+        (Some(lhs_ty), None) => Some(peel(lhs_ty)),
+        (None, Some(rhs_ty)) => Some(peel(rhs_ty)),
+        (None, None) => None,
+    }
+}
+
+fn extract_option_inner_type_for_hint(ty: &syn::Type) -> Option<syn::Type> {
+    let ty = peel_reference_paren_group_type_hint(ty);
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let last = tp.path.segments.last()?;
+    if last.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => Some(inner.clone()),
+        _ => None,
+    })
+}
+
+fn infer_option_payload_hint_for_placeholder(
+    expr: &syn::Expr,
+    known_local_types: &HashMap<String, syn::Type>,
+) -> Option<syn::Type> {
+    let expr = peel_paren_group_expr(expr);
+    if expr_is_option_none_constructor(expr) {
+        return None;
+    }
+    if let syn::Expr::Call(call) = expr {
+        if let syn::Expr::Path(path_expr) = call.func.as_ref() {
+            let joined = path_expr
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            if matches!(
+                joined.as_str(),
+                "Some"
+                    | "Option::Some"
+                    | "core::option::Option::Some"
+                    | "std::option::Option::Some"
+            ) && call.args.len() == 1
+            {
+                return call
+                    .args
+                    .first()
+                    .and_then(|arg| infer_hint_type_for_local_placeholder(arg, known_local_types));
+            }
+        }
+    }
+
+    let inferred = infer_hint_type_for_local_placeholder(expr, known_local_types)?;
+    extract_option_inner_type_for_hint(&inferred).or(Some(inferred))
 }
 
 fn normalize_placeholder_hint_for_owner(owner_target: Option<&str>, hint: syn::Type) -> syn::Type {
@@ -45976,6 +52761,8 @@ fn is_consuming_method_name(method: &str) -> bool {
             | "unwrap_right"
             | "expect_left"
             | "expect_right"
+            | "map"
+            | "filter_map"
     ) || method.starts_with("into_")
 }
 
@@ -46294,7 +53081,10 @@ mod tests {
             ),
             "{out}"
         );
-        assert!(!out.contains("SmallVec<std::array<const uint32_t&, 2>>::new_()"), "{out}");
+        assert!(
+            !out.contains("SmallVec<std::array<const uint32_t&, 2>>::new_()"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -46388,6 +53178,143 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf411_extension_impl_merged_impl_generics_emit_template_prefix() {
+        let out = transpile_str(
+            r#"
+            trait KeyFunction<A> {
+                type Key;
+                fn call_mut(&mut self, arg: A) -> Self::Key;
+            }
+
+            impl<A, K, F> KeyFunction<A> for F
+            where
+                F: FnMut(A) -> K,
+            {
+                type Key = K;
+                fn call_mut(&mut self, arg: A) -> Self::Key {
+                    (*self)(arg)
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("template<typename A, typename K, typename F>")
+                || out.contains("template<typename A, typename F, typename K>"),
+            "{out}"
+        );
+        assert!(out.contains("K call_mut(F& self_, A arg) {"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf411_extension_impl_module_forward_decl_keeps_assoc_bound_generics() {
+        let out = transpile_str_module(
+            r#"
+            trait KeyFunction<A> {
+                type Key;
+                fn call_mut(&mut self, arg: A) -> Self::Key;
+            }
+
+            impl<A, K, F> KeyFunction<A> for F
+            where
+                F: FnMut(A) -> K,
+            {
+                type Key = K;
+                fn call_mut(&mut self, arg: A) -> Self::Key {
+                    (*self)(arg)
+                }
+            }
+            "#,
+            "itertools",
+        );
+        assert!(
+            out.contains("template<typename A, typename K, typename F>")
+                || out.contains("template<typename A, typename F, typename K>"),
+            "{out}"
+        );
+        assert!(out.contains("K call_mut(F& self_, A arg);"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf411_extension_impl_keeps_multi_char_assoc_binding_generics() {
+        let out = transpile_str_module(
+            r#"
+            trait MultiUnzip {
+                type FromA;
+                fn multiunzip(self) -> (Self::FromA,);
+            }
+
+            impl<IT, FromA> MultiUnzip for IT {
+                type FromA = FromA;
+                fn multiunzip(self) -> (Self::FromA,) {
+                    panic!()
+                }
+            }
+            "#,
+            "itertools",
+        );
+        assert!(
+            out.contains("template<typename IT, typename FromA>")
+                || out.contains("template<typename FromA, typename IT>"),
+            "{out}"
+        );
+        assert!(out.contains("std::tuple<FromA> multiunzip(IT self_);"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf411_extension_impl_tuple_return_keeps_generic_param_usage() {
+        let out = transpile_str_module(
+            r#"
+            trait MultiUnzip<FromI> {
+                fn multiunzip(self) -> FromI;
+            }
+
+            impl<IT, A, FromA> MultiUnzip<(FromA,)> for IT {
+                fn multiunzip(self) -> (FromA,) {
+                    panic!()
+                }
+            }
+            "#,
+            "itertools",
+        );
+        assert!(
+            out.contains("template<typename IT, typename FromA>")
+                || out.contains("template<typename FromA, typename IT>"),
+            "{out}"
+        );
+        assert!(out.contains("std::tuple<FromA> multiunzip(IT self_);"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf411_extension_impl_body_self_assoc_has_local_self_alias() {
+        let out = transpile_str(
+            r#"
+            trait IterLike {
+                type Item;
+                fn next(&mut self) -> Option<Self::Item>;
+            }
+
+            trait PeekOps: IterLike {
+                fn take_one(&mut self) -> Option<Self::Item>;
+            }
+
+            impl<T: IterLike> PeekOps for T {
+                fn take_one(&mut self) -> Option<Self::Item> {
+                    if let Some(v) = self.next() {
+                        return Some(v);
+                    }
+                    None
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("using Self = std::remove_reference_t<decltype(self_)>;"),
+            "{out}"
+        );
+        assert!(out.contains("rusty::Option<typename Self::Item>"), "{out}");
+    }
+
+    #[test]
     fn test_leaf411_local_method_name_is_not_rewritten_to_extension_free_function() {
         let out = transpile_str(
             r#"
@@ -46445,8 +53372,14 @@ mod tests {
         "#,
         );
         assert!(out.contains("std::span<const uint8_t>"), "{out}");
-        assert!(out.contains("std::array<uint8_t, 2> _slice_ref_tmp"), "{out}");
-        assert!(!out.contains("static const auto _slice_ref_tmp = std::array{5, 6};"), "{out}");
+        assert!(
+            out.contains("std::array<uint8_t, 2> _slice_ref_tmp"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("static const auto _slice_ref_tmp = std::array{5, 6};"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -47177,7 +54110,9 @@ mod tests {
         );
         assert!(
             out.contains("return typename S::IntoIter(")
-                || out.contains("return typename S::IntoIter{"),
+                || out.contains("return typename S::IntoIter{")
+                || out.contains("return IntoIter(")
+                || out.contains("return IntoIter{"),
             "struct literal should lower through associated alias target, got:\n{}",
             out
         );
@@ -47185,6 +54120,18 @@ mod tests {
             !out.contains("return typename S::IntoIter<A>(")
                 && !out.contains("return typename S::IntoIter<A>{"),
             "associated alias target should not gain spurious template args, got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("IntoIter into_iter(")
+                || out.contains("typename S::IntoIter into_iter("),
+            "associated alias return type should stay non-templated at use sites, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("IntoIter<A> into_iter(")
+                && !out.contains("typename S::IntoIter<A> into_iter("),
+            "associated alias return type should not gain spurious template args, got:\n{}",
             out
         );
     }
@@ -47758,7 +54705,9 @@ mod tests {
             .expect("missing else branch in Outer move constructor");
         let consume_block = &out[consume_start..else_start];
         assert_eq!(
-            consume_block.matches("other.rusty_mark_forgotten();").count(),
+            consume_block
+                .matches("other.rusty_mark_forgotten();")
+                .count(),
             2,
             "Outer consume branch should emit two source marks when first field has Drop"
         );
@@ -47788,7 +54737,9 @@ mod tests {
             .expect("missing else branch in Outer move constructor");
         let consume_block = &out[consume_start..else_start];
         assert_eq!(
-            consume_block.matches("other.rusty_mark_forgotten();").count(),
+            consume_block
+                .matches("other.rusty_mark_forgotten();")
+                .count(),
             1,
             "Outer consume branch should emit one source mark when first field has no Drop"
         );
@@ -48266,6 +55217,27 @@ mod tests {
     fn test_index_expr() {
         let out = transpile_str("fn f() { let x = arr[0]; }");
         assert!(out.contains("arr[0]"));
+    }
+
+    #[test]
+    fn test_fixed_array_index_expr_uses_at() {
+        let out = transpile_str("fn f(a: [i32; 3], i: usize) -> i32 { a[i] }");
+        assert!(out.contains("return a.at(i);"), "{out}");
+    }
+
+    #[test]
+    fn test_mut_unsuffixed_int_seed_reuses_assignment_type_hint() {
+        let out = transpile_str(
+            r#"
+            fn f(n: usize) -> usize {
+                let mut c = 1;
+                c = n;
+                c
+            }
+            "#,
+        );
+        assert!(out.contains("size_t c = 1;"), "{out}");
+        assert!(!out.contains("auto c = 1;"), "{out}");
     }
 
     #[test]
@@ -48756,8 +55728,7 @@ mod tests {
     }
 
     #[test]
-    fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_stmt_match_uses_variant_get()
-    {
+    fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_stmt_match_uses_variant_get() {
         let out = transpile_str(
             r#"
             enum CollectionAllocErr {
@@ -48797,8 +55768,7 @@ mod tests {
     }
 
     #[test]
-    fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_expr_match_uses_variant_get()
-    {
+    fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_expr_match_uses_variant_get() {
         let out = transpile_str(
             r#"
             enum CollectionAllocErr {
@@ -49357,8 +56327,14 @@ mod tests {
         "#,
         );
         assert!(out.contains("return this->operator*();"), "{out}");
-        assert!(out.contains("std::span<const int32_t> as_ref() const {"), "{out}");
-        assert!(out.contains("std::span<const int32_t> borrow() const {"), "{out}");
+        assert!(
+            out.contains("std::span<const int32_t> as_ref() const {"),
+            "{out}"
+        );
+        assert!(
+            out.contains("std::span<const int32_t> borrow() const {"),
+            "{out}"
+        );
         assert!(out.contains("const Buf& alias() const {"), "{out}");
         assert!(out.contains("return (*this);"), "{out}");
     }
@@ -49517,7 +56493,8 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains("using IntoIter = Iter<A>;") || out.contains("using IntoIter = ::Iter<A>;")
+            out.contains("using IntoIter = Iter<A>;")
+                || out.contains("using IntoIter = ::Iter<A>;")
         );
         assert!(out.contains("into_iter("));
         assert!(!out.contains("IntoIter<A> into_iter("));
@@ -49616,7 +56593,9 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("std::variant_alternative_t<1, std::remove_reference_t<decltype(_m)>>"));
+        assert!(
+            out.contains("std::variant_alternative_t<1, std::remove_reference_t<decltype(_m)>>")
+        );
         assert!(!out.contains("const Included&"));
         assert!(!out.contains("const Excluded&"));
     }
@@ -49636,7 +56615,9 @@ mod tests {
             "#,
         );
         assert!(out.contains("Wrap<A> make("));
-        assert!(out.contains("NonNull<Outer<A>>::new_(") || out.contains("NonNull<Outer<A>>::new("));
+        assert!(
+            out.contains("NonNull<Outer<A>>::new_(") || out.contains("NonNull<Outer<A>>::new(")
+        );
         assert!(!out.contains("NonNull<Outer<T>>::new_("));
         assert!(!out.contains("NonNull<Outer<T>>::new("));
     }
@@ -49656,7 +56637,9 @@ mod tests {
             "#,
         );
         assert!(out.contains("Wrap<A> make("));
-        assert!(out.contains("NonNull<Outer<A>>::new_(") || out.contains("NonNull<Outer<A>>::new("));
+        assert!(
+            out.contains("NonNull<Outer<A>>::new_(") || out.contains("NonNull<Outer<A>>::new(")
+        );
         assert!(!out.contains("NonNull<Outer<T>>::new_("));
         assert!(!out.contains("NonNull<Outer<T>>::new("));
     }
@@ -49775,11 +56758,15 @@ mod tests {
     #[test]
     fn test_leaf5119_unreachable_unchecked_paths_are_diverging() {
         assert!(CodeGen::is_diverging_function_path("unreachable_unchecked"));
-        assert!(CodeGen::is_diverging_function_path("hint::unreachable_unchecked"));
+        assert!(CodeGen::is_diverging_function_path(
+            "hint::unreachable_unchecked"
+        ));
         assert!(CodeGen::is_diverging_function_path(
             "core::hint::unreachable_unchecked"
         ));
-        assert!(CodeGen::is_diverging_function_path("std::hint::unreachable_unchecked"));
+        assert!(CodeGen::is_diverging_function_path(
+            "std::hint::unreachable_unchecked"
+        ));
         assert!(CodeGen::is_diverging_function_path(
             "alloc::alloc::handle_alloc_error"
         ));
@@ -49827,7 +56814,9 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.contains("[&]() -> std::tuple<int32_t, size_t> { rusty::intrinsics::unreachable(); }()"),
+            out.contains(
+                "[&]() -> std::tuple<int32_t, size_t> { rusty::intrinsics::unreachable(); }()"
+            ),
             "{out}"
         );
     }
@@ -53491,7 +60480,10 @@ mod tests {
         );
         assert!(out.contains("RUSTY_TRY("), "{out}");
         assert!(!out.contains("RUSTY_TRY_INTO("), "{out}");
-        assert!(!out.contains("rusty::Result<std::tuple<>, void*>::Ok"), "{out}");
+        assert!(
+            !out.contains("rusty::Result<std::tuple<>, void*>::Ok"),
+            "{out}"
+        );
     }
 
     // ── Phase 11: Doc comments, tests, build integration ────────
@@ -53713,6 +60705,31 @@ mod tests {
         );
         assert!(out.contains("decltype(auto) operator[]("), "{out}");
         assert!(!out.contains("auto operator[]("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf4154333333332801_softened_index_reference_return_avoids_pointer_layering() {
+        let out = transpile_str_module(
+            r#"
+            trait Array { type Item; }
+            struct SmallVec<A>(A);
+
+            impl<A: Array> std::ops::Deref for SmallVec<A> {
+                type Target = [A::Item];
+                fn deref(&self) -> &Self::Target { todo!() }
+            }
+
+            impl<A: Array, I> std::ops::Index<I> for SmallVec<A> {
+                type Output = A::Item;
+                fn index(&self, index: I) -> &Self::Output {
+                    &(**self)[index]
+                }
+            }
+        "#,
+            "smallvec_like",
+        );
+        assert!(out.contains("return (*(*this))[index];"), "{out}");
+        assert!(!out.contains("return &(*(*this))[index];"), "{out}");
     }
 
     #[test]
@@ -55240,10 +62257,7 @@ mod tests {
             }
             "#,
         );
-        assert!(
-            out.contains("Box<") && out.contains("::from_raw("),
-            "{out}"
-        );
+        assert!(out.contains("Box<") && out.contains("::from_raw("), "{out}");
         assert!(out.contains(".into_raw()"), "{out}");
         assert!(!out.contains("Box::from_raw("), "{out}");
         assert!(!out.contains("Box::into_raw("), "{out}");
@@ -55264,9 +62278,14 @@ mod tests {
         // Should emit Box<T>::from_raw() with template arg from expected type.
         assert!(
             out.contains("Box<") && out.contains("::from_raw("),
-            "expected Box<T>::from_raw pattern, got:\n{}", out
+            "expected Box<T>::from_raw pattern, got:\n{}",
+            out
         );
-        assert!(!out.contains("Box::from_raw("), "should not emit bare Box::from_raw, got:\n{}", out);
+        assert!(
+            !out.contains("Box::from_raw("),
+            "should not emit bare Box::from_raw, got:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -55282,7 +62301,8 @@ mod tests {
         );
         assert!(
             out.contains("Box<") && out.contains("::from_raw("),
-            "expected Box<T>::from_raw pattern, got:\n{}", out
+            "expected Box<T>::from_raw pattern, got:\n{}",
+            out
         );
     }
 
@@ -57820,7 +64840,9 @@ mod tests {
             out
         );
         assert!(
-            out.contains("decltype(std::declval<I>().chain(std::declval<J>())) chain_it(I left, J right)"),
+            out.contains(
+                "decltype(std::declval<I>().chain(std::declval<J>())) chain_it(I left, J right)"
+            ),
             "expected iter::Chain lowering, got:\n{}",
             out
         );
@@ -57830,7 +64852,9 @@ mod tests {
             out
         );
         assert!(
-            out.contains("decltype(rusty::zip(std::declval<I>(), std::declval<J>())) zip_it(I left, J right)"),
+            out.contains(
+                "decltype(rusty::zip(std::declval<I>(), std::declval<J>())) zip_it(I left, J right)"
+            ),
             "expected Zip lowering through rusty::zip decltype, got:\n{}",
             out
         );
@@ -57850,7 +64874,9 @@ mod tests {
             out
         );
         assert!(
-            out.contains("decltype(std::declval<rusty::Vec<T>>().into_iter()) alloc_vec_into_iter_ty()"),
+            out.contains(
+                "decltype(std::declval<rusty::Vec<T>>().into_iter()) alloc_vec_into_iter_ty()"
+            ),
             "expected alloc::vec::IntoIter lowering, got:\n{}",
             out
         );
@@ -57969,7 +64995,10 @@ mod tests {
         assert!(out.contains("using rusty::Either;"), "{out}");
         assert!(out.contains("const rusty::Either_Left<A, B>& _v"), "{out}");
         assert!(out.contains("const rusty::Either_Right<A, B>& _v"), "{out}");
-        assert!(!out.contains("Rust-only unresolved import: using either::Either;"), "{out}");
+        assert!(
+            !out.contains("Rust-only unresolved import: using either::Either;"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -58044,7 +65073,9 @@ mod tests {
             "unexpected struct forward declaration conflicts with alias-based enum emission:\n{}",
             out
         );
-        let alias_pos = out.find(alias).expect("missing ErrorKind alias forward declaration");
+        let alias_pos = out
+            .find(alias)
+            .expect("missing ErrorKind alias forward declaration");
         let sig_pos = out
             .find("::error::ErrorKind parse_kind();")
             .expect("missing parse_kind forward declaration");
@@ -58130,7 +65161,9 @@ mod tests {
             "expected alias to nested private_ type, got:\n{}",
             out
         );
-        let ns_pos = out.find(nested_ns).expect("missing private_ namespace forward declarations");
+        let ns_pos = out
+            .find(nested_ns)
+            .expect("missing private_ namespace forward declarations");
         let alias_pos = out.find(alias).expect("missing DuplicatesBy alias");
         assert!(
             ns_pos < alias_pos,
@@ -58288,7 +65321,9 @@ mod tests {
         assert!(helpers.contains("decltype(auto) right(Value&& value)"));
         assert!(helpers.contains("struct Either_Left { L _0; };"));
         assert!(helpers.contains("struct Either_Right { R _0; };"));
-        assert!(helpers.contains("using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;"));
+        assert!(
+            helpers.contains("using Either = std::variant<Either_Left<L, R>, Either_Right<L, R>>;")
+        );
     }
 
     #[test]
@@ -58681,6 +65716,12 @@ mod tests {
         assert!(helpers.contains("using Utf8Error = rusty::String;"));
         assert!(helpers.contains("from_utf8_unchecked(Bytes&& bytes)"));
         assert!(helpers.contains("from_utf8_unchecked_mut(Bytes&& bytes)"));
+        assert!(helpers.contains("struct Chars {"));
+        assert!(helpers.contains("using Item = char32_t;"));
+        assert!(helpers.contains("struct CharIndices {"));
+        assert!(helpers.contains("using Item = std::tuple<std::size_t, char32_t>;"));
+        assert!(helpers.contains("struct Bytes {"));
+        assert!(helpers.contains("using Item = uint8_t;"));
         assert!(helpers.contains("namespace char_runtime {"));
         assert!(helpers.contains("from_u32(uint32_t value)"));
     }
@@ -59216,7 +66257,11 @@ mod tests {
             "#,
         );
         assert!(out.contains("template<typename... Ts> using Imp = imp::OnceCell<Ts...>;"));
-        assert!(out.contains("Imp<T>::new_()"), "expected recovered alias args, got:\n{}", out);
+        assert!(
+            out.contains("Imp<T>::new_()"),
+            "expected recovered alias args, got:\n{}",
+            out
+        );
         assert!(!out.contains("Imp::new_()"));
     }
 
@@ -59233,8 +66278,16 @@ mod tests {
             }
             "#,
         );
-        assert!(!out.contains("FLAGS.size()"), "unexpected FLAGS helper emitted:\n{}", out);
-        assert!(!out.contains("iter_names() const"), "unexpected bitflags helper emitted:\n{}", out);
+        assert!(
+            !out.contains("FLAGS.size()"),
+            "unexpected FLAGS helper emitted:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("iter_names() const"),
+            "unexpected bitflags helper emitted:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -59752,9 +66805,18 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("auto v = SmallVec<std::array<rusty::String, 2>>::new_();"), "{out}");
-        assert!(out.contains("v.push(rusty::String::from(\"hello\"));"), "{out}");
-        assert!(!out.contains("SmallVec<std::array<auto, 2>>::new_()"), "{out}");
+        assert!(
+            out.contains("auto v = SmallVec<std::array<rusty::String, 2>>::new_();"),
+            "{out}"
+        );
+        assert!(
+            out.contains("v.push(rusty::String::from(\"hello\"));"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("SmallVec<std::array<auto, 2>>::new_()"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -59946,6 +67008,32 @@ mod tests {
         );
         assert!(!out.contains("auto local = SmallVec::new_();"));
         assert!(!out.contains("return SmallVec::from_vec("));
+    }
+
+    #[test]
+    fn test_leaf512_hoisted_local_struct_literal_does_not_force_spurious_template_args() {
+        let out = transpile_str_module(
+            r#"
+            struct FormatWith<I, F> {
+                inner: (I, F),
+            }
+
+            impl<I: Clone, F: Clone> Clone for FormatWith<I, F> {
+                fn clone(&self) -> Self {
+                    struct PutBackOnDrop<'r, 'a, I, F> {
+                        into: &'r FormatWith<I, F>,
+                        inner: (I, F),
+                    }
+                    let pbod = PutBackOnDrop { into: self, inner: self.inner.clone() };
+                    FormatWith { inner: pbod.inner }
+                }
+            }
+            "#,
+            "itertools",
+        );
+        assert!(!out.contains("PutBackOnDrop<F, F>"), "{out}");
+        assert!(!out.contains("PutBackOnDrop<I, F>"), "{out}");
+        assert!(out.contains("const auto pbod = PutBackOnDrop{"), "{out}");
     }
 
     #[test]
@@ -60346,6 +67434,23 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4154333333332791_index_expr_expected_str_does_not_wrap_container_in_string_view() {
+        let out = transpile_str(
+            r#"
+            fn f(v: Vec<String>) {
+                match (&v[0], &"hello") {
+                    (left, right) => {
+                        let _same = *left == *right;
+                    }
+                };
+            }
+            "#,
+        );
+        assert!(!out.contains("std::string_view(v)[0]"), "{out}");
+        assert!(!out.contains("std::string_view((*v))[0]"), "{out}");
+    }
+
+    #[test]
     fn test_leaf41543333333327251_self_typed_path_expected_str_uses_string_view_helper() {
         let out = transpile_str(
             r#"
@@ -60408,6 +67513,26 @@ mod tests {
         );
         assert!(out.contains("auto _m0 = &*p;"));
         assert!(!out.contains("std::string_view(*p)"));
+    }
+
+    #[test]
+    fn test_leaf41543333333327131_runtime_match_ref_binding_deref_keeps_reference_value_shape() {
+        let out = transpile_str(
+            r#"
+            enum E {
+                Heap { ptr: usize, len: usize },
+                Inline,
+            }
+            fn f(e: &E) -> (usize, usize) {
+                match e {
+                    E::Heap { ptr, len } => (*ptr, *len),
+                    E::Inline => (0, 0),
+                }
+            }
+            "#,
+        );
+        assert!(!out.contains("std::make_tuple(*ptr"), "{out}");
+        assert!(!out.contains("std::make_tuple(*len"), "{out}");
     }
 
     #[test]
@@ -60702,7 +67827,10 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("rusty::char_runtime::is_whitespace(ch)"), "{out}");
+        assert!(
+            out.contains("rusty::char_runtime::is_whitespace(ch)"),
+            "{out}"
+        );
         assert!(!out.contains("ch.is_whitespace()"), "{out}");
     }
 
@@ -60721,8 +67849,14 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("rusty::scan(rusty::str_runtime::chars(s), 0"), "{out}");
-        assert!(out.contains("rusty::char_runtime::is_whitespace(ch)"), "{out}");
+        assert!(
+            out.contains("rusty::scan(rusty::str_runtime::chars(s), 0"),
+            "{out}"
+        );
+        assert!(
+            out.contains("rusty::char_runtime::is_whitespace(ch)"),
+            "{out}"
+        );
         assert!(!out.contains("ch.is_whitespace()"), "{out}");
     }
 
@@ -60740,7 +67874,10 @@ mod tests {
             "#,
         );
         assert!(out.contains("s.is_whitespace()"), "{out}");
-        assert!(!out.contains("rusty::char_runtime::is_whitespace(s)"), "{out}");
+        assert!(
+            !out.contains("rusty::char_runtime::is_whitespace(s)"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -60809,7 +67946,10 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return rusty::count(rusty::skip(v.into_iter(), 1));"), "{out}");
+        assert!(
+            out.contains("return rusty::count(rusty::skip(v.into_iter(), 1));"),
+            "{out}"
+        );
         assert!(!out.contains(".skip(1).count()"), "{out}");
     }
 
@@ -60825,7 +67965,10 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("rusty::scan(rusty::str_runtime::chars(s), 0"), "{out}");
+        assert!(
+            out.contains("rusty::scan(rusty::str_runtime::chars(s), 0"),
+            "{out}"
+        );
         assert!(!out.contains(".chars().scan("), "{out}");
         assert!(!out.contains(".scan(0"), "{out}");
     }
@@ -60919,7 +68062,10 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("return rusty::detail::type_level_size<A>()"), "{out}");
+        assert!(
+            out.contains("return rusty::detail::type_level_size<A>()"),
+            "{out}"
+        );
         assert!(!out.contains("A::size()"), "{out}");
     }
 
@@ -60946,7 +68092,10 @@ mod tests {
             type It<'a, T> = core::slice::Iter<'a, T>;
         "#,
         );
-        assert!(out.contains("using It = rusty::slice_iter::Iter<const T>;"), "{out}");
+        assert!(
+            out.contains("using It = rusty::slice_iter::Iter<const T>;"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -60956,8 +68105,14 @@ mod tests {
             type ItMut<'a, T> = core::slice::IterMut<'a, T>;
         "#,
         );
-        assert!(out.contains("using ItMut = rusty::slice_iter::Iter<T>;"), "{out}");
-        assert!(!out.contains("using ItMut = rusty::slice_iter::Iter<const T>;"), "{out}");
+        assert!(
+            out.contains("using ItMut = rusty::slice_iter::Iter<T>;"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("using ItMut = rusty::slice_iter::Iter<const T>;"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -61001,7 +68156,10 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("rusty::rev(v.drain(rusty::range(0, 0)))"), "{out}");
+        assert!(
+            out.contains("rusty::rev(v.drain(rusty::range(0, 0)))"),
+            "{out}"
+        );
         assert!(!out.contains(".drain(rusty::range(0, 0)).rev()"), "{out}");
     }
 
@@ -61022,11 +68180,11 @@ mod tests {
             }
             "#,
         );
+        assert!(out.contains("rusty::collect_range(v.into_iter())"), "{out}");
         assert!(
-            out.contains("rusty::collect_range(v.into_iter())"),
+            !out.contains("rusty::collect_range(rusty::iter(v))"),
             "{out}"
         );
-        assert!(!out.contains("rusty::collect_range(rusty::iter(v))"), "{out}");
     }
 
     #[test]
@@ -61057,11 +68215,22 @@ mod tests {
             }
             "#,
         );
-        assert!(
-            out.contains("rusty::iter(std::move(iterable))"),
-            "{out}"
-        );
+        assert!(out.contains("rusty::iter(std::move(iterable))"), "{out}");
         assert!(!out.contains("iterable.into_iter()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5157_array_literal_into_iter_binding_uses_iter_bridge() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let iter = [1, 2, 3].into_iter();
+                let _ = iter.next();
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::iter(std::array{1, 2, 3})"), "{out}");
+        assert!(!out.contains("std::array{1, 2, 3}.into_iter()"), "{out}");
     }
 
     #[test]
@@ -61174,7 +68343,8 @@ mod tests {
                 || out.contains(
                     "return rusty::Option<rusty::detail::associated_item_t<L>>(std::move(value));"
                 )
-                || out.contains("return rusty::Option<typename IterEither::Item>(std::move(value));"),
+                || out
+                    .contains("return rusty::Option<typename IterEither::Item>(std::move(value));"),
             "{out}"
         );
         assert!(!out.contains("return std::nullopt;"), "{out}");
@@ -61248,14 +68418,8 @@ mod tests {
             out.contains("auto&& _swap_view = _swap_recv.deref_mut();"),
             "{out}"
         );
-        assert!(
-            out.contains("const auto _swap_i = i;"),
-            "{out}"
-        );
-        assert!(
-            out.contains("const auto _swap_j = j;"),
-            "{out}"
-        );
+        assert!(out.contains("const auto _swap_i = i;"), "{out}");
+        assert!(out.contains("const auto _swap_j = j;"), "{out}");
         assert!(
             out.contains("if (!(_swap_i < _swap_len && _swap_j < _swap_len)) { rusty::panicking::panic(\"index out of bounds\"); }"),
             "{out}"
@@ -61293,10 +68457,7 @@ mod tests {
             }
             "#,
         );
-        assert!(
-            out.contains("std::tuple<size_t&, size_t>{len,"),
-            "{out}"
-        );
+        assert!(out.contains("std::tuple<size_t&, size_t>{len,"), "{out}");
         assert!(!out.contains("std::make_tuple(len"), "{out}");
     }
 
@@ -61356,7 +68517,10 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("auto [len_ptr, _] = this->triple_mut();"), "{out}");
+        assert!(
+            out.contains("auto [len_ptr, _] = this->triple_mut();"),
+            "{out}"
+        );
         assert!(out.contains("if (len_ptr == 0)"), "{out}");
         assert!(out.contains("return len_ptr;"), "{out}");
         assert!(!out.contains("*len_ptr"), "{out}");
@@ -61380,8 +68544,7 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains("rusty::detail::associated_item_t<A>")
-                || out.contains("typename A::Item"),
+            out.contains("rusty::detail::associated_item_t<A>") || out.contains("typename A::Item"),
             "{out}"
         );
         assert!(
@@ -62179,6 +69342,7 @@ mod tests {
         assert!(!out.contains("auto _m = *(*this);"));
         assert!(out.contains("return rusty::deref_ref("));
         assert!(!out.contains("&**inner"));
+        assert!(!out.contains("typename Either::Target&"));
     }
 
     #[test]
@@ -62247,8 +69411,7 @@ mod tests {
         "#,
         );
         assert!(
-            out.contains("auto _m0_tmp = *mk();")
-                || out.contains("auto _m0_tmp = *::mk();"),
+            out.contains("auto _m0_tmp = *mk();") || out.contains("auto _m0_tmp = *::mk();"),
             "{out}"
         );
         assert!(out.contains("auto _m0 = &_m0_tmp;"), "{out}");
@@ -62284,7 +69447,10 @@ mod tests {
         "#,
         );
         assert!(out.contains("auto _m0_tmp = *v.swap_remove(1);"), "{out}");
-        assert!(!out.contains("auto&& _m0_tmp = *v.swap_remove(1);"), "{out}");
+        assert!(
+            !out.contains("auto&& _m0_tmp = *v.swap_remove(1);"),
+            "{out}"
+        );
         assert!(out.contains("auto _m0 = &_m0_tmp;"), "{out}");
     }
 
@@ -62884,7 +70050,10 @@ mod tests {
             out.contains("decltype(auto) val = _iflet_scrutinee.unwrap();"),
             "{out}"
         );
-        assert!(!out.contains("auto val = _iflet_scrutinee.unwrap();"), "{out}");
+        assert!(
+            !out.contains("auto val = _iflet_scrutinee.unwrap();"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -62916,13 +70085,15 @@ mod tests {
         "#,
         );
         assert!(!out.contains("String::as_str"), "{out}");
-        assert!(out.contains("return opt.map([](auto&& _f, auto&&... _args)"), "{out}");
+        assert!(
+            out.contains("return opt.map([](auto&& _f, auto&&... _args)"),
+            "{out}"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "unresolved Result constructor type for Ok call without concrete context")]
-    fn test_get_or_try_init_ok_without_error_context_fails_early() {
-        let _ = transpile_str(
+    fn test_get_or_try_init_ok_without_error_context_uses_receiver_typed_ok() {
+        let out = transpile_str(
             r#"
             struct OnceCell<T>;
             impl<T> OnceCell<T> {
@@ -62938,6 +70109,15 @@ mod tests {
             }
         "#,
         );
+        assert!(
+            out.contains("-> rusty::Result<rusty::String, std::tuple<>>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("rusty::Result<rusty::String, std::tuple<>>::Ok"),
+            "{out}"
+        );
+        assert!(!out.contains("rusty::Ok("), "{out}");
     }
 
     #[test]
@@ -63714,7 +70894,10 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("auto [ptr, len_ref, cap] = this->triple_mut();"), "{out}");
+        assert!(
+            out.contains("auto [ptr, len_ref, cap] = this->triple_mut();"),
+            "{out}"
+        );
         assert!(out.contains("size_t* len = &len_ref;"), "{out}");
         assert!(out.contains("if (*len == cap)"), "{out}");
         assert!(out.contains("len = &heap_len;"), "{out}");
@@ -63778,8 +70961,14 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("auto [ptr, len_ref, cap] = this->triple_mut();"), "{out}");
-        assert!(out.contains("auto [heap_ptr, heap_len] = this->data.heap_mut();"), "{out}");
+        assert!(
+            out.contains("auto [ptr, len_ref, cap] = this->triple_mut();"),
+            "{out}"
+        );
+        assert!(
+            out.contains("auto [heap_ptr, heap_len] = this->data.heap_mut();"),
+            "{out}"
+        );
         assert!(out.contains("len = &heap_len;"), "{out}");
     }
 
@@ -64026,7 +71215,9 @@ mod tests {
         let helper_pos = out
             .find("struct SetLenOnDrop {")
             .expect("SetLenOnDrop definition emitted");
-        let consumer_pos = out.find("struct VecLike {").expect("VecLike definition emitted");
+        let consumer_pos = out
+            .find("struct VecLike {")
+            .expect("VecLike definition emitted");
         assert!(
             helper_pos < consumer_pos,
             "types used via associated calls in merged impl bodies must be emitted first\nGot:\n{out}"
@@ -65536,6 +72727,149 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf105403_write_hex_extension_return_type_does_not_duplicate_rusty_namespace() {
+        let out = transpile_str(
+            r#"
+            trait WriteHex {
+                fn write_hex<W: std::fmt::Write>(&self, writer: W) -> std::fmt::Result;
+            }
+            impl WriteHex for u8 {
+                fn write_hex<W: std::fmt::Write>(&self, writer: W) -> std::fmt::Result { Ok(()) }
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::fmt::Result write_hex("), "{out}");
+        assert!(!out.contains("rusty::rusty::fmt::Result"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf10541_option_or_pattern_match_prefers_runtime_checks_over_visit() {
+        let out = transpile_str(
+            r#"
+            fn f(input: Option<Option<i32>>) -> Option<i32> {
+                match input {
+                    None | Some(None) => None,
+                    Some(elt) => elt,
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("_m.is_none()") && out.contains("_m.is_some()"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("std::visit(overloaded { [&](const Some&"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf10541_tuple_option_or_pattern_match_avoids_some_visit_lambdas() {
+        let out = transpile_str(
+            r#"
+            fn f(a: (usize, Option<usize>), b: (usize, Option<usize>)) -> (usize, Option<usize>) {
+                let hi = match (a.1, b.1) {
+                    (Some(x), Some(y)) => x.checked_mul(y),
+                    (Some(0), None) | (None, Some(0)) => Some(0),
+                    _ => None,
+                };
+                (a.0.saturating_mul(b.0), hi)
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("std::visit(overloaded { [&](const Some&"),
+            "{out}"
+        );
+        assert!(out.contains("_m0.is_some() && _m1.is_some()"), "{out}");
+        assert!(out.contains("[&]() -> rusty::Option<size_t>"), "{out}");
+        assert!(out.contains("rusty::Option<size_t>(0)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf10541_tuple_option_match_some_cmp_max_infers_option_payload_type() {
+        let out = transpile_str(
+            r#"
+            fn f(a: (usize, Option<usize>), b: (usize, Option<usize>)) -> (usize, Option<usize>) {
+                let upper = match (a.1, b.1) {
+                    (Some(x), Some(y)) => Some(core::cmp::max(x, y)),
+                    _ => None,
+                };
+                (core::cmp::max(a.0, b.0), upper)
+            }
+            "#,
+        );
+        assert!(out.contains("[&]() -> rusty::Option<size_t>"), "{out}");
+        assert!(
+            out.contains("rusty::Option<size_t>(core::cmp::max"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf10541_tuple_alias_destructure_keeps_match_option_return_typed() {
+        let out = transpile_str(
+            r#"
+            type SizeHint = (usize, Option<usize>);
+            fn f(a: SizeHint, b: SizeHint) -> SizeHint {
+                let (a_lower, a_upper) = a;
+                let (b_lower, b_upper) = b;
+                let upper = match (a_upper, b_upper) {
+                    (Some(x), Some(y)) => Some(core::cmp::max(x, y)),
+                    _ => None,
+                };
+                (core::cmp::max(a_lower, b_lower), upper)
+            }
+            "#,
+        );
+        assert!(out.contains("[&]() -> rusty::Option<size_t>"), "{out}");
+        assert!(out.contains("rusty::Option<size_t>(rusty::None)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf10541_closure_tuple_destructure_renames_value_bindings_that_shadow_type_params() {
+        let out = transpile_str(
+            r#"
+            fn f<A, I>(iter: I)
+            where
+                I: Iterator<Item = (A,)>,
+            {
+                let _ = iter.fold((), |(), (A,)| {
+                    let _ = A;
+                    ()
+                });
+            }
+            "#,
+        );
+        assert!(out.contains("[A_shadow1]"), "{out}");
+        assert!(!out.contains("auto&& [A] ="), "{out}");
+    }
+
+    #[test]
+    fn test_leaf10541_method_tuple_parameter_pattern_emits_destructure_prelude() {
+        let out = transpile_str(
+            r#"
+            struct S;
+            impl S {
+                fn sum((c, t): (usize, usize)) -> usize {
+                    c + t
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("_arg0"), "{out}");
+        assert!(
+            out.contains("auto&& c = std::get<0>(rusty::detail::deref_if_pointer(_arg0));"),
+            "{out}"
+        );
+        assert!(
+            out.contains("auto&& t = std::get<1>(rusty::detail::deref_if_pointer(_arg0));"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn test_leaf105403_runtime_fallback_has_hex_helpers() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(
@@ -65852,9 +73186,7 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains(
-                "Buf::from(rusty::slice_full(std::array<uint32_t, 3>{1, 2, 3}))"
-            ),
+            out.contains("Buf::from(rusty::slice_full(std::array<uint32_t, 3>{1, 2, 3}))"),
             "associated from call should type the slice_full array literal from expected element type\nGot: {out}"
         );
         assert!(
@@ -65912,9 +73244,7 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains(
-                "Buf::from(rusty::slice_full(std::array<uint32_t, 3>{1, 2, 3}))"
-            ),
+            out.contains("Buf::from(rusty::slice_full(std::array<uint32_t, 3>{1, 2, 3}))"),
             "owner-scoped overload fallback should select slice-like signature for slice_full argument\nGot: {out}"
         );
         assert!(
@@ -65974,7 +73304,8 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains("rusty::Vec<uint8_t>::new_()") || out.contains("rusty::Vec<uint8_t>::new()"),
+            out.contains("rusty::Vec<uint8_t>::new_()")
+                || out.contains("rusty::Vec<uint8_t>::new()"),
             "Vec local should specialize from associated from(...) usage context\nGot: {out}"
         );
         assert!(
