@@ -100,9 +100,35 @@ struct AssocCallOwnerTypeCollector<'a> {
     owner_type_names: HashSet<String>,
 }
 
+struct KnownTypeReferenceCollector<'a> {
+    known_type_names: &'a HashSet<String>,
+    referenced_type_names: HashSet<String>,
+}
+
 #[derive(Default)]
 struct AsyncExprCollector {
     found: bool,
+}
+
+fn collect_known_type_names_from_token_stream(
+    tokens: proc_macro2::TokenStream,
+    known_type_names: &HashSet<String>,
+    out: &mut HashSet<String>,
+) {
+    for token in tokens {
+        match token {
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                if known_type_names.contains(name.as_str()) {
+                    out.insert(name);
+                }
+            }
+            TokenTree::Group(group) => {
+                collect_known_type_names_from_token_stream(group.stream(), known_type_names, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for AsyncExprCollector {
@@ -133,6 +159,52 @@ impl<'a> AssocCallOwnerTypeCollector<'a> {
             .nth(path.segments.len().saturating_sub(2))
             .map(|segment| segment.ident.to_string())
     }
+
+    fn extract_path_tail_type_name(path: &syn::Path) -> Option<String> {
+        path.segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+    }
+
+    fn collect_type_names_from_macro_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        collect_known_type_names_from_token_stream(
+            tokens,
+            self.known_type_names,
+            &mut self.owner_type_names,
+        );
+    }
+}
+
+impl<'a> KnownTypeReferenceCollector<'a> {
+    fn new(known_type_names: &'a HashSet<String>) -> Self {
+        Self {
+            known_type_names,
+            referenced_type_names: HashSet::new(),
+        }
+    }
+
+    fn into_referenced_type_names(self) -> HashSet<String> {
+        self.referenced_type_names
+    }
+
+    fn maybe_record_tail_path_type_name(&mut self, path: &syn::Path) {
+        if let Some(name) = path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            && self.known_type_names.contains(name.as_str())
+        {
+            self.referenced_type_names.insert(name);
+        }
+    }
+
+    fn collect_type_names_from_macro_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        collect_known_type_names_from_token_stream(
+            tokens,
+            self.known_type_names,
+            &mut self.referenced_type_names,
+        );
+    }
 }
 
 impl<'ast> Visit<'ast> for AssocCallOwnerTypeCollector<'_> {
@@ -143,10 +215,65 @@ impl<'ast> Visit<'ast> for AssocCallOwnerTypeCollector<'_> {
                     if self.known_type_names.contains(owner_name.as_str()) {
                         self.owner_type_names.insert(owner_name);
                     }
+                } else if let Some(type_name) = Self::extract_path_tail_type_name(&path_expr.path) {
+                    if self.known_type_names.contains(type_name.as_str()) {
+                        self.owner_type_names.insert(type_name);
+                    }
                 }
             }
         }
         visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if node.qself.is_none()
+            && let Some(type_name) = Self::extract_path_tail_type_name(&node.path)
+            && self.known_type_names.contains(type_name.as_str())
+        {
+            self.owner_type_names.insert(type_name);
+        }
+        visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        self.collect_type_names_from_macro_tokens(node.tokens.clone());
+        visit::visit_macro(self, node);
+    }
+}
+
+impl<'ast> Visit<'ast> for KnownTypeReferenceCollector<'_> {
+    fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
+        if node.qself.is_none() {
+            self.maybe_record_tail_path_type_name(&node.path);
+        }
+        visit::visit_type_path(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if node.qself.is_none() {
+            self.maybe_record_tail_path_type_name(&node.path);
+        }
+        visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path_expr) = node.func.as_ref()
+            && path_expr.qself.is_none()
+        {
+            if let Some(owner_name) =
+                AssocCallOwnerTypeCollector::extract_owner_type_name(&path_expr.path)
+                && self.known_type_names.contains(owner_name.as_str())
+            {
+                self.referenced_type_names.insert(owner_name);
+            }
+            self.maybe_record_tail_path_type_name(&path_expr.path);
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        self.collect_type_names_from_macro_tokens(node.tokens.clone());
+        visit::visit_macro(self, node);
     }
 }
 
@@ -236,6 +363,10 @@ pub struct CodeGen {
     /// Ordered in-scope type parameter names per pushed generic scope.
     /// Preserves declaration order for omitted-generic recovery fallbacks.
     type_param_scope_order: Vec<Vec<String>>,
+    /// Per-scope mapping from trait name -> unique implementing type param name.
+    /// Used to lower trait static calls like `Error::invalid_value(...)` to
+    /// the constrained generic param (`E::invalid_value(...)`).
+    trait_bound_type_param_scopes: Vec<HashMap<String, String>>,
     /// Trait default static methods (no receiver) keyed by trait name.
     /// Used to inject these methods into implementing types.
     trait_static_default_methods: HashMap<String, Vec<syn::ImplItemFn>>,
@@ -546,6 +677,11 @@ pub struct CodeGen {
     /// Top-level inline module names declared in this file.
     /// Used to lower bare module imports (`use crate::{iter};`) as namespace imports.
     declared_module_names: HashSet<String>,
+    /// Declared inline module paths (top-level and nested), for example
+    /// `iter` and `adaptors::modular`.
+    /// Used to distinguish namespace imports from value/function imports that
+    /// happen to end with a lowercase segment.
+    declared_module_paths: HashSet<String>,
     /// Top-level modules that are imported as bare namespaces from nested scopes.
     /// Used to emit just-enough global namespace forward declarations for alias imports.
     required_top_level_module_aliases: HashSet<String>,
@@ -671,6 +807,7 @@ impl CodeGen {
             current_struct: None,
             type_param_scopes: Vec::new(),
             type_param_scope_order: Vec::new(),
+            trait_bound_type_param_scopes: Vec::new(),
             trait_static_default_methods: HashMap::new(),
             trait_method_has_receiver: HashMap::new(),
             module_runtime_helper_traits: HashSet::new(),
@@ -762,6 +899,7 @@ impl CodeGen {
             declared_item_names: HashSet::new(),
             item_const_types: HashMap::new(),
             declared_module_names: HashSet::new(),
+            declared_module_paths: HashSet::new(),
             required_top_level_module_aliases: HashSet::new(),
             module_qualified_functions: HashMap::new(),
             module_namespace_renames: HashMap::new(),
@@ -874,6 +1012,7 @@ impl CodeGen {
         self.declared_item_names.clear();
         self.item_const_types.clear();
         self.declared_module_names.clear();
+        self.declared_module_paths.clear();
         self.required_top_level_module_aliases.clear();
         self.emitted_scoped_type_aliases.clear();
         self.emitted_method_conflict_keys.clear();
@@ -922,6 +1061,7 @@ impl CodeGen {
         self.owner_method_has_receiver.clear();
         self.type_param_scopes.clear();
         self.type_param_scope_order.clear();
+        self.trait_bound_type_param_scopes.clear();
         self.reassigned_vars.clear();
         self.consuming_method_receiver_vars.clear();
         self.mutable_pointer_aliased_vars.clear();
@@ -1060,7 +1200,7 @@ impl CodeGen {
         // This ensures the parity runner's prelude-skip logic doesn't
         // accidentally skip forward declarations.
         // Note: Use items stay AFTER forward decls (they may depend on them).
-        let ordered_items = self.order_items_for_emission(&file.items, true);
+        let ordered_items = self.order_items_for_emission(&file.items, true, true);
         let mut deferred_items: Vec<&syn::Item> = Vec::new();
         for item in &ordered_items {
             if matches!(item, syn::Item::ExternCrate(_)) {
@@ -1230,7 +1370,11 @@ impl CodeGen {
         &self,
         items: &'a [syn::Item],
         delay_function_namespaces: bool,
+        ignore_inline_module_fn_deps: bool,
     ) -> Vec<&'a syn::Item> {
+        let known_scope_type_names = Self::collect_top_level_type_names(items);
+        let trait_default_type_deps =
+            Self::collect_trait_default_method_type_dependencies(items, &known_scope_type_names);
         let inline_modules: Vec<(usize, &syn::Item)> = items
             .iter()
             .enumerate()
@@ -1243,7 +1387,14 @@ impl CodeGen {
         if inline_modules.is_empty() {
             let mut result: Vec<&syn::Item> = items.iter().collect();
             Self::topological_sort_structs(&mut result);
-            return result;
+            let (early_enums, rest): (Vec<&syn::Item>, Vec<&syn::Item>) =
+                result.into_iter().partition(|item| {
+                    matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()))
+                });
+            let mut final_result = Vec::with_capacity(early_enums.len() + rest.len());
+            final_result.extend(early_enums);
+            final_result.extend(rest);
+            return final_result;
         }
 
         let module_names: Vec<String> = inline_modules
@@ -1364,6 +1515,16 @@ impl CodeGen {
         final_ordered.extend(early_enums);
         final_ordered.extend(rest);
 
+        // Delay inline modules until after sibling type definitions they reference.
+        // Rust allows looking ahead to later items; C++ requires complete types at
+        // construction/use sites inside inline method bodies.
+        Self::delay_inline_modules_for_type_dependencies(
+            &mut final_ordered,
+            &known_scope_type_names,
+            &trait_default_type_deps,
+            ignore_inline_module_fn_deps,
+        );
+
         // Topologically sort structs and data enums so types used as fields are
         // emitted before the types that contain them.  Forward declarations are
         // not enough when a type is used as a by-value field.
@@ -1380,6 +1541,15 @@ impl CodeGen {
         let mut final_ordered = Vec::with_capacity(early_enums.len() + rest.len());
         final_ordered.extend(early_enums);
         final_ordered.extend(rest);
+        // Topological sorting can move type definitions after module items. Run the
+        // module-delay pass again on final type positions to preserve Rust's
+        // look-ahead semantics inside inline module bodies.
+        Self::delay_inline_modules_for_type_dependencies(
+            &mut final_ordered,
+            &known_scope_type_names,
+            &trait_default_type_deps,
+            ignore_inline_module_fn_deps,
+        );
         final_ordered
     }
 
@@ -1400,6 +1570,225 @@ impl CodeGen {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn collect_top_level_type_names(items: &[syn::Item]) -> HashSet<String> {
+        items
+            .iter()
+            .filter_map(Self::item_top_level_type_name)
+            .collect()
+    }
+
+    fn item_top_level_type_name(item: &syn::Item) -> Option<String> {
+        match item {
+            syn::Item::Struct(s) => Some(s.ident.to_string()),
+            syn::Item::Enum(e) => Some(e.ident.to_string()),
+            _ => None,
+        }
+    }
+
+    fn collect_known_type_references_in_module_items(
+        items: &[syn::Item],
+        known_type_names: &HashSet<String>,
+        trait_default_type_deps: &HashMap<String, HashSet<String>>,
+        ignore_fn_items: bool,
+    ) -> HashSet<String> {
+        let mut collector = KnownTypeReferenceCollector::new(known_type_names);
+        for item in items {
+            if ignore_fn_items
+                && matches!(
+                    item,
+                    syn::Item::Fn(_) | syn::Item::Use(_) | syn::Item::Impl(_)
+                )
+            {
+                continue;
+            }
+            collector.visit_item(item);
+        }
+        let mut refs = collector.into_referenced_type_names();
+        if ignore_fn_items {
+            return refs;
+        }
+        for item in items {
+            let syn::Item::Use(u) = item else {
+                continue;
+            };
+            let mut prefix: Vec<String> = Vec::new();
+            Self::collect_use_tree_known_type_references(
+                &u.tree,
+                &mut prefix,
+                known_type_names,
+                &mut refs,
+            );
+        }
+        Self::collect_trait_impl_default_method_dependency_hints(
+            items,
+            trait_default_type_deps,
+            &mut refs,
+        );
+        refs
+    }
+
+    fn collect_use_tree_known_type_references(
+        tree: &syn::UseTree,
+        prefix: &mut Vec<String>,
+        known_type_names: &HashSet<String>,
+        out: &mut HashSet<String>,
+    ) {
+        match tree {
+            syn::UseTree::Path(p) => {
+                prefix.push(p.ident.to_string());
+                Self::collect_use_tree_known_type_references(
+                    &p.tree,
+                    prefix,
+                    known_type_names,
+                    out,
+                );
+                let _ = prefix.pop();
+            }
+            syn::UseTree::Name(n) => {
+                if known_type_names.contains(n.ident.to_string().as_str()) {
+                    out.insert(n.ident.to_string());
+                }
+            }
+            syn::UseTree::Rename(r) => {
+                if known_type_names.contains(r.ident.to_string().as_str()) {
+                    out.insert(r.ident.to_string());
+                }
+            }
+            syn::UseTree::Glob(_) => {
+                if let Some(last) = prefix.last()
+                    && known_type_names.contains(last.as_str())
+                {
+                    out.insert(last.clone());
+                }
+            }
+            syn::UseTree::Group(g) => {
+                for nested in &g.items {
+                    Self::collect_use_tree_known_type_references(
+                        nested,
+                        prefix,
+                        known_type_names,
+                        out,
+                    );
+                }
+            }
+        }
+    }
+
+    fn collect_trait_default_method_type_dependencies(
+        items: &[syn::Item],
+        known_type_names: &HashSet<String>,
+    ) -> HashMap<String, HashSet<String>> {
+        let mut deps_by_trait: HashMap<String, HashSet<String>> = HashMap::new();
+        for item in items {
+            let syn::Item::Trait(trait_item) = item else {
+                continue;
+            };
+            let trait_name = trait_item.ident.to_string();
+            let mut trait_deps: HashSet<String> = HashSet::new();
+            for trait_member in &trait_item.items {
+                let syn::TraitItem::Fn(method) = trait_member else {
+                    continue;
+                };
+                if method.default.is_none() {
+                    continue;
+                }
+                let mut collector = KnownTypeReferenceCollector::new(known_type_names);
+                collector.visit_trait_item_fn(method);
+                trait_deps.extend(collector.into_referenced_type_names());
+            }
+            if !trait_deps.is_empty() {
+                deps_by_trait.insert(trait_name, trait_deps);
+            }
+        }
+        deps_by_trait
+    }
+
+    fn collect_trait_impl_default_method_dependency_hints(
+        items: &[syn::Item],
+        trait_default_type_deps: &HashMap<String, HashSet<String>>,
+        out: &mut HashSet<String>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Impl(item_impl) => {
+                    let Some((_, trait_path, _)) = &item_impl.trait_ else {
+                        continue;
+                    };
+                    let Some(trait_name) =
+                        trait_path.segments.last().map(|seg| seg.ident.to_string())
+                    else {
+                        continue;
+                    };
+                    if let Some(deps) = trait_default_type_deps.get(trait_name.as_str()) {
+                        out.extend(deps.iter().cloned());
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        Self::collect_trait_impl_default_method_dependency_hints(
+                            nested,
+                            trait_default_type_deps,
+                            out,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn delay_inline_modules_for_type_dependencies<'a>(
+        items: &mut Vec<&'a syn::Item>,
+        known_scope_type_names: &HashSet<String>,
+        trait_default_type_deps: &HashMap<String, HashSet<String>>,
+        ignore_fn_items: bool,
+    ) {
+        if known_scope_type_names.is_empty() || items.is_empty() {
+            return;
+        }
+
+        let mut idx = 0usize;
+        while idx < items.len() {
+            let syn::Item::Mod(module_item) = items[idx] else {
+                idx += 1;
+                continue;
+            };
+            let Some((_, nested_items)) = &module_item.content else {
+                idx += 1;
+                continue;
+            };
+            let deps = Self::collect_known_type_references_in_module_items(
+                nested_items,
+                known_scope_type_names,
+                trait_default_type_deps,
+                ignore_fn_items,
+            );
+            if deps.is_empty() {
+                idx += 1;
+                continue;
+            }
+
+            let mut last_dep_pos = idx;
+            for (pos, item) in items.iter().enumerate().skip(idx + 1) {
+                let Some(type_name) = Self::item_top_level_type_name(item) else {
+                    continue;
+                };
+                if deps.contains(type_name.as_str()) {
+                    last_dep_pos = pos;
+                }
+            }
+
+            if last_dep_pos > idx {
+                let module_ref = items.remove(idx);
+                items.insert(last_dep_pos, module_ref);
+                // Re-check the same index after shifting.
+                continue;
+            }
+
+            idx += 1;
         }
     }
 
@@ -1739,57 +2128,29 @@ impl CodeGen {
                 }
             }
 
-            // Collect cyclic type names.
-            let cyclic_names: Vec<String> = in_cycle
-                .iter()
-                .enumerate()
-                .filter(|pair| *pair.1)
-                .filter_map(|(pos, _)| {
-                    struct_indices.get(pos).and_then(|&idx| {
-                        items.get(idx).and_then(|item| match item {
-                            syn::Item::Struct(s) => Some(s.ident.to_string()),
-                            syn::Item::Enum(e)
-                                if e.variants.iter().any(|v| !v.fields.is_empty()) =>
-                            {
-                                Some(e.ident.to_string())
-                            }
-                            _ => None,
-                        })
-                    })
-                })
-                .collect();
-
             // Separate cyclic from non-cyclic: keep non-cyclic in topological order,
-            // move cyclic to end (in their original relative order).
+            // move cyclic to end (in their original relative order among type items).
             let original_items_at_struct_positions: Vec<&syn::Item> =
                 struct_indices.iter().map(|&idx| items[idx]).collect();
 
             let mut new_order: Vec<&syn::Item> = Vec::with_capacity(n);
-            let mut cyclic_items: Vec<&syn::Item> = Vec::new();
-
-            for &sorted_pos in sorted_indices.iter() {
-                let item = original_items_at_struct_positions[sorted_pos];
-                let name = match item {
-                    syn::Item::Struct(s) => s.ident.to_string(),
-                    syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
-                        e.ident.to_string()
-                    }
-                    _ => continue,
-                };
-                if cyclic_names.contains(&name) {
-                    cyclic_items.push(item);
-                } else {
-                    new_order.push(item);
+            // Keep acyclic nodes in Kahn order.
+            for &sorted_pos in &sorted_indices {
+                if !in_cycle[sorted_pos] {
+                    new_order.push(original_items_at_struct_positions[sorted_pos]);
                 }
             }
-            // Append cyclic items at the end.
-            new_order.extend(cyclic_items);
+            // Append all cycle-participating nodes exactly once in original order.
+            for (pos, item) in original_items_at_struct_positions.iter().enumerate() {
+                if in_cycle[pos] {
+                    new_order.push(*item);
+                }
+            }
+            debug_assert_eq!(new_order.len(), n);
 
             // Place items back at their struct positions.
             for (i, &struct_idx) in struct_indices.iter().enumerate() {
-                if i < new_order.len() {
-                    items[struct_idx] = new_order[i];
-                }
+                items[struct_idx] = new_order[i];
             }
             return;
         }
@@ -2928,7 +3289,7 @@ impl CodeGen {
     }
 
     fn emit_item_forward_decls(&mut self, items: &[syn::Item], module_depth: usize) -> bool {
-        let ordered_items = self.order_items_for_emission(items, false);
+        let ordered_items = self.order_items_for_emission(items, false, false);
         let mut emitted_names = HashSet::new();
         let mut emitted_consts = HashSet::new();
         let mut emitted_aliases = HashSet::new();
@@ -2943,8 +3304,7 @@ impl CodeGen {
                     if !emitted_names.insert(name.clone()) {
                         continue;
                     }
-                    let export_prefix =
-                        if self.is_exported_at_module_depth(&s.vis, module_depth) {
+                    let export_prefix = if self.is_exported_at_module_depth(&s.vis, module_depth) {
                         "export "
                     } else {
                         ""
@@ -2964,24 +3324,12 @@ impl CodeGen {
                         ""
                     };
                     if enum_is_c_like(e) {
-                        if self.module_body_forward_decl_pass {
-                            self.emit_template_prefix_without_type_defaults(&e.generics);
-                            self.writeln(&format!("{}enum class {} {{", export_prefix, name));
-                            self.indent += 1;
-                            let variants = self.render_c_like_enum_variants(e);
-                            self.writeln(&variants.join(",\n    "));
-                            self.indent -= 1;
-                            self.writeln("};");
-                            self.forward_emitted_c_like_enums
-                                .insert(self.scoped_type_key(&name));
-                            self.forward_emitted_c_like_enums.insert(name.clone());
-                        } else {
-                            // The global recursive forward-declaration pass may visit nested
-                            // modules before the module body emits. Keep this pass to a plain
-                            // declaration to avoid duplicate full enum definitions.
-                            self.emit_template_prefix_without_type_defaults(&e.generics);
-                            self.writeln(&format!("{}enum class {};", export_prefix, name));
-                        }
+                        // Always emit plain c-like enum declarations here.
+                        // Full definitions are emitted in normal item emission order;
+                        // duplicating full definitions in forward-decl passes causes
+                        // ODR/duplicate-definition failures in nested modules.
+                        self.emit_template_prefix_without_type_defaults(&e.generics);
+                        self.writeln(&format!("{}enum class {};", export_prefix, name));
                     } else if self.enum_uses_struct_wrapper(e) {
                         self.emit_template_prefix_without_type_defaults(&e.generics);
                         self.writeln(&format!("{}struct {};", export_prefix, name));
@@ -3876,8 +4224,27 @@ impl CodeGen {
                 syn::Item::Mod(m) => {
                     self.declared_item_names.insert(m.ident.to_string());
                     self.declared_module_names.insert(m.ident.to_string());
+                    self.declared_module_paths.insert(m.ident.to_string());
+                    if let Some((_, nested_items)) = &m.content {
+                        self.collect_nested_module_names(nested_items, &[m.ident.to_string()]);
+                    }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn collect_nested_module_names(&mut self, items: &[syn::Item], parent_path: &[String]) {
+        for item in items {
+            if let syn::Item::Mod(m) = item {
+                let mod_name = m.ident.to_string();
+                self.declared_module_names.insert(mod_name.clone());
+                let mut scoped = parent_path.to_vec();
+                scoped.push(mod_name.clone());
+                self.declared_module_paths.insert(scoped.join("::"));
+                if let Some((_, nested_items)) = &m.content {
+                    self.collect_nested_module_names(nested_items, &scoped);
+                }
             }
         }
     }
@@ -4641,7 +5008,13 @@ impl CodeGen {
                 !matches!(seg.ident.to_string().as_str(), "crate" | "self" | "super")
             })
         {
-            out.push(format!("{}::{}", self.module_stack.join("::"), joined));
+            for depth in (1..=self.module_stack.len()).rev() {
+                out.push(format!(
+                    "{}::{}",
+                    self.module_stack[..depth].join("::"),
+                    joined
+                ));
+            }
         }
 
         if let Some(rest) = joined.strip_prefix("crate::") {
@@ -4704,6 +5077,120 @@ impl CodeGen {
             return Some(format!("::{}", escaped));
         }
         None
+    }
+
+    fn resolve_scoped_namespace_function_expr_path(
+        &self,
+        namespace_name: &str,
+        fn_name: &str,
+    ) -> Option<String> {
+        if namespace_name.is_empty() || fn_name.is_empty() {
+            return None;
+        }
+        let mut candidates = Vec::new();
+        candidates.push(format!("{}::{}", namespace_name, fn_name));
+        for depth in (1..=self.module_stack.len()).rev() {
+            let prefix = self.module_stack[..depth].join("::");
+            candidates.push(format!("{}::{}::{}", prefix, namespace_name, fn_name));
+        }
+        candidates.retain(|candidate| self.is_known_free_function_path(candidate));
+        candidates.sort();
+        candidates.dedup();
+        if candidates.len() == 1 {
+            let escaped = self.escape_and_rename_qualified_name(&candidates[0]);
+            return Some(format!("::{}", escaped));
+        }
+        None
+    }
+
+    fn collect_known_free_function_paths(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for key in self.function_arg_pass_styles.keys() {
+            out.insert(key.clone());
+        }
+        for key in self.function_arg_expected_types.keys() {
+            out.insert(key.clone());
+        }
+        for key in self.function_type_param_names.keys() {
+            out.insert(key.clone());
+        }
+        for key in self.function_return_types.keys() {
+            out.insert(key.clone());
+        }
+        for (trait_key, methods) in &self.extension_trait_impl_methods {
+            let mut parts: Vec<&str> = trait_key.split("::").collect();
+            if parts.pop().is_none() {
+                continue;
+            }
+            let module_scope = parts.join("::");
+            for method in methods {
+                let method_name = method.method.sig.ident.to_string();
+                let full_path = if module_scope.is_empty() {
+                    format!("rusty_ext::{}", method_name)
+                } else {
+                    format!("{}::rusty_ext::{}", module_scope, method_name)
+                };
+                out.insert(full_path);
+            }
+        }
+        out
+    }
+
+    fn common_module_prefix_depth(path: &str, module_path: &str) -> usize {
+        let mut depth = 0usize;
+        for (lhs, rhs) in path.split("::").zip(module_path.split("::")) {
+            if lhs != rhs {
+                break;
+            }
+            depth += 1;
+        }
+        depth
+    }
+
+    fn resolve_unscoped_namespace_function_expr_path(
+        &self,
+        namespace_name: &str,
+        fn_name: &str,
+    ) -> Option<String> {
+        if namespace_name.is_empty() || fn_name.is_empty() {
+            return None;
+        }
+        let suffix = format!("::{}::{}", namespace_name, fn_name);
+        let mut candidates: Vec<String> = self
+            .collect_known_free_function_paths()
+            .into_iter()
+            .filter(|key| key.ends_with(&suffix))
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        if candidates.is_empty() {
+            return None;
+        }
+        if candidates.len() == 1 {
+            let escaped = self.escape_and_rename_qualified_name(&candidates[0]);
+            return Some(format!("::{}", escaped));
+        }
+        let current_module = self.module_stack.join("::");
+        let mut ranked: Vec<(usize, String)> = candidates
+            .into_iter()
+            .map(|candidate| {
+                (
+                    Self::common_module_prefix_depth(&candidate, &current_module),
+                    candidate,
+                )
+            })
+            .collect();
+        ranked.sort_by(|(ld, lp), (rd, rp)| rd.cmp(ld).then_with(|| lp.cmp(rp)));
+        let best = ranked.first()?.clone();
+        let is_ambiguous = ranked
+            .iter()
+            .skip(1)
+            .any(|(depth, _)| *depth == best.0 && best.0 > 0);
+        if is_ambiguous {
+            return None;
+        }
+        let escaped = self.escape_and_rename_qualified_name(&best.1);
+        Some(format!("::{}", escaped))
     }
 
     fn lookup_function_arg_pass_style(
@@ -6219,7 +6706,10 @@ impl CodeGen {
         self.expanded_test_markers.iter().any(|marker| {
             marker == fn_name
                 || marker == &scoped
-                || marker.rsplit("::").next().is_some_and(|tail| tail == fn_name)
+                || marker
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == fn_name)
         })
     }
 
@@ -7131,9 +7621,9 @@ impl CodeGen {
                 }),
                 _ => false,
             });
-        let stub_expanded_async_test_body =
-            self.is_expanded_test_marker_function(&f.sig.ident.to_string())
-                && self.block_contains_async_expr(&f.block);
+        let stub_expanded_async_test_body = self
+            .is_expanded_test_marker_function(&f.sig.ident.to_string())
+            && self.block_contains_async_expr(&f.block);
         if stub_expanded_async_test_body {
             // Expanded marker wrappers resolve against emitted top-level function set.
             // Removing this entry causes wrapper generation to skip the unsupported
@@ -7317,7 +7807,8 @@ impl CodeGen {
                 if let syn::ImplItem::Type(t) = impl_item {
                     let alias_rust_name = t.ident.to_string();
                     let alias_name = escape_cpp_keyword(&t.ident.to_string());
-                    let alias_cpp_type = self.map_type(&t.ty);
+                    let alias_cpp_type = self
+                        .normalize_assoc_alias_target_type(&alias_rust_name, self.map_type(&t.ty));
                     self.emit_impl_item(impl_item);
                     // Even when constrained mode skips emitting the alias as a C++ member,
                     // keep its mapped type available for subsequent method return/projection
@@ -7725,7 +8216,8 @@ impl CodeGen {
                 if let syn::ImplItem::Type(t) = impl_item {
                     let alias_rust_name = t.ident.to_string();
                     let alias_name = escape_cpp_keyword(&alias_rust_name);
-                    let alias_cpp_type = self.map_type(&t.ty);
+                    let alias_cpp_type = self
+                        .normalize_assoc_alias_target_type(&alias_rust_name, self.map_type(&t.ty));
                     if let Some(scope) = self.current_struct_assoc_cpp_types.last_mut() {
                         scope.insert(alias_rust_name, alias_cpp_type.clone());
                         scope.insert(alias_name, alias_cpp_type);
@@ -8409,7 +8901,6 @@ impl CodeGen {
             // C-like enum → enum class
             let enum_name = name.to_string();
             let scoped_enum_name = self.scoped_type_key(&enum_name);
-            let enum_decl_marker = format!("enum class {} {{", name);
             let export_prefix = if self.is_exported(&e.vis) {
                 "export "
             } else {
@@ -8419,11 +8910,9 @@ impl CodeGen {
             // Global duplicate-suppression is only valid for non-local emission.
             let is_local_scope = self.block_depth > 0;
             let already_defined = !is_local_scope
-                && (self
+                && self
                     .forward_emitted_c_like_enums
-                    .contains(&scoped_enum_name)
-                    || self.forward_emitted_c_like_enums.contains(&enum_name)
-                    || self.output.contains(&enum_decl_marker));
+                    .contains(&scoped_enum_name);
             if !already_defined {
                 self.writeln(&format!("{}enum class {} {{", export_prefix, name));
                 self.indent += 1;
@@ -8431,6 +8920,10 @@ impl CodeGen {
                 self.writeln(&variants.join(",\n    "));
                 self.indent -= 1;
                 self.writeln("};");
+                if !is_local_scope {
+                    self.forward_emitted_c_like_enums
+                        .insert(scoped_enum_name.clone());
+                }
             }
 
             // Emit associated constants and display helpers from impl blocks for C-like enums.
@@ -8873,16 +9366,45 @@ impl CodeGen {
         }
         let ty = self.map_type(&c.ty);
         let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
+        // `std::span` constants built from array literals need stable backing storage.
+        // Emitting `constexpr std::span = std::array{...}` binds span to a temporary.
+        if ty.starts_with("std::span<") && expr.trim_start().starts_with("std::array<") {
+            if self.block_depth > 0 {
+                self.record_local_const_binding(&name.to_string(), true);
+            }
+            let storage_name = format!("{}_storage", name);
+            let storage_qualifier = if self.block_depth == 0 {
+                "static const auto"
+            } else {
+                "const auto"
+            };
+            self.writeln(&format!("{} {} = {};", storage_qualifier, storage_name, expr));
+            let export_prefix = if self.block_depth == 0 && self.is_exported(&c.vis) {
+                "export "
+            } else {
+                ""
+            };
+            self.writeln(&format!(
+                "{}const {} {} = {};",
+                export_prefix, ty, name, storage_name
+            ));
+            return;
+        }
+        let expr_requires_runtime_storage = expr.contains("thread_local ")
+            || expr.contains(" static ")
+            || expr.starts_with("[]()")
+            || expr.contains("_slice_ref_tmp");
         let storage = if self.block_depth > 0 {
-            if is_numeric_cpp_scalar_type(&ty)
-                || matches!(ty.as_str(), "bool" | "float" | "double" | "long double")
+            if (is_numeric_cpp_scalar_type(&ty)
+                || matches!(ty.as_str(), "bool" | "float" | "double" | "long double"))
+                && !expr_requires_runtime_storage
             {
                 "constexpr"
             } else {
                 "const"
             }
         } else {
-            if ty.contains('*') {
+            if ty.contains('*') || ty.contains("std::span<") || expr_requires_runtime_storage {
                 // Pointer constants often lower through reinterpret casts that are not
                 // constexpr-friendly on all targets; prefer `const` storage.
                 "const"
@@ -8899,7 +9421,10 @@ impl CodeGen {
             ""
         };
         if storage == "const" && ty.contains('*') {
-            self.writeln(&format!("{}{} const {} = {};", export_prefix, ty, name, expr));
+            self.writeln(&format!(
+                "{}{} const {} = {};",
+                export_prefix, ty, name, expr
+            ));
         } else {
             self.writeln(&format!(
                 "{}{} {} {} = {};",
@@ -9392,6 +9917,7 @@ impl CodeGen {
     ) -> bool {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
+        self.record_extension_free_function_symbol(&method_name);
         let escaped_method_name = escape_cpp_keyword(&method_name);
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
@@ -9448,15 +9974,25 @@ impl CodeGen {
             params.push(format!("{} {}", ty, param_name));
         }
 
-        let return_type = self.rewrite_cpp_import_bound_type_spelling(
-            &self.map_extension_impl_return_type(
+        let return_type =
+            self.rewrite_cpp_import_bound_type_spelling(&self.map_extension_impl_return_type(
                 &method.sig.output,
                 &method_spec.self_ty,
                 &self_cpp_ty,
                 &associated_type_cpp_bindings,
-            ),
-        );
+            ));
         self.in_forward_decl_signature = prev_forward_decl_signature;
+        let signature_has_unresolved_placeholder = params.iter().any(|param| {
+            param.contains("/* TODO")
+                || type_string_has_auto_placeholder(param)
+                || self.mapped_assoc_type_contains_unbound_placeholder(param)
+        }) || return_type.contains("/* TODO")
+            || type_string_has_auto_placeholder(&return_type)
+            || self.mapped_assoc_type_contains_unbound_placeholder(&return_type);
+        if signature_has_unresolved_placeholder {
+            self.pop_type_param_scope();
+            return false;
+        }
         self.writeln(&format!(
             "{} {}({});",
             return_type,
@@ -9470,6 +10006,7 @@ impl CodeGen {
     fn emit_extension_trait_free_function(&mut self, method_spec: &ExtensionImplMethod) {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
+        self.record_extension_free_function_symbol(&method_name);
         let escaped_method_name = escape_cpp_keyword(&method_name);
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
@@ -9532,6 +10069,21 @@ impl CodeGen {
             &self_cpp_ty,
             &associated_type_cpp_bindings,
         );
+        let signature_has_unresolved_placeholder = params.iter().any(|param| {
+            param.contains("/* TODO")
+                || type_string_has_auto_placeholder(param)
+                || self.mapped_assoc_type_contains_unbound_placeholder(param)
+        }) || return_type.contains("/* TODO")
+            || type_string_has_auto_placeholder(&return_type)
+            || self.mapped_assoc_type_contains_unbound_placeholder(&return_type);
+        if signature_has_unresolved_placeholder {
+            self.writeln(&format!(
+                "// Rust-only extension method skipped (unresolved signature placeholder): {}",
+                method_name
+            ));
+            self.pop_type_param_scope();
+            return;
+        }
         self.writeln(&format!(
             "{} {}({}) {{",
             return_type,
@@ -9574,6 +10126,15 @@ impl CodeGen {
         )
     }
 
+    fn record_extension_free_function_symbol(&mut self, method_name: &str) {
+        let scoped_name = if self.module_stack.is_empty() {
+            format!("rusty_ext::{}", method_name)
+        } else {
+            format!("{}::rusty_ext::{}", self.module_stack.join("::"), method_name)
+        };
+        self.record_function_return_type(&scoped_name, None);
+    }
+
     fn extension_free_function_generics(
         &self,
         method: &syn::ImplItemFn,
@@ -9598,11 +10159,8 @@ impl CodeGen {
             .into_iter()
             .filter(|param| match param {
                 syn::GenericParam::Type(tp) => {
-                    self.extension_method_type_param_is_used(
-                        method,
-                        self_ty,
-                        &tp.ident.to_string(),
-                    ) || assoc_binding_mentions_type_param(&tp.ident.to_string())
+                    self.extension_method_type_param_is_used(method, self_ty, &tp.ident.to_string())
+                        || assoc_binding_mentions_type_param(&tp.ident.to_string())
                 }
                 syn::GenericParam::Const(_) => true,
                 syn::GenericParam::Lifetime(_) => false,
@@ -9784,6 +10342,14 @@ impl CodeGen {
                 mapped = mapped.replace("Self::", &format!("{}::", self_cpp_ty));
                 changed = true;
             }
+            if mapped.contains("typename auto::") {
+                mapped = mapped.replace("typename auto::", &format!("typename {}::", self_cpp_ty));
+                changed = true;
+            }
+            if mapped.contains("auto::") {
+                mapped = mapped.replace("auto::", &format!("{}::", self_cpp_ty));
+                changed = true;
+            }
 
             if !changed {
                 break;
@@ -9850,7 +10416,7 @@ impl CodeGen {
                 if self.emit_extension_trait_forward_decls_for_scope(&scope_path) {
                     self.newline();
                 }
-                let ordered_items = self.order_items_for_emission(items, true);
+                let ordered_items = self.order_items_for_emission(items, true, false);
                 for item in ordered_items {
                     match item {
                         syn::Item::Fn(_) | syn::Item::Mod(_) => {
@@ -9890,7 +10456,7 @@ impl CodeGen {
                 if emitted_forward_decls {
                     self.newline();
                 }
-                let ordered_items = self.order_items_for_emission(items, true);
+                let ordered_items = self.order_items_for_emission(items, true, false);
                 for item in ordered_items {
                     if matches!(item, syn::Item::Impl(_)) {
                         continue;
@@ -9961,6 +10527,13 @@ impl CodeGen {
             let resolved_path = self.resolve_unqualified_local_import_path(path);
             let resolved_path = self.strip_current_crate_prefix_from_import_path(&resolved_path);
             let resolved_path = self.resolve_nested_local_reexport_path(&resolved_path);
+            let normalized_import = normalize_use_import_path(&resolved_path);
+            if normalized_import.starts_with("std::os::")
+                || normalized_import.starts_with("core::os::")
+            {
+                self.writeln(&format!("// Rust-only: using {};", resolved_path));
+                continue;
+            }
             self.record_option_alias_import(&resolved_path);
             self.record_variant_constructor_alias_import(&resolved_path);
             if self.is_variant_constructor_alias_import(&resolved_path) {
@@ -10061,7 +10634,14 @@ impl CodeGen {
                     // Apply module namespace renames (e.g., sync → sync_mod)
                     // to using declaration paths.
                     let using_path = self.apply_module_renames_to_path(&using_path);
-                    let using_path = self.rewrite_global_using_path_for_local_alias_root(&using_path);
+                    let using_path =
+                        self.rewrite_global_using_path_for_local_alias_root(&using_path);
+                    if let Some(ns_alias_stmt) =
+                        self.namespace_alias_statement_for_module_import(&using_path)
+                    {
+                        self.writeln(&format!("{}{}", export_prefix, ns_alias_stmt));
+                        continue;
+                    }
                     // Check if this is an enum variant import (e.g., Ordering::SeqCst).
                     // C++ enum class values can't be imported with `using`.
                     // Emit `constexpr auto SeqCst = ...::Ordering::SeqCst;` instead.
@@ -10087,6 +10667,14 @@ impl CodeGen {
                         ));
                     } else {
                         self.writeln(&format!("{}using {};", export_prefix, using_path));
+                    }
+                    let cow_target =
+                        split_use_import_alias(normalize_use_import_path(&mapped_path))
+                            .map(|(_, target)| target.trim())
+                            .unwrap_or_else(|| normalize_use_import_path(&mapped_path).trim());
+                    if cow_target == "rusty::Cow" {
+                        self.writeln(&format!("{}using ::rusty::Cow_Borrowed;", export_prefix));
+                        self.writeln(&format!("{}using ::rusty::Cow_Owned;", export_prefix));
                     }
                     // When importing a data enum type, also import its namespace
                     // so variant structs (EnumName_VariantName) are accessible.
@@ -10225,6 +10813,9 @@ impl CodeGen {
     }
 
     fn resolve_bare_module_namespace_import(&self, path: &str) -> Option<String> {
+        if path.trim_start().starts_with("namespace ") {
+            return None;
+        }
         let normalized = normalize_use_import_path(path);
         if normalized.is_empty()
             || normalized.contains("::")
@@ -10239,6 +10830,27 @@ impl CodeGen {
             return None;
         }
         Some(normalized.to_string())
+    }
+
+    fn namespace_alias_statement_for_module_import(&self, using_path: &str) -> Option<String> {
+        let trimmed = using_path.trim();
+        if trimmed.is_empty() || trimmed.contains(" = ") || !trimmed.contains("::") {
+            return None;
+        }
+        let normalized = trimmed.trim_start_matches("::");
+        let last = normalized.rsplit("::").next()?;
+        if !last
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase())
+            || !self.declared_module_names.contains(last)
+            || !self.declared_module_paths.contains(normalized)
+        {
+            return None;
+        }
+        let alias = escape_cpp_keyword(last);
+        let target = self.escape_and_rename_qualified_name(normalized);
+        Some(format!("namespace {} = ::{};", alias, target))
     }
 
     fn emit_namespace_alias_import(&mut self, namespace_path: &str) {
@@ -10259,6 +10871,36 @@ impl CodeGen {
             return;
         }
         let escaped = self.escape_and_rename_qualified_name(trimmed);
+        let tail = trimmed.rsplit("::").next().unwrap_or(trimmed);
+        let tail_looks_like_type = tail
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+            || (self.local_declared_types.contains(tail)
+                && !self.declared_module_names.contains(tail));
+        if tail_looks_like_type {
+            self.writeln(&format!(
+                "// Rust-only namespace import skipped for type path: using namespace {};",
+                escaped
+            ));
+            return;
+        }
+        let root = trimmed.split("::").next().unwrap_or(trimmed);
+        let root_is_known_module = self.declared_module_names.contains(root);
+        let root_is_import_alias = self.import_alias_names.contains(root);
+        if trimmed == "std" || trimmed.starts_with("std::") || root_is_import_alias {
+            self.writeln(&format!("using namespace ::{};", escaped));
+            return;
+        }
+        if root_is_known_module {
+            // Forward-declare local module namespaces when imported before their
+            // definition so top-level `using namespace ::foo;` remains valid.
+            if self.module_stack.is_empty() {
+                self.writeln(&format!("namespace {} {{}}", escaped));
+            }
+            self.writeln(&format!("using namespace ::{};", escaped));
+            return;
+        }
         self.writeln(&format!("namespace {} {{}}", escaped));
         self.writeln(&format!("using namespace {};", escaped));
     }
@@ -10522,6 +11164,9 @@ impl CodeGen {
 
     fn should_skip_unresolved_bare_import(&self, path: &str) -> bool {
         if self.module_stack.is_empty() {
+            return false;
+        }
+        if path.trim_start().starts_with("namespace ") {
             return false;
         }
         let normalized = normalize_use_import_path(path);
@@ -10865,9 +11510,16 @@ impl CodeGen {
                     ));
                     return;
                 }
-                let name = escape_cpp_keyword(&t.ident.to_string());
-                let mut ty = self.map_type(&t.ty);
-                if ty == name || ty.starts_with(&format!("{}<", name)) {
+                let alias_rust_name = t.ident.to_string();
+                let name = escape_cpp_keyword(&alias_rust_name);
+                let alias_is_type_param = self.is_type_param_in_scope(&alias_rust_name);
+                let mut ty = self.normalize_assoc_alias_target_type(
+                    &alias_rust_name,
+                    self.map_type(&t.ty),
+                );
+                if (ty == name || ty.starts_with(&format!("{}<", name)))
+                    && !(alias_is_type_param && ty == name)
+                {
                     let ns_prefix = if self.module_stack.is_empty() {
                         String::new()
                     } else {
@@ -10889,6 +11541,11 @@ impl CodeGen {
                         ty = format!("::{}", ty);
                     }
                 }
+                if alias_is_type_param && ty == name {
+                    // C++ forbids redeclaring a template parameter name as a nested alias.
+                    // The template parameter itself remains the associated type binding.
+                    return;
+                }
                 if !self.mark_emitted_non_method_member_name(&name) {
                     return;
                 }
@@ -10898,6 +11555,20 @@ impl CodeGen {
                 self.writeln("// TODO: unhandled impl item");
             }
         }
+    }
+
+    fn normalize_assoc_alias_target_type(
+        &self,
+        alias_rust_name: &str,
+        mut mapped_ty: String,
+    ) -> String {
+        if self.is_type_param_in_scope(alias_rust_name) {
+            let scoped_alias_tail = format!("::{}", alias_rust_name);
+            if mapped_ty == alias_rust_name || mapped_ty.ends_with(&scoped_alias_tail) {
+                mapped_ty = escape_cpp_keyword(alias_rust_name);
+            }
+        }
+        mapped_ty
     }
 
     fn impl_const_type_requires_inline_const(&self, ty_cpp: &str) -> bool {
@@ -11014,8 +11685,8 @@ impl CodeGen {
                 .last()
                 .is_some_and(|scope| scope.contains(&escape_cpp_keyword(&name)))
                 || self
-                .resolve_current_struct_assoc_cpp_type_if_concrete(&name)
-                .is_some()
+                    .resolve_current_struct_assoc_cpp_type_if_concrete(&name)
+                    .is_some()
         })
     }
 
@@ -11459,7 +12130,10 @@ impl CodeGen {
             let syn::FnArg::Typed(pat_type) = arg else {
                 continue;
             };
-            let ty = self.map_type(&pat_type.ty);
+            let mapped = self.map_type(&pat_type.ty);
+            let ty = self
+                .soften_incomplete_nominal_param_type(&pat_type.ty, &mapped)
+                .unwrap_or(mapped);
             let param_name = match pat_type.pat.as_ref() {
                 syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 syn::Pat::Wild(_) => format!("_arg{}", idx),
@@ -11948,11 +12622,8 @@ impl CodeGen {
                                 )
                         });
                     if (arg_expected.is_none() || expected_needs_owner_recovery)
-                        && let Some(fallback) = self.lookup_associated_call_arg_expected_type_fallback(
-                            call,
-                            idx,
-                            Some(arg),
-                        )
+                        && let Some(fallback) = self
+                            .lookup_associated_call_arg_expected_type_fallback(call, idx, Some(arg))
                     {
                         let fallback = if let Some(substitutions) = substitutions.as_ref() {
                             self.substitute_type_params_in_type(&fallback, substitutions)
@@ -11962,8 +12633,8 @@ impl CodeGen {
                         arg_expected = Some(fallback);
                     }
                     if arg_expected.is_none()
-                        && let Some(fallback) =
-                            self.infer_associated_call_arg_expected_type_from_call_expected_owner(
+                        && let Some(fallback) = self
+                            .infer_associated_call_arg_expected_type_from_call_expected_owner(
                                 call,
                                 context_expected_ty,
                                 idx,
@@ -12368,11 +13039,8 @@ impl CodeGen {
                     )
             });
             if (expected_ty.is_none() || expected_needs_owner_recovery)
-                && let Some(fallback) = self.lookup_associated_call_arg_expected_type_fallback(
-                    call,
-                    idx,
-                    Some(arg),
-                )
+                && let Some(fallback) =
+                    self.lookup_associated_call_arg_expected_type_fallback(call, idx, Some(arg))
             {
                 let fallback = if let Some(substitutions) = substitutions.as_ref() {
                     self.substitute_type_params_in_type(&fallback, substitutions)
@@ -12382,8 +13050,8 @@ impl CodeGen {
                 expected_ty = Some(fallback);
             }
             if expected_ty.is_none()
-                && let Some(fallback) =
-                    self.infer_associated_call_arg_expected_type_from_call_expected_owner(
+                && let Some(fallback) = self
+                    .infer_associated_call_arg_expected_type_from_call_expected_owner(
                         call,
                         context_expected_ty,
                         idx,
@@ -13734,9 +14402,7 @@ impl CodeGen {
             }
             syn::Expr::Tuple(tuple_expr) => {
                 self.collect_uninitialized_local_type_hints_from_tuple(
-                    tuple_expr,
-                    candidates,
-                    hints,
+                    tuple_expr, candidates, hints,
                 );
                 for elem in &tuple_expr.elems {
                     self.collect_uninitialized_local_type_hints_in_expr(elem, candidates, hints);
@@ -15905,7 +16571,9 @@ impl CodeGen {
             syn::Pat::Path(pp) => self
                 .runtime_path_match_condition_method(&pp.path, variant_ctx)
                 .is_some(),
-            syn::Pat::Ident(pi) => self.runtime_ident_match_condition_method(pi, variant_ctx).is_some(),
+            syn::Pat::Ident(pi) => self
+                .runtime_ident_match_condition_method(pi, variant_ctx)
+                .is_some(),
             syn::Pat::Or(or_pat) => or_pat
                 .cases
                 .iter()
@@ -18940,9 +19608,10 @@ impl CodeGen {
                     .fields
                     .iter()
                     .any(|field| self.expr_contains_unsuffixed_int_literal(&field.expr))
-                    || struct_expr.rest.as_ref().is_some_and(|rest| {
-                        self.expr_contains_unsuffixed_int_literal(rest)
-                    })
+                    || struct_expr
+                        .rest
+                        .as_ref()
+                        .is_some_and(|rest| self.expr_contains_unsuffixed_int_literal(rest))
             }
             syn::Expr::Index(index) => {
                 self.expr_contains_unsuffixed_int_literal(&index.expr)
@@ -18952,15 +19621,15 @@ impl CodeGen {
                 self.expr_contains_unsuffixed_int_literal(&await_expr.base)
             }
             syn::Expr::Try(try_expr) => self.expr_contains_unsuffixed_int_literal(&try_expr.expr),
-            syn::Expr::Closure(closure) => {
-                self.expr_contains_unsuffixed_int_literal(&closure.body)
-            }
-            syn::Expr::Return(ret) => ret.expr.as_ref().is_some_and(|value| {
-                self.expr_contains_unsuffixed_int_literal(value)
-            }),
-            syn::Expr::Break(brk) => brk.expr.as_ref().is_some_and(|value| {
-                self.expr_contains_unsuffixed_int_literal(value)
-            }),
+            syn::Expr::Closure(closure) => self.expr_contains_unsuffixed_int_literal(&closure.body),
+            syn::Expr::Return(ret) => ret
+                .expr
+                .as_ref()
+                .is_some_and(|value| self.expr_contains_unsuffixed_int_literal(value)),
+            syn::Expr::Break(brk) => brk
+                .expr
+                .as_ref()
+                .is_some_and(|value| self.expr_contains_unsuffixed_int_literal(value)),
             syn::Expr::Let(let_expr) => self.expr_contains_unsuffixed_int_literal(&let_expr.expr),
             _ => false,
         }
@@ -19131,6 +19800,43 @@ impl CodeGen {
                     ));
                 }
                 syn::Pat::Ident(pi) => {
+                    if pi.by_ref.is_none() && pi.mutability.is_none() && pi.subpat.is_none() {
+                        let ident_name = pi.ident.to_string();
+                        let data_enum_variant_path = variant_ctx.and_then(|ctx| {
+                            self.data_enum_variants_by_enum
+                                .get(&ctx.enum_name)
+                                .filter(|variants| variants.contains(&ident_name))
+                                .and_then(|_| {
+                                    syn::parse_str::<syn::Path>(&format!(
+                                        "{}::{}",
+                                        ctx.enum_name, ident_name
+                                    ))
+                                    .ok()
+                                })
+                        });
+                        if let Some(variant_path) = data_enum_variant_path {
+                            let cpp_type =
+                                scoped.visit_pattern_cpp_type(&variant_path, variant_ctx, Some("_m"));
+                            if let Some((_, guard)) = &arm.guard {
+                                let guard_str = scoped.emit_expr_to_string(guard);
+                                parts.push(format!(
+                                    "[&](const {}& _v){} {{ if ({}) return {}; return {}; }}",
+                                    cpp_type,
+                                    lambda_return_annotation,
+                                    guard_str,
+                                    arm_value,
+                                    scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
+                                ));
+                            } else {
+                                parts.push(format!(
+                                    "[&](const {}&){} {{ return {}; }}",
+                                    cpp_type, lambda_return_annotation, arm_value
+                                ));
+                            }
+                            scoped.pop_pattern_ref_binding_scope();
+                            continue;
+                        }
+                    }
                     let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                     parts.push(format!(
                         "[&](const auto& {}){} {{ return {}; }}",
@@ -19798,6 +20504,18 @@ impl CodeGen {
         })
     }
 
+    fn match_expr_tuple_scrutinee_arity(&self, scrutinee: &syn::Expr) -> Option<usize> {
+        if let syn::Expr::Tuple(tuple_scrutinee) = self.peel_paren_group_expr(scrutinee) {
+            return Some(tuple_scrutinee.elems.len());
+        }
+        let inferred = self.infer_simple_expr_type(scrutinee)?;
+        let inferred = self.peel_reference_paren_group_type(&inferred);
+        let syn::Type::Tuple(tuple_ty) = inferred else {
+            return None;
+        };
+        Some(tuple_ty.elems.len())
+    }
+
     fn tuple_pattern_elem_value_condition(
         &self,
         pat: &syn::Pat,
@@ -20092,6 +20810,259 @@ impl CodeGen {
                             syn::Pat::Tuple(tuple_pat)
                                 if tuple_pat.elems.len() == tuple_scrutinee.elems.len() =>
                             {
+                                let mut tuple_case_conditions = Vec::new();
+                                for (idx, elem_pat) in tuple_pat.elems.iter().enumerate() {
+                                    let value_name = format!("_m{}", idx);
+                                    let mut elem_bindings = Vec::new();
+                                    let Some(cond) = self
+                                        .collect_runtime_match_binding_stmts_and_condition(
+                                            elem_pat,
+                                            &value_name,
+                                            &mut elem_bindings,
+                                            None,
+                                        )
+                                    else {
+                                        supported = false;
+                                        break;
+                                    };
+                                    if !elem_bindings.is_empty() {
+                                        supported = false;
+                                        break;
+                                    }
+                                    if let Some(cond_expr) = cond {
+                                        tuple_case_conditions.push(cond_expr);
+                                    }
+                                }
+                                if !supported {
+                                    break;
+                                }
+                                let case_cond = if tuple_case_conditions.is_empty() {
+                                    "true".to_string()
+                                } else {
+                                    tuple_case_conditions.join(" && ")
+                                };
+                                case_conditions.push(case_cond);
+                            }
+                            syn::Pat::Wild(_) => {
+                                case_conditions.clear();
+                                case_conditions.push("true".to_string());
+                                break;
+                            }
+                            syn::Pat::Ident(pi) if pi.ident == "_" => {
+                                case_conditions.clear();
+                                case_conditions.push("true".to_string());
+                                break;
+                            }
+                            _ => {
+                                supported = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !supported || case_conditions.is_empty() {
+                        continue;
+                    }
+                    let cond_expr = if case_conditions.len() == 1 {
+                        case_conditions.remove(0)
+                    } else {
+                        format!("({})", case_conditions.join(" || "))
+                    };
+                    let binding_map = HashMap::new();
+                    let body = {
+                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                            &arm.body,
+                            match_expected_ty,
+                            &binding_map,
+                        );
+                        self.maybe_wrap_variant_constructor_with_expected_enum(
+                            &arm.body,
+                            emitted,
+                            match_expected_ty,
+                        )
+                    };
+                    let diverging = self.is_expr_diverging(&arm.body);
+                    let body_is_return_expr = body.trim_start().starts_with("return ");
+                    let ret_prefix = if diverging || body_is_return_expr {
+                        ""
+                    } else {
+                        "return "
+                    };
+                    out.push_str(&format!("if ({}) {{ ", cond_expr));
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str =
+                            self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
+                        out.push_str(&format!(
+                            "if ({}) {{ {}{}; }} ",
+                            guard_str, ret_prefix, body
+                        ));
+                    } else {
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
+                    }
+                    out.push_str("} ");
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(match_expected_ty) = match_expected_ty {
+            out.push_str(&format!(
+                "return {}; }}()",
+                self.match_expr_unreachable_fallback_with_expected(Some(match_expected_ty))
+            ));
+        } else {
+            out.push_str("rusty::intrinsics::unreachable(); }()");
+        }
+        out
+    }
+
+    fn emit_match_expr_tuple_value_conditions_for_scrutinee_expr(
+        &self,
+        tuple_scrutinee_expr: &syn::Expr,
+        arity: usize,
+        arms: &[syn::Arm],
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        let concrete_expected_ty = expected_ty.filter(|ty| {
+            !self
+                .expected_lambda_return_annotation(Some(*ty), true)
+                .is_empty()
+        });
+        let inferred_match_ty = if concrete_expected_ty.is_none() {
+            self.infer_match_arms_common_type(arms)
+        } else {
+            None
+        }
+        .and_then(|ty| {
+            if self.type_contains_tuple_placeholder_marker(&ty) {
+                None
+            } else {
+                Some(ty)
+            }
+        });
+        let match_expected_ty = concrete_expected_ty.or(inferred_match_ty.as_ref());
+        let lambda_return_annotation =
+            self.expected_lambda_return_annotation(match_expected_ty, true);
+        let mut out = format!("[&](){} {{ ", lambda_return_annotation);
+        let scrutinee = self.emit_expr_to_string(tuple_scrutinee_expr);
+        out.push_str(&format!("auto&& _m_tuple = {}; ", scrutinee));
+        for idx in 0..arity {
+            out.push_str(&format!(
+                "auto&& _m{} = std::get<{}>(rusty::detail::deref_if_pointer(_m_tuple)); ",
+                idx, idx
+            ));
+        }
+
+        for arm in arms {
+            match &arm.pat {
+                syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == arity => {
+                    let mut conditions = Vec::new();
+                    let mut bindings = Vec::new();
+                    let mut binding_map = HashMap::new();
+                    let mut supported = true;
+                    for (idx, elem_pat) in tuple_pat.elems.iter().enumerate() {
+                        let value_name = format!("_m{}", idx);
+                        let mut elem_bindings = Vec::new();
+                        let Some(cond) = self
+                            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                                elem_pat,
+                                &value_name,
+                                &mut elem_bindings,
+                                &mut binding_map,
+                                None,
+                            )
+                        else {
+                            supported = false;
+                            break;
+                        };
+                        bindings.extend(elem_bindings);
+                        if let Some(cond_expr) = cond {
+                            conditions.push(cond_expr);
+                        }
+                    }
+                    if !supported {
+                        continue;
+                    }
+                    let cond_expr = if conditions.is_empty() {
+                        "true".to_string()
+                    } else {
+                        conditions.join(" && ")
+                    };
+                    let body = {
+                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                            &arm.body,
+                            match_expected_ty,
+                            &binding_map,
+                        );
+                        self.maybe_wrap_variant_constructor_with_expected_enum(
+                            &arm.body,
+                            emitted,
+                            match_expected_ty,
+                        )
+                    };
+                    let diverging = self.is_expr_diverging(&arm.body);
+                    let body_is_return_expr = body.trim_start().starts_with("return ");
+                    let ret_prefix = if diverging || body_is_return_expr {
+                        ""
+                    } else {
+                        "return "
+                    };
+                    out.push_str(&format!("if ({}) {{ ", cond_expr));
+                    for binding in bindings {
+                        out.push_str(&binding);
+                        out.push(' ');
+                    }
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str =
+                            self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
+                        out.push_str(&format!(
+                            "if ({}) {{ {}{}; }} ",
+                            guard_str, ret_prefix, body
+                        ));
+                    } else {
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
+                    }
+                    out.push_str("} ");
+                }
+                syn::Pat::Wild(_) => {
+                    let binding_map = HashMap::new();
+                    let body = {
+                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                            &arm.body,
+                            match_expected_ty,
+                            &binding_map,
+                        );
+                        self.maybe_wrap_variant_constructor_with_expected_enum(
+                            &arm.body,
+                            emitted,
+                            match_expected_ty,
+                        )
+                    };
+                    let diverging = self.is_expr_diverging(&arm.body);
+                    let body_is_return_expr = body.trim_start().starts_with("return ");
+                    let ret_prefix = if diverging || body_is_return_expr {
+                        ""
+                    } else {
+                        "return "
+                    };
+                    out.push_str("if (true) { ");
+                    if let Some((_, guard)) = &arm.guard {
+                        let guard_str =
+                            self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
+                        out.push_str(&format!(
+                            "if ({}) {{ {}{}; }} ",
+                            guard_str, ret_prefix, body
+                        ));
+                    } else {
+                        out.push_str(&format!("{}{}; ", ret_prefix, body));
+                    }
+                    out.push_str("} ");
+                }
+                syn::Pat::Or(or_pat) => {
+                    let mut case_conditions = Vec::new();
+                    let mut supported = true;
+                    for case in &or_pat.cases {
+                        match case {
+                            syn::Pat::Tuple(tuple_pat) if tuple_pat.elems.len() == arity => {
                                 let mut tuple_case_conditions = Vec::new();
                                 for (idx, elem_pat) in tuple_pat.elems.iter().enumerate() {
                                     let value_name = format!("_m{}", idx);
@@ -20514,6 +21485,13 @@ impl CodeGen {
         {
             base = format!("rusty::{}", base);
         }
+        if matches!(enum_name.as_deref(), Some("Cow"))
+            && !self.is_local_type_name_in_scope("Cow")
+            && !self.local_declared_types.contains("Cow")
+            && !base.starts_with("rusty::")
+        {
+            base = format!("rusty::{}", base);
+        }
         let template_args =
             self.variant_pattern_template_args(path, enum_name.as_deref(), variant_ctx);
         if template_args.is_empty() {
@@ -20719,6 +21697,14 @@ impl CodeGen {
             syn::Expr::Paren(p) => self.infer_variant_type_context_from_expr(&p.expr),
             syn::Expr::Group(g) => self.infer_variant_type_context_from_expr(&g.expr),
             syn::Expr::Reference(r) => self.infer_variant_type_context_from_expr(&r.expr),
+            syn::Expr::Unary(unary) => self
+                .infer_simple_expr_type(expr)
+                .and_then(|ty| self.infer_variant_type_context_from_type(&ty))
+                .or_else(|| self.infer_variant_type_context_from_expr(&unary.expr)),
+            syn::Expr::Cast(cast) => self
+                .infer_simple_expr_type(expr)
+                .and_then(|ty| self.infer_variant_type_context_from_type(&ty))
+                .or_else(|| self.infer_variant_type_context_from_expr(&cast.expr)),
             _ => None,
         }
     }
@@ -23580,6 +24566,9 @@ impl CodeGen {
     }
 
     fn pattern_ident_is_const_value(&self, name: &str) -> bool {
+        if self.unit_struct_types.contains(name) {
+            return true;
+        }
         if self.lookup_item_const_type(name).is_some() {
             return true;
         }
@@ -25361,7 +26350,9 @@ impl CodeGen {
                     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                         for arg in &args.args {
                             if let syn::GenericArgument::Type(inner) = arg {
-                                self.collect_assoc_binding_type_param_candidates_in_type(inner, out);
+                                self.collect_assoc_binding_type_param_candidates_in_type(
+                                    inner, out,
+                                );
                             }
                         }
                     }
@@ -27986,7 +28977,10 @@ impl CodeGen {
         match pat {
             syn::Pat::Ident(pi) => {
                 if pi.ident != "_" {
-                    out.insert(pi.ident.to_string());
+                    let name = pi.ident.to_string();
+                    if !self.pattern_ident_is_const_value(&name) {
+                        out.insert(name);
+                    }
                 }
                 if let Some((_, subpat)) = &pi.subpat {
                     self.collect_pattern_ref_binding_names(subpat, out);
@@ -28027,7 +29021,10 @@ impl CodeGen {
     fn collect_pattern_binding_names(&self, pat: &syn::Pat, out: &mut HashSet<String>) {
         match pat {
             syn::Pat::Ident(pi) => {
-                out.insert(pi.ident.to_string());
+                let name = pi.ident.to_string();
+                if !self.pattern_ident_is_const_value(&name) {
+                    out.insert(name);
+                }
                 if let Some((_, subpat)) = &pi.subpat {
                     self.collect_pattern_binding_names(subpat, out);
                 }
@@ -28101,6 +29098,13 @@ impl CodeGen {
             syn::Expr::Group(g) => self.is_expr_reference_like(&g.expr),
             syn::Expr::Reference(_) => true,
             syn::Expr::Field(field_expr) => {
+                if self
+                    .infer_simple_expr_type(expr)
+                    .as_ref()
+                    .is_some_and(|ty| self.type_is_reference_like(ty))
+                {
+                    return true;
+                }
                 let member_name = match &field_expr.member {
                     syn::Member::Named(ident) => ident.to_string(),
                     syn::Member::Unnamed(_) => return false,
@@ -29695,6 +30699,27 @@ impl CodeGen {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::to_string({})", receiver);
         }
+        // Rust float predicate methods are inherent scalar helpers.
+        if mc.method == "is_finite" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::is_finite({})", receiver);
+        }
+        if mc.method == "is_nan" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::is_nan({})", receiver);
+        }
+        if mc.method == "is_infinite" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::is_infinite({})", receiver);
+        }
+        if mc.method == "is_sign_negative" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::is_sign_negative({})", receiver);
+        }
+        if mc.method == "is_sign_positive" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            return format!("rusty::is_sign_positive({})", receiver);
+        }
         if mc.method == "deref" && mc.args.is_empty() {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::deref_ref({})", receiver);
@@ -29736,6 +30761,10 @@ impl CodeGen {
         if mc.method == "into_boxed_slice" && mc.args.is_empty() {
             let receiver = self.emit_expr_maybe_move(&mc.receiver);
             return format!("rusty::into_boxed_slice({})", receiver);
+        }
+        if mc.method == "into_boxed_str" && mc.args.is_empty() {
+            let receiver = self.emit_expr_maybe_move(&mc.receiver);
+            return format!("rusty::into_boxed_str({})", receiver);
         }
         if let Some(description_call) = self.try_emit_error_description_dispatch_call(mc) {
             return description_call;
@@ -30177,6 +31206,15 @@ impl CodeGen {
                     .or(owner_expected_ty.as_ref())
                     .or(method_expected_ty)
                     .or(inferred_expected.as_ref()));
+            if method_name == "invalid_length"
+                && idx == 1
+                && let syn::Expr::Reference(reference) = self.peel_paren_group_expr(arg)
+                && !self.is_stable_reference_lvalue_expr(&reference.expr)
+            {
+                let inner = self.emit_expr_to_string_with_expected(&reference.expr, None);
+                args.push(format!("rusty::addr_of_temp({})", inner));
+                continue;
+            }
             let mut emitted_arg =
                 self.emit_call_arg_with_pass_style(arg, style, arg_expected, false, None);
             if self.method_arg_prefers_value_move_heuristic(&method_name, idx)
@@ -30187,6 +31225,19 @@ impl CodeGen {
                 emitted_arg = format!("std::move({})", emitted_arg);
             }
             args.push(emitted_arg);
+        }
+        if method_name == "map"
+            && args.len() == 1
+            && let Some(callable) =
+                self.try_emit_map_callable_arg_with_expected(&mc.args[0], expected_ty)
+        {
+            return self.emit_receiver_member_call(
+                &mc.receiver,
+                &method_name,
+                None,
+                &[callable],
+                expected_ty,
+            );
         }
         let mut method_template_args = self.emit_method_call_template_args(mc, &args);
         if method_template_args.is_none()
@@ -30264,7 +31315,7 @@ impl CodeGen {
             };
             return format!("rusty::as_mut_slice({})", receiver);
         }
-        if method_name == "clone_from_slice"
+        if matches!(method_name.as_str(), "clone_from_slice" | "copy_from_slice")
             && args.len() == 1
             && self.should_lower_slice_deref_method_call(&mc.receiver)
         {
@@ -30279,6 +31330,8 @@ impl CodeGen {
             } else {
                 format!("rusty::as_mut_slice({})", receiver)
             };
+            // Rust `copy_from_slice` and `clone_from_slice` share element-wise
+            // semantics for our lowered span/slice surface.
             return format!("rusty::clone_from_slice({}, {})", dst, args[0]);
         }
         if method_name == "write_fmt" && args.len() == 1 {
@@ -30288,7 +31341,58 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::io::write_fmt({}, {})", receiver, args[0]);
+            let receiver_ty = self.infer_simple_expr_type(&mc.receiver);
+            let has_receiver_write_fmt = self
+                .lookup_method_arg_type_from_receiver_type(&mc.receiver, "write_fmt", 0)
+                .is_some()
+                || receiver_ty.as_ref().is_some_and(|ty| {
+                    self.lookup_owner_method_return_type_from_receiver_type(ty, "write_fmt")
+                        .is_some()
+                });
+            let has_receiver_write_str = self
+                .lookup_method_arg_type_from_receiver_type(&mc.receiver, "write_str", 0)
+                .is_some()
+                || receiver_ty.as_ref().is_some_and(|ty| {
+                    self.lookup_owner_method_return_type_from_receiver_type(ty, "write_str")
+                        .is_some()
+                });
+            let has_receiver_write_char = self
+                .lookup_method_arg_type_from_receiver_type(&mc.receiver, "write_char", 0)
+                .is_some()
+                || receiver_ty.as_ref().is_some_and(|ty| {
+                    self.lookup_owner_method_return_type_from_receiver_type(ty, "write_char")
+                        .is_some()
+                });
+            let has_receiver_write = self
+                .lookup_method_arg_type_from_receiver_type(&mc.receiver, "write", 0)
+                .is_some()
+                || receiver_ty.as_ref().is_some_and(|ty| {
+                    self.lookup_owner_method_return_type_from_receiver_type(ty, "write")
+                        .is_some()
+                });
+            let has_receiver_write_all = self
+                .lookup_method_arg_type_from_receiver_type(&mc.receiver, "write_all", 0)
+                .is_some()
+                || receiver_ty.as_ref().is_some_and(|ty| {
+                    self.lookup_owner_method_return_type_from_receiver_type(ty, "write_all")
+                        .is_some()
+                });
+            if has_receiver_write_fmt {
+                return format!("{}.write_fmt({})", receiver, args[0]);
+            }
+            if has_receiver_write_str || has_receiver_write_char {
+                return format!("{}.write_str({})", receiver, args[0]);
+            }
+            if has_receiver_write || has_receiver_write_all {
+                return format!("rusty::io::write_fmt({}, {})", receiver, args[0]);
+            }
+            if matches!(
+                self.peel_paren_group_expr(&mc.receiver),
+                syn::Expr::Reference(_)
+            ) {
+                return format!("rusty::io::write_fmt({}, {})", receiver, args[0]);
+            }
+            return format!("rusty::write_fmt({}, {})", receiver, args[0]);
         }
         if method_name == "map_err" && mc.args.len() == 1 {
             let callable_arg = self
@@ -30305,7 +31409,7 @@ impl CodeGen {
                     &method_name,
                     None,
                     &[typed_callable_arg],
-                    None,
+                    expected_ty,
                 );
             }
             return self.emit_receiver_member_call(
@@ -30313,8 +31417,63 @@ impl CodeGen {
                 &method_name,
                 None,
                 &[callable_arg],
-                None,
+                expected_ty,
             );
+        }
+        if method_name == "parse"
+            && args.is_empty()
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .map(|ty| self.map_type(ty))
+                .is_some_and(|ty| {
+                    matches!(
+                        ty.as_str(),
+                        "std::string_view" | "rusty::String" | "std::string"
+                    )
+                })
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            if let Some(ok_ty) = self.expected_result_type_arg(expected_ty, 0) {
+                let ok_cpp = self.map_type(ok_ty);
+                if ok_cpp != "auto"
+                    && !ok_cpp.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&ok_cpp)
+                {
+                    return format!("rusty::str_runtime::parse<{}>({})", ok_cpp, receiver);
+                }
+            }
+            return format!("rusty::str_runtime::parse({})", receiver);
+        }
+        if method_name == "as_ref"
+            && args.is_empty()
+            && !self.is_expr_raw_pointer_like(&mc.receiver)
+            && self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .is_some_and(|ty| self.expected_type_is_string_view(Some(ty)))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            if let Some(expected_ty) = expected_ty {
+                let expected_cpp = self.map_type(expected_ty);
+                if expected_cpp != "auto"
+                    && !expected_cpp.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&expected_cpp)
+                {
+                    return format!("rusty::as_ref_into<{}>({})", expected_cpp, receiver);
+                }
+            }
+            return receiver;
         }
         if matches!(method_name.as_str(), "as_ptr" | "as_mut_ptr") && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -31378,7 +32537,9 @@ impl CodeGen {
                     None
                 }
             }
-            syn::Expr::Block(block_expr) => self.infer_try_init_error_type_from_block(&block_expr.block),
+            syn::Expr::Block(block_expr) => {
+                self.infer_try_init_error_type_from_block(&block_expr.block)
+            }
             syn::Expr::If(if_expr) => {
                 let then_err = self.infer_try_init_error_type_from_block(&if_expr.then_branch);
                 let else_err = if_expr
@@ -31709,6 +32870,53 @@ impl CodeGen {
         ))
     }
 
+    fn try_emit_map_callable_arg_with_expected(
+        &self,
+        arg: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let path_expr = match self.peel_paren_group_expr(arg) {
+            syn::Expr::Path(path) => path,
+            _ => return None,
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let target_ty = self
+            .expected_result_type_arg(expected_ty, 0)
+            .or_else(|| self.expected_option_type_arg(expected_ty))?;
+        let target_cpp = self.map_type(target_ty);
+        if target_cpp == "auto"
+            || target_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&target_cpp)
+        {
+            return None;
+        }
+        if matches!(
+            joined.as_str(),
+            "From::from" | "core::convert::From::from" | "std::convert::From::from"
+        ) {
+            return Some(format!(
+                "[&](auto&& _v) -> {} {{ return rusty::from_into<{}>(std::forward<decltype(_v)>(_v)); }}",
+                target_cpp, target_cpp
+            ));
+        }
+        if matches!(
+            joined.as_str(),
+            "AsRef::as_ref" | "core::convert::AsRef::as_ref" | "std::convert::AsRef::as_ref"
+        ) {
+            return Some(format!(
+                "[&](auto&& _v) -> {} {{ return rusty::as_ref_into<{}>(std::forward<decltype(_v)>(_v)); }}",
+                target_cpp, target_cpp
+            ));
+        }
+        None
+    }
+
     fn try_emit_extension_method_call(
         &self,
         mc: &syn::ExprMethodCall,
@@ -31759,6 +32967,16 @@ impl CodeGen {
         } else {
             "rusty"
         };
+        if extension_ns == "rusty_ext" {
+            if let Some(qualified_fn) = self
+                .resolve_scoped_namespace_function_expr_path("rusty_ext", &method_name)
+                .or_else(|| {
+                    self.resolve_unscoped_namespace_function_expr_path("rusty_ext", &method_name)
+                })
+            {
+                return Some(format!("{}({})", qualified_fn, all_args.join(", ")));
+            }
+        }
         Some(format!(
             "{}::{}({})",
             extension_ns,
@@ -31812,6 +33030,21 @@ impl CodeGen {
             return format!("rusty::String::from({})", inner);
         }
         match expr {
+            syn::Expr::Path(path_expr)
+                if path_expr.path.segments.len() == 1
+                    && path_expr.path.segments[0].ident == "PhantomData" =>
+            {
+                if let Some(expected) = expected_ty {
+                    let expected_cpp = self.map_type(expected);
+                    if expected_cpp.starts_with("rusty::PhantomData<")
+                        && !expected_cpp.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(&expected_cpp)
+                    {
+                        return format!("{}{{}}", expected_cpp);
+                    }
+                }
+                return "rusty::PhantomData<std::tuple<>>{}".to_string();
+            }
             syn::Expr::Lit(lit) => self.emit_lit_with_expected(&lit.lit, expected_ty),
             syn::Expr::Call(call) => self.emit_call_expr_to_string(call, expected_ty),
             syn::Expr::MethodCall(mc) => self.emit_method_call_expr_to_string(mc, expected_ty),
@@ -31915,6 +33148,26 @@ impl CodeGen {
                 if let Some(expected_inner) = self.expected_reference_inner_type(expected_ty) {
                     return self.emit_expr_to_string_with_expected(&r.expr, Some(expected_inner));
                 }
+                if expected_ty.is_some_and(|ty| {
+                    self.is_type_raw_pointer_like(self.peel_reference_paren_group_type(ty))
+                }) && !self.is_stable_reference_lvalue_expr(&r.expr)
+                {
+                    let expected_pointee_ty = expected_ty
+                        .and_then(|ty| self.extract_pointer_pointee_info_from_type(ty))
+                        .map(|(pointee, _)| pointee);
+                    let inner = self
+                        .emit_expr_to_string_with_expected(&r.expr, expected_pointee_ty.as_ref());
+                    let expected_ptr_cpp = expected_ty
+                        .map(|ty| self.map_type(ty))
+                        .filter(|mapped| {
+                            !mapped.contains("/* TODO") && !type_string_has_auto_placeholder(mapped)
+                        })
+                        .unwrap_or_else(|| "auto*".to_string());
+                    return format!(
+                        "[&]() -> {} {{ auto _rusty_ref_ptr_value = ({}); thread_local std::optional<std::remove_cvref_t<decltype(_rusty_ref_ptr_value)>> _rusty_ref_ptr_tmp; _rusty_ref_ptr_tmp.reset(); _rusty_ref_ptr_tmp.emplace(std::move(_rusty_ref_ptr_value)); return &*_rusty_ref_ptr_tmp; }}()",
+                        expected_ptr_cpp, inner
+                    );
+                }
                 let ref_inner = self.peel_paren_group_expr(&r.expr);
                 if self.in_deref_method_scope() || self.in_deref_mut_method_scope() {
                     return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
@@ -31938,6 +33191,15 @@ impl CodeGen {
                     {
                         return self.emit_expr_to_string_with_expected(ref_inner, expected_ty);
                     }
+                }
+                if let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(&r.expr)
+                    && mc.method == "into_bytes"
+                {
+                    // Common expanded serde pattern: `&err.into_bytes()` is a borrow
+                    // for byte-slice contexts. In C++, taking `&` here creates a
+                    // pointer-to-container temporary. Keep the value expression and
+                    // let surrounding span coercions normalize it.
+                    return self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
                 }
                 // In Rust, `&expr` borrows the expression. In C++, `&expr` takes
                 // the address, which doesn't work on rvalues. Strip `&` for
@@ -33126,7 +34388,8 @@ impl CodeGen {
                     && owner_cpp.starts_with("rusty::Vec<")
                     && rust_method_name == "from_iter"
                     && idx == 0
-                    && let Some(item_ty) = self.expected_vec_element_type(Some(expected_ty)).cloned()
+                    && let Some(item_ty) =
+                        self.expected_vec_element_type(Some(expected_ty)).cloned()
                 {
                     let iter_expected: syn::Type = parse_quote!(impl Iterator<Item = #item_ty>);
                     arg_expected_ty = Some(iter_expected);
@@ -36054,6 +37317,11 @@ impl CodeGen {
             .last()
             .map(|seg| seg.ident.to_string())
             .unwrap_or_default();
+        if owner_name == "Vec" && method_name == "extend_from_slice" {
+            // Keep UFCS Vec::extend_from_slice lowering on the runtime helper path;
+            // owner-template recovery here can otherwise produce invalid Vec<auto>.
+            return "rusty::vec_extend_from_slice".to_string();
+        }
         let vec_from_raw_parts_recovery = owner_name == "Vec"
             && matches!(method_name.as_str(), "from_raw_parts" | "from_raw_parts_in");
         let vec_from_raw_parts_explicit_recovery =
@@ -36063,6 +37331,7 @@ impl CodeGen {
             owner_name.as_str(),
             "ArrayVec"
                 | "ArrayString"
+                | "Vec"
                 | "HashMap"
                 | "MaybeUninit"
                 | "NonNull"
@@ -36080,6 +37349,7 @@ impl CodeGen {
             "ArrayVec"
                 | "Cell"
                 | "ArrayString"
+                | "Vec"
                 | "HashMap"
                 | "MaybeUninit"
                 | "NonNull"
@@ -36113,9 +37383,23 @@ impl CodeGen {
 
         let mut rendered: Vec<String> = Vec::with_capacity(path.segments.len());
         for (idx, seg) in path.segments.iter().enumerate() {
-            let mut seg_text = if idx == owner_idx && owner_idx == 0 && owner_name == "IterEither"
-            {
+            if owner_name == "Vec" && idx < owner_idx {
+                let seg_name = seg.ident.to_string();
+                let is_std_alloc_prefix = idx == 0 && matches!(seg_name.as_str(), "std" | "alloc");
+                let is_vec_module_prefix = idx == 1
+                    && path
+                        .segments
+                        .first()
+                        .is_some_and(|first| matches!(first.ident.to_string().as_str(), "std" | "alloc"))
+                    && seg_name == "vec";
+                if is_std_alloc_prefix || is_vec_module_prefix {
+                    continue;
+                }
+            }
+            let mut seg_text = if idx == owner_idx && owner_idx == 0 && owner_name == "IterEither" {
                 "iterator::IterEither".to_string()
+            } else if idx == owner_idx && owner_name == "Vec" {
+                "rusty::Vec".to_string()
             } else {
                 escape_cpp_keyword(&seg.ident.to_string())
             };
@@ -36396,9 +37680,9 @@ impl CodeGen {
             return None;
         }
 
-        let type_key = self.declared_type_key_for_path(path).or_else(|| {
-            self.lookup_declared_type_key_for_base(&type_name, &type_name)
-        })?;
+        let type_key = self
+            .declared_type_key_for_path(path)
+            .or_else(|| self.lookup_declared_type_key_for_base(&type_name, &type_name))?;
         let params = self.declared_type_params.get(&type_key)?;
         if params.len() != 1 {
             return None;
@@ -36414,7 +37698,11 @@ impl CodeGen {
             "std::remove_pointer_t<std::remove_cvref_t<decltype(({}))>>",
             arg0_cpp
         );
-        Some(format!("{}<{}>", escape_cpp_keyword(&type_name), deduced_arg_cpp))
+        Some(format!(
+            "{}<{}>",
+            escape_cpp_keyword(&type_name),
+            deduced_arg_cpp
+        ))
     }
 
     fn resolve_try_into_target_type(
@@ -37187,6 +38475,23 @@ impl CodeGen {
         }
         if matches!(
             func.as_str(),
+            "String::from_utf8_lossy"
+                | "rusty::String::from_utf8_lossy"
+                | "std::string::String::from_utf8_lossy"
+                | "alloc::string::String::from_utf8_lossy"
+        ) && call.args.len() == 1
+        {
+            let arg = self.emit_expr_maybe_move(&call.args[0]);
+            let expects_cow = expected_ty
+                .map(|ty| self.map_type(ty))
+                .is_some_and(|mapped| mapped == "rusty::Cow");
+            if expects_cow {
+                return format!("rusty::Cow_Owned(rusty::String::from_utf8_lossy({}))", arg);
+            }
+            return format!("rusty::String::from_utf8_lossy({})", arg);
+        }
+        if matches!(
+            func.as_str(),
             "rusty::fmt::Formatter::write_str"
                 | "rusty::fmt::Formatter::write_char"
                 | "core::fmt::Formatter::write_str"
@@ -37424,6 +38729,21 @@ impl CodeGen {
             );
         }
 
+        if call.args.is_empty() {
+            let is_vec_new_call = matches!(func.as_str(), "Vec::new_" | "rusty::Vec::new_")
+                || ((func.starts_with("rusty::Vec<") || func.starts_with("::rusty::Vec<"))
+                    && func.ends_with(">::new_"));
+            if is_vec_new_call {
+                if let Some(expected) = expected_ty {
+                    let expected_cpp = self.map_type(expected);
+                    if expected_cpp.starts_with("rusty::Vec<")
+                        && !type_string_has_auto_placeholder(&expected_cpp)
+                    {
+                        return format!("{}::new_()", expected_cpp);
+                    }
+                }
+            }
+        }
         if matches!(func.as_str(), "Vec::new_" | "rusty::Vec::new_") && call.args.is_empty() {
             if let Some(expected) = expected_ty {
                 let expected_cpp = self.map_type(expected);
@@ -37538,16 +38858,10 @@ impl CodeGen {
                 if Self::types_equivalent_by_tokens(&left_item, &right_item) {
                     return None;
                 }
-                if left_seed
-                    && !right_seed
-                    && self.type_is_concrete_hint_candidate(&right_item)
-                {
+                if left_seed && !right_seed && self.type_is_concrete_hint_candidate(&right_item) {
                     return Some(right_item);
                 }
-                if right_seed
-                    && !left_seed
-                    && self.type_is_concrete_hint_candidate(&left_item)
-                {
+                if right_seed && !left_seed && self.type_is_concrete_hint_candidate(&left_item) {
                     return Some(left_item);
                 }
                 None
@@ -37955,12 +39269,29 @@ impl CodeGen {
         } else {
             Some(call_type_substitutions)
         };
+        let call_is_invalid_length = matches!(
+            self.peel_paren_group_expr(call.func.as_ref()),
+            syn::Expr::Path(path_expr)
+                if path_expr
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|seg| seg.ident == "invalid_length")
+        );
         let call_expected_ty = expected_ty;
         let call_args: Vec<String> = call
             .args
             .iter()
             .enumerate()
             .map(|(idx, arg)| {
+                if call_is_invalid_length
+                    && idx == 1
+                    && let syn::Expr::Reference(reference) = self.peel_paren_group_expr(arg)
+                    && !self.is_stable_reference_lvalue_expr(&reference.expr)
+                {
+                    let inner = self.emit_expr_to_string_with_expected(&reference.expr, None);
+                    return format!("rusty::addr_of_temp({})", inner);
+                }
                 let style = self.lookup_function_arg_pass_style(&call.func, idx);
                 let mut arg_expected_ty = self.lookup_function_arg_expected_type_for_call(
                     call,
@@ -38585,7 +39916,10 @@ impl CodeGen {
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
-        joined == "core::convert::From::from" || joined == "std::convert::From::from"
+        matches!(
+            joined.as_str(),
+            "From::from" | "core::convert::From::from" | "std::convert::From::from"
+        )
     }
 
     fn is_default_trait_default_path_expr(&self, expr: &syn::Expr) -> bool {
@@ -38813,7 +40147,21 @@ impl CodeGen {
             }
             return format!("rusty::String::from({})", inner);
         }
-        inner
+        if target_is_ref {
+            return inner;
+        }
+        let target_ctor = self.strip_into_target_cpp_type(target_cpp_ty);
+        if target_ctor == "auto"
+            || target_ctor.contains("/* TODO")
+            || type_string_has_auto_placeholder(&target_ctor)
+        {
+            return inner;
+        }
+        let canonical_target = self.canonical_into_target_cpp_type(target_cpp_ty);
+        if Self::is_scalar_into_target_cpp_type(&canonical_target) {
+            return format!("static_cast<{}>({})", target_ctor, inner);
+        }
+        format!("{}({})", target_ctor, inner)
     }
 
     fn lookup_constructor_template_args(&self, ctor_name: &str) -> Option<Vec<String>> {
@@ -39380,15 +40728,16 @@ impl CodeGen {
         let ty = target_ty_override
             .map(|ty| self.map_type(ty))
             .unwrap_or_else(|| self.map_type(&cast.ty));
-        let target_is_pointer_type =
-            matches!(target_ty_override, Some(syn::Type::Ptr(_)))
-                || matches!(cast.ty.as_ref(), syn::Type::Ptr(_))
-                || ty.ends_with('*');
+        let target_is_pointer_type = matches!(target_ty_override, Some(syn::Type::Ptr(_)))
+            || matches!(cast.ty.as_ref(), syn::Type::Ptr(_))
+            || ty.ends_with('*');
         let target_normalized = ty.trim_start_matches("const ").trim_end_matches('&').trim();
         let target_is_numeric_scalar = is_numeric_cpp_scalar_type(target_normalized);
         let source_is_raw_pointer_type = self.is_expr_raw_pointer_like(&cast.expr);
-        let source_is_explicit_reference =
-            matches!(self.peel_paren_group_expr(&cast.expr), syn::Expr::Reference(_));
+        let source_is_explicit_reference = matches!(
+            self.peel_paren_group_expr(&cast.expr),
+            syn::Expr::Reference(_)
+        );
         let source_is_reference_like = self.is_expr_reference_like(&cast.expr);
         if type_string_has_auto_placeholder(&ty) {
             if target_is_pointer_type
@@ -39399,7 +40748,9 @@ impl CodeGen {
             } else {
                 expr
             }
-        } else if target_is_pointer_type && source_is_raw_pointer_type && !source_is_explicit_reference
+        } else if target_is_pointer_type
+            && source_is_raw_pointer_type
+            && !source_is_explicit_reference
         {
             let target_is_mut_ptr = match target_ty_override {
                 Some(syn::Type::Ptr(p)) => p.mutability.is_some(),
@@ -39433,7 +40784,8 @@ impl CodeGen {
                 "reinterpret_cast<{}>(static_cast<std::uintptr_t>({}))",
                 ty, expr
             )
-        } else if target_is_numeric_scalar && (source_is_raw_pointer_type || source_is_reference_like)
+        } else if target_is_numeric_scalar
+            && (source_is_raw_pointer_type || source_is_reference_like)
         {
             format!(
                 "static_cast<{}>(reinterpret_cast<std::uintptr_t>({}))",
@@ -39499,6 +40851,16 @@ impl CodeGen {
                             }
                         }
                     }
+                    if matches!(self.peel_paren_group_expr(&un.expr), syn::Expr::Field(_))
+                        && !self.is_expr_raw_pointer_like(&un.expr)
+                        && !self.method_receiver_is_manually_drop_expr(&un.expr)
+                        && self
+                            .infer_simple_expr_type(&un.expr)
+                            .as_ref()
+                            .is_some_and(|ty| self.type_is_reference_like(ty))
+                    {
+                        return self.emit_expr_to_string(&un.expr);
+                    }
                     if self.is_expr_reference_like(&un.expr)
                         || self.is_self_reference_field_access(&un.expr)
                     {
@@ -39551,6 +40913,13 @@ impl CodeGen {
                             return self.emit_expr_to_string(ref_inner);
                         }
                     }
+                }
+                if let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(&r.expr)
+                    && mc.method == "into_bytes"
+                {
+                    // `&err.into_bytes()` in expanded serde-style code should lower as
+                    // byte buffer value (later coerced to span), not address-of container.
+                    return self.emit_expr_to_string(&r.expr);
                 }
                 let inner = self.emit_expr_to_string(&r.expr);
                 if inner.starts_with('&') {
@@ -41834,8 +43203,12 @@ impl CodeGen {
     }
 
     fn expr_indexes_fixed_array(&self, expr: &syn::Expr) -> bool {
-        self.infer_simple_expr_type(expr)
-            .is_some_and(|ty| matches!(self.peel_reference_paren_group_type(&ty), syn::Type::Array(_)))
+        self.infer_simple_expr_type(expr).is_some_and(|ty| {
+            matches!(
+                self.peel_reference_paren_group_type(&ty),
+                syn::Type::Array(_)
+            )
+        })
     }
 
     fn emit_index_expr_to_string(
@@ -41886,23 +43259,31 @@ impl CodeGen {
                 self.emit_match_expr_switch(&match_expr.arms, expected_ty)
             );
         }
+        if let Some(tuple_arity) = self.match_expr_tuple_scrutinee_arity(&match_expr.expr) {
+            if self.tuple_match_can_lower_as_value_conditions(&match_expr.arms, tuple_arity) {
+                if let syn::Expr::Tuple(tuple_scrutinee) = self.peel_paren_group_expr(&match_expr.expr)
+                {
+                    return self.emit_match_expr_tuple_value_conditions(
+                        tuple_scrutinee,
+                        &match_expr.arms,
+                        expected_ty,
+                    );
+                }
+                return self.emit_match_expr_tuple_value_conditions_for_scrutinee_expr(
+                    &match_expr.expr,
+                    tuple_arity,
+                    &match_expr.arms,
+                    expected_ty,
+                );
+            }
+        }
         if let Some(runtime_expr) =
             self.emit_runtime_match_expr(match_expr, variant_ctx.as_ref(), expected_ty)
         {
             return runtime_expr;
         }
         // Match as expression → immediately-invoked lambda
-        if let syn::Expr::Tuple(tuple_scrutinee) = match_expr.expr.as_ref() {
-            if self.tuple_match_can_lower_as_value_conditions(
-                &match_expr.arms,
-                tuple_scrutinee.elems.len(),
-            ) {
-                return self.emit_match_expr_tuple_value_conditions(
-                    tuple_scrutinee,
-                    &match_expr.arms,
-                    expected_ty,
-                );
-            }
+        if let syn::Expr::Tuple(tuple_scrutinee) = self.peel_paren_group_expr(&match_expr.expr) {
             let tuple_variant_ctx = tuple_scrutinee
                 .elems
                 .iter()
@@ -42669,12 +44050,60 @@ impl CodeGen {
             return "(*this)".to_string();
         }
 
+        // Trait static call dispatch:
+        // - `Error::invalid_value(...)` where `E: Error` -> `E::invalid_value(...)`
+        // - `de::Error::invalid_length(...)` where `E: de::Error` -> `E::invalid_length(...)`
+        // - inside concrete impls, `Deserialize::deserialize(...)` -> `SelfType::deserialize(...)`
+        if segments.len() >= 2 {
+            if let Some(type_param) =
+                self.resolve_trait_static_call_type_param_for_segments(&segments)
+            {
+                let method_name = escape_cpp_keyword(
+                    segments
+                        .last()
+                        .expect("segments.len() >= 2 implies non-empty"),
+                );
+                return format!("{}::{}", type_param, method_name);
+            }
+            if let Some(owner) = self.resolve_trait_static_call_owner_in_current_context(&segments)
+            {
+                let method_name = escape_cpp_keyword(
+                    segments
+                        .last()
+                        .expect("segments.len() >= 2 implies non-empty"),
+                );
+                return format!("{}::{}", owner, method_name);
+            }
+            let trait_name = &segments[segments.len() - 2];
+            if trait_name == "Error"
+                && let Some(return_hint) = self.current_return_type_hint()
+                && let Some(err_ty) = self.expected_result_type_arg(Some(return_hint), 1)
+            {
+                let mut owner = self.map_type(err_ty);
+                if owner != "auto"
+                    && !owner.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&owner)
+                {
+                    owner = owner.trim_start_matches("typename ").to_string();
+                    let method_name = escape_cpp_keyword(
+                        segments
+                            .last()
+                            .expect("segments.len() >= 2 implies non-empty"),
+                    );
+                    return format!("{}::{}", owner, method_name);
+                }
+            }
+        }
+
         // Forward declarations are emitted before in-namespace `use` aliases. When
         // a single-segment path refers to a uniquely declared crate type from a
         // sibling namespace (for example `Position` imported from `error`), qualify
         // it explicitly to keep signatures order-independent.
         if segments.len() == 1 {
             if let Some(scoped) = self.resolve_unique_forward_decl_type_path(&segments[0]) {
+                return scoped;
+            }
+            if let Some(scoped) = self.resolve_unique_nonlocal_type_path(&segments[0]) {
                 return scoped;
             }
         }
@@ -42838,6 +44267,17 @@ impl CodeGen {
         }
         if joined == "core::result::Result::Err" || joined == "std::result::Result::Err" {
             return "Err".to_string();
+        }
+        if segments.len() >= 2
+            && segments.last().is_some_and(|seg| seg == "Result")
+            && segments
+                .iter()
+                .nth_back(1)
+                .is_some_and(|seg| seg.starts_with("__private"))
+        {
+            // Expanded crates can alias Result through hidden `__private`
+            // modules (e.g. `crate::__private::Result`).
+            return "rusty::Result".to_string();
         }
 
         // Expanded either crate commonly references `IterEither` through imports.
@@ -43030,6 +44470,60 @@ impl CodeGen {
         Some(format!("::{}", escaped))
     }
 
+    fn resolve_unique_nonlocal_type_path(&self, name: &str) -> Option<String> {
+        if name.is_empty()
+            || name == "Self"
+            || self.is_type_param_in_scope(name)
+            || !name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            return None;
+        }
+
+        let mut scoped_matches: Vec<&str> = self
+            .local_declared_types
+            .iter()
+            .filter_map(|decl| {
+                let (_, tail) = decl.rsplit_once("::")?;
+                if tail == name {
+                    Some(decl.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if scoped_matches.is_empty() {
+            return None;
+        }
+
+        let current_scoped = if self.module_stack.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}::{}", self.module_stack.join("::"), name)
+        };
+        if scoped_matches
+            .iter()
+            .any(|candidate| *candidate == current_scoped)
+        {
+            return None;
+        }
+
+        scoped_matches.sort_unstable();
+        scoped_matches.dedup();
+        if scoped_matches.len() != 1 {
+            return None;
+        }
+
+        let escaped = scoped_matches[0]
+            .split("::")
+            .map(escape_cpp_keyword)
+            .collect::<Vec<String>>()
+            .join("::");
+        Some(format!("::{}", escaped))
+    }
+
     fn try_emit_numeric_limits_max_path(
         &self,
         path: &syn::Path,
@@ -43185,6 +44679,22 @@ impl CodeGen {
             let owner = path.segments[0].ident.to_string();
             let fn_name = path.segments[1].ident.to_string();
             if owner == "rusty_ext" || owner == "Itertools" {
+                if owner == "rusty_ext"
+                    && fn_name == "deserialize"
+                    && self.module_stack.iter().any(|seg| seg == "de")
+                {
+                    return "::de::rusty_ext::deserialize".to_string();
+                }
+                if let Some(scoped) =
+                    self.resolve_scoped_namespace_function_expr_path(&owner, &fn_name)
+                {
+                    return scoped;
+                }
+                if let Some(unscoped) =
+                    self.resolve_unscoped_namespace_function_expr_path(&owner, &fn_name)
+                {
+                    return unscoped;
+                }
                 if let Some(qualified) = self.module_qualified_functions.get(&fn_name) {
                     if !qualified.is_empty() {
                         let needs_root = self
@@ -43449,14 +44959,14 @@ impl CodeGen {
             return Self::rewrite_builtin_namespace_aliases_in_type(cpp_ty);
         }
         let mut rewritten = cpp_ty.to_string();
-        let mut bindings: Vec<(&String, &String)> = self.cpp_module_import_bindings.iter().collect();
+        let mut bindings: Vec<(&String, &String)> =
+            self.cpp_module_import_bindings.iter().collect();
         bindings.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.len()));
         for (alias, target) in bindings {
             let escaped_alias = escape_cpp_keyword(alias);
             let needle = format!("{}::", escaped_alias);
             let replacement = format!("{}::", target);
-            rewritten =
-                Self::replace_cpp_path_alias_tokens(&rewritten, &needle, &replacement);
+            rewritten = Self::replace_cpp_path_alias_tokens(&rewritten, &needle, &replacement);
         }
         Self::rewrite_builtin_namespace_aliases_in_type(&rewritten)
     }
@@ -43469,10 +44979,12 @@ impl CodeGen {
         let mut idx = 0usize;
         while let Some(rel_pos) = input[idx..].find(needle) {
             let pos = idx + rel_pos;
+            let preceded_by_scope = pos >= 2 && &input.as_bytes()[pos - 2..pos] == b"::";
             let boundary_ok = if pos == 0 {
                 true
             } else {
-                !input
+                !preceded_by_scope
+                    && !input
                     .as_bytes()
                     .get(pos - 1)
                     .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
@@ -43598,7 +45110,10 @@ impl CodeGen {
         let all_provided_in_scope = provided
             .iter()
             .all(|provided_name| self.is_type_param_in_scope(provided_name));
-        if self.resolve_current_struct_assoc_cpp_type(&type_name).is_some() && all_provided_in_scope
+        if self
+            .resolve_current_struct_assoc_cpp_type(&type_name)
+            .is_some()
+            && all_provided_in_scope
         {
             return true;
         }
@@ -44997,6 +46512,36 @@ impl CodeGen {
         matches!(normalized, [slice, iter] if slice == "slice" && iter == family)
     }
 
+    fn type_is_primitive_str_path(ty: &syn::Type) -> bool {
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        if tp.qself.is_some() {
+            return false;
+        }
+        let idents: Vec<String> = tp
+            .path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        if idents.is_empty() {
+            return false;
+        }
+        if idents.len() == 1 {
+            return idents[0] == "str";
+        }
+        if idents.last().is_some_and(|last| last == "str")
+            && idents
+                .iter()
+                .nth_back(1)
+                .is_some_and(|prev| prev == "primitive")
+        {
+            return true;
+        }
+        false
+    }
+
     fn map_type(&self, ty: &syn::Type) -> String {
         match ty {
             syn::Type::Path(tp) => {
@@ -45047,6 +46592,9 @@ impl CodeGen {
                 }
 
                 let mut path_str = self.emit_path_to_string(&tp.path);
+                if path_str == "__private::Result" {
+                    path_str = "rusty::Result".to_string();
+                }
                 let path_is_current_struct_assoc_projection =
                     self.path_is_current_struct_assoc_projection(&tp.path);
                 if path_is_current_struct_assoc_projection {
@@ -45145,6 +46693,13 @@ impl CodeGen {
                     let seg_name = last_seg.ident.to_string();
                     if seg_name == "Box" {
                         if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                            if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                                if Self::type_is_primitive_str_path(inner_ty) {
+                                    // `Box<str>` is owned string storage in Rust.
+                                    // Keep ownership in C++ using `rusty::String`.
+                                    return "rusty::Box<rusty::String>".to_string();
+                                }
+                            }
                             if let Some(syn::GenericArgument::Type(syn::Type::TraitObject(to))) =
                                 args.args.first()
                             {
@@ -45217,6 +46772,20 @@ impl CodeGen {
                 // Check if the last segment has generic arguments
                 if let Some(last_seg) = tp.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                        let joined_no_args = tp
+                            .path
+                            .segments
+                            .iter()
+                            .map(|seg| seg.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        if let Some((cpp_type, needs_template_args)) =
+                            types::map_std_type(&joined_no_args)
+                        {
+                            if !needs_template_args {
+                                return cpp_type.to_string();
+                            }
+                        }
                         self.type_arg_nesting.set(self.type_arg_nesting.get() + 1);
                         let mut generic_args: Vec<String> = args
                             .args
@@ -47347,8 +48916,7 @@ impl CodeGen {
             }
         }
 
-        let lambda_return_annotation =
-            self.expected_lambda_return_annotation(expected_ty, false);
+        let lambda_return_annotation = self.expected_lambda_return_annotation(expected_ty, false);
 
         Some(format!(
             "[&](){} {{ {} }}()",
@@ -47373,13 +48941,161 @@ impl CodeGen {
                 _ => {}
             }
         }
+        let trait_bound_map = Self::collect_trait_bound_type_param_map(generics);
         self.type_param_scopes.push(scope);
         self.type_param_scope_order.push(ordered_scope);
+        self.trait_bound_type_param_scopes.push(trait_bound_map);
     }
 
     fn pop_type_param_scope(&mut self) {
         self.type_param_scopes.pop();
         self.type_param_scope_order.pop();
+        self.trait_bound_type_param_scopes.pop();
+    }
+
+    fn trait_name_from_bound(bound: &syn::TypeParamBound) -> Option<String> {
+        let syn::TypeParamBound::Trait(trait_bound) = bound else {
+            return None;
+        };
+        trait_bound
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+    }
+
+    fn record_trait_bound_type_param_binding(
+        map: &mut HashMap<String, Option<String>>,
+        trait_name: String,
+        type_param_name: &str,
+    ) {
+        use std::collections::hash_map::Entry;
+        match map.entry(trait_name) {
+            Entry::Vacant(vac) => {
+                vac.insert(Some(type_param_name.to_string()));
+            }
+            Entry::Occupied(mut occ) => {
+                if occ.get().as_deref() != Some(type_param_name) {
+                    occ.insert(None);
+                }
+            }
+        }
+    }
+
+    fn collect_trait_bound_type_param_map(generics: &syn::Generics) -> HashMap<String, String> {
+        let mut raw: HashMap<String, Option<String>> = HashMap::new();
+        for param in &generics.params {
+            let syn::GenericParam::Type(tp) = param else {
+                continue;
+            };
+            let type_param_name = tp.ident.to_string();
+            for bound in &tp.bounds {
+                if let Some(trait_name) = Self::trait_name_from_bound(bound) {
+                    Self::record_trait_bound_type_param_binding(
+                        &mut raw,
+                        trait_name,
+                        &type_param_name,
+                    );
+                }
+            }
+        }
+
+        if let Some(where_clause) = &generics.where_clause {
+            for predicate in &where_clause.predicates {
+                let syn::WherePredicate::Type(type_pred) = predicate else {
+                    continue;
+                };
+                let syn::Type::Path(type_path) = &type_pred.bounded_ty else {
+                    continue;
+                };
+                if type_path.qself.is_some() || type_path.path.segments.len() != 1 {
+                    continue;
+                }
+                let type_param_name = type_path.path.segments[0].ident.to_string();
+                for bound in &type_pred.bounds {
+                    if let Some(trait_name) = Self::trait_name_from_bound(bound) {
+                        Self::record_trait_bound_type_param_binding(
+                            &mut raw,
+                            trait_name,
+                            &type_param_name,
+                        );
+                    }
+                }
+            }
+        }
+
+        raw.into_iter()
+            .filter_map(|(trait_name, type_param)| type_param.map(|tp| (trait_name, tp)))
+            .collect()
+    }
+
+    fn path_tail_looks_like_method_name(name: &str) -> bool {
+        name.chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+    }
+
+    fn trait_static_call_has_receiver_for_segments(&self, segments: &[String]) -> Option<bool> {
+        if segments.len() < 2 {
+            return None;
+        }
+        let method_name = segments.last()?;
+        if !Self::path_tail_looks_like_method_name(method_name) {
+            return None;
+        }
+        let trait_idx = segments.len() - 2;
+        let trait_name = &segments[trait_idx];
+        let key_unscoped = format!("{}::{}", trait_name, method_name);
+        let scoped_trait = segments[..=trait_idx].join("::");
+        let key_scoped = format!("{}::{}", scoped_trait, method_name);
+        self.trait_method_has_receiver
+            .get(&key_scoped)
+            .copied()
+            .or_else(|| self.trait_method_has_receiver.get(&key_unscoped).copied())
+    }
+
+    fn resolve_trait_static_call_type_param_for_segments(
+        &self,
+        segments: &[String],
+    ) -> Option<String> {
+        if segments.len() < 2 {
+            return None;
+        }
+        if self.trait_static_call_has_receiver_for_segments(segments)? {
+            return None;
+        }
+        let trait_idx = segments.len() - 2;
+        let trait_name = &segments[trait_idx];
+        self.resolve_unique_trait_bound_type_param(trait_name)
+    }
+
+    fn resolve_trait_static_call_owner_in_current_context(
+        &self,
+        segments: &[String],
+    ) -> Option<String> {
+        if segments.len() < 2 {
+            return None;
+        }
+        if self.trait_static_call_has_receiver_for_segments(segments)? {
+            return None;
+        }
+        let method_name = segments.last()?;
+        let current_struct = self.current_struct.as_ref()?;
+        let has_current_owner_method = self
+            .lookup_owner_method_has_receiver(current_struct, method_name)
+            .is_some_and(|has_receiver| !has_receiver);
+        if has_current_owner_method {
+            Some(current_struct.clone())
+        } else {
+            None
+        }
+    }
+
+    fn resolve_unique_trait_bound_type_param(&self, trait_name: &str) -> Option<String> {
+        self.trait_bound_type_param_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(trait_name).cloned())
     }
 
     fn ordered_type_params_in_scope(&self) -> Vec<String> {
@@ -48205,7 +49921,10 @@ impl CodeGen {
             .iter()
             .map(|arg| match arg {
                 syn::FnArg::Typed(pat_type) => {
-                    let ty = self.map_type(&pat_type.ty);
+                    let mapped = self.map_type(&pat_type.ty);
+                    let ty = self
+                        .soften_incomplete_nominal_param_type(&pat_type.ty, &mapped)
+                        .unwrap_or(mapped);
                     let name = match pat_type.pat.as_ref() {
                         syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                         _ => "_".to_string(),
@@ -48216,6 +49935,38 @@ impl CodeGen {
             })
             .collect();
         params.join(", ")
+    }
+
+    fn soften_incomplete_nominal_param_type(&self, ty: &syn::Type, mapped: &str) -> Option<String> {
+        if !(self.module_name.is_some() || self.expanded_libtest_mode) {
+            return None;
+        }
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return None;
+        }
+        let seg = tp.path.segments.first()?;
+        if !matches!(seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let ident = seg.ident.to_string();
+        if mapped != ident
+            || !ident
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+            || self.is_local_type_name_in_scope(&ident)
+        {
+            return None;
+        }
+        if !self.declared_item_names.contains(&ident) && !self.local_declared_types.contains(&ident)
+        {
+            return None;
+        }
+        Some("const auto&".to_string())
     }
 }
 
@@ -48603,7 +50354,9 @@ fn needs_runtime_path_fallback_helpers(output: &str) -> bool {
         "rusty::deref_ref(",
         "rusty::deref_mut(",
         "rusty::partial_cmp(",
+        "namespace cmp = rusty::cmp;",
         "namespace cmp = core::cmp;",
+        "rusty::cmp::",
         "core::cmp::",
     ];
     markers.iter().any(|m| output.contains(m))
@@ -48613,6 +50366,16 @@ fn runtime_path_fallback_helpers_text() -> &'static str {
     "namespace rusty {\n\
 namespace cmp {\n\
 enum class Ordering { Less, Equal, Greater };\n\
+template<typename T>\n\
+struct Reverse {\n\
+    T _0;\n\
+    Reverse() = default;\n\
+    explicit Reverse(T value) : _0(std::move(value)) {}\n\
+    bool operator==(const Reverse&) const = default;\n\
+    bool operator<(const Reverse& other) const {\n\
+        return other._0 < _0;\n\
+    }\n\
+};\n\
 namespace detail {\n\
 template<typename... Ts>\n\
 inline constexpr bool dependent_false_v = false;\n\
@@ -48656,6 +50419,14 @@ Ordering then_with(Ordering ord, F&& f) {\n\
         return std::forward<F>(f)();\n\
     }\n\
     return ord;\n\
+}\n\
+template<typename T>\n\
+const T& min(const T& lhs, const T& rhs) {\n\
+    return detail::less_than(rhs, lhs) ? rhs : lhs;\n\
+}\n\
+template<typename T>\n\
+const T& max(const T& lhs, const T& rhs) {\n\
+    return detail::less_than(lhs, rhs) ? rhs : lhs;\n\
 }\n\
 }\n\
 // Clone: dispatches to .clone() if available, otherwise copy-constructs.\n\
@@ -48702,6 +50473,49 @@ template<typename T>\n\
 constexpr decltype(auto) format_numeric_arg(T&& value);\n\
 // Rust u8::is_ascii_digit() — check if byte is in '0'..='9'.\n\
 inline bool is_ascii_digit(uint8_t b) { return b >= '0' && b <= '9'; }\n\
+template<typename T>\n\
+inline bool is_nan(T value) {\n\
+    using V = std::remove_cv_t<std::remove_reference_t<T>>;\n\
+    if constexpr (std::is_floating_point_v<V>) {\n\
+        return value != value;\n\
+    } else {\n\
+        return false;\n\
+    }\n\
+}\n\
+template<typename T>\n\
+inline bool is_infinite(T value) {\n\
+    using V = std::remove_cv_t<std::remove_reference_t<T>>;\n\
+    if constexpr (std::is_floating_point_v<V>) {\n\
+        const auto inf = std::numeric_limits<V>::infinity();\n\
+        return value == inf || value == -inf;\n\
+    } else {\n\
+        return false;\n\
+    }\n\
+}\n\
+template<typename T>\n\
+inline bool is_finite(T value) {\n\
+    return !is_nan(value) && !is_infinite(value);\n\
+}\n\
+template<typename T>\n\
+inline bool is_sign_negative(T value) {\n\
+    using V = std::remove_cv_t<std::remove_reference_t<T>>;\n\
+    if constexpr (std::is_same_v<V, float>) {\n\
+        return (std::bit_cast<uint32_t>(value) & 0x80000000u) != 0;\n\
+    } else if constexpr (std::is_same_v<V, double>) {\n\
+        return (std::bit_cast<uint64_t>(value) & 0x8000000000000000ULL) != 0;\n\
+    } else if constexpr (std::is_floating_point_v<V>) {\n\
+        return value < static_cast<V>(0)\n\
+            || (value == static_cast<V>(0) && (static_cast<V>(1) / value) < static_cast<V>(0));\n\
+    } else if constexpr (std::is_signed_v<V>) {\n\
+        return value < static_cast<V>(0);\n\
+    } else {\n\
+        return false;\n\
+    }\n\
+}\n\
+template<typename T>\n\
+inline bool is_sign_positive(T value) {\n\
+    return !is_sign_negative(value);\n\
+}\n\
 } // namespace rusty\n\
 // DefaultHasher stub — used by expanded #[derive(Hash)] test code.\n\
 struct DefaultHasher {\n\
@@ -49005,7 +50819,12 @@ std::string to_string(const T& value) {\n\
         if (value == nullptr) {\n\
             return \"<null>\";\n\
         }\n\
-        return rusty::to_string(*value);\n\
+        using Pointee = std::remove_cv_t<std::remove_pointer_t<Value>>;\n\
+        if constexpr (std::is_void_v<Pointee>) {\n\
+            return std::format(\"0x{:x}\", static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(value)));\n\
+        } else {\n\
+            return rusty::to_string(*value);\n\
+        }\n\
     } else if constexpr (requires(rusty::fmt::Formatter& f) { rusty_fmt(value, f); }) {\n\
         rusty::fmt::Formatter formatter{};\n\
         auto result = rusty_fmt(value, formatter);\n\
@@ -49090,6 +50909,11 @@ constexpr decltype(auto) format_numeric_arg(T&& value) {\n\
 }\n\
 namespace path {\n\
 using Path = std::string;\n\
+inline const Path& as_ref(std::string_view value) {\n\
+    thread_local Path _path_ref_tmp;\n\
+    _path_ref_tmp = std::string(value);\n\
+    return _path_ref_tmp;\n\
+}\n\
 }\n\
 namespace time {\n\
 struct Duration {\n\
@@ -49112,6 +50936,10 @@ struct Instant {\n\
     Duration duration_since(Instant earlier) const {\n\
         return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)};\n\
     }\n\
+};\n\
+struct SystemTime {\n\
+    std::chrono::system_clock::time_point inner;\n\
+    static SystemTime now() { return SystemTime{std::chrono::system_clock::now()}; }\n\
 };\n\
 }\n\
 namespace future {\n\
@@ -49152,6 +50980,82 @@ struct Delay {\n\
 namespace ffi {\n\
 using OsStr = std::string;\n\
 using CStr = std::string;\n\
+using OsString = std::string;\n\
+using CString = std::string;\n\
+inline rusty::Result<CString, rusty::String> cstring_new(std::string_view value) {\n\
+    return rusty::Result<CString, rusty::String>::Ok(std::string(value));\n\
+}\n\
+inline rusty::Result<CString, rusty::String> cstring_new(rusty::String value) {\n\
+    return cstring_new(std::string_view(value.as_str()));\n\
+}\n\
+template<typename Bytes>\n\
+rusty::Result<CString, rusty::String> cstring_new(const Bytes& bytes) {\n\
+    if constexpr (requires { bytes.data(); bytes.size(); }) {\n\
+        const auto* raw = bytes.data();\n\
+        const auto len = static_cast<std::size_t>(bytes.size());\n\
+        const auto* data = reinterpret_cast<const char*>(raw);\n\
+        return rusty::Result<CString, rusty::String>::Ok(std::string(data, len));\n\
+    }\n\
+    return rusty::Result<CString, rusty::String>::Err(rusty::String::from(\"unsupported CString input\"));\n\
+}\n\
+}\n\
+template<typename Target, typename Input>\n\
+Target from_into(Input&& input) {\n\
+    if constexpr (requires { Target::from(std::forward<Input>(input)); }) {\n\
+        return Target::from(std::forward<Input>(input));\n\
+    } else if constexpr (std::is_constructible_v<Target, Input&&>) {\n\
+        return Target(std::forward<Input>(input));\n\
+    } else if constexpr (std::is_convertible_v<Input&&, Target>) {\n\
+        return static_cast<Target>(std::forward<Input>(input));\n\
+    } else {\n\
+        return Target{};\n\
+    }\n\
+}\n\
+template<typename Target, typename Input>\n\
+Target as_ref_into(Input&& input) {\n\
+    using RawTarget = std::remove_cv_t<std::remove_reference_t<Target>>;\n\
+    if constexpr (std::is_same_v<RawTarget, rusty::path::Path>) {\n\
+        if constexpr (std::is_convertible_v<Input, std::string_view>) {\n\
+            return static_cast<Target>(rusty::path::as_ref(std::string_view(input)));\n\
+        } else if constexpr (requires { input.as_str(); }) {\n\
+            return static_cast<Target>(rusty::path::as_ref(std::string_view(input.as_str())));\n\
+        }\n\
+    }\n\
+    if constexpr (requires { std::forward<Input>(input).as_ref(); }) {\n\
+        return static_cast<Target>(std::forward<Input>(input).as_ref());\n\
+    } else {\n\
+        return static_cast<Target>(std::forward<Input>(input));\n\
+    }\n\
+}\n\
+template<typename T>\n\
+constexpr T* addr_of_temp(T& value) {\n\
+    return &value;\n\
+}\n\
+template<typename T>\n\
+const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value) {\n\
+    using Stored = std::remove_cv_t<std::remove_reference_t<T>>;\n\
+    thread_local std::optional<Stored> _addr_of_tmp;\n\
+    _addr_of_tmp.reset();\n\
+    _addr_of_tmp.emplace(std::forward<T>(value));\n\
+    return &*_addr_of_tmp;\n\
+}\n\
+struct Cow_Borrowed {\n\
+    std::string_view _0;\n\
+    explicit Cow_Borrowed(std::string_view value) : _0(value) {}\n\
+};\n\
+struct Cow_Owned {\n\
+    rusty::String _0;\n\
+    explicit Cow_Owned(rusty::String value) : _0(std::move(value)) {}\n\
+};\n\
+using Cow = std::variant<Cow_Borrowed, Cow_Owned>;\n\
+inline Cow clone(const Cow& value) {\n\
+    if (const auto* borrowed = std::get_if<Cow_Borrowed>(&value)) {\n\
+        return Cow_Borrowed{borrowed->_0};\n\
+    }\n\
+    if (const auto* owned = std::get_if<Cow_Owned>(&value)) {\n\
+        return Cow_Owned{owned->_0.clone()};\n\
+    }\n\
+    return Cow_Borrowed{std::string_view{}};\n\
 }\n\
 namespace pin {\n\
 template<typename T>\n\
@@ -49207,6 +51111,36 @@ void hash(const T& value, State& state) {\n\
         combine(state, h);\n\
     }\n\
 }\n\
+}\n\
+template<typename Writer, typename FmtArg>\n\
+rusty::fmt::Result write_fmt(Writer&& writer, FmtArg&& fmt_arg) {\n\
+    const auto text = rusty::to_string(std::forward<FmtArg>(fmt_arg));\n\
+    const auto text_view = std::string_view(text);\n\
+    if constexpr (requires { std::forward<Writer>(writer).write_fmt(text_view); }) {\n\
+        return std::forward<Writer>(writer).write_fmt(text_view);\n\
+    } else if constexpr (requires { writer.write_fmt(text_view); }) {\n\
+        return writer.write_fmt(text_view);\n\
+    } else if constexpr (requires { std::forward<Writer>(writer).write_str(text_view); }) {\n\
+        return std::forward<Writer>(writer).write_str(text_view);\n\
+    } else if constexpr (requires { writer.write_str(text_view); }) {\n\
+        return writer.write_str(text_view);\n\
+    } else if constexpr (requires { std::forward<Writer>(writer).formatter.write_str(text_view); }) {\n\
+        if constexpr (requires { std::forward<Writer>(writer).has_decimal_point; }) {\n\
+            if (text_view.find('.') != std::string_view::npos) {\n\
+                std::forward<Writer>(writer).has_decimal_point = true;\n\
+            }\n\
+        }\n\
+        return std::forward<Writer>(writer).formatter.write_str(text_view);\n\
+    } else if constexpr (requires { writer.formatter.write_str(text_view); }) {\n\
+        if constexpr (requires { writer.has_decimal_point; }) {\n\
+            if (text_view.find('.') != std::string_view::npos) {\n\
+                writer.has_decimal_point = true;\n\
+            }\n\
+        }\n\
+        return writer.formatter.write_str(text_view);\n\
+    } else {\n\
+        return rusty::fmt::Result::Err(rusty::fmt::Error{});\n\
+    }\n\
 }\n\
 template<typename Value, typename Writer>\n\
 rusty::fmt::Result write_hex(const Value& value, Writer&& writer) {\n\
@@ -49884,6 +51818,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
         };
     }
 
+    if let Some(action) = rewrite_lib_core_facade_import(normalized) {
+        return action;
+    }
     if is_either_variant_reexport(normalized) {
         return UseImportAction::RustOnly;
     }
@@ -49918,6 +51855,12 @@ fn classify_use_import(path: &str) -> UseImportAction {
         return action;
     }
     if let Some(action) = rewrite_std_string_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_borrow_import(normalized) {
+        return action;
+    }
+    if let Some(action) = rewrite_std_ffi_import(normalized) {
         return action;
     }
     if let Some(action) = rewrite_std_sync_import(normalized) {
@@ -50124,6 +52067,64 @@ fn is_supported_external_import_mapping(path: &str) -> bool {
     normalized == "either" || normalized.starts_with("either::")
 }
 
+fn rewrite_lib_core_facade_import(path: &str) -> Option<UseImportAction> {
+    let mapped = if path == "lib::core" {
+        "std".to_string()
+    } else if let Some(rest) = path.strip_prefix("lib::core::") {
+        format!("std::{}", rest)
+    } else if let Some(rest) = path.strip_prefix("lib::") {
+        // Expanded crates frequently route std/core through `lib::*` facade
+        // imports. Reuse existing std mapping logic for known module families.
+        let facade_root = rest.split("::").next().unwrap_or("");
+        const FACADE_ROOTS: &[&str] = &[
+            "alloc",
+            "any",
+            "borrow",
+            "boxed",
+            "cell",
+            "char",
+            "cmp",
+            "collections",
+            "convert",
+            "default",
+            "ffi",
+            "fmt",
+            "hash",
+            "hint",
+            "io",
+            "iter",
+            "marker",
+            "mem",
+            "net",
+            "num",
+            "ops",
+            "option",
+            "panic",
+            "path",
+            "primitive",
+            "ptr",
+            "rc",
+            "result",
+            "slice",
+            "str",
+            "string",
+            "sync",
+            "task",
+            "thread",
+            "time",
+            "vec",
+        ];
+        if FACADE_ROOTS.contains(&facade_root) {
+            format!("std::{}", rest)
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    Some(classify_use_import(&mapped))
+}
+
 fn rewrite_std_io_import(path: &str) -> Option<UseImportAction> {
     // `use std::io;` imports the module name itself; alias it to rusty::io.
     if path == "std::io" {
@@ -50261,10 +52262,51 @@ fn rewrite_std_marker_import(path: &str) -> Option<UseImportAction> {
 }
 
 fn rewrite_std_string_import(path: &str) -> Option<UseImportAction> {
-    if path == "std::string::String" {
-        return Some(UseImportAction::Using("rusty::String".to_string()));
+    if path == "std::string" {
+        return Some(UseImportAction::RustOnly);
     }
-    None
+    let item = path.strip_prefix("std::string::")?;
+    let action = match item {
+        "String" => UseImportAction::Using("rusty::String".to_string()),
+        // Rust trait import only; generated methods are lowered directly.
+        "ToString" => UseImportAction::RustOnly,
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_borrow_import(path: &str) -> Option<UseImportAction> {
+    if matches!(path, "std::borrow" | "core::borrow" | "alloc::borrow") {
+        return Some(UseImportAction::RustOnly);
+    }
+    let item = path
+        .strip_prefix("std::borrow::")
+        .or_else(|| path.strip_prefix("core::borrow::"))
+        .or_else(|| path.strip_prefix("alloc::borrow::"))?;
+    let action = match item {
+        "Cow" => UseImportAction::Using("rusty::Cow".to_string()),
+        // Trait-only import surface.
+        "ToOwned" => UseImportAction::RustOnly,
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_ffi_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::ffi" {
+        return Some(UseImportAction::Raw(
+            "namespace ffi = rusty::ffi;".to_string(),
+        ));
+    }
+    let item = path.strip_prefix("std::ffi::")?;
+    let action = match item {
+        "CStr" => UseImportAction::Using("rusty::ffi::CStr".to_string()),
+        "CString" => UseImportAction::Using("rusty::ffi::CString".to_string()),
+        "OsStr" => UseImportAction::Using("rusty::ffi::OsStr".to_string()),
+        "OsString" => UseImportAction::Using("rusty::ffi::OsString".to_string()),
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
 }
 
 fn rewrite_std_sync_import(path: &str) -> Option<UseImportAction> {
@@ -50408,9 +52450,7 @@ fn rewrite_std_time_import(path: &str) -> Option<UseImportAction> {
 
 fn rewrite_std_task_import(path: &str) -> Option<UseImportAction> {
     if path == "std::task" || path == "core::task" {
-        return Some(UseImportAction::Raw(
-            "namespace task = rusty;".to_string(),
-        ));
+        return Some(UseImportAction::Raw("namespace task = rusty;".to_string()));
     }
 
     let item = path
@@ -50523,6 +52563,8 @@ fn rewrite_std_primitive_module_import(path: &str) -> Option<UseImportAction> {
         path,
         "std::usize"
             | "std::isize"
+            | "std::f32"
+            | "std::f64"
             | "std::u8"
             | "std::u16"
             | "std::u32"
@@ -50621,6 +52663,9 @@ fn rewrite_std_slice_import(path: &str) -> Option<UseImportAction> {
 
 fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
     let action = match path {
+        "std::result" | "core::result" => {
+            UseImportAction::Raw("namespace result = rusty;".to_string())
+        }
         "Option" => UseImportAction::Using("rusty::Option".to_string()),
         "Option::Some" => UseImportAction::Using("rusty::Some".to_string()),
         "Option::None" => UseImportAction::Using("rusty::None".to_string()),
@@ -50651,17 +52696,19 @@ fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
 }
 
 fn rewrite_std_cmp_import(path: &str) -> Option<UseImportAction> {
-    if path == "std::cmp" {
+    if path == "std::cmp" || path == "core::cmp" {
         return Some(UseImportAction::Raw(
-            "namespace cmp = core::cmp;".to_string(),
+            "namespace cmp = rusty::cmp;".to_string(),
         ));
     }
 
-    let item = path.strip_prefix("std::cmp::")?;
+    let item = path
+        .strip_prefix("std::cmp::")
+        .or_else(|| path.strip_prefix("core::cmp::"))?;
     let action = match item {
         "Ordering" => UseImportAction::Using("rusty::cmp::Ordering".to_string()),
-        "min" => UseImportAction::Using("core::cmp::min".to_string()),
-        "max" => UseImportAction::Using("core::cmp::max".to_string()),
+        "min" => UseImportAction::Using("rusty::cmp::min".to_string()),
+        "max" => UseImportAction::Using("rusty::cmp::max".to_string()),
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -51970,6 +54017,36 @@ fn collect_local_generic_placeholder_hints_in_expr(
             }
         }
         syn::Expr::Call(call) => {
+            if let syn::Expr::Path(path_expr) = peel_paren_group_expr(call.func.as_ref()) {
+                let joined = path_expr
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                if matches!(
+                    joined.as_str(),
+                    "CString::new"
+                        | "CString::new_"
+                        | "std::ffi::CString::new"
+                        | "std::ffi::CString::new_"
+                        | "rusty::ffi::cstring_new"
+                ) {
+                    if let Some(first_arg) = call.args.first()
+                        && let Some(name) = extract_simple_local_ident(first_arg)
+                        && candidates.contains(&name)
+                        && !hints.contains_key(&name)
+                        && candidate_owner_targets
+                            .get(&name)
+                            .is_some_and(|owner| owner == "Vec")
+                    {
+                        let ty: syn::Type = parse_quote!(u8);
+                        let normalized = normalize_placeholder_hint_for_owner(Some("Vec"), ty);
+                        hints.insert(name, normalized);
+                    }
+                }
+            }
             collect_local_generic_placeholder_hints_in_expr(
                 &call.func,
                 candidates,
@@ -53593,7 +55670,10 @@ mod tests {
                 || out.contains("template<typename FromA, typename IT>"),
             "{out}"
         );
-        assert!(out.contains("std::tuple<FromA> multiunzip(IT self_);"), "{out}");
+        assert!(
+            out.contains("std::tuple<FromA> multiunzip(IT self_);"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -53617,7 +55697,10 @@ mod tests {
                 || out.contains("template<typename FromA, typename IT>"),
             "{out}"
         );
-        assert!(out.contains("std::tuple<FromA> multiunzip(IT self_);"), "{out}");
+        assert!(
+            out.contains("std::tuple<FromA> multiunzip(IT self_);"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -54459,8 +56542,7 @@ mod tests {
             out
         );
         assert!(
-            out.contains("IntoIter into_iter(")
-                || out.contains("typename S::IntoIter into_iter("),
+            out.contains("IntoIter into_iter(") || out.contains("typename S::IntoIter into_iter("),
             "associated alias return type should stay non-templated at use sites, got:\n{}",
             out
         );
@@ -58236,6 +60318,28 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf415433_trait_static_call_rewrites_to_bound_type_param() {
+        let out = transpile_str(
+            r#"
+            trait Error {
+                fn invalid_value() -> i32;
+            }
+            fn f<E: Error>() -> i32 {
+                Error::invalid_value()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("return E::invalid_value();"),
+            "trait static call should dispatch through the bound type parameter\nGot: {out}"
+        );
+        assert!(
+            !out.contains("return Error::invalid_value();"),
+            "trait identifier should not be emitted as a concrete owner in generic call sites\nGot: {out}"
+        );
+    }
+
+    #[test]
     fn test_leaf415433_module_mode_trait_default_method_self_const_uses_self_alias() {
         let out = transpile_str_module(
             r#"
@@ -59946,10 +62050,7 @@ mod tests {
 
     #[test]
     fn test_leaf42_std_task_imports_lower_to_rusty_runtime_types() {
-        let out = transpile_str_module(
-            "use std::task::{Context, Poll, Wake, Waker};",
-            "my_crate",
-        );
+        let out = transpile_str_module("use std::task::{Context, Poll, Wake, Waker};", "my_crate");
         assert!(out.contains("using ::rusty::Context;"));
         assert!(out.contains("using ::rusty::Poll;"));
         assert!(out.contains("using ::rusty::Waker;"));
@@ -61641,6 +63742,51 @@ mod tests {
         );
         assert!(out.contains("using namespace external;"));
         assert!(!out.contains("export using namespace external;"));
+    }
+
+    #[test]
+    fn test_leaf10535_top_level_pub_glob_reexport_forward_declares_namespace() {
+        let out = transpile_str_module(
+            r#"
+            pub use external::*;
+            mod external {
+                pub mod __private {}
+            }
+        "#,
+            "bitflags_like",
+        );
+
+        let fwd = out
+            .find("namespace external {}")
+            .expect("top-level glob import should forward declare external namespace");
+        let using = out
+            .find("using namespace ::external;")
+            .expect("top-level glob import should use global external namespace");
+        assert!(
+            fwd < using,
+            "namespace forward declaration should precede global using directive:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf10535_same_name_function_import_does_not_emit_namespace_alias() {
+        let out = transpile_str(
+            r#"
+            mod combinations {
+                pub fn combinations() {}
+            }
+            mod powerset {
+                use crate::combinations::combinations;
+                pub fn call() { combinations(); }
+            }
+        "#,
+        );
+        assert!(out.contains("using ::combinations::combinations;"), "{out}");
+        assert!(
+            !out.contains("namespace combinations = ::combinations::combinations;"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -65894,6 +68040,34 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10527_module_c_like_enum_definition_hoisted_before_struct_methods() {
+        let out = transpile_str(
+            r#"
+            mod with_position {
+                pub struct WithPosition;
+                pub enum Position { First, Last }
+                impl WithPosition {
+                    pub fn first() -> Position {
+                        Position::First
+                    }
+                }
+            }
+            "#,
+        );
+        let enum_pos = out
+            .find("enum class Position {")
+            .expect("c-like enum definition should be emitted");
+        let struct_pos = out
+            .find("struct WithPosition {")
+            .expect("struct definition should be emitted");
+        assert!(
+            enum_pos < struct_pos,
+            "enum definition must precede struct methods that use enum variants:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf10527_auto_derived_c_like_enum_fmt_does_not_emit_rusty_fmt_helper() {
         let out = transpile_str(
             r#"
@@ -66625,6 +68799,43 @@ mod tests {
         );
         assert!(out.contains("rusty::vec_extend_from_slice(v, other);"));
         assert!(!out.contains("rusty::Vec::extend_from_slice"));
+        assert!(!out.contains("rusty::Vec<auto>::extend_from_slice"));
+    }
+
+    #[test]
+    fn test_leaf518_vec_new_in_option_context_uses_expected_item_type() {
+        let out = transpile_str(
+            r#"
+            fn f() -> Option<Vec<u8>> {
+                Some(Vec::new_())
+            }
+            "#,
+        );
+        assert!(out.contains("rusty::Vec<uint8_t>::new_()"), "{out}");
+        assert!(!out.contains("rusty::Vec<auto>::new_()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf_smallvec_box_bool_deref_assignment_is_preserved() {
+        let out = transpile_str(
+            r#"
+            struct PanicOnDoubleDrop { dropped: Box<bool> }
+            impl Drop for PanicOnDoubleDrop {
+                fn drop(&mut self) {
+                    if !!*self.dropped {
+                        panic!("already dropped");
+                    }
+                    *self.dropped = true;
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("if (!!*this->dropped)") || out.contains("if (!!(*this->dropped))"),
+            "{out}"
+        );
+        assert!(out.contains("*this->dropped = true;"), "{out}");
+        assert!(!out.contains("\n        this->dropped = true;"), "{out}");
     }
 
     #[test]
@@ -71700,6 +73911,169 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5115_impl_body_struct_literal_dependency_orders_helper_type_before_consumer() {
+        let out = transpile_str(
+            r#"
+            struct Error;
+            impl Error {
+                fn code(v: i32) -> i32 {
+                    OneOf { names: v }.names
+                }
+            }
+
+            struct OneOf {
+                names: i32,
+            }
+            "#,
+        );
+
+        let helper_pos = out
+            .find("struct OneOf {")
+            .expect("OneOf definition emitted");
+        let consumer_pos = out
+            .find("struct Error {")
+            .expect("Error definition emitted");
+        assert!(
+            helper_pos < consumer_pos,
+            "types constructed via struct literals in merged impl bodies must be emitted first\nGot:\n{out}"
+        );
+        assert!(
+            out.contains("OneOf{.names ="),
+            "expected struct literal emission to remain intact, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5115_module_body_struct_literal_dependency_delays_module_after_type() {
+        let out = transpile_str(
+            r#"
+            mod de {
+                pub mod value {
+                    pub struct Error;
+                    impl Error {
+                        pub fn code(v: i32) -> i32 {
+                            OneOf { names: v }.names
+                        }
+                    }
+                }
+
+                pub struct OneOf {
+                    pub names: i32,
+                }
+            }
+            "#,
+        );
+
+        let oneof_pos = out
+            .find("struct OneOf {")
+            .expect("OneOf definition emitted");
+        let value_ns_pos = out
+            .rfind("namespace value {")
+            .expect("value namespace emitted");
+        assert!(
+            oneof_pos < value_ns_pos,
+            "module containing struct-literal uses of sibling types should emit after those type definitions\nGot:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5115_macro_token_type_dependency_orders_helper_type_before_enum() {
+        let out = transpile_str(
+            r#"
+            enum Unexpected {
+                Float(f64),
+            }
+            impl Unexpected {
+                fn fmt_like(&self) {
+                    let _ = format_args!("{}", WithDecimalPoint(1.0));
+                }
+            }
+            struct WithDecimalPoint(f64);
+            "#,
+        );
+
+        let helper_pos = out
+            .find("struct WithDecimalPoint {")
+            .expect("WithDecimalPoint definition emitted");
+        let consumer_pos = out
+            .find("struct Unexpected :")
+            .expect("Unexpected enum wrapper emitted");
+        assert!(
+            helper_pos < consumer_pos,
+            "types referenced only from macro token streams should still participate in dependency ordering\nGot:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5115_module_use_import_type_dependency_delays_module() {
+        let out = transpile_str(
+            r#"
+            mod de {
+                mod impls {
+                    use super::Unexpected;
+                    fn marker() { let _ = Unexpected::A; }
+                }
+                enum Unexpected { A }
+            }
+            "#,
+        );
+
+        let enum_pos = out
+            .find("enum class Unexpected")
+            .expect("Unexpected enum emitted");
+        let impls_pos = out
+            .rfind("namespace impls {")
+            .expect("impls module emitted");
+        assert!(
+            enum_pos < impls_pos,
+            "module with use-imported sibling type dependency should emit after that type\nGot:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5115_topo_reorder_keeps_module_delayed_after_wrapper_enum_dependency() {
+        let out = transpile_str(
+            r#"
+            mod de {
+                mod impls {
+                    use super::Unexpected;
+                    fn marker(v: &str) {
+                        let _ = Unexpected::Str(v);
+                    }
+                }
+
+                enum Unexpected<'a> {
+                    Str(&'a str),
+                    Holder(Holder),
+                }
+
+                struct Holder;
+
+                impl core::fmt::Display for Unexpected<'_> {
+                    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                        match self {
+                            Unexpected::Str(_) => f.write_str("str"),
+                            Unexpected::Holder(_) => f.write_str("holder"),
+                        }
+                    }
+                }
+            }
+            "#,
+        );
+
+        let unexpected_pos = out
+            .find("struct Unexpected :")
+            .expect("Unexpected wrapper enum emitted");
+        let impls_pos = out
+            .rfind("namespace impls {")
+            .expect("impls module emitted");
+        assert!(
+            unexpected_pos < impls_pos,
+            "module delay should be re-applied after topo sort so wrapper enum dependencies stay complete at use sites\nGot:\n{out}"
+        );
+    }
+
+    #[test]
     fn test_leaf5116_reference_field_deref_collapses_without_pointer_star() {
         let out = transpile_str(
             r#"
@@ -72530,6 +74904,30 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4154448_into_boxed_str_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            type ErrorImpl = Box<str>;
+            fn f(msg: &str) -> ErrorImpl {
+                msg.to_string().into_boxed_str()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("using ErrorImpl = rusty::Box<rusty::String>;"),
+            "Box<str> should map to owned boxed string storage\nGot: {out}"
+        );
+        assert!(
+            out.contains("rusty::into_boxed_str(rusty::to_string(msg))"),
+            "into_boxed_str method call should lower to runtime helper\nGot: {out}"
+        );
+        assert!(
+            !out.contains(".into_boxed_str()"),
+            "generated C++ should not rely on a std::string member named into_boxed_str\nGot: {out}"
+        );
+    }
+
+    #[test]
     fn test_leaf4154448_runtime_fallback_has_to_string_helper() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(
@@ -72609,6 +75007,25 @@ mod tests {
         assert!(
             helpers.contains("is_ascii_digit(uint8_t"),
             "runtime should have is_ascii_digit helper"
+        );
+    }
+
+    #[test]
+    fn test_leaf4154451_float_is_finite_lowers_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn check(v: f64) -> bool {
+                v.is_finite()
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::is_finite(v)"),
+            "f64::is_finite should lower to rusty::is_finite\nGot: {out}"
+        );
+        assert!(
+            !out.contains(".is_finite()"),
+            "generated C++ should not call nonexistent floating-point member methods\nGot: {out}"
         );
     }
 

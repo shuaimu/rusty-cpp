@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A discovered crate target from `cargo metadata`.
@@ -10,6 +10,13 @@ pub struct CrateTarget {
     pub src_path: PathBuf,
     /// C++20 module name derived from target name
     pub module_name: String,
+}
+
+/// A local path dependency package discovered from the resolved dependency graph.
+#[derive(Debug, Clone)]
+pub struct LocalDependencyPackage {
+    pub name: String,
+    pub manifest_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +99,46 @@ struct Package {
 }
 
 #[derive(Deserialize)]
+struct CargoMetadataResolved {
+    packages: Vec<ResolvedPackage>,
+    resolve: Option<ResolveGraph>,
+}
+
+#[derive(Deserialize)]
+struct ResolvedPackage {
+    id: String,
+    name: String,
+    manifest_path: PathBuf,
+    source: Option<String>,
+    targets: Vec<Target>,
+}
+
+#[derive(Deserialize)]
+struct ResolveGraph {
+    nodes: Vec<ResolveNode>,
+}
+
+#[derive(Deserialize)]
+struct ResolveNode {
+    id: String,
+    #[serde(default)]
+    deps: Vec<ResolveDep>,
+}
+
+#[derive(Deserialize)]
+struct ResolveDep {
+    pkg: String,
+    #[serde(default)]
+    dep_kinds: Vec<ResolveDepKind>,
+}
+
+#[derive(Deserialize)]
+struct ResolveDepKind {
+    kind: Option<String>,
+    target: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct Target {
     name: String,
     kind: Vec<String>,
@@ -135,6 +182,41 @@ fn select_target_package<'a>(
         .packages
         .first()
         .ok_or_else(|| "No packages found in cargo metadata".to_string())
+}
+
+fn select_resolved_package<'a>(
+    metadata: &'a CargoMetadataResolved,
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+) -> Result<&'a ResolvedPackage, String> {
+    if let Some(filter) = package_filter {
+        return metadata
+            .packages
+            .iter()
+            .find(|p| p.name == filter)
+            .ok_or_else(|| format!("Package '{}' not found in metadata", filter));
+    }
+
+    let requested_manifest = canonicalized_path(manifest_path);
+    if let Some(pkg) = metadata
+        .packages
+        .iter()
+        .find(|p| canonicalized_path(&p.manifest_path) == requested_manifest)
+    {
+        return Ok(pkg);
+    }
+
+    metadata
+        .packages
+        .first()
+        .ok_or_else(|| "No packages found in cargo metadata".to_string())
+}
+
+fn target_is_library_like(target: &Target) -> bool {
+    if target.kind.iter().any(|kind| kind == "proc-macro") {
+        return false;
+    }
+    matches!(TargetKind::from_cargo(&target.kind), TargetKind::Lib)
 }
 
 fn normalize_module_base(name: &str) -> String {
@@ -270,6 +352,127 @@ pub fn discover_targets(
     Ok((pkg.name.clone(), targets))
 }
 
+/// Discover resolved local path dependencies for the selected package.
+///
+/// Returns local dependency packages in deterministic dependency order
+/// (dependencies first), filtered to unconditional normal dependencies
+/// (`kind = null`, `target = null`) and packages exposing a library target.
+pub fn discover_local_path_dependencies(
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+) -> Result<Vec<LocalDependencyPackage>, String> {
+    let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
+    let output = std::process::Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .current_dir(project_dir)
+        .output()
+        .map_err(|e| format!("Failed to run cargo metadata: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("cargo metadata failed:\n{}", stderr));
+    }
+
+    let metadata: CargoMetadataResolved = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse cargo metadata: {}", e))?;
+    let selected = select_resolved_package(&metadata, manifest_path, package_filter)?;
+    let root_id = selected.id.clone();
+
+    let mut packages_by_id: HashMap<&str, &ResolvedPackage> = HashMap::new();
+    for pkg in &metadata.packages {
+        packages_by_id.insert(pkg.id.as_str(), pkg);
+    }
+
+    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    if let Some(resolve) = &metadata.resolve {
+        for node in &resolve.nodes {
+            let mut deps = Vec::new();
+            for dep in &node.deps {
+                // Keep only unconditional normal dependencies; skip dev/build and
+                // target-qualified edges we cannot soundly evaluate here.
+                let include = dep.dep_kinds.is_empty()
+                    || dep
+                        .dep_kinds
+                        .iter()
+                        .any(|kind| kind.kind.is_none() && kind.target.is_none());
+                if include {
+                    deps.push(dep.pkg.as_str());
+                }
+            }
+            deps.sort_by(|a, b| {
+                let a_name = packages_by_id.get(a).map(|p| p.name.as_str()).unwrap_or("");
+                let b_name = packages_by_id.get(b).map(|p| p.name.as_str()).unwrap_or("");
+                a_name.cmp(b_name).then_with(|| a.cmp(b))
+            });
+            deps.dedup();
+            edges.insert(node.id.as_str(), deps);
+        }
+    }
+
+    fn visit<'a>(
+        node_id: &'a str,
+        root_id: &str,
+        packages_by_id: &HashMap<&'a str, &'a ResolvedPackage>,
+        edges: &HashMap<&'a str, Vec<&'a str>>,
+        visiting: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+        out: &mut Vec<LocalDependencyPackage>,
+    ) {
+        if visited.contains(node_id) || visiting.contains(node_id) {
+            return;
+        }
+        visiting.insert(node_id.to_string());
+
+        if let Some(deps) = edges.get(node_id) {
+            for dep in deps {
+                visit(dep, root_id, packages_by_id, edges, visiting, visited, out);
+            }
+        }
+
+        visiting.remove(node_id);
+        visited.insert(node_id.to_string());
+
+        if node_id == root_id {
+            return;
+        }
+        let Some(pkg) = packages_by_id.get(node_id) else {
+            return;
+        };
+        if pkg.source.is_some() {
+            return;
+        }
+        if !pkg.targets.iter().any(target_is_library_like) {
+            return;
+        }
+        out.push(LocalDependencyPackage {
+            name: pkg.name.clone(),
+            manifest_path: canonicalized_path(&pkg.manifest_path),
+        });
+    }
+
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut deps = Vec::new();
+    visit(
+        root_id.as_str(),
+        root_id.as_str(),
+        &packages_by_id,
+        &edges,
+        &mut visiting,
+        &mut visited,
+        &mut deps,
+    );
+
+    // Keep deterministic uniqueness in case multiple IDs map to same manifest path.
+    let mut seen_manifests = HashSet::new();
+    deps.retain(|dep| seen_manifests.insert(dep.manifest_path.clone()));
+    Ok(deps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +495,27 @@ mod tests {
             TargetKind::from_cargo(&["example".to_string()]),
             TargetKind::Example
         );
+        assert_eq!(
+            TargetKind::from_cargo(&["proc-macro".to_string()]),
+            TargetKind::Lib
+        );
+    }
+
+    #[test]
+    fn test_target_is_library_like_excludes_proc_macro() {
+        let proc_macro_target = Target {
+            name: "pollster_macro".to_string(),
+            kind: vec!["proc-macro".to_string()],
+            src_path: "src/lib.rs".to_string(),
+        };
+        assert!(!target_is_library_like(&proc_macro_target));
+
+        let lib_target = Target {
+            name: "pollster".to_string(),
+            kind: vec!["lib".to_string()],
+            src_path: "src/lib.rs".to_string(),
+        };
+        assert!(target_is_library_like(&lib_target));
     }
 
     #[test]
