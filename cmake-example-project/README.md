@@ -62,8 +62,10 @@ ctest -R cpp_rust_member_interop --output-on-failure
 Notes:
 
 - The test wiring is enabled by default with `ENABLE_CPP_RUST_MEMBER_INTEROP_TEST=ON`.
-- The script probes for C++20 modules support (`import std`) and skips if unavailable.
-- Fixture sources are under `cmake-example-project/interop/`.
+- Rust source transpilation is configured in CMake via `RustyCppTranspiler.cmake` (`cpp_rust_member_interop_transpile` target).
+- The script probes for C++20 modules support using a local module import and skips if unavailable.
+- The script prefers `clang++` (precompiled module flow) and falls back to `g++ -fmodules-ts`.
+- Fixture sources are under `cmake-example-project/src/`.
 
 ## CMakeLists.txt Integration
 
@@ -80,6 +82,7 @@ set(RUSTYCPP_DIR "${CMAKE_SOURCE_DIR}/third-party/rusty-cpp")
 
 # Include the CMake module
 include(${RUSTYCPP_DIR}/cmake/RustyCppSubmodule.cmake)
+include(${RUSTYCPP_DIR}/cmake/RustyCppTranspiler.cmake)
 
 # Enable borrow checking
 enable_borrow_checking()
@@ -134,6 +137,7 @@ git submodule update --remote --merge
 | `enable_borrow_checking()` | Enable checking, verify dependencies, create build target |
 | `add_borrow_check_target(target)` | Add checks for all sources in a target |
 | `add_borrow_check(file.cpp)` | Add check for a single file |
+| `rustycpp_add_transpile_target(name ...)` | Generate transpiled `.cppm` from Rust source in the build graph |
 
 ## Example Annotations
 

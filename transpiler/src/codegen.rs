@@ -2931,7 +2931,9 @@ impl CodeGen {
                     if !emitted_names.insert(name.clone()) {
                         continue;
                     }
-                    let export_prefix = if self.is_exported_at_module_depth(&s.vis, module_depth) {
+                    let export_prefix = if self.is_exported(&s.vis) {
+                    let export_prefix =
+                        if self.is_exported_at_module_depth(&s.vis, module_depth) {
                         "export "
                     } else {
                         ""
@@ -3193,9 +3195,14 @@ impl CodeGen {
         } else {
             ""
         };
+        let export_prefix = if self.is_exported(&f.vis) {
+            "export "
+        } else {
+            ""
+        };
         self.writeln(&format!(
-            "{}{} {}({});",
-            abi_prefix, return_type, name, params
+            "{}{}{} {}({});",
+            export_prefix, abi_prefix, return_type, name, params
         ));
         true
     }
@@ -59678,6 +59685,12 @@ mod tests {
     }
 
     #[test]
+    fn test_pub_fn_forward_decl_exported() {
+        let out = transpile_str_module("pub fn hello() {}", "my_crate");
+        assert!(out.contains("export void hello();"));
+    }
+
+    #[test]
     fn test_private_fn_not_exported() {
         let out = transpile_str_module("fn helper() {}", "my_crate");
         assert!(!out.contains("export void helper"));
@@ -59716,6 +59729,18 @@ mod tests {
         assert!(out.contains("export enum class Code {"), "{out}");
         assert!(out.contains("A = 10"), "{out}");
         assert!(out.contains("B = 20"), "{out}");
+    }
+
+    #[test]
+    fn test_pub_struct_forward_decl_exported() {
+        let out = transpile_str_module(
+            r#"
+            pub struct Foo { pub x: i32 }
+            pub fn identity(v: Foo) -> Foo { v }
+        "#,
+            "my_crate",
+        );
+        assert!(out.contains("export struct Foo;"));
     }
 
     #[test]

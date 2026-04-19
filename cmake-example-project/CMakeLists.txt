@@ -27,6 +27,7 @@ message(STATUS "RUSTYCPP_DIR: ${RUSTYCPP_DIR}")
 # Include the RustyCpp CMake module
 # This provides: enable_borrow_checking(), add_borrow_check_target(), etc.
 include(${RUSTYCPP_DIR}/cmake/RustyCppSubmodule.cmake)
+include(${RUSTYCPP_DIR}/cmake/RustyCppTranspiler.cmake)
 
 # Set build type for rusty-cpp (release is recommended for speed)
 set(RUSTYCPP_BUILD_TYPE "release" CACHE STRING "Build type for rusty-cpp")
@@ -68,8 +69,36 @@ option(
 find_program(BASH_EXECUTABLE bash)
 if(ENABLE_CPP_RUST_MEMBER_INTEROP_TEST AND BASH_EXECUTABLE)
     set(
+        CPP_RUST_MEMBER_INTEROP_RUST_SOURCE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/member_bridge.rs"
+    )
+    set(
+        CPP_RUST_MEMBER_INTEROP_CPP_MODULE_INDEX
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/cpp_module_index.toml"
+    )
+    set(
+        CPP_RUST_MEMBER_INTEROP_TRANSPILED_CPPM
+        "${CMAKE_BINARY_DIR}/generated/interop.bridge.cppm"
+    )
+    rustycpp_add_transpile_target(
+        cpp_rust_member_interop_transpile
+        SOURCE
+            "${CPP_RUST_MEMBER_INTEROP_RUST_SOURCE}"
+        OUTPUT
+            "${CPP_RUST_MEMBER_INTEROP_TRANSPILED_CPPM}"
+        MODULE_NAME
+            "interop.bridge"
+        CPP_MODULE_INDEX
+            "${CPP_RUST_MEMBER_INTEROP_CPP_MODULE_INDEX}"
+    )
+
+    set(
         CPP_RUST_MEMBER_INTEROP_SCRIPT
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cpp_rust_member_interop.sh"
+    )
+    set(
+        CPP_RUST_MEMBER_INTEROP_TEST_RUNNER
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cpp_rust_member_interop_test.cmake"
     )
     set(
         CPP_RUST_MEMBER_INTEROP_WORK_DIR
@@ -79,22 +108,30 @@ if(ENABLE_CPP_RUST_MEMBER_INTEROP_TEST AND BASH_EXECUTABLE)
     add_test(
         NAME cpp_rust_member_interop
         COMMAND
-            ${BASH_EXECUTABLE}
-            ${CPP_RUST_MEMBER_INTEROP_SCRIPT}
-            --rustycpp-dir
-            ${RUSTYCPP_DIR}
-            --work-dir
-            ${CPP_RUST_MEMBER_INTEROP_WORK_DIR}
+            ${CMAKE_COMMAND}
+            -DPROJECT_BINARY_DIR_PATH=${CMAKE_BINARY_DIR}
+            -DTRANSPILE_TARGET_NAME=cpp_rust_member_interop_transpile
+            -DBASH_EXECUTABLE_PATH=${BASH_EXECUTABLE}
+            -DINTEROP_SCRIPT_PATH=${CPP_RUST_MEMBER_INTEROP_SCRIPT}
+            -DRUSTYCPP_DIR_PATH=${RUSTYCPP_DIR}
+            -DINTEROP_WORK_DIR_PATH=${CPP_RUST_MEMBER_INTEROP_WORK_DIR}
+            -DTRANSPILED_CPPM_PATH=${CPP_RUST_MEMBER_INTEROP_TRANSPILED_CPPM}
+            -P
+            ${CPP_RUST_MEMBER_INTEROP_TEST_RUNNER}
     )
 
     add_custom_target(cpp_rust_member_interop_test
         COMMAND
-            ${BASH_EXECUTABLE}
-            ${CPP_RUST_MEMBER_INTEROP_SCRIPT}
-            --rustycpp-dir
-            ${RUSTYCPP_DIR}
-            --work-dir
-            ${CPP_RUST_MEMBER_INTEROP_WORK_DIR}
+            ${CMAKE_COMMAND}
+            -DPROJECT_BINARY_DIR_PATH=${CMAKE_BINARY_DIR}
+            -DTRANSPILE_TARGET_NAME=cpp_rust_member_interop_transpile
+            -DBASH_EXECUTABLE_PATH=${BASH_EXECUTABLE}
+            -DINTEROP_SCRIPT_PATH=${CPP_RUST_MEMBER_INTEROP_SCRIPT}
+            -DRUSTYCPP_DIR_PATH=${RUSTYCPP_DIR}
+            -DINTEROP_WORK_DIR_PATH=${CPP_RUST_MEMBER_INTEROP_WORK_DIR}
+            -DTRANSPILED_CPPM_PATH=${CPP_RUST_MEMBER_INTEROP_TRANSPILED_CPPM}
+            -P
+            ${CPP_RUST_MEMBER_INTEROP_TEST_RUNNER}
         COMMENT "Running C++ <-> Rust member interop smoke test"
         USES_TERMINAL
     )

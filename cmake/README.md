@@ -5,6 +5,10 @@ This directory contains CMake modules for integrating the Rusty C++ Checker into
 1. **Global Installation** (`CppBorrowChecker.cmake`) - Traditional approach with system-wide installation
 2. **Submodule Integration** (`RustyCppSubmodule.cmake`) - Self-contained approach without global installation
 
+It also includes a transpiler helper module:
+
+3. **Transpiler Integration** (`RustyCppTranspiler.cmake`) - Build-graph Rust->C++ transpile targets
+
 ## Integration Methods
 
 ### Method 1: Global Installation
@@ -98,6 +102,22 @@ set(BORROW_CHECK_FATAL ON)
 set(BORROW_CHECKER_INCLUDE_PATHS 
     "/usr/local/include/boost"
     "/opt/custom/include"
+)
+```
+
+## Transpiler Target Integration
+
+Use `RustyCppTranspiler.cmake` when you want CMake targets that generate `.cppm` output from Rust sources:
+
+```cmake
+include(${RUSTYCPP_DIR}/cmake/RustyCppTranspiler.cmake)
+
+rustycpp_add_transpile_target(
+    my_bridge_transpile
+    SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/bridge.rs
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/my.bridge.cppm
+    MODULE_NAME my.bridge
+    CPP_MODULE_INDEX ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp_module_index.toml
 )
 ```
 
