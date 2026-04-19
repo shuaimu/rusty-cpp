@@ -218,6 +218,35 @@ fn canonical_cpp_module_path(path: &str) -> String {
     path.trim().replace('.', "::")
 }
 
+fn cpp_symbol_kind_contains(symbol: &CppModuleIndexSymbol, needle: &str) -> bool {
+    symbol
+        .kind
+        .as_deref()
+        .is_some_and(|kind| kind.to_ascii_lowercase().contains(needle))
+}
+
+fn cpp_symbol_is_member_method(symbol: &CppModuleIndexSymbol) -> bool {
+    cpp_symbol_kind_contains(symbol, "method")
+}
+
+fn collect_cpp_module_member_symbol_map(
+    index: &CppModuleSymbolIndex,
+) -> HashMap<String, HashSet<String>> {
+    let mut by_module: HashMap<String, HashSet<String>> = HashMap::new();
+    for (module_path, module_entry) in &index.modules {
+        let mut member_symbols = HashSet::new();
+        for (symbol_name, symbol) in &module_entry.symbols {
+            if cpp_symbol_is_member_method(symbol) {
+                member_symbols.insert(symbol_name.clone());
+            }
+        }
+        if !member_symbols.is_empty() {
+            by_module.insert(module_path.clone(), member_symbols);
+        }
+    }
+    by_module
+}
+
 /// Transpile Rust source code to C++ code.
 /// If `module_name` is provided, emit C++20 module declarations.
 pub fn transpile(rust_source: &str, module_name: Option<&str>) -> Result<String, String> {
@@ -353,6 +382,10 @@ pub fn transpile_full_with_options(
         codegen.set_crate_name(name);
     }
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
+    if let Some(index) = options.cpp_module_symbol_index.as_ref() {
+        let member_symbols = collect_cpp_module_member_symbol_map(index);
+        codegen.set_cpp_module_member_symbols(member_symbols);
+    }
     codegen.emit_file(&file, module_name);
     Ok(codegen.into_output())
 }
@@ -665,6 +698,10 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         Self::symbol_kind_contains(symbol, "template")
     }
 
+    fn symbol_is_member_method(symbol: &CppModuleIndexSymbol) -> bool {
+        Self::symbol_kind_contains(symbol, "method")
+    }
+
     fn symbol_is_callable_kind(symbol: &CppModuleIndexSymbol) -> bool {
         Self::symbol_kind_contains(symbol, "function")
             || Self::symbol_kind_contains(symbol, "method")
@@ -709,15 +746,6 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
             return;
         };
         let call_site = call.to_token_stream().to_string();
-        if path_expr.path.segments.len() > 2 {
-            self.record_diagnostic(
-                &call_site,
-                &module_path,
-                &symbol_name,
-                "TODO(leaf22.7): member-function import syntax is unsupported for `cpp::` MVP (only free/static function calls are supported)",
-            );
-            return;
-        }
 
         let Some(symbol) =
             self.validate_cpp_module_symbol_access(&call_site, &module_path, &symbol_name)
@@ -735,6 +763,10 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
         }
 
         let call_arity = call.args.len();
+        let member_style_arity = (path_expr.path.segments.len() > 2
+            && call_arity > 0
+            && Self::symbol_is_member_method(&symbol))
+        .then_some(call_arity - 1);
         if Self::symbol_is_template(&symbol) && symbol.callable_signatures.is_empty() {
             self.record_diagnostic(
                 &call_site,
@@ -756,19 +788,26 @@ impl<'a> CppForeignCallResolutionVisitor<'a> {
 
         let mut has_arity_match = false;
         for signature in &symbol.callable_signatures {
-            if parse_callable_signature_arity(signature).is_some_and(|arity| arity == call_arity) {
+            if parse_callable_signature_arity(signature).is_some_and(|arity| {
+                arity == call_arity || member_style_arity.is_some_and(|adjusted| arity == adjusted)
+            }) {
                 has_arity_match = true;
                 break;
             }
         }
         if !has_arity_match {
+            let arity_label = if let Some(adjusted) = member_style_arity {
+                format!("{} (receiver-adjusted: {})", call_arity, adjusted)
+            } else {
+                call_arity.to_string()
+            };
             self.record_diagnostic(
                 &call_site,
                 &module_path,
                 &symbol_name,
                 &format!(
                     "call cannot be matched to indexed callable family (arity {} does not match signatures [{}])",
-                    call_arity,
+                    arity_label,
                     symbol.callable_signatures.join(", ")
                 ),
             );
@@ -1787,13 +1826,21 @@ fn f() -> i32 {
     }
 
     #[test]
-    fn test_cpp_module_call_errors_for_member_function_import_syntax() {
+    fn test_cpp_module_call_member_function_import_syntax_is_allowed() {
         let mut modules = BTreeMap::new();
+        let mut symbols = BTreeMap::new();
+        symbols.insert(
+            "vector::push_back".to_string(),
+            CppModuleIndexSymbol {
+                kind: Some("method".to_string()),
+                callable_signatures: vec!["void(int)".to_string()],
+            },
+        );
         modules.insert(
             "std".to_string(),
             CppModuleIndexModule {
                 namespace: Some("std".to_string()),
-                symbols: BTreeMap::new(),
+                symbols,
             },
         );
         let options = TranspileOptions {
@@ -1802,11 +1849,13 @@ fn f() -> i32 {
             ..TranspileOptions::default()
         };
 
-        let err = transpile_full_with_options(
+        let out = transpile_full_with_options(
             r#"
 use cpp::std as cpp_std;
 fn f(v: i32) -> i32 {
-    unsafe { cpp_std::vector::push_back(v) }
+    let mut vec: *mut i32 = core::ptr::null_mut();
+    unsafe { cpp_std::vector::push_back(vec, v) }
+    0
 }
 "#,
             None,
@@ -1815,12 +1864,9 @@ fn f(v: i32) -> i32 {
             None,
             &options,
         )
-        .expect_err("member-function import syntax should fail under MVP limits");
+        .expect("member-function import syntax should transpile");
 
-        assert!(err.contains("TODO(leaf22.7)"));
-        assert!(err.contains("member-function import syntax is unsupported"));
-        assert!(err.contains("symbol `vector::push_back`"));
-        assert!(err.contains("/tmp/cpp-index.toml"));
+        assert!(out.contains("vec->push_back("));
     }
 
     #[test]

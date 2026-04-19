@@ -517,6 +517,10 @@ pub struct CodeGen {
     cpp_module_import_paths: Vec<String>,
     /// De-duplication keys for recorded C++ module import paths.
     cpp_module_import_path_keys: HashSet<String>,
+    /// Indexed member-method symbols by C++ module path.
+    /// Keys are canonical module paths without `cpp::` (e.g., `std`), values contain
+    /// symbol names as recorded in the index (e.g., `vector::push_back`).
+    cpp_module_member_symbols: HashMap<String, HashSet<String>>,
     /// True while emitting function forward declaration signatures.
     /// Used to qualify single-segment type paths that depend on `use` aliases
     /// emitted later in the namespace body.
@@ -741,6 +745,7 @@ impl CodeGen {
             cpp_module_import_bindings: HashMap::new(),
             cpp_module_import_paths: Vec::new(),
             cpp_module_import_path_keys: HashSet::new(),
+            cpp_module_member_symbols: HashMap::new(),
             in_forward_decl_signature: false,
             declared_item_names: HashSet::new(),
             item_const_types: HashMap::new(),
@@ -818,6 +823,13 @@ impl CodeGen {
     /// candidate feedback edges selected by the prototype planner.
     pub fn set_by_value_cycle_breaking_prototype(&mut self, enabled: bool) {
         self.enable_by_value_cycle_breaking_prototype = enabled;
+    }
+
+    pub fn set_cpp_module_member_symbols(
+        &mut self,
+        cpp_module_member_symbols: HashMap<String, HashSet<String>>,
+    ) {
+        self.cpp_module_member_symbols = cpp_module_member_symbols;
     }
 
     /// Emit a complete Rust file as C++ code.
@@ -36590,6 +36602,71 @@ impl CodeGen {
         Some(format!("rusty::array_from_fn<{}>({})", cap_expr, mapper))
     }
 
+    fn resolve_cpp_import_bound_symbol_for_path(
+        &self,
+        path: &syn::Path,
+    ) -> Option<(String, String)> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let binding = path.segments.first()?.ident.to_string();
+        let module_path = self.cpp_module_import_bindings.get(&binding)?.clone();
+        let symbol_name = path
+            .segments
+            .iter()
+            .skip(1)
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if symbol_name.is_empty() {
+            return None;
+        }
+        Some((module_path, symbol_name))
+    }
+
+    fn cpp_import_symbol_is_member_method(&self, module_path: &str, symbol_name: &str) -> bool {
+        let Some(module_symbols) = self.cpp_module_member_symbols.get(module_path) else {
+            return false;
+        };
+        if module_symbols.contains(symbol_name) {
+            return true;
+        }
+        symbol_name
+            .rsplit("::")
+            .next()
+            .is_some_and(|tail| module_symbols.contains(tail))
+    }
+
+    fn try_emit_cpp_import_bound_member_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        if path_expr.path.segments.len() < 3 || call.args.is_empty() {
+            return None;
+        }
+        let (module_path, symbol_name) =
+            self.resolve_cpp_import_bound_symbol_for_path(&path_expr.path)?;
+        if !self.cpp_import_symbol_is_member_method(&module_path, &symbol_name) {
+            return None;
+        }
+        let method_name = path_expr.path.segments.last()?.ident.to_string();
+        let method_template_args = self.emit_expr_path_template_args(&path_expr.path);
+        let receiver = call.args.first()?;
+        let member_args: Vec<String> = call
+            .args
+            .iter()
+            .skip(1)
+            .map(|arg| self.emit_expr_maybe_move(arg))
+            .collect();
+        Some(self.emit_receiver_member_call(
+            receiver,
+            &method_name,
+            method_template_args.as_deref(),
+            &member_args,
+            None,
+        ))
+    }
+
     /// Emit a call expression, optionally using expected type context from parent.
     fn emit_call_expr_to_string(
         &self,
@@ -37696,6 +37773,9 @@ impl CodeGen {
             return format!("rusty::Err({})", arg);
         }
         if let Some(emitted) = self.try_emit_omitted_assoc_static_call_with_arg_decltype(call) {
+            return emitted;
+        }
+        if let Some(emitted) = self.try_emit_cpp_import_bound_member_call(call) {
             return emitted;
         }
 
@@ -52863,6 +52943,18 @@ mod tests {
         cg.into_output()
     }
 
+    fn transpile_str_module_with_cpp_members(
+        rust_code: &str,
+        module_name: &str,
+        cpp_module_member_symbols: HashMap<String, HashSet<String>>,
+    ) -> String {
+        let file: syn::File = syn::parse_str(rust_code).unwrap();
+        let mut cg = CodeGen::new();
+        cg.set_cpp_module_member_symbols(cpp_module_member_symbols);
+        cg.emit_file(&file, Some(module_name));
+        cg.into_output()
+    }
+
     fn transpile_str_with_by_value_cycle_breaking_prototype(rust_code: &str) -> String {
         let file: syn::File = syn::parse_str(rust_code).unwrap();
         let mut cg = CodeGen::new();
@@ -61057,6 +61149,58 @@ mod tests {
         assert!(
             !out.contains("return beta::transform("),
             "unqualified binding call should be rewritten to qualified path: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf224_cpp_member_call_lowers_to_receiver_dispatch() {
+        let mut member_symbols: HashMap<String, HashSet<String>> = HashMap::new();
+        member_symbols.insert(
+            "std".to_string(),
+            HashSet::from([String::from("vector::push_back")]),
+        );
+        let out = transpile_str_module_with_cpp_members(
+            r#"
+            use cpp::std as cpp_std;
+            pub fn push_value(vec: i32, value: i32) {
+                cpp_std::vector::push_back(vec, value);
+            }
+        "#,
+            "my_crate",
+            member_symbols,
+        );
+
+        assert!(
+            out.contains("vec.push_back("),
+            "member call should lower through receiver dispatch: {out}"
+        );
+        assert!(
+            !out.contains("std::vector::push_back("),
+            "member call should not remain static-path dispatched: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf224_cpp_member_call_pointer_receiver_uses_arrow_dispatch() {
+        let mut member_symbols: HashMap<String, HashSet<String>> = HashMap::new();
+        member_symbols.insert(
+            "std".to_string(),
+            HashSet::from([String::from("vector::push_back")]),
+        );
+        let out = transpile_str_module_with_cpp_members(
+            r#"
+            use cpp::std as cpp_std;
+            pub unsafe fn push_ptr(vec: *mut i32, value: i32) {
+                cpp_std::vector::push_back(vec, value);
+            }
+        "#,
+            "my_crate",
+            member_symbols,
+        );
+
+        assert!(
+            out.contains("vec->push_back("),
+            "raw pointer receiver should use -> dispatch: {out}"
         );
     }
 

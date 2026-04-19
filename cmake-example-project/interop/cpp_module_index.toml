@@ -1,0 +1,8 @@
+version = 1
+
+[modules."interop::host"]
+namespace = "interop::host"
+
+[modules."interop::host".symbols."Counter::add"]
+kind = "method"
+callable_signatures = ["int(int)"]

@@ -1615,9 +1615,9 @@ Current enforced MVP surface is intentionally narrow:
 
 - supported:
   - free/static function calls through imported bindings (`binding::symbol(...)`),
+  - indexed member-function calls via receiver-first syntax (`binding::Type::method(receiver, args...)`),
   - module constants in value position (`binding::CONSTANT`).
 - unsupported (fail-fast with explicit `TODO(leaf22.7)` diagnostics):
-  - member-function import syntax (`binding::Type::method(...)` and other multi-segment member-like paths),
   - template-only exports without indexed callable signatures (no resolvable call shape),
   - macro imports/usage through `cpp::` bindings (`binding::name!(...)`).
 

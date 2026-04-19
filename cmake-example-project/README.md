@@ -45,6 +45,26 @@ The build will automatically:
 3. Fail if any violations are found
 4. Compile the project
 
+### Optional: Run C++ <-> Rust Member Interop Test
+
+This repository example also includes a transpiler-backed interop smoke test where:
+
+- Rust calls a C++ class member function through `use cpp::...` (`Counter::add`).
+- A C++ class method calls Rust struct member functions from the transpiled module.
+
+From `cmake-example-project/build`:
+
+```bash
+cmake --build . --target cpp_rust_member_interop_test
+ctest -R cpp_rust_member_interop --output-on-failure
+```
+
+Notes:
+
+- The test wiring is enabled by default with `ENABLE_CPP_RUST_MEMBER_INTEROP_TEST=ON`.
+- The script probes for C++20 modules support (`import std`) and skips if unavailable.
+- Fixture sources are under `cmake-example-project/interop/`.
+
 ## CMakeLists.txt Integration
 
 Minimal example:
@@ -85,6 +105,9 @@ cmake -DRUSTYCPP_BUILD_TYPE=debug ..
 
 # Make borrow check failures fatal (stop on first error)
 cmake -DBORROW_CHECK_FATAL=ON ..
+
+# Disable C++ <-> Rust interop smoke test wiring
+cmake -DENABLE_CPP_RUST_MEMBER_INTEROP_TEST=OFF ..
 ```
 
 ## Keeping rusty-cpp Updated
