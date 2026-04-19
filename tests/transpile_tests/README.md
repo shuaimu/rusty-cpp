@@ -55,9 +55,6 @@ Tests the rusty-cpp transpiler against real-world Rust crates.
 |-------|--------------|
 | `pollster` | Minimal `block_on` executor, `Future`/`Poll`/waker interaction |
 
-`pollster` currently runs through the transpile stage in parity-matrix while
-runtime/library-surface parity for thread-local/task APIs is still being expanded.
-
 ## What the tests check
 
 1. Transpilation succeeds (no panics, no errors)

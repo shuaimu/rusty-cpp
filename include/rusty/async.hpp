@@ -15,6 +15,7 @@
 #include <coroutine>
 #include <functional>
 #include <queue>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -196,6 +197,62 @@ private:
     explicit Task(std::coroutine_handle<promise_type> h) : handle_(h) {}
     std::coroutine_handle<promise_type> handle_;
 };
+
+// Block current thread until a poll-based future completes.
+// Supports both direct pollables and Rust-expanded shapes that use
+// `into_future()` + `new_unchecked()` + `as_mut().poll(...)`.
+template<typename FutureLike>
+auto block_on(FutureLike&& future_like) {
+    auto future = [&]() {
+        if constexpr (requires { std::forward<FutureLike>(future_like).into_future(); }) {
+            return std::forward<FutureLike>(future_like).into_future();
+        } else {
+            return std::forward<FutureLike>(future_like);
+        }
+    }();
+
+    Waker waker{[]() {}};
+    Context context{&waker};
+
+    if constexpr (requires { future.new_unchecked(); }) {
+        auto pinned = future.new_unchecked();
+        while (true) {
+            auto polled = [&]() -> decltype(auto) {
+                if constexpr (requires { pinned.as_mut().poll(context); }) {
+                    return pinned.as_mut().poll(context);
+                } else {
+                    return pinned.poll(context);
+                }
+            }();
+            if (polled.is_ready()) {
+                if constexpr (requires { polled.value; }) {
+                    return std::move(polled.value);
+                } else {
+                    return;
+                }
+            }
+            std::this_thread::yield();
+        }
+    } else {
+        while (true) {
+            auto polled = [&]() -> decltype(auto) {
+                if constexpr (requires { future.as_mut().poll(context); }) {
+                    return future.as_mut().poll(context);
+                } else {
+                    return future.poll(context);
+                }
+            }();
+            if (polled.is_ready()) {
+                if constexpr (requires { polled.value; }) {
+                    return std::move(polled.value);
+                } else {
+                    return;
+                }
+            }
+            std::this_thread::yield();
+        }
+    }
+}
 
 // ── Executor: event loop ───────────────────────────────────────
 class Executor {

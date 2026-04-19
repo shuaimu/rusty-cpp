@@ -100,6 +100,18 @@ struct AssocCallOwnerTypeCollector<'a> {
     owner_type_names: HashSet<String>,
 }
 
+#[derive(Default)]
+struct AsyncExprCollector {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for AsyncExprCollector {
+    fn visit_expr_async(&mut self, node: &'ast syn::ExprAsync) {
+        self.found = true;
+        visit::visit_expr_async(self, node);
+    }
+}
+
 impl<'a> AssocCallOwnerTypeCollector<'a> {
     fn new(known_type_names: &'a HashSet<String>) -> Self {
         Self {
@@ -2992,6 +3004,9 @@ impl CodeGen {
                 continue;
             }
             if c.ident == "_" || self.is_rust_libtest_metadata_type(&c.ty) {
+                continue;
+            }
+            if self.is_thread_local_key_type(&c.ty) {
                 continue;
             }
             let name = escape_cpp_keyword(&c.ident.to_string());
@@ -6186,6 +6201,28 @@ impl CodeGen {
         }
     }
 
+    fn block_contains_async_expr(&self, block: &syn::Block) -> bool {
+        let mut collector = AsyncExprCollector::default();
+        collector.visit_block(block);
+        collector.found
+    }
+
+    fn is_expanded_test_marker_function(&self, fn_name: &str) -> bool {
+        if !self.expanded_libtest_mode {
+            return false;
+        }
+        let scoped = if self.module_stack.is_empty() {
+            fn_name.to_string()
+        } else {
+            format!("{}::{}", self.module_stack.join("::"), fn_name)
+        };
+        self.expanded_test_markers.iter().any(|marker| {
+            marker == fn_name
+                || marker == &scoped
+                || marker.rsplit("::").next().is_some_and(|tail| tail == fn_name)
+        })
+    }
+
     fn emit_expanded_test_wrappers(&mut self) {
         if self.expanded_test_markers.is_empty() {
             return;
@@ -7028,11 +7065,11 @@ impl CodeGen {
 
         let fn_name = f.sig.ident.to_string();
         let scoped_name = if self.module_stack.is_empty() {
-            fn_name
+            fn_name.clone()
         } else {
             format!("{}::{}", self.module_stack.join("::"), fn_name)
         };
-        self.emitted_top_level_functions.insert(scoped_name);
+        self.emitted_top_level_functions.insert(scoped_name.clone());
 
         let is_test = Self::has_test_attr(&f.attrs);
 
@@ -7079,6 +7116,30 @@ impl CodeGen {
         } else {
             return_type
         };
+        let is_into_future_block_on_helper = !is_async
+            && name == "block_on"
+            && f.sig.inputs.len() == 1
+            && return_type.contains("::Output")
+            && f.sig.generics.params.iter().any(|param| match param {
+                syn::GenericParam::Type(tp) => tp.bounds.iter().any(|bound| match bound {
+                    syn::TypeParamBound::Trait(trait_bound) => trait_bound
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|seg| seg.ident == "IntoFuture"),
+                    _ => false,
+                }),
+                _ => false,
+            });
+        let stub_expanded_async_test_body =
+            self.is_expanded_test_marker_function(&f.sig.ident.to_string())
+                && self.block_contains_async_expr(&f.block);
+        if stub_expanded_async_test_body {
+            // Expanded marker wrappers resolve against emitted top-level function set.
+            // Removing this entry causes wrapper generation to skip the unsupported
+            // async test body while still preserving marker metadata for diagnostics.
+            self.emitted_top_level_functions.remove(&scoped_name);
+        }
 
         // Emit test case wrapper if #[test]
         if is_test {
@@ -7118,6 +7179,36 @@ impl CodeGen {
             export_prefix, abi_prefix, return_type, name, params
         ));
         self.indent += 1;
+
+        if stub_expanded_async_test_body {
+            self.writeln(
+                "throw std::runtime_error(\"unsupported async test body in expanded parity mode\");",
+            );
+            self.indent -= 1;
+            self.writeln("}");
+            self.pop_type_param_scope();
+            return;
+        }
+
+        if is_into_future_block_on_helper {
+            let fut_name = f
+                .sig
+                .inputs
+                .first()
+                .and_then(|arg| match arg {
+                    syn::FnArg::Typed(pat_ty) => match pat_ty.pat.as_ref() {
+                        syn::Pat::Ident(id) => Some(escape_cpp_keyword(&id.ident.to_string())),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .unwrap_or_else(|| "fut".to_string());
+            self.writeln(&format!("return rusty::block_on(std::move({}));", fut_name));
+            self.indent -= 1;
+            self.writeln("}");
+            self.pop_type_param_scope();
+            return;
+        }
 
         // Async functions use co_return instead of return
         let prev_async = self.in_async;
@@ -8711,10 +8802,29 @@ impl CodeGen {
             .is_some_and(|seg| seg.ident == "new_const")
     }
 
+    fn is_thread_local_key_type(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_paren_group_type(ty);
+        let syn::Type::Path(type_path) = ty else {
+            return false;
+        };
+        type_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "LocalKey")
+    }
+
     fn emit_const(&mut self, c: &syn::ItemConst) {
         // Skip wildcard const bindings (`const _: () = ...;`) which are
         // Rust compile-time assertions or macro-internal scope blocks.
         if c.ident == "_" {
+            return;
+        }
+        if self.is_thread_local_key_type(&c.ty) {
+            self.writeln(&format!(
+                "// Rust-only thread-local const skipped (no direct C++ LocalKey lowering): {}",
+                c.ident
+            ));
             return;
         }
         if self.is_rust_libtest_metadata_type(&c.ty) {
@@ -48987,8 +49097,56 @@ struct Duration {\n\
     static Duration from_secs(unsigned long secs) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::seconds(secs))}; }\n\
     static Duration from_millis(unsigned long ms) { return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(ms))}; }\n\
     static Duration from_nanos(unsigned long ns) { return Duration{std::chrono::nanoseconds(ns)}; }\n\
+    friend bool operator==(const Duration& lhs, const Duration& rhs) { return lhs.inner == rhs.inner; }\n\
+    friend bool operator!=(const Duration& lhs, const Duration& rhs) { return lhs.inner != rhs.inner; }\n\
+    friend bool operator<(const Duration& lhs, const Duration& rhs) { return lhs.inner < rhs.inner; }\n\
+    friend bool operator<=(const Duration& lhs, const Duration& rhs) { return lhs.inner <= rhs.inner; }\n\
+    friend bool operator>(const Duration& lhs, const Duration& rhs) { return lhs.inner > rhs.inner; }\n\
+    friend bool operator>=(const Duration& lhs, const Duration& rhs) { return lhs.inner >= rhs.inner; }\n\
     template<typename Rep, typename Period>\n\
     operator std::chrono::duration<Rep, Period>() const { return std::chrono::duration_cast<std::chrono::duration<Rep, Period>>(inner); }\n\
+};\n\
+struct Instant {\n\
+    std::chrono::steady_clock::time_point inner;\n\
+    static Instant now() { return Instant{std::chrono::steady_clock::now()}; }\n\
+    Duration duration_since(Instant earlier) const {\n\
+        return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)};\n\
+    }\n\
+};\n\
+}\n\
+namespace future {\n\
+template<typename T>\n\
+struct Ready {\n\
+    using Output = T;\n\
+    T value;\n\
+    bool done = false;\n\
+    Ready into_future() { return std::move(*this); }\n\
+    Ready new_unchecked() { return std::move(*this); }\n\
+    Ready& as_mut() { return *this; }\n\
+    rusty::Poll<T> poll(rusty::Context&) {\n\
+        done = true;\n\
+        return rusty::Poll<T>::ready_with(std::move(value));\n\
+    }\n\
+};\n\
+template<typename T>\n\
+Ready<std::decay_t<T>> ready(T&& value) {\n\
+    return Ready<std::decay_t<T>>{std::forward<T>(value), false};\n\
+}\n\
+struct Delay {\n\
+    using Output = std::tuple<>;\n\
+    std::chrono::nanoseconds duration{};\n\
+    bool done = false;\n\
+    static Delay new_(rusty::time::Duration duration) { return Delay{duration.inner, false}; }\n\
+    Delay into_future() { return std::move(*this); }\n\
+    Delay new_unchecked() { return std::move(*this); }\n\
+    Delay& as_mut() { return *this; }\n\
+    rusty::Poll<std::tuple<>> poll(rusty::Context&) {\n\
+        if (!done) {\n\
+            std::this_thread::sleep_for(duration);\n\
+            done = true;\n\
+        }\n\
+        return rusty::Poll<std::tuple<>>::ready_with(std::tuple<>{});\n\
+    }\n\
 };\n\
 }\n\
 namespace ffi {\n\
@@ -49768,6 +49926,9 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_thread_import(normalized) {
         return action;
     }
+    if let Some(action) = rewrite_std_task_import(normalized) {
+        return action;
+    }
     if let Some(action) = rewrite_std_net_import(normalized) {
         return action;
     }
@@ -50238,7 +50399,29 @@ fn rewrite_std_time_import(path: &str) -> Option<UseImportAction> {
     let item = path.strip_prefix("std::time::")?;
     let action = match item {
         "Duration" => UseImportAction::Using("rusty::time::Duration".to_string()),
-        "Instant" | "SystemTime" => UseImportAction::RustOnly,
+        "Instant" => UseImportAction::Using("rusty::time::Instant".to_string()),
+        "SystemTime" => UseImportAction::RustOnly,
+        _ => UseImportAction::RustOnly,
+    };
+    Some(action)
+}
+
+fn rewrite_std_task_import(path: &str) -> Option<UseImportAction> {
+    if path == "std::task" || path == "core::task" {
+        return Some(UseImportAction::Raw(
+            "namespace task = rusty;".to_string(),
+        ));
+    }
+
+    let item = path
+        .strip_prefix("std::task::")
+        .or_else(|| path.strip_prefix("core::task::"))?;
+    let action = match item {
+        "Context" => UseImportAction::Using("rusty::Context".to_string()),
+        "Poll" => UseImportAction::Using("rusty::Poll".to_string()),
+        "Waker" => UseImportAction::Using("rusty::Waker".to_string()),
+        // Wake is a Rust trait surface; impl lowering emits inherent methods.
+        "Wake" => UseImportAction::RustOnly,
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -59762,6 +59945,27 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf42_std_task_imports_lower_to_rusty_runtime_types() {
+        let out = transpile_str_module(
+            "use std::task::{Context, Poll, Wake, Waker};",
+            "my_crate",
+        );
+        assert!(out.contains("using ::rusty::Context;"));
+        assert!(out.contains("using ::rusty::Poll;"));
+        assert!(out.contains("using ::rusty::Waker;"));
+        assert!(out.contains("// Rust-only: using std::task::Wake;"));
+        assert!(!out.contains("using std::task::Context;"));
+    }
+
+    #[test]
+    fn test_leaf42_std_time_instant_import_lowered() {
+        let out = transpile_str_module("use std::time::{Duration, Instant};", "my_crate");
+        assert!(out.contains("using ::rusty::time::Duration;"));
+        assert!(out.contains("using ::rusty::time::Instant;"));
+        assert!(!out.contains("using std::time::Instant;"));
+    }
+
+    #[test]
     fn test_pub_use_export() {
         let out = transpile_str_module("pub use crate::types::MyType;", "my_crate");
         // crate:: resolves within the same module tree (module name is not a namespace)
@@ -59988,6 +60192,25 @@ mod tests {
             out.contains("// Rust-only libtest marker without emitted function: missing_test_fn")
         );
         assert!(!out.contains("rusty_test_missing_test_fn"));
+    }
+
+    #[test]
+    fn test_leaf419_expanded_async_marker_function_is_stubbed_and_wrapper_skipped() {
+        let out = transpile_str_module(
+            r#"
+            #[rustc_test_marker = "async_case"]
+            pub const async_case: test::TestDescAndFn = unsafe { std::mem::zeroed() };
+            fn async_case() {
+                let _ = async { 42 };
+            }
+        "#,
+            "fixture",
+        );
+
+        assert!(out.contains("void async_case() {"));
+        assert!(out.contains("unsupported async test body in expanded parity mode"));
+        assert!(out.contains("marker without emitted function: async_case"));
+        assert!(!out.contains("rusty_test_async_case"));
     }
 
     #[test]

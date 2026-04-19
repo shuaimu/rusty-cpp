@@ -61,6 +61,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Barrier" | "std::sync::Barrier" => Some(("rusty::Barrier", false)),
         "Once" | "std::sync::Once" => Some(("rusty::Once", false)),
         "std::thread::Thread" => Some(("rusty::thread::Thread", false)),
+        "std::thread::LocalKey" => Some(("rusty::thread::LocalKey", true)),
         "std::sync::atomic::AtomicBool" | "core::sync::atomic::AtomicBool" => {
             Some(("rusty::sync::atomic::AtomicBool", false))
         }
@@ -112,8 +113,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "std::sync::atomic::Ordering" | "core::sync::atomic::Ordering" => {
             Some(("rusty::sync::atomic::Ordering", false))
         }
-        "core::task::Poll" => Some(("rusty::Poll", true)),
-        "core::task::Context" => Some(("rusty::Context", false)),
+        "core::task::Poll" | "std::task::Poll" => Some(("rusty::Poll", true)),
+        "core::task::Context" | "std::task::Context" => Some(("rusty::Context", false)),
+        "core::task::Waker" | "std::task::Waker" => Some(("rusty::Waker", false)),
 
         // Runtime compatibility fallbacks for expanded Rust paths.
         "core::cmp::Ordering" => Some(("rusty::cmp::Ordering", false)),
@@ -172,6 +174,8 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
             Some(("rusty::PhantomData", true))
         }
         "Pin" | "std::pin::Pin" | "core::pin::Pin" => Some(("rusty::pin::Pin", true)),
+        "std::future::Ready" | "core::future::Ready" => Some(("rusty::future::Ready", true)),
+        "std::time::Instant" => Some(("rusty::time::Instant", false)),
         "std::path::Path" => Some(("rusty::path::Path", false)),
         "std::path::PathBuf" => Some(("rusty::path::PathBuf", false)),
         "std::ffi::OsStr" => Some(("rusty::ffi::OsStr", false)),
@@ -224,6 +228,12 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "iter::empty" | "core::iter::empty" | "std::iter::empty" => Some("rusty::empty"),
         "iter::repeat_with" | "core::iter::repeat_with" | "std::iter::repeat_with" => {
             Some("rusty::repeat_with")
+        }
+        "std::future::ready" | "core::future::ready" | "future::ready" => {
+            Some("rusty::future::ready")
+        }
+        "futures_timer::Delay::new" | "futures_timer::Delay::new_" => {
+            Some("rusty::future::Delay::new_")
         }
         "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
         "Vec::extend_from_slice"
@@ -482,6 +492,18 @@ mod tests {
             Some(("rusty::Poll", true))
         );
         assert_eq!(
+            map_std_type("std::task::Poll"),
+            Some(("rusty::Poll", true))
+        );
+        assert_eq!(
+            map_std_type("std::task::Context"),
+            Some(("rusty::Context", false))
+        );
+        assert_eq!(
+            map_std_type("std::task::Waker"),
+            Some(("rusty::Waker", false))
+        );
+        assert_eq!(
             map_std_type("core::slice::Iter"),
             Some(("rusty::slice_iter::Iter", true))
         );
@@ -510,6 +532,14 @@ mod tests {
         assert_eq!(
             map_std_type("std::ffi::CStr"),
             Some(("rusty::ffi::CStr", false))
+        );
+        assert_eq!(
+            map_std_type("std::time::Instant"),
+            Some(("rusty::time::Instant", false))
+        );
+        assert_eq!(
+            map_std_type("std::future::Ready"),
+            Some(("rusty::future::Ready", true))
         );
         assert_eq!(
             map_std_type("std::mem::ManuallyDrop"),
@@ -863,6 +893,14 @@ mod tests {
         assert_eq!(
             map_function_path("std::io::_print"),
             Some("rusty::io::_print")
+        );
+        assert_eq!(
+            map_function_path("std::future::ready"),
+            Some("rusty::future::ready")
+        );
+        assert_eq!(
+            map_function_path("futures_timer::Delay::new"),
+            Some("rusty::future::Delay::new_")
         );
         assert_eq!(map_function_path("repeat"), Some("rusty::repeat"));
         assert_eq!(

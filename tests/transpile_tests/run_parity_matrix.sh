@@ -46,14 +46,6 @@ declare -A CRATE_REF=(
     ["pollster"]="master"
 )
 
-# Per-crate parity pipeline stop-stage overrides.
-# Most crates run full parity through Stage E (`run`).
-declare -A CRATE_STOP_AFTER=(
-    # Async runtime crate currently validated through transpilation output;
-    # full C++ runtime parity needs additional async/thread-local lowering work.
-    ["pollster"]="transpile"
-)
-
 TARGET_CRATE=""
 WORK_ROOT="${REPO_ROOT}/.rusty-parity-matrix"
 DRY_RUN=0
@@ -210,12 +202,10 @@ run_parity_for_crate() {
     local manifest="${crate_dir}/Cargo.toml"
     local work_dir="${WORK_ROOT}/${crate}"
     local matrix_log="${work_dir}/matrix.log"
-    local stop_after="${CRATE_STOP_AFTER[${crate}]:-run}"
-
     if [[ "${DRY_RUN}" -eq 1 ]]; then
         echo "crate: ${crate}"
         echo "  manifest: ${manifest}"
-        echo "  command: cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path ${manifest} --stop-after ${stop_after} --work-dir ${work_dir}"
+        echo "  command: cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path ${manifest} --stop-after run --work-dir ${work_dir}"
         return 0
     fi
 
@@ -240,7 +230,7 @@ run_parity_for_crate() {
         --manifest-path
         "${manifest}"
         --stop-after
-        "${stop_after}"
+        run
         --work-dir
         "${work_dir}"
     )
