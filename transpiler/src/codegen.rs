@@ -2931,8 +2931,13 @@ impl CodeGen {
                     if !emitted_names.insert(name.clone()) {
                         continue;
                     }
+                    let export_prefix = if self.is_exported_at_module_depth(&s.vis, module_depth) {
+                        "export "
+                    } else {
+                        ""
+                    };
                     self.emit_template_prefix_without_type_defaults(&s.generics);
-                    self.writeln(&format!("struct {};", name));
+                    self.writeln(&format!("{}struct {};", export_prefix, name));
                     emitted_any = true;
                 }
                 syn::Item::Enum(e) => {
@@ -2940,13 +2945,17 @@ impl CodeGen {
                     if !emitted_names.insert(name.clone()) {
                         continue;
                     }
+                    let export_prefix = if self.is_exported_at_module_depth(&e.vis, module_depth) {
+                        "export "
+                    } else {
+                        ""
+                    };
                     if enum_is_c_like(e) {
                         if self.module_body_forward_decl_pass {
                             self.emit_template_prefix_without_type_defaults(&e.generics);
-                            self.writeln(&format!("enum class {} {{", name));
+                            self.writeln(&format!("{}enum class {} {{", export_prefix, name));
                             self.indent += 1;
-                            let variants: Vec<String> =
-                                e.variants.iter().map(|v| v.ident.to_string()).collect();
+                            let variants = self.render_c_like_enum_variants(e);
                             self.writeln(&variants.join(",\n    "));
                             self.indent -= 1;
                             self.writeln("};");
@@ -2958,11 +2967,11 @@ impl CodeGen {
                             // modules before the module body emits. Keep this pass to a plain
                             // declaration to avoid duplicate full enum definitions.
                             self.emit_template_prefix_without_type_defaults(&e.generics);
-                            self.writeln(&format!("enum class {};", name));
+                            self.writeln(&format!("{}enum class {};", export_prefix, name));
                         }
                     } else if self.enum_uses_struct_wrapper(e) {
                         self.emit_template_prefix_without_type_defaults(&e.generics);
-                        self.writeln(&format!("struct {};", name));
+                        self.writeln(&format!("{}struct {};", export_prefix, name));
                     } else {
                         self.emit_data_enum_alias_forward_decl(e);
                     }
@@ -2988,6 +2997,11 @@ impl CodeGen {
             if !emitted_consts.insert(name.clone()) {
                 continue;
             }
+            let export_prefix = if self.is_exported_at_module_depth(&c.vis, module_depth) {
+                "export "
+            } else {
+                ""
+            };
             let ty = self.map_type(&c.ty);
             if type_string_has_auto_placeholder(&ty) {
                 continue;
@@ -2996,9 +3010,9 @@ impl CodeGen {
                 // Preserve pointer mutability in forward declarations for const items.
                 // `extern const T* name;` changes pointee constness; emit `T* const`
                 // shape instead to match later `constexpr T*` definitions.
-                self.writeln(&format!("extern {} const {};", ty, name));
+                self.writeln(&format!("{}extern {} const {};", export_prefix, ty, name));
             } else {
-                self.writeln(&format!("extern const {} {};", ty, name));
+                self.writeln(&format!("{}extern const {} {};", export_prefix, ty, name));
             }
             emitted_any = true;
         }
@@ -6010,6 +6024,12 @@ impl CodeGen {
             && matches!(vis, syn::Visibility::Public(_))
     }
 
+    /// Returns true if visibility is pub, we're in module mode, and the item is
+    /// being emitted at top-level module depth during forward-declaration passes.
+    fn is_exported_at_module_depth(&self, vis: &syn::Visibility, module_depth: usize) -> bool {
+        self.module_name.is_some() && module_depth == 0 && matches!(vis, syn::Visibility::Public(_))
+    }
+
     /// Emit doc comments from attributes as Doxygen-style `///` comments.
     fn emit_doc_comments(&mut self, attrs: &[syn::Attribute]) {
         for attr in attrs {
@@ -7895,6 +7915,20 @@ impl CodeGen {
         derives
     }
 
+    fn render_c_like_enum_variants(&self, e: &syn::ItemEnum) -> Vec<String> {
+        e.variants
+            .iter()
+            .map(|variant| {
+                let name = variant.ident.to_string();
+                if let Some((_, expr)) = &variant.discriminant {
+                    format!("{} = {}", name, self.emit_expr_to_string(expr))
+                } else {
+                    name
+                }
+            })
+            .collect()
+    }
+
     fn emit_enum(&mut self, e: &syn::ItemEnum) {
         let name = &e.ident;
         let has_data = e.variants.iter().any(|v| !v.fields.is_empty());
@@ -8279,6 +8313,11 @@ impl CodeGen {
             let enum_name = name.to_string();
             let scoped_enum_name = self.scoped_type_key(&enum_name);
             let enum_decl_marker = format!("enum class {} {{", name);
+            let export_prefix = if self.is_exported(&e.vis) {
+                "export "
+            } else {
+                ""
+            };
             // Local Rust enums can reuse identifiers across function scopes.
             // Global duplicate-suppression is only valid for non-local emission.
             let is_local_scope = self.block_depth > 0;
@@ -8289,10 +8328,9 @@ impl CodeGen {
                     || self.forward_emitted_c_like_enums.contains(&enum_name)
                     || self.output.contains(&enum_decl_marker));
             if !already_defined {
-                self.writeln(&format!("enum class {} {{", name));
+                self.writeln(&format!("{}enum class {} {{", export_prefix, name));
                 self.indent += 1;
-                let variants: Vec<String> =
-                    e.variants.iter().map(|v| v.ident.to_string()).collect();
+                let variants = self.render_c_like_enum_variants(e);
                 self.writeln(&variants.join(",\n    "));
                 self.indent -= 1;
                 self.writeln("};");
@@ -8739,10 +8777,18 @@ impl CodeGen {
         if self.block_depth > 0 {
             self.record_local_const_binding(&name.to_string(), true);
         }
-        if storage == "const" && ty.contains('*') {
-            self.writeln(&format!("{} const {} = {};", ty, name, expr));
+        let export_prefix = if self.block_depth == 0 && self.is_exported(&c.vis) {
+            "export "
         } else {
-            self.writeln(&format!("{} {} {} = {};", storage, ty, name, expr));
+            ""
+        };
+        if storage == "const" && ty.contains('*') {
+            self.writeln(&format!("{}{} const {} = {};", export_prefix, ty, name, expr));
+        } else {
+            self.writeln(&format!(
+                "{}{} {} {} = {};",
+                export_prefix, storage, ty, name, expr
+            ));
         }
     }
 
@@ -53081,6 +53127,15 @@ mod tests {
     }
 
     #[test]
+    fn test_c_like_enum_preserves_discriminants() {
+        let out = transpile_str("enum Code { A = 10, B = 20, C }");
+        assert!(out.contains("enum class Code {"));
+        assert!(out.contains("A = 10"));
+        assert!(out.contains("B = 20"));
+        assert!(out.contains("C"));
+    }
+
+    #[test]
     fn test_enum_with_data() {
         let out = transpile_str("enum Shape { Circle(f64), Rect { w: f64, h: f64 }, None }");
         assert!(out.contains("struct Shape_Circle {"));
@@ -59633,6 +59688,34 @@ mod tests {
     fn test_pub_struct_exported() {
         let out = transpile_str_module("pub struct Foo { pub x: i32 }", "my_crate");
         assert!(out.contains("export struct Foo"));
+    }
+
+    #[test]
+    fn test_pub_const_exported_in_module_mode() {
+        let out = transpile_str_module(
+            r#"
+            pub const MAGIC: i32 = 42;
+            pub fn read_magic() -> i32 { MAGIC }
+            "#,
+            "my_crate",
+        );
+        assert!(out.contains("export extern const int32_t MAGIC;"));
+        assert!(out.contains("export constexpr int32_t MAGIC = 42;"));
+    }
+
+    #[test]
+    fn test_pub_enum_forward_decl_and_definition_are_exported_in_module_mode() {
+        let out = transpile_str_module(
+            r#"
+            pub fn code_sum() -> i32 { (Code::A as i32) + (Code::B as i32) }
+            pub enum Code { A = 10, B = 20 }
+            "#,
+            "my_crate",
+        );
+        assert!(out.contains("export enum class Code;"), "{out}");
+        assert!(out.contains("export enum class Code {"), "{out}");
+        assert!(out.contains("A = 10"), "{out}");
+        assert!(out.contains("B = 20"), "{out}");
     }
 
     #[test]
