@@ -333,7 +333,11 @@ function(add_borrow_check SOURCE_FILE)
     # NOTE: We use add_custom_target with COMMAND instead of add_custom_command
     # so that borrow checking always runs (see note in add_borrow_check_target)
     add_custom_target(${CHECK_NAME} ALL
-        COMMAND ${CPP_BORROW_CHECKER} ${SOURCE_ABS} ${INCLUDE_FLAGS} ${DEFINE_FLAGS}
+        COMMAND ${CPP_BORROW_CHECKER}
+                --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json
+                ${SOURCE_ABS}
+                ${INCLUDE_FLAGS}
+                ${DEFINE_FLAGS}
         COMMENT "Borrow checking ${SOURCE_FILE}"
         VERBATIM
     )
@@ -431,7 +435,11 @@ function(add_borrow_check_target TARGET_NAME)
             # 3. Borrow checking is fast enough that running it every time is acceptable
             # TODO: Implement proper dependency tracking using DEPFILE in the future
             add_custom_target(${CHECK_NAME}
-                COMMAND ${CPP_BORROW_CHECKER} ${SOURCE_ABS} ${INCLUDE_FLAGS} ${DEFINE_FLAGS}
+                COMMAND ${CPP_BORROW_CHECKER}
+                        --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json
+                        ${SOURCE_ABS}
+                        ${INCLUDE_FLAGS}
+                        ${DEFINE_FLAGS}
                 COMMENT "Borrow checking ${SOURCE} (from ${TARGET_NAME})"
                 VERBATIM
             )

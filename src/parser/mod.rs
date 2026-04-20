@@ -35,6 +35,15 @@ pub fn parse_cpp_file_with_includes_and_defines(
     include_paths: &[std::path::PathBuf],
     defines: &[String],
 ) -> Result<CppAst, String> {
+    parse_cpp_file_with_includes_defines_and_args(path, include_paths, defines, &[])
+}
+
+pub fn parse_cpp_file_with_includes_defines_and_args(
+    path: &Path,
+    include_paths: &[std::path::PathBuf],
+    defines: &[String],
+    extra_clang_args: &[String],
+) -> Result<CppAst, String> {
     // Initialize Clang
     let clang = Clang::new().map_err(|e| format!("Failed to initialize Clang: {:?}", e))?;
 
@@ -52,6 +61,11 @@ pub fn parse_cpp_file_with_includes_and_defines(
         // Don't fail on missing includes
         "-Wno-error".to_string(),
     ];
+
+    // Add extra compile flags (for example module flags extracted from compile_commands.json).
+    for extra_arg in extra_clang_args {
+        args.push(extra_arg.clone());
+    }
 
     // Add include paths
     for include_path in include_paths {

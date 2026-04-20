@@ -304,7 +304,7 @@ public:
     }
     
     // Destructor
-    ~Vec() noexcept(false) {
+    ~Vec() noexcept {
         clear();
         clear_forgotten_storage_marks();
         deallocate_storage(data_, capacity_);

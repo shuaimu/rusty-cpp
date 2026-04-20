@@ -4,7 +4,7 @@ use colored::*;
 use serde_json;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[macro_use]
 mod debug_macros;
@@ -54,6 +54,12 @@ struct Args {
     format: String,
 }
 
+#[derive(Debug, Default)]
+struct CompileCommandConfig {
+    include_paths: Vec<PathBuf>,
+    clang_args: Vec<String>,
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -100,6 +106,7 @@ fn analyze_file(
 ) -> Result<Vec<String>, String> {
     // Start with CLI-provided include paths
     let mut all_include_paths = include_paths.to_vec();
+    let mut extra_clang_args: Vec<String> = Vec::new();
 
     // Add include paths from environment variables
     all_include_paths.extend(extract_include_paths_from_env());
@@ -109,10 +116,11 @@ fn analyze_file(
     // (they're implicit to the compiler, not passed as -I flags)
     all_include_paths.extend(extract_include_paths_from_clang());
 
-    // Extract additional include paths from compile_commands.json if provided
+    // Extract additional include paths and compile flags from compile_commands.json if provided
     if let Some(cc_path) = compile_commands {
-        let extracted_paths = extract_include_paths_from_compile_commands(cc_path, path)?;
-        all_include_paths.extend(extracted_paths);
+        let extracted = extract_compile_config_from_compile_commands(cc_path, path)?;
+        all_include_paths.extend(extracted.include_paths);
+        extra_clang_args.extend(extracted.clang_args);
     }
 
     // Parse included headers for lifetime annotations
@@ -141,7 +149,12 @@ fn analyze_file(
     }
 
     // Parse the C++ file with include paths and defines
-    let ast = parser::parse_cpp_file_with_includes_and_defines(path, &all_include_paths, defines)?;
+    let ast = parser::parse_cpp_file_with_includes_defines_and_args(
+        path,
+        &all_include_paths,
+        defines,
+        &extra_clang_args,
+    )?;
 
     // Parse safety annotations using the unified rule
     let mut safety_context = parser::safety_annotations::parse_safety_annotations(path)?;
@@ -339,10 +352,10 @@ fn analyze_file(
     Ok(violations)
 }
 
-fn extract_include_paths_from_compile_commands(
+fn extract_compile_config_from_compile_commands(
     cc_path: &PathBuf,
     source_file: &PathBuf,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<CompileCommandConfig, String> {
     let content = fs::read_to_string(cc_path)
         .map_err(|e| format!("Failed to read compile_commands.json: {}", e))?;
 
@@ -356,36 +369,94 @@ fn extract_include_paths_from_compile_commands(
         if let Some(file) = entry.get("file").and_then(|f| f.as_str()) {
             if file.ends_with(&*source_str) || source_str.ends_with(file) {
                 if let Some(command) = entry.get("command").and_then(|c| c.as_str()) {
-                    return extract_include_paths_from_command(command);
+                    let directory = entry
+                        .get("directory")
+                        .and_then(|d| d.as_str())
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    return extract_compile_config_from_command(command, &directory);
                 }
             }
         }
     }
 
-    Ok(Vec::new()) // No matching entry found
+    Ok(CompileCommandConfig::default()) // No matching entry found
 }
 
-fn extract_include_paths_from_command(command: &str) -> Result<Vec<PathBuf>, String> {
-    let mut paths = Vec::new();
+fn absolutize_if_needed(path: &str, base_dir: &Path) -> PathBuf {
+    let p = PathBuf::from(path);
+    if p.is_absolute() {
+        p
+    } else {
+        base_dir.join(p)
+    }
+}
+
+fn extract_compile_config_from_command(
+    command: &str,
+    directory: &Path,
+) -> Result<CompileCommandConfig, String> {
+    let mut config = CompileCommandConfig::default();
     let parts: Vec<&str> = command.split_whitespace().collect();
 
     let mut i = 0;
     while i < parts.len() {
         if parts[i] == "-I" && i + 1 < parts.len() {
             // -I /path/to/include
-            paths.push(PathBuf::from(parts[i + 1]));
+            config
+                .include_paths
+                .push(absolutize_if_needed(parts[i + 1], directory));
             i += 2;
         } else if parts[i].starts_with("-I") {
             // -I/path/to/include
             let path = &parts[i][2..];
-            paths.push(PathBuf::from(path));
+            config
+                .include_paths
+                .push(absolutize_if_needed(path, directory));
+            i += 1;
+        } else if parts[i] == "-std" && i + 1 < parts.len() {
+            // -std c++23
+            config.clang_args.push("-std".to_string());
+            config.clang_args.push(parts[i + 1].to_string());
+            i += 2;
+        } else if parts[i].starts_with("-std=") {
+            // -std=c++23
+            config.clang_args.push(parts[i].to_string());
+            i += 1;
+        } else if parts[i] == "-fprebuilt-module-path" && i + 1 < parts.len() {
+            // -fprebuilt-module-path /path/to/pcms
+            let module_dir = absolutize_if_needed(parts[i + 1], directory);
+            config.clang_args.push(format!(
+                "-fprebuilt-module-path={}",
+                module_dir.display()
+            ));
+            i += 2;
+        } else if parts[i].starts_with("-fprebuilt-module-path=") {
+            // -fprebuilt-module-path=/path/to/pcms
+            if let Some((_, module_dir)) = parts[i].split_once('=') {
+                let module_dir = absolutize_if_needed(module_dir, directory);
+                config.clang_args.push(format!(
+                    "-fprebuilt-module-path={}",
+                    module_dir.display()
+                ));
+            } else {
+                config.clang_args.push(parts[i].to_string());
+            }
+            i += 1;
+        } else if parts[i] == "-fmodules"
+            || parts[i] == "-fmodules-ts"
+            || parts[i].starts_with("-fmodule-file=")
+            || parts[i].starts_with("-fmodule-map-file=")
+        {
+            // Keep known module-related clang flags.
+            config.clang_args.push(parts[i].to_string());
             i += 1;
         } else {
             i += 1;
         }
     }
 
-    Ok(paths)
+    Ok(config)
 }
 
 fn extract_include_paths_from_env() -> Vec<PathBuf> {
