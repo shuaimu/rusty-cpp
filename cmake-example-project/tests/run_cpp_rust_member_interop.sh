@@ -71,6 +71,7 @@ RUST_SOURCE="${EXAMPLE_ROOT}/src/member_bridge.rs"
 CPP_MODULE_INDEX="${EXAMPLE_ROOT}/src/cpp_module_index.toml"
 CPP_HOST_MODULE="${EXAMPLE_ROOT}/src/interop.host.cppm"
 CPP_MAIN_SOURCE="${EXAMPLE_ROOT}/src/interop_main.cpp"
+RUSTY_RUNTIME_MODULE="${RUSTYCPP_DIR}/include/rusty/rusty.cppm"
 TRANSPILED_CPPM="${WORK_DIR}/interop.bridge.cppm"
 PROGRAM_PATH="${WORK_DIR}/interop_member_demo"
 TRANSPILE_LOG="${WORK_DIR}/transpile.log"
@@ -104,9 +105,10 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
     else
         echo "[dry-run] transpile stage skipped (using pre-transpiled ${TRANSPILED_CPPM})"
     fi
+    echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${RUSTYCPP_DIR}/include -x c++ -c ${RUSTY_RUNTIME_MODULE} -o ${WORK_DIR}/rusty.runtime.o"
     echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${RUSTYCPP_DIR}/include -x c++ -c ${CPP_HOST_MODULE} -o ${WORK_DIR}/interop.host.o"
     echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${RUSTYCPP_DIR}/include -x c++ -c ${TRANSPILED_CPPM} -o ${WORK_DIR}/interop.bridge.o"
-    echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${RUSTYCPP_DIR}/include ${CPP_MAIN_SOURCE} ${WORK_DIR}/interop.host.o ${WORK_DIR}/interop.bridge.o -o ${PROGRAM_PATH}"
+    echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${RUSTYCPP_DIR}/include ${CPP_MAIN_SOURCE} ${WORK_DIR}/interop.host.o ${WORK_DIR}/interop.bridge.o ${WORK_DIR}/rusty.runtime.o -o ${PROGRAM_PATH}"
     echo "[dry-run] ${PROGRAM_PATH}"
     exit 0
 fi
@@ -177,7 +179,8 @@ try_probe() {
         cd "${WORK_DIR}" &&
         "${compiler}" "${flags[@]}" -x c++ -c "${PROBE_MODULE_SOURCE}" -o module_probe.o &&
         "${compiler}" "${flags[@]}" -x c++ -c "${PROBE_MAIN_SOURCE}" -o module_probe_main.o &&
-        "${compiler}" "${flags[@]}" module_probe.o module_probe_main.o -o module_probe
+        "${compiler}" "${flags[@]}" module_probe.o module_probe_main.o -o module_probe &&
+        "${compiler}" "${flags[@]}" -I "${RUSTYCPP_DIR}/include" -x c++ -c "${RUSTY_RUNTIME_MODULE}" -o rusty.runtime.probe.o
     ) >>"${BUILD_LOG}" 2>&1; then
         SUPPORTED_COMPILER="${compiler}"
         SUPPORTED_FLAGS="${flags[*]}"
@@ -198,7 +201,9 @@ try_probe_clang() {
         "${compiler}" "${flags[@]}" -fprebuilt-module-path="${WORK_DIR}" -c "${PROBE_MODULE_SOURCE}" -o module_probe.o &&
         "${compiler}" "${flags[@]}" -fprebuilt-module-path="${WORK_DIR}" -c "${PROBE_MAIN_SOURCE}" -o module_probe_main.o &&
         "${compiler}" "${flags[@]}" module_probe.o module_probe_main.o -o module_probe &&
-        ./module_probe
+        ./module_probe &&
+        "${compiler}" "${flags[@]}" --precompile -I "${RUSTYCPP_DIR}/include" "${RUSTY_RUNTIME_MODULE}" -o rusty.runtime.probe.pcm &&
+        "${compiler}" "${flags[@]}" -fprebuilt-module-path="${WORK_DIR}" -I "${RUSTYCPP_DIR}/include" -c "${RUSTY_RUNTIME_MODULE}" -o rusty.runtime.probe.o
     ) >>"${BUILD_LOG}" 2>&1; then
         SUPPORTED_COMPILER="${compiler}"
         SUPPORTED_FLAGS="${flags[*]}"
@@ -231,6 +236,15 @@ echo "using compiler: ${SUPPORTED_COMPILER} ${SUPPORTED_FLAGS} (${SUPPORTED_MODE
 if [[ "${SUPPORTED_MODE}" == "clang-precompile" ]]; then
     if ! (
         cd "${WORK_DIR}" &&
+        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" --precompile -I "${RUSTYCPP_DIR}/include" "${RUSTY_RUNTIME_MODULE}" -o rusty.pcm
+    ) >>"${BUILD_LOG}" 2>&1; then
+        report_failure "precompile-rusty-runtime-module"
+        tail -n 80 "${BUILD_LOG}" >&2 || true
+        exit 1
+    fi
+
+    if ! (
+        cd "${WORK_DIR}" &&
         "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" --precompile -I "${RUSTYCPP_DIR}/include" "${CPP_HOST_MODULE}" -o interop.host.pcm
     ) >>"${BUILD_LOG}" 2>&1; then
         report_failure "precompile-host-module"
@@ -243,6 +257,15 @@ if [[ "${SUPPORTED_MODE}" == "clang-precompile" ]]; then
         "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" --precompile -fprebuilt-module-path="${WORK_DIR}" -I "${RUSTYCPP_DIR}/include" "${TRANSPILED_CPPM}" -o interop.bridge.pcm
     ) >>"${BUILD_LOG}" 2>&1; then
         report_failure "precompile-rust-module"
+        tail -n 80 "${BUILD_LOG}" >&2 || true
+        exit 1
+    fi
+
+    if ! (
+        cd "${WORK_DIR}" &&
+        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" -fprebuilt-module-path="${WORK_DIR}" -I "${RUSTYCPP_DIR}/include" -c "${RUSTY_RUNTIME_MODULE}" -o rusty.runtime.o
+    ) >>"${BUILD_LOG}" 2>&1; then
+        report_failure "compile-rusty-runtime-module"
         tail -n 80 "${BUILD_LOG}" >&2 || true
         exit 1
     fi
@@ -276,13 +299,22 @@ if [[ "${SUPPORTED_MODE}" == "clang-precompile" ]]; then
 
     if ! (
         cd "${WORK_DIR}" &&
-        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" interop_main.o interop.host.o interop.bridge.o -o "${PROGRAM_PATH}"
+        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" interop_main.o interop.host.o interop.bridge.o rusty.runtime.o -o "${PROGRAM_PATH}"
     ) >>"${BUILD_LOG}" 2>&1; then
         report_failure "link-main"
         tail -n 80 "${BUILD_LOG}" >&2 || true
         exit 1
     fi
 else
+    if ! (
+        cd "${WORK_DIR}" &&
+        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" -I "${RUSTYCPP_DIR}/include" -x c++ -c "${RUSTY_RUNTIME_MODULE}" -o rusty.runtime.o
+    ) >>"${BUILD_LOG}" 2>&1; then
+        report_failure "compile-rusty-runtime-module"
+        tail -n 80 "${BUILD_LOG}" >&2 || true
+        exit 1
+    fi
+
     if ! (
         cd "${WORK_DIR}" &&
         "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" -I "${RUSTYCPP_DIR}/include" -x c++ -c "${CPP_HOST_MODULE}" -o interop.host.o
@@ -303,7 +335,7 @@ else
 
     if ! (
         cd "${WORK_DIR}" &&
-        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" -I "${RUSTYCPP_DIR}/include" "${CPP_MAIN_SOURCE}" interop.host.o interop.bridge.o -o "${PROGRAM_PATH}"
+        "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" -I "${RUSTYCPP_DIR}/include" "${CPP_MAIN_SOURCE}" interop.host.o interop.bridge.o rusty.runtime.o -o "${PROGRAM_PATH}"
     ) >>"${BUILD_LOG}" 2>&1; then
         report_failure "link-main"
         tail -n 80 "${BUILD_LOG}" >&2 || true

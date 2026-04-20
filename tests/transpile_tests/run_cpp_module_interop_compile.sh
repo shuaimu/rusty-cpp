@@ -49,6 +49,7 @@ done
 MANIFEST_PATH="${REPO_ROOT}/tests/transpile_tests/cpp_module_interop/Cargo.toml"
 INDEX_PATH="${REPO_ROOT}/tests/transpile_tests/cpp_module_interop/cpp_module_index.toml"
 CUSTOM_MODULE_PATH="${REPO_ROOT}/tests/transpile_tests/cpp_module_interop/cpp_modules/custom.math.cppm"
+RUSTY_RUNTIME_MODULE_PATH="${REPO_ROOT}/include/rusty/rusty.cppm"
 TARGET_CPPM_PATH="${WORK_DIR}/targets/cpp_module_interop/cpp_module_interop.cppm"
 TRANSPILE_LOG="${WORK_DIR}/transpile.log"
 BUILD_LOG="${WORK_DIR}/build.log"
@@ -63,6 +64,7 @@ report_failure() {
     echo "build.log: ${BUILD_LOG}" >&2
     echo "transpiled.cppm: ${TARGET_CPPM_PATH}" >&2
     echo "custom-module.cppm: ${CUSTOM_MODULE_PATH}" >&2
+    echo "rusty-runtime-module.cppm: ${RUSTY_RUNTIME_MODULE_PATH}" >&2
 }
 
 echo "═══════════════════════════════════════════════════════════════════════"
@@ -96,6 +98,7 @@ PARITY_CMD=(
 if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "[dry-run] ${PARITY_CMD[*]}"
     echo "[dry-run] g++ -std=c++23 -fmodules-ts -x c++ -c import_std_probe.cppm -o import_std_probe.o"
+    echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${REPO_ROOT}/include -x c++ -c ${RUSTY_RUNTIME_MODULE_PATH} -o rusty.runtime.o"
     echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${REPO_ROOT}/include -x c++ -c ${CUSTOM_MODULE_PATH} -o custom.math.o"
     echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${REPO_ROOT}/include -x c++ -c ${TARGET_CPPM_PATH} -o cpp_module_interop.o"
     exit 0
@@ -168,6 +171,15 @@ echo "using compiler: ${SUPPORTED_COMPILER}" | tee -a "${STATUS_LOG}"
 echo "compiler flags: ${SUPPORTED_FLAGS}" | tee -a "${STATUS_LOG}"
 
 IFS=' ' read -r -a ACTIVE_FLAGS <<<"${SUPPORTED_FLAGS}"
+
+if ! (
+    cd "${WORK_DIR}" &&
+    "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" -I "${REPO_ROOT}/include" -x c++ -c "${RUSTY_RUNTIME_MODULE_PATH}" -o rusty.runtime.o
+) >>"${BUILD_LOG}" 2>&1; then
+    report_failure "compile-rusty-runtime-module"
+    tail -n 80 "${BUILD_LOG}" >&2 || true
+    exit 1
+fi
 
 if ! (
     cd "${WORK_DIR}" &&

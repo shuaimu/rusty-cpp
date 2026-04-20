@@ -1227,12 +1227,15 @@ impl CodeGen {
         self.writeln("#include <cstdlib>");
         self.writeln("#include <bit>");
         self.writeln("#include <stdexcept>");
-        self.writeln("#include <rusty/rusty.hpp>");
+        if self.module_name.is_none() {
+            self.writeln("#include <rusty/rusty.hpp>");
+        }
         self.writeln("#include <rusty/try.hpp>");
         self.newline();
 
         if let Some(ref mod_name) = self.module_name {
             self.writeln(&format!("export module {};", mod_name));
+            self.writeln("import rusty;");
             self.newline();
         }
 
@@ -67329,6 +67332,16 @@ mod tests {
         let export_idx = out.find("export module my_crate;").unwrap();
         assert!(module_idx < include_idx);
         assert!(include_idx < export_idx);
+    }
+
+    #[test]
+    fn test_module_mode_imports_rusty_runtime_module() {
+        let out = transpile_str_module("fn f() {}", "my_crate");
+        let export_idx = out.find("export module my_crate;").unwrap();
+        let import_idx = out.find("import rusty;").unwrap();
+        assert!(export_idx < import_idx);
+        assert!(!out.contains("#include <rusty/rusty.hpp>"));
+        assert!(out.contains("#include <rusty/try.hpp>"));
     }
 
     #[test]

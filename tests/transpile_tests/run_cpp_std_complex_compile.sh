@@ -48,6 +48,7 @@ done
 
 MANIFEST_PATH="${REPO_ROOT}/tests/transpile_tests/cpp_std_complex/Cargo.toml"
 INDEX_PATH="${REPO_ROOT}/tests/transpile_tests/cpp_std_complex/cpp_module_index.toml"
+RUSTY_RUNTIME_MODULE_PATH="${REPO_ROOT}/include/rusty/rusty.cppm"
 TARGET_CPPM_PATH="${WORK_DIR}/targets/cpp_std_complex/cpp_std_complex.cppm"
 TRANSPILE_LOG="${WORK_DIR}/transpile.log"
 BUILD_LOG="${WORK_DIR}/build.log"
@@ -61,6 +62,7 @@ report_failure() {
     echo "transpile.log: ${TRANSPILE_LOG}" >&2
     echo "build.log: ${BUILD_LOG}" >&2
     echo "transpiled.cppm: ${TARGET_CPPM_PATH}" >&2
+    echo "rusty-runtime-module.cppm: ${RUSTY_RUNTIME_MODULE_PATH}" >&2
 }
 
 echo "═══════════════════════════════════════════════════════════════════════"
@@ -93,6 +95,7 @@ PARITY_CMD=(
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "[dry-run] ${PARITY_CMD[*]}"
+    echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${REPO_ROOT}/include -x c++ -c ${RUSTY_RUNTIME_MODULE_PATH} -o rusty.runtime.o"
     echo "[dry-run] g++ -std=c++23 -fmodules-ts -I ${REPO_ROOT}/include -x c++ -c ${TARGET_CPPM_PATH} -o cpp_std_complex.o"
     exit 0
 fi
@@ -164,6 +167,15 @@ echo "using compiler: ${SUPPORTED_COMPILER}" | tee -a "${STATUS_LOG}"
 echo "compiler flags: ${SUPPORTED_FLAGS}" | tee -a "${STATUS_LOG}"
 
 IFS=' ' read -r -a ACTIVE_FLAGS <<<"${SUPPORTED_FLAGS}"
+
+if ! (
+    cd "${WORK_DIR}" &&
+    "${SUPPORTED_COMPILER}" "${ACTIVE_FLAGS[@]}" -I "${REPO_ROOT}/include" -x c++ -c "${RUSTY_RUNTIME_MODULE_PATH}" -o rusty.runtime.o
+) >>"${BUILD_LOG}" 2>&1; then
+    report_failure "compile-rusty-runtime-module"
+    tail -n 80 "${BUILD_LOG}" >&2 || true
+    exit 1
+fi
 
 if ! (
     cd "${WORK_DIR}" &&

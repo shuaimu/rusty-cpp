@@ -222,6 +222,15 @@ Include all types:
 #include "rusty/rusty.hpp"
 ```
 
+Or use the C++20 module interface:
+```cpp
+import rusty;
+```
+
+`import rusty;` is currently an experimental GCC-14-stable subset surface.
+If you need the full umbrella API on toolchains with module issues, use
+`#include "rusty/rusty.hpp"` instead.
+
 Or include individual headers:
 ```cpp
 #include "rusty/box.hpp"
