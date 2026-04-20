@@ -315,6 +315,22 @@ public:
         }
         return Option<U>(None);
     }
+
+    template<typename U, typename F>
+    U map_or(U default_value, F&& f) const {
+        if (has_value) {
+            return f(value);
+        }
+        return default_value;
+    }
+
+    template<typename D, typename F>
+    auto map_or_else(D&& default_fn, F&& f) const -> decltype(f(value)) {
+        if (has_value) {
+            return f(value);
+        }
+        return default_fn();
+    }
     
     // Take the value out, leaving None
     // @lifetime: owned
@@ -433,6 +449,14 @@ public:
             return Option(*ptr);
         }
         return Option();
+    }
+
+    // Take the reference and leave this option as None.
+    // @lifetime: owned
+    Option<T&> take() {
+        Option<T&> result = *this;
+        ptr = nullptr;
+        return result;
     }
 
     // Explicit bool conversion
@@ -672,6 +696,14 @@ public:
             return Option(*ptr);
         }
         return Option();
+    }
+
+    // Take the reference and leave this option as None.
+    // @lifetime: owned
+    Option<const T&> take() {
+        Option<const T&> result = *this;
+        ptr = nullptr;
+        return result;
     }
 
     // Explicit bool conversion

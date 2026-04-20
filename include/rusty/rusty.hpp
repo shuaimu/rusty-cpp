@@ -187,6 +187,16 @@ namespace rusty {
         return String::from(value.as_str());
     }
 
+    template<typename T, std::size_t Extent>
+    Vec<std::remove_const_t<T>> to_owned(std::span<T, Extent> value) {
+        using Elem = std::remove_const_t<T>;
+        Vec<Elem> out(value.size());
+        for (const auto& item : value) {
+            out.push(static_cast<Elem>(item));
+        }
+        return out;
+    }
+
     template<typename T>
     auto to_owned(const T& value) {
         if constexpr (requires { value.clone(); }) {

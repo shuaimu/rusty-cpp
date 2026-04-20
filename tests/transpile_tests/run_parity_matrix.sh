@@ -15,7 +15,10 @@ declare -a MATRIX_CRATES=(
     "smallvec"
     "itertools"
     "once_cell"
+    "serde_core"
+    "serde"
     "pollster"
+    "toml"
 )
 
 declare -A CRATE_REPO=(
@@ -29,7 +32,10 @@ declare -A CRATE_REPO=(
     ["smallvec"]="https://github.com/servo/rust-smallvec.git"
     ["itertools"]="https://github.com/rust-itertools/itertools.git"
     ["once_cell"]="https://github.com/matklad/once_cell.git"
+    ["serde_core"]="https://github.com/serde-rs/serde.git"
+    ["serde"]="https://github.com/serde-rs/serde.git"
     ["pollster"]="https://github.com/zesterer/pollster.git"
+    ["toml"]="https://github.com/toml-rs/toml.git"
 )
 
 declare -A CRATE_REF=(
@@ -43,7 +49,16 @@ declare -A CRATE_REF=(
     ["smallvec"]="v1.15.1"
     ["itertools"]="v0.14.0"
     ["once_cell"]="v1.21.4"
+    ["serde_core"]="v1.0.228"
+    ["serde"]="v1.0.228"
     ["pollster"]="master"
+    ["toml"]="main"
+)
+
+declare -A CRATE_MANIFEST_REL=(
+    ["serde_core"]="serde_core/Cargo.toml"
+    ["serde"]="serde/Cargo.toml"
+    ["toml"]="crates/toml/Cargo.toml"
 )
 
 TARGET_CRATE=""
@@ -59,7 +74,7 @@ print_usage() {
 Usage: $(basename "$0") [options]
 
 Run parity matrix across crate set:
-  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags, smallvec, itertools, once_cell, pollster
+  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags, smallvec, itertools, once_cell, serde_core, serde, pollster, toml
 
 Options:
   --crate <name>      Run only one matrix crate
@@ -176,7 +191,8 @@ ensure_crate_checkout() {
     local ref="${CRATE_REF[${crate}]}"
     local work_dir="${WORK_ROOT}/${crate}"
 
-    if [[ -f "${crate_dir}/Cargo.toml" ]]; then
+    local manifest_rel="${CRATE_MANIFEST_REL[${crate}]:-Cargo.toml}"
+    if [[ -f "${crate_dir}/${manifest_rel}" ]]; then
         return 0
     fi
 
@@ -199,7 +215,8 @@ ensure_crate_checkout() {
 run_parity_for_crate() {
     local crate="$1"
     local crate_dir="${SCRIPT_DIR}/${crate}"
-    local manifest="${crate_dir}/Cargo.toml"
+    local manifest_rel="${CRATE_MANIFEST_REL[${crate}]:-Cargo.toml}"
+    local manifest="${crate_dir}/${manifest_rel}"
     local work_dir="${WORK_ROOT}/${crate}"
     local matrix_log="${work_dir}/matrix.log"
     if [[ "${DRY_RUN}" -eq 1 ]]; then

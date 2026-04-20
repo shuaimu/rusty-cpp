@@ -57,6 +57,8 @@ public:
         : cur_(span.data()), end_(span.data() + span.size()) {}
 
     Iter into_iter() const { return *this; }
+    Iter& by_ref() { return *this; }
+    const Iter& by_ref() const { return *this; }
 
     rusty::Option<pointer> next() {
         if (cur_ == end_) {
@@ -78,6 +80,12 @@ public:
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         const size_t remaining = static_cast<size_t>(end_ - cur_);
         return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
+    }
+
+    size_t count() {
+        const size_t remaining = static_cast<size_t>(end_ - cur_);
+        cur_ = end_;
+        return remaining;
     }
 
     class ClonedIter {
@@ -238,6 +246,34 @@ template<typename T>
 constexpr decltype(auto) deref_if_pointer(T&& value) {
     if constexpr (std::is_pointer_v<std::remove_reference_t<T>>) {
         return *std::forward<T>(value);
+    } else {
+        return std::forward<T>(value);
+    }
+}
+
+template<typename T>
+constexpr decltype(auto) deref_if_pointer_like(T&& value) {
+    using value_type = std::remove_reference_t<T>;
+    if constexpr (std::is_pointer_v<value_type>) {
+        return *std::forward<T>(value);
+    } else if constexpr (requires(value_type& v) {
+                             v.get();
+                             *v;
+                         }) {
+        if constexpr (std::is_pointer_v<decltype(std::declval<value_type&>().get())>) {
+            return *std::forward<T>(value);
+        } else {
+            return std::forward<T>(value);
+        }
+    } else if constexpr (requires(value_type& v) { *v; }) {
+        using deref_type = std::remove_cvref_t<decltype(*std::declval<value_type&>())>;
+        // Deref-like value types (for example ArrayVec/ArrayString) should compare/hash
+        // on their target view instead of recursing through self-comparisons.
+        if constexpr (!std::is_same_v<deref_type, value_type>) {
+            return *std::forward<T>(value);
+        } else {
+            return std::forward<T>(value);
+        }
     } else {
         return std::forward<T>(value);
     }

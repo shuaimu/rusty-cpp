@@ -13751,7 +13751,7 @@ impl CodeGen {
                     return;
                 }
                 let ty = self.map_type(&c.ty);
-                let expr = self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty));
+                let expr = self.emit_impl_const_expr(c);
                 // Self-referential const (type is the enclosing struct):
                 // split into declaration inside struct + definition after.
                 if self.is_self_referential_const_type(&ty) {
@@ -13950,6 +13950,42 @@ impl CodeGen {
             }
             _ => {}
         }
+    }
+
+    fn emit_impl_const_expr(&self, c: &syn::ImplItemConst) -> String {
+        if let Some(resolved) = self.resolve_shadowed_impl_const_expr(c) {
+            return resolved;
+        }
+        self.emit_expr_to_string_with_expected(&c.expr, Some(&c.ty))
+    }
+
+    fn resolve_shadowed_impl_const_expr(&self, c: &syn::ImplItemConst) -> Option<String> {
+        let expr = self.peel_paren_group_expr(&c.expr);
+        let syn::Expr::Path(path_expr) = expr else {
+            return None;
+        };
+        if path_expr.path.leading_colon.is_some() || path_expr.path.segments.len() != 1 {
+            return None;
+        }
+        let const_name = c.ident.to_string();
+        let referenced = path_expr.path.segments.first()?.ident.to_string();
+        if referenced != const_name {
+            return None;
+        }
+
+        // Rust resolves bare names in associated const initializers against outer
+        // module items before the const being declared. Qualify explicitly to avoid
+        // C++ self-shadowing like `const START = START;`.
+        let module_prefix = if self.module_stack.is_empty() {
+            String::new()
+        } else {
+            format!("{}::", self.module_stack.join("::"))
+        };
+        let qualified_rust_path = format!("::{}{}", module_prefix, const_name);
+        let Ok(qualified_expr) = syn::parse_str::<syn::Expr>(&qualified_rust_path) else {
+            return None;
+        };
+        Some(self.emit_expr_to_string_with_expected(&qualified_expr, Some(&c.ty)))
     }
 
     fn return_type_current_struct_assoc_aliases_emitted(&self, output: &syn::ReturnType) -> bool {
@@ -49000,7 +49036,7 @@ impl CodeGen {
                     format!("\"{}\"", escaped)
                 }
             }
-            syn::Lit::Char(c) => format!("U'{}'", c.value()),
+            syn::Lit::Char(c) => escape_cpp_char_literal(c.value()),
             syn::Lit::Byte(b) => format!("static_cast<uint8_t>({})", b.value()),
             syn::Lit::ByteStr(bs) => {
                 let bytes: Vec<String> =
@@ -53191,6 +53227,11 @@ impl CodeGen {
                 } else {
                     referent_cpp
                 };
+                if r.mutability.is_none()
+                    && self.array_reference_element_decays_to_value(&normalized_referent_cpp)
+                {
+                    return normalized_referent_cpp;
+                }
                 let wrapper_target = if r.mutability.is_some() {
                     normalized_referent_cpp
                 } else {
@@ -53202,6 +53243,11 @@ impl CodeGen {
             syn::Type::Group(g) => self.map_array_element_type(&g.elem),
             _ => self.map_type(elem_ty),
         }
+    }
+
+    fn array_reference_element_decays_to_value(&self, referent_cpp: &str) -> bool {
+        let normalized = self.canonical_into_target_cpp_type(referent_cpp);
+        normalized == "std::string_view" || normalized.starts_with("std::span<")
     }
 
     /// Emit an expression, wrapping local variable paths in std::move().
@@ -56299,7 +56345,18 @@ fn impl_method_conflict_key(method: &syn::ImplItemFn) -> String {
         }
     }
     let params_key = params.join(",");
-    let generics_key = normalize_token_text(method.sig.generics.to_token_stream().to_string());
+    let generics_key = method
+        .sig
+        .generics
+        .params
+        .iter()
+        .map(|param| match param {
+            syn::GenericParam::Type(tp) => format!("type:{}", tp.ident),
+            syn::GenericParam::Const(cp) => format!("const:{}", cp.ident),
+            syn::GenericParam::Lifetime(lp) => format!("lt:{}", lp.lifetime.ident),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
         "{}|{}|{}|{}",
         method.sig.ident, receiver_key, generics_key, params_key
@@ -58935,6 +58992,32 @@ fn escape_cpp_string_literal_content(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn escape_cpp_char_literal(value: char) -> String {
+    format!("U'{}'", escape_cpp_char_literal_content(value))
+}
+
+fn escape_cpp_char_literal_content(value: char) -> String {
+    match value {
+        '\\' => "\\\\".to_string(),
+        '\'' => "\\'".to_string(),
+        '\n' => "\\n".to_string(),
+        '\r' => "\\r".to_string(),
+        '\t' => "\\t".to_string(),
+        '\0' => "\\0".to_string(),
+        '\x08' => "\\b".to_string(),
+        '\x0C' => "\\f".to_string(),
+        ch if ch.is_ascii_graphic() || ch == ' ' => ch.to_string(),
+        ch => {
+            let code = ch as u32;
+            if code <= 0xFFFF {
+                format!("\\u{:04X}", code)
+            } else {
+                format!("\\U{:08X}", code)
+            }
+        }
+    }
 }
 
 fn escape_cpp_keyword(name: &str) -> String {
@@ -61703,6 +61786,16 @@ mod tests {
         let out = transpile_str("fn f(a: [&u32; 2]) {}");
         assert!(out.contains("std::array<std::reference_wrapper<std::add_const_t<uint32_t>>, 2>"));
         assert!(!out.contains("std::array<const uint32_t&, 2>"));
+    }
+
+    #[test]
+    fn test_leaf_toml_array_of_str_references_decays_to_string_view_values() {
+        let out = transpile_str("fn f(a: [&str; 3]) {}");
+        assert!(out.contains("std::array<std::string_view, 3>"), "{out}");
+        assert!(
+            !out.contains("std::array<std::reference_wrapper<std::add_const_t<std::string_view>>, 3>"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -65092,6 +65185,26 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf_toml_trait_bound_only_signature_diff_still_dedupes_fmt() {
+        let out = transpile_str(
+            r#"
+            struct Spanned<T> { value: T }
+            impl<T: core::fmt::Debug> core::fmt::Debug for Spanned<T> {
+                fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { true }
+            }
+            impl<T: core::fmt::Display> core::fmt::Display for Spanned<T> {
+                fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { true }
+            }
+            "#,
+        );
+        assert_eq!(
+            out.matches("rusty::fmt::Result fmt(rusty::fmt::Formatter&").count(),
+            1,
+            "{out}"
+        );
+    }
+
+    #[test]
     fn test_self_field_access() {
         let out = transpile_str(
             r#"
@@ -65398,6 +65511,25 @@ mod tests {
         "#,
         );
         assert!(out.contains("static constexpr int32_t MAX = 100;"));
+    }
+
+    #[test]
+    fn test_impl_const_with_same_named_module_const_qualifies_outer_path() {
+        let out = transpile_str(
+            r#"
+            mod spanned {
+                const START_FIELD: &str = "start";
+                struct Spanned;
+                impl Spanned {
+                    const START_FIELD: &'static str = START_FIELD;
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("static constexpr std::string_view START_FIELD = std::string_view(::spanned::START_FIELD);"),
+            "{out}"
+        );
     }
 
     // ── extern "C" and unsafe tests ─────────────────────────────
@@ -72047,6 +72179,28 @@ mod tests {
         let out = transpile_str("fn f() { let chars = ['a', 'b']; }");
         assert!(out.contains("std::array{U'a', U'b'}"));
         assert!(!out.contains("rusty::intrinsics::unreachable()"));
+    }
+
+    #[test]
+    fn test_leaf_toml_char_literals_escape_control_and_special_chars() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let _ = '\n';
+                let _ = '\r';
+                let _ = '\t';
+                let _ = '\'';
+                let _ = '\\';
+                let _ = '\u{1F600}';
+            }
+            "#,
+        );
+        assert!(out.contains("U'\\n'"));
+        assert!(out.contains("U'\\r'"));
+        assert!(out.contains("U'\\t'"));
+        assert!(out.contains("U'\\''"));
+        assert!(out.contains("U'\\\\'"));
+        assert!(out.contains("U'\\U0001F600'"));
     }
 
     #[test]

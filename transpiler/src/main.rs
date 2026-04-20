@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Output};
@@ -120,6 +120,11 @@ struct ParityTestArgs {
     /// Enable diagnostic-only prototype planning for by-value SCC cycle breaking
     #[arg(long)]
     by_value_cycle_breaking_prototype: bool,
+
+    /// Allow parity to proceed when no transpiled test wrappers are discovered.
+    /// Useful for library-only crates to validate transpile + C++ compile.
+    #[arg(long)]
+    allow_empty_tests: bool,
 }
 
 /// Transpile an entire Rust crate in one command.
@@ -433,12 +438,236 @@ fn is_overloaded_deduction_line(trimmed: &str) -> bool {
     trimmed.contains("overloaded(Ts...) -> overloaded<Ts...>;")
 }
 
+fn strip_export_prefix(trimmed: &str) -> &str {
+    trimmed.strip_prefix("export ").unwrap_or(trimmed)
+}
+
+fn extract_namespace_segments(trimmed_no_comment: &str) -> Option<Vec<String>> {
+    let line = strip_export_prefix(trimmed_no_comment).trim();
+    let rest = line.strip_prefix("namespace ")?;
+    let brace_idx = rest.find('{')?;
+    let ns_path = rest[..brace_idx].trim();
+    if ns_path.is_empty() || ns_path.contains('=') {
+        return None;
+    }
+    let segments: Vec<String> = ns_path
+        .split("::")
+        .map(|seg| seg.trim())
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| seg.to_string())
+        .collect();
+    if segments.is_empty() {
+        return None;
+    }
+    Some(segments)
+}
+
+fn is_identifier_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn parse_type_path(rest: &str) -> usize {
+    let chars: Vec<char> = rest.chars().collect();
+    if chars.is_empty() || !is_identifier_start(chars[0]) {
+        return 0;
+    }
+    let mut i = 1;
+    while i < chars.len() {
+        let ch = chars[i];
+        if is_identifier_char(ch) {
+            i += 1;
+            continue;
+        }
+        if ch == ':' && i + 1 < chars.len() && chars[i + 1] == ':' {
+            // Require a valid identifier start after `::`.
+            if i + 2 >= chars.len() || !is_identifier_start(chars[i + 2]) {
+                break;
+            }
+            i += 2;
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+fn is_named_forward_decl(line: &str, keyword: &str) -> bool {
+    let rest = line.strip_prefix(keyword).map(str::trim_start);
+    let Some(rest) = rest else {
+        return false;
+    };
+    let path_len = parse_type_path(rest);
+    if path_len == 0 {
+        return false;
+    }
+    rest[path_len..].trim() == ";"
+}
+
+fn is_enum_forward_decl(line: &str) -> bool {
+    if let Some(rest) = line.strip_prefix("enum class ").map(str::trim_start) {
+        let path_len = parse_type_path(rest);
+        if path_len == 0 {
+            return false;
+        }
+        let tail = rest[path_len..].trim();
+        if tail == ";" {
+            return true;
+        }
+        if !tail.starts_with(':') || !tail.ends_with(';') {
+            return false;
+        }
+        return !tail.contains('{');
+    }
+    if let Some(rest) = line.strip_prefix("enum ").map(str::trim_start) {
+        let path_len = parse_type_path(rest);
+        if path_len == 0 {
+            return false;
+        }
+        return rest[path_len..].trim() == ";";
+    }
+    false
+}
+
+fn is_simple_forward_decl_line(trimmed_no_comment: &str) -> bool {
+    let line = strip_export_prefix(trimmed_no_comment).trim();
+    if line.is_empty() || line.contains('{') || !line.ends_with(';') {
+        return false;
+    }
+    is_named_forward_decl(line, "struct ")
+        || is_named_forward_decl(line, "class ")
+        || is_named_forward_decl(line, "union ")
+        || is_enum_forward_decl(line)
+}
+
+fn extract_forward_declaration_from_line(
+    trimmed_no_comment: &str,
+    pending_template_line: &mut Option<String>,
+) -> Option<String> {
+    let line = strip_export_prefix(trimmed_no_comment).trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    if line.starts_with("template<") && !line.contains('{') {
+        if line.ends_with('>') && !line.ends_with(";") {
+            *pending_template_line = Some(line.to_string());
+            return None;
+        }
+        if line.ends_with(';')
+            && (line.contains(" struct ")
+                || line.contains(" class ")
+                || line.contains(" union ")
+                || line.contains(" enum "))
+        {
+            *pending_template_line = None;
+            return Some(line.to_string());
+        }
+    }
+
+    if is_simple_forward_decl_line(line) {
+        let decl = if let Some(template) = pending_template_line.take() {
+            format!("{} {}", template, line)
+        } else {
+            line.to_string()
+        };
+        return Some(decl);
+    }
+
+    *pending_template_line = None;
+    None
+}
+
+fn wrap_forward_decl_in_namespaces(namespace_path: &[String], decl: &str) -> String {
+    if namespace_path.is_empty() {
+        return decl.to_string();
+    }
+    let mut wrapped = String::new();
+    for ns in namespace_path {
+        wrapped.push_str("namespace ");
+        wrapped.push_str(ns);
+        wrapped.push_str(" { ");
+    }
+    wrapped.push_str(decl);
+    for _ in namespace_path {
+        wrapped.push_str(" }");
+    }
+    wrapped
+}
+
+fn collect_namespace_forward_declarations(content: &str) -> BTreeSet<String> {
+    let mut decls = BTreeSet::new();
+    let mut namespace_path: Vec<String> = Vec::new();
+    // Stack entries hold how many namespace segments were pushed by this `{`.
+    // `0` means non-namespace scope.
+    let mut brace_stack: Vec<usize> = Vec::new();
+    let mut pending_template_line: Option<String> = None;
+    let has_payload_marker = content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("// extern crate") || trimmed.starts_with("// Rust-only:")
+    });
+    let mut in_payload = !has_payload_marker;
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !in_payload {
+            if trimmed.starts_with("// extern crate") || trimmed.starts_with("// Rust-only:") {
+                in_payload = true;
+                namespace_path.clear();
+                brace_stack.clear();
+                pending_template_line = None;
+            }
+            continue;
+        }
+        let no_comment = trimmed.split("//").next().unwrap_or("").trim();
+        if no_comment.is_empty() {
+            continue;
+        }
+
+        let mut open_braces = no_comment.chars().filter(|ch| *ch == '{').count();
+
+        if let Some(segments) = extract_namespace_segments(no_comment) {
+            let pushed_count = segments.len();
+            namespace_path.extend(segments);
+            brace_stack.push(pushed_count);
+            open_braces = open_braces.saturating_sub(1);
+        }
+
+        if let Some(decl) =
+            extract_forward_declaration_from_line(no_comment, &mut pending_template_line)
+        {
+            decls.insert(wrap_forward_decl_in_namespaces(&namespace_path, &decl));
+        }
+
+        for _ in 0..open_braces {
+            brace_stack.push(0);
+        }
+
+        let close_braces = no_comment.chars().filter(|ch| *ch == '}').count();
+        for _ in 0..close_braces {
+            if let Some(pushed_count) = brace_stack.pop() {
+                for _ in 0..pushed_count {
+                    namespace_path.pop();
+                }
+            }
+        }
+    }
+
+    decls
+}
+
 /// Detect lines that define top-level functions or namespace blocks that
 /// may collide across test targets flattened into one runner.
 /// Note: namespace dedup is cross-file only (within a single cppm,
 /// reopened namespaces with different content are preserved).
 fn is_duplicatable_definition(trimmed: &str) -> bool {
-    let t = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let t = strip_export_prefix(trimmed);
     // `namespace util {`
     if t.starts_with("namespace ")
         && t.ends_with('{')
@@ -461,7 +690,7 @@ fn is_duplicatable_definition(trimmed: &str) -> bool {
 
 /// Extract a dedup key from a definition line.
 fn extract_definition_key(trimmed: &str) -> Option<String> {
-    let t = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let t = strip_export_prefix(trimmed);
     // For functions and namespaces: use everything before '{'
     if let Some(before_brace) = t.split('{').next() {
         let key = before_brace.trim().to_string();
@@ -473,7 +702,7 @@ fn extract_definition_key(trimmed: &str) -> Option<String> {
 }
 
 fn extract_rusty_test_wrapper_name(trimmed: &str) -> Option<String> {
-    let line = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let line = strip_export_prefix(trimmed);
     let rest = line.strip_prefix("void rusty_test_")?;
     let end = rest.find('(')?;
     Some(format!("rusty_test_{}", &rest[..end]))
@@ -559,6 +788,30 @@ fn parity_cpp_compiler_from_env(cxx: Option<String>) -> String {
 
 fn parity_cpp_compiler() -> String {
     parity_cpp_compiler_from_env(std::env::var("CXX").ok())
+}
+
+fn parse_running_tests_count(line: &str) -> Option<usize> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("running ")?;
+    let digit_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_len == 0 {
+        return None;
+    }
+    if !rest[digit_len..].starts_with(" test") {
+        return None;
+    }
+    rest[..digit_len].parse::<usize>().ok()
+}
+
+fn baseline_ran_any_tests(work_dir: &Path) -> Option<bool> {
+    let baseline_path = work_dir.join("baseline.txt");
+    let content = fs::read_to_string(&baseline_path).ok()?;
+    Some(
+        content
+            .lines()
+            .filter_map(parse_running_tests_count)
+            .any(|count| count > 0),
+    )
 }
 
 #[cfg(test)]
@@ -673,6 +926,90 @@ export void rusty_test_tests_regular_case() {
             parity_cpp_compiler_from_env(Some("  /usr/bin/clang++  ".to_string())),
             "/usr/bin/clang++"
         );
+    }
+
+    #[test]
+    fn test_parse_running_tests_count_parses_cargo_test_lines() {
+        assert_eq!(parse_running_tests_count("running 0 tests"), Some(0));
+        assert_eq!(parse_running_tests_count("running 1 test"), Some(1));
+        assert_eq!(parse_running_tests_count("running 42 tests"), Some(42));
+        assert_eq!(
+            parse_running_tests_count(" test result: ok. 0 passed"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_baseline_ran_any_tests_detects_zero_vs_nonzero_runs() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let baseline = temp.path().join("baseline.txt");
+
+        std::fs::write(
+            &baseline,
+            "running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+        )
+        .expect("write baseline");
+        assert_eq!(baseline_ran_any_tests(temp.path()), Some(false));
+
+        std::fs::write(
+            &baseline,
+            "running 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+        )
+        .expect("write baseline");
+        assert_eq!(baseline_ran_any_tests(temp.path()), Some(true));
+    }
+
+    #[test]
+    fn test_collect_namespace_forward_declarations_hoists_nested_structs() {
+        let content = r#"
+namespace private_ {
+    namespace de {
+        namespace content {
+            struct ContentVisitor;
+            rusty::Option<std::string_view> content_as_str(const ::private_::ser::content::Content& content);
+        }
+    }
+    namespace ser {
+        namespace content {
+            struct Content;
+        }
+    }
+}
+"#;
+
+        let decls = collect_namespace_forward_declarations(content);
+        assert!(decls.contains(
+            "namespace private_ { namespace de { namespace content { struct ContentVisitor; } } }"
+        ));
+        assert!(decls.contains(
+            "namespace private_ { namespace ser { namespace content { struct Content; } } }"
+        ));
+    }
+
+    #[test]
+    fn test_collect_namespace_forward_declarations_handles_template_forward_decls() {
+        let content = r#"
+namespace foo {
+namespace bar {
+template<typename E>
+struct Serializer;
+template<typename T> struct Node;
+template<typename T>
+auto not_a_forward_decl(T value) {
+    return value;
+}
+}
+}
+"#;
+
+        let decls = collect_namespace_forward_declarations(content);
+        assert!(decls.contains(
+            "namespace foo { namespace bar { template<typename E> struct Serializer; } }"
+        ));
+        assert!(
+            decls.contains("namespace foo { namespace bar { template<typename T> struct Node; } }")
+        );
+        assert!(!decls.iter().any(|decl| decl.contains("not_a_forward_decl")));
     }
 }
 
@@ -1021,6 +1358,58 @@ fn discover_targets_with_workspace_fallback(
     metadata::discover_targets(&isolated_manifest, package)
 }
 
+fn discover_local_dependencies_with_workspace_fallback(
+    manifest: &Path,
+    project_dir: &Path,
+    package: Option<&str>,
+    crate_name: &str,
+    work_dir: &Path,
+) -> Result<Vec<metadata::LocalDependencyPackage>, String> {
+    let initial = metadata::discover_local_path_dependencies(manifest, package);
+    if initial.is_ok() {
+        return initial;
+    }
+
+    let initial_err = initial.err().unwrap_or_default();
+    if !is_workspace_mismatch(&initial_err) {
+        return Err(initial_err);
+    }
+
+    println!("  Dependency metadata retry: detected workspace mismatch.");
+    let selected_package = package.unwrap_or(crate_name);
+    if let Some(workspace_manifest) = workspace_manifest_from_error(&initial_err) {
+        println!(
+            "  Dependency metadata retry: cargo metadata --manifest-path {} -p {}",
+            workspace_manifest.display(),
+            selected_package
+        );
+        let workspace_attempt =
+            metadata::discover_local_path_dependencies(&workspace_manifest, Some(selected_package));
+        if workspace_attempt.is_ok() {
+            return workspace_attempt;
+        }
+
+        let workspace_err = workspace_attempt.err().unwrap_or_default();
+        if !is_workspace_package_miss(&workspace_err) {
+            return Err(workspace_err);
+        }
+    }
+
+    let mut isolated_manifest_cache = None;
+    let isolated_manifest = ensure_isolated_manifest_copy(
+        manifest,
+        project_dir,
+        work_dir,
+        "dependency_metadata_source_manifest",
+        &mut isolated_manifest_cache,
+    )?;
+    println!(
+        "  Dependency metadata retry: cargo metadata --manifest-path {}",
+        isolated_manifest.display()
+    );
+    metadata::discover_local_path_dependencies(&isolated_manifest, package)
+}
+
 fn run_cargo_expand_with_workspace_fallback(
     manifest: &Path,
     project_dir: &Path,
@@ -1112,6 +1501,19 @@ fn clear_stage_outputs(work_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct ParityDependencyTarget {
+    package_name: String,
+    manifest_path: PathBuf,
+    module_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedCppmArtifact {
+    path: PathBuf,
+    is_test_target: bool,
+}
+
 fn target_artifacts_root(work_dir: &Path) -> PathBuf {
     work_dir.join("targets")
 }
@@ -1126,6 +1528,14 @@ fn expanded_artifact_path(target_dir: &Path) -> PathBuf {
 
 fn cppm_artifact_path(target_dir: &Path, module_name: &str) -> PathBuf {
     target_dir.join(format!("{}.cppm", module_name))
+}
+
+fn dependency_artifacts_root(work_dir: &Path) -> PathBuf {
+    work_dir.join("deps")
+}
+
+fn dependency_artifact_dir(work_dir: &Path, module_name: &str) -> PathBuf {
+    dependency_artifacts_root(work_dir).join(module_name)
 }
 
 fn reset_target_artifacts(
@@ -1194,6 +1604,75 @@ fn reset_target_artifacts(
     }
 
     Ok(target_dirs)
+}
+
+fn reset_dependency_artifacts(
+    work_dir: &Path,
+    deps: &[ParityDependencyTarget],
+) -> Result<HashMap<String, PathBuf>, String> {
+    let artifacts_root = dependency_artifacts_root(work_dir);
+    fs::create_dir_all(&artifacts_root).map_err(|e| {
+        format!(
+            "Failed to create dependency artifacts directory {}: {}",
+            artifacts_root.display(),
+            e
+        )
+    })?;
+
+    let expected_modules: HashSet<&str> = deps.iter().map(|d| d.module_name.as_str()).collect();
+    for entry in fs::read_dir(&artifacts_root)
+        .map_err(|e| format!("Failed to read {}: {}", artifacts_root.display(), e))?
+    {
+        let entry = entry.map_err(|e| {
+            format!(
+                "Failed to inspect {} entry: {}",
+                artifacts_root.display(),
+                e
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
+        if file_type.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !expected_modules.contains(name.as_str()) {
+                fs::remove_dir_all(&path).map_err(|e| {
+                    format!(
+                        "Failed to remove stale dependency dir {}: {}",
+                        path.display(),
+                        e
+                    )
+                })?;
+            }
+        } else {
+            fs::remove_file(&path)
+                .map_err(|e| format!("Failed to remove stale file {}: {}", path.display(), e))?;
+        }
+    }
+
+    let mut dep_dirs = HashMap::new();
+    for dep in deps {
+        let dep_dir = dependency_artifact_dir(work_dir, &dep.module_name);
+        if dep_dir.exists() {
+            fs::remove_dir_all(&dep_dir).map_err(|e| {
+                format!(
+                    "Failed to reset dependency dir {}: {}",
+                    dep_dir.display(),
+                    e
+                )
+            })?;
+        }
+        fs::create_dir_all(&dep_dir).map_err(|e| {
+            format!(
+                "Failed to create dependency dir {}: {}",
+                dep_dir.display(),
+                e
+            )
+        })?;
+        dep_dirs.insert(dep.module_name.clone(), dep_dir);
+    }
+    Ok(dep_dirs)
 }
 
 /// Run the parity test pipeline: cargo test → cargo expand → transpile → C++ compile → run → compare.
@@ -1306,17 +1785,124 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     if targets.is_empty() {
         return Err("No test-capable targets found".to_string());
     }
+    let dependency_packages = discover_local_dependencies_with_workspace_fallback(
+        &manifest,
+        &project_dir,
+        args.package.as_deref(),
+        crate_name,
+        &work_dir,
+    )?;
+    let mut dependency_targets: Vec<ParityDependencyTarget> = Vec::new();
+    for dep in dependency_packages {
+        let dep_project_dir = dep
+            .manifest_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        let (_, dep_targets) = discover_targets_with_workspace_fallback(
+            &dep.manifest_path,
+            &dep_project_dir,
+            Some(dep.name.as_str()),
+            dep.name.as_str(),
+            &work_dir,
+        )?;
+        if let Some(lib_target) = dep_targets
+            .iter()
+            .find(|target| matches!(target.kind, metadata::TargetKind::Lib))
+        {
+            dependency_targets.push(ParityDependencyTarget {
+                package_name: dep.name,
+                manifest_path: dep.manifest_path,
+                module_name: lib_target.module_name.clone(),
+            });
+        }
+    }
+    if !dependency_targets.is_empty() {
+        println!("  Local dependencies:");
+        for dep in &dependency_targets {
+            println!(
+                "    {} ({}) → module {}",
+                dep.package_name,
+                dep.manifest_path.display(),
+                dep.module_name
+            );
+        }
+    }
     let target_dirs = if args.dry_run {
         HashMap::new()
     } else {
         reset_target_artifacts(&work_dir, &targets)?
     };
+    let dependency_dirs = if args.dry_run {
+        HashMap::new()
+    } else {
+        reset_dependency_artifacts(&work_dir, &dependency_targets)?
+    };
     println!();
 
     // ── Stage B: Expand ─────────────────────────────────
     println!("Stage B: Running cargo expand per target...");
+    let mut expanded_dependency_sources: Vec<(ParityDependencyTarget, String)> = Vec::new();
     let mut expanded_sources: Vec<(metadata::CrateTarget, String)> = Vec::new();
     let mut expand_isolated_manifest: Option<PathBuf> = None;
+
+    for dep in &dependency_targets {
+        let dep_project_dir = dep
+            .manifest_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        if args.dry_run {
+            println!(
+                "  [dry-run] cargo expand -p {} --lib --theme=none in {}",
+                dep.package_name,
+                dep_project_dir.display()
+            );
+            continue;
+        }
+
+        let mut dep_expand_isolated_manifest: Option<PathBuf> = None;
+        let dep_cargo_flags: Vec<String> = Vec::new();
+        let output = run_cargo_expand_with_workspace_fallback(
+            &dep.manifest_path,
+            &dep_project_dir,
+            Some(dep.package_name.as_str()),
+            dep.package_name.as_str(),
+            &["--lib".to_string()],
+            &dep_cargo_flags,
+            &work_dir,
+            &mut dep_expand_isolated_manifest,
+        )?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!(
+                "  Warning: cargo expand failed for dependency '{}': {}",
+                dep.package_name,
+                stderr.lines().next().unwrap_or("")
+            );
+            continue;
+        }
+
+        let source = String::from_utf8(output.stdout)
+            .map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))?;
+        let dep_dir = dependency_dirs.get(&dep.module_name).ok_or_else(|| {
+            format!(
+                "Missing dependency artifact directory for module '{}'",
+                dep.module_name
+            )
+        })?;
+        let expanded_path = expanded_artifact_path(dep_dir);
+        std::fs::write(&expanded_path, &source)
+            .map_err(|e| format!("Failed to write expanded source: {}", e))?;
+        println!(
+            "  dep {} (--lib): {} lines → {}",
+            dep.package_name,
+            source.lines().count(),
+            expanded_path.display()
+        );
+        expanded_dependency_sources.push((dep.clone(), source));
+    }
 
     for target in &targets {
         let (expand_args, expand_desc): (Vec<String>, String) = match target.kind {
@@ -1429,18 +2015,32 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             &args.cpp_module_index,
         )?)
     };
+    let flattened_dependency_aliases: HashMap<String, String> = dependency_targets
+        .iter()
+        .map(|dep| (dep.package_name.replace('-', "_"), String::new()))
+        .collect();
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
+        external_crate_module_aliases: HashMap::new(),
     };
 
-    let mut generated_cppm_files: Vec<PathBuf> = Vec::new();
+    let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
     let mut extension_method_hints = HashSet::new();
+    for (_, source) in &expanded_dependency_sources {
+        extension_method_hints.extend(transpile::collect_extension_method_hints(source));
+    }
     for (_, source) in &expanded_sources {
         extension_method_hints.extend(transpile::collect_extension_method_hints(source));
     }
     if args.dry_run {
+        for dep in &dependency_targets {
+            println!(
+                "  [dry-run] transpile dependency {} as module '{}' (cpp index: {})",
+                dep.package_name, dep.module_name, cpp_index_label
+            );
+        }
         for target in &targets {
             println!(
                 "  [dry-run] transpile {} as module '{}' (cpp index: {})",
@@ -1448,14 +2048,59 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             );
         }
     } else {
-        for (target, source) in &expanded_sources {
+        for (dep, source) in &expanded_dependency_sources {
+            let dep_crate_name = dep.package_name.replace('-', "_");
+            let mut dep_options = transpile_options.clone();
+            dep_options.external_crate_module_aliases = flattened_dependency_aliases
+                .iter()
+                .filter_map(|(crate_name, mapped)| {
+                    if crate_name == &dep_crate_name {
+                        None
+                    } else {
+                        Some((crate_name.clone(), mapped.clone()))
+                    }
+                })
+                .collect();
+            let cpp = transpile::transpile_full_with_options(
+                source,
+                Some(&dep.module_name),
+                &type_map,
+                &extension_method_hints,
+                Some(dep.package_name.as_str()),
+                &dep_options,
+            )?;
+            let dep_dir = dependency_dirs.get(&dep.module_name).ok_or_else(|| {
+                format!(
+                    "Missing dependency artifact directory for module '{}'",
+                    dep.module_name
+                )
+            })?;
+            let cppm_path = cppm_artifact_path(dep_dir, &dep.module_name);
+            std::fs::write(&cppm_path, &cpp)
+                .map_err(|e| format!("Failed to write transpiled dependency: {}", e))?;
+            println!(
+                "  dep {} ({}): {} lines → {}",
+                dep.package_name,
+                dep.module_name,
+                cpp.lines().count(),
+                cppm_path.display()
+            );
+            generated_cppm_files.push(GeneratedCppmArtifact {
+                path: cppm_path,
+                is_test_target: false,
+            });
+        }
+
+        for (target_idx, (target, source)) in expanded_sources.iter().enumerate() {
+            let mut target_options = transpile_options.clone();
+            target_options.external_crate_module_aliases = flattened_dependency_aliases.clone();
             let cpp = transpile::transpile_full_with_options(
                 source,
                 Some(&target.module_name),
                 &type_map,
                 &extension_method_hints,
                 Some(crate_name),
-                &transpile_options,
+                &target_options,
             )?;
             let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
                 format!(
@@ -1472,7 +2117,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 cpp.lines().count(),
                 cppm_path.display()
             );
-            generated_cppm_files.push(cppm_path);
+            generated_cppm_files.push(GeneratedCppmArtifact {
+                path: cppm_path,
+                is_test_target: target_idx > 0,
+            });
         }
     }
     if should_stop("transpile") {
@@ -1508,6 +2156,12 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 "No .cppm files generated in this run — Stage C may have failed".to_string(),
             );
         }
+        let mut cppm_units: Vec<(GeneratedCppmArtifact, String)> = Vec::new();
+        for artifact in &cppm_files {
+            let content = std::fs::read_to_string(&artifact.path)
+                .map_err(|e| format!("Failed to read {}: {}", artifact.path.display(), e))?;
+            cppm_units.push((artifact.clone(), content));
+        }
 
         // Generate runner: strip module syntax, add includes, add main
         let mut runner_src = String::new();
@@ -1526,6 +2180,18 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         );
         runner_src.push_str("template<class... Ts>\n");
         runner_src.push_str("overloaded(Ts...) -> overloaded<Ts...>;\n\n");
+        let mut hoisted_forward_decls: BTreeSet<String> = BTreeSet::new();
+        for (_, content) in &cppm_units {
+            hoisted_forward_decls.extend(collect_namespace_forward_declarations(content));
+        }
+        if !hoisted_forward_decls.is_empty() {
+            runner_src.push_str("// Hoisted namespace forward declarations\n");
+            for decl in &hoisted_forward_decls {
+                runner_src.push_str(decl);
+                runner_src.push('\n');
+            }
+            runner_src.push('\n');
+        }
 
         // Collect test names and transpiled code
         let mut test_entries: Vec<RunnerTestEntry> = Vec::new();
@@ -1538,16 +2204,14 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             .map(|target| format!("{}::", target.module_name))
             .collect();
 
-        for (cppm_index, cppm_path) in cppm_files.iter().enumerate() {
-            let content = std::fs::read_to_string(cppm_path)
-                .map_err(|e| format!("Failed to read {}: {}", cppm_path.display(), e))?;
-
+        for (cppm_index, (artifact, content)) in cppm_units.iter().enumerate() {
+            let cppm_path = &artifact.path;
             let mut pending_overloaded_template = false;
             let mut unit_emitted_runtime_prelude = false;
             let mut skip_shared_prelude = cppm_index > 0 && runtime_prelude_emitted;
-            collect_rusty_test_entries_from_cppm(&content, &mut seen_test_fns, &mut test_entries);
+            collect_rusty_test_entries_from_cppm(content, &mut seen_test_fns, &mut test_entries);
 
-            let is_test_target = cppm_index > 0;
+            let is_test_target = artifact.is_test_target;
             // Definitions collected from THIS cppm file — added to
             // `seen_definitions` at end of file so within-file reopened
             // namespaces are not falsely deduplicated.
@@ -1622,11 +2286,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 if is_overloaded_struct_line(trimmed) || is_overloaded_deduction_line(trimmed) {
                     continue;
                 }
-                // Strip 'export ' prefix from declarations
-                let line = if let Some(rest) = line.strip_prefix("export ") {
-                    rest
-                } else {
-                    line
+                // Strip `export` from declarations, preserving indentation.
+                // C++ `export` is module syntax; the parity runner is a flat TU.
+                let line = {
+                    let trimmed_start = line.trim_start();
+                    if let Some(rest) = trimmed_start.strip_prefix("export ") {
+                        let indent_len = line.len() - trimmed_start.len();
+                        let indent = &line[..indent_len];
+                        format!("{}{}", indent, rest)
+                    } else {
+                        line.to_string()
+                    }
                 };
                 // Skip duplicate top-level definitions across test targets.
                 // Multiple test targets may define identical helpers (e.g.,
@@ -1662,7 +2332,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                         this_file_definitions.push(sig);
                     }
                 }
-                runner_src.push_str(line);
+                runner_src.push_str(&line);
                 runner_src.push('\n');
                 if trimmed == "namespace rusty {"
                     && (content.contains("namespace panicking {")
@@ -1688,63 +2358,94 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         }
 
         if test_entries.is_empty() {
-            return Err("No transpiled test wrappers discovered (expected exported rusty_test_* functions).".to_string());
-        }
-        test_entries.sort_by(|a, b| a.fn_name.cmp(&b.fn_name));
-
-        // Generate main() that runs all tests
-        runner_src.push_str("\n// ── Test runner ──\n");
-        runner_src.push_str("int main(int argc, char** argv) {\n");
-        runner_src
-            .push_str("    if (argc == 3 && std::string(argv[1]) == \"--rusty-single-test\") {\n");
-        runner_src.push_str("        const std::string test_name = argv[2];\n");
-        runner_src.push_str("        rusty::mem::clear_all_forgotten_addresses();\n");
-        runner_src.push_str("        try {\n");
-        for entry in &test_entries {
-            runner_src.push_str(&format!(
-                "            if (test_name == \"{}\") {{ {}(); return 0; }}\n",
-                entry.fn_name, entry.fn_name
-            ));
-        }
-        runner_src.push_str(
-            "            std::cerr << \"Unknown single-test wrapper: \" << test_name << std::endl;\n",
-        );
-        runner_src.push_str("            return 64;\n");
-        runner_src.push_str("        } catch (const std::exception& e) {\n");
-        runner_src.push_str("            std::cerr << e.what() << std::endl;\n");
-        runner_src.push_str("            return 101;\n");
-        runner_src.push_str("        } catch (...) {\n");
-        runner_src.push_str("            return 102;\n");
-        runner_src.push_str("        }\n");
-        runner_src.push_str("    }\n");
-        runner_src.push_str("    int pass = 0, fail = 0;\n");
-        for entry in &test_entries {
-            let fn_name = &entry.fn_name;
-            let label = &entry.label;
-            if entry.should_panic {
-                runner_src.push_str(&format!(
-                    "    {{\n        const std::string cmd = std::string(\"\\\"\") + argv[0] + \"\\\" --rusty-single-test {}\";\n        const int status = std::system(cmd.c_str());\n        if (status != 0) {{ std::cout << \"  {} PASSED (expected panic)\" << std::endl; pass++; }}\n        else {{ std::cerr << \"  {} FAILED: expected panic\" << std::endl; fail++; }}\n    }}\n",
-                    fn_name, label, label
-                ));
+            let baseline_ran_tests = if args.no_baseline {
+                None
             } else {
+                baseline_ran_any_tests(&work_dir)
+            };
+            let allow_empty_from_baseline = matches!(baseline_ran_tests, Some(false));
+
+            if !args.allow_empty_tests && !allow_empty_from_baseline {
+                return Err("No transpiled test wrappers discovered (expected exported rusty_test_* functions).".to_string());
+            }
+            if args.allow_empty_tests {
+                println!(
+                    "  No transpiled test wrappers discovered; continuing due to --allow-empty-tests"
+                );
+            } else if allow_empty_from_baseline {
+                println!(
+                    "  No transpiled test wrappers discovered; baseline reported zero tests, continuing with compile-validation only"
+                );
+            } else {
+                println!("  No transpiled test wrappers discovered; compile-validation only");
+            }
+            runner_src.push_str("\n// ── Compile-validation runner ──\n");
+            runner_src.push_str("int main() {\n");
+            runner_src.push_str(
+                "    std::cout << \"No transpiled test wrappers discovered; compile-validation only.\" << std::endl;\n",
+            );
+            runner_src.push_str("    return 0;\n");
+            runner_src.push_str("}\n");
+        } else {
+            test_entries.sort_by(|a, b| a.fn_name.cmp(&b.fn_name));
+
+            // Generate main() that runs all tests
+            runner_src.push_str("\n// ── Test runner ──\n");
+            runner_src.push_str("int main(int argc, char** argv) {\n");
+            runner_src.push_str(
+                "    if (argc == 3 && std::string(argv[1]) == \"--rusty-single-test\") {\n",
+            );
+            runner_src.push_str("        const std::string test_name = argv[2];\n");
+            runner_src.push_str("        rusty::mem::clear_all_forgotten_addresses();\n");
+            runner_src.push_str("        try {\n");
+            for entry in &test_entries {
                 runner_src.push_str(&format!(
-                    "    rusty::mem::clear_all_forgotten_addresses();\n    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
-                    fn_name, label
-                ));
-                runner_src.push_str(&format!(
-                    "    catch (const std::exception& e) {{ std::cerr << \"  {} FAILED: \" << e.what() << std::endl; fail++; }}\n",
-                    label
-                ));
-                runner_src.push_str(&format!(
-                    "    catch (...) {{ std::cerr << \"  {} FAILED (unknown exception)\" << std::endl; fail++; }}\n",
-                    label
+                    "            if (test_name == \"{}\") {{ {}(); return 0; }}\n",
+                    entry.fn_name, entry.fn_name
                 ));
             }
+            runner_src.push_str(
+                "            std::cerr << \"Unknown single-test wrapper: \" << test_name << std::endl;\n",
+            );
+            runner_src.push_str("            return 64;\n");
+            runner_src.push_str("        } catch (const std::exception& e) {\n");
+            runner_src.push_str("            std::cerr << e.what() << std::endl;\n");
+            runner_src.push_str("            return 101;\n");
+            runner_src.push_str("        } catch (...) {\n");
+            runner_src.push_str("            return 102;\n");
+            runner_src.push_str("        }\n");
+            runner_src.push_str("    }\n");
+            runner_src.push_str("    int pass = 0, fail = 0;\n");
+            for entry in &test_entries {
+                let fn_name = &entry.fn_name;
+                let label = &entry.label;
+                if entry.should_panic {
+                    runner_src.push_str(&format!(
+                        "    {{\n        const std::string cmd = std::string(\"\\\"\") + argv[0] + \"\\\" --rusty-single-test {}\";\n        const int status = std::system(cmd.c_str());\n        if (status != 0) {{ std::cout << \"  {} PASSED (expected panic)\" << std::endl; pass++; }}\n        else {{ std::cerr << \"  {} FAILED: expected panic\" << std::endl; fail++; }}\n    }}\n",
+                        fn_name, label, label
+                    ));
+                } else {
+                    runner_src.push_str(&format!(
+                        "    rusty::mem::clear_all_forgotten_addresses();\n    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
+                        fn_name, label
+                    ));
+                    runner_src.push_str(&format!(
+                        "    catch (const std::exception& e) {{ std::cerr << \"  {} FAILED: \" << e.what() << std::endl; fail++; }}\n",
+                        label
+                    ));
+                    runner_src.push_str(&format!(
+                        "    catch (...) {{ std::cerr << \"  {} FAILED (unknown exception)\" << std::endl; fail++; }}\n",
+                        label
+                    ));
+                }
+            }
+            runner_src.push_str("    std::cout << std::endl;\n");
+            runner_src.push_str(
+                "    std::cout << \"Results: \" << pass << \" passed, \" << fail << \" failed\" << std::endl;\n",
+            );
+            runner_src.push_str("    return fail > 0 ? 1 : 0;\n");
+            runner_src.push_str("}\n");
         }
-        runner_src.push_str("    std::cout << std::endl;\n");
-        runner_src.push_str("    std::cout << \"Results: \" << pass << \" passed, \" << fail << \" failed\" << std::endl;\n");
-        runner_src.push_str("    return fail > 0 ? 1 : 0;\n");
-        runner_src.push_str("}\n");
 
         std::fs::write(&runner_path, &runner_src)
             .map_err(|e| format!("Failed to write runner: {}", e))?;
@@ -1919,6 +2620,7 @@ fn main() {
         by_value_cycle_breaking_prototype: cli.by_value_cycle_breaking_prototype,
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
+        external_crate_module_aliases: HashMap::new(),
     };
 
     // Handle --crate: transpile entire crate

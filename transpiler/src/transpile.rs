@@ -62,6 +62,9 @@ pub struct TranspileOptions {
     /// Source paths used to load the configured C++ module symbol index.
     /// Used in diagnostics so unresolved-symbol errors point to the configured index input.
     pub cpp_module_symbol_index_sources: Vec<PathBuf>,
+    /// Maps Rust external crate roots to transpiled C++ module namespaces available
+    /// in the current compilation unit (for example `serde_core` -> `serde_core`).
+    pub external_crate_module_aliases: HashMap<String, String>,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -383,6 +386,7 @@ pub fn transpile_full_with_options(
         codegen.set_crate_name(name);
     }
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
+    codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);

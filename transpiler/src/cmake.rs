@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
 /// Minimal Cargo.toml structure for CMake generation.
@@ -67,10 +67,45 @@ pub fn extract_dependencies(cargo: &CargoToml) -> Vec<CrateDep> {
 #[allow(dead_code)]
 pub struct Package {
     pub name: String,
-    #[serde(default = "default_version")]
+    #[serde(
+        default = "default_version",
+        deserialize_with = "deserialize_version_field"
+    )]
     pub version: String,
-    #[serde(default = "default_edition")]
+    #[serde(
+        default = "default_edition",
+        deserialize_with = "deserialize_edition_field"
+    )]
     pub edition: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CargoStringField {
+    String(String),
+    Table(toml::value::Table),
+}
+
+fn deserialize_version_field<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<CargoStringField>::deserialize(deserializer)?;
+    Ok(match raw {
+        Some(CargoStringField::String(value)) if !value.is_empty() => value,
+        _ => default_version(),
+    })
+}
+
+fn deserialize_edition_field<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<CargoStringField>::deserialize(deserializer)?;
+    Ok(match raw {
+        Some(CargoStringField::String(value)) if !value.is_empty() => value,
+        _ => default_edition(),
+    })
 }
 
 fn default_version() -> String {
@@ -303,6 +338,20 @@ mod tests {
         assert_eq!(cargo.package.version, "1.0.0");
         assert!(cargo.bins.is_some());
         assert_eq!(cargo.bins.as_ref().unwrap()[0].name, "hello");
+    }
+
+    #[test]
+    fn test_parse_cargo_toml_workspace_inherited_package_fields() {
+        let toml_str = r#"
+            [package]
+            name = "hello"
+            version.workspace = true
+            edition.workspace = true
+        "#;
+        let cargo: CargoToml = toml::from_str(toml_str).unwrap();
+        assert_eq!(cargo.package.name, "hello");
+        assert_eq!(cargo.package.version, "0.1.0");
+        assert_eq!(cargo.package.edition, "2021");
     }
 
     #[test]

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <type_traits>
+#include <utility>
 
 namespace rusty::num {
 
@@ -50,8 +51,40 @@ public:
     }
 };
 
+template<typename T>
+struct Wrapping {
+    T _0{};
+
+    constexpr Wrapping() = default;
+    constexpr explicit Wrapping(T value) : _0(std::move(value)) {}
+    constexpr T value() const {
+        return _0;
+    }
+};
+
+template<typename T>
+struct Saturating {
+    T _0{};
+
+    constexpr Saturating() = default;
+    constexpr explicit Saturating(T value) : _0(std::move(value)) {}
+    constexpr T value() const {
+        return _0;
+    }
+};
+
 using NonZeroUsize = NonZero<std::size_t>;
 using NonZeroU64 = NonZero<std::uint64_t>;
+using NonZeroI8 = NonZero<std::int8_t>;
+using NonZeroI16 = NonZero<std::int16_t>;
+using NonZeroI32 = NonZero<std::int32_t>;
+using NonZeroI64 = NonZero<std::int64_t>;
+using NonZeroI128 = NonZero<__int128>;
+using NonZeroIsize = NonZero<std::ptrdiff_t>;
+using NonZeroU8 = NonZero<std::uint8_t>;
+using NonZeroU16 = NonZero<std::uint16_t>;
+using NonZeroU32 = NonZero<std::uint32_t>;
+using NonZeroU128 = NonZero<unsigned __int128>;
 
 } // namespace rusty::num
 

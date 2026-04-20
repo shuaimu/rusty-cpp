@@ -14,6 +14,30 @@ struct TcpStream {
     ~TcpStream() = default;
 };
 
+struct IpAddr {
+    IpAddr() = default;
+};
+
+struct Ipv4Addr {
+    Ipv4Addr() = default;
+};
+
+struct Ipv6Addr {
+    Ipv6Addr() = default;
+};
+
+struct SocketAddr {
+    SocketAddr() = default;
+};
+
+struct SocketAddrV4 {
+    SocketAddrV4() = default;
+};
+
+struct SocketAddrV6 {
+    SocketAddrV6() = default;
+};
+
 } // namespace rusty::net
 
 #endif // RUSTY_NET_HPP

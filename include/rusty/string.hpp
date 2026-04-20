@@ -15,6 +15,8 @@
 #include <span>
 #include <limits>
 #include <stdexcept>
+#include <utility>
+#include "rusty/box.hpp"
 #include "rusty/fmt.hpp"
 
 // @safe
@@ -28,6 +30,48 @@ class str;
 // Manages a heap-allocated, growable UTF-8 string
 class String {
 private:
+    static bool is_valid_utf8_bytes(const unsigned char* data, size_t len) {
+        size_t i = 0;
+        while (i < len) {
+            const auto byte = data[i];
+            if (byte <= 0x7F) {
+                ++i;
+                continue;
+            }
+            if ((byte >> 5) == 0x6) {
+                if (i + 1 >= len) return false;
+                const auto b1 = data[i + 1];
+                if ((b1 & 0xC0) != 0x80 || byte < 0xC2) return false;
+                i += 2;
+                continue;
+            }
+            if ((byte >> 4) == 0xE) {
+                if (i + 2 >= len) return false;
+                const auto b1 = data[i + 1];
+                const auto b2 = data[i + 2];
+                if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return false;
+                if (byte == 0xE0 && b1 < 0xA0) return false;
+                if (byte == 0xED && b1 >= 0xA0) return false;
+                i += 3;
+                continue;
+            }
+            if ((byte >> 3) == 0x1E) {
+                if (i + 3 >= len) return false;
+                const auto b1 = data[i + 1];
+                const auto b2 = data[i + 2];
+                const auto b3 = data[i + 3];
+                if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;
+                if (byte == 0xF0 && b1 < 0x90) return false;
+                if (byte == 0xF4 && b1 >= 0x90) return false;
+                if (byte > 0xF4) return false;
+                i += 4;
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+
     char* data_;
     size_t len_;      // Current length (excluding null terminator)
     size_t capacity_; // Allocated capacity (including space for null terminator)
@@ -117,6 +161,45 @@ public:
         s.len_ = sv.length();
         s.ensure_null_terminated();
         return s;
+    }
+
+    // Rust-like lossy UTF-8 decode helper used by expanded crates.
+    // Current runtime keeps a byte-preserving fallback to maintain compile parity.
+    static String from_utf8_lossy(std::span<const uint8_t> bytes) {
+        String s;
+        if (bytes.empty()) {
+            return s;
+        }
+        s.grow(bytes.size() + 1);
+        for (size_t i = 0; i < bytes.size(); i++) {
+            s.data_[i] = static_cast<char>(bytes[i]);
+        }
+        s.len_ = bytes.size();
+        s.ensure_null_terminated();
+        return s;
+    }
+
+    template<typename Bytes>
+    static rusty::Result<String, String> from_utf8(Bytes&& bytes) {
+        if constexpr (requires { bytes.data(); bytes.size(); }) {
+            const auto* raw = bytes.data();
+            const size_t len = static_cast<size_t>(bytes.size());
+            const auto* data = reinterpret_cast<const unsigned char*>(raw);
+            if (!is_valid_utf8_bytes(data, len)) {
+                return rusty::Result<String, String>::Err(String::from("invalid utf-8"));
+            }
+            String s;
+            if (len > 0) {
+                s.grow(len + 1);
+                for (size_t i = 0; i < len; i++) {
+                    s.data_[i] = static_cast<char>(data[i]);
+                }
+                s.len_ = len;
+                s.ensure_null_terminated();
+            }
+            return rusty::Result<String, String>::Ok(std::move(s));
+        }
+        return rusty::Result<String, String>::Err(String::from("unsupported from_utf8 input"));
     }
     
     // Move constructor (String is move-only)
@@ -313,6 +396,34 @@ public:
     // @lifetime: owned
     std::string to_string() const {
         return data_ ? std::string(data_, len_) : std::string();
+    }
+
+    std::vector<uint8_t> into_bytes() && {
+        std::vector<uint8_t> out;
+        out.reserve(len_);
+        for (size_t i = 0; i < len_; i++) {
+            out.push_back(static_cast<uint8_t>(data_[i]));
+        }
+        return out;
+    }
+
+    std::vector<uint8_t> into_bytes() const& {
+        std::vector<uint8_t> out;
+        out.reserve(len_);
+        for (size_t i = 0; i < len_; i++) {
+            out.push_back(static_cast<uint8_t>(data_[i]));
+        }
+        return out;
+    }
+
+    // Rust `String::into_boxed_str()`.
+    // Keep owned storage by boxing the String itself.
+    Box<String> into_boxed_str() && {
+        return Box<String>::new_(std::move(*this));
+    }
+
+    Box<String> into_boxed_str() const& {
+        return Box<String>::new_(this->clone());
     }
     
     // Character access
@@ -617,6 +728,22 @@ public:
     }
 };
 
+inline Box<String> into_boxed_str(String value) {
+    return Box<String>::new_(std::move(value));
+}
+
+inline Box<String> into_boxed_str(std::string value) {
+    return Box<String>::new_(String::from(value));
+}
+
+inline Box<String> into_boxed_str(std::string_view value) {
+    return Box<String>::new_(String::from(value));
+}
+
+inline Box<String> into_boxed_str(const char* value) {
+    return Box<String>::new_(String::from(value));
+}
+
 // str - borrowed string slice (similar to Rust's &str)
 // This is a non-owning view into a string
 class str {
@@ -710,8 +837,10 @@ inline std::tuple<std::string_view, std::string_view> split_at(std::string_view 
 // Symmetric comparison: allow `"str" == rusty::String` and `"str" == rusty::str`
 inline bool operator==(const char* lhs, const String& rhs) { return rhs == lhs; }
 inline bool operator!=(const char* lhs, const String& rhs) { return !(rhs == lhs); }
-inline bool operator==(const char* lhs, const str& rhs) { return rhs == lhs; }
-inline bool operator!=(const char* lhs, const str& rhs) { return !(rhs == lhs); }
+inline bool operator==(const char* lhs, const str& rhs) {
+    return std::string_view(lhs ? lhs : "") == rhs.as_str();
+}
+inline bool operator!=(const char* lhs, const str& rhs) { return !(lhs == rhs); }
 // Also support string_view comparisons
 inline bool operator==(std::string_view lhs, const String& rhs) { return lhs == rhs.as_str(); }
 inline bool operator==(const String& lhs, std::string_view rhs) { return lhs.as_str() == rhs; }

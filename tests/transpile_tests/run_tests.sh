@@ -165,6 +165,11 @@ run_test "pollster" \
     "master" \
     "Minimal async executor — Future/Poll/waker block_on paths"
 
+run_test "toml" \
+    "https://github.com/toml-rs/toml.git" \
+    "main" \
+    "Serde-backed TOML parser/serializer — data model, derive-heavy encode/decode"
+
 # ── Summary ─────────────────────────────────────────────
 
 echo "╔═══════════════════════════════════════════════════╗"

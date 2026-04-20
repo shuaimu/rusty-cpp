@@ -1,6 +1,7 @@
 #ifndef RUSTY_BOX_HPP
 #define RUSTY_BOX_HPP
 
+#include <string_view>
 #include <type_traits>  // for std::enable_if, std::is_convertible, std::is_same
 #include <utility>  // for std::move, std::forward
 
@@ -160,6 +161,16 @@ public:
     explicit operator bool() const {
         return is_valid();
     }
+
+    // String-like deref coercion for Box<str>/Box<String>-style call sites.
+    template<typename U = T>
+    requires (std::is_convertible_v<const U&, std::string_view>)
+    operator std::string_view() const {
+        if (!ptr) {
+            return std::string_view();
+        }
+        return static_cast<std::string_view>(*ptr);
+    }
     
     // Take ownership of the raw pointer (Rust: Box::into_raw)
     // After this, the Box is empty and caller is responsible for deletion
@@ -207,6 +218,31 @@ Box<T> make_box(Args&&... args) {
         // new and std::forward are unsafe operations
         return Box<T>(new T(std::forward<Args>(args)...));
     }
+}
+
+template<typename L, typename R>
+requires (
+    requires(const L& lhs, const R& rhs) { lhs == rhs; } ||
+    requires(const L& lhs, const R& rhs) { rhs == lhs; }
+)
+bool operator==(const Box<L>& lhs, const Box<R>& rhs) {
+    if (!lhs.is_valid() || !rhs.is_valid()) {
+        return lhs.get() == rhs.get();
+    }
+    if constexpr (requires(const L& left, const R& right) { left == right; }) {
+        return *lhs == *rhs;
+    } else {
+        return *rhs == *lhs;
+    }
+}
+
+template<typename L, typename R>
+requires (
+    requires(const L& lhs, const R& rhs) { lhs == rhs; } ||
+    requires(const L& lhs, const R& rhs) { rhs == lhs; }
+)
+bool operator!=(const Box<L>& lhs, const Box<R>& rhs) {
+    return !(lhs == rhs);
 }
 
 } // namespace rusty

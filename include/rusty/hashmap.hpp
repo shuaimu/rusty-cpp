@@ -960,6 +960,96 @@ public:
     }
 };
 
+namespace detail {
+
+template<typename Map, typename Key>
+class HashMapVacantEntryProxy {
+    using key_type = std::remove_cvref_t<Key>;
+
+public:
+    HashMapVacantEntryProxy(Map& map, key_type key) : map_(&map), key_(std::move(key)) {}
+
+    const key_type& key() const {
+        return key_;
+    }
+
+    template<typename Value>
+    decltype(auto) insert(Value&& value) const {
+        auto& slot = map_->entry(std::move(key_));
+        slot = std::forward<Value>(value);
+        return (slot);
+    }
+
+private:
+    Map* map_;
+    mutable key_type key_;
+};
+
+template<typename Map, typename Key>
+class HashMapOccupiedEntryProxy {
+    using key_type = std::remove_cvref_t<Key>;
+
+public:
+    HashMapOccupiedEntryProxy(Map& map, key_type key) : map_(&map), key_(std::move(key)) {}
+
+    const key_type& key() const {
+        return key_;
+    }
+
+    decltype(auto) get() const {
+        return map_->entry(key_);
+    }
+
+    template<typename Value>
+    decltype(auto) insert(Value&& value) const {
+        auto& slot = map_->entry(key_);
+        slot = std::forward<Value>(value);
+        return (slot);
+    }
+
+private:
+    Map* map_;
+    mutable key_type key_;
+};
+
+template<typename Map, typename Key>
+class HashMapEntryProbe {
+    using key_type = std::remove_cvref_t<Key>;
+
+public:
+    HashMapEntryProbe(Map& map, key_type key)
+        : map_(&map), key_(std::move(key)), is_vacant_(!map.contains_key(key_)) {}
+
+    bool is_vacant() const {
+        return is_vacant_;
+    }
+
+    bool is_occupied() const {
+        return !is_vacant_;
+    }
+
+    HashMapVacantEntryProxy<Map, key_type> vacant_entry() const {
+        return HashMapVacantEntryProxy<Map, key_type>(*map_, std::move(key_));
+    }
+
+    HashMapOccupiedEntryProxy<Map, key_type> occupied_entry() const {
+        return HashMapOccupiedEntryProxy<Map, key_type>(*map_, std::move(key_));
+    }
+
+private:
+    Map* map_;
+    mutable key_type key_;
+    bool is_vacant_;
+};
+
+template<typename Map, typename Key>
+auto make_entry_probe(Map& map, Key&& key) {
+    using key_type = std::remove_cvref_t<Key>;
+    return HashMapEntryProbe<Map, key_type>(map, key_type(std::forward<Key>(key)));
+}
+
+} // namespace detail
+
 // Factory function
 template<typename K, typename V>
 // @lifetime: owned

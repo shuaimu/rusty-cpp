@@ -225,6 +225,25 @@ fn create_integration_only_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
     dir.join("Cargo.toml")
 }
 
+/// Create a fixture with no unit/integration tests, therefore no wrappers.
+fn create_no_wrappers_fixture(dir: &std::path::Path) -> PathBuf {
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"no_wrappers_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+
+    dir.join("Cargo.toml")
+}
+
 /// Create a fixture with bin/test target names that collide after normalization.
 fn create_module_name_collision_fixture(dir: &std::path::Path) -> PathBuf {
     let src_dir = dir.join("src");
@@ -1009,6 +1028,7 @@ fn test_stop_after_build_succeeds_for_integration_only_crate() {
         .arg("parity-test")
         .arg("--manifest-path")
         .arg(&manifest)
+        .arg("--no-baseline")
         .arg("--stop-after")
         .arg("build")
         .arg("--work-dir")
@@ -1326,6 +1346,7 @@ fn test_stop_after_build_generates_runner_entries_from_discovered_wrappers() {
         .arg("parity-test")
         .arg("--manifest-path")
         .arg(&manifest)
+        .arg("--no-baseline")
         .arg("--stop-after")
         .arg("build")
         .arg("--work-dir")
@@ -1363,6 +1384,101 @@ fn test_stop_after_build_generates_runner_entries_from_discovered_wrappers() {
         "wrapper invocation order should be deterministic by wrapper name"
     );
     assert!(!runner_cpp.contains("TEST_CASE(\""));
+}
+
+#[test]
+fn test_stop_after_build_without_wrappers_errors_by_default() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_no_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--no-baseline")
+        .arg("--stop-after")
+        .arg("build")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        !output.status.success(),
+        "expected failure without wrappers"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("No transpiled test wrappers discovered"));
+}
+
+#[test]
+fn test_stop_after_run_without_wrappers_and_zero_baseline_auto_compile_validation() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_no_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--stop-after")
+        .arg("run")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(
+            "No transpiled test wrappers discovered; baseline reported zero tests, continuing with compile-validation only"
+        )
+    );
+    assert!(stdout.contains("Run: PASS"));
+
+    let run_log = std::fs::read_to_string(run_log_path(work_dir.path())).expect("read run.log");
+    assert!(run_log.contains("compile-validation only"));
+}
+
+#[test]
+fn test_stop_after_run_without_wrappers_allowed_with_compile_validation() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let manifest = create_no_wrappers_fixture(fixture_dir.path());
+    let work_dir = tempfile::tempdir().unwrap();
+
+    let output = transpiler_bin()
+        .arg("parity-test")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--allow-empty-tests")
+        .arg("--stop-after")
+        .arg("run")
+        .arg("--work-dir")
+        .arg(work_dir.path())
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(
+            "No transpiled test wrappers discovered; continuing due to --allow-empty-tests"
+        )
+    );
+    assert!(stdout.contains("Run: PASS"));
+
+    let run_log = std::fs::read_to_string(run_log_path(work_dir.path())).expect("read run.log");
+    assert!(run_log.contains("compile-validation only"));
 }
 
 #[test]

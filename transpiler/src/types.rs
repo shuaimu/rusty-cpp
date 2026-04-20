@@ -25,6 +25,57 @@ pub fn map_primitive_type(rust_type: &str) -> Option<&'static str> {
 /// Returns (cpp_type_base, needs_template_args).
 pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
     match rust_path {
+        // Primitive module aliases occasionally appear in expanded code via
+        // imports like `use core::usize;`.
+        "std::bool" | "core::bool" | "std::primitive::bool" | "core::primitive::bool" => {
+            Some(("bool", false))
+        }
+        "std::char" | "core::char" | "std::primitive::char" | "core::primitive::char" => {
+            Some(("char32_t", false))
+        }
+        "std::i8" | "core::i8" | "std::primitive::i8" | "core::primitive::i8" => {
+            Some(("int8_t", false))
+        }
+        "std::i16" | "core::i16" | "std::primitive::i16" | "core::primitive::i16" => {
+            Some(("int16_t", false))
+        }
+        "std::i32" | "core::i32" | "std::primitive::i32" | "core::primitive::i32" => {
+            Some(("int32_t", false))
+        }
+        "std::i64" | "core::i64" | "std::primitive::i64" | "core::primitive::i64" => {
+            Some(("int64_t", false))
+        }
+        "std::i128" | "core::i128" | "std::primitive::i128" | "core::primitive::i128" => {
+            Some(("__int128", false))
+        }
+        "std::isize" | "core::isize" | "std::primitive::isize" | "core::primitive::isize" => {
+            Some(("ptrdiff_t", false))
+        }
+        "std::u8" | "core::u8" | "std::primitive::u8" | "core::primitive::u8" => {
+            Some(("uint8_t", false))
+        }
+        "std::u16" | "core::u16" | "std::primitive::u16" | "core::primitive::u16" => {
+            Some(("uint16_t", false))
+        }
+        "std::u32" | "core::u32" | "std::primitive::u32" | "core::primitive::u32" => {
+            Some(("uint32_t", false))
+        }
+        "std::u64" | "core::u64" | "std::primitive::u64" | "core::primitive::u64" => {
+            Some(("uint64_t", false))
+        }
+        "std::u128" | "core::u128" | "std::primitive::u128" | "core::primitive::u128" => {
+            Some(("unsigned __int128", false))
+        }
+        "std::usize" | "core::usize" | "std::primitive::usize" | "core::primitive::usize" => {
+            Some(("size_t", false))
+        }
+        "std::f32" | "core::f32" | "std::primitive::f32" | "core::primitive::f32" => {
+            Some(("float", false))
+        }
+        "std::f64" | "core::f64" | "std::primitive::f64" | "core::primitive::f64" => {
+            Some(("double", false))
+        }
+
         // Smart pointers
         "Box" | "std::boxed::Box" => Some(("rusty::Box", true)),
         "Rc" | "std::rc::Rc" => Some(("rusty::Rc", true)),
@@ -43,10 +94,21 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "BTreeMap" | "std::collections::BTreeMap" => Some(("rusty::BTreeMap", true)),
         "BTreeSet" | "std::collections::BTreeSet" => Some(("rusty::BTreeSet", true)),
         "VecDeque" | "std::collections::VecDeque" => Some(("rusty::VecDeque", true)),
+        "std::collections::hash_map::DefaultHasher" => Some(("DefaultHasher", false)),
+        // Fallback aliases for collection families not yet modeled separately.
+        // Keep a deterministic compile surface in expanded serde-style targets.
+        "BinaryHeap" | "std::collections::BinaryHeap" => Some(("rusty::Vec", true)),
+        "LinkedList" | "std::collections::LinkedList" => Some(("rusty::Vec", true)),
 
         // Strings
         "String" | "std::string::String" => Some(("rusty::String", false)),
         "net::TcpStream" | "std::net::TcpStream" => Some(("rusty::net::TcpStream", false)),
+        "net::IpAddr" | "std::net::IpAddr" => Some(("rusty::net::IpAddr", false)),
+        "net::Ipv4Addr" | "std::net::Ipv4Addr" => Some(("rusty::net::Ipv4Addr", false)),
+        "net::Ipv6Addr" | "std::net::Ipv6Addr" => Some(("rusty::net::Ipv6Addr", false)),
+        "net::SocketAddr" | "std::net::SocketAddr" => Some(("rusty::net::SocketAddr", false)),
+        "net::SocketAddrV4" | "std::net::SocketAddrV4" => Some(("rusty::net::SocketAddrV4", false)),
+        "net::SocketAddrV6" | "std::net::SocketAddrV6" => Some(("rusty::net::SocketAddrV6", false)),
 
         // Error handling
         "Option" | "std::option::Option" => Some(("rusty::Option", true)),
@@ -156,17 +218,62 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "NonNull" | "std::ptr::NonNull" | "core::ptr::NonNull" => {
             Some(("rusty::ptr::NonNull", true))
         }
-        "NonZeroUsize" | "std::num::NonZeroUsize" | "core::num::NonZeroUsize" => {
-            Some(("rusty::num::NonZeroUsize", false))
-        }
-        "NonZeroU64" | "std::num::NonZeroU64" | "core::num::NonZeroU64" => {
+        "NonZeroUsize"
+        | "num::NonZeroUsize"
+        | "std::num::NonZeroUsize"
+        | "core::num::NonZeroUsize" => Some(("rusty::num::NonZeroUsize", false)),
+        "NonZeroU64" | "num::NonZeroU64" | "std::num::NonZeroU64" | "core::num::NonZeroU64" => {
             Some(("rusty::num::NonZeroU64", false))
         }
-        "std::alloc::Layout" | "core::alloc::Layout" => Some(("rusty::alloc::Layout", false)),
+        "NonZeroI8" | "num::NonZeroI8" | "std::num::NonZeroI8" | "core::num::NonZeroI8" => {
+            Some(("rusty::num::NonZeroI8", false))
+        }
+        "NonZeroI16" | "num::NonZeroI16" | "std::num::NonZeroI16" | "core::num::NonZeroI16" => {
+            Some(("rusty::num::NonZeroI16", false))
+        }
+        "NonZeroI32" | "num::NonZeroI32" | "std::num::NonZeroI32" | "core::num::NonZeroI32" => {
+            Some(("rusty::num::NonZeroI32", false))
+        }
+        "NonZeroI64" | "num::NonZeroI64" | "std::num::NonZeroI64" | "core::num::NonZeroI64" => {
+            Some(("rusty::num::NonZeroI64", false))
+        }
+        "NonZeroI128" | "num::NonZeroI128" | "std::num::NonZeroI128" | "core::num::NonZeroI128" => {
+            Some(("rusty::num::NonZeroI128", false))
+        }
+        "NonZeroIsize"
+        | "num::NonZeroIsize"
+        | "std::num::NonZeroIsize"
+        | "core::num::NonZeroIsize" => Some(("rusty::num::NonZeroIsize", false)),
+        "NonZeroU8" | "num::NonZeroU8" | "std::num::NonZeroU8" | "core::num::NonZeroU8" => {
+            Some(("rusty::num::NonZeroU8", false))
+        }
+        "NonZeroU16" | "num::NonZeroU16" | "std::num::NonZeroU16" | "core::num::NonZeroU16" => {
+            Some(("rusty::num::NonZeroU16", false))
+        }
+        "NonZeroU32" | "num::NonZeroU32" | "std::num::NonZeroU32" | "core::num::NonZeroU32" => {
+            Some(("rusty::num::NonZeroU32", false))
+        }
+        "NonZeroU128" | "num::NonZeroU128" | "std::num::NonZeroU128" | "core::num::NonZeroU128" => {
+            Some(("rusty::num::NonZeroU128", false))
+        }
+        "Wrapping" | "num::Wrapping" | "std::num::Wrapping" | "core::num::Wrapping" => {
+            Some(("rusty::num::Wrapping", true))
+        }
+        "Saturating" | "num::Saturating" | "std::num::Saturating" | "core::num::Saturating" => {
+            Some(("rusty::num::Saturating", true))
+        }
+        "Reverse" | "cmp::Reverse" | "std::cmp::Reverse" | "core::cmp::Reverse" => {
+            Some(("rusty::cmp::Reverse", true))
+        }
+        "std::alloc::Layout" | "core::alloc::Layout" | "alloc::alloc::Layout" => {
+            Some(("rusty::alloc::Layout", false))
+        }
         "std::alloc::LayoutErr"
         | "core::alloc::LayoutErr"
         | "std::alloc::LayoutError"
-        | "core::alloc::LayoutError" => Some(("rusty::alloc::LayoutErr", false)),
+        | "core::alloc::LayoutError"
+        | "alloc::alloc::LayoutErr"
+        | "alloc::alloc::LayoutError" => Some(("rusty::alloc::LayoutErr", false)),
         "std::str::Utf8Error" | "core::str::Utf8Error" => {
             Some(("rusty::str_runtime::Utf8Error", false))
         }
@@ -176,10 +283,21 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Pin" | "std::pin::Pin" | "core::pin::Pin" => Some(("rusty::pin::Pin", true)),
         "std::future::Ready" | "core::future::Ready" => Some(("rusty::future::Ready", true)),
         "std::time::Instant" => Some(("rusty::time::Instant", false)),
-        "std::path::Path" => Some(("rusty::path::Path", false)),
-        "std::path::PathBuf" => Some(("rusty::path::PathBuf", false)),
-        "std::ffi::OsStr" => Some(("rusty::ffi::OsStr", false)),
-        "std::ffi::CStr" => Some(("rusty::ffi::CStr", false)),
+        "Duration" | "std::time::Duration" | "core::time::Duration" => {
+            Some(("rusty::time::Duration", false))
+        }
+        "SystemTime" | "std::time::SystemTime" | "core::time::SystemTime" => {
+            Some(("rusty::time::SystemTime", false))
+        }
+        "Path" | "std::path::Path" => Some(("rusty::path::Path", false)),
+        "PathBuf" | "std::path::PathBuf" => Some(("rusty::path::PathBuf", false)),
+        "Cow" | "std::borrow::Cow" | "core::borrow::Cow" | "alloc::borrow::Cow" => {
+            Some(("rusty::Cow", false))
+        }
+        "OsStr" | "std::ffi::OsStr" => Some(("rusty::ffi::OsStr", false)),
+        "CStr" | "std::ffi::CStr" => Some(("rusty::ffi::CStr", false)),
+        "CString" | "std::ffi::CString" => Some(("rusty::ffi::CString", false)),
+        "OsString" | "std::ffi::OsString" => Some(("rusty::ffi::OsString", false)),
         "std::process::Child" => Some(("rusty::process::Child", false)),
         "std::process::Command" => Some(("rusty::process::Command", false)),
 
@@ -197,7 +315,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "io::Stderr" | "std::io::Stderr" => Some(("rusty::io::Stderr", false)),
 
         // str (bare type, not &str — &str handled at Type::Reference level)
-        "str" => Some(("std::string_view", false)),
+        "str" | "core::primitive::str" | "std::primitive::str" => {
+            Some(("std::string_view", false))
+        }
 
         _ => None,
     }
@@ -216,6 +336,15 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         // String::from → rusty::String constructor
         "String::from" => Some("rusty::String::from"),
         "String::new" => Some("rusty::String::new_"),
+        "String::from_utf8"
+        | "std::string::String::from_utf8"
+        | "alloc::string::String::from_utf8" => Some("rusty::String::from_utf8"),
+        "String::from_utf8_lossy"
+        | "std::string::String::from_utf8_lossy"
+        | "alloc::string::String::from_utf8_lossy" => Some("rusty::String::from_utf8_lossy"),
+        "CString::new" | "CString::new_" | "std::ffi::CString::new" | "std::ffi::CString::new_" => {
+            Some("rusty::ffi::cstring_new")
+        }
         // Vec::new
         "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new" => Some("rusty::Vec::new_"),
         "vec::from_elem" | "std::vec::from_elem" | "alloc::vec::from_elem" => {
@@ -236,6 +365,13 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
             Some("rusty::future::Delay::new_")
         }
         "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
+        "DefaultHasher::new"
+        | "DefaultHasher::new_"
+        | "std::collections::hash_map::DefaultHasher::new"
+        | "std::collections::hash_map::DefaultHasher::new_" => Some("DefaultHasher::new_"),
+        "DefaultHasher::default" | "std::collections::hash_map::DefaultHasher::default" => {
+            Some("DefaultHasher::new_")
+        }
         "Vec::extend_from_slice"
         | "std::vec::Vec::extend_from_slice"
         | "alloc::vec::Vec::extend_from_slice" => Some("rusty::vec_extend_from_slice"),
@@ -338,17 +474,24 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "std::process::abort" => Some("std::abort"),
         "core::hash::Hash::hash" => Some("rusty::hash::hash"),
         "Add::add" | "core::ops::Add::add" | "std::ops::Add::add" => Some("rusty::ops::add_fn"),
-        "core::cmp::min" | "std::cmp::min" => Some("core::cmp::min"),
-        "core::cmp::max" | "std::cmp::max" => Some("core::cmp::max"),
+        "cmp::min" | "core::cmp::min" | "std::cmp::min" => Some("rusty::cmp::min"),
+        "cmp::max" | "core::cmp::max" | "std::cmp::max" => Some("rusty::cmp::max"),
         "std::str::from_utf8" | "core::str::from_utf8" | "str::from_utf8" => {
             Some("rusty::str_runtime::from_utf8")
         }
+        "std::string_view::from_utf8" => Some("rusty::str_runtime::from_utf8"),
         "std::str::from_utf8_unchecked"
         | "core::str::from_utf8_unchecked"
-        | "str::from_utf8_unchecked" => Some("rusty::str_runtime::from_utf8_unchecked"),
+        | "str::from_utf8_unchecked"
+        | "std::string_view::from_utf8_unchecked" => {
+            Some("rusty::str_runtime::from_utf8_unchecked")
+        }
         "std::str::from_utf8_unchecked_mut"
         | "core::str::from_utf8_unchecked_mut"
-        | "str::from_utf8_unchecked_mut" => Some("rusty::str_runtime::from_utf8_unchecked_mut"),
+        | "str::from_utf8_unchecked_mut"
+        | "std::string_view::from_utf8_unchecked_mut" => {
+            Some("rusty::str_runtime::from_utf8_unchecked_mut")
+        }
         "std::char::from_u32" | "core::char::from_u32" | "char::from_u32" => {
             Some("rusty::char_runtime::from_u32")
         }
@@ -491,10 +634,7 @@ mod tests {
             map_std_type("core::task::Poll"),
             Some(("rusty::Poll", true))
         );
-        assert_eq!(
-            map_std_type("std::task::Poll"),
-            Some(("rusty::Poll", true))
-        );
+        assert_eq!(map_std_type("std::task::Poll"), Some(("rusty::Poll", true)));
         assert_eq!(
             map_std_type("std::task::Context"),
             Some(("rusty::Context", false))
@@ -595,6 +735,10 @@ mod tests {
             map_std_type("std::net::TcpStream"),
             Some(("rusty::net::TcpStream", false))
         );
+        assert_eq!(
+            map_std_type("std::collections::hash_map::DefaultHasher"),
+            Some(("DefaultHasher", false))
+        );
     }
 
     #[test]
@@ -678,6 +822,18 @@ mod tests {
             map_function_path("String::new"),
             Some("rusty::String::new_")
         );
+        assert_eq!(
+            map_function_path("String::from_utf8"),
+            Some("rusty::String::from_utf8")
+        );
+        assert_eq!(
+            map_function_path("alloc::string::String::from_utf8"),
+            Some("rusty::String::from_utf8")
+        );
+        assert_eq!(
+            map_function_path("String::from_utf8_lossy"),
+            Some("rusty::String::from_utf8_lossy")
+        );
         assert_eq!(map_function_path("Vec::new"), Some("rusty::Vec::new_"));
         assert_eq!(
             map_function_path("alloc::vec::from_elem"),
@@ -711,6 +867,18 @@ mod tests {
             map_function_path("std::sync::atomic::fence"),
             Some("rusty::sync::atomic::fence")
         );
+        assert_eq!(
+            map_function_path("DefaultHasher::new"),
+            Some("DefaultHasher::new_")
+        );
+        assert_eq!(
+            map_function_path("std::collections::hash_map::DefaultHasher::new"),
+            Some("DefaultHasher::new_")
+        );
+        assert_eq!(
+            map_function_path("std::collections::hash_map::DefaultHasher::default"),
+            Some("DefaultHasher::new_")
+        );
         assert_eq!(map_function_path("Unknown::method"), None);
     }
 
@@ -736,8 +904,10 @@ mod tests {
             map_function_path("core::hash::Hash::hash"),
             Some("rusty::hash::hash")
         );
-        assert_eq!(map_function_path("std::cmp::min"), Some("core::cmp::min"));
-        assert_eq!(map_function_path("core::cmp::max"), Some("core::cmp::max"));
+        assert_eq!(map_function_path("std::cmp::min"), Some("rusty::cmp::min"));
+        assert_eq!(map_function_path("core::cmp::max"), Some("rusty::cmp::max"));
+        assert_eq!(map_function_path("cmp::min"), Some("rusty::cmp::min"));
+        assert_eq!(map_function_path("cmp::max"), Some("rusty::cmp::max"));
         assert_eq!(
             map_function_path("std::str::from_utf8"),
             Some("rusty::str_runtime::from_utf8")
@@ -897,6 +1067,18 @@ mod tests {
         assert_eq!(
             map_function_path("std::future::ready"),
             Some("rusty::future::ready")
+        );
+        assert_eq!(
+            map_function_path("std::string_view::from_utf8"),
+            Some("rusty::str_runtime::from_utf8")
+        );
+        assert_eq!(
+            map_function_path("std::string_view::from_utf8_unchecked"),
+            Some("rusty::str_runtime::from_utf8_unchecked")
+        );
+        assert_eq!(
+            map_function_path("std::string_view::from_utf8_unchecked_mut"),
+            Some("rusty::str_runtime::from_utf8_unchecked_mut")
         );
         assert_eq!(
             map_function_path("futures_timer::Delay::new"),

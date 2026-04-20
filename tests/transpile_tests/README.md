@@ -55,6 +55,13 @@ Tests the rusty-cpp transpiler against real-world Rust crates.
 |-------|--------------|
 | `pollster` | Minimal `block_on` executor, `Future`/`Poll`/waker interaction |
 
+### Tier 6: Serialization ecosystem (workspace crates)
+| Crate | What it tests |
+|-------|--------------|
+| `serde_core` | Core serialization traits, derives expansions, no-std oriented surfaces |
+| `serde` | Full serde crate wiring on top of `serde_core` with broader API coverage |
+| `toml` | Serde-backed TOML parser/serializer with medium-complex real-world data model coverage |
+
 ## What the tests check
 
 1. Transpilation succeeds (no panics, no errors)
