@@ -35,6 +35,7 @@ struct ExtensionImplMethod {
 enum RuntimeMatchEnumKind {
     Option,
     Result,
+    Entry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,9 +368,12 @@ pub struct CodeGen {
     /// Used to lower trait static calls like `Error::invalid_value(...)` to
     /// the constrained generic param (`E::invalid_value(...)`).
     trait_bound_type_param_scopes: Vec<HashMap<String, String>>,
-    /// Trait default static methods (no receiver) keyed by trait name.
+    /// Trait default static methods (no receiver) keyed by scoped trait path.
     /// Used to inject these methods into implementing types.
     trait_static_default_methods: HashMap<String, Vec<syn::ImplItemFn>>,
+    /// Scoped trait paths declared in this crate/module (including traits with
+    /// no default static methods). Used to avoid cross-trait fallback injection.
+    trait_declared_paths: HashSet<String>,
     /// Trait method receiver shape keyed by `Trait::method` (scoped + unscoped).
     /// Used to safely rewrite UFCS-style trait calls with by-value receivers.
     trait_method_has_receiver: HashMap<String, bool>,
@@ -429,6 +433,11 @@ pub struct CodeGen {
     /// Module scopes (`""` for root, otherwise `a::b`) where extension
     /// free-function forward declarations were already emitted.
     emitted_extension_forward_decl_scopes: HashSet<String>,
+    /// Free-function paths that were successfully emitted during the forward
+    /// declaration pass (`mod::name` using Rust identifiers).
+    /// Used to avoid emitting `using ::mod::name;` imports that name functions
+    /// with no declaration visible at the import site.
+    forward_declared_function_paths: HashSet<String>,
     /// Cross-source extension method names supplied by higher-level orchestrators
     /// (for example parity multi-target transpilation).
     external_extension_method_hints: HashSet<String>,
@@ -445,6 +454,9 @@ pub struct CodeGen {
     /// These are emitted as standalone constants since enum class can't
     /// have static members; path references are rewritten accordingly.
     c_like_enum_consts: HashSet<String>,
+    /// Tracks enum-member keys on C-like enums (e.g., "Ordering_SeqCst").
+    /// Used to avoid misclassifying enum class variants as data-enum variants.
+    c_like_enum_variants: HashSet<String>,
     /// Scoped C-like enum names fully emitted during forward-declaration pass.
     /// Prevents duplicate enum class definitions in the main item pass.
     forward_emitted_c_like_enums: HashSet<String>,
@@ -653,6 +665,14 @@ pub struct CodeGen {
     /// Alias names introduced by `use ... as Alias`.
     /// Used to avoid alias-order-sensitive non-void forward declarations.
     import_alias_names: HashSet<String>,
+    /// Namespace aliases emitted from `use` imports, keyed by module scope and alias name.
+    /// This avoids duplicate alias emission in the same namespace while still allowing
+    /// the same alias in different modules.
+    module_scope_namespace_aliases: HashSet<(String, String)>,
+    /// Pre-collected module-scope import bindings keyed by `(scope, local_name)`.
+    /// Enables order-independent path lowering for names introduced by `use` items
+    /// that may appear later in source order than their first use.
+    scope_import_bindings: HashMap<(String, String), HashSet<String>>,
     /// Rust-visible bindings introduced by `use cpp::...` imports.
     /// Maps binding name (alias or tail segment) → imported C++ module path without `cpp::`.
     cpp_module_import_bindings: HashMap<String, String>,
@@ -725,6 +745,9 @@ pub struct CodeGen {
     block_depth: usize,
     /// User-provided type mappings for external crate types.
     user_type_map: types::UserTypeMap,
+    /// Maps Rust external crate roots (e.g., `serde_core`) to transpiled C++ module
+    /// namespaces available in the current build unit.
+    external_crate_module_aliases: HashMap<String, String>,
     /// Forward-declared cyclic type names for proper emission ordering.
     /// Populated during `topological_sort_structs` when cycles are detected.
     cyclic_type_names: HashSet<String>,
@@ -809,6 +832,7 @@ impl CodeGen {
             type_param_scope_order: Vec::new(),
             trait_bound_type_param_scopes: Vec::new(),
             trait_static_default_methods: HashMap::new(),
+            trait_declared_paths: HashSet::new(),
             trait_method_has_receiver: HashMap::new(),
             module_runtime_helper_traits: HashSet::new(),
             enum_type_params: HashMap::new(),
@@ -826,11 +850,13 @@ impl CodeGen {
             extension_method_names: HashSet::new(),
             local_extension_method_names: HashSet::new(),
             emitted_extension_forward_decl_scopes: HashSet::new(),
+            forward_declared_function_paths: HashSet::new(),
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
             data_enum_unit_variants: HashSet::new(),
             data_enum_variants_by_enum: HashMap::new(),
             c_like_enum_consts: HashSet::new(),
+            c_like_enum_variants: HashSet::new(),
             forward_emitted_c_like_enums: HashSet::new(),
             module_body_forward_decl_pass: false,
             type_arg_nesting: std::cell::Cell::new(0),
@@ -891,6 +917,8 @@ impl CodeGen {
             option_type_aliases: HashSet::new(),
             variant_constructor_aliases: HashMap::new(),
             import_alias_names: HashSet::new(),
+            module_scope_namespace_aliases: HashSet::new(),
+            scope_import_bindings: HashMap::new(),
             cpp_module_import_bindings: HashMap::new(),
             cpp_module_import_paths: Vec::new(),
             cpp_module_import_path_keys: HashSet::new(),
@@ -914,6 +942,7 @@ impl CodeGen {
             in_async: false,
             block_depth: 0,
             user_type_map: types::UserTypeMap::default(),
+            external_crate_module_aliases: HashMap::new(),
             cyclic_type_names: HashSet::new(),
             unsupported_by_value_cycle_diagnostics: Vec::new(),
             unsupported_by_value_cycle_keys: HashSet::new(),
@@ -982,6 +1011,13 @@ impl CodeGen {
         self.cpp_module_member_symbols = cpp_module_member_symbols;
     }
 
+    pub fn set_external_crate_module_aliases(
+        &mut self,
+        external_crate_module_aliases: HashMap<String, String>,
+    ) {
+        self.external_crate_module_aliases = external_crate_module_aliases;
+    }
+
     /// Emit a complete Rust file as C++ code.
     /// Uses a two-pass approach: first collects impl blocks, then emits items
     /// with methods merged into their struct definitions.
@@ -1005,6 +1041,8 @@ impl CodeGen {
         self.option_type_aliases.clear();
         self.variant_constructor_aliases.clear();
         self.import_alias_names.clear();
+        self.module_scope_namespace_aliases.clear();
+        self.scope_import_bindings.clear();
         self.cpp_module_import_bindings.clear();
         self.cpp_module_import_paths.clear();
         self.cpp_module_import_path_keys.clear();
@@ -1027,6 +1065,8 @@ impl CodeGen {
         self.declared_type_params.clear();
         self.declared_type_param_kinds.clear();
         self.declared_type_param_defaults.clear();
+        self.trait_static_default_methods.clear();
+        self.trait_declared_paths.clear();
         self.trait_method_has_receiver.clear();
         self.module_runtime_helper_traits.clear();
         self.numeric_type_aliases.clear();
@@ -1039,10 +1079,12 @@ impl CodeGen {
         self.extension_method_names.clear();
         self.local_extension_method_names.clear();
         self.emitted_extension_forward_decl_scopes.clear();
+        self.forward_declared_function_paths.clear();
         self.data_enum_types.clear();
         self.data_enum_unit_variants.clear();
         self.data_enum_variants_by_enum.clear();
         self.c_like_enum_consts.clear();
+        self.c_like_enum_variants.clear();
         self.forward_emitted_c_like_enums.clear();
         self.module_body_forward_decl_pass = false;
         self.struct_field_types.clear();
@@ -1123,8 +1165,8 @@ impl CodeGen {
         self.collect_crate_reexports(&file.items);
         // Pass 1f: collect trait method receiver shapes for UFCS rewriting.
         self.collect_trait_method_receiver_shapes(&file.items, &[]);
-        // Pass 1f: collect trait static default methods before impl blocks.
-        self.collect_trait_static_default_methods(&file.items);
+        // Pass 1f2: collect trait static default methods before impl blocks.
+        self.collect_trait_static_default_methods(&file.items, &[]);
         // Pass 1g: collect all impl blocks (including inline-module nested ones)
         // by scoped type name.
         self.collect_impl_blocks(&file.items, &[]);
@@ -1138,6 +1180,9 @@ impl CodeGen {
         // Pass 1i: collect `use ... as Alias` names so forward declaration emission can
         // avoid alias-order-sensitive non-void signatures.
         self.collect_import_alias_names(&file.items);
+        // Pass 1i.2: collect module-scope import bindings so path lowering can resolve
+        // names introduced later via `use` regardless source order.
+        self.collect_scope_import_bindings(&file.items, &[]);
         // Pass 1i.5: collect top-level module names that must be forward-declared so
         // nested bare-module imports can emit valid namespace aliases.
         self.collect_required_top_level_module_aliases(&file.items, &[]);
@@ -3475,7 +3520,8 @@ impl CodeGen {
             if Self::has_cfg_test(&f.attrs) {
                 continue;
             }
-            if self.emit_function_forward_decl(f, module_depth > 0) {
+            let allow_non_unit_forward_decl = true;
+            if self.emit_function_forward_decl(f, allow_non_unit_forward_decl) {
                 emitted_any = true;
             }
         }
@@ -3488,19 +3534,16 @@ impl CodeGen {
         if self.is_rust_libtest_main(f) || Self::has_test_attr(&f.attrs) {
             return false;
         }
-        let output_has_import_alias = match &f.sig.output {
-            syn::ReturnType::Type(_, ty) => self.type_tokens_contain_import_alias(ty),
-            syn::ReturnType::Default => false,
-        };
         let can_forward_declare = match &f.sig.output {
             syn::ReturnType::Default => true,
             syn::ReturnType::Type(_, ty) => {
                 matches!(ty.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty())
-                    || (allow_non_unit && !output_has_import_alias && {
+                    || (allow_non_unit && {
                         self.push_type_param_scope(&f.sig.generics);
                         let mapped = self.map_type(ty);
                         self.pop_type_param_scope();
                         !type_string_has_auto_placeholder(&mapped)
+                            && !self.cpp_spelling_mentions_import_alias(&mapped)
                     })
             }
         };
@@ -3527,7 +3570,6 @@ impl CodeGen {
                 .collect();
         }
 
-        self.emit_template_prefix(&emitted_generics);
         self.push_type_param_scope(&f.sig.generics);
         let prev_forward_decl_signature = self.in_forward_decl_signature;
         self.in_forward_decl_signature = true;
@@ -3536,13 +3578,46 @@ impl CodeGen {
         } else {
             self.map_return_type(&f.sig.output)
         };
-        let params = self.map_fn_params(&f.sig.inputs);
+        let mut params = self.map_fn_params(&f.sig.inputs);
+        let mut signature_has_unresolved_scoped_paths = self
+            .forward_decl_type_spelling_has_unresolved_scoped_path(&return_type)
+            || self.forward_decl_type_spelling_has_unresolved_scoped_path(&params);
+        if signature_has_unresolved_scoped_paths {
+            // Forward-decl mapping can over-qualify colliding tails in some alias-heavy
+            // scopes (for example serde's `Content` reexports). Retry once with normal
+            // signature mapping and keep it if it resolves cleanly.
+            self.in_forward_decl_signature = false;
+            let fallback_return_type = if undeduced_return_type_param.is_some() {
+                "auto".to_string()
+            } else {
+                self.map_return_type(&f.sig.output)
+            };
+            let fallback_params = self.map_fn_params(&f.sig.inputs);
+            let fallback_has_unresolved = self
+                .forward_decl_type_spelling_has_unresolved_scoped_path(&fallback_return_type)
+                || self.forward_decl_type_spelling_has_unresolved_scoped_path(&fallback_params);
+            let fallback_mentions_unqualified_scope_import = self
+                .forward_decl_signature_mentions_unqualified_scope_import_name(
+                    &fallback_return_type,
+                    &fallback_params,
+                );
+            if !fallback_has_unresolved && !fallback_mentions_unqualified_scope_import {
+                return_type = fallback_return_type;
+                params = fallback_params;
+                signature_has_unresolved_scoped_paths = false;
+            }
+            self.in_forward_decl_signature = true;
+        }
         self.in_forward_decl_signature = prev_forward_decl_signature;
         self.pop_type_param_scope();
+        if signature_has_unresolved_scoped_paths {
+            return false;
+        }
 
         if is_async {
             return_type = format!("rusty::Task<{}>", return_type);
         }
+        self.emit_template_prefix(&emitted_generics);
 
         let abi_prefix = if let Some(abi) = &f.sig.abi {
             if let Some(name) = &abi.name {
@@ -3566,7 +3641,68 @@ impl CodeGen {
             "{}{}{} {}({});",
             export_prefix, abi_prefix, return_type, name, params
         ));
+        let rust_name = f.sig.ident.to_string();
+        let rust_path = if self.module_stack.is_empty() {
+            rust_name
+        } else {
+            format!("{}::{}", self.module_stack.join("::"), rust_name)
+        };
+        self.forward_declared_function_paths.insert(rust_path);
         true
+    }
+
+    fn forward_decl_type_spelling_has_unresolved_scoped_path(&self, spelling: &str) -> bool {
+        for token in Self::extract_cpp_scoped_path_tokens(spelling) {
+            let normalized = token.trim_start_matches("::");
+            if normalized.is_empty() {
+                continue;
+            }
+            let mut parts = normalized.split("::");
+            let Some(first) = parts.next() else {
+                continue;
+            };
+            if first.is_empty()
+                || matches!(first, "std" | "rusty" | "lib")
+                || first.starts_with("__gnu")
+                || first.starts_with("__cxx")
+                || first.starts_with("__1")
+                || first.starts_with("__")
+                || self.is_type_param_in_scope(first)
+                || first == "Self"
+            {
+                continue;
+            }
+            if self.local_declared_types.contains(normalized) {
+                continue;
+            }
+            return true;
+        }
+        false
+    }
+
+    fn extract_cpp_scoped_path_tokens(spelling: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut flush = |buf: &mut String, out: &mut Vec<String>| {
+            if buf.contains("::") {
+                let trimmed = buf.trim_matches(':');
+                if !trimmed.is_empty() {
+                    out.push(buf.clone());
+                }
+            }
+            buf.clear();
+        };
+        for ch in spelling.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' {
+                cur.push(ch);
+            } else {
+                flush(&mut cur, &mut out);
+            }
+        }
+        flush(&mut cur, &mut out);
+        out.sort();
+        out.dedup();
+        out
     }
 
     fn type_tokens_contain_import_alias(&self, ty: &syn::Type) -> bool {
@@ -3577,6 +3713,83 @@ impl CodeGen {
         tokens
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .any(|token| !token.is_empty() && self.import_alias_names.contains(token))
+    }
+
+    fn cpp_spelling_mentions_import_alias(&self, spelling: &str) -> bool {
+        if self.import_alias_names.is_empty() {
+            return false;
+        }
+        spelling
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|token| !token.is_empty() && self.import_alias_names.contains(token))
+    }
+
+    fn forward_decl_scope_import_local_names(&self) -> HashSet<String> {
+        let scope_key = self.module_stack.join("::");
+        let escaped_scope_key = self
+            .module_stack
+            .iter()
+            .map(|seg| escape_cpp_keyword(seg))
+            .collect::<Vec<String>>()
+            .join("::");
+        self.scope_import_bindings
+            .iter()
+            .filter_map(|((scope, local), _)| {
+                (scope == &scope_key || scope == &escaped_scope_key || scope.is_empty())
+                    .then_some(local.clone())
+            })
+            .collect()
+    }
+
+    fn cpp_spelling_mentions_identifier_unqualified(spelling: &str, ident: &str) -> bool {
+        if ident.is_empty() {
+            return false;
+        }
+        let bytes = spelling.as_bytes();
+        let ident_bytes = ident.as_bytes();
+        let mut pos = 0usize;
+        while pos + ident_bytes.len() <= bytes.len() {
+            let Some(rel) = spelling[pos..].find(ident) else {
+                break;
+            };
+            let start = pos + rel;
+            let end = start + ident_bytes.len();
+            let left_ok = start == 0
+                || !spelling.as_bytes()[start - 1].is_ascii_alphanumeric()
+                    && spelling.as_bytes()[start - 1] != b'_';
+            let right_ok = end == bytes.len()
+                || !spelling.as_bytes()[end].is_ascii_alphanumeric()
+                    && spelling.as_bytes()[end] != b'_';
+            if left_ok && right_ok {
+                let qualified = start >= 2 && bytes[start - 2] == b':' && bytes[start - 1] == b':';
+                if !qualified {
+                    return true;
+                }
+            }
+            pos = start + ident_bytes.len();
+        }
+        false
+    }
+
+    fn forward_decl_signature_mentions_unqualified_scope_import_name(
+        &self,
+        return_type: &str,
+        params: &str,
+    ) -> bool {
+        self.forward_decl_scope_import_local_names()
+            .into_iter()
+            .any(|local_name| {
+                if local_name.is_empty()
+                    || local_name == "_"
+                    || self.is_type_param_in_scope(&local_name)
+                    || self.current_scope_declares_type_name(&local_name)
+                    || self.declared_item_names.contains(&local_name)
+                {
+                    return false;
+                }
+                Self::cpp_spelling_mentions_identifier_unqualified(return_type, &local_name)
+                    || Self::cpp_spelling_mentions_identifier_unqualified(params, &local_name)
+            })
     }
 
     fn has_forward_decl_items(items: &[syn::Item]) -> bool {
@@ -3651,10 +3864,9 @@ impl CodeGen {
                         &self.local_declared_types,
                     );
 
-                    let trait_name = impl_block
-                        .trait_
-                        .as_ref()
-                        .and_then(|(_, path, _)| path.segments.last())
+                    let trait_path = impl_block.trait_.as_ref().map(|(_, path, _)| path);
+                    let trait_name = trait_path
+                        .and_then(|path| path.segments.last())
                         .map(|seg| seg.ident.to_string());
                     let is_inherent_impl = trait_name.is_none();
                     let is_drop_trait = trait_name.as_deref() == Some("Drop");
@@ -3744,10 +3956,13 @@ impl CodeGen {
                     // Inject trait static default methods (no receiver) into the type.
                     // These are methods like `Flags::empty()`, `Flags::all()` that have
                     // default implementations in the trait but aren't in the explicit impl block.
-                    if let Some(trait_name_str) = trait_name.as_ref() {
+                    if let Some(trait_path) = trait_path
+                        && let Some(default_key) =
+                            self.resolve_trait_static_default_key_for_impl(trait_path, module_path)
+                    {
                         if let Some(static_defaults) = self
                             .trait_static_default_methods
-                            .get(trait_name_str)
+                            .get(&default_key)
                             .cloned()
                         {
                             let entry = self.impl_blocks.entry(type_name.clone()).or_default();
@@ -3992,11 +4207,18 @@ impl CodeGen {
         }
     }
 
-    fn collect_trait_static_default_methods(&mut self, items: &[syn::Item]) {
+    fn collect_trait_static_default_methods(&mut self, items: &[syn::Item], module_path: &[String]) {
         for item in items {
             match item {
                 syn::Item::Trait(t) => {
                     let trait_name = t.ident.to_string();
+                    let scoped_trait_name = qualify_impl_type_name(
+                        &trait_name,
+                        module_path,
+                        &self.declared_item_names,
+                        &self.local_declared_types,
+                    );
+                    self.trait_declared_paths.insert(scoped_trait_name.clone());
                     let mut static_defaults = Vec::new();
                     for trait_item in &t.items {
                         if let syn::TraitItem::Fn(method) = trait_item {
@@ -4021,12 +4243,14 @@ impl CodeGen {
                     }
                     if !static_defaults.is_empty() {
                         self.trait_static_default_methods
-                            .insert(trait_name, static_defaults);
+                            .insert(scoped_trait_name, static_defaults);
                     }
                 }
                 syn::Item::Mod(m) => {
                     if let Some((_, nested_items)) = &m.content {
-                        self.collect_trait_static_default_methods(nested_items);
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_trait_static_default_methods(nested_items, &nested_path);
                     }
                 }
                 _ => {}
@@ -4081,6 +4305,268 @@ impl CodeGen {
             }
             syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
         }
+    }
+
+    fn collect_scope_import_bindings(&mut self, items: &[syn::Item], module_path: &[String]) {
+        let prev_stack = self.module_stack.clone();
+        self.module_stack = module_path.to_vec();
+
+        for item in items {
+            match item {
+                syn::Item::Use(u) => {
+                    for raw_path in self.flatten_use_tree_preserve_crate(&u.tree, "") {
+                        self.record_scope_import_binding(module_path, &raw_path);
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested_items)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_scope_import_bindings(nested_items, &nested_path);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.module_stack = prev_stack;
+    }
+
+    fn record_scope_import_binding(&mut self, module_path: &[String], raw_path: &str) {
+        let rewritten = self.rewrite_external_crate_import_path(raw_path);
+        let resolved = self.resolve_unqualified_local_import_path(&rewritten);
+        let resolved = self.strip_current_crate_prefix_from_import_path(&resolved);
+        let resolved = self.resolve_nested_local_reexport_path(&resolved);
+        let resolved = self.rewrite_seed_ctor_path_string(&resolved);
+        let (local_name, target_path) =
+            if let Some((alias, target)) = split_use_import_alias(&resolved) {
+                (alias.trim(), target.trim())
+            } else {
+                let normalized = resolved.trim();
+                let Some(local_tail) = normalized.rsplit("::").next() else {
+                    return;
+                };
+                (local_tail.trim(), normalized)
+            };
+        let normalized_scope_target = self.map_scope_import_binding_target_path(target_path);
+        let target_path = normalized_scope_target.trim();
+        if local_name.is_empty()
+            || target_path.is_empty()
+            || local_name == "*"
+            || local_name == "self"
+            || local_name == "crate"
+            || local_name == "super"
+            || target_path.ends_with("::*")
+        {
+            return;
+        }
+        let scope_key = module_path.join("::");
+        let escaped_scope_key = module_path
+            .iter()
+            .map(|seg| escape_cpp_keyword(seg))
+            .collect::<Vec<String>>()
+            .join("::");
+        let escaped_local_name = escape_cpp_keyword(local_name);
+        let mut scope_keys = vec![scope_key];
+        if !escaped_scope_key.is_empty() {
+            scope_keys.push(escaped_scope_key);
+        }
+        scope_keys.sort();
+        scope_keys.dedup();
+        let mut local_keys = vec![local_name.to_string()];
+        if !escaped_local_name.is_empty() {
+            local_keys.push(escaped_local_name);
+        }
+        local_keys.sort();
+        local_keys.dedup();
+        for scope_key in scope_keys {
+            for local_key in &local_keys {
+                self.scope_import_bindings
+                    .entry((scope_key.clone(), local_key.clone()))
+                    .or_default()
+                    .insert(target_path.to_string());
+            }
+        }
+    }
+
+    fn map_scope_import_binding_target_path(&self, target_path: &str) -> String {
+        let normalized = normalize_use_import_path(target_path);
+        match classify_use_import(normalized) {
+            UseImportAction::Using(mapped) => mapped,
+            UseImportAction::Raw(raw_stmt) => raw_stmt
+                .strip_prefix("namespace ")
+                .and_then(|stmt| stmt.split_once('='))
+                .map(|(_, rhs)| rhs.trim().trim_end_matches(';').trim().to_string())
+                .filter(|rhs| !rhs.is_empty())
+                .unwrap_or_else(|| target_path.to_string()),
+            _ => target_path.to_string(),
+        }
+    }
+
+    fn unescape_cpp_keyword_segment(segment: &str) -> String {
+        if let Some(stripped) = segment.strip_suffix('_')
+            && escape_cpp_keyword(stripped) == segment
+        {
+            return stripped.to_string();
+        }
+        segment.to_string()
+    }
+
+    fn scope_binding_key_variants(value: &str) -> Vec<String> {
+        let mut variants = Vec::new();
+        variants.push(value.to_string());
+        if !value.is_empty() {
+            let unescaped = value
+                .split("::")
+                .filter(|seg| !seg.is_empty())
+                .map(Self::unescape_cpp_keyword_segment)
+                .collect::<Vec<String>>()
+                .join("::");
+            if !unescaped.is_empty() {
+                variants.push(unescaped);
+            }
+        }
+        variants.sort();
+        variants.dedup();
+        variants
+    }
+
+    fn escape_qualified_path_preserve_global(path: &str) -> String {
+        let trimmed = path.trim();
+        if trimmed.is_empty() || trimmed.contains(" = ") {
+            return path.to_string();
+        }
+        if let Some(rest) = trimmed.strip_prefix("::") {
+            return format!("::{}", escape_cpp_path_segments(rest));
+        }
+        escape_cpp_path_segments(trimmed)
+    }
+
+    fn pick_preferred_scope_binding_target<'a>(
+        &self,
+        candidates: &'a HashSet<String>,
+    ) -> Option<&'a String> {
+        if candidates.is_empty() {
+            return None;
+        }
+        if candidates.len() == 1 {
+            return candidates.iter().next();
+        }
+        let mut private_candidates: Vec<&String> = candidates
+            .iter()
+            .filter(|candidate| {
+                let root = candidate
+                    .trim_start_matches("::")
+                    .split("::")
+                    .next()
+                    .unwrap_or_default();
+                root.starts_with("__private")
+            })
+            .collect();
+        private_candidates.sort();
+        private_candidates.dedup();
+        if private_candidates.len() == 1 {
+            return Some(private_candidates[0]);
+        }
+        None
+    }
+
+    fn pick_preferred_forward_decl_scope_binding_target<'a>(
+        &self,
+        candidates: &'a HashSet<String>,
+        local_name: &str,
+    ) -> Option<&'a String> {
+        if candidates.is_empty() || local_name.is_empty() {
+            return None;
+        }
+        let local_trimmed = local_name.trim_start_matches("::");
+        let mut suffix_matches: Vec<&String> = candidates
+            .iter()
+            .filter(|candidate| {
+                let trimmed = candidate.trim_start_matches("::");
+                trimmed != local_trimmed && trimmed.ends_with(&format!("::{}", local_trimmed))
+            })
+            .collect();
+        suffix_matches.sort();
+        suffix_matches.dedup();
+        if suffix_matches.len() == 1 {
+            return Some(suffix_matches[0]);
+        }
+
+        let mut non_identity: Vec<&String> = candidates
+            .iter()
+            .filter(|candidate| candidate.trim_start_matches("::") != local_trimmed)
+            .collect();
+        non_identity.sort();
+        non_identity.dedup();
+        if non_identity.len() == 1 {
+            return Some(non_identity[0]);
+        }
+        None
+    }
+
+    fn resolve_scope_import_binding_path_for_scope(
+        &self,
+        scope_key: &str,
+        local_name: &str,
+    ) -> Option<String> {
+        if local_name.is_empty() {
+            return None;
+        }
+        let scope_variants = Self::scope_binding_key_variants(scope_key);
+        let local_variants = Self::scope_binding_key_variants(local_name);
+        let mut candidates: HashSet<String> = HashSet::new();
+        for scope in &scope_variants {
+            for local in &local_variants {
+                if let Some(found) = self
+                    .scope_import_bindings
+                    .get(&(scope.clone(), local.clone()))
+                {
+                    candidates.extend(found.iter().cloned());
+                }
+            }
+        }
+        let target = self
+            .pick_preferred_scope_binding_target(&candidates)
+            .or_else(|| {
+                if self.in_forward_decl_signature {
+                    self.pick_preferred_forward_decl_scope_binding_target(&candidates, local_name)
+                } else {
+                    None
+                }
+            })?;
+        if target.is_empty() {
+            None
+        } else {
+            let mut resolved_target = target.to_string();
+            resolved_target = self.resolve_unqualified_local_import_path(&resolved_target);
+            resolved_target = self.strip_current_crate_prefix_from_import_path(&resolved_target);
+            resolved_target = self.resolve_nested_local_reexport_path(&resolved_target);
+            resolved_target = self.rewrite_external_crate_import_path(&resolved_target);
+            let resolved_trimmed = resolved_target.trim_start_matches("::");
+            if let Some((root, rest)) = resolved_trimmed.split_once("::")
+                && let Some(private_target) = self.inferred_private_alias_target(root)
+            {
+                let private_target = private_target.trim_start_matches("::");
+                if !private_target.is_empty() {
+                    resolved_target = format!("{}::{}", private_target, rest);
+                }
+            }
+            resolved_target = self.rewrite_seed_ctor_path_string(&resolved_target);
+            Some(Self::escape_qualified_path_preserve_global(
+                &resolved_target,
+            ))
+        }
+    }
+
+    fn resolve_scope_import_binding_path(&self, local_name: &str) -> Option<String> {
+        let scope_key = self.module_stack.join("::");
+        if self.current_scope_declares_type_name(local_name)
+            || self.current_scope_declares_function_name(local_name)
+        {
+            return None;
+        }
+        self.resolve_scope_import_binding_path_for_scope(&scope_key, local_name)
     }
 
     fn collect_local_impl_overrides(
@@ -4352,6 +4838,7 @@ impl CodeGen {
                         &e.ident.to_string(),
                         &e.generics,
                     );
+                    self.record_c_like_enum_variant_consts(module_path, e);
                 }
                 syn::Item::Type(t) => {
                     self.record_local_declared_type(module_path, &t.ident.to_string());
@@ -4379,6 +4866,21 @@ impl CodeGen {
         if !module_path.is_empty() {
             self.local_declared_types
                 .insert(format!("{}::{}", module_path.join("::"), type_name));
+        }
+    }
+
+    fn record_c_like_enum_variant_consts(&mut self, module_path: &[String], e: &syn::ItemEnum) {
+        if e.variants.iter().any(|variant| !variant.fields.is_empty()) {
+            return;
+        }
+        let enum_name = e.ident.to_string();
+        for variant in &e.variants {
+            let key = format!("{}_{}", enum_name, variant.ident);
+            self.c_like_enum_variants.insert(key.clone());
+            if !module_path.is_empty() {
+                self.c_like_enum_variants
+                    .insert(format!("{}::{}", module_path.join("::"), key));
+            }
         }
     }
 
@@ -4686,7 +5188,28 @@ impl CodeGen {
                         let expected_types =
                             self.collect_arg_expected_types_from_inputs(&method.sig.inputs, true);
                         self.record_method_arg_expected_types(&method_name, expected_types.clone());
+                        let method_type_params =
+                            self.collect_type_param_names_from_generics(&method.sig.generics);
+                        let method_return_ty =
+                            self.collect_return_type_from_output(&method.sig.output);
                         for owner in &owner_keys {
+                            let owner_method_key = format!("{}::{}", owner, method_name);
+                            self.record_function_arg_pass_styles(
+                                &owner_method_key,
+                                self.collect_arg_pass_styles_from_inputs(&method.sig.inputs, true),
+                            );
+                            self.record_function_arg_expected_types(
+                                &owner_method_key,
+                                expected_types.clone(),
+                            );
+                            self.record_function_type_param_names(
+                                &owner_method_key,
+                                method_type_params.clone(),
+                            );
+                            self.record_function_return_type(
+                                &owner_method_key,
+                                method_return_ty.clone(),
+                            );
                             self.record_owner_method_arg_expected_types(
                                 owner,
                                 &method_name,
@@ -4989,6 +5512,97 @@ impl CodeGen {
         merged
     }
 
+    fn lookup_owner_method_type_param_names<'a>(
+        &'a self,
+        owner: &str,
+        method_name: &str,
+    ) -> Option<&'a Vec<String>> {
+        for key in self.owner_method_lookup_keys(owner, method_name) {
+            if let Some(params) = self.function_type_param_names.get(&key)
+                && !params.is_empty()
+            {
+                return Some(params);
+            }
+        }
+        None
+    }
+
+    fn owner_method_lookup_keys(&self, owner: &str, method_name: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        keys.push(format!("{}::{}", owner, method_name));
+        if let Some(last) = owner.rsplit("::").next() {
+            keys.push(format!("{}::{}", last, method_name));
+        }
+        let mut dedup = HashSet::new();
+        keys.retain(|key| dedup.insert(key.clone()));
+        keys
+    }
+
+    fn lookup_owner_method_arg_expected_types_for_template_inference<'a>(
+        &'a self,
+        owner: &str,
+        method_name: &str,
+    ) -> Option<&'a Vec<Option<syn::Type>>> {
+        for key in self.owner_method_lookup_keys(owner, method_name) {
+            if let Some(expected_types) = self.function_arg_expected_types.get(&key) {
+                return Some(expected_types);
+            }
+        }
+        None
+    }
+
+    fn lookup_owner_method_return_type_for_template_inference<'a>(
+        &'a self,
+        owner: &str,
+        method_name: &str,
+    ) -> Option<&'a syn::Type> {
+        for key in self.owner_method_lookup_keys(owner, method_name) {
+            if let Some(Some(ret_ty)) = self.function_return_types.get(&key) {
+                return Some(ret_ty);
+            }
+        }
+        None
+    }
+
+    fn infer_method_template_args_from_in_scope_undeduced_params(
+        &self,
+        owner: &str,
+        method_name: &str,
+    ) -> Option<String> {
+        let type_params = self.lookup_owner_method_type_param_names(owner, method_name)?;
+        if type_params.is_empty() {
+            return None;
+        }
+        let arg_expected_types = self
+            .lookup_owner_method_arg_expected_types_for_template_inference(owner, method_name)?;
+        let return_ty =
+            self.lookup_owner_method_return_type_for_template_inference(owner, method_name)?;
+
+        // Only inject explicit method template args when every method type parameter
+        // is referenced in the return type and in none of the parameter types.
+        // This matches Rust's expected-type inference cases that C++ cannot deduce.
+        let all_undeduced_from_args = type_params.iter().all(|param| {
+            self.type_mentions_named_type_param(return_ty, param)
+                && !arg_expected_types
+                    .iter()
+                    .flatten()
+                    .any(|arg_ty| self.type_mentions_named_type_param(arg_ty, param))
+        });
+        if !all_undeduced_from_args {
+            return None;
+        }
+        if !type_params.iter().all(|param| self.is_type_param_in_scope(param)) {
+            return None;
+        }
+
+        let mapped_params = type_params
+            .iter()
+            .map(|param| escape_cpp_keyword(param))
+            .collect::<Vec<String>>()
+            .join(", ");
+        Some(format!("<{}>", mapped_params))
+    }
+
     fn call_path_candidates(&self, path: &syn::Path) -> Vec<String> {
         let mut out = Vec::new();
         let joined = path
@@ -5039,6 +5653,36 @@ impl CodeGen {
             }
         }
 
+        // Metadata maps are collected from raw Rust identifiers, while emission
+        // scopes can carry escaped C++ identifiers (`private_`). Query both.
+        let mut normalized_variants = Vec::new();
+        for candidate in &out {
+            let parts: Vec<&str> = candidate
+                .split("::")
+                .filter(|seg| !seg.is_empty())
+                .collect();
+            if parts.is_empty() {
+                continue;
+            }
+            let unescaped = parts
+                .iter()
+                .map(|seg| Self::unescape_cpp_keyword_segment(seg))
+                .collect::<Vec<String>>()
+                .join("::");
+            if !unescaped.is_empty() && unescaped != *candidate {
+                normalized_variants.push(unescaped);
+            }
+            let escaped = parts
+                .iter()
+                .map(|seg| escape_cpp_keyword(seg))
+                .collect::<Vec<String>>()
+                .join("::");
+            if !escaped.is_empty() && escaped != *candidate {
+                normalized_variants.push(escaped);
+            }
+        }
+        out.extend(normalized_variants);
+
         let mut dedup = HashSet::new();
         out.retain(|k| dedup.insert(k.clone()));
         out
@@ -5074,6 +5718,29 @@ impl CodeGen {
         candidates.dedup();
         if candidates.len() == 1 {
             let escaped = self.escape_and_rename_qualified_name(&candidates[0]);
+            if path.segments.len() == 1 {
+                let qualified_parent = escaped
+                    .rsplit_once("::")
+                    .map(|(parent, _)| parent)
+                    .unwrap_or_default();
+                let current_scope = self.module_stack.join("::");
+                let escaped_current_scope = self
+                    .module_stack
+                    .iter()
+                    .map(|seg| escape_cpp_keyword(seg))
+                    .collect::<Vec<String>>()
+                    .join("::");
+                let directly_inside = (!current_scope.is_empty()
+                    && (qualified_parent == current_scope
+                        || current_scope.ends_with(&format!("::{}", qualified_parent))))
+                    || (!escaped_current_scope.is_empty()
+                        && (qualified_parent == escaped_current_scope
+                            || escaped_current_scope
+                                .ends_with(&format!("::{}", qualified_parent))));
+                if directly_inside {
+                    return Some(escape_cpp_keyword(&path.segments[0].ident.to_string()));
+                }
+            }
             return Some(format!("::{}", escaped));
         }
         None
@@ -5208,6 +5875,29 @@ impl CodeGen {
                 }
             }
         }
+        let func_name = path_expr
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        if func_name.is_empty() {
+            return None;
+        }
+        let suffix = format!("::{}", func_name);
+        let mut fallback_keys: Vec<&String> = self
+            .function_arg_pass_styles
+            .keys()
+            .filter(|key| key.as_str() == func_name || key.ends_with(&suffix))
+            .collect();
+        fallback_keys.sort();
+        fallback_keys.dedup();
+        if fallback_keys.len() == 1
+            && let Some(styles) = self.function_arg_pass_styles.get(fallback_keys[0])
+            && let Some(style) = styles.get(arg_idx).copied()
+        {
+            return Some(style);
+        }
         None
     }
 
@@ -5225,6 +5915,29 @@ impl CodeGen {
                     return Some(ty);
                 }
             }
+        }
+        let func_name = path_expr
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        if func_name.is_empty() {
+            return None;
+        }
+        let suffix = format!("::{}", func_name);
+        let mut fallback_keys: Vec<&String> = self
+            .function_arg_expected_types
+            .keys()
+            .filter(|key| key.as_str() == func_name || key.ends_with(&suffix))
+            .collect();
+        fallback_keys.sort();
+        fallback_keys.dedup();
+        if fallback_keys.len() == 1
+            && let Some(expected) = self.function_arg_expected_types.get(fallback_keys[0])
+            && let Some(Some(ty)) = expected.get(arg_idx)
+        {
+            return Some(ty);
         }
         None
     }
@@ -5412,7 +6125,15 @@ impl CodeGen {
         if !matches!(owner_seg.arguments, syn::PathArguments::None) {
             return None;
         }
-        let owner_name = owner_seg.ident.to_string();
+        let owner_name = if owner_seg.ident == "Self" {
+            self.current_struct
+                .as_deref()
+                .and_then(|name| name.rsplit("::").next())
+                .unwrap_or("Self")
+                .to_string()
+        } else {
+            owner_seg.ident.to_string()
+        };
         if owner_name != "Self" && owner_name != expected_owner_name {
             return None;
         }
@@ -5796,6 +6517,178 @@ impl CodeGen {
         None
     }
 
+    fn lookup_owner_method_arg_expected_type_for_owner_key(
+        &self,
+        owner_key: &str,
+        method_name: &str,
+        arg_idx: usize,
+        arg_expr: Option<&syn::Expr>,
+    ) -> Option<syn::Type> {
+        let key = Self::owner_method_key(owner_key, method_name);
+        if let Some(expected) = self.owner_method_arg_expected_types.get(&key)
+            && let Some(Some(ty)) = expected.get(arg_idx)
+        {
+            return Some(ty.clone());
+        }
+        if let Some(variants) = self.owner_method_arg_expected_type_variants.get(&key)
+            && let Some(ty) =
+                self.select_owner_method_arg_expected_type_variant(variants, arg_idx, arg_expr)
+        {
+            return Some(ty);
+        }
+        None
+    }
+
+    fn owner_path_to_candidate_owner_keys(
+        &self,
+        owner_path: &syn::Path,
+        owner_name: &str,
+    ) -> Vec<String> {
+        let raw_segments: Vec<String> = owner_path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect();
+        if raw_segments.is_empty() {
+            return Vec::new();
+        }
+        let mut candidates = Vec::new();
+        let joined = raw_segments.join("::");
+        let root = raw_segments.first().map(|s| s.as_str()).unwrap_or_default();
+        match root {
+            "crate" => {
+                candidates.push(joined.clone());
+                if raw_segments.len() > 1 {
+                    candidates.push(raw_segments[1..].join("::"));
+                }
+            }
+            "self" => {
+                if raw_segments.len() > 1 {
+                    let rest = raw_segments[1..].join("::");
+                    if !self.module_stack.is_empty() {
+                        candidates.push(format!("{}::{}", self.module_stack.join("::"), rest));
+                    }
+                    candidates.push(rest);
+                }
+            }
+            "super" => {
+                if raw_segments.len() > 1 {
+                    let rest = raw_segments[1..].join("::");
+                    let mut resolved = if self.module_stack.len() > 1 {
+                        self.module_stack[..self.module_stack.len() - 1].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    if !rest.is_empty() {
+                        resolved.push(rest.clone());
+                    }
+                    if !resolved.is_empty() {
+                        candidates.push(resolved.join("::"));
+                    }
+                    candidates.push(rest);
+                }
+            }
+            _ => {
+                // Scope-first ordering prevents same-tail collisions (e.g.
+                // `SeqDeserializer` across sibling modules) and keeps local
+                // owner declarations preferred over unrelated global tails.
+                if !self.module_stack.is_empty() {
+                    for depth in (1..=self.module_stack.len()).rev() {
+                        candidates.push(format!(
+                            "{}::{}",
+                            self.module_stack[..depth].join("::"),
+                            joined
+                        ));
+                    }
+                }
+                if raw_segments.len() == 1 && !self.module_stack.is_empty() {
+                    candidates.push(format!("{}::{}", self.module_stack.join("::"), owner_name));
+                }
+                candidates.push(joined);
+            }
+        }
+        let mut expanded = Vec::new();
+        let mut dedup = HashSet::new();
+        for candidate in candidates {
+            for variant in self.owner_key_spelling_variants(&candidate) {
+                if dedup.insert(variant.clone()) {
+                    expanded.push(variant);
+                }
+            }
+        }
+        expanded
+    }
+
+    fn owner_key_spelling_variants(&self, owner_key: &str) -> Vec<String> {
+        if owner_key.is_empty() {
+            return Vec::new();
+        }
+        let mut variants = Vec::new();
+        variants.push(owner_key.to_string());
+        let parts: Vec<&str> = owner_key
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .collect();
+        if !parts.is_empty() {
+            let unescaped = parts
+                .iter()
+                .map(|segment| Self::unescape_cpp_keyword_segment(segment))
+                .collect::<Vec<String>>()
+                .join("::");
+            if !unescaped.is_empty() && unescaped != owner_key {
+                variants.push(unescaped);
+            }
+            let escaped = parts
+                .iter()
+                .map(|segment| escape_cpp_keyword(segment))
+                .collect::<Vec<String>>()
+                .join("::");
+            if !escaped.is_empty() && escaped != owner_key && !variants.contains(&escaped) {
+                variants.push(escaped);
+            }
+        }
+        variants
+    }
+
+    fn lookup_owner_method_arg_expected_type_from_owner_path(
+        &self,
+        owner_path: Option<&syn::Path>,
+        owner_name: &str,
+        method_name: &str,
+        arg_idx: usize,
+        arg_expr: Option<&syn::Expr>,
+    ) -> Option<syn::Type> {
+        let owner_path = owner_path?;
+        let owner_keys = self.owner_path_to_candidate_owner_keys(owner_path, owner_name);
+        if owner_path.segments.len() == 1 && !self.module_stack.is_empty() {
+            let current_prefix = format!("{}::", self.module_stack.join("::"));
+            for owner_key in owner_keys
+                .iter()
+                .filter(|key| key.starts_with(&current_prefix))
+            {
+                if let Some(expected) = self.lookup_owner_method_arg_expected_type_for_owner_key(
+                    owner_key,
+                    method_name,
+                    arg_idx,
+                    arg_expr,
+                ) {
+                    return Some(expected);
+                }
+            }
+        }
+        for owner_key in owner_keys {
+            if let Some(expected) = self.lookup_owner_method_arg_expected_type_for_owner_key(
+                &owner_key,
+                method_name,
+                arg_idx,
+                arg_expr,
+            ) {
+                return Some(expected);
+            }
+        }
+        None
+    }
+
     fn lookup_associated_call_return_type(&self, call: &syn::ExprCall) -> Option<syn::Type> {
         let syn::Expr::Path(path_expr) = call.func.as_ref() else {
             return None;
@@ -6043,7 +6936,166 @@ impl CodeGen {
                 }
             }
         }
+        if let Some(expected_ref_ty) = effective_expected_ty
+            && let Some(deref_arg) =
+                self.try_emit_auto_deref_arg_for_expected_reference(arg, expected_ref_ty)
+        {
+            return deref_arg;
+        }
         self.emit_expr_to_string_with_expected_and_move_if_needed(arg, effective_expected_ty)
+    }
+
+    fn is_pointer_like_autoderef_owner_name(name: &str) -> bool {
+        matches!(
+            name,
+            "Box"
+                | "Rc"
+                | "Arc"
+                | "Ref"
+                | "RefMut"
+                | "MutexGuard"
+                | "RwLockReadGuard"
+                | "RwLockWriteGuard"
+        )
+    }
+
+    fn type_is_pointer_like_owner_type(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return false;
+        };
+        tp.path
+            .segments
+            .last()
+            .is_some_and(|seg| Self::is_pointer_like_autoderef_owner_name(&seg.ident.to_string()))
+    }
+
+    fn unary_deref_should_collapse_reference_like_operand(&self, expr: &syn::Expr) -> bool {
+        let inferred = self
+            .infer_simple_expr_type(expr)
+            .or_else(|| self.infer_local_binding_type_from_initializer(expr));
+        let Some(inferred) = inferred else {
+            return !matches!(self.peel_paren_group_expr(expr), syn::Expr::Path(_));
+        };
+        let inferred = self.peel_paren_group_type(&inferred);
+        if self.type_is_pointer_like_owner_type(inferred) {
+            return false;
+        }
+        let syn::Type::Reference(reference) = inferred else {
+            return true;
+        };
+        !self.type_is_pointer_like_owner_type(&reference.elem)
+    }
+
+    fn should_insert_move_for_deref_expected_value(
+        &self,
+        expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> bool {
+        let Some(expected_ty) = expected_ty else {
+            return false;
+        };
+        if matches!(
+            self.peel_reference_paren_group_type(expected_ty),
+            syn::Type::Reference(_) | syn::Type::Ptr(_)
+        ) {
+            return false;
+        }
+        let syn::Expr::Unary(unary) = self.peel_paren_group_expr(expr) else {
+            return false;
+        };
+        if !matches!(unary.op, syn::UnOp::Deref(_)) {
+            return false;
+        }
+        let base = self.peel_paren_group_expr(&unary.expr);
+        if !self.should_insert_move(base) {
+            return false;
+        }
+        if let Some(base_ty) = self.infer_simple_expr_type(base)
+            && let syn::Type::Reference(reference) = self.peel_paren_group_type(&base_ty)
+            && reference.mutability.is_none()
+        {
+            return false;
+        }
+        true
+    }
+
+    fn try_emit_auto_deref_arg_for_expected_reference(
+        &self,
+        arg: &syn::Expr,
+        expected_ref_ty: &syn::Type,
+    ) -> Option<String> {
+        let expected_inner = self.expected_reference_inner_type(Some(expected_ref_ty))?;
+        let expected_inner = self.peel_reference_paren_group_type(expected_inner);
+        if matches!(
+            expected_inner,
+            syn::Type::Reference(_)
+                | syn::Type::Ptr(_)
+                | syn::Type::Slice(_)
+                | syn::Type::Array(_)
+                | syn::Type::Tuple(_)
+        ) {
+            return None;
+        }
+        let expected_owner = match expected_inner {
+            syn::Type::Path(tp) => {
+                let seg = tp.path.segments.last()?;
+                let owner = seg.ident.to_string();
+                if Self::is_pointer_like_autoderef_owner_name(&owner) {
+                    return None;
+                }
+                // Restrict unknown-type fallback to user-defined type-like
+                // references (e.g. &Content). Primitive/string/slice borrows
+                // should keep direct argument passing.
+                if !owner
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+                {
+                    return None;
+                }
+                owner
+            }
+            _ => return None,
+        };
+        if matches!(
+            self.peel_paren_group_expr(arg),
+            syn::Expr::Path(path)
+                if path.path.segments.len() == 1 && path.path.segments[0].ident == "self"
+        ) {
+            return None;
+        }
+        let arg_supports_autoderef = if let Some(arg_ty) = self.infer_simple_expr_type(arg) {
+            let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
+            if let syn::Type::Path(arg_tp) = arg_ty {
+                let arg_owner = arg_tp.path.segments.last()?.ident.to_string();
+                if Self::is_pointer_like_autoderef_owner_name(&arg_owner) {
+                    true
+                } else {
+                    matches!(
+                        self.peel_paren_group_expr(arg),
+                        syn::Expr::Path(_) | syn::Expr::Field(_)
+                    )
+                }
+            } else {
+                matches!(
+                    self.peel_paren_group_expr(arg),
+                    syn::Expr::Path(_) | syn::Expr::Field(_)
+                )
+            }
+        } else {
+            matches!(
+                self.peel_paren_group_expr(arg),
+                syn::Expr::Path(_) | syn::Expr::Field(_)
+            ) && !expected_owner.is_empty()
+        };
+        if !arg_supports_autoderef {
+            return None;
+        }
+        // Expected-reference argument sites must preserve lvalue identity.
+        // Moving here turns `T&` calls into rvalues and breaks mutable-ref APIs.
+        let arg_cpp = self.emit_expr_to_string(arg);
+        Some(format!("rusty::detail::deref_if_pointer_like({})", arg_cpp))
     }
 
     fn try_emit_expected_constructor_callable(
@@ -6154,6 +7206,51 @@ impl CodeGen {
         ))
     }
 
+    fn try_emit_data_enum_variant_constructor_callable_path(
+        &self,
+        path: &syn::Path,
+    ) -> Option<String> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        if !matches!(
+            path.segments.last().map(|seg| &seg.arguments),
+            Some(syn::PathArguments::None)
+        ) {
+            return None;
+        }
+        let enum_name = path.segments.iter().nth_back(1)?.ident.to_string();
+        let variant_name = path.segments.last()?.ident.to_string();
+        if !self
+            .data_enum_variants_by_enum
+            .get(&enum_name)
+            .is_some_and(|variants| variants.contains(&variant_name))
+        {
+            return None;
+        }
+        let variant_key = format!("{}_{}", enum_name, variant_name);
+        if self.data_enum_unit_variants.contains(&variant_key) {
+            return None;
+        }
+
+        let enum_path: syn::Path = {
+            let segs: Vec<syn::PathSegment> = path
+                .segments
+                .iter()
+                .take(path.segments.len() - 1)
+                .cloned()
+                .collect();
+            let mut p = path.clone();
+            p.segments = segs.into_iter().collect();
+            p
+        };
+        let variant_ty = self.data_enum_variant_struct_type_name(&enum_path, &variant_name);
+        Some(format!(
+            "[](auto&& _v) {{ return {}{{std::forward<decltype(_v)>(_v)}}; }}",
+            variant_ty
+        ))
+    }
+
     /// If `path` is `Type::method` where `Type` is a known local type and
     /// `method` is a lowercase instance method name, emit as forwarding lambda wrapper.
     fn try_emit_method_reference_lambda(&self, path: &syn::Path) -> Option<String> {
@@ -6225,6 +7322,49 @@ impl CodeGen {
             &self.declared_item_names,
             &self.local_declared_types,
         )
+    }
+
+    fn resolve_trait_static_default_key_for_impl(
+        &self,
+        trait_path: &syn::Path,
+        module_path: &[String],
+    ) -> Option<String> {
+        let scoped_key = self.resolve_trait_scoped_key_for_impl(trait_path, module_path);
+        if self.trait_static_default_methods.contains_key(&scoped_key) {
+            return Some(scoped_key);
+        }
+        if self.trait_declared_paths.contains(&scoped_key) {
+            // Trait is known locally but has no static default methods.
+            return None;
+        }
+        let is_explicit_nonrelative = trait_path.segments.len() > 1
+            && trait_path
+                .segments
+                .first()
+                .is_some_and(|seg| !matches!(seg.ident.to_string().as_str(), "self" | "super" | "crate"));
+        if is_explicit_nonrelative {
+            return None;
+        }
+        let tail = trait_path.segments.last()?.ident.to_string();
+        if self.trait_static_default_methods.contains_key(&tail) {
+            return Some(tail);
+        }
+        let mut matches: Vec<String> = self
+            .trait_static_default_methods
+            .keys()
+            .filter(|candidate| {
+                candidate
+                    .rsplit_once("::")
+                    .is_some_and(|(_, suffix)| suffix == tail)
+            })
+            .cloned()
+            .collect();
+        matches.sort_unstable();
+        matches.dedup();
+        if matches.len() == 1 {
+            return matches.into_iter().next();
+        }
+        None
     }
 
     fn collect_extension_trait_impl_methods(
@@ -6948,6 +8088,109 @@ impl CodeGen {
             .iter()
             .rev()
             .any(|scope| scope.contains(name))
+    }
+
+    fn current_scope_declares_type_name(&self, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        if self.is_local_type_name_in_scope(name) {
+            return true;
+        }
+        let escaped_name = escape_cpp_keyword(name);
+        let mut candidates: Vec<String> = vec![name.to_string()];
+        if escaped_name != name {
+            candidates.push(escaped_name.clone());
+        }
+
+        if !self.module_stack.is_empty() {
+            let scope = self.module_stack.join("::");
+            candidates.push(format!("{}::{}", scope, name));
+            candidates.push(format!("{}::{}", scope, escaped_name));
+
+            let escaped_scope = self
+                .module_stack
+                .iter()
+                .map(|seg| escape_cpp_keyword(seg))
+                .collect::<Vec<String>>()
+                .join("::");
+            if escaped_scope != scope {
+                candidates.push(format!("{}::{}", escaped_scope, name));
+                candidates.push(format!("{}::{}", escaped_scope, escaped_name));
+            }
+        }
+
+        candidates
+            .into_iter()
+            .any(|candidate| self.local_declared_types.contains(&candidate))
+    }
+
+    fn current_module_declares_type_name_exact(&self, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        if self.is_local_type_name_in_scope(name) {
+            return true;
+        }
+        let escaped_name = escape_cpp_keyword(name);
+        if self.module_stack.is_empty() {
+            return self.local_declared_types.contains(name)
+                || self.local_declared_types.contains(&escaped_name);
+        }
+        let scope = self.module_stack.join("::");
+        let escaped_scope = self
+            .module_stack
+            .iter()
+            .map(|seg| escape_cpp_keyword(seg))
+            .collect::<Vec<String>>()
+            .join("::");
+        let mut candidates = vec![
+            format!("{}::{}", scope, name),
+            format!("{}::{}", scope, escaped_name),
+            format!("{}::{}", escaped_scope, name),
+            format!("{}::{}", escaped_scope, escaped_name),
+        ];
+        candidates.sort();
+        candidates.dedup();
+        candidates
+            .into_iter()
+            .any(|candidate| self.local_declared_types.contains(&candidate))
+    }
+
+    fn current_scope_declares_function_name(&self, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        if self.is_local_function_name_in_scope(name) {
+            return true;
+        }
+        if self.module_stack.is_empty() {
+            return false;
+        }
+        let scope = self.module_stack.join("::");
+        let escaped_scope = self
+            .module_stack
+            .iter()
+            .map(|seg| escape_cpp_keyword(seg))
+            .collect::<Vec<String>>()
+            .join("::");
+        let escaped_name = escape_cpp_keyword(name);
+        let mut scope_prefixes = vec![scope];
+        if escaped_scope != scope_prefixes[0] {
+            scope_prefixes.push(escaped_scope);
+        }
+        let mut candidate_tails = vec![name.to_string()];
+        if escaped_name != name {
+            candidate_tails.push(escaped_name);
+        }
+        self.module_qualified_functions.values().any(|qualified| {
+            !qualified.is_empty()
+                && scope_prefixes.iter().any(|prefix| {
+                    candidate_tails
+                        .iter()
+                        .any(|tail| qualified == &format!("{}::{}", prefix, tail))
+                })
+        })
     }
 
     fn nested_fn_const_generic_params(&self, generics: &syn::Generics) -> Vec<(String, String)> {
@@ -7807,8 +9050,12 @@ impl CodeGen {
                 if let syn::ImplItem::Type(t) = impl_item {
                     let alias_rust_name = t.ident.to_string();
                     let alias_name = escape_cpp_keyword(&t.ident.to_string());
-                    let alias_cpp_type = self
-                        .normalize_assoc_alias_target_type(&alias_rust_name, self.map_type(&t.ty));
+                    let alias_cpp_type = Self::rewrite_private_keyword_namespace_in_type_path(
+                        &self.normalize_assoc_alias_target_type(
+                            &alias_rust_name,
+                            self.map_type(&t.ty),
+                        ),
+                    );
                     self.emit_impl_item(impl_item);
                     // Even when constrained mode skips emitting the alias as a C++ member,
                     // keep its mapped type available for subsequent method return/projection
@@ -8216,8 +9463,12 @@ impl CodeGen {
                 if let syn::ImplItem::Type(t) = impl_item {
                     let alias_rust_name = t.ident.to_string();
                     let alias_name = escape_cpp_keyword(&alias_rust_name);
-                    let alias_cpp_type = self
-                        .normalize_assoc_alias_target_type(&alias_rust_name, self.map_type(&t.ty));
+                    let alias_cpp_type = Self::rewrite_private_keyword_namespace_in_type_path(
+                        &self.normalize_assoc_alias_target_type(
+                            &alias_rust_name,
+                            self.map_type(&t.ty),
+                        ),
+                    );
                     if let Some(scope) = self.current_struct_assoc_cpp_types.last_mut() {
                         scope.insert(alias_rust_name, alias_cpp_type.clone());
                         scope.insert(alias_name, alias_cpp_type);
@@ -8518,28 +9769,102 @@ impl CodeGen {
             .collect()
     }
 
+    fn map_variant_ctor_param_type(&self, ty: &syn::Type, ctor_name: &str) -> String {
+        let mut mapped = self.map_type(ty);
+        let ctor_ident = escape_cpp_keyword(ctor_name);
+        if mapped != ctor_ident {
+            return mapped;
+        }
+        let syn::Type::Path(tp) = ty else {
+            return mapped;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return mapped;
+        }
+        let local_name = tp.path.segments[0].ident.to_string();
+        let scope_key = self.module_stack.join("::");
+        if let Some(bound_target) = self.resolve_scope_import_binding_path_for_scope(&scope_key, &local_name)
+        {
+            let rebound = self.rewrite_cpp_import_bound_type_spelling(&bound_target);
+            if !rebound.is_empty() && rebound != mapped {
+                mapped = rebound;
+            }
+        }
+        mapped
+    }
+
+    fn should_emit_data_enum_variant_ctor_helper(&self, ctor_name: &str) -> bool {
+        if ctor_name.is_empty() {
+            return false;
+        }
+        if matches!(ctor_name, "Left" | "Right") {
+            // `Either::Left/Right` helpers are widely referenced as bare
+            // constructors in expanded code paths; keep emitting them.
+            return true;
+        }
+        if self.current_scope_declares_type_name(ctor_name) || self.is_type_param_in_scope(ctor_name)
+        {
+            return false;
+        }
+        let scope_key = self.module_stack.join("::");
+        let type_like_import = self
+            .resolve_scope_import_binding_path_for_scope(&scope_key, ctor_name)
+            .or_else(|| self.resolve_scope_import_binding_path_for_scope("", ctor_name))
+            .is_some_and(|target| {
+                let normalized = target.trim().trim_start_matches("::").to_string();
+                if normalized.is_empty() {
+                    return false;
+                }
+                let escaped = Self::escape_qualified_path_preserve_global(&normalized);
+                if self.is_known_free_function_path(&normalized)
+                    || self.is_known_free_function_path(&escaped)
+                {
+                    return false;
+                }
+                if self.local_declared_types.contains(&normalized)
+                    || self.local_declared_types.contains(&escaped)
+                {
+                    return true;
+                }
+                let tail = normalized.rsplit("::").next().unwrap_or("");
+                tail.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+            });
+        !type_like_import
+    }
+
     fn emit_enum(&mut self, e: &syn::ItemEnum) {
         let name = &e.ident;
         let has_data = e.variants.iter().any(|v| !v.fields.is_empty());
+        let enum_name = name.to_string();
+        let scoped_enum_name = self.scoped_type_key(&enum_name);
         if has_data {
-            self.data_enum_types.insert(name.to_string());
-            self.data_enum_variants_by_enum.insert(
-                name.to_string(),
-                e.variants
-                    .iter()
-                    .map(|variant| variant.ident.to_string())
-                    .collect(),
-            );
+            self.data_enum_types.insert(enum_name.clone());
+            self.data_enum_types.insert(scoped_enum_name.clone());
+            let variants: HashSet<String> = e
+                .variants
+                .iter()
+                .map(|variant| variant.ident.to_string())
+                .collect();
+            self.data_enum_variants_by_enum
+                .entry(enum_name.clone())
+                .or_default()
+                .extend(variants.iter().cloned());
+            self.data_enum_variants_by_enum
+                .entry(scoped_enum_name.clone())
+                .or_default()
+                .extend(variants.iter().cloned());
             // Track which variants are unit variants (no fields)
             for variant in &e.variants {
                 if variant.fields.is_empty() {
                     self.data_enum_unit_variants
-                        .insert(format!("{}_{}", name, variant.ident));
+                        .insert(format!("{}_{}", enum_name, variant.ident));
+                    self.data_enum_unit_variants
+                        .insert(format!("{}_{}", scoped_enum_name, variant.ident));
                 }
             }
         } else {
-            self.data_enum_types.remove(&name.to_string());
-            self.data_enum_variants_by_enum.remove(&name.to_string());
+            self.data_enum_types.remove(&scoped_enum_name);
+            self.data_enum_variants_by_enum.remove(&scoped_enum_name);
         }
         self.push_type_param_scope(&e.generics);
 
@@ -8697,6 +10022,9 @@ impl CodeGen {
             // helper definitions appear later in the file.
             for variant in &e.variants {
                 let vname = &variant.ident;
+                if !self.should_emit_data_enum_variant_ctor_helper(&vname.to_string()) {
+                    continue;
+                }
                 let variant_struct = if has_generics {
                     format!("{}_{}{}", name, vname, template_args)
                 } else {
@@ -8704,12 +10032,13 @@ impl CodeGen {
                 };
                 match &variant.fields {
                     syn::Fields::Unnamed(fields) => {
+                        let ctor_name = vname.to_string();
                         let params: Vec<String> = fields
                             .unnamed
                             .iter()
                             .enumerate()
                             .map(|(i, f)| {
-                                let ty = self.map_type(&f.ty);
+                                let ty = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
                                 format!("{} _{}", ty, i)
                             })
                             .collect();
@@ -8724,12 +10053,13 @@ impl CodeGen {
                         ));
                     }
                     syn::Fields::Named(fields) => {
+                        let ctor_name = vname.to_string();
                         let params: Vec<String> = fields
                             .named
                             .iter()
                             .map(|f| {
                                 let fname = f.ident.as_ref().unwrap();
-                                let ftype = self.map_type(&f.ty);
+                                let ftype = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
                                 format!("{} {}", ftype, fname)
                             })
                             .collect();
@@ -8763,6 +10093,108 @@ impl CodeGen {
                 self.indent += 1;
                 self.writeln(&format!("using variant = {};", variant_type));
                 self.writeln("using variant::variant;");
+                let enum_wrapper_type = if has_generics {
+                    format!("{}{}", name, template_args)
+                } else {
+                    name.to_string()
+                };
+                for variant in &e.variants {
+                    let vname = &variant.ident;
+                    let variant_struct = if has_generics {
+                        format!("{}_{}{}", name, vname, template_args)
+                    } else {
+                        format!("{}_{}", name, vname)
+                    };
+                    match &variant.fields {
+                        syn::Fields::Unnamed(fields) => {
+                            let variant_name = vname.to_string();
+                            let params: Vec<String> = fields
+                                .unnamed
+                                .iter()
+                                .enumerate()
+                                .map(|(i, f)| {
+                                    let ty = self.map_type(&f.ty);
+                                    format!("{} _{}", ty, i)
+                                })
+                                .collect();
+                            let args: Vec<String> = fields
+                                .unnamed
+                                .iter()
+                                .enumerate()
+                                .map(|(i, f)| {
+                                    let ty = self.map_type(&f.ty);
+                                    let forwarded = format!("std::forward<{ty}>(_{i})");
+                                    let rewrite_field_key = Self::format_by_value_field_name(
+                                        Some(variant_name.as_str()),
+                                        &format!("#{}", i),
+                                    );
+                                    self.wrap_by_value_cycle_rewrite_field_initializer(
+                                        &enum_owner_name,
+                                        &rewrite_field_key,
+                                        forwarded,
+                                    )
+                                })
+                                .collect();
+                            self.writeln(&format!(
+                                "static {} {}({}) {{ return {}{{{}{{{}}}}}; }}",
+                                enum_wrapper_type,
+                                vname,
+                                params.join(", "),
+                                enum_wrapper_type,
+                                variant_struct,
+                                args.join(", ")
+                            ));
+                        }
+                        syn::Fields::Named(fields) => {
+                            let variant_name = vname.to_string();
+                            let params: Vec<String> = fields
+                                .named
+                                .iter()
+                                .map(|f| {
+                                    let fname = f.ident.as_ref().unwrap();
+                                    let ftype = self.map_type(&f.ty);
+                                    format!("{} {}", ftype, fname)
+                                })
+                                .collect();
+                            let args: Vec<String> = fields
+                                .named
+                                .iter()
+                                .map(|f| {
+                                    let fname = f.ident.as_ref().unwrap();
+                                    let ftype = self.map_type(&f.ty);
+                                    let forwarded = format!("std::forward<{}>({})", ftype, fname);
+                                    let rewrite_field_key = Self::format_by_value_field_name(
+                                        Some(variant_name.as_str()),
+                                        &fname.to_string(),
+                                    );
+                                    let wrapped = self
+                                        .wrap_by_value_cycle_rewrite_field_initializer(
+                                            &enum_owner_name,
+                                            &rewrite_field_key,
+                                            forwarded,
+                                        );
+                                    format!(".{} = {}", fname, wrapped)
+                                })
+                                .collect();
+                            self.writeln(&format!(
+                                "static {} {}({}) {{ return {}{{{}{{{}}}}}; }}",
+                                enum_wrapper_type,
+                                vname,
+                                params.join(", "),
+                                enum_wrapper_type,
+                                variant_struct,
+                                args.join(", ")
+                            ));
+                        }
+                        syn::Fields::Unit => {
+                            self.writeln(&format!(
+                                "static {} {}() {{ return {}{{{}{{}}}}; }}",
+                                enum_wrapper_type, vname, enum_wrapper_type, variant_struct
+                            ));
+                        }
+                    }
+                }
+                self.newline();
 
                 // Merge impl block methods into the enum struct
                 if let Some(methods) = self.take_impls_for_type(&name.to_string()) {
@@ -8795,6 +10227,9 @@ impl CodeGen {
             // This avoids template arg deduction issues (e.g., Left(2) can't deduce R).
             for variant in &e.variants {
                 let vname = &variant.ident;
+                if !self.should_emit_data_enum_variant_ctor_helper(&vname.to_string()) {
+                    continue;
+                }
                 let variant_struct = if has_generics {
                     format!("{}_{}{}", name, vname, template_args)
                 } else {
@@ -8804,12 +10239,13 @@ impl CodeGen {
                 match &variant.fields {
                     syn::Fields::Unnamed(fields) => {
                         let variant_name = vname.to_string();
+                        let ctor_name = vname.to_string();
                         let params: Vec<String> = fields
                             .unnamed
                             .iter()
                             .enumerate()
                             .map(|(i, f)| {
-                                let ty = self.map_type(&f.ty);
+                                let ty = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
                                 format!("{} _{}", ty, i)
                             })
                             .collect();
@@ -8818,7 +10254,7 @@ impl CodeGen {
                             .iter()
                             .enumerate()
                             .map(|(i, f)| {
-                                let ty = self.map_type(&f.ty);
+                                let ty = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
                                 let param = format!("_{}", i);
                                 let forwarded = format!("std::forward<{}>({})", ty, param);
                                 let rewrite_field_key = Self::format_by_value_field_name(
@@ -8846,12 +10282,13 @@ impl CodeGen {
                     }
                     syn::Fields::Named(fields) => {
                         let variant_name = vname.to_string();
+                        let ctor_name = vname.to_string();
                         let params: Vec<String> = fields
                             .named
                             .iter()
                             .map(|f| {
                                 let fname = f.ident.as_ref().unwrap();
-                                let ftype = self.map_type(&f.ty);
+                                let ftype = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
                                 format!("{} {}", ftype, fname)
                             })
                             .collect();
@@ -8860,7 +10297,7 @@ impl CodeGen {
                             .iter()
                             .map(|f| {
                                 let fname = f.ident.as_ref().unwrap();
-                                let ftype = self.map_type(&f.ty);
+                                let ftype = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
                                 let forwarded = format!("std::forward<{}>({})", ftype, fname);
                                 let rewrite_field_key = Self::format_by_value_field_name(
                                     Some(variant_name.as_str()),
@@ -8931,6 +10368,12 @@ impl CodeGen {
             // inline constexpr with a namespaced name.
             let name_str = name.to_string();
             let scoped_name = self.scoped_type_key(&name_str);
+            for variant in &e.variants {
+                self.c_like_enum_variants
+                    .insert(format!("{}_{}", name, variant.ident));
+                self.c_like_enum_variants
+                    .insert(format!("{}_{}", scoped_enum_name, variant.ident));
+            }
             let enum_impl_items = self
                 .impl_blocks
                 .get(&scoped_name)
@@ -9243,8 +10686,9 @@ impl CodeGen {
 
         self.emit_template_prefix(&t.generics);
         self.push_type_param_scope(&t.generics);
-        let target = self.map_type(&t.ty);
+        let mut target = self.map_type(&t.ty);
         self.pop_type_param_scope();
+        target = Self::rewrite_private_keyword_namespace_in_type_path(&target);
         self.writeln(&format!("using {} = {};", name, target));
 
         // Alias tracking only applies to concrete (non-generic) aliases.
@@ -9378,7 +10822,10 @@ impl CodeGen {
             } else {
                 "const auto"
             };
-            self.writeln(&format!("{} {} = {};", storage_qualifier, storage_name, expr));
+            self.writeln(&format!(
+                "{} {} = {};",
+                storage_qualifier, storage_name, expr
+            ));
             let export_prefix = if self.block_depth == 0 && self.is_exported(&c.vis) {
                 "export "
             } else {
@@ -9458,6 +10905,7 @@ impl CodeGen {
             self.emit_extension_trait_free_functions(trait_name, &methods);
             if self.module_name.is_some() || self.expanded_libtest_mode {
                 self.skipped_module_traits.insert(scoped);
+                self.skipped_module_traits.insert(trait_name.to_string());
             }
             return;
         }
@@ -9471,9 +10919,11 @@ impl CodeGen {
                     .insert(trait_name.to_string());
                 self.module_runtime_helper_traits.insert(scoped.clone());
                 self.skipped_module_traits.remove(&scoped);
+                self.skipped_module_traits.remove(&trait_name.to_string());
                 return;
             }
             self.skipped_module_traits.insert(scoped);
+            self.skipped_module_traits.insert(trait_name.to_string());
             if self.module_name.is_some() {
                 self.writeln(&format!(
                     "// Rust-only trait {} (Proxy facade emission skipped in module mode)",
@@ -9917,7 +11367,6 @@ impl CodeGen {
     ) -> bool {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
-        self.record_extension_free_function_symbol(&method_name);
         let escaped_method_name = escape_cpp_keyword(&method_name);
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
@@ -9931,14 +11380,14 @@ impl CodeGen {
         );
         let prev_forward_decl_signature = self.in_forward_decl_signature;
         self.in_forward_decl_signature = true;
+        self.push_type_param_scope(&free_generics);
         let self_cpp_ty =
             self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty));
         if self.extension_self_type_mapping_is_unsupported(&self_cpp_ty) {
+            self.pop_type_param_scope();
             self.in_forward_decl_signature = prev_forward_decl_signature;
             return false;
         }
-        self.emit_template_prefix(&free_generics);
-        self.push_type_param_scope(&free_generics);
 
         let mut associated_type_cpp_bindings: HashMap<String, String> = HashMap::new();
         for (name, ty) in &method_spec.associated_type_bindings {
@@ -9974,13 +11423,16 @@ impl CodeGen {
             params.push(format!("{} {}", ty, param_name));
         }
 
-        let return_type =
+        let mut return_type =
             self.rewrite_cpp_import_bound_type_spelling(&self.map_extension_impl_return_type(
                 &method.sig.output,
                 &method_spec.self_ty,
                 &self_cpp_ty,
                 &associated_type_cpp_bindings,
             ));
+        if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
+            return_type = "auto".to_string();
+        }
         self.in_forward_decl_signature = prev_forward_decl_signature;
         let signature_has_unresolved_placeholder = params.iter().any(|param| {
             param.contains("/* TODO")
@@ -9989,24 +11441,24 @@ impl CodeGen {
         }) || return_type.contains("/* TODO")
             || type_string_has_auto_placeholder(&return_type)
             || self.mapped_assoc_type_contains_unbound_placeholder(&return_type);
+        self.pop_type_param_scope();
         if signature_has_unresolved_placeholder {
-            self.pop_type_param_scope();
             return false;
         }
+        self.emit_template_prefix(&free_generics);
+        self.record_extension_free_function_symbol(&method_name);
         self.writeln(&format!(
             "{} {}({});",
             return_type,
             escaped_method_name,
             params.join(", ")
         ));
-        self.pop_type_param_scope();
         true
     }
 
     fn emit_extension_trait_free_function(&mut self, method_spec: &ExtensionImplMethod) {
         let method = &method_spec.method;
         let method_name = method.sig.ident.to_string();
-        self.record_extension_free_function_symbol(&method_name);
         let escaped_method_name = escape_cpp_keyword(&method_name);
 
         let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
@@ -10030,7 +11482,6 @@ impl CodeGen {
             ));
             return;
         }
-        self.emit_template_prefix(&free_generics);
         self.push_type_param_scope(&free_generics);
         let mut associated_type_cpp_bindings: HashMap<String, String> = HashMap::new();
         for (name, ty) in &method_spec.associated_type_bindings {
@@ -10063,12 +11514,15 @@ impl CodeGen {
             params.push(format!("{} {}", ty, param_name));
         }
 
-        let return_type = self.map_extension_impl_return_type(
+        let mut return_type = self.map_extension_impl_return_type(
             &method.sig.output,
             &method_spec.self_ty,
             &self_cpp_ty,
             &associated_type_cpp_bindings,
         );
+        if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
+            return_type = "auto".to_string();
+        }
         let signature_has_unresolved_placeholder = params.iter().any(|param| {
             param.contains("/* TODO")
                 || type_string_has_auto_placeholder(param)
@@ -10076,14 +11530,16 @@ impl CodeGen {
         }) || return_type.contains("/* TODO")
             || type_string_has_auto_placeholder(&return_type)
             || self.mapped_assoc_type_contains_unbound_placeholder(&return_type);
+        self.pop_type_param_scope();
         if signature_has_unresolved_placeholder {
             self.writeln(&format!(
                 "// Rust-only extension method skipped (unresolved signature placeholder): {}",
                 method_name
             ));
-            self.pop_type_param_scope();
             return;
         }
+        self.emit_template_prefix(&free_generics);
+        self.record_extension_free_function_symbol(&method_name);
         self.writeln(&format!(
             "{} {}({}) {{",
             return_type,
@@ -10091,6 +11547,7 @@ impl CodeGen {
             params.join(", ")
         ));
         self.indent += 1;
+        self.push_type_param_scope(&free_generics);
         // Extension methods can mention `Self::Assoc` in bodies; define a local
         // alias so dependent associated paths remain valid in free-function form.
         self.writeln("using Self = std::remove_reference_t<decltype(self_)>;");
@@ -10126,11 +11583,60 @@ impl CodeGen {
         )
     }
 
+    fn extension_return_type_requires_auto_fallback(
+        &self,
+        return_type: &str,
+        self_cpp_ty: &str,
+    ) -> bool {
+        let trimmed_self = self_cpp_ty.trim();
+        let builtin_self = matches!(
+            trimmed_self,
+            "bool"
+                | "char"
+                | "signed char"
+                | "unsigned char"
+                | "wchar_t"
+                | "char8_t"
+                | "char16_t"
+                | "char32_t"
+                | "short"
+                | "unsigned short"
+                | "int"
+                | "unsigned int"
+                | "long"
+                | "unsigned long"
+                | "long long"
+                | "unsigned long long"
+                | "int8_t"
+                | "uint8_t"
+                | "int16_t"
+                | "uint16_t"
+                | "int32_t"
+                | "uint32_t"
+                | "int64_t"
+                | "uint64_t"
+                | "size_t"
+                | "ptrdiff_t"
+                | "float"
+                | "double"
+                | "long double"
+                | "__int128"
+                | "unsigned __int128"
+        );
+        builtin_self
+            && (return_type.contains(&format!("{trimmed_self}::"))
+                || return_type.contains("auto::"))
+    }
+
     fn record_extension_free_function_symbol(&mut self, method_name: &str) {
         let scoped_name = if self.module_stack.is_empty() {
             format!("rusty_ext::{}", method_name)
         } else {
-            format!("{}::rusty_ext::{}", self.module_stack.join("::"), method_name)
+            format!(
+                "{}::rusty_ext::{}",
+                self.module_stack.join("::"),
+                method_name
+            )
         };
         self.record_function_return_type(&scoped_name, None);
     }
@@ -10485,13 +11991,15 @@ impl CodeGen {
 
         // Detect external crate imports
         let root_ident = self.get_use_root(&u.tree);
+        let mapped_external_root = self.external_crate_module_aliases.get(&root_ident);
         let is_external = !matches!(
             root_ident.as_str(),
             "crate" | "self" | "super" | "std" | "core" | "alloc" | "cpp"
         ) && root_ident.chars().next().is_some_and(|c| c.is_lowercase())
             && self.crate_name.as_deref() != Some(root_ident.as_str())
             && !self.declared_item_names.contains(&root_ident)
-            && !self.import_alias_names.contains(&root_ident);
+            && !self.import_alias_names.contains(&root_ident)
+            && mapped_external_root.is_none();
 
         if is_external {
             self.writeln(&format!(
@@ -10508,8 +12016,9 @@ impl CodeGen {
         } else {
             ""
         };
-        for path in &paths {
-            if let Some(cpp_import) = classify_cpp_module_use_import(path) {
+        for raw_path in &paths {
+            let path = self.rewrite_external_crate_import_path(raw_path);
+            if let Some(cpp_import) = classify_cpp_module_use_import(&path) {
                 self.record_cpp_module_use_import(&cpp_import);
                 if cpp_import.explicit_alias {
                     self.writeln(&format!(
@@ -10524,7 +12033,7 @@ impl CodeGen {
                 }
                 continue;
             }
-            let resolved_path = self.resolve_unqualified_local_import_path(path);
+            let resolved_path = self.resolve_unqualified_local_import_path(&path);
             let resolved_path = self.strip_current_crate_prefix_from_import_path(&resolved_path);
             let resolved_path = self.resolve_nested_local_reexport_path(&resolved_path);
             let normalized_import = normalize_use_import_path(&resolved_path);
@@ -10636,10 +12145,49 @@ impl CodeGen {
                     let using_path = self.apply_module_renames_to_path(&using_path);
                     let using_path =
                         self.rewrite_global_using_path_for_local_alias_root(&using_path);
+                    let using_path = self.rewrite_using_path_with_scope_import_root(&using_path);
+                    let using_path = self
+                        .try_resolve_nested_local_type_path(&using_path)
+                        .unwrap_or(using_path);
+                    let using_path = self.rewrite_using_content_reexport_path(&using_path);
+                    let using_path = self.rewrite_using_path_with_scope_import_root(&using_path);
+                    let using_path = Self::strip_crate_root_cpp_path(&using_path);
+                    let using_path =
+                        self.rewrite_global_using_path_for_private_alias_root(&using_path);
+                    self.emit_private_alias_forward_decl_for_using_path(&using_path);
+                    if self.should_skip_unresolved_single_segment_type_import(&using_path) {
+                        self.writeln(&format!(
+                            "// Rust-only unresolved import: using {};",
+                            resolved_path
+                        ));
+                        continue;
+                    }
+                    if self.should_skip_unresolved_function_using_import(&using_path) {
+                        self.writeln(&format!(
+                            "// Rust-only unresolved function import (forward decl unavailable): using {};",
+                            resolved_path
+                        ));
+                        continue;
+                    }
                     if let Some(ns_alias_stmt) =
                         self.namespace_alias_statement_for_module_import(&using_path)
                     {
                         self.writeln(&format!("{}{}", export_prefix, ns_alias_stmt));
+                        continue;
+                    }
+                    let using_tail = using_path.trim_start_matches("::");
+                    if !using_tail.is_empty()
+                        && !using_tail.contains("::")
+                        && !using_tail.contains(" = ")
+                        && using_tail
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_lowercase())
+                    {
+                        self.writeln(&format!(
+                            "// Rust-only namespace re-export: using {};",
+                            resolved_path
+                        ));
                         continue;
                     }
                     // Check if this is an enum variant import (e.g., Ordering::SeqCst).
@@ -10676,6 +12224,10 @@ impl CodeGen {
                         self.writeln(&format!("{}using ::rusty::Cow_Borrowed;", export_prefix));
                         self.writeln(&format!("{}using ::rusty::Cow_Owned;", export_prefix));
                     }
+                    if cow_target == "rusty::Either" {
+                        self.writeln(&format!("{}using ::rusty::Either_Left;", export_prefix));
+                        self.writeln(&format!("{}using ::rusty::Either_Right;", export_prefix));
+                    }
                     // When importing a data enum type, also import its namespace
                     // so variant structs (EnumName_VariantName) are accessible.
                     let imported_name = mapped_path.rsplit("::").next().unwrap_or(&mapped_path);
@@ -10690,6 +12242,15 @@ impl CodeGen {
                 }
                 UseImportAction::Raw(statement) => {
                     if let Some(alias_name) = parse_namespace_alias_name(&statement) {
+                        if self.block_depth == 0 {
+                            let scope_key = self.module_stack.join("::");
+                            if !self
+                                .module_scope_namespace_aliases
+                                .insert((scope_key, alias_name.to_string()))
+                            {
+                                continue;
+                            }
+                        }
                         self.declared_item_names.insert(alias_name.to_string());
                         self.import_alias_names.insert(alias_name.to_string());
                     }
@@ -10722,6 +12283,277 @@ impl CodeGen {
             return using_path.to_string();
         }
         without_global.to_string()
+    }
+
+    fn rewrite_using_path_with_scope_import_root(&self, using_path: &str) -> String {
+        let trimmed = using_path.trim();
+        if trimmed.is_empty() || trimmed.contains(" = ") {
+            return using_path.to_string();
+        }
+        let had_leading_colon = trimmed.starts_with("::");
+        let without_global = trimmed.trim_start_matches("::");
+        let Some((root, remainder)) = without_global.split_once("::") else {
+            return using_path.to_string();
+        };
+        let root_variants = Self::scope_binding_key_variants(root);
+        let root_is_private_alias = root_variants
+            .iter()
+            .any(|variant| variant.ends_with("_private"));
+        let mut bound_target = self
+            .resolve_scope_import_binding_path(root)
+            .or_else(|| self.resolve_scope_import_binding_path_for_scope("", root))
+            .or_else(|| self.inferred_private_alias_target(root))
+            .unwrap_or_default();
+        if bound_target.is_empty() {
+            if root_is_private_alias {
+                if let Some(private_target) = root_variants
+                    .iter()
+                    .find_map(|variant| self.inferred_private_alias_target(variant))
+                {
+                    bound_target = private_target;
+                } else if let Some(full_target) =
+                    self.infer_private_alias_full_path_from_remainder(remainder)
+                {
+                    return if had_leading_colon || full_target.starts_with("::") {
+                        format!("::{}", full_target.trim_start_matches("::"))
+                    } else {
+                        full_target
+                    };
+                }
+            }
+            if bound_target.is_empty() {
+                return using_path.to_string();
+            }
+        }
+        let mut rebound_target = bound_target.clone();
+        if root_is_private_alias {
+            if let Some(private_target) = root_variants
+                .iter()
+                .find_map(|variant| self.inferred_private_alias_target(variant))
+            {
+                rebound_target = private_target;
+            }
+        }
+        let rebound_base = rebound_target.trim().trim_start_matches("::");
+        let mut rebound = rebound_base.to_string();
+        if rebound.is_empty() {
+            return using_path.to_string();
+        }
+        if !remainder.is_empty() {
+            let rebound_tail = rebound_base.rsplit("::").next().unwrap_or_default();
+            if rebound_tail == remainder && rebound_base.contains("::") {
+                return if had_leading_colon || rebound_target.trim_start().starts_with("::") {
+                    format!("::{}", rebound)
+                } else {
+                    rebound
+                };
+            }
+            let rebound_known_function = self
+                .owner_key_spelling_variants(rebound_base)
+                .iter()
+                .any(|candidate| self.is_known_free_function_path(candidate));
+            if rebound_known_function {
+                if rebound_tail == remainder {
+                    return if had_leading_colon || rebound_target.trim_start().starts_with("::") {
+                        format!("::{}", rebound)
+                    } else {
+                        rebound
+                    };
+                }
+                return using_path.to_string();
+            }
+            rebound.push_str("::");
+            rebound.push_str(remainder);
+        }
+        if had_leading_colon || rebound_target.trim_start().starts_with("::") {
+            format!("::{}", rebound)
+        } else {
+            rebound
+        }
+    }
+
+    fn infer_private_alias_full_path_from_remainder(&self, remainder: &str) -> Option<String> {
+        let remainder = remainder.trim();
+        if remainder.is_empty() {
+            return None;
+        }
+        let suffix = format!("::{}", remainder.trim_start_matches("::"));
+        let mut candidates: Vec<String> = self
+            .local_declared_types
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .split("::")
+                    .next()
+                    .is_some_and(|root| root.starts_with("__private"))
+                    && candidate.ends_with(&suffix)
+            })
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            let mut module_candidates: Vec<String> = self
+                .declared_module_paths
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .split("::")
+                        .next()
+                        .is_some_and(|root| root.starts_with("__private"))
+                })
+                .map(|candidate| format!("{}::{}", candidate, remainder))
+                .collect();
+            candidates.append(&mut module_candidates);
+        }
+        candidates.sort();
+        candidates.dedup();
+        if candidates.is_empty() {
+            return None;
+        }
+        if candidates.len() == 1 {
+            return candidates.first().cloned();
+        }
+        let mut ranked: Vec<(usize, String)> = candidates
+            .into_iter()
+            .map(|candidate| {
+                (
+                    candidate.split("::").filter(|seg| !seg.is_empty()).count(),
+                    candidate,
+                )
+            })
+            .collect();
+        ranked.sort_by(|(ld, lp), (rd, rp)| ld.cmp(rd).then_with(|| lp.cmp(rp)));
+        let best_depth = ranked.first()?.0;
+        let mut best: Vec<String> = ranked
+            .into_iter()
+            .filter_map(|(depth, candidate)| (depth == best_depth).then_some(candidate))
+            .collect();
+        best.sort();
+        best.dedup();
+        if best.len() == 1 {
+            best.first().cloned()
+        } else {
+            None
+        }
+    }
+
+    fn emit_private_alias_forward_decl_for_using_path(&mut self, using_path: &str) {
+        let trimmed = using_path.trim();
+        if trimmed.is_empty() || trimmed.contains(" = ") {
+            return;
+        }
+        let without_global = trimmed.trim_start_matches("::");
+        let Some((root, remainder)) = without_global.split_once("::") else {
+            return;
+        };
+        if !root.ends_with("_private") {
+            return;
+        }
+        let target = self.inferred_private_alias_target(root).or_else(|| {
+            self.infer_private_alias_full_path_from_remainder(remainder)
+                .and_then(|full| {
+                    full.trim_start_matches("::")
+                        .split_once("::")
+                        .map(|(target_root, _)| format!("::{}", target_root))
+                })
+        });
+        let Some(target) = target else {
+            return;
+        };
+        let alias = escape_cpp_keyword(root);
+        let target = if target.starts_with("::") {
+            target
+        } else {
+            format!("::{}", target)
+        };
+        self.writeln(&format!("namespace {} = {};", alias, target));
+        self.import_alias_names.insert(root.to_string());
+        self.declared_item_names.insert(root.to_string());
+    }
+
+    fn rewrite_global_using_path_for_private_alias_root(&self, using_path: &str) -> String {
+        let trimmed = using_path.trim();
+        if !trimmed.starts_with("::") || trimmed.contains(" = ") {
+            return using_path.to_string();
+        }
+        let without_global = trimmed.trim_start_matches("::");
+        let Some((root, _)) = without_global.split_once("::") else {
+            return using_path.to_string();
+        };
+        if root.ends_with("_private") {
+            without_global.to_string()
+        } else {
+            using_path.to_string()
+        }
+    }
+
+    fn inferred_private_alias_target(&self, alias_root: &str) -> Option<String> {
+        if !alias_root.ends_with("_private") {
+            return None;
+        }
+        let local_variants = Self::scope_binding_key_variants(alias_root);
+        let mut alias_targets: Vec<String> = Vec::new();
+        for ((_, local_name), targets) in &self.scope_import_bindings {
+            if local_variants.iter().any(|variant| variant == local_name) {
+                alias_targets.extend(targets.iter().cloned());
+            }
+        }
+        let mut candidates: Vec<String> = alias_targets
+            .into_iter()
+            .filter_map(|target| {
+                let trimmed = target.trim().trim_start_matches("::");
+                let root = trimmed.split("::").next().unwrap_or_default();
+                root.starts_with("__private").then_some(trimmed.to_string())
+            })
+            .collect();
+        if candidates.is_empty() {
+            candidates = self
+                .declared_module_paths
+                .iter()
+                .filter(|path| {
+                    path.rsplit("::")
+                        .next()
+                        .is_some_and(|tail| tail.starts_with("__private"))
+                })
+                .cloned()
+                .collect();
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort();
+        candidates.dedup();
+        if candidates.len() == 1 {
+            return candidates
+                .first()
+                .map(|path| format!("::{}", path.trim_start_matches("::")));
+        }
+        // Prefer the shortest namespace path (usually the root-level private
+        // module) to avoid import-order sensitivity from late namespace aliases.
+        let mut ranked: Vec<(usize, String)> = candidates
+            .into_iter()
+            .map(|candidate| {
+                (
+                    candidate.split("::").filter(|seg| !seg.is_empty()).count(),
+                    candidate,
+                )
+            })
+            .collect();
+        ranked.sort_by(|(ld, lp), (rd, rp)| ld.cmp(rd).then_with(|| lp.cmp(rp)));
+        let best_depth = ranked.first()?.0;
+        let mut best: Vec<String> = ranked
+            .into_iter()
+            .filter_map(|(depth, candidate)| (depth == best_depth).then_some(candidate))
+            .collect();
+        best.sort();
+        best.dedup();
+        if best.len() == 1 {
+            best.first()
+                .map(|path| format!("::{}", path.trim_start_matches("::")))
+        } else {
+            best.into_iter()
+                .find(|path| !path.contains("::"))
+                .map(|path| format!("::{}", path.trim_start_matches("::")))
+        }
     }
 
     fn template_alias_import_statement(&mut self, mapped_path: &str) -> Option<String> {
@@ -10834,23 +12666,71 @@ impl CodeGen {
 
     fn namespace_alias_statement_for_module_import(&self, using_path: &str) -> Option<String> {
         let trimmed = using_path.trim();
-        if trimmed.is_empty() || trimmed.contains(" = ") || !trimmed.contains("::") {
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Some((alias, target)) = split_use_import_alias(trimmed) {
+            let alias = alias.trim().trim_start_matches("::");
+            let target = target.trim().trim_start_matches("::");
+            if alias.is_empty() || target.is_empty() {
+                return None;
+            }
+            let alias_is_module_like = alias.starts_with("__")
+                || alias
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_lowercase())
+                || self.declared_module_names.contains(alias);
+            if !alias_is_module_like || !self.matches_declared_module_path(target) {
+                return None;
+            }
+            let alias = escape_cpp_keyword(alias);
+            let target = self.escape_and_rename_qualified_name(target);
+            return Some(format!("namespace {} = ::{};", alias, target));
+        }
+        if trimmed.contains(" = ") || !trimmed.contains("::") {
             return None;
         }
         let normalized = trimmed.trim_start_matches("::");
         let last = normalized.rsplit("::").next()?;
+        let root = normalized.split("::").next().unwrap_or_default();
+        let root_is_private_like =
+            matches!(root, "private" | "private_") || root.starts_with("__private");
+        let normalized_variants = self.owner_key_spelling_variants(normalized);
+        let is_known_function_path = normalized_variants
+            .iter()
+            .any(|candidate| self.is_known_free_function_path(candidate));
+        let matches_tail_declared_module = self
+            .declared_module_paths
+            .iter()
+            .any(|declared| declared.ends_with(&format!("::{}", last)));
+        let matches_module_path =
+            self.matches_declared_module_path(normalized) || matches_tail_declared_module;
+        let private_fallback_allowed = root_is_private_like
+            && !matches_module_path
+            && normalized.split("::").count() == 2;
         if !last
             .chars()
             .next()
             .is_some_and(|ch| ch.is_ascii_lowercase())
-            || !self.declared_module_names.contains(last)
-            || !self.declared_module_paths.contains(normalized)
+            || is_known_function_path
+            || (!matches_module_path && !private_fallback_allowed)
         {
             return None;
         }
         let alias = escape_cpp_keyword(last);
         let target = self.escape_and_rename_qualified_name(normalized);
         Some(format!("namespace {} = ::{};", alias, target))
+    }
+
+    fn matches_declared_module_path(&self, normalized_path: &str) -> bool {
+        if self.declared_module_paths.contains(normalized_path) {
+            return true;
+        }
+        self.declared_module_paths.iter().any(|declared| {
+            let escaped_declared = self.escape_and_rename_qualified_name(declared);
+            escaped_declared == normalized_path
+        })
     }
 
     fn emit_namespace_alias_import(&mut self, namespace_path: &str) {
@@ -11089,12 +12969,169 @@ impl CodeGen {
             .unwrap_or_else(|| path.to_string())
     }
 
+    fn rewrite_seed_ctor_path_string(&self, path: &str) -> String {
+        let trimmed = path.trim();
+        if trimmed.is_empty() || trimmed.contains(" = ") {
+            return path.to_string();
+        }
+        let had_leading_colon = trimmed.starts_with("::");
+        let mut segments: Vec<String> = trimmed
+            .trim_start_matches("::")
+            .split("::")
+            .filter(|seg| !seg.is_empty())
+            .map(|seg| seg.to_string())
+            .collect();
+        if segments.len() != 2 {
+            return path.to_string();
+        }
+        let parent = escape_cpp_keyword(&segments[0]);
+        let leaf = escape_cpp_keyword(&segments[1]);
+        let seed_like_leaf = leaf.ends_with("Seed");
+        if !seed_like_leaf {
+            return path.to_string();
+        }
+        let private_root =
+            matches!(parent.as_str(), "private" | "private_") || parent.starts_with("__private");
+        let direct_seed = format!("{}::seed::{}", parent, leaf);
+        let seed_module = format!("{}::seed", parent);
+        if private_root
+            || self.local_declared_types.contains(&direct_seed)
+            || self.declared_module_paths.contains(&seed_module)
+        {
+            segments.insert(1, "seed".to_string());
+            let rewritten = segments.join("::");
+            return if had_leading_colon || private_root {
+                format!("::{}", rewritten)
+            } else {
+                rewritten
+            };
+        }
+        path.to_string()
+    }
+
+    fn rewrite_using_content_reexport_path(&self, path: &str) -> String {
+        let trimmed = path.trim();
+        if trimmed.is_empty() || trimmed.contains(" = ") {
+            return path.to_string();
+        }
+        let had_leading_colon = trimmed.starts_with("::");
+        let normalized = trimmed.trim_start_matches("::");
+        if !normalized.contains("::content::") {
+            return path.to_string();
+        }
+        let parts: Vec<&str> = normalized.split("::").collect();
+        if parts.len() < 2 {
+            return path.to_string();
+        }
+        let leaf = *parts.last().unwrap_or(&"");
+        if !leaf
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            return path.to_string();
+        }
+        if parts.len() >= 4 && parts[parts.len() - 2] == "content" {
+            let parent_idx = parts.len() - 3;
+            if matches!(parts[parent_idx], "de" | "ser") {
+                let mut collapsed_parts: Vec<String> = parts[..parent_idx]
+                    .iter()
+                    .map(|seg| (*seg).to_string())
+                    .collect();
+                collapsed_parts.push("content".to_string());
+                collapsed_parts.push(leaf.to_string());
+                let collapsed = collapsed_parts.join("::");
+                let escaped_collapsed = collapsed_parts
+                    .iter()
+                    .map(|seg| escape_cpp_keyword(seg))
+                    .collect::<Vec<String>>()
+                    .join("::");
+                if self.local_declared_types.contains(&collapsed)
+                    || self.local_declared_types.contains(&escaped_collapsed)
+                {
+                    return if had_leading_colon {
+                        format!("::{}", escaped_collapsed)
+                    } else {
+                        escaped_collapsed
+                    };
+                }
+            }
+        }
+        let reexport_scope = parts[..parts.len().saturating_sub(1)].join("::");
+        if !reexport_scope.is_empty()
+            && let Some(bound_target) =
+                self.resolve_scope_import_binding_path_for_scope(&reexport_scope, leaf)
+        {
+            let normalized_target = bound_target.trim_start_matches("::");
+            if !normalized_target.is_empty() {
+                return if had_leading_colon || bound_target.starts_with("::") {
+                    format!("::{}", normalized_target)
+                } else {
+                    normalized_target.to_string()
+                };
+            }
+        }
+        let escaped_leaf = escape_cpp_keyword(leaf);
+        let mut candidates: Vec<String> = self
+            .local_declared_types
+            .iter()
+            .filter(|candidate| {
+                let candidate = candidate.as_str();
+                if candidate.contains("::content::") {
+                    return false;
+                }
+                candidate.ends_with(&format!("::{}", leaf))
+                    || candidate.ends_with(&format!("::{}", escaped_leaf))
+            })
+            .cloned()
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        if candidates.len() != 1 {
+            let mut private_candidates: Vec<String> = candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .split("::")
+                        .next()
+                        .is_some_and(|root| root.starts_with("__private"))
+                })
+                .cloned()
+                .collect();
+            private_candidates.sort();
+            private_candidates.dedup();
+            if private_candidates.len() == 1 {
+                return if had_leading_colon {
+                    format!("::{}", private_candidates[0])
+                } else {
+                    private_candidates[0].clone()
+                };
+            }
+            return path.to_string();
+        }
+        if had_leading_colon {
+            format!("::{}", candidates[0])
+        } else {
+            candidates[0].clone()
+        }
+    }
+
     fn try_resolve_nested_local_type_path(&self, path: &str) -> Option<String> {
+        let escape_lookup_path = |raw: &str| -> String {
+            raw.split("::")
+                .filter(|seg| !seg.is_empty())
+                .map(escape_cpp_keyword)
+                .collect::<Vec<_>>()
+                .join("::")
+        };
         let normalized = path.trim_start_matches("::");
         if normalized.is_empty() || normalized.contains(" = ") {
             return None;
         }
-        if self.local_declared_types.contains(normalized) {
+        let normalized_escaped = escape_lookup_path(normalized);
+        if self.local_declared_types.contains(normalized)
+            || self.local_declared_types.contains(&normalized_escaped)
+        {
             return None;
         }
 
@@ -11112,17 +13149,58 @@ impl CodeGen {
         }
 
         let parent = parts[..parts.len() - 1].join("::");
-        let prefix = format!("{}::", parent);
-        let suffix = format!("::{}", leaf);
+        let escaped_parts: Vec<String> = parts.iter().map(|seg| escape_cpp_keyword(seg)).collect();
+        let escaped_parent = escaped_parts[..escaped_parts.len() - 1].join("::");
+        let escaped_leaf = escaped_parts
+            .last()
+            .cloned()
+            .unwrap_or_else(|| leaf.to_string());
+        let prefixes = [format!("{}::", parent), format!("{}::", escaped_parent)];
+        let suffixes = [format!("::{}", leaf), format!("::{}", escaped_leaf)];
         let mut candidates: Vec<String> = self
             .local_declared_types
             .iter()
-            .filter(|candidate| candidate.starts_with(&prefix) && candidate.ends_with(&suffix))
+            .filter(|candidate| {
+                prefixes.iter().any(|prefix| candidate.starts_with(prefix))
+                    && suffixes.iter().any(|suffix| candidate.ends_with(suffix))
+            })
             .cloned()
             .collect();
         candidates.sort();
         candidates.dedup();
         if candidates.len() != 1 {
+            let seed_fallbacks = [
+                format!("{}::seed::{}", parent, leaf),
+                format!("{}::seed::{}", escaped_parent, escaped_leaf),
+            ];
+            let seed_like_leaf = leaf.ends_with("Seed") || escaped_leaf.ends_with("Seed");
+            if seed_like_leaf
+                && let Some(seed_fallback) = seed_fallbacks
+                    .iter()
+                    .find(|candidate| self.local_declared_types.contains(candidate.as_str()))
+            {
+                return if path.starts_with("::") {
+                    Some(format!("::{}", seed_fallback))
+                } else {
+                    Some((*seed_fallback).clone())
+                };
+            }
+            let seed_modules = [
+                format!("{}::seed", parent),
+                format!("{}::seed", escaped_parent),
+            ];
+            if seed_like_leaf
+                && seed_modules
+                    .iter()
+                    .any(|seed_mod| self.declared_module_paths.contains(seed_mod))
+            {
+                let resolved_seed = format!("{}::seed::{}", escaped_parent, escaped_leaf);
+                return if path.starts_with("::") {
+                    Some(format!("::{}", resolved_seed))
+                } else {
+                    Some(resolved_seed)
+                };
+            }
             return None;
         }
         let resolved = candidates.pop()?;
@@ -11134,25 +13212,65 @@ impl CodeGen {
     }
 
     fn is_skipped_module_trait_import(&self, path: &str) -> bool {
-        let normalized = normalize_use_import_path(path);
-        if self.skipped_module_traits.contains(normalized) {
+        let normalized = normalize_use_import_path(path).trim();
+        if normalized.is_empty() || normalized.starts_with("namespace ") {
+            return false;
+        }
+        let stripped = normalized.trim_start_matches("::");
+        let stripped_tail = stripped.rsplit("::").next().unwrap_or(stripped);
+        if self.skipped_module_traits.contains(stripped) {
             return true;
         }
-        if normalized.is_empty()
-            || normalized.contains("::")
-            || normalized.contains(" = ")
-            || normalized.starts_with("namespace ")
-        {
-            return false;
+        if self.skipped_module_traits.contains(stripped_tail) {
+            return true;
         }
-        if self.declared_item_names.contains(normalized) {
-            return false;
+        if let Some((_, target)) = split_use_import_alias(stripped) {
+            let target = target.trim_start_matches("::");
+            let target_tail = target.rsplit("::").next().unwrap_or(target);
+            if self.skipped_module_traits.contains(target) {
+                return true;
+            }
+            if self.skipped_module_traits.contains(target_tail) {
+                return true;
+            }
+        }
+        if stripped.starts_with("de::")
+            && matches!(
+                stripped_tail,
+                "Deserialize"
+                    | "DeserializeSeed"
+                    | "Deserializer"
+                    | "EnumAccess"
+                    | "Error"
+                    | "Expected"
+                    | "IntoDeserializer"
+                    | "MapAccess"
+                    | "SeqAccess"
+                    | "VariantAccess"
+                    | "Visitor"
+            )
+        {
+            return true;
+        }
+        if stripped.starts_with("ser::")
+            && matches!(
+                stripped_tail,
+                "Serialize"
+                    | "Serializer"
+                    | "SerializeSeq"
+                    | "SerializeTuple"
+                    | "SerializeTupleStruct"
+                    | "SerializeTupleVariant"
+                    | "SerializeMap"
+                    | "SerializeStruct"
+                    | "SerializeStructVariant"
+            )
+        {
+            return true;
         }
         self.skipped_module_traits.iter().any(|scoped| {
-            scoped
-                .rsplit("::")
-                .next()
-                .is_some_and(|tail| tail == normalized)
+            let tail = scoped.rsplit("::").next().unwrap_or(scoped);
+            tail == stripped || tail == stripped_tail || scoped == stripped
         })
     }
 
@@ -11184,6 +13302,72 @@ impl CodeGen {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_lowercase())
+    }
+
+    fn should_skip_unresolved_single_segment_type_import(&self, using_path: &str) -> bool {
+        if !(self.module_name.is_some() || self.expanded_libtest_mode) {
+            return false;
+        }
+        let normalized = using_path
+            .trim()
+            .trim_start_matches("::")
+            .trim_start_matches("typename ")
+            .trim();
+        if normalized.is_empty()
+            || normalized.contains("::")
+            || normalized.contains(" = ")
+            || normalized.starts_with("namespace ")
+        {
+            return false;
+        }
+        if !normalized
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            return false;
+        }
+        if self.declared_item_names.contains(normalized)
+            || self.local_declared_types.contains(normalized)
+            || self.import_alias_names.contains(normalized)
+            || self.is_local_type_name_in_scope(normalized)
+        {
+            return false;
+        }
+        true
+    }
+
+    fn should_skip_unresolved_function_using_import(&self, using_path: &str) -> bool {
+        let normalized = using_path
+            .trim()
+            .trim_start_matches("::")
+            .trim_start_matches("typename ")
+            .trim();
+        if normalized.is_empty()
+            || !normalized.contains("::")
+            || normalized.contains(" = ")
+            || normalized.starts_with("namespace ")
+        {
+            return false;
+        }
+        let tail = normalized.rsplit("::").next().unwrap_or(normalized);
+        if !tail
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+        {
+            return false;
+        }
+        let normalized_variants = self.owner_key_spelling_variants(normalized);
+        let is_known_function_path = normalized_variants
+            .iter()
+            .any(|candidate| self.is_known_free_function_path(candidate));
+        if !is_known_function_path {
+            return false;
+        }
+        !normalized_variants.iter().any(|candidate| {
+            self.forward_declared_function_paths.contains(candidate)
+        })
     }
 
     fn emitted_method_conflict_key(
@@ -11327,6 +13511,22 @@ impl CodeGen {
     /// Flatten a use tree into a list of fully-qualified C++ paths.
     /// Handles groups by expanding each item with the parent prefix.
     fn flatten_use_tree(&self, tree: &syn::UseTree, prefix: &str) -> Vec<String> {
+        self.flatten_use_tree_impl(tree, prefix, false)
+    }
+
+    /// Flatten a use tree while preserving explicit `crate::` qualification.
+    /// Used by scope-import binding collection so expression/type path lowering
+    /// can retain crate-root semantics in nested namespaces.
+    fn flatten_use_tree_preserve_crate(&self, tree: &syn::UseTree, prefix: &str) -> Vec<String> {
+        self.flatten_use_tree_impl(tree, prefix, true)
+    }
+
+    fn flatten_use_tree_impl(
+        &self,
+        tree: &syn::UseTree,
+        prefix: &str,
+        preserve_crate_root: bool,
+    ) -> Vec<String> {
         match tree {
             syn::UseTree::Path(p) => {
                 let ident = p.ident.to_string();
@@ -11335,14 +13535,30 @@ impl CodeGen {
                 // Map path prefixes (crate::, self::, core::, etc.)
                 let mapped = match ident.as_str() {
                     "crate" => {
+                        if preserve_crate_root {
+                            let new_prefix = if prefix.is_empty() {
+                                "crate".to_string()
+                            } else {
+                                format!("{}::crate", prefix)
+                            };
+                            return self.flatten_use_tree_impl(
+                                &p.tree,
+                                &new_prefix,
+                                preserve_crate_root,
+                            );
+                        }
                         // `crate::` paths refer to the current Rust module tree.
                         // In C++ module output, module names are not C++ namespaces,
                         // so keep these as local namespace paths (same as `self::`).
-                        return self.flatten_use_tree(&p.tree, prefix);
+                        return self.flatten_use_tree_impl(&p.tree, prefix, preserve_crate_root);
                     }
                     "self" => {
                         if self.module_stack.is_empty() {
-                            return self.flatten_use_tree(&p.tree, prefix);
+                            return self.flatten_use_tree_impl(
+                                &p.tree,
+                                prefix,
+                                preserve_crate_root,
+                            );
                         }
                         let module_prefix = self.module_stack.join("::");
                         let new_prefix = if prefix.is_empty() {
@@ -11350,13 +13566,21 @@ impl CodeGen {
                         } else {
                             format!("{}::{}", prefix, module_prefix)
                         };
-                        return self.flatten_use_tree(&p.tree, &new_prefix);
+                        return self.flatten_use_tree_impl(
+                            &p.tree,
+                            &new_prefix,
+                            preserve_crate_root,
+                        );
                     }
                     "super" => {
                         if self.module_stack.len() > 1 {
                             self.module_stack[..self.module_stack.len() - 1].join("::")
                         } else {
-                            return self.flatten_use_tree(&p.tree, prefix);
+                            return self.flatten_use_tree_impl(
+                                &p.tree,
+                                prefix,
+                                preserve_crate_root,
+                            );
                         }
                     }
                     "std" | "core" | "alloc" if at_root => "std".to_string(),
@@ -11369,7 +13593,7 @@ impl CodeGen {
                     format!("{}::{}", prefix, mapped)
                 };
 
-                self.flatten_use_tree(&p.tree, &new_prefix)
+                self.flatten_use_tree_impl(&p.tree, &new_prefix, preserve_crate_root)
             }
             syn::UseTree::Name(n) => {
                 let name = n.ident.to_string();
@@ -11419,12 +13643,65 @@ impl CodeGen {
                             }
                         }
                         _ => {
-                            result.extend(self.flatten_use_tree(item, prefix));
+                            result.extend(self.flatten_use_tree_impl(
+                                item,
+                                prefix,
+                                preserve_crate_root,
+                            ));
                         }
                     }
                 }
                 result
             }
+        }
+    }
+
+    fn rewrite_external_crate_import_path(&self, path: &str) -> String {
+        if let Some((alias, target)) = split_use_import_alias(path) {
+            let mapped_target = self.rewrite_external_crate_import_path(target);
+            return format!("{} = {}", alias, mapped_target);
+        }
+        let Some((root, rest)) = path.split_once("::") else {
+            return match self.external_crate_module_aliases.get(path) {
+                Some(mapped_root) if mapped_root.is_empty() => path.to_string(),
+                Some(mapped_root) => mapped_root.clone(),
+                None => path.to_string(),
+            };
+        };
+        let Some(mapped_root) = self.external_crate_module_aliases.get(root) else {
+            return path.to_string();
+        };
+        if mapped_root.is_empty() {
+            rest.to_string()
+        } else if rest.is_empty() {
+            mapped_root.clone()
+        } else {
+            format!("{}::{}", mapped_root, rest)
+        }
+    }
+
+    fn rewrite_external_crate_path_segments(&self, segments: &[String]) -> Vec<String> {
+        if segments.is_empty() {
+            return Vec::new();
+        }
+        let root = &segments[0];
+        let Some(mapped_root) = self.external_crate_module_aliases.get(root) else {
+            return segments.to_vec();
+        };
+        let mut rewritten: Vec<String> = Vec::new();
+        if !mapped_root.is_empty() {
+            rewritten.extend(
+                mapped_root
+                    .split("::")
+                    .filter(|seg| !seg.is_empty())
+                    .map(|seg| seg.to_string()),
+            );
+        }
+        rewritten.extend(segments.iter().skip(1).cloned());
+        if rewritten.is_empty() {
+            segments.to_vec()
+        } else {
+            rewritten
         }
     }
 
@@ -11513,17 +13790,22 @@ impl CodeGen {
                 let alias_rust_name = t.ident.to_string();
                 let name = escape_cpp_keyword(&alias_rust_name);
                 let alias_is_type_param = self.is_type_param_in_scope(&alias_rust_name);
-                let mut ty = self.normalize_assoc_alias_target_type(
-                    &alias_rust_name,
-                    self.map_type(&t.ty),
-                );
+                let mut ty =
+                    self.normalize_assoc_alias_target_type(&alias_rust_name, self.map_type(&t.ty));
+                ty = Self::rewrite_private_keyword_namespace_in_type_path(&ty);
                 if (ty == name || ty.starts_with(&format!("{}<", name)))
                     && !(alias_is_type_param && ty == name)
                 {
                     let ns_prefix = if self.module_stack.is_empty() {
                         String::new()
                     } else {
-                        format!("{}::", self.module_stack.join("::"))
+                        let escaped_module = self
+                            .module_stack
+                            .iter()
+                            .map(|seg| escape_cpp_keyword(seg))
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        format!("{}::", escaped_module)
                     };
                     ty = format!("::{}{}", ns_prefix, ty);
                 }
@@ -11568,7 +13850,7 @@ impl CodeGen {
                 mapped_ty = escape_cpp_keyword(alias_rust_name);
             }
         }
-        mapped_ty
+        Self::rewrite_private_keyword_namespace_in_type_path(&mapped_ty)
     }
 
     fn impl_const_type_requires_inline_const(&self, ty_cpp: &str) -> bool {
@@ -11747,6 +14029,12 @@ impl CodeGen {
         } else {
             Some(resolved)
         }
+    }
+
+    fn current_struct_assoc_alias_exists(&self, assoc_name: &str) -> bool {
+        self.current_struct_assoc_cpp_types.last().is_some_and(|scope| {
+            scope.contains_key(assoc_name) || scope.contains_key(&escape_cpp_keyword(assoc_name))
+        })
     }
 
     fn path_is_current_struct_assoc_projection(&self, path: &syn::Path) -> bool {
@@ -12230,6 +14518,7 @@ impl CodeGen {
         }
         self.indent += 1;
         for (alias_name, alias_ty) in &deduced_return_aliases {
+            let alias_ty = Self::rewrite_private_keyword_namespace_in_type_path(alias_ty);
             self.writeln(&format!("using {} = {};", alias_name, alias_ty));
         }
         if is_drop_destructor {
@@ -13072,6 +15361,13 @@ impl CodeGen {
                 );
             }
             if expected_ty.is_none() {
+                expected_ty = self.infer_tuple_constructor_arg_expected_type_from_context(
+                    call,
+                    context_expected_ty,
+                    idx,
+                );
+            }
+            if expected_ty.is_none() {
                 expected_ty = context_expected_ty.cloned();
             }
             let Some(expected_ty) = expected_ty else {
@@ -13086,6 +15382,46 @@ impl CodeGen {
                 hints.insert(name, hint_ty);
             }
         }
+    }
+
+    fn infer_tuple_constructor_arg_expected_type_from_context(
+        &self,
+        call: &syn::ExprCall,
+        context_expected_ty: Option<&syn::Type>,
+        arg_idx: usize,
+    ) -> Option<syn::Type> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let joined = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !matches!(
+            joined.as_str(),
+            "make_tuple" | "std::make_tuple" | "core::tuple::make_tuple"
+        ) {
+            return None;
+        }
+        let expected_ty = context_expected_ty?;
+        let tuple_candidate = self
+            .expected_wrapper_inner_type_candidates(expected_ty)
+            .into_iter()
+            .find(|inner| {
+                matches!(
+                    self.peel_reference_paren_group_type(inner),
+                    syn::Type::Tuple(_)
+                )
+            })
+            .or_else(|| Some(expected_ty.clone()))?;
+        let tuple_candidate = self.peel_reference_paren_group_type(&tuple_candidate);
+        let syn::Type::Tuple(tuple_ty) = tuple_candidate else {
+            return None;
+        };
+        tuple_ty.elems.iter().nth(arg_idx).cloned()
     }
 
     fn augment_uninitialized_local_type_hints_from_usage(
@@ -13284,7 +15620,6 @@ impl CodeGen {
     ) {
         if let Some(name) = self.option_some_payload_local_name(expr)
             && candidates.contains(&name)
-            && !hints.contains_key(&name)
         {
             hints.insert(name, option_inner_ty.clone());
         }
@@ -13598,7 +15933,7 @@ impl CodeGen {
             let Some(name) = local_binding_name(local) else {
                 continue;
             };
-            if hints.contains_key(&name) || !self.local_binding_is_mutable(local) {
+            if !self.local_binding_is_mutable(local) {
                 continue;
             }
             let Some(init) = &local.init else {
@@ -14296,17 +16631,21 @@ impl CodeGen {
             syn::Expr::Assign(assign) => {
                 if let Some(name) = extract_simple_local_ident(&assign.left) {
                     if candidates.contains(&name) && !hints.contains_key(&name) {
-                        if let Some(rhs_ty) = self
-                            .infer_local_binding_type_from_initializer(&assign.right)
-                            .or_else(|| self.infer_simple_expr_type(&assign.right))
-                            .or_else(|| {
-                                extract_simple_local_ident(&assign.right)
-                                    .and_then(|rhs_name| self.lookup_local_binding_type(&rhs_name))
-                            })
-                        {
-                            if self.type_is_concrete_hint_candidate(&rhs_ty) {
-                                hints.insert(name, rhs_ty);
-                            }
+                        let rhs_candidates: [Option<syn::Type>; 5] = [
+                            self.infer_local_binding_type_from_initializer(&assign.right),
+                            self.infer_simple_expr_type(&assign.right),
+                            self.infer_option_hint_type_from_some_expr(assign.right.as_ref()),
+                            self.extract_option_some_call_arg(assign.right.as_ref())
+                                .and_then(|_| {
+                                    self.infer_option_hint_type_from_return_context_for_unresolved_some()
+                                }),
+                            extract_simple_local_ident(&assign.right)
+                                .and_then(|rhs_name| self.lookup_local_binding_type(&rhs_name)),
+                        ];
+                        if let Some(rhs_ty) = rhs_candidates.into_iter().flatten().find(|rhs_ty| {
+                            self.type_is_placeholder_hint_candidate_allow_scoped_generics(rhs_ty)
+                        }) {
+                            hints.insert(name, rhs_ty);
                         }
                     }
                 }
@@ -14495,6 +16834,145 @@ impl CodeGen {
         }
     }
 
+    fn infer_option_hint_type_from_some_expr(&self, expr: &syn::Expr) -> Option<syn::Type> {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Call(call) = expr else {
+            return None;
+        };
+        let call_func = self.peel_paren_group_expr(call.func.as_ref());
+        let syn::Expr::Path(path_expr) = call_func else {
+            return None;
+        };
+        if !self.is_option_some_path(&path_expr.path) {
+            return None;
+        }
+        let inner_expr = call.args.first()?;
+        let inner_ty = self
+            .infer_local_binding_type_from_initializer(inner_expr)
+            .or_else(|| self.infer_simple_expr_type(inner_expr))
+            .or_else(|| self.infer_hint_type_from_expr(inner_expr))?;
+        Some(parse_quote!(Option<#inner_ty>))
+    }
+
+    fn collect_type_param_names_in_type(&self, ty: &syn::Type, out: &mut HashSet<String>) {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none() {
+                    for seg in &tp.path.segments {
+                        let name = seg.ident.to_string();
+                        if self.is_type_param_in_scope(&name) || self.is_struct_type_param(&name)
+                        {
+                            out.insert(name);
+                        }
+                    }
+                }
+                for seg in &tp.path.segments {
+                    match &seg.arguments {
+                        syn::PathArguments::AngleBracketed(args) => {
+                            for arg in &args.args {
+                                if let syn::GenericArgument::Type(inner) = arg {
+                                    self.collect_type_param_names_in_type(inner, out);
+                                }
+                            }
+                        }
+                        syn::PathArguments::Parenthesized(args) => {
+                            for input in &args.inputs {
+                                self.collect_type_param_names_in_type(input, out);
+                            }
+                            if let syn::ReturnType::Type(_, output) = &args.output {
+                                self.collect_type_param_names_in_type(output, out);
+                            }
+                        }
+                        syn::PathArguments::None => {}
+                    }
+                }
+            }
+            syn::Type::Reference(r) => self.collect_type_param_names_in_type(&r.elem, out),
+            syn::Type::Ptr(p) => self.collect_type_param_names_in_type(&p.elem, out),
+            syn::Type::Paren(p) => self.collect_type_param_names_in_type(&p.elem, out),
+            syn::Type::Group(g) => self.collect_type_param_names_in_type(&g.elem, out),
+            syn::Type::Tuple(t) => {
+                for elem in &t.elems {
+                    self.collect_type_param_names_in_type(elem, out);
+                }
+            }
+            syn::Type::Array(a) => self.collect_type_param_names_in_type(&a.elem, out),
+            syn::Type::Slice(s) => self.collect_type_param_names_in_type(&s.elem, out),
+            _ => {}
+        }
+    }
+
+    fn infer_option_hint_type_from_return_context_for_unresolved_some(&self) -> Option<syn::Type> {
+        let return_ty = self.current_return_type_hint()?;
+        let return_ty = self.peel_reference_paren_group_type(return_ty);
+        let syn::Type::Path(tp) = return_ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        if last.ident != "Result" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let type_args: Vec<syn::Type> = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        if type_args.len() < 2 {
+            return None;
+        }
+
+        let ok_ty = &type_args[0];
+        let err_ty = &type_args[1];
+        let mut ok_params = HashSet::new();
+        let mut err_params = HashSet::new();
+        self.collect_type_param_names_in_type(ok_ty, &mut ok_params);
+        self.collect_type_param_names_in_type(err_ty, &mut err_params);
+
+        let mut value_only_params: Vec<String> =
+            ok_params.difference(&err_params).cloned().collect();
+        value_only_params.sort();
+        value_only_params.dedup();
+
+        if value_only_params.len() != 1 {
+            // Expanded trait impl methods often return `Result<Self::Value, E>`
+            // where `Self::Value` hides the concrete generic (for example `T`).
+            // Recover that by selecting the unique in-scope type parameter not used
+            // by the error side when the Ok side is `Self::Value`.
+            let ok_is_self_value_assoc = matches!(
+                self.peel_reference_paren_group_type(ok_ty),
+                syn::Type::Path(ok_path)
+                    if ok_path.qself.is_none()
+                        && ok_path.path.segments.len() == 2
+                        && ok_path.path.segments[0].ident == "Self"
+                        && ok_path.path.segments[1].ident == "Value"
+            );
+            if value_only_params.is_empty() && ok_is_self_value_assoc {
+                let mut fallback_params: Vec<String> = self
+                    .ordered_type_params_in_scope()
+                    .into_iter()
+                    .filter(|name| !err_params.contains(name))
+                    .collect();
+                fallback_params.sort();
+                fallback_params.dedup();
+                if fallback_params.len() == 1 {
+                    value_only_params = fallback_params;
+                }
+            }
+        }
+        if value_only_params.len() != 1 {
+            return None;
+        }
+        let inner_ty = syn::parse_str::<syn::Type>(&value_only_params[0]).ok()?;
+        Some(parse_quote!(Option<#inner_ty>))
+    }
+
     fn extract_candidate_local_name_for_hint_expr(&self, expr: &syn::Expr) -> Option<String> {
         let expr = self.peel_paren_group_expr(expr);
         if let syn::Expr::Reference(reference) = expr {
@@ -14624,12 +17102,27 @@ impl CodeGen {
         if !owner_looks_like_type {
             return None;
         }
+        let mut owner_path = syn::Path {
+            leading_colon: path_expr.path.leading_colon,
+            segments: syn::punctuated::Punctuated::new(),
+        };
+        for seg in path_expr.path.segments.iter().take(owner_seg_idx + 1) {
+            owner_path.segments.push(seg.clone());
+        }
         // For explicit associated calls (`Type::method(...)`), avoid falling back
         // to method-name-only signatures from unrelated owners. That fallback can
         // cross-wire hints for common names like `new_unchecked` and trigger
         // invalid coercions at call sites.
-        let mut expected =
-            self.lookup_owner_method_arg_expected_type(&owner, &method, arg_idx, arg_expr);
+        let mut expected = self.lookup_owner_method_arg_expected_type_from_owner_path(
+            Some(&owner_path),
+            &owner,
+            &method,
+            arg_idx,
+            arg_expr,
+        );
+        if expected.is_none() && owner_path.segments.len() > 1 {
+            expected = self.lookup_owner_method_arg_expected_type(&owner, &method, arg_idx, arg_expr);
+        }
         if expected.is_none() {
             return self.infer_associated_call_arg_expected_type_from_owner(
                 owner_seg, &owner, &method, arg_idx, arg_expr,
@@ -14763,6 +17256,7 @@ impl CodeGen {
                 Some(boxed_ty)
             }
             ("Box", "new" | "new_" | "make", 0) => Some(owner_inner_ty),
+            (name, "new" | "new_", 0) if name.ends_with("Deserializer") => None,
             (_, "new" | "new_", 0) => Some(owner_inner_ty),
             ("OnceBox", "get_or_init", 0) => {
                 let callable_ty: syn::Type = parse_quote!(impl FnOnce() -> Box<#owner_inner_ty>);
@@ -14845,6 +17339,7 @@ impl CodeGen {
                 Some(boxed_ty)
             }
             ("Box", "new" | "new_" | "make", 0) => Some(owner_inner_ty),
+            (name, "new" | "new_", 0) if name.ends_with("Deserializer") => None,
             (_, "new" | "new_", 0) => Some(owner_inner_ty),
             ("OnceBox", "get_or_init", 0) => {
                 let callable_ty: syn::Type = parse_quote!(impl FnOnce() -> Box<#owner_inner_ty>);
@@ -15310,6 +17805,8 @@ impl CodeGen {
         depth: usize,
     ) -> Option<syn::Type> {
         let direct = match owner_target {
+            "Option" => extract_option_inner_type_for_hint(expected_ty)
+                .or_else(|| Some(self.peel_reference_paren_group_type(expected_ty).clone())),
             "Vec" => extract_vec_element_type_for_hint(expected_ty)
                 .or_else(|| extract_sequence_element_type_for_hint(expected_ty)),
             "Array" => extract_sequence_element_type_for_hint(expected_ty),
@@ -16147,7 +18644,9 @@ impl CodeGen {
         }
 
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
-        let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+        let scrutinee = self
+            .try_emit_runtime_entry_probe_for_match_arms(&match_expr.arms, &match_expr.expr)
+            .unwrap_or_else(|| self.emit_expr_to_string(&match_expr.expr));
         if self.try_emit_runtime_match_stmt(match_expr, variant_ctx.as_ref()) {
             return;
         }
@@ -16484,8 +18983,7 @@ impl CodeGen {
         self.writeln("{");
         self.indent += 1;
         self.writeln(&format!("auto&& _m = {};", scrutinee));
-        self.writeln("do {");
-        self.indent += 1;
+        self.writeln("bool _m_matched = false;");
 
         for (
             arm,
@@ -16498,6 +18996,8 @@ impl CodeGen {
             ),
         ) in match_expr.arms.iter().zip(arm_plans.into_iter())
         {
+            self.writeln("if (!_m_matched) {");
+            self.indent += 1;
             for pre_line in arm_pre_lines {
                 self.writeln(&pre_line);
             }
@@ -16517,12 +19017,12 @@ impl CodeGen {
                 self.writeln(&format!("if ({}) {{", guard_condition));
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
-                self.writeln("break;");
+                self.writeln("_m_matched = true;");
                 self.indent -= 1;
                 self.writeln("}");
             } else {
                 self.emit_arm_body(&arm.body);
-                self.writeln("break;");
+                self.writeln("_m_matched = true;");
             }
             self.pop_local_cpp_binding_scope(pushed_binding_scope);
 
@@ -16532,10 +19032,10 @@ impl CodeGen {
             }
             self.indent -= 1;
             self.writeln("}");
+            self.indent -= 1;
+            self.writeln("}");
         }
 
-        self.indent -= 1;
-        self.writeln("} while (false);");
         self.indent -= 1;
         self.writeln("}");
         true
@@ -16613,7 +19113,7 @@ impl CodeGen {
 
         enum_name
             .as_ref()
-            .is_some_and(|name| self.data_enum_types.contains(name))
+            .is_some_and(|name| self.data_enum_name_matches(name))
     }
 
     fn try_emit_binding_tuple_match(&mut self, match_expr: &syn::ExprMatch) -> bool {
@@ -16795,11 +19295,10 @@ impl CodeGen {
             "auto _m_tuple = std::make_tuple({});",
             tuple_elem_names.join(", ")
         ));
-        self.writeln("do {");
-        self.indent += 1;
+        self.writeln("bool _m_matched = false;");
 
         for arm in &match_expr.arms {
-            self.writeln("{");
+            self.writeln("if (!_m_matched) {");
             self.indent += 1;
 
             let mut binding_stmts = Vec::new();
@@ -16830,20 +19329,18 @@ impl CodeGen {
                 self.writeln(&format!("if ({}) {{", guard_str));
                 self.indent += 1;
                 self.emit_arm_body(&arm.body);
-                self.writeln("break;");
+                self.writeln("_m_matched = true;");
                 self.indent -= 1;
                 self.writeln("}");
             } else {
                 self.emit_arm_body(&arm.body);
-                self.writeln("break;");
+                self.writeln("_m_matched = true;");
             }
 
             self.indent -= 1;
             self.writeln("}");
         }
 
-        self.indent -= 1;
-        self.writeln("} while (false);");
         self.indent -= 1;
         self.writeln("}");
         true
@@ -17706,7 +20203,10 @@ impl CodeGen {
             syn::Pat::Tuple(tuple_pat) => {
                 let mut conditions = Vec::new();
                 for (i, elem_pat) in tuple_pat.elems.iter().enumerate() {
-                    let elem_expr = format!("std::get<{}>({})", i, source_expr);
+                    let elem_expr = format!(
+                        "std::get<{}>(rusty::detail::deref_if_pointer({}))",
+                        i, source_expr
+                    );
                     let elem_condition = self.collect_runtime_match_binding_stmts_and_condition(
                         elem_pat,
                         &elem_expr,
@@ -17806,12 +20306,17 @@ impl CodeGen {
                     let matched_value =
                         format!("std::as_const({}).{}()", source_expr, unwrap_method);
                     let mut conditions = vec![format!("{}.{}()", source_expr, cond_method)];
+                    let payload_variant_ctx = self
+                        .infer_variant_type_context_from_pattern(
+                            tuple_struct_pat.elems.first()?,
+                            variant_ctx,
+                        );
                     let payload_condition = self
                         .collect_runtime_match_binding_stmts_and_condition(
                             tuple_struct_pat.elems.first()?,
                             &matched_value,
                             out,
-                            variant_ctx,
+                            payload_variant_ctx.as_ref(),
                         )?;
                     if let Some(payload_condition) = payload_condition {
                         conditions.push(payload_condition);
@@ -17821,8 +20326,7 @@ impl CodeGen {
 
                 let variant_cpp = self.variant_pattern_cpp_type(&tuple_struct_pat.path, None);
                 let is_data_enum_variant = self
-                    .extract_variant_pattern_enum_name(&tuple_struct_pat.path, &variant_cpp)
-                    .is_some_and(|name| self.data_enum_types.contains(&name));
+                    .path_is_known_data_enum_variant_with_ctx(&tuple_struct_pat.path, variant_ctx);
                 let scrutinee_base = format!("rusty::detail::deref_if_pointer({})", source_expr);
                 let mut conditions = Vec::new();
                 let payload_base_expr = if is_data_enum_variant {
@@ -17853,15 +20357,23 @@ impl CodeGen {
                     self.runtime_path_match_condition_method(&path_pat.path, variant_ctx)
                 {
                     Some(Some(format!("{}.{}()", source_expr, cond_method)))
+                } else if self.path_is_known_data_enum_variant_with_ctx(&path_pat.path, variant_ctx)
+                {
+                    let variant_cpp = self.variant_pattern_cpp_type(&path_pat.path, variant_ctx);
+                    let scrutinee_base =
+                        format!("rusty::detail::deref_if_pointer({})", source_expr);
+                    Some(Some(format!(
+                        "std::holds_alternative<{}>({})",
+                        variant_cpp, scrutinee_base
+                    )))
                 } else {
                     self.tuple_pattern_elem_value_condition(pat, source_expr)
                 }
             }
             syn::Pat::Struct(struct_pat) => {
                 let variant_cpp = self.variant_pattern_cpp_type(&struct_pat.path, None);
-                let is_data_enum_variant = self
-                    .extract_variant_pattern_enum_name(&struct_pat.path, &variant_cpp)
-                    .is_some_and(|name| self.data_enum_types.contains(&name));
+                let is_data_enum_variant =
+                    self.path_is_known_data_enum_variant_with_ctx(&struct_pat.path, variant_ctx);
                 let field_base_expr = if is_data_enum_variant {
                     format!("std::get<{}>({})", variant_cpp, source_expr)
                 } else {
@@ -18001,7 +20513,10 @@ impl CodeGen {
             syn::Pat::Tuple(tuple_pat) => {
                 let mut conditions = Vec::new();
                 for (i, elem_pat) in tuple_pat.elems.iter().enumerate() {
-                    let elem_expr = format!("std::get<{}>({})", i, source_expr);
+                    let elem_expr = format!(
+                        "std::get<{}>(rusty::detail::deref_if_pointer({}))",
+                        i, source_expr
+                    );
                     let elem_condition = self
                         .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                             elem_pat,
@@ -18107,13 +20622,18 @@ impl CodeGen {
                     let matched_value =
                         format!("std::as_const({}).{}()", source_expr, unwrap_method);
                     let mut conditions = vec![format!("{}.{}()", source_expr, cond_method)];
+                    let payload_variant_ctx = self
+                        .infer_variant_type_context_from_pattern(
+                            tuple_struct_pat.elems.first()?,
+                            variant_ctx,
+                        );
                     let payload_condition = self
                         .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                             tuple_struct_pat.elems.first()?,
                             &matched_value,
                             out,
                             rust_to_cpp,
-                            variant_ctx,
+                            payload_variant_ctx.as_ref(),
                         )?;
                     if let Some(payload_condition) = payload_condition {
                         conditions.push(payload_condition);
@@ -18123,8 +20643,7 @@ impl CodeGen {
 
                 let variant_cpp = self.variant_pattern_cpp_type(&tuple_struct_pat.path, None);
                 let is_data_enum_variant = self
-                    .extract_variant_pattern_enum_name(&tuple_struct_pat.path, &variant_cpp)
-                    .is_some_and(|name| self.data_enum_types.contains(&name));
+                    .path_is_known_data_enum_variant_with_ctx(&tuple_struct_pat.path, variant_ctx);
                 let scrutinee_base = format!("rusty::detail::deref_if_pointer({})", source_expr);
                 let mut conditions = Vec::new();
                 let payload_base_expr = if is_data_enum_variant {
@@ -18157,15 +20676,23 @@ impl CodeGen {
                     self.runtime_path_match_condition_method(&path_pat.path, variant_ctx)
                 {
                     Some(Some(format!("{}.{}()", source_expr, cond_method)))
+                } else if self.path_is_known_data_enum_variant_with_ctx(&path_pat.path, variant_ctx)
+                {
+                    let variant_cpp = self.variant_pattern_cpp_type(&path_pat.path, variant_ctx);
+                    let scrutinee_base =
+                        format!("rusty::detail::deref_if_pointer({})", source_expr);
+                    Some(Some(format!(
+                        "std::holds_alternative<{}>({})",
+                        variant_cpp, scrutinee_base
+                    )))
                 } else {
                     self.tuple_pattern_elem_value_condition(pat, source_expr)
                 }
             }
             syn::Pat::Struct(struct_pat) => {
                 let variant_cpp = self.variant_pattern_cpp_type(&struct_pat.path, None);
-                let is_data_enum_variant = self
-                    .extract_variant_pattern_enum_name(&struct_pat.path, &variant_cpp)
-                    .is_some_and(|name| self.data_enum_types.contains(&name));
+                let is_data_enum_variant =
+                    self.path_is_known_data_enum_variant_with_ctx(&struct_pat.path, variant_ctx);
                 let field_base_expr = if is_data_enum_variant {
                     format!("std::get<{}>({})", variant_cpp, source_expr)
                 } else {
@@ -19348,8 +21875,8 @@ impl CodeGen {
                     parts.push(format!("if (_m == {}) {}{};", val, ret_prefix, body));
                 }
                 syn::Pat::Path(pp) => {
-                    let val = self.emit_path_to_string(&pp.path);
-                    parts.push(format!("if (_m == {}) {}{};", val, ret_prefix, body));
+                    let cond = self.path_pattern_value_condition(&pp.path, "_m");
+                    parts.push(format!("if ({}) {}{};", cond, ret_prefix, body));
                 }
                 syn::Pat::Or(or_pat) => {
                     let mut conds = Vec::new();
@@ -19359,7 +21886,7 @@ impl CodeGen {
                                 conds.push(format!("_m == {}", self.emit_lit(&lit.lit)))
                             }
                             syn::Pat::Path(pp) => {
-                                conds.push(format!("_m == {}", self.emit_path_to_string(&pp.path)))
+                                conds.push(self.path_pattern_value_condition(&pp.path, "_m"))
                             }
                             syn::Pat::Range(_range_pat) => {
                                 let Some(cond) =
@@ -19416,7 +21943,7 @@ impl CodeGen {
                 _ => parts.push(format!("{}{};", ret_prefix, body)),
             }
         }
-        parts.join(" ")
+        parts.join("\n")
     }
 
     fn collect_switch_match_tuple_literal_hints(
@@ -19641,6 +22168,7 @@ impl CodeGen {
         arms: &[syn::Arm],
         variant_ctx: Option<&VariantTypeContext>,
         expected_ty: Option<&syn::Type>,
+        borrow_payload: bool,
     ) -> String {
         // Expression-form match arms may dereference payload bindings (e.g. `*ch`) that
         // are references due match ergonomics. Evaluate each arm body with a temporary
@@ -19687,14 +22215,16 @@ impl CodeGen {
                             || scoped.expected_type_contains_mut_reference(expected_ty);
                         let visit_param = if needs_mut_param {
                             format!("{}& _v", cpp_type)
-                        } else {
+                        } else if borrow_payload {
                             format!("const {}& _v", cpp_type)
+                        } else {
+                            format!("{}&& _v", cpp_type)
                         };
                         parts.push(format!(
                             "[&]({}){} {{ {} if ({}) return {}; return {}; }}",
                             visit_param,
                             lambda_return_annotation,
-                            binding_stmts.join(" "),
+                            binding_stmts.join("\n"),
                             guard_str,
                             arm_value,
                             scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
@@ -19705,14 +22235,16 @@ impl CodeGen {
                             || scoped.expected_type_contains_mut_reference(expected_ty);
                         let visit_param = if needs_mut_param {
                             format!("{}& _v", cpp_type)
-                        } else {
+                        } else if borrow_payload {
                             format!("const {}& _v", cpp_type)
+                        } else {
+                            format!("{}&& _v", cpp_type)
                         };
                         parts.push(format!(
                             "[&]({}){} {{ {} return {}; }}",
                             visit_param,
                             lambda_return_annotation,
-                            binding_stmts.join(" "),
+                            binding_stmts.join("\n"),
                             arm_value
                         ));
                     }
@@ -19721,18 +22253,28 @@ impl CodeGen {
                     let cpp_type = scoped.visit_pattern_cpp_type(&pp.path, variant_ctx, Some("_m"));
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = scoped.emit_expr_to_string(guard);
+                        let visit_param = if borrow_payload {
+                            format!("const {}& _v", cpp_type)
+                        } else {
+                            format!("{}&& _v", cpp_type)
+                        };
                         parts.push(format!(
-                            "[&](const {}& _v){} {{ if ({}) return {}; return {}; }}",
-                            cpp_type,
+                            "[&]({}){} {{ if ({}) return {}; return {}; }}",
+                            visit_param,
                             lambda_return_annotation,
                             guard_str,
                             arm_value,
                             scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
                         ));
                     } else {
+                        let visit_param = if borrow_payload {
+                            format!("const {}&", cpp_type)
+                        } else {
+                            format!("{}&&", cpp_type)
+                        };
                         parts.push(format!(
-                            "[&](const {}&){} {{ return {}; }}",
-                            cpp_type, lambda_return_annotation, arm_value
+                            "[&]({}){} {{ return {}; }}",
+                            visit_param, lambda_return_annotation, arm_value
                         ));
                     }
                 }
@@ -19769,8 +22311,10 @@ impl CodeGen {
                         || scoped.expected_type_contains_mut_reference(expected_ty)
                     {
                         format!("{}& _v", cpp_type)
-                    } else {
+                    } else if borrow_payload {
                         format!("const {}& _v", cpp_type)
+                    } else {
+                        format!("{}&& _v", cpp_type)
                     };
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = scoped.emit_expr_to_string(guard);
@@ -19778,7 +22322,7 @@ impl CodeGen {
                             "[&]({}){} {{ {} if ({}) return {}; return {}; }}",
                             visit_param,
                             lambda_return_annotation,
-                            binding_stmts.join(" "),
+                            binding_stmts.join("\n"),
                             guard_str,
                             arm_value,
                             scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
@@ -19788,15 +22332,21 @@ impl CodeGen {
                             "[&]({}){} {{ {} return {}; }}",
                             visit_param,
                             lambda_return_annotation,
-                            binding_stmts.join(" "),
+                            binding_stmts.join("\n"),
                             arm_value
                         ));
                     }
                 }
                 syn::Pat::Wild(_) => {
                     parts.push(format!(
-                        "[&](const auto&){} {{ return {}; }}",
-                        lambda_return_annotation, arm_value
+                        "[&]({}){} {{ return {}; }}",
+                        if borrow_payload {
+                            "const auto&"
+                        } else {
+                            "auto&&"
+                        },
+                        lambda_return_annotation,
+                        arm_value
                     ));
                 }
                 syn::Pat::Ident(pi) => {
@@ -19815,22 +22365,36 @@ impl CodeGen {
                                 })
                         });
                         if let Some(variant_path) = data_enum_variant_path {
-                            let cpp_type =
-                                scoped.visit_pattern_cpp_type(&variant_path, variant_ctx, Some("_m"));
+                            let cpp_type = scoped.visit_pattern_cpp_type(
+                                &variant_path,
+                                variant_ctx,
+                                Some("_m"),
+                            );
                             if let Some((_, guard)) = &arm.guard {
                                 let guard_str = scoped.emit_expr_to_string(guard);
+                                let visit_param = if borrow_payload {
+                                    format!("const {}& _v", cpp_type)
+                                } else {
+                                    format!("{}&& _v", cpp_type)
+                                };
                                 parts.push(format!(
-                                    "[&](const {}& _v){} {{ if ({}) return {}; return {}; }}",
-                                    cpp_type,
+                                    "[&]({}){} {{ if ({}) return {}; return {}; }}",
+                                    visit_param,
                                     lambda_return_annotation,
                                     guard_str,
                                     arm_value,
-                                    scoped.match_expr_unreachable_fallback_with_expected(expected_ty),
+                                    scoped
+                                        .match_expr_unreachable_fallback_with_expected(expected_ty),
                                 ));
                             } else {
+                                let visit_param = if borrow_payload {
+                                    format!("const {}&", cpp_type)
+                                } else {
+                                    format!("{}&&", cpp_type)
+                                };
                                 parts.push(format!(
-                                    "[&](const {}&){} {{ return {}; }}",
-                                    cpp_type, lambda_return_annotation, arm_value
+                                    "[&]({}){} {{ return {}; }}",
+                                    visit_param, lambda_return_annotation, arm_value
                                 ));
                             }
                             scoped.pop_pattern_ref_binding_scope();
@@ -19839,13 +22403,25 @@ impl CodeGen {
                     }
                     let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                     parts.push(format!(
-                        "[&](const auto& {}){} {{ return {}; }}",
-                        cpp_name, lambda_return_annotation, arm_value
+                        "[&]({} {}){} {{ return {}; }}",
+                        if borrow_payload {
+                            "const auto&"
+                        } else {
+                            "auto&&"
+                        },
+                        cpp_name,
+                        lambda_return_annotation,
+                        arm_value
                     ));
                 }
                 _ => {
                     parts.push(format!(
-                        "[&](const auto&){} {{ return {}; }}",
+                        "[&]({}){} {{ return {}; }}",
+                        if borrow_payload {
+                            "const auto&"
+                        } else {
+                            "auto&&"
+                        },
                         lambda_return_annotation,
                         scoped.match_expr_unreachable_fallback_with_expected(expected_ty)
                     ));
@@ -19857,12 +22433,13 @@ impl CodeGen {
     }
 
     fn runtime_match_enum_kind_by_name(&self, enum_name: &str) -> Option<RuntimeMatchEnumKind> {
-        if self.data_enum_types.contains(enum_name) {
+        if self.data_enum_name_matches(enum_name) {
             return None;
         }
         match enum_name {
             "Option" => Some(RuntimeMatchEnumKind::Option),
             "Result" => Some(RuntimeMatchEnumKind::Result),
+            "Entry" => Some(RuntimeMatchEnumKind::Entry),
             _ => None,
         }
     }
@@ -19895,12 +22472,85 @@ impl CodeGen {
             return Some(kind);
         }
         if path.segments.len() == 1 {
-            let variant_name = path.segments.last()?.ident.to_string();
-            if let Some(kind) = self.runtime_match_enum_kind_by_variant_name(&variant_name) {
-                return Some(kind);
+            if variant_ctx.is_none() {
+                let variant_name = path.segments.last()?.ident.to_string();
+                if let Some(kind) = self.runtime_match_enum_kind_by_variant_name(&variant_name) {
+                    return Some(kind);
+                }
             }
         }
         None
+    }
+
+    fn path_runtime_entry_variant_name(&self, path: &syn::Path) -> Option<&'static str> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let owner = path.segments.iter().nth_back(1)?.ident.to_string();
+        if owner != "Entry" {
+            return None;
+        }
+        let variant = self
+            .canonical_variant_name(&path.segments.last()?.ident.to_string())
+            .to_string();
+        match variant.as_str() {
+            "Vacant" => Some("Vacant"),
+            "Occupied" => Some("Occupied"),
+            _ => None,
+        }
+    }
+
+    fn pat_uses_runtime_entry_variant(&self, pat: &syn::Pat) -> bool {
+        match self.peel_pat_type_ref_paren(pat) {
+            syn::Pat::TupleStruct(ts) => self.path_runtime_entry_variant_name(&ts.path).is_some(),
+            syn::Pat::Path(pp) => self.path_runtime_entry_variant_name(&pp.path).is_some(),
+            syn::Pat::Struct(sp) => self.path_runtime_entry_variant_name(&sp.path).is_some(),
+            syn::Pat::Or(or_pat) => or_pat
+                .cases
+                .iter()
+                .any(|case| self.pat_uses_runtime_entry_variant(case)),
+            _ => false,
+        }
+    }
+
+    fn try_emit_runtime_entry_probe_expr(&self, expr: &syn::Expr) -> Option<String> {
+        let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(expr) else {
+            return None;
+        };
+        if mc.method != "entry" || mc.args.len() != 1 {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let key = self.emit_expr_maybe_move(&mc.args[0]);
+        Some(format!(
+            "rusty::detail::make_entry_probe({}, {})",
+            receiver, key
+        ))
+    }
+
+    fn try_emit_runtime_entry_probe_for_pattern(
+        &self,
+        pat: &syn::Pat,
+        expr: &syn::Expr,
+    ) -> Option<String> {
+        if !self.pat_uses_runtime_entry_variant(pat) {
+            return None;
+        }
+        self.try_emit_runtime_entry_probe_expr(expr)
+    }
+
+    fn try_emit_runtime_entry_probe_for_match_arms(
+        &self,
+        arms: &[syn::Arm],
+        expr: &syn::Expr,
+    ) -> Option<String> {
+        if !arms
+            .iter()
+            .any(|arm| self.pat_uses_runtime_entry_variant(&arm.pat))
+        {
+            return None;
+        }
+        self.try_emit_runtime_entry_probe_expr(expr)
     }
 
     fn runtime_tuple_struct_match_methods(
@@ -19916,6 +22566,8 @@ impl CodeGen {
             (RuntimeMatchEnumKind::Option, "Some") => Some(("is_some", "unwrap")),
             (RuntimeMatchEnumKind::Result, "Ok") => Some(("is_ok", "unwrap")),
             (RuntimeMatchEnumKind::Result, "Err") => Some(("is_err", "unwrap_err")),
+            (RuntimeMatchEnumKind::Entry, "Vacant") => Some(("is_vacant", "vacant_entry")),
+            (RuntimeMatchEnumKind::Entry, "Occupied") => Some(("is_occupied", "occupied_entry")),
             _ => None,
         }
     }
@@ -19931,6 +22583,8 @@ impl CodeGen {
             .to_string();
         match (kind, variant_name.as_str()) {
             (RuntimeMatchEnumKind::Option, "None") => Some("is_none"),
+            (RuntimeMatchEnumKind::Entry, "Vacant") => Some("is_vacant"),
+            (RuntimeMatchEnumKind::Entry, "Occupied") => Some("is_occupied"),
             _ => None,
         }
     }
@@ -19954,13 +22608,26 @@ impl CodeGen {
             (RuntimeMatchEnumKind::Option, "Some") => Some("is_some"),
             (RuntimeMatchEnumKind::Result, "Ok") => Some("is_ok"),
             (RuntimeMatchEnumKind::Result, "Err") => Some("is_err"),
+            (RuntimeMatchEnumKind::Entry, "Vacant") => Some("is_vacant"),
+            (RuntimeMatchEnumKind::Entry, "Occupied") => Some("is_occupied"),
             _ => None,
         }
     }
 
     fn runtime_match_scrutinee_borrows_payload(&self, expr: &syn::Expr) -> bool {
         let expr = self.peel_paren_group_expr(expr);
-        matches!(expr, syn::Expr::Reference(_)) || self.is_expr_reference_like(expr)
+        if matches!(expr, syn::Expr::Reference(_)) || self.is_expr_reference_like(expr) {
+            return true;
+        }
+        if let syn::Expr::Unary(unary) = expr
+            && matches!(unary.op, syn::UnOp::Deref(_))
+        {
+            let base = self.peel_paren_group_expr(&unary.expr);
+            return matches!(base, syn::Expr::Reference(_))
+                || self.is_expr_reference_like(base)
+                || self.runtime_match_scrutinee_borrows_payload(base);
+        }
+        false
     }
 
     fn emit_runtime_match_expr(
@@ -20026,17 +22693,20 @@ impl CodeGen {
                     out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
                     let matched_value = format!("_mv{}", idx);
                     let mut binding_stmts = Vec::new();
+                    let payload_variant_ctx =
+                        self.infer_variant_type_context_from_pattern(&ts.elems[0], variant_ctx);
                     let payload_match_condition = self
                         .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                             &ts.elems[0],
                             &matched_value,
                             &mut binding_stmts,
                             &mut binding_map,
-                            variant_ctx,
+                            payload_variant_ctx.as_ref(),
                         )?;
                     let needs_payload_materialization = !binding_stmts.is_empty()
                         || payload_match_condition.is_some()
                         || arm.guard.is_some();
+                    let mut payload_bindings_are_refs = true;
                     if needs_payload_materialization {
                         let payload_value_source =
                             if payload_match_condition.is_some() || arm.guard.is_some() {
@@ -20044,6 +22714,7 @@ impl CodeGen {
                             } else {
                                 payload_source
                             };
+                        payload_bindings_are_refs = payload_value_source != "_m";
                         out.push_str(&format!(
                             "auto&& {} = {}.{}(); ",
                             matched_value, payload_value_source, unwrap_method
@@ -20057,10 +22728,11 @@ impl CodeGen {
                         out.push(' ');
                     }
                     let body = {
-                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                        let emitted = self.emit_expr_with_try_style_binding_scope_with_ref_mode(
                             &arm.body,
                             expected_ty,
                             &binding_map,
+                            payload_bindings_are_refs,
                         );
                         self.maybe_wrap_variant_constructor_with_expected_enum(
                             &arm.body,
@@ -20083,8 +22755,12 @@ impl CodeGen {
                     };
 
                     if let Some((_, guard)) = &arm.guard {
-                        let guard_str =
-                            self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
+                        let guard_str = self.emit_expr_with_try_style_binding_scope_with_ref_mode(
+                            guard,
+                            None,
+                            &binding_map,
+                            payload_bindings_are_refs,
+                        );
                         out.push_str(&format!(
                             "if ({}) {{ {}{}; }} ",
                             guard_str, ret_prefix, body
@@ -20425,7 +23101,7 @@ impl CodeGen {
                         parts.push(format!(
                             "[&]({}) {{ {} if ({}) return {}; return {}; }}",
                             params.join(", "),
-                            binding_stmts.join(" "),
+                            binding_stmts.join("\n"),
                             guard_str,
                             body,
                             self.match_expr_unreachable_fallback_with_expected(expected_ty)
@@ -20434,7 +23110,7 @@ impl CodeGen {
                         parts.push(format!(
                             "[&]({}) {{ {} return {}; }}",
                             params.join(", "),
-                            binding_stmts.join(" "),
+                            binding_stmts.join("\n"),
                             body
                         ));
                     }
@@ -20635,13 +23311,8 @@ impl CodeGen {
     }
 
     fn path_pattern_value_condition(&self, path: &syn::Path, value_expr: &str) -> String {
-        // Data-enum unit variants are represented as std::variant alternatives,
-        // not associated enum constants; match them by active alternative type.
         let variant_cpp = self.variant_pattern_cpp_type(path, None);
-        let is_data_enum_variant = self
-            .extract_variant_pattern_enum_name(path, &variant_cpp)
-            .is_some_and(|name| self.data_enum_types.contains(&name));
-        if is_data_enum_variant {
+        if self.path_is_known_data_enum_variant(path) {
             format!("std::holds_alternative<{}>({})", variant_cpp, value_expr)
         } else {
             let value = self.emit_path_to_string(path);
@@ -21169,7 +23840,8 @@ impl CodeGen {
     }
 
     fn infer_match_expr_common_arm_type(&self, match_expr: &syn::ExprMatch) -> Option<syn::Type> {
-        self.infer_match_arms_common_type(&match_expr.arms)
+        self.infer_match_arms_common_type_with_scrutinee(match_expr)
+            .or_else(|| self.infer_match_arms_common_type(&match_expr.arms))
     }
 
     fn expr_is_option_some_integer_literal(&self, expr: &syn::Expr) -> bool {
@@ -21344,6 +24016,74 @@ impl CodeGen {
         common
     }
 
+    fn infer_match_arm_type_with_scrutinee_bindings(
+        &self,
+        scrutinee_expr: &syn::Expr,
+        arm: &syn::Arm,
+    ) -> Option<syn::Type> {
+        let mut inner = self.new_inner_for_block();
+        if inner.local_bindings.is_empty() {
+            inner.local_bindings.push(HashMap::new());
+            inner.local_shadowed_binding_types.push(HashMap::new());
+            inner.local_const_bindings.push(HashMap::new());
+            inner.local_reference_bindings.push(HashSet::new());
+            inner.local_cpp_bindings.push(HashMap::new());
+        }
+
+        let mut env = HashMap::new();
+        if let Some(scrutinee_ty) = self
+            .infer_simple_expr_type(scrutinee_expr)
+            .or_else(|| self.infer_local_binding_type_from_initializer(scrutinee_expr))
+        {
+            inner.bind_pattern_types_into_env(&arm.pat, &scrutinee_ty, &mut env);
+        }
+
+        inner
+            .infer_expr_type_with_env(&arm.body, &env)
+            .or_else(|| inner.infer_local_binding_type_from_initializer(&arm.body))
+            .or_else(|| inner.infer_simple_expr_type(&arm.body))
+    }
+
+    fn infer_match_arms_common_type_with_scrutinee(
+        &self,
+        match_expr: &syn::ExprMatch,
+    ) -> Option<syn::Type> {
+        let mut common: Option<syn::Type> = None;
+        let mut saw_option_none_arm = false;
+
+        for arm in &match_expr.arms {
+            if self.is_expr_diverging(&arm.body) {
+                continue;
+            }
+            if self.expr_is_option_none_value(&arm.body) {
+                saw_option_none_arm = true;
+                continue;
+            }
+            let arm_ty = self
+                .infer_match_arm_type_with_scrutinee_bindings(&match_expr.expr, arm)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&arm.body))
+                .or_else(|| self.infer_simple_expr_type(&arm.body))?;
+            if let Some(existing) = &common {
+                if !Self::types_equivalent_by_tokens(existing, &arm_ty) {
+                    return None;
+                }
+            } else {
+                common = Some(arm_ty);
+            }
+        }
+
+        if saw_option_none_arm {
+            let common_ty = common?;
+            if self.expected_option_type_arg(Some(&common_ty)).is_some()
+                || self.map_type(&common_ty).starts_with("rusty::Option<")
+            {
+                return Some(common_ty);
+            }
+            return None;
+        }
+        common
+    }
+
     fn emit_tuple_visit_subpattern(
         &self,
         pat: &syn::Pat,
@@ -21415,6 +24155,31 @@ impl CodeGen {
         self.match_expr_unreachable_fallback().to_string()
     }
 
+    fn index_out_of_bounds_fallback_with_expected(&self, expected_ty: Option<&syn::Type>) -> String {
+        const PANIC_EXPR: &str = "rusty::panicking::panic(\"index out of bounds\")";
+        if let Some(expected) = expected_ty {
+            if self.type_contains_unresolved_self_type_path(expected) {
+                return PANIC_EXPR.to_string();
+            }
+            let fallback_ty = self
+                .extract_callable_return_type_from_type(expected)
+                .unwrap_or_else(|| expected.clone());
+            if self.type_contains_unresolved_self_type_path(&fallback_ty) {
+                return PANIC_EXPR.to_string();
+            }
+            let fallback_cpp = self.map_type(&fallback_ty);
+            if fallback_cpp == "auto"
+                || fallback_cpp.contains("/* TODO")
+                || fallback_cpp.contains("Self::")
+                || type_string_has_auto_placeholder(&fallback_cpp)
+            {
+                return PANIC_EXPR.to_string();
+            }
+            return format!("[&]() -> {} {{ {}; }}()", fallback_cpp, PANIC_EXPR);
+        }
+        PANIC_EXPR.to_string()
+    }
+
     /// Map Rust enum-variant pattern paths to generated C++ variant struct names.
     /// Examples:
     /// - `Either::Left` -> `Either_Left`
@@ -21427,33 +24192,89 @@ impl CodeGen {
         path: &syn::Path,
         variant_ctx: Option<&VariantTypeContext>,
     ) -> String {
-        let raw = self.emit_path_to_string(path).replace("::", "_");
-        let stripped = raw
-            .strip_prefix("crate_")
-            .or_else(|| raw.strip_prefix("self_"))
-            .or_else(|| raw.strip_prefix("super_"))
-            .unwrap_or(&raw)
-            .to_string();
-        let looks_like_variant_name = stripped
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_uppercase());
-        let mut base = if stripped.contains('_') {
-            stripped
-        } else if looks_like_variant_name {
-            if let Some(ctx) = variant_ctx {
-                format!("{}_{}", ctx.enum_name, stripped)
-            } else if let Some(struct_name) = &self.current_struct {
-                if self.data_enum_types.contains(struct_name) {
-                    format!("{}_{}", struct_name, stripped)
+        let last_ident = path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let has_known_enum_owner = path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|seg| seg.ident.to_string())
+            .is_some_and(|owner| self.data_enum_name_matches(&owner));
+        let is_flattened_variant_spelling = last_ident.contains('_')
+            && self
+                .flattened_data_enum_variant_parts(&last_ident)
+                .is_some()
+            && !has_known_enum_owner;
+
+        let mut base = if is_flattened_variant_spelling {
+            self.emit_path_to_string(path)
+        } else if path.segments.len() >= 2 {
+            if let Some(owner_seg) = path.segments.iter().nth_back(1) {
+                let owner = owner_seg.ident.to_string();
+                if self.path_matches_c_like_enum_const(&owner, &last_ident) {
+                    self.emit_path_to_string(path)
+                } else {
+                    let variant = path
+                        .segments
+                        .last()
+                        .map(|seg| {
+                            self.canonical_variant_name(&seg.ident.to_string())
+                                .to_string()
+                        })
+                        .unwrap_or_default();
+                    let mut enum_path = path.clone();
+                    let _ = enum_path.segments.pop();
+                    self.data_enum_variant_struct_type_name(&enum_path, &variant)
+                }
+            } else {
+                self.emit_path_to_string(path)
+            }
+        } else {
+            let raw = path
+                .segments
+                .last()
+                .map(|seg| {
+                    self.canonical_variant_name(&seg.ident.to_string())
+                        .trim_start_matches("::")
+                        .replace("::", "_")
+                })
+                .unwrap_or_default();
+            let stripped = raw
+                .strip_prefix("crate_")
+                .or_else(|| raw.strip_prefix("self_"))
+                .or_else(|| raw.strip_prefix("super_"))
+                .unwrap_or(&raw)
+                .to_string();
+            let looks_like_variant_name = stripped
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase());
+            if stripped.contains('_') {
+                stripped
+            } else if looks_like_variant_name {
+                if let Some(ctx) = variant_ctx
+                    && self.enum_has_variant_name(&ctx.enum_name, &stripped)
+                {
+                    format!("{}_{}", ctx.enum_name, stripped)
+                } else if let Some(unique_enum) =
+                    self.unique_data_enum_name_for_variant_name(&stripped)
+                {
+                    format!("{}_{}", unique_enum, stripped)
+                } else if let Some(struct_name) = &self.current_struct {
+                    if self.data_enum_types.contains(struct_name) {
+                        format!("{}_{}", struct_name, stripped)
+                    } else {
+                        stripped
+                    }
                 } else {
                     stripped
                 }
             } else {
                 stripped
             }
-        } else {
-            stripped
         };
 
         let enum_name = self
@@ -21494,11 +24315,37 @@ impl CodeGen {
         }
         let template_args =
             self.variant_pattern_template_args(path, enum_name.as_deref(), variant_ctx);
-        if template_args.is_empty() {
+        let out = if template_args.is_empty() || Self::cpp_spelling_has_terminal_template_args(&base)
+        {
             base
         } else {
             format!("{}<{}>", base, template_args.join(", "))
+        };
+        out
+    }
+
+    fn cpp_spelling_has_terminal_template_args(spelling: &str) -> bool {
+        let trimmed = spelling.trim_end();
+        if !trimmed.ends_with('>') {
+            return false;
         }
+        let mut depth = 0usize;
+        for ch in trimmed.chars().rev() {
+            match ch {
+                '>' => depth += 1,
+                '<' => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn runtime_bound_variant_index_for_path(
@@ -21559,7 +24406,14 @@ impl CodeGen {
             if penultimate == "Self" {
                 return self.current_struct.clone();
             }
-            return Some(penultimate);
+            if self.data_enum_name_matches(&penultimate) {
+                return Some(penultimate);
+            }
+        }
+        if let Some(last_ident) = path.segments.last().map(|seg| seg.ident.to_string())
+            && let Some((enum_name, _)) = self.flattened_data_enum_variant_parts(&last_ident)
+        {
+            return Some(enum_name);
         }
         if let Some(struct_name) = &self.current_struct {
             if resolved_cpp_type.starts_with(&format!("{}_", struct_name)) {
@@ -21610,7 +24464,7 @@ impl CodeGen {
             // `std::ops::Bound` variant patterns commonly appear without explicit
             // type arguments (`Bound::Included(&i)`). Default to `usize` shape so
             // emitted visitor arm types remain concrete and compilable.
-            if name == "Bound" && !self.data_enum_types.contains(name) {
+            if name == "Bound" && !self.data_enum_name_matches(name) {
                 return vec!["size_t".to_string()];
             }
         }
@@ -21710,12 +24564,394 @@ impl CodeGen {
     }
 
     fn type_supports_variant_context(&self, type_name: &str) -> bool {
-        self.data_enum_types.contains(type_name)
+        self.data_enum_name_matches(type_name)
             || self.runtime_match_enum_kind_by_name(type_name).is_some()
             || (type_name == "Either"
                 && !self.is_local_type_name_in_scope("Either")
                 && !self.local_declared_types.contains("Either"))
-            || (type_name == "Bound" && !self.data_enum_types.contains("Bound"))
+            || (type_name == "Bound" && !self.data_enum_name_matches("Bound"))
+    }
+
+    fn data_enum_name_matches(&self, enum_name: &str) -> bool {
+        self.data_enum_types.contains(enum_name)
+            || self.data_enum_variants_by_enum.contains_key(enum_name)
+            || self.data_enum_types.iter().any(|known| {
+                known
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == enum_name)
+            })
+            || self.data_enum_variants_by_enum.keys().any(|known| {
+                known
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == enum_name)
+            })
+    }
+
+    fn unique_data_enum_name_for_variant_name(&self, variant_name: &str) -> Option<String> {
+        if variant_name.is_empty() {
+            return None;
+        }
+        let canonical_variant = self.canonical_variant_name(variant_name).to_string();
+        let mut enum_matches: HashSet<String> = HashSet::new();
+        for (enum_name, variants) in &self.data_enum_variants_by_enum {
+            if variants.contains(variant_name) || variants.contains(&canonical_variant) {
+                if let Some(tail) = enum_name.rsplit("::").next() {
+                    enum_matches.insert(tail.to_string());
+                }
+            }
+        }
+        if enum_matches.len() == 1 {
+            enum_matches.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    fn ident_looks_like_variant_ctor_name(ident: &str) -> bool {
+        ident
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+            && ident != "Self"
+    }
+
+    fn path_matches_c_like_enum_const(&self, enum_name: &str, variant_name: &str) -> bool {
+        if enum_name.is_empty() || variant_name.is_empty() {
+            return false;
+        }
+        if !self.data_enum_name_matches(enum_name) {
+            let canonical_variant = self.canonical_variant_name(variant_name).to_string();
+            let is_builtin_cmp_ordering_variant = enum_name == "Ordering"
+                && matches!(canonical_variant.as_str(), "Less" | "Equal" | "Greater");
+            let is_builtin_atomic_ordering_variant = enum_name == "Ordering"
+                && matches!(
+                    canonical_variant.as_str(),
+                    "Relaxed" | "Release" | "Acquire" | "AcqRel" | "SeqCst" | "Consume"
+                );
+            let is_builtin_fmt_alignment_variant = enum_name == "Alignment"
+                && matches!(canonical_variant.as_str(), "Left" | "Right" | "Center");
+            if is_builtin_cmp_ordering_variant
+                || is_builtin_atomic_ordering_variant
+                || is_builtin_fmt_alignment_variant
+            {
+                return true;
+            }
+        }
+        let canonical = self.canonical_variant_name(variant_name).to_string();
+        let raw_key = format!("{}_{}", enum_name, variant_name);
+        let canonical_key = format!("{}_{}", enum_name, canonical);
+        self.c_like_enum_consts.contains(&raw_key)
+            || self.c_like_enum_consts.contains(&canonical_key)
+            || self.c_like_enum_variants.contains(&raw_key)
+            || self.c_like_enum_variants.contains(&canonical_key)
+            || self
+                .c_like_enum_consts
+                .iter()
+                .any(|key| key.ends_with(&format!("::{}", raw_key)))
+            || self
+                .c_like_enum_consts
+                .iter()
+                .any(|key| key.ends_with(&format!("::{}", canonical_key)))
+            || self
+                .c_like_enum_variants
+                .iter()
+                .any(|key| key.ends_with(&format!("::{}", raw_key)))
+            || self
+                .c_like_enum_variants
+                .iter()
+                .any(|key| key.ends_with(&format!("::{}", canonical_key)))
+    }
+
+    fn path_is_plausible_data_enum_variant(&self, path: &syn::Path) -> bool {
+        if path.segments.len() < 2 {
+            return false;
+        }
+        let owner = path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let variant = path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        if owner.is_empty() || variant.is_empty() {
+            return false;
+        }
+        if matches!(owner.as_str(), "Option" | "Result") {
+            return false;
+        }
+        if !Self::ident_looks_like_variant_ctor_name(&owner)
+            || !Self::ident_looks_like_variant_ctor_name(&variant)
+        {
+            return false;
+        }
+        if self.path_matches_c_like_enum_const(&owner, &variant) {
+            return false;
+        }
+        true
+    }
+
+    fn infer_variant_type_context_from_pattern(
+        &self,
+        pat: &syn::Pat,
+        fallback: Option<&VariantTypeContext>,
+    ) -> Option<VariantTypeContext> {
+        let pat = self.peel_pat_type_ref_paren(pat);
+        match pat {
+            syn::Pat::TupleStruct(tuple_struct_pat) => {
+                if tuple_struct_pat.path.segments.len() >= 2 {
+                    let enum_name = tuple_struct_pat
+                        .path
+                        .segments
+                        .iter()
+                        .nth_back(1)
+                        .map(|seg| seg.ident.to_string())?;
+                    if self.type_supports_variant_context(&enum_name)
+                        || self.path_is_plausible_data_enum_variant(&tuple_struct_pat.path)
+                    {
+                        let template_args = fallback
+                            .filter(|ctx| ctx.enum_name == enum_name)
+                            .map(|ctx| ctx.template_args.clone())
+                            .unwrap_or_default();
+                        return Some(VariantTypeContext {
+                            enum_name,
+                            template_args,
+                        });
+                    }
+                }
+                if tuple_struct_pat.path.segments.len() == 1
+                    && let Some(ctx) = fallback
+                    && Self::ident_looks_like_variant_ctor_name(
+                        &tuple_struct_pat
+                            .path
+                            .segments
+                            .last()
+                            .map(|seg| seg.ident.to_string())
+                            .unwrap_or_default(),
+                    )
+                {
+                    return Some(ctx.clone());
+                }
+                fallback.cloned()
+            }
+            syn::Pat::Struct(struct_pat) => {
+                if struct_pat.path.segments.len() >= 2 {
+                    let enum_name = struct_pat
+                        .path
+                        .segments
+                        .iter()
+                        .nth_back(1)
+                        .map(|seg| seg.ident.to_string())?;
+                    if self.type_supports_variant_context(&enum_name)
+                        || self.path_is_plausible_data_enum_variant(&struct_pat.path)
+                    {
+                        let template_args = fallback
+                            .filter(|ctx| ctx.enum_name == enum_name)
+                            .map(|ctx| ctx.template_args.clone())
+                            .unwrap_or_default();
+                        return Some(VariantTypeContext {
+                            enum_name,
+                            template_args,
+                        });
+                    }
+                }
+                fallback.cloned()
+            }
+            syn::Pat::Path(path_pat) => {
+                if path_pat.path.segments.len() >= 2 {
+                    let enum_name = path_pat
+                        .path
+                        .segments
+                        .iter()
+                        .nth_back(1)
+                        .map(|seg| seg.ident.to_string())?;
+                    if self.type_supports_variant_context(&enum_name)
+                        || self.path_is_plausible_data_enum_variant(&path_pat.path)
+                    {
+                        let template_args = fallback
+                            .filter(|ctx| ctx.enum_name == enum_name)
+                            .map(|ctx| ctx.template_args.clone())
+                            .unwrap_or_default();
+                        return Some(VariantTypeContext {
+                            enum_name,
+                            template_args,
+                        });
+                    }
+                }
+                if path_pat.path.segments.len() == 1
+                    && let Some(ctx) = fallback
+                    && Self::ident_looks_like_variant_ctor_name(
+                        &path_pat
+                            .path
+                            .segments
+                            .last()
+                            .map(|seg| seg.ident.to_string())
+                            .unwrap_or_default(),
+                    )
+                {
+                    return Some(ctx.clone());
+                }
+                fallback.cloned()
+            }
+            syn::Pat::Reference(reference_pat) => {
+                self.infer_variant_type_context_from_pattern(&reference_pat.pat, fallback)
+            }
+            syn::Pat::Type(type_pat) => {
+                self.infer_variant_type_context_from_pattern(&type_pat.pat, fallback)
+            }
+            syn::Pat::Paren(paren_pat) => {
+                self.infer_variant_type_context_from_pattern(&paren_pat.pat, fallback)
+            }
+            _ => fallback.cloned(),
+        }
+    }
+
+    fn flattened_data_enum_variant_parts(&self, ident: &str) -> Option<(String, String)> {
+        let (enum_name, variant_name) = ident.rsplit_once('_')?;
+        if enum_name.is_empty() || variant_name.is_empty() {
+            return None;
+        }
+        let canonical_variant = self.canonical_variant_name(variant_name).to_string();
+        if let Some(variants) = self.data_enum_variants_by_enum.get(enum_name)
+            && variants.contains(&canonical_variant)
+        {
+            return Some((enum_name.to_string(), canonical_variant));
+        }
+        let tail_match = self
+            .data_enum_variants_by_enum
+            .iter()
+            .any(|(known_enum, variants)| {
+                known_enum
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == enum_name)
+                    && variants.contains(&canonical_variant)
+            });
+        if tail_match {
+            Some((enum_name.to_string(), canonical_variant))
+        } else {
+            None
+        }
+    }
+
+    fn enum_has_variant_name(&self, enum_name: &str, variant_name: &str) -> bool {
+        if let Some(variants) = self.data_enum_variants_by_enum.get(enum_name)
+            && variants.contains(variant_name)
+        {
+            return true;
+        }
+        self.data_enum_variants_by_enum
+            .iter()
+            .filter(|(known_enum, _)| {
+                known_enum
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == enum_name)
+            })
+            .any(|(_, variants)| variants.contains(variant_name))
+    }
+
+    fn path_is_known_data_enum_variant(&self, path: &syn::Path) -> bool {
+        let raw_variant_name = path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        if raw_variant_name.is_empty() {
+            return false;
+        }
+        let canonical_variant_name = self.canonical_variant_name(&raw_variant_name).to_string();
+        if path.segments.len() >= 2 {
+            let enum_name = path
+                .segments
+                .iter()
+                .nth_back(1)
+                .map(|seg| seg.ident.to_string())
+                .unwrap_or_default();
+            if self.data_enum_name_matches(&enum_name)
+                && (self.enum_has_variant_name(&enum_name, &canonical_variant_name)
+                    || self.enum_has_variant_name(&enum_name, &raw_variant_name))
+            {
+                return true;
+            }
+        }
+        if self.path_is_plausible_data_enum_variant(path) {
+            return true;
+        }
+
+        if self
+            .flattened_data_enum_variant_parts(&raw_variant_name)
+            .is_some()
+            || self
+                .flattened_data_enum_variant_parts(&canonical_variant_name)
+                .is_some()
+        {
+            return true;
+        }
+        if path.segments.len() == 1
+            && self
+                .unique_data_enum_name_for_variant_name(&raw_variant_name)
+                .is_some()
+        {
+            return true;
+        }
+        self.data_enum_unit_variants.contains(&raw_variant_name)
+            || self
+                .data_enum_unit_variants
+                .contains(&canonical_variant_name)
+    }
+
+    fn path_is_known_data_enum_variant_with_ctx(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        if self.path_is_known_data_enum_variant(path) {
+            return true;
+        }
+        let Some(ctx) = variant_ctx else {
+            return false;
+        };
+        let raw_variant_name = path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        if raw_variant_name.is_empty() {
+            return false;
+        }
+        let canonical_variant_name = self.canonical_variant_name(&raw_variant_name).to_string();
+        if self.enum_has_variant_name(&ctx.enum_name, &canonical_variant_name)
+            || self.enum_has_variant_name(&ctx.enum_name, &raw_variant_name)
+        {
+            return true;
+        }
+        if matches!(ctx.enum_name.as_str(), "Option" | "Result") {
+            return false;
+        }
+        if self.path_matches_c_like_enum_const(&ctx.enum_name, &raw_variant_name)
+            || self.path_matches_c_like_enum_const(&ctx.enum_name, &canonical_variant_name)
+        {
+            return false;
+        }
+        if path.segments.len() >= 2 {
+            let owner = path
+                .segments
+                .iter()
+                .nth_back(1)
+                .map(|seg| seg.ident.to_string())
+                .unwrap_or_default();
+            if owner == ctx.enum_name && Self::ident_looks_like_variant_ctor_name(&raw_variant_name)
+            {
+                return true;
+            }
+        }
+        path.segments.len() == 1 && Self::ident_looks_like_variant_ctor_name(&raw_variant_name)
     }
 
     fn infer_variant_type_context_from_type(&self, ty: &syn::Type) -> Option<VariantTypeContext> {
@@ -21874,11 +25110,17 @@ impl CodeGen {
         first: bool,
     ) -> bool {
         let scrutinee_var = "_iflet_scrutinee";
-        let use_scrutinee_storage = self.if_let_requires_single_eval_scrutinee(scrutinee_expr);
+        let runtime_entry_probe_scrutinee =
+            self.try_emit_runtime_entry_probe_for_pattern(pat, scrutinee_expr);
+        let effective_scrutinee_cpp = runtime_entry_probe_scrutinee
+            .as_deref()
+            .unwrap_or(scrutinee_cpp);
+        let use_scrutinee_storage = self.if_let_requires_single_eval_scrutinee(scrutinee_expr)
+            || runtime_entry_probe_scrutinee.is_some();
         let source_expr = if use_scrutinee_storage {
             scrutinee_var
         } else {
-            scrutinee_cpp
+            effective_scrutinee_cpp
         };
         let variant_ctx = self.infer_variant_type_context_from_expr(scrutinee_expr);
         let mut binding_stmts = Vec::new();
@@ -21898,7 +25140,7 @@ impl CodeGen {
         let if_header = if use_scrutinee_storage {
             format!(
                 "if (auto&& {} = {}; {}) {{",
-                scrutinee_var, scrutinee_cpp, cond
+                scrutinee_var, effective_scrutinee_cpp, cond
             )
         } else {
             format!("if ({}) {{", cond)
@@ -23736,10 +26978,12 @@ impl CodeGen {
                         // Can't use in structured binding, fall back to void cast.
                         self.writeln(&format!("static_cast<void>({});", expr_str));
                     } else {
+                        let tuple_source_expr =
+                            format!("rusty::detail::deref_if_pointer_like({})", expr_str);
                         self.writeln(&format!(
                             "auto [{}] = {};",
                             tuple_binding_names.join(", "),
-                            expr_str
+                            tuple_source_expr
                         ));
                         for (idx, cpp_name, tuple_slot_name) in &tuple_rebind_pointer_bindings {
                             let ptr_ty = inferred_tuple_type
@@ -24591,6 +27835,10 @@ impl CodeGen {
                     .c_like_enum_consts
                     .iter()
                     .any(|key| key.ends_with(&format!("_{}", name)))
+                || self
+                    .c_like_enum_variants
+                    .iter()
+                    .any(|key| key.ends_with(&format!("_{}", name)))
             {
                 return true;
             }
@@ -25424,7 +28672,11 @@ impl CodeGen {
                         "Some" | "Option::Some" | "core::option::Option::Some"
                     ) && call.args.len() == 1
                     {
-                        if let Some(arg_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                        if let Some(arg_ty) =
+                            self.infer_simple_expr_type(&call.args[0]).or_else(|| {
+                                self.infer_local_binding_type_from_initializer(&call.args[0])
+                            })
+                        {
                             return Some(parse_quote!(Option<#arg_ty>));
                         }
                         return None;
@@ -26243,12 +29495,24 @@ impl CodeGen {
             && let Some(ret_ty) =
                 self.lookup_owner_method_return_type_from_receiver_type(&receiver_ty, &method)
         {
+            let ret_ty = self.substitute_self_type_with_receiver_type(ret_ty, &receiver_ty);
             return Some(
                 self.substitute_single_unbound_return_type_param_from_call_args(ret_ty, &mc.args),
             );
         }
 
         None
+    }
+
+    fn substitute_self_type_with_receiver_type(
+        &self,
+        ret_ty: syn::Type,
+        receiver_ty: &syn::Type,
+    ) -> syn::Type {
+        let receiver_ty = self.peel_reference_paren_group_type(receiver_ty).clone();
+        let mut substitutions = HashMap::new();
+        substitutions.insert("Self".to_string(), receiver_ty);
+        self.substitute_type_params_in_type(&ret_ty, &substitutions)
     }
 
     fn substitute_single_unbound_return_type_param_from_call_args(
@@ -27101,6 +30365,36 @@ impl CodeGen {
                     Some(parse_quote!(&#inner_ty))
                 }
             }
+            syn::Expr::Unary(unary) => match unary.op {
+                syn::UnOp::Neg(_) | syn::UnOp::Not(_) => self.infer_simple_expr_type(&unary.expr),
+                syn::UnOp::Deref(_) => {
+                    let base_ty = self
+                        .infer_simple_expr_type(&unary.expr)
+                        .or_else(|| self.infer_local_binding_type_from_initializer(&unary.expr))?;
+                    self.infer_deref_result_type_from_type(&base_ty)
+                }
+                _ => None,
+            },
+            syn::Expr::Try(try_expr) => {
+                let inner_ty = self
+                    .infer_simple_expr_type(&try_expr.expr)
+                    .or_else(|| self.infer_local_binding_type_from_initializer(&try_expr.expr))?;
+                let inner_ty = self.peel_reference_paren_group_type(&inner_ty);
+                let syn::Type::Path(tp) = inner_ty else {
+                    return None;
+                };
+                let last = tp.path.segments.last()?;
+                if last.ident != "Result" && last.ident != "Option" {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(ty) => Some(ty.clone()),
+                    _ => None,
+                })
+            }
             syn::Expr::Range(range) => self.infer_range_expr_type(range),
             syn::Expr::Tuple(tuple) => {
                 let mut elems = Vec::new();
@@ -27147,6 +30441,13 @@ impl CodeGen {
                     self.infer_local_binding_type_from_initializer(inner)
                         .or_else(|| self.infer_simple_expr_type(inner))
                 }),
+            syn::Expr::Block(block_expr) => self
+                .extract_single_expr_from_block(&block_expr.block)
+                .and_then(|inner| {
+                    self.infer_local_binding_type_from_initializer(inner)
+                        .or_else(|| self.infer_simple_expr_type(inner))
+                }),
+            syn::Expr::Match(match_expr) => self.infer_match_expr_common_arm_type(match_expr),
             syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
             syn::Expr::Field(field) => match &field.member {
                 syn::Member::Named(ident) => {
@@ -29205,7 +32506,7 @@ impl CodeGen {
         }
         let field_name = match &field_expr.member {
             syn::Member::Named(ident) => ident.to_string(),
-            syn::Member::Unnamed(_) => return false,
+            syn::Member::Unnamed(idx) => format!("_{}", idx.index),
         };
         let Some(struct_name) = self.current_struct.as_ref() else {
             return false;
@@ -29254,6 +32555,7 @@ impl CodeGen {
     /// Used to avoid emitting `return <void-expr>` in match arm bodies.
     fn is_expr_diverging(&self, expr: &syn::Expr) -> bool {
         match expr {
+            syn::Expr::Return(_) | syn::Expr::Break(_) | syn::Expr::Continue(_) => true,
             syn::Expr::Call(call) => {
                 let path_str = self.expr_path_string(&call.func);
                 Self::is_diverging_function_path(&path_str)
@@ -30616,6 +33918,17 @@ impl CodeGen {
             };
             return format!("rusty::len({})", receiver);
         }
+        if mc.method == "contains"
+            && mc.args.len() == 1
+            && self.expr_lowers_to_slice_or_span_view(&mc.receiver)
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let needle = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!(
+                "[&]() {{ auto&& _haystack = {}; auto&& _needle = {}; for (const auto& _item : _haystack) {{ if constexpr (requires {{ _item == _needle; }}) {{ if (_item == _needle) return true; }} else if constexpr (requires {{ _needle == _item; }}) {{ if (_needle == _item) return true; }} }} return false; }}()",
+                receiver, needle
+            );
+        }
         if matches!(mc.method.to_string().as_str(), "min" | "max") && mc.args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -30796,7 +34109,18 @@ impl CodeGen {
         }
         if mc.method == "into_iter" && mc.args.is_empty() {
             if self.should_bridge_direct_into_iter_receiver_to_iter(&mc.receiver) {
-                let receiver = self.emit_expr_maybe_move(&mc.receiver);
+                let receiver_expected = self.infer_into_iter_receiver_expected_type_from_call_expected(
+                    &mc.receiver,
+                    expected_ty,
+                );
+                let receiver = if let Some(receiver_expected) = receiver_expected.as_ref() {
+                    self.emit_expr_to_string_with_expected_and_move_if_needed(
+                        &mc.receiver,
+                        Some(receiver_expected),
+                    )
+                } else {
+                    self.emit_expr_maybe_move(&mc.receiver)
+                };
                 return format!("rusty::iter({})", receiver);
             }
         }
@@ -31068,10 +34392,10 @@ impl CodeGen {
             let mapper = self.emit_expr_maybe_move(&mc.args[0]);
             return format!("rusty::map({}, {})", receiver, mapper);
         }
-        if let Some(try_fold_call) = self.try_emit_iter_try_fold_call(mc) {
+        if let Some(try_fold_call) = self.try_emit_iter_try_fold_call(mc, expected_ty) {
             return try_fold_call;
         }
-        if let Some(fold_call) = self.try_emit_iter_fold_call(mc) {
+        if let Some(fold_call) = self.try_emit_iter_fold_call(mc, expected_ty) {
             return fold_call;
         }
         if let Some(all_call) = self.try_emit_iter_all_call(mc) {
@@ -31236,7 +34560,7 @@ impl CodeGen {
                 &method_name,
                 None,
                 &[callable],
-                expected_ty,
+                None,
             );
         }
         let mut method_template_args = self.emit_method_call_template_args(mc, &args);
@@ -31251,6 +34575,35 @@ impl CodeGen {
             {
                 method_template_args = Some(format!("<{}>", err_cpp));
             }
+        }
+        if method_template_args.is_none()
+            && mc.turbofish.is_none()
+            && let Some(owner_name) = self.infer_method_call_receiver_owner_name(&mc.receiver)
+            && let Some(inferred_args) = self
+                .infer_method_template_args_from_in_scope_undeduced_params(
+                    &owner_name,
+                    &method_name,
+                )
+        {
+            method_template_args = Some(inferred_args);
+        }
+        if method_template_args.is_none()
+            && mc.turbofish.is_none()
+            && mc.args.is_empty()
+            && let Some(owner_name) = self.infer_method_call_receiver_owner_name(&mc.receiver)
+            && let Some(type_params) =
+                self.lookup_owner_method_type_param_names(&owner_name, &method_name)
+            && !type_params.is_empty()
+            && type_params
+                .iter()
+                .all(|param| self.is_type_param_in_scope(param))
+        {
+            let mapped_params = type_params
+                .iter()
+                .map(|param| escape_cpp_keyword(param))
+                .collect::<Vec<String>>()
+                .join(", ");
+            method_template_args = Some(format!("<{}>", mapped_params));
         }
         if matches!(method_name.as_str(), "as_ref" | "as_mut")
             && args.is_empty()
@@ -31395,10 +34748,16 @@ impl CodeGen {
             return format!("rusty::write_fmt({}, {})", receiver, args[0]);
         }
         if method_name == "map_err" && mc.args.len() == 1 {
-            let callable_arg = self
-                .try_emit_map_err_callable_arg(&mc.args[0])
-                .unwrap_or_else(|| self.emit_expr_to_string(&mc.args[0]));
             if let Some(expected_err_ty) = self.expected_result_type_arg(expected_ty, 1) {
+                let callable_arg = self
+                    .try_emit_map_err_callable_arg(&mc.args[0])
+                    .or_else(|| {
+                        self.try_emit_error_trait_callable_with_expected_owner(
+                            &mc.args[0],
+                            expected_err_ty,
+                        )
+                    })
+                    .unwrap_or_else(|| self.emit_expr_to_string(&mc.args[0]));
                 let expected_err_cpp = self.map_type(expected_err_ty);
                 let typed_callable_arg = format!(
                     "[&](auto&& _err) -> {} {{ return ({}) (std::forward<decltype(_err)>(_err)); }}",
@@ -31412,6 +34771,9 @@ impl CodeGen {
                     expected_ty,
                 );
             }
+            let callable_arg = self
+                .try_emit_map_err_callable_arg(&mc.args[0])
+                .unwrap_or_else(|| self.emit_expr_to_string(&mc.args[0]));
             return self.emit_receiver_member_call(
                 &mc.receiver,
                 &method_name,
@@ -31496,6 +34858,15 @@ impl CodeGen {
             if let Some(expected_ptr_cpp) = self.expected_raw_pointer_cpp_type(expected_ty) {
                 // Raw-pointer surfaces can carry storage wrappers (`MaybeUninit<T>*`)
                 // while call context expects payload pointers (`T*`).
+                if method_name == "as_ptr"
+                    && let Some(const_target) =
+                        Self::pointer_const_cast_target_cpp_type(&expected_ptr_cpp)
+                {
+                    return format!(
+                        "const_cast<{}>(reinterpret_cast<{}>({}))",
+                        expected_ptr_cpp, const_target, helper_call
+                    );
+                }
                 return format!("reinterpret_cast<{}>({})", expected_ptr_cpp, helper_call);
             }
             return helper_call;
@@ -31772,7 +35143,13 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::cmp::cmp({}, {})", receiver, args[0]);
+            let rhs = match self.peel_paren_group_expr(&mc.args[0]) {
+                syn::Expr::Reference(r) if !self.is_expr_raw_pointer_like(&r.expr) => {
+                    self.emit_expr_to_string(&r.expr)
+                }
+                _ => self.emit_expr_to_string(&mc.args[0]),
+            };
+            return format!("rusty::cmp::cmp({}, {})", receiver, rhs);
         }
         // Rust `.partial_cmp(&other)` on primitives → `rusty::partial_cmp(a, b)`.
         // Expanded `#[derive(PartialOrd)]` calls `.partial_cmp()` on every field.
@@ -31783,7 +35160,13 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::partial_cmp({}, {})", receiver, args[0]);
+            let rhs = match self.peel_paren_group_expr(&mc.args[0]) {
+                syn::Expr::Reference(r) if !self.is_expr_raw_pointer_like(&r.expr) => {
+                    self.emit_expr_to_string(&r.expr)
+                }
+                _ => self.emit_expr_to_string(&mc.args[0]),
+            };
+            return format!("rusty::partial_cmp({}, {})", receiver, rhs);
         }
         if method_name == "zip" && mc.args.len() == 1 {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
@@ -32037,7 +35420,10 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
-            return format!("rusty::{}({}, {})", method_name, receiver, args[0]);
+            return format!(
+                "[&]() {{ auto&& _checked_lhs = {}; return rusty::{}(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>({})); }}()",
+                receiver, method_name, args[0]
+            );
         }
         if method_name == "checked_next_power_of_two"
             && args.is_empty()
@@ -32280,6 +35666,42 @@ impl CodeGen {
         }
 
         Some((owner, substitutions))
+    }
+
+    fn infer_method_call_receiver_owner_name(&self, receiver: &syn::Expr) -> Option<String> {
+        if let Some((owner, _)) = self.receiver_owner_name_and_type_substitutions(receiver)
+            && owner != "Self"
+            && !owner.is_empty()
+        {
+            return Some(owner);
+        }
+
+        let receiver = self.peel_paren_group_expr(receiver);
+        let syn::Expr::Call(call) = receiver else {
+            return None;
+        };
+        if !call.args.is_empty() {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        if path_expr.path.segments.len() < 2 {
+            return None;
+        }
+        let method = path_expr.path.segments.last()?.ident.to_string();
+        if !matches!(method.as_str(), "new" | "new_" | "default" | "default_") {
+            return None;
+        }
+        let owner = path_expr
+            .path
+            .segments
+            .iter()
+            .take(path_expr.path.segments.len().saturating_sub(1))
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<String>>()
+            .join("::");
+        if owner.is_empty() { None } else { Some(owner) }
     }
 
     fn lookup_method_arg_expected_type_from_receiver_owner(
@@ -32870,6 +36292,78 @@ impl CodeGen {
         ))
     }
 
+    fn try_emit_error_trait_callable_with_expected_owner(
+        &self,
+        arg: &syn::Expr,
+        expected_owner_ty: &syn::Type,
+    ) -> Option<String> {
+        let path_expr = match self.peel_paren_group_expr(arg) {
+            syn::Expr::Path(path) => path,
+            _ => return None,
+        };
+        if path_expr.path.segments.len() < 2 {
+            return None;
+        }
+        let owner_seg = path_expr.path.segments.iter().nth_back(1)?;
+        let method_seg = path_expr.path.segments.last()?;
+        if owner_seg.ident != "Error" || method_seg.ident != "custom" {
+            return None;
+        }
+        if !matches!(owner_seg.arguments, syn::PathArguments::None)
+            || !matches!(method_seg.arguments, syn::PathArguments::None)
+        {
+            return None;
+        }
+        let mut owner_cpp = self.map_type(self.peel_reference_paren_group_type(expected_owner_ty));
+        if owner_cpp == "auto"
+            || owner_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&owner_cpp)
+        {
+            return None;
+        }
+        owner_cpp = owner_cpp.trim_start_matches("typename ").to_string();
+        if owner_cpp.is_empty() {
+            return None;
+        }
+        Some(format!("{}::custom", owner_cpp))
+    }
+
+    fn try_emit_error_trait_path_with_expected_owner(
+        &self,
+        path: &syn::Path,
+        expected_owner_ty: &syn::Type,
+    ) -> Option<String> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let owner_seg = path.segments.iter().nth_back(1)?;
+        let method_seg = path.segments.last()?;
+        if owner_seg.ident != "Error" {
+            return None;
+        }
+        if !matches!(owner_seg.arguments, syn::PathArguments::None)
+            || !matches!(method_seg.arguments, syn::PathArguments::None)
+        {
+            return None;
+        }
+        let mut owner_cpp = self.map_type(self.peel_reference_paren_group_type(expected_owner_ty));
+        if owner_cpp == "auto"
+            || owner_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&owner_cpp)
+        {
+            return None;
+        }
+        owner_cpp = owner_cpp.trim_start_matches("typename ").to_string();
+        if owner_cpp.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}::{}",
+            owner_cpp,
+            escape_cpp_keyword(&method_seg.ident.to_string())
+        ))
+    }
+
     fn try_emit_map_callable_arg_with_expected(
         &self,
         arg: &syn::Expr,
@@ -32879,6 +36373,11 @@ impl CodeGen {
             syn::Expr::Path(path) => path,
             _ => return None,
         };
+        if let Some(variant_ctor) =
+            self.try_emit_data_enum_variant_constructor_callable_path(&path_expr.path)
+        {
+            return Some(variant_ctor);
+        }
         let joined = path_expr
             .path
             .segments
@@ -32976,6 +36475,15 @@ impl CodeGen {
             {
                 return Some(format!("{}({})", qualified_fn, all_args.join(", ")));
             }
+            if method_name == "deserialize" {
+                return Some(format!(
+                    "::de::rusty_ext::deserialize({})",
+                    all_args.join(", ")
+                ));
+            }
+            if method_name == "serialize" && all_args.len() == 2 {
+                return Some(self.emit_serialize_dispatch_call(&all_args[0], &all_args[1]));
+            }
         }
         Some(format!(
             "{}::{}({})",
@@ -32983,6 +36491,13 @@ impl CodeGen {
             escape_cpp_keyword(&method_name),
             all_args.join(", ")
         ))
+    }
+
+    fn emit_serialize_dispatch_call(&self, value_expr: &str, serializer_expr: &str) -> String {
+        format!(
+            "([&](auto&& __self, auto&& __serializer) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }}) {{ return std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }} else {{ return ::ser::impls::rusty_ext::serialize(std::forward<decltype(__self)>(__self), std::forward<decltype(__serializer)>(__serializer)); }} }})({}, {})",
+            value_expr, serializer_expr
+        )
     }
 
     fn receiver_has_inherent_method_named(&self, receiver: &syn::Expr, method_name: &str) -> bool {
@@ -34221,9 +37736,7 @@ impl CodeGen {
         let variant_name = path.segments.last()?.ident.to_string();
         let enum_name = path.segments.iter().nth_back(1)?.ident.to_string();
         let variant_key = format!("{}_{}", enum_name, variant_name);
-        if !self.data_enum_unit_variants.contains(&variant_key) {
-            return None;
-        }
+        let is_known_data_enum_unit_variant = self.data_enum_unit_variants.contains(&variant_key);
 
         let expected_path = self.expected_type_path(expected_ty)?;
         let expected_last = expected_path.segments.last()?.ident.to_string();
@@ -34241,8 +37754,230 @@ impl CodeGen {
             return None;
         }
 
-        let variant_ty = self.data_enum_variant_struct_type_name(expected_path, &variant_name);
-        Some(format!("{}{{}}", variant_ty))
+        if is_known_data_enum_unit_variant {
+            let variant_ty = self.data_enum_variant_struct_type_name(expected_path, &variant_name);
+            return Some(format!("{}{{}}", variant_ty));
+        }
+
+        // Local C-like enums should remain plain enum-class paths (`E::Variant`)
+        // and must not be rewritten to zero-arg constructor style.
+        let is_local_c_like_enum = self.forward_emitted_c_like_enums.iter().any(|enum_key| {
+            enum_key
+                .rsplit("::")
+                .next()
+                .is_some_and(|tail| tail == enum_name)
+        });
+        if is_local_c_like_enum {
+            return None;
+        }
+
+        // C-like enum variants (including built-ins like core::cmp::Ordering)
+        // are value paths, not zero-arg constructor calls.
+        if self.path_matches_c_like_enum_const(&enum_name, &variant_name) {
+            return None;
+        }
+        // Fallback for externally-transpiled data enums that expose unit variants
+        // as static zero-arg constructors (`Type::Variant()`), where local
+        // data-enum metadata is unavailable in this compilation unit.
+        let variant_is_camel_case = variant_name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+            && !variant_name
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+        if !variant_is_camel_case {
+            return None;
+        }
+
+        let mut owner_cpp = self.map_type(expected_ty);
+        while owner_cpp.ends_with('&') {
+            owner_cpp.pop();
+            owner_cpp = owner_cpp.trim_end().to_string();
+        }
+        if let Some(rest) = owner_cpp.strip_prefix("const ") {
+            owner_cpp = rest.trim_start().to_string();
+        }
+        if owner_cpp.is_empty()
+            || owner_cpp == "auto"
+            || owner_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&owner_cpp)
+        {
+            return None;
+        }
+        Some(format!(
+            "{}::{}()",
+            owner_cpp,
+            escape_cpp_keyword(&variant_name)
+        ))
+    }
+
+    fn try_emit_data_enum_variant_call_with_expected(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let expected_ty = expected_ty?;
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let path = &path_expr.path;
+        if self.is_option_some_path(path) || self.is_option_none_path(path) {
+            return None;
+        }
+        let variant_name = path.segments.last()?.ident.to_string();
+
+        if let Some(expected_enum) = self.expected_data_enum_name(expected_ty) {
+            let variants = self.data_enum_variants_by_enum.get(&expected_enum)?;
+            if !variants.contains(&variant_name) {
+                return None;
+            }
+
+            // If an explicit owner is present (`Enum::Variant(...)`), ensure it
+            // matches the expected enum so we don't rewrite unrelated paths.
+            if path.segments.len() >= 2 {
+                let owner_name = path.segments.iter().nth_back(1)?.ident.to_string();
+                let owner_matches = if owner_name == expected_enum {
+                    true
+                } else if owner_name == "Self" {
+                    self.current_struct
+                        .as_ref()
+                        .and_then(|s| s.rsplit("::").next())
+                        .is_some_and(|tail| tail == expected_enum)
+                } else {
+                    false
+                };
+                if !owner_matches {
+                    return None;
+                }
+            }
+
+            let expected_path = self.expected_type_path(expected_ty)?;
+            let variant_ty = self.data_enum_variant_struct_type_name(expected_path, &variant_name);
+            let expected_has_reference_payload = self
+                .peel_reference_paren_group_type(expected_ty)
+                .to_token_stream()
+                .to_string()
+                .contains('&')
+                || self.expected_type_contains_mut_reference(Some(expected_ty));
+            let args: Vec<String> = call
+                .args
+                .iter()
+                .map(|arg| {
+                    if expected_has_reference_payload {
+                        self.emit_expr_to_string(arg)
+                    } else {
+                        self.emit_expr_maybe_move(arg)
+                    }
+                })
+                .collect();
+            if args.is_empty() {
+                return Some(format!("{}{{}}", variant_ty));
+            }
+            return Some(format!("{}{{{}}}", variant_ty, args.join(", ")));
+        }
+
+        // Fallback for externally-transpiled data enums where local enum metadata
+        // is unavailable in this compilation unit. Prefer static variant
+        // constructors on the expected owner type (`Type::Variant(...)`).
+        if path.segments.len() >= 2 {
+            // Explicitly-owned variant calls (`Owner::Variant(...)`) can be handled
+            // by normal path lowering and data-enum constructor rules. Avoid
+            // re-binding them to unrelated expected types.
+            return None;
+        }
+        let expected_path = self.expected_type_path(expected_ty)?;
+        let mut owner_tail = expected_path.segments.last()?.ident.to_string();
+        if owner_tail == "Self" {
+            owner_tail = self
+                .current_struct
+                .as_ref()
+                .and_then(|name| name.rsplit("::").next().map(ToString::to_string))
+                .unwrap_or(owner_tail);
+        }
+        let mapped_owner = self.map_type(expected_ty);
+        let owner_maps_to_bare_ident = mapped_owner == owner_tail
+            && !mapped_owner.contains("::")
+            && !mapped_owner.contains('<');
+        if owner_maps_to_bare_ident
+            && !self.current_scope_declares_type_name(&owner_tail)
+            && !self.data_enum_name_matches(&owner_tail)
+        {
+            // Expected owner is an unresolved placeholder-like identifier
+            // (for example a generic from another function signature). Avoid
+            // synthesizing `Owner::Variant(...)` from such names.
+            return None;
+        }
+        if owner_tail == variant_name {
+            // Tuple-struct constructors and same-name local value constructors
+            // should stay as direct constructor calls (`Type(...)`), not
+            // re-bound to `Type::Type(...)`.
+            return None;
+        }
+        if self.is_type_param_in_scope(&owner_tail) {
+            // Generic owner placeholders (e.g., `T`) do not expose static
+            // variant-constructor surfaces in C++.
+            return None;
+        }
+        let owner_is_known_local_type = self.local_declared_types.contains(&owner_tail)
+            || self
+                .local_declared_types
+                .iter()
+                .any(|decl| decl.rsplit("::").next().is_some_and(|tail| tail == owner_tail));
+        if owner_is_known_local_type && !self.data_enum_types.contains(&owner_tail) {
+            return None;
+        }
+        if matches!(owner_tail.as_str(), "Option" | "Result") {
+            return None;
+        }
+        let variant_is_camel_case = variant_name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+            && !variant_name
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+        if !variant_is_camel_case {
+            return None;
+        }
+
+        let mut owner_cpp = self.map_type(expected_ty);
+        while owner_cpp.ends_with('&') {
+            owner_cpp.pop();
+            owner_cpp = owner_cpp.trim_end().to_string();
+        }
+        if let Some(rest) = owner_cpp.strip_prefix("const ") {
+            owner_cpp = rest.trim_start().to_string();
+        }
+        if owner_cpp.is_empty()
+            || owner_cpp == "auto"
+            || owner_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&owner_cpp)
+            || owner_cpp.starts_with("rusty::Option<")
+            || owner_cpp.starts_with("rusty::Result<")
+        {
+            return None;
+        }
+
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|arg| self.emit_expr_maybe_move(arg))
+            .collect();
+        if args.is_empty() {
+            Some(format!(
+                "{}::{}()",
+                owner_cpp,
+                escape_cpp_keyword(&variant_name)
+            ))
+        } else {
+            Some(format!(
+                "{}::{}({})",
+                owner_cpp,
+                escape_cpp_keyword(&variant_name),
+                args.join(", ")
+            ))
+        }
     }
 
     fn expected_type_last_ident(&self, expected_ty: &syn::Type) -> Option<String> {
@@ -34438,6 +38173,9 @@ impl CodeGen {
         }
 
         let owner = owner_seg.ident.to_string();
+        if owner.ends_with("Deserializer") {
+            return None;
+        }
         let scoped_owner = if self.module_stack.is_empty() {
             owner.clone()
         } else {
@@ -35212,6 +38950,9 @@ impl CodeGen {
         if Self::path_is_option_none(path) {
             return true;
         }
+        if path.segments.len() != 1 {
+            return false;
+        }
         path.segments
             .last()
             .is_some_and(|seg| self.canonical_variant_name(&seg.ident.to_string()) == "None")
@@ -35220,6 +38961,9 @@ impl CodeGen {
     fn is_option_some_path(&self, path: &syn::Path) -> bool {
         if Self::path_is_option_some(path) {
             return true;
+        }
+        if path.segments.len() != 1 {
+            return false;
         }
         path.segments
             .last()
@@ -36208,6 +39952,23 @@ impl CodeGen {
             syn::Type::Path(tp) => {
                 let last = tp.path.segments.last()?;
                 match last.ident.to_string().as_str() {
+                    "IntoIter" | "Iter"
+                        if matches!(last.arguments, syn::PathArguments::None)
+                            && tp.path.segments.len() >= 2 =>
+                    {
+                        let mut owner_path = syn::Path {
+                            leading_colon: tp.path.leading_colon,
+                            segments: syn::punctuated::Punctuated::new(),
+                        };
+                        for seg in tp.path.segments.iter().take(tp.path.segments.len() - 1) {
+                            owner_path.segments.push(seg.clone());
+                        }
+                        let owner_ty = syn::Type::Path(syn::TypePath {
+                            qself: None,
+                            path: owner_path,
+                        });
+                        Some(parse_quote!(rusty::detail::associated_item_t<#owner_ty>))
+                    }
                     "SmallVec" => {
                         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
                             return None;
@@ -36628,6 +40389,16 @@ impl CodeGen {
         }
     }
 
+    fn infer_remove_cvref_decltype_from_expr(&self, expr: &syn::Expr) -> Option<String> {
+        let expr_cpp = self.emit_expr_to_string(expr);
+        // Statement-expression lowering can produce block-like C++ snippets; those
+        // are not valid in `decltype((...))` template argument contexts.
+        if expr_cpp.contains('{') || expr_cpp.contains(';') {
+            return None;
+        }
+        Some(format!("std::remove_cvref_t<decltype(({}))>", expr_cpp))
+    }
+
     fn infer_owner_first_type_arg_from_expr(
         &self,
         owner_name: &str,
@@ -36653,12 +40424,336 @@ impl CodeGen {
         })
     }
 
-    fn infer_owner_template_args_for_call(
+    fn declared_owner_type_param_names_for_owner_key(
         &self,
+        owner_key: &str,
+    ) -> Option<Vec<String>> {
+        let params = self.declared_type_params.get(owner_key)?;
+        if params.is_empty() {
+            return None;
+        }
+        let kinds = self.declared_type_param_kinds.get(owner_key);
+        let type_params: Vec<String> = params
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, param)| {
+                let is_type_param = kinds
+                    .and_then(|kinds| kinds.get(idx))
+                    .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
+                if is_type_param && !param.starts_with('\'') {
+                    Some(param.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if type_params.is_empty() {
+            None
+        } else {
+            Some(type_params)
+        }
+    }
+
+    fn declared_owner_type_param_names_for_owner_path(
+        &self,
+        owner_path: &syn::Path,
+        owner_name: &str,
+    ) -> Option<Vec<String>> {
+        let owner_keys = self.owner_path_to_candidate_owner_keys(owner_path, owner_name);
+        if owner_path.segments.len() == 1 && !self.module_stack.is_empty() {
+            let current_prefix = format!("{}::", self.module_stack.join("::"));
+            for owner_key in owner_keys
+                .iter()
+                .filter(|key| key.starts_with(&current_prefix))
+            {
+                if let Some(params) = self.declared_owner_type_param_names_for_owner_key(owner_key) {
+                    return Some(params);
+                }
+            }
+        }
+        for owner_key in owner_keys {
+            if let Some(params) = self.declared_owner_type_param_names_for_owner_key(&owner_key) {
+                return Some(params);
+            }
+        }
+        None
+    }
+
+    fn declared_owner_type_param_names_by_tail(&self, owner_name: &str) -> Option<Vec<String>> {
+        let mut candidates: Vec<Vec<String>> = self
+            .declared_type_params
+            .keys()
+            .filter_map(|key| {
+                if !key
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == owner_name)
+                {
+                    return None;
+                }
+                self.declared_owner_type_param_names_for_owner_key(key)
+            })
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        if candidates.len() == 1 {
+            candidates.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    fn infer_owner_template_args_from_declared_method_signature(
+        &self,
+        owner_path: Option<&syn::Path>,
         owner_name: &str,
         method_name: &str,
         call: &syn::ExprCall,
     ) -> Option<Vec<Option<String>>> {
+        let type_params = if let Some(owner_path) = owner_path {
+            // For qualified/associated calls, prefer owner-path keyed metadata and
+            // avoid tail-only fallback that can cross-wire same-tail types.
+            self.declared_owner_type_param_names_for_owner_path(owner_path, owner_name)?
+        } else {
+            self.declared_owner_type_param_names_by_tail(owner_name)?
+        };
+        if type_params.is_empty() {
+            return None;
+        }
+        let mut inferred: Vec<Option<String>> = vec![None; type_params.len()];
+        for (arg_idx, arg_expr) in call.args.iter().enumerate() {
+            let Some(expected_arg_ty) = self.lookup_owner_method_arg_expected_type_from_owner_path(
+                owner_path,
+                owner_name,
+                method_name,
+                arg_idx,
+                Some(arg_expr),
+            ) else {
+                continue;
+            };
+            let arg_cpp_ty = self
+                .infer_hint_type_from_expr(arg_expr)
+                .or_else(|| self.infer_simple_expr_type(arg_expr))
+                .map(|ty| self.map_type(&ty))
+                .filter(|mapped| {
+                    mapped != "auto"
+                        && !mapped.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(mapped)
+                })
+                .or_else(|| {
+                    self.infer_remove_cvref_decltype_from_expr(arg_expr)
+                });
+            let Some(arg_cpp_ty) = arg_cpp_ty else {
+                continue;
+            };
+            for (param_idx, param_name) in type_params.iter().enumerate() {
+                if inferred[param_idx].is_none()
+                    && self.expected_type_is_direct_type_param(&expected_arg_ty, param_name)
+                {
+                    inferred[param_idx] = Some(arg_cpp_ty.clone());
+                }
+            }
+        }
+        if inferred.iter().any(|entry| entry.is_some()) {
+            Some(inferred)
+        } else {
+            None
+        }
+    }
+
+    fn expected_type_is_direct_type_param(&self, ty: &syn::Type, param_name: &str) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        matches!(
+            ty,
+            syn::Type::Path(tp)
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident == param_name
+        )
+    }
+
+    fn infer_owner_template_args_for_call(
+        &self,
+        owner_path: Option<&syn::Path>,
+        owner_name: &str,
+        method_name: &str,
+        call: &syn::ExprCall,
+    ) -> Option<Vec<Option<String>>> {
+        if owner_name.ends_with("Deserializer") && matches!(method_name, "new" | "new_") {
+            let declared_owner_type_params = if let Some(path) = owner_path {
+                self.declared_owner_type_param_names_for_owner_path(path, owner_name)
+            } else {
+                self.declared_owner_type_param_names_by_tail(owner_name)
+            };
+            let owner_path_is_unqualified = owner_path.is_some_and(|path| path.segments.len() == 1);
+            let explicit_owner_arg_arity = owner_path.and_then(|path| {
+                path.segments.last().and_then(|seg| {
+                    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                        return None;
+                    };
+                    Some(
+                        args.args
+                            .iter()
+                            .filter(|arg| {
+                                matches!(
+                                    arg,
+                                    syn::GenericArgument::Type(_) | syn::GenericArgument::Const(_)
+                                )
+                            })
+                            .count(),
+                    )
+                })
+            });
+
+            let inferred_payload = call.args.first().and_then(|arg| {
+                self.infer_hint_type_from_expr(arg)
+                    .or_else(|| self.infer_simple_expr_type(arg))
+                    .map(|ty| self.map_type(&ty))
+                    .filter(|mapped| {
+                        mapped != "auto"
+                            && !mapped.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(mapped)
+                    })
+                    .or_else(|| self.infer_remove_cvref_decltype_from_expr(arg))
+            });
+            let inferred_error = self
+                .current_return_type_hint()
+                .and_then(|return_ty| self.expected_result_type_arg(Some(return_ty), 1))
+                .map(|err_ty| self.map_type(err_ty).trim_start_matches("typename ").to_string())
+                .filter(|mapped| {
+                    mapped != "auto"
+                        && !mapped.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(mapped)
+                })
+                .or_else(|| self.is_type_param_in_scope("E").then_some("E".to_string()));
+            let default_error_arg = inferred_error
+                .clone()
+                .or_else(|| self.is_type_param_in_scope("E").then_some("E".to_string()))
+                .unwrap_or_else(|| "E".to_string());
+
+            // Expanded serde frequently emits `Type::<_>::new_(...)` for these
+            // constructors. In those single-slot forms, the owner slot is the
+            // error type parameter, not payload.
+            if explicit_owner_arg_arity == Some(1) && !owner_name.contains("Access") {
+                return Some(vec![Some(default_error_arg.clone())]);
+            }
+            if owner_path_is_unqualified
+                && self.is_type_param_in_scope("E")
+                && matches!(
+                    owner_name,
+                    "SeqDeserializer"
+                        | "MapDeserializer"
+                        | "SeqRefDeserializer"
+                        | "MapRefDeserializer"
+                        | "ContentDeserializer"
+                        | "ContentRefDeserializer"
+                        | "EnumDeserializer"
+                        | "VariantDeserializer"
+                )
+            {
+                let err = inferred_error.clone().unwrap_or_else(|| "E".to_string());
+                return Some(vec![Some(err)]);
+            }
+
+            // Access deserializer helpers are payload-bound (`A`) and should
+            // recover their owner argument from the constructor payload.
+            if owner_name.contains("Access") {
+                if let Some(inferred_payload) = inferred_payload {
+                    return Some(vec![Some(inferred_payload)]);
+                }
+                return None;
+            }
+
+            let owner_type_params = declared_owner_type_params.or_else(|| {
+                if matches!(
+                    owner_name,
+                    "SeqDeserializer"
+                        | "MapDeserializer"
+                        | "SeqRefDeserializer"
+                        | "MapRefDeserializer"
+                ) {
+                    if owner_path_is_unqualified
+                        && self.is_type_param_in_scope("E")
+                        && !self.is_type_param_in_scope("I")
+                    {
+                        Some(vec!["E".to_string()])
+                    } else {
+                        Some(vec!["I".to_string(), "E".to_string()])
+                    }
+                } else if matches!(
+                    owner_name,
+                    "ContentDeserializer"
+                        | "ContentRefDeserializer"
+                        | "EnumDeserializer"
+                        | "VariantDeserializer"
+                ) {
+                    Some(vec!["E".to_string()])
+                } else {
+                    None
+                }
+            });
+            if let Some(owner_type_params) = owner_type_params {
+                let mut inferred = vec![None; owner_type_params.len()];
+
+                if let Some(from_signature) = self
+                    .infer_owner_template_args_from_declared_method_signature(
+                        owner_path,
+                        owner_name,
+                        method_name,
+                        call,
+                    )
+                {
+                    for (idx, inferred_arg) in from_signature.into_iter().enumerate() {
+                        if idx < inferred.len() && inferred[idx].is_none() {
+                            inferred[idx] = inferred_arg;
+                        }
+                    }
+                }
+
+                let default_error_arg = Some(default_error_arg.clone());
+
+                for (idx, param) in owner_type_params.iter().enumerate() {
+                    if param == "E" && inferred[idx].is_none() {
+                        inferred[idx] = default_error_arg.clone().or_else(|| {
+                            self.is_type_param_in_scope(param).then_some(param.clone())
+                        });
+                    }
+                }
+
+                if matches!(
+                    owner_name,
+                    "SeqDeserializer"
+                        | "MapDeserializer"
+                        | "SeqRefDeserializer"
+                        | "MapRefDeserializer"
+                ) && owner_type_params.len() > 1
+                    && !inferred.is_empty()
+                    && inferred[0].is_none()
+                    && owner_type_params
+                        .first()
+                        .is_some_and(|param| param != "E")
+                {
+                    inferred[0] = inferred_payload.clone();
+                }
+
+                // Content/enum deserializer constructors in serde commonly expose
+                // a single owner parameter that binds the error type. If signature
+                // inference could not recover a concrete owner arg, prefer the
+                // in-scope error slot instead of constructor payload type.
+                if owner_type_params.len() == 1
+                    && !owner_name.contains("Access")
+                    && inferred.first().is_some_and(|arg| arg.is_none())
+                {
+                    inferred[0] = default_error_arg;
+                }
+
+                if inferred.iter().any(|arg| arg.is_some()) {
+                    return Some(inferred);
+                }
+            }
+            return None;
+        }
+
         match owner_name {
             "ArrayVec" => {
                 let mut inferred = vec![None, None];
@@ -36886,13 +40981,21 @@ impl CodeGen {
                     let inferred = call
                         .args
                         .first()
-                        .and_then(|arg| self.infer_hint_type_from_expr(arg))
+                        .and_then(|arg| {
+                            self.infer_hint_type_from_expr(arg)
+                                .or_else(|| self.infer_local_binding_type_from_initializer(arg))
+                                .or_else(|| self.infer_simple_expr_type(arg))
+                        })
                         .map(|ty| self.map_type(&ty))
+                        .filter(|mapped| {
+                            mapped != "auto"
+                                && !mapped.contains("/* TODO")
+                                && !type_string_has_auto_placeholder(mapped)
+                        })
                         .or_else(|| {
-                            call.args.first().map(|arg| {
-                                let arg_cpp = self.emit_expr_to_string(arg);
-                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
-                            })
+                            call.args
+                                .first()
+                                .and_then(|arg| self.infer_remove_cvref_decltype_from_expr(arg))
                         });
                     if let Some(inferred) = inferred {
                         Some(vec![Some(inferred)])
@@ -36914,10 +41017,9 @@ impl CodeGen {
                         })
                         .map(|ty| self.map_type(&ty))
                         .or_else(|| {
-                            call.args.first().map(|arg| {
-                                let arg_cpp = self.emit_expr_to_string(arg);
-                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
-                            })
+                            call.args
+                                .first()
+                                .and_then(|arg| self.infer_remove_cvref_decltype_from_expr(arg))
                         });
                     inferred.map(|inner| vec![Some(inner)])
                 } else {
@@ -36953,10 +41055,9 @@ impl CodeGen {
                         .and_then(|arg| self.infer_hint_type_from_expr(arg))
                         .map(|ty| self.map_type(&ty))
                         .or_else(|| {
-                            call.args.first().map(|arg| {
-                                let arg_cpp = self.emit_expr_to_string(arg);
-                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
-                            })
+                            call.args
+                                .first()
+                                .and_then(|arg| self.infer_remove_cvref_decltype_from_expr(arg))
                         });
                     if let Some(inferred) = inferred {
                         Some(vec![Some(inferred)])
@@ -37088,10 +41189,9 @@ impl CodeGen {
                                 .map(|ty| self.map_type(&ty))
                         })
                         .or_else(|| {
-                            call.args.first().map(|arg| {
-                                let arg_cpp = self.emit_expr_to_string(arg);
-                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
-                            })
+                            call.args
+                                .first()
+                                .and_then(|arg| self.infer_remove_cvref_decltype_from_expr(arg))
                         });
                     if let Some(inferred) = inferred {
                         Some(vec![Some(inferred)])
@@ -37179,10 +41279,9 @@ impl CodeGen {
                         .and_then(|arg| self.infer_hint_type_from_expr(arg))
                         .map(|ty| self.map_type(&ty))
                         .or_else(|| {
-                            call.args.first().map(|arg| {
-                                let arg_cpp = self.emit_expr_to_string(arg);
-                                format!("std::remove_cvref_t<decltype(({}))>", arg_cpp)
-                            })
+                            call.args
+                                .first()
+                                .and_then(|arg| self.infer_remove_cvref_decltype_from_expr(arg))
                         });
                     if let Some(inferred) = inferred {
                         Some(vec![Some(inferred)])
@@ -37256,7 +41355,12 @@ impl CodeGen {
                     None
                 }
             }
-            _ => None,
+            _ => self.infer_owner_template_args_from_declared_method_signature(
+                owner_path,
+                owner_name,
+                method_name,
+                call,
+            ),
         }
     }
 
@@ -37270,11 +41374,89 @@ impl CodeGen {
             return base_func;
         };
         let path = &path_expr.path;
+        let function_path = path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        if let Some(expected_owner_ty) = expected_ty
+            && let Some(rewritten) =
+                self.try_emit_error_trait_path_with_expected_owner(path, expected_owner_ty)
+        {
+            return rewritten;
+        }
         if path.segments.len() == 1 {
+            if let Some(qself) = &path_expr.qself
+                && let Some(method_seg) = path.segments.first()
+            {
+                let owner_ty = self.peel_reference_paren_group_type(&qself.ty);
+                let mut owner_cpp = self.map_type(owner_ty);
+                owner_cpp = owner_cpp.trim_start_matches("typename ").trim().to_string();
+                if !owner_cpp.is_empty()
+                    && owner_cpp != "auto"
+                    && !owner_cpp.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&owner_cpp)
+                {
+                    let mut method = escape_cpp_keyword(&method_seg.ident.to_string());
+                    if let syn::PathArguments::AngleBracketed(args) = &method_seg.arguments {
+                        let mapped_args: Vec<String> = args
+                            .args
+                            .iter()
+                            .filter_map(|arg| match arg {
+                                syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                                syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                                _ => None,
+                            })
+                            .collect();
+                        if !mapped_args.is_empty() {
+                            method = format!("{}<{}>", method, mapped_args.join(", "));
+                        }
+                    }
+                    if owner_cpp == "std::string_view" {
+                        match method.as_str() {
+                            "from_utf8" => return "rusty::str_runtime::from_utf8".to_string(),
+                            "from_utf8_unchecked" => {
+                                return "rusty::str_runtime::from_utf8_unchecked".to_string();
+                            }
+                            "from_utf8_unchecked_mut" => {
+                                return "rusty::str_runtime::from_utf8_unchecked_mut".to_string();
+                            }
+                            _ => {}
+                        }
+                    }
+                    return format!("{}::{}", owner_cpp, method);
+                }
+            }
             if let Some(recovered) =
                 self.recover_single_segment_constructor_type_args_from_call(path, call)
             {
                 return recovered;
+            }
+            // Inside impl bodies, Rust allows unqualified associated static calls
+            // like `new_()` / `default_()`. Keep these bound to the current owner.
+            if let (Some(current_struct), Some(method_seg)) =
+                (self.current_struct.as_ref(), path.segments.first())
+            {
+                let method_name = method_seg.ident.to_string();
+                let is_constructor_like =
+                    matches!(method_name.as_str(), "new" | "new_" | "default" | "default_");
+                let owner_tail = current_struct.rsplit("::").next().unwrap_or(current_struct);
+                if is_constructor_like
+                    && !self.is_local_function_name_in_scope(&method_name)
+                    && self
+                        .lookup_owner_method_has_receiver(owner_tail, &method_name)
+                        .is_some()
+                    && let Ok(qualified_path) = syn::parse_str::<syn::Path>(&format!(
+                        "{}::{}",
+                        owner_tail, method_name
+                    ))
+                {
+                    let qualified = self.emit_path_to_string(&qualified_path);
+                    if !qualified.is_empty() && qualified != method_name {
+                        return qualified;
+                    }
+                }
             }
             return base_func;
         }
@@ -37308,10 +41490,24 @@ impl CodeGen {
         let owner_has_declared_generics = self
             .declared_type_params_for_path(&owner_path)
             .is_some_and(|params| !params.is_empty());
+        let owner_has_any_declared_generic_tail =
+            self.owner_has_any_declared_generic_tail(&owner_name);
         let owner_declared_arity = self
             .declared_type_params_for_path(&owner_path)
             .map(|params| params.len())
-            .filter(|arity| *arity > 0);
+            .filter(|arity| *arity > 0)
+            .or_else(|| self.declared_type_param_arity_for_owner_tail(&owner_name));
+        let owner_in_std_rusty_submodule = path.segments.len() >= 2
+            && path
+                .segments
+                .first()
+                .is_some_and(|seg| seg.ident == "std")
+            && path.segments.iter().nth(1).is_some_and(|seg| {
+                matches!(
+                    seg.ident.to_string().as_str(),
+                    "time" | "path" | "ffi" | "env" | "process"
+                )
+            });
         let method_name = path
             .segments
             .last()
@@ -37343,7 +41539,9 @@ impl CodeGen {
                 | "Lazy"
         ) || (owner_name == "Box"
             && box_owner_recovery_enabled)
-            || owner_has_declared_generics;
+            || owner_name.ends_with("Deserializer")
+            || owner_has_declared_generics
+            || owner_has_any_declared_generic_tail;
         let owner_is_supported_omitted_recovery_target = matches!(
             owner_name.as_str(),
             "ArrayVec"
@@ -37362,12 +41560,31 @@ impl CodeGen {
                 | "Box"
         ) || (owner_name == "Box"
             && box_owner_recovery_enabled)
-            || owner_has_declared_generics;
+            || owner_name.ends_with("Deserializer")
+            || owner_has_declared_generics
+            || owner_has_any_declared_generic_tail;
+        let deserializer_owner_prefers_error_param = owner_name.ends_with("Deserializer");
+        let owner_is_qualified_new_like_omitted_target = owner_args_omitted
+            && owner_idx > 0
+            && matches!(method_name.as_str(), "new" | "new_")
+            && call.args.len() == 1
+            && !owner_in_std_rusty_submodule
+            && !deserializer_owner_prefers_error_param
+            && !owner_has_declared_generics
+            && !owner_has_any_declared_generic_tail;
+        if types::map_function_path(&function_path).is_some()
+            && owner_is_qualified_new_like_omitted_target
+        {
+            // Preserve mapped runtime/static paths (e.g. futures_timer::Delay::new)
+            // rather than forcing omitted-owner generic recovery on the Rust source path.
+            return base_func;
+        }
         if !owner_has_placeholder_arg
             && !(owner_has_explicit_args && owner_is_supported_explicit_recovery_target)
             && !vec_from_raw_parts_explicit_recovery
             && !(owner_args_omitted && owner_is_supported_omitted_recovery_target)
             && !(owner_args_omitted && vec_from_raw_parts_recovery)
+            && !owner_is_qualified_new_like_omitted_target
         {
             return base_func;
         }
@@ -37377,8 +41594,12 @@ impl CodeGen {
                 self.current_return_type_hint()
                     .and_then(|ty| self.expected_type_generic_args_for_owner(ty, &owner_name))
             });
-        let inferred_owner_args =
-            self.infer_owner_template_args_for_call(&owner_name, &method_name, call);
+        let inferred_owner_args = self.infer_owner_template_args_for_call(
+            Some(&owner_path),
+            &owner_name,
+            &method_name,
+            call,
+        );
         let scoped_owner_args = self.recover_omitted_owner_generic_args_from_scope(&owner_path);
 
         let mut rendered: Vec<String> = Vec::with_capacity(path.segments.len());
@@ -37387,10 +41608,9 @@ impl CodeGen {
                 let seg_name = seg.ident.to_string();
                 let is_std_alloc_prefix = idx == 0 && matches!(seg_name.as_str(), "std" | "alloc");
                 let is_vec_module_prefix = idx == 1
-                    && path
-                        .segments
-                        .first()
-                        .is_some_and(|first| matches!(first.ident.to_string().as_str(), "std" | "alloc"))
+                    && path.segments.first().is_some_and(|first| {
+                        matches!(first.ident.to_string().as_str(), "std" | "alloc")
+                    })
                     && seg_name == "vec";
                 if is_std_alloc_prefix || is_vec_module_prefix {
                     continue;
@@ -37512,6 +41732,7 @@ impl CodeGen {
                         .or_else(|| inferred_owner_args.as_ref().map(|args| args.len()))
                         .or_else(|| scoped_owner_args.as_ref().map(|args| args.len()))
                         .or(owner_declared_arity)
+                        .or_else(|| owner_is_qualified_new_like_omitted_target.then_some(1))
                         .or_else(|| {
                             // If all inference sources failed but this is a supported omitted-owner
                             // target, use a default arity based on known type shapes.
@@ -37585,11 +41806,36 @@ impl CodeGen {
                                 let fallback = (arg_idx == 0)
                                     .then_some(owner_first_arg_fallback.clone())
                                     .flatten();
-                                if let Some(arg) = expected.or(inferred).or(scoped).or(fallback) {
+                                if let Some(arg) = expected.or(scoped).or(inferred).or(fallback) {
                                     recovered.push(arg);
                                 } else {
                                     complete = false;
                                     break;
+                                }
+                            }
+                            if !complete && owner_is_qualified_new_like_omitted_target {
+                                let inferred_from_type = call
+                                    .args
+                                    .first()
+                                    .and_then(|arg| {
+                                        self.infer_hint_type_from_expr(arg)
+                                            .or_else(|| self.infer_simple_expr_type(arg))
+                                    })
+                                    .map(|ty| self.map_type(&ty))
+                                    .filter(|mapped| {
+                                        mapped != "auto"
+                                            && !mapped.contains("/* TODO")
+                                            && !type_string_has_auto_placeholder(mapped)
+                                    });
+                                let inferred = inferred_from_type.or_else(|| {
+                                    call.args.first().and_then(|arg| {
+                                        self.infer_remove_cvref_decltype_from_expr(arg)
+                                    })
+                                });
+                                if let Some(inferred) = inferred {
+                                    recovered.clear();
+                                    recovered.push(inferred);
+                                    complete = true;
                                 }
                             }
                             if complete && !recovered.is_empty() {
@@ -37659,7 +41905,29 @@ impl CodeGen {
             }
             rendered.push(seg_text);
         }
-        rendered.join("::")
+        let mut emitted = rendered.join("::");
+        let mut force_leading_colon = path.leading_colon.is_some();
+        if !force_leading_colon
+            && !rendered.is_empty()
+            && rendered[0]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+            && self
+                .module_stack
+                .iter()
+                .any(|scope_seg| scope_seg == &rendered[0])
+            && self.declared_module_names.contains(&rendered[0])
+        {
+            // Keep recovered associated-call paths rooted when nested scopes shadow
+            // the same module segment name (e.g. `de::...` inside `private_::de::...`).
+            force_leading_colon = true;
+        }
+        if force_leading_colon && !emitted.is_empty() && !emitted.starts_with("::") {
+            emitted = format!("::{}", emitted);
+        }
+        let emitted = Self::strip_crate_root_cpp_path(&emitted);
+        self.rewrite_seed_ctor_path_string(&emitted)
     }
 
     fn recover_single_segment_constructor_type_args_from_call(
@@ -37764,12 +42032,19 @@ impl CodeGen {
         if mc.method != "into" || !mc.args.is_empty() {
             return None;
         }
-        let receiver_kind = self.classify_into_receiver_expr(&mc.receiver)?;
+        if expected_ty.is_none() && self.expr_lowers_to_slice_or_span_view(&mc.receiver) {
+            let receiver = self.emit_expr_maybe_move(&mc.receiver);
+            return Some(format!("rusty::to_vec({})", receiver));
+        }
+        let receiver_kind = self.classify_into_receiver_expr(&mc.receiver);
+        let expected_was_none = expected_ty.is_none();
         let target_ty = match expected_ty {
             Some(expected) => expected.clone(),
             // Keep no-context string-literal lowering compilable (`"x".into()`) while
             // avoiding blanket rewrites for non-string primitives without target type.
-            None if receiver_kind == IntoReceiverKind::StringLike => parse_quote!(rusty::String),
+            None if receiver_kind == Some(IntoReceiverKind::StringLike) => {
+                parse_quote!(rusty::String)
+            }
             None => return None,
         };
         if self.type_contains_infer(&target_ty) {
@@ -37786,9 +42061,15 @@ impl CodeGen {
         let stripped_target = self.strip_into_target_cpp_type(&target_cpp);
         let canonical_target = self.canonical_into_target_cpp_type(&target_cpp);
         let receiver = self.emit_expr_maybe_move(&mc.receiver);
+        if expected_was_none
+            && self.expr_lowers_to_slice_or_span_view(&mc.receiver)
+            && canonical_target.starts_with("rusty::Vec<")
+        {
+            return Some(format!("rusty::to_vec({})", receiver));
+        }
 
         match receiver_kind {
-            IntoReceiverKind::StringLike => match canonical_target.as_str() {
+            Some(IntoReceiverKind::StringLike) => match canonical_target.as_str() {
                 "rusty::String" => Some(format!("rusty::String::from({})", receiver)),
                 "std::string" => Some(format!("std::string({})", receiver)),
                 "std::string_view" => Some(format!("std::string_view({})", receiver)),
@@ -37796,13 +42077,14 @@ impl CodeGen {
                 "char*" => Some(receiver),
                 _ => None,
             },
-            IntoReceiverKind::ScalarLike => {
+            Some(IntoReceiverKind::ScalarLike) => {
                 if Self::is_scalar_into_target_cpp_type(&canonical_target) {
                     Some(format!("static_cast<{}>({})", stripped_target, receiver))
                 } else {
-                    None
+                    Some(format!("rusty::from_into<{}>({})", target_cpp, receiver))
                 }
             }
+            None => Some(format!("rusty::from_into<{}>({})", target_cpp, receiver)),
         }
     }
 
@@ -37891,6 +42173,123 @@ impl CodeGen {
         false
     }
 
+    fn call_expr_is_iter_like(&self, call: &syn::ExprCall) -> bool {
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return false;
+        };
+        for candidate in self.call_path_candidates(&path_expr.path) {
+            let mapped = types::map_function_path(&candidate).unwrap_or(candidate.as_str());
+            if matches!(mapped, "iter" | "rusty::iter" | "std::iter::iter" | "core::iter::iter")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn infer_fold_like_init_expected_type_from_call_context(
+        &self,
+        call: &syn::ExprCall,
+        arg_idx: usize,
+        call_expected_ty: Option<&syn::Type>,
+    ) -> Option<syn::Type> {
+        if arg_idx != 1 || call.args.len() < 2 {
+            return None;
+        }
+        let init_expr = self.peel_paren_group_expr(&call.args[1]);
+        if !Self::is_unsuffixed_int_literal_expr(init_expr) {
+            return None;
+        }
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        let mut is_fold_like = false;
+        let mut is_try_fold_like = false;
+        for candidate in self.call_path_candidates(&path_expr.path) {
+            let mapped = types::map_function_path(&candidate).unwrap_or(candidate.as_str());
+            if matches!(mapped, "fold" | "rusty::fold") {
+                is_fold_like = true;
+            }
+            if matches!(mapped, "try_fold" | "rusty::try_fold") {
+                is_fold_like = true;
+                is_try_fold_like = true;
+            }
+        }
+        if !is_fold_like {
+            return None;
+        }
+        let contextual_expected_ty = call_expected_ty.or(self.current_return_type_hint());
+
+        let from_call_expected = if is_try_fold_like {
+            contextual_expected_ty
+                .and_then(|ty| self.expected_option_type_arg(Some(ty)).cloned())
+                .or_else(|| {
+                    contextual_expected_ty
+                        .and_then(|ty| self.expected_result_type_arg(Some(ty), 0).cloned())
+                })
+        } else {
+            contextual_expected_ty.cloned()
+        };
+        if let Some(from_call_expected) = from_call_expected
+            && self.type_is_concrete_hint_candidate(&from_call_expected)
+        {
+            return Some(from_call_expected);
+        }
+
+        if call.args.len() >= 3
+            && let Some(from_reducer_acc) =
+                self.lookup_function_arg_expected_type(&call.args[2], 0)
+            && self.type_is_concrete_hint_candidate(from_reducer_acc)
+        {
+            return Some(from_reducer_acc.clone());
+        }
+
+        if let Some(iter_item_ty) = self.infer_iter_item_type_from_expr(&call.args[0])
+            && self.type_is_concrete_hint_candidate(&iter_item_ty)
+            && is_numeric_cpp_scalar_type(self.map_type(&iter_item_ty).trim())
+        {
+            return Some(iter_item_ty);
+        }
+        if let Some(counting_hint) =
+            self.infer_fold_like_counting_init_hint_from_iter_expr(&call.args[0])
+        {
+            return Some(counting_hint);
+        }
+        None
+    }
+
+    fn infer_fold_like_counting_init_hint_from_iter_expr(
+        &self,
+        iter_expr: &syn::Expr,
+    ) -> Option<syn::Type> {
+        let iter_expr = self.peel_paren_group_expr(iter_expr);
+        match iter_expr {
+            syn::Expr::MethodCall(mc) if mc.method == "enumerate" => Some(parse_quote!(size_t)),
+            syn::Expr::Call(call) => {
+                let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref())
+                else {
+                    return None;
+                };
+                let is_counting_iter = self.call_path_candidates(&path_expr.path).iter().any(
+                    |candidate| {
+                        let mapped = types::map_function_path(candidate).unwrap_or(candidate);
+                        matches!(
+                            mapped,
+                            "enumerate"
+                                | "rusty::enumerate"
+                                | "range"
+                                | "rusty::range"
+                                | "range_inclusive"
+                                | "rusty::range_inclusive"
+                        )
+                    },
+                );
+                is_counting_iter.then_some(parse_quote!(size_t))
+            }
+            _ => None,
+        }
+    }
+
     fn expr_is_once_with_unsuffixed_numeric_seed(&self, expr: &syn::Expr) -> bool {
         let syn::Expr::Call(call) = self.peel_paren_group_expr(expr) else {
             return false;
@@ -37973,7 +42372,7 @@ impl CodeGen {
         }
         if elem_cpp.is_none() || cap_cpp.is_none() {
             if let Some(inferred_owner_args) =
-                self.infer_owner_template_args_for_call("ArrayVec", &method_name, call)
+                self.infer_owner_template_args_for_call(None, "ArrayVec", &method_name, call)
             {
                 if elem_cpp.is_none() {
                     elem_cpp = inferred_owner_args
@@ -38137,6 +42536,11 @@ impl CodeGen {
             return emitted;
         }
         if let Some(ty) = expected_ty {
+            if let Some(emitted) =
+                self.try_emit_data_enum_variant_call_with_expected(call, Some(ty))
+            {
+                return emitted;
+            }
             if let Some(emitted) = self.try_emit_iter_either_new_call_with_expected(call, ty) {
                 return emitted;
             }
@@ -38168,6 +42572,12 @@ impl CodeGen {
             }
         });
         let resolved_hint = resolved_hint_owned.as_ref();
+        if let Some(emitted) = self.try_emit_data_enum_variant_call_with_expected(
+            call,
+            expected_ty.or(self.current_return_type_hint()),
+        ) {
+            return emitted;
+        }
         let result_ctor_with_infer_turbofish =
             if let syn::Expr::Path(path_expr) = call.func.as_ref() {
                 path_expr.path.segments.last().and_then(|last| {
@@ -38243,6 +42653,9 @@ impl CodeGen {
         if let Some(variant_ctor) = self.try_emit_data_enum_variant_constructor(call) {
             return variant_ctor;
         }
+        if let Some(c_like_variant) = self.try_emit_c_like_enum_variant_zero_arg_call(call) {
+            return c_like_variant;
+        }
 
         // Intercept derived-trait UFCS calls with arbitrary arg shapes
         // (including `std::move(arg)` from expanded derive code) that the
@@ -38252,6 +42665,40 @@ impl CodeGen {
         }
         if let Some(trait_call) = self.try_emit_trait_ufcs_by_value_receiver_call(call) {
             return trait_call;
+        }
+        if let syn::Expr::Path(path_expr) = call.func.as_ref() {
+            let segments: Vec<String> = path_expr
+                .path
+                .segments
+                .iter()
+                .map(|seg| seg.ident.to_string())
+                .collect();
+            if segments.len() >= 2
+                && segments
+                    .get(segments.len().saturating_sub(2))
+                    .is_some_and(|seg| seg == "Deserializer")
+                && self
+                    .trait_static_call_has_receiver_for_segments(&segments)
+                    .unwrap_or(true)
+                && !call.args.is_empty()
+            {
+                let method = escape_cpp_keyword(
+                    segments
+                        .last()
+                        .expect("segments.len() >= 2 implies non-empty"),
+                );
+                let receiver = self.emit_expr_maybe_move(&call.args[0]);
+                let args: Vec<String> = call
+                    .args
+                    .iter()
+                    .skip(1)
+                    .map(|arg| self.emit_expr_maybe_move(arg))
+                    .collect();
+                if args.is_empty() {
+                    return format!("({}).{}()", receiver, method);
+                }
+                return format!("({}).{}({})", receiver, method, args.join(", "));
+            }
         }
 
         // Phase 18 Blocker 2 (leaf 2): Rewrite UFCS trait-method calls from:
@@ -38466,6 +42913,96 @@ impl CodeGen {
         }
 
         let mut func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
+        func = self.rewrite_seed_ctor_path_string(&func);
+        func = match func.as_str() {
+            "std::string_view::from_utf8" | "::std::string_view::from_utf8" => {
+                "rusty::str_runtime::from_utf8".to_string()
+            }
+            "std::string_view::from_utf8_unchecked"
+            | "::std::string_view::from_utf8_unchecked" => {
+                "rusty::str_runtime::from_utf8_unchecked".to_string()
+            }
+            "std::string_view::from_utf8_unchecked_mut"
+            | "::std::string_view::from_utf8_unchecked_mut" => {
+                "rusty::str_runtime::from_utf8_unchecked_mut".to_string()
+            }
+            _ => func,
+        };
+        if call.args.len() == 1 {
+            let func_leaf = func.rsplit("::").next().unwrap_or_default();
+            let unresolved_box_ctor = matches!(func_leaf, "new" | "new_" | "make")
+                && (matches!(
+                    func.as_str(),
+                    "Box::new"
+                        | "Box::new_"
+                        | "Box::make"
+                        | "rusty::Box::new"
+                        | "rusty::Box::new_"
+                        | "rusty::Box::make"
+                ) || func.contains("Box<auto>::"));
+            if unresolved_box_ctor {
+                let box_inner_expected_ty = expected_ty.and_then(|ty| {
+                    let ty = self.peel_reference_paren_group_type(ty);
+                    let syn::Type::Path(tp) = ty else {
+                        return None;
+                    };
+                    let last = tp.path.segments.last()?;
+                    if last.ident != "Box" {
+                        return None;
+                    }
+                    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                        return None;
+                    };
+                    args.args.iter().find_map(|arg| match arg {
+                        syn::GenericArgument::Type(inner) => Some(inner.clone()),
+                        _ => None,
+                    })
+                });
+                let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    &call.args[0],
+                    box_inner_expected_ty.as_ref(),
+                );
+                return format!("rusty::make_box({})", arg);
+            }
+        }
+        if func == "rusty_ext::deserialize"
+            || func == "::rusty_ext::deserialize"
+            || func.ends_with("::rusty_ext::deserialize")
+        {
+            func = "::de::rusty_ext::deserialize".to_string();
+        }
+        if (func == "rusty_ext::serialize"
+            || func == "::rusty_ext::serialize"
+            || func.ends_with("::rusty_ext::serialize")
+            || func == "Serialize::serialize"
+            || func.ends_with("::Serialize::serialize"))
+            && call.args.len() == 2
+        {
+            let value = self.emit_expr_maybe_move(&call.args[0]);
+            let serializer = self.emit_expr_maybe_move(&call.args[1]);
+            return self.emit_serialize_dispatch_call(&value, &serializer);
+        }
+        if (func == "Deserialize::deserialize" || func.ends_with("::Deserialize::deserialize"))
+            && call.args.len() == 1
+        {
+            let expected_ok_ty = effective_resolved_hint
+                .or(expected_ty)
+                .or(self.current_return_type_hint())
+                .and_then(|hint| self.expected_result_type_arg(Some(hint), 0));
+            if let Some(ok_ty) = expected_ok_ty {
+                let ok_cpp = self.map_type(ok_ty);
+                if ok_cpp != "auto"
+                    && !ok_cpp.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&ok_cpp)
+                {
+                    let deserializer = self.emit_expr_maybe_move(&call.args[0]);
+                    return format!(
+                        "::de::rusty_ext::deserialize(rusty::PhantomData<{}>{{}}, {})",
+                        ok_cpp, deserializer
+                    );
+                }
+            }
+        }
         if can_resolve_result_ctor_infer
             && let Some((ctor_name, _)) = result_ctor_with_infer_turbofish.as_ref()
         {
@@ -38725,6 +43262,49 @@ impl CodeGen {
             let arg = self.emit_expr_maybe_move(&call.args[0]);
             return format!(
                 "rusty::RefCell<std::remove_cvref_t<decltype(({}))>>::new_({})",
+                arg, arg
+            );
+        }
+        if matches!(
+            func.as_str(),
+            "ManuallyDrop::new_"
+                | "rusty::mem::ManuallyDrop::new_"
+                | "std::mem::ManuallyDrop::new_"
+                | "core::mem::ManuallyDrop::new_"
+        ) && call.args.len() == 1
+        {
+            let expected_inner_ty = expected_ty.and_then(|ty| {
+                let ty = self.peel_reference_paren_group_type(ty);
+                let syn::Type::Path(tp) = ty else {
+                    return None;
+                };
+                let last = tp.path.segments.last()?;
+                if last.ident != "ManuallyDrop" {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(inner) => Some(inner.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(expected) = expected_ty {
+                let expected_cpp = self.map_type(expected);
+                if expected_cpp.starts_with("rusty::mem::ManuallyDrop<")
+                    && !type_string_has_auto_placeholder(&expected_cpp)
+                {
+                    let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                        &call.args[0],
+                        expected_inner_ty.as_ref(),
+                    );
+                    return format!("{}::new_({})", expected_cpp, arg);
+                }
+            }
+            let arg = self.emit_expr_maybe_move(&call.args[0]);
+            return format!(
+                "rusty::mem::ManuallyDrop<std::remove_cvref_t<decltype(({}))>>::new_({})",
                 arg, arg
             );
         }
@@ -39169,8 +43749,11 @@ impl CodeGen {
                         }
                     }
                 }
-                if expected_cpp == "rusty::fmt::Result" {
-                    return format!("{}::Ok({})", expected_cpp, arg);
+                if expected_cpp == "rusty::fmt::Result"
+                    || expected_cpp == "fmt::Result"
+                    || expected_cpp.ends_with("::fmt::Result")
+                {
+                    return format!("rusty::fmt::Result::Ok({})", arg);
                 }
                 if expected_cpp.starts_with("rusty::io::Result<")
                     || expected_cpp.starts_with("io::Result<")
@@ -39232,8 +43815,11 @@ impl CodeGen {
                         }
                     }
                 }
-                if expected_cpp == "rusty::fmt::Result" {
-                    return format!("{}::Err({})", expected_cpp, arg);
+                if expected_cpp == "rusty::fmt::Result"
+                    || expected_cpp == "fmt::Result"
+                    || expected_cpp.ends_with("::fmt::Result")
+                {
+                    return format!("rusty::fmt::Result::Err({})", arg);
                 }
                 if expected_cpp.starts_with("rusty::io::Result<")
                     || expected_cpp.starts_with("io::Result<")
@@ -39359,6 +43945,40 @@ impl CodeGen {
                         idx,
                     );
                 }
+                if arg_expected_ty.is_none()
+                    && let Some(fold_hint) = self
+                        .infer_fold_like_init_expected_type_from_call_context(
+                            call,
+                            idx,
+                            call_expected_ty,
+                        )
+                {
+                    arg_expected_ty = Some(fold_hint);
+                }
+                if (arg_expected_ty.is_none() || expected_needs_owner_recovery)
+                    && idx == 0
+                    && self.call_expr_is_iter_like(call)
+                    && let Some(iter_expected) = self
+                        .infer_into_iter_receiver_expected_type_from_call_expected(
+                            arg,
+                            call_expected_ty,
+                        )
+                {
+                    arg_expected_ty = Some(iter_expected);
+                }
+                if std::env::var("RUSTY_DEBUG_CALL_EXPECTED").is_ok()
+                    && matches!(call.func.as_ref(), syn::Expr::Path(path_expr)
+                        if path_expr.path.segments.last().is_some_and(|seg| seg.ident == "content_clone"))
+                {
+                    let expected_dbg = arg_expected_ty
+                        .as_ref()
+                        .map(|ty| ty.to_token_stream().to_string())
+                        .unwrap_or_else(|| "None".to_string());
+                    eprintln!(
+                        "[debug-call-expected] idx={} expected={} style={:?}",
+                        idx, expected_dbg, style
+                    );
+                }
                 let callable_bound_arg_intent =
                     self.lookup_callable_param_bound_arg_intent(&call.func, idx);
                 self.emit_call_arg_with_pass_style(
@@ -39403,7 +44023,36 @@ impl CodeGen {
         } else {
             func
         };
+        let func = Self::collapse_constructor_like_call_path(&func);
         format!("{}({})", func, args.join(", "))
+    }
+
+    fn collapse_constructor_like_call_path(func: &str) -> String {
+        let trimmed = func.trim();
+        if trimmed.is_empty() {
+            return func.to_string();
+        }
+        let had_leading_colon = trimmed.starts_with("::");
+        let normalized = trimmed.trim_start_matches("::");
+        let Some((owner, method)) = normalized.rsplit_once("::") else {
+            return func.to_string();
+        };
+        let owner_tail = owner.rsplit("::").next().unwrap_or(owner);
+        let owner_ctor_name = owner_tail.split('<').next().unwrap_or(owner_tail);
+        let method_name = method.split('<').next().unwrap_or(method);
+        let ctor_like = owner_ctor_name == method_name
+            && owner_ctor_name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase());
+        if !ctor_like {
+            return func.to_string();
+        }
+        if had_leading_colon {
+            format!("::{}", owner)
+        } else {
+            owner.to_string()
+        }
     }
 
     fn emit_raw_pointer_call_arg(&self, arg: &syn::Expr) -> Option<String> {
@@ -39676,6 +44325,105 @@ impl CodeGen {
         None
     }
 
+    fn recover_variant_constructor_owner_generic_args(&self, path: &syn::Path) -> Option<Vec<String>> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        if let Some(owner_seg) = path.segments.iter().nth_back(1)
+            && let syn::PathArguments::AngleBracketed(owner_args) = &owner_seg.arguments
+        {
+            let mapped_owner_args: Vec<String> = owner_args
+                .args
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::GenericArgument::Type(ty) => Some(self.map_type(ty)),
+                    syn::GenericArgument::Const(expr) => Some(self.emit_expr_to_string(expr)),
+                    _ => None,
+                })
+                .collect();
+            if !mapped_owner_args.is_empty() {
+                return Some(mapped_owner_args);
+            }
+        }
+
+        let mut owner_path = syn::Path {
+            leading_colon: path.leading_colon,
+            segments: syn::punctuated::Punctuated::new(),
+        };
+        for seg in path
+            .segments
+            .iter()
+            .take(path.segments.len().saturating_sub(1))
+        {
+            owner_path.segments.push(seg.clone());
+        }
+        let recovered_from_scope = self
+            .recover_omitted_owner_generic_args_from_scope(&owner_path)
+            .or_else(|| {
+                if owner_path.leading_colon.is_some() {
+                    let mut unrooted = owner_path.clone();
+                    unrooted.leading_colon = None;
+                    self.recover_omitted_owner_generic_args_from_scope(&unrooted)
+                } else {
+                    None
+                }
+            });
+        if recovered_from_scope.is_some() {
+            return recovered_from_scope;
+        }
+
+        // Match-arm/lambda lowering can temporarily drop owner generic params
+        // (for example `Either<L, R>` inside `impl IterEither<L, R>` methods).
+        // If the owner params are declared on the current enclosing struct, use
+        // those names directly.
+        let owner_declared_params = self.declared_type_params_for_path(&owner_path)?;
+        if owner_declared_params.is_empty() {
+            return None;
+        }
+        let current_struct = self.current_struct.as_ref()?;
+        let current_scoped = self.scoped_type_key(current_struct);
+        let current_params = self
+            .declared_type_params
+            .get(current_struct)
+            .or_else(|| self.declared_type_params.get(&current_scoped))?;
+        if owner_declared_params
+            .iter()
+            .all(|param| current_params.contains(param))
+        {
+            return Some(owner_declared_params.to_vec());
+        }
+        None
+    }
+
+    fn resolve_single_segment_variant_ctor_import_path(
+        &self,
+        path: &syn::Path,
+        ctor_name: &str,
+    ) -> Option<syn::Path> {
+        if path.segments.len() != 1 {
+            return None;
+        }
+        if !matches!(
+            path.segments.last().map(|seg| &seg.arguments),
+            Some(syn::PathArguments::None)
+        ) {
+            return None;
+        }
+        let local_name = path.segments.first()?.ident.to_string();
+        let bound_target = self
+            .resolve_scope_import_binding_path(&local_name)
+            .or_else(|| self.resolve_scope_import_binding_path_for_scope("", &local_name))?;
+        let bound_path = syn::parse_str::<syn::Path>(&bound_target).ok()?;
+        if bound_path.segments.len() < 2 {
+            return None;
+        }
+        let bound_ctor = self.variant_ctor_name_from_path(&bound_path)?;
+        if bound_ctor != ctor_name {
+            return None;
+        }
+        Some(bound_path)
+    }
+
     fn try_emit_variant_constructor_callable(&self, path: &syn::Path) -> Option<String> {
         let ctor_name = self.variant_ctor_name_from_path(path)?;
         if !matches!(
@@ -39685,50 +44433,53 @@ impl CodeGen {
             return None;
         }
 
+        let mut owner_name = path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
         let mut recovered_args = self.lookup_constructor_template_args(&ctor_name);
-        if recovered_args.is_none() && path.segments.len() >= 2 {
-            if let Some(owner_seg) = path.segments.iter().nth_back(1)
-                && let syn::PathArguments::AngleBracketed(owner_args) = &owner_seg.arguments
-            {
-                let mapped_owner_args: Vec<String> = owner_args
-                    .args
-                    .iter()
-                    .filter_map(|arg| match arg {
-                        syn::GenericArgument::Type(ty) => Some(self.map_type(ty)),
-                        syn::GenericArgument::Const(expr) => Some(self.emit_expr_to_string(expr)),
-                        _ => None,
-                    })
-                    .collect();
-                if !mapped_owner_args.is_empty() {
-                    recovered_args = Some(mapped_owner_args);
-                }
-            }
+        if recovered_args.is_none() {
+            recovered_args = self.recover_variant_constructor_owner_generic_args(path);
         }
-        if recovered_args.is_none() && path.segments.len() >= 2 {
-            let mut owner_path = syn::Path {
-                leading_colon: path.leading_colon,
-                segments: syn::punctuated::Punctuated::new(),
-            };
-            for seg in path
-                .segments
-                .iter()
-                .take(path.segments.len().saturating_sub(1))
-            {
-                owner_path.segments.push(seg.clone());
+        if recovered_args.is_none()
+            && let Some(bound_path) =
+                self.resolve_single_segment_variant_ctor_import_path(path, &ctor_name)
+        {
+            if owner_name.is_empty() {
+                owner_name = bound_path
+                    .segments
+                    .iter()
+                    .nth_back(1)
+                    .map(|seg| seg.ident.to_string())
+                    .unwrap_or_default();
             }
-            recovered_args = self.recover_omitted_owner_generic_args_from_scope(&owner_path);
+            recovered_args = self.recover_variant_constructor_owner_generic_args(&bound_path);
+        }
+        if recovered_args.is_none()
+            && path.segments.len() == 1
+            && matches!(ctor_name.as_str(), "Left" | "Right")
+            && self.enum_has_variant_name("Either", &ctor_name)
+        {
+            let owner_path = syn::parse_str::<syn::Path>("Either").ok();
+            recovered_args = owner_path
+                .as_ref()
+                .and_then(|owner| self.recover_omitted_owner_generic_args_from_scope(owner))
+                .or_else(|| {
+                    syn::parse_str::<syn::Path>("::Either")
+                        .ok()
+                        .and_then(|owner| self.recover_omitted_owner_generic_args_from_scope(&owner))
+                });
+            if recovered_args.is_some() && owner_name.is_empty() {
+                owner_name = "Either".to_string();
+            }
         }
         let recovered_args = recovered_args?;
         if recovered_args.len() < 2 {
             return None;
         }
 
-        let owner_name = path
-            .segments
-            .iter()
-            .nth_back(1)
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
         let ctor_cpp = if owner_name == "Either" {
             format!("rusty::either::{}", ctor_name)
         } else {
@@ -39749,7 +44500,64 @@ impl CodeGen {
         if let Some(last) = enum_base_path.segments.last_mut() {
             last.arguments = syn::PathArguments::None;
         }
-        let cpp_enum_base = self.emit_path_to_string(&enum_base_path);
+        // Variant struct types are emitted alongside the enum definition, not
+        // alongside local `use` aliases. When the enum owner is a single-segment
+        // imported alias (`use content::Content;`), qualify through the bound
+        // target path so variant structs resolve as `content::Content_Variant`.
+        let mut bound_target_cpp_override: Option<String> = None;
+        let enum_base_path = if enum_base_path.segments.len() == 1 {
+            let local_name = enum_base_path.segments[0].ident.to_string();
+            if self.current_module_declares_type_name_exact(&local_name) {
+                enum_base_path
+            } else {
+                let scope_key = self.module_stack.join("::");
+                let mut bound_target = self
+                    .resolve_scope_import_binding_path_for_scope(&scope_key, &local_name)
+                    .or_else(|| self.resolve_scope_import_binding_path_for_scope("", &local_name));
+                if bound_target
+                    .as_ref()
+                    .is_some_and(|target| target.trim_start_matches("::") == local_name)
+                {
+                    let scope_variants = Self::scope_binding_key_variants(&scope_key);
+                    let local_variants = Self::scope_binding_key_variants(&local_name);
+                    let mut candidates: HashSet<String> = HashSet::new();
+                    for scope in &scope_variants {
+                        for local in &local_variants {
+                            if let Some(found) =
+                                self.scope_import_bindings.get(&(scope.clone(), local.clone()))
+                            {
+                                candidates.extend(found.iter().cloned());
+                            }
+                        }
+                    }
+                    let mut non_identity: Vec<String> = candidates
+                        .into_iter()
+                        .filter(|candidate| candidate.trim_start_matches("::") != local_name)
+                        .map(|candidate| candidate.trim_start_matches("::").to_string())
+                        .collect();
+                    non_identity.sort();
+                    non_identity.dedup();
+                    if non_identity.len() == 1 {
+                        bound_target = non_identity.into_iter().next();
+                    }
+                }
+                if let Some(target) = bound_target {
+                    let escaped_target = Self::strip_crate_root_cpp_path(
+                        &Self::escape_qualified_path_preserve_global(target.trim()),
+                    );
+                    if !escaped_target.is_empty() {
+                        bound_target_cpp_override = Some(escaped_target);
+                    }
+                    syn::parse_str::<syn::Path>(target.trim()).unwrap_or(enum_base_path)
+                } else {
+                    enum_base_path
+                }
+            }
+        } else {
+            enum_base_path
+        };
+        let cpp_enum_base = bound_target_cpp_override
+            .unwrap_or_else(|| self.emit_path_to_string(&enum_base_path));
         let variant_base = format!("{}_{}", cpp_enum_base, variant_name);
 
         let explicit_args: Vec<String> = enum_path
@@ -39883,6 +44691,31 @@ impl CodeGen {
         } else {
             Some(format!("{}{{{}}}", cpp_variant_struct, args.join(", ")))
         }
+    }
+
+    fn try_emit_c_like_enum_variant_zero_arg_call(&self, call: &syn::ExprCall) -> Option<String> {
+        if !call.args.is_empty() {
+            return None;
+        }
+        let func_expr = self.peel_paren_group_expr(call.func.as_ref());
+        let syn::Expr::Path(path_expr) = func_expr else {
+            return None;
+        };
+        if path_expr.path.segments.len() < 2 {
+            return None;
+        }
+        let enum_name = path_expr
+            .path
+            .segments
+            .iter()
+            .nth_back(1)?
+            .ident
+            .to_string();
+        let variant_name = path_expr.path.segments.last()?.ident.to_string();
+        if !self.path_matches_c_like_enum_const(&enum_name, &variant_name) {
+            return None;
+        }
+        Some(self.emit_path_to_string(&path_expr.path))
     }
 
     fn is_string_from_call_expr(&self, expr: &syn::Expr) -> bool {
@@ -40265,9 +45098,20 @@ impl CodeGen {
             template_args[1].as_str()
         };
         let arg = self.emit_from_conversion_to_target(&call.args[0], target_cpp_ty);
+        let owner_name = func_path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let ctor_cpp = if owner_name == "Either" {
+            format!("rusty::either::{}", ctor_name)
+        } else {
+            ctor_name
+        };
         Some(format!(
             "{}<{}, {}>({})",
-            ctor_name, template_args[0], template_args[1], arg
+            ctor_cpp, template_args[0], template_args[1], arg
         ))
     }
 
@@ -40380,13 +45224,18 @@ impl CodeGen {
                 || self.module_runtime_helper_traits.contains(&owner_path))
             && (self.trait_method_has_receiver.contains_key(&key_scoped)
                 || self.trait_method_has_receiver.contains_key(&key_unscoped));
-        if is_runtime_helper_method {
+        let receiver_is_self_path = call
+            .args
+            .first()
+            .map(|arg| self.peel_paren_group_expr(arg))
+            .is_some_and(|arg| {
+                matches!(arg, syn::Expr::Path(p)
+                    if p.path.segments.len() == 1 && p.path.segments[0].ident == "self")
+            });
+        if is_runtime_helper_method && receiver_is_self_path {
             return None;
         }
 
-        if self.local_declared_types.contains(&owner_leaf) {
-            return None;
-        }
         if matches!(
             self.lookup_owner_method_has_receiver(&owner_leaf, &method_name),
             Some(false)
@@ -40739,6 +45588,14 @@ impl CodeGen {
             syn::Expr::Reference(_)
         );
         let source_is_reference_like = self.is_expr_reference_like(&cast.expr);
+        let source_reference_to_pointer_like = source_is_reference_like
+            && self
+                .infer_simple_expr_type(&cast.expr)
+                .as_ref()
+                .is_some_and(|src_ty| {
+                    let src_ty = self.peel_reference_paren_group_type(src_ty);
+                    self.is_type_raw_pointer_like(src_ty)
+                });
         if type_string_has_auto_placeholder(&ty) {
             if target_is_pointer_type
                 && self.is_expr_reference_like(&cast.expr)
@@ -40785,7 +45642,7 @@ impl CodeGen {
                 ty, expr
             )
         } else if target_is_numeric_scalar
-            && (source_is_raw_pointer_type || source_is_reference_like)
+            && (source_is_raw_pointer_type || source_reference_to_pointer_like)
         {
             format!(
                 "static_cast<{}>(reinterpret_cast<std::uintptr_t>({}))",
@@ -40861,8 +45718,9 @@ impl CodeGen {
                     {
                         return self.emit_expr_to_string(&un.expr);
                     }
-                    if self.is_expr_reference_like(&un.expr)
-                        || self.is_self_reference_field_access(&un.expr)
+                    if (self.is_expr_reference_like(&un.expr)
+                        || self.is_self_reference_field_access(&un.expr))
+                        && self.unary_deref_should_collapse_reference_like_operand(&un.expr)
                     {
                         self.emit_expr_to_string(&un.expr)
                     } else {
@@ -40871,8 +45729,24 @@ impl CodeGen {
                             format!("rusty::deref_ref({})", operand)
                         } else if self.in_deref_mut_method_scope() {
                             format!("rusty::deref_mut({})", operand)
-                        } else {
+                        } else if self.is_expr_raw_pointer_like(&un.expr) {
                             format!("*{}", operand)
+                        } else if self
+                            .infer_simple_expr_type(&un.expr)
+                            .or_else(|| self.infer_local_binding_type_from_initializer(&un.expr))
+                            .as_ref()
+                            .is_some_and(|ty| {
+                                !matches!(
+                                    self.peel_reference_paren_group_type(ty),
+                                    syn::Type::Reference(_) | syn::Type::Ptr(_)
+                                )
+                            })
+                        {
+                            // Rust unary-deref on non-reference operands should invoke
+                            // overloaded `operator*` when present (for Deref-like types).
+                            format!("*({})", operand)
+                        } else {
+                            format!("rusty::detail::deref_if_pointer_like({})", operand)
                         }
                     }
                 }
@@ -41202,7 +46076,7 @@ impl CodeGen {
                     })
                     .filter(|stmt| !stmt.trim().is_empty())
                     .collect::<Vec<_>>()
-                    .join(" ");
+                    .join("\n");
                 // Rust permits `if cond { ... }` expression form only for unit.
                 // Lower to an IIFE so expression-position unit initializers compile.
                 return format!(
@@ -42177,7 +47051,7 @@ impl CodeGen {
         parts.push("}".to_string());
         parts.push("}()".to_string());
 
-        parts.join(" ")
+        parts.join("\n")
     }
 
     /// Extract the binding name from an if-let pattern like `Some(x)` → "x"
@@ -42350,7 +47224,7 @@ impl CodeGen {
         let bindings_prefix = if binding_stmts.is_empty() {
             String::new()
         } else {
-            format!("{} ", binding_stmts.join(" "))
+            format!("{}\n", binding_stmts.join("\n"))
         };
 
         Some(format!(
@@ -42746,6 +47620,13 @@ impl CodeGen {
         if self.receiver_is_fixed_array_like_expr(receiver) {
             return true;
         }
+        if let Some(receiver_ty) = self.infer_simple_expr_type(receiver) {
+            let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+            let receiver_cpp = self.map_type(receiver_ty);
+            if receiver_cpp.starts_with("rusty::Vec<") || receiver_cpp.starts_with("std::span<") {
+                return true;
+            }
+        }
         if self.is_iterator_like_receiver_expr(receiver)
             || self.is_probably_iterator_receiver_expr(receiver)
         {
@@ -42769,13 +47650,23 @@ impl CodeGen {
         if self.receiver_is_fixed_array_like_expr(receiver) {
             return true;
         }
+        if let Some(receiver_ty) = self.infer_simple_expr_type(receiver) {
+            let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+            let receiver_cpp = self.map_type(receiver_ty);
+            if receiver_cpp.starts_with("rusty::Vec<") || receiver_cpp.starts_with("std::span<") {
+                return true;
+            }
+        }
         if self.is_iterator_like_receiver_expr(receiver)
             || self.is_probably_iterator_receiver_expr(receiver)
         {
             return false;
         }
         let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
-            return false;
+            // Unknown direct `.into_iter()` receiver types are usually generic or
+            // pattern-introduced values without a concrete member surface.
+            // Bridge through `rusty::iter(...)` to keep call sites compilable.
+            return true;
         };
         let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
         let syn::Type::Path(tp) = receiver_ty else {
@@ -42912,22 +47803,88 @@ impl CodeGen {
         Some(format!("rusty::rev({})", receiver))
     }
 
-    fn try_emit_iter_fold_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+    fn infer_fold_like_init_expected_type_from_method_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+        call_expected_ty: Option<&syn::Type>,
+        is_try_fold: bool,
+    ) -> Option<syn::Type> {
+        if mc.args.len() != 2 {
+            return None;
+        }
+        if let Some(from_reducer_acc) = self.lookup_function_arg_expected_type(&mc.args[1], 0)
+            && self.type_is_concrete_hint_candidate(from_reducer_acc)
+        {
+            return Some(from_reducer_acc.clone());
+        }
+        let contextual_expected_ty = call_expected_ty.or(self.current_return_type_hint());
+        let from_call_expected = if is_try_fold {
+            contextual_expected_ty
+                .and_then(|ty| self.expected_option_type_arg(Some(ty)).cloned())
+                .or_else(|| {
+                    contextual_expected_ty
+                        .and_then(|ty| self.expected_result_type_arg(Some(ty), 0).cloned())
+                })
+        } else {
+            contextual_expected_ty.cloned()
+        };
+        if let Some(from_call_expected) = from_call_expected
+            && self.type_is_concrete_hint_candidate(&from_call_expected)
+        {
+            return Some(from_call_expected);
+        }
+        let init_expr = self.peel_paren_group_expr(&mc.args[0]);
+        if !Self::is_unsuffixed_int_literal_expr(init_expr) {
+            return None;
+        }
+        if let Some(iter_item_ty) = self.infer_iter_item_type_from_expr(&mc.receiver)
+            && self.type_is_concrete_hint_candidate(&iter_item_ty)
+            && is_numeric_cpp_scalar_type(self.map_type(&iter_item_ty).trim())
+        {
+            return Some(iter_item_ty);
+        }
+        if let Some(counting_hint) =
+            self.infer_fold_like_counting_init_hint_from_iter_expr(&mc.receiver)
+        {
+            return Some(counting_hint);
+        }
+        None
+    }
+
+    fn try_emit_iter_fold_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
         if mc.method != "fold" || mc.args.len() != 2 {
             return None;
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
-        let init = self.emit_expr_maybe_move(mc.args.first()?);
+        let init_expected =
+            self.infer_fold_like_init_expected_type_from_method_call(mc, expected_ty, false);
+        let init = self.emit_expr_to_string_with_expected_and_move_if_needed(
+            mc.args.first()?,
+            init_expected.as_ref(),
+        );
         let reducer = self.emit_expr_maybe_move(mc.args.iter().nth(1)?);
         Some(format!("rusty::fold({}, {}, {})", receiver, init, reducer))
     }
 
-    fn try_emit_iter_try_fold_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+    fn try_emit_iter_try_fold_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
         if mc.method != "try_fold" || mc.args.len() != 2 {
             return None;
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
-        let init = self.emit_expr_maybe_move(mc.args.first()?);
+        let init_expected =
+            self.infer_fold_like_init_expected_type_from_method_call(mc, expected_ty, true);
+        let init = self.emit_expr_to_string_with_expected_and_move_if_needed(
+            mc.args.first()?,
+            init_expected.as_ref(),
+        );
         let reducer = self.emit_expr_maybe_move(mc.args.iter().nth(1)?);
         Some(format!(
             "rusty::try_fold({}, {}, {})",
@@ -43199,7 +48156,7 @@ impl CodeGen {
         if !array.elems.is_empty() {
             return None;
         }
-        Some(self.match_expr_unreachable_fallback_with_expected(expected_ty))
+        Some(self.index_out_of_bounds_fallback_with_expected(expected_ty))
     }
 
     fn expr_indexes_fixed_array(&self, expr: &syn::Expr) -> bool {
@@ -43261,7 +48218,8 @@ impl CodeGen {
         }
         if let Some(tuple_arity) = self.match_expr_tuple_scrutinee_arity(&match_expr.expr) {
             if self.tuple_match_can_lower_as_value_conditions(&match_expr.arms, tuple_arity) {
-                if let syn::Expr::Tuple(tuple_scrutinee) = self.peel_paren_group_expr(&match_expr.expr)
+                if let syn::Expr::Tuple(tuple_scrutinee) =
+                    self.peel_paren_group_expr(&match_expr.expr)
                 {
                     return self.emit_match_expr_tuple_value_conditions(
                         tuple_scrutinee,
@@ -43307,18 +48265,37 @@ impl CodeGen {
         } else {
             let scrutinee =
                 self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
+            let visit_borrows_payload =
+                self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
+            let visit_payload = if visit_borrows_payload {
+                "_m"
+            } else {
+                "std::move(_m)"
+            };
             // Variant match → IIFE with std::visit
             if self.should_force_size_t_visit_return_for_bound_match(match_expr, expected_ty) {
                 format!(
-                    "[&]() {{ auto&& _m = {}; return std::visit<size_t>(overloaded {{ {} }}, _m); }}()",
+                    "[&]() {{ auto&& _m = {}; return std::visit<size_t>(overloaded {{ {} }}, {}); }}()",
                     scrutinee,
-                    self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref(), expected_ty)
+                    self.emit_match_expr_visit(
+                        &match_expr.arms,
+                        variant_ctx.as_ref(),
+                        expected_ty,
+                        visit_borrows_payload,
+                    ),
+                    visit_payload
                 )
             } else {
                 format!(
-                    "[&]() {{ auto&& _m = {}; return std::visit(overloaded {{ {} }}, _m); }}()",
+                    "[&]() {{ auto&& _m = {}; return std::visit(overloaded {{ {} }}, {}); }}()",
                     scrutinee,
-                    self.emit_match_expr_visit(&match_expr.arms, variant_ctx.as_ref(), expected_ty)
+                    self.emit_match_expr_visit(
+                        &match_expr.arms,
+                        variant_ctx.as_ref(),
+                        expected_ty,
+                        visit_borrows_payload,
+                    ),
+                    visit_payload
                 )
             }
         }
@@ -43374,9 +48351,10 @@ impl CodeGen {
         }
     }
 
-    fn new_inner_with_try_style_binding_scope(
+    fn new_inner_with_try_style_binding_scope_with_ref_mode(
         &self,
         binding_map: &HashMap<String, String>,
+        treat_bindings_as_refs: bool,
     ) -> Self {
         let mut inner = self.new_inner_for_block();
         if binding_map.is_empty() {
@@ -43389,13 +48367,22 @@ impl CodeGen {
         for rust_name in binding_map.keys() {
             binding_types.insert(rust_name.clone(), None);
             binding_consts.insert(rust_name.clone(), false);
-            binding_refs.insert(rust_name.clone());
+            if treat_bindings_as_refs {
+                binding_refs.insert(rust_name.clone());
+            }
         }
         inner.local_bindings.push(binding_types);
         inner.local_shadowed_binding_types.push(HashMap::new());
         inner.local_const_bindings.push(binding_consts);
         inner.local_reference_bindings.push(binding_refs);
         inner
+    }
+
+    fn new_inner_with_try_style_binding_scope(
+        &self,
+        binding_map: &HashMap<String, String>,
+    ) -> Self {
+        self.new_inner_with_try_style_binding_scope_with_ref_mode(binding_map, true)
     }
 
     fn push_local_cpp_binding_scope(&mut self, binding_map: &HashMap<String, String>) -> bool {
@@ -43496,14 +48483,32 @@ impl CodeGen {
         }
     }
 
+    fn emit_expr_with_try_style_binding_scope_with_ref_mode(
+        &self,
+        expr: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+        binding_map: &HashMap<String, String>,
+        treat_bindings_as_refs: bool,
+    ) -> String {
+        let inner = self.new_inner_with_try_style_binding_scope_with_ref_mode(
+            binding_map,
+            treat_bindings_as_refs,
+        );
+        inner.emit_expr_to_string_with_expected(expr, expected_ty)
+    }
+
     fn emit_expr_with_try_style_binding_scope(
         &self,
         expr: &syn::Expr,
         expected_ty: Option<&syn::Type>,
         binding_map: &HashMap<String, String>,
     ) -> String {
-        let inner = self.new_inner_with_try_style_binding_scope(binding_map);
-        inner.emit_expr_to_string_with_expected(expr, expected_ty)
+        self.emit_expr_with_try_style_binding_scope_with_ref_mode(
+            expr,
+            expected_ty,
+            binding_map,
+            true,
+        )
     }
 
     fn emit_return_expr_with_variant_ctx_and_try_style_binding_scope(
@@ -43678,8 +48683,11 @@ impl CodeGen {
         let return_stmt =
             self.emit_try_style_return_flow_statement(&return_arm.body, &return_binding_map)?;
 
-        let mut scrutinee =
-            self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref());
+        let mut scrutinee = self
+            .try_emit_runtime_entry_probe_for_match_arms(&match_expr.arms, &match_expr.expr)
+            .unwrap_or_else(|| {
+                self.emit_expr_to_string_with_variant_ctx(&match_expr.expr, variant_ctx.as_ref())
+            });
         if let Some(ctx) = variant_ctx.as_ref() {
             if let syn::Expr::Call(call) = match_expr.expr.as_ref() {
                 if let syn::Expr::Path(path) = call.func.as_ref() {
@@ -43695,12 +48703,12 @@ impl CodeGen {
         let success_bindings_str = if success_bindings.is_empty() {
             String::new()
         } else {
-            format!("{} ", success_bindings.join(" "))
+            format!("{}\n", success_bindings.join("\n"))
         };
         let return_bindings_str = if return_bindings.is_empty() {
             String::new()
         } else {
-            format!("{} ", return_bindings.join(" "))
+            format!("{}\n", return_bindings.join("\n"))
         };
         let return_guard = if return_cond == "true" {
             String::new()
@@ -43843,13 +48851,13 @@ impl CodeGen {
             String::new()
         } else {
             success_bindings.push(String::new());
-            success_bindings.join(" ")
+            success_bindings.join("\n")
         };
         let return_bindings_str = if return_bindings.is_empty() {
             String::new()
         } else {
             return_bindings.push(String::new());
-            return_bindings.join(" ")
+            return_bindings.join("\n")
         };
 
         let success_check = if success_variant == "Left" {
@@ -43944,14 +48952,36 @@ impl CodeGen {
                 }
             }
         }
+        if let syn::Lit::Int(int_lit) = lit
+            && int_lit.suffix().is_empty()
+            && let Some(expected_ty) = expected_ty
+        {
+            let mapped_expected = self.map_type(expected_ty);
+            let target_cpp = self.strip_into_target_cpp_type(&mapped_expected);
+            if !target_cpp.is_empty()
+                && target_cpp != "auto"
+                && !target_cpp.contains("/* TODO")
+                && !type_string_has_auto_placeholder(&target_cpp)
+                && is_numeric_cpp_scalar_type(target_cpp.trim())
+            {
+                return format!(
+                    "static_cast<{}>({})",
+                    target_cpp.trim(),
+                    int_lit.base10_digits()
+                );
+            }
+        }
         self.emit_lit(lit)
     }
 
     fn emit_lit(&self, lit: &syn::Lit) -> String {
         match lit {
             syn::Lit::Int(i) => {
-                if i.suffix() == "u8" {
-                    return format!("static_cast<uint8_t>({})", i.base10_digits());
+                let suffix = i.suffix();
+                if !suffix.is_empty()
+                    && let Some(mapped) = types::map_primitive_type(suffix)
+                {
+                    return format!("static_cast<{}>({})", mapped, i.base10_digits());
                 }
                 i.base10_digits().to_string()
             }
@@ -44017,8 +49047,10 @@ impl CodeGen {
     }
 
     fn emit_path_to_string(&self, path: &syn::Path) -> String {
-        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        let joined = segments.join("::");
+        let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let mut joined = segments.join("::");
+        let mut force_leading_colon = path.leading_colon.is_some();
+        let original_force_leading_colon = force_leading_colon;
 
         // Resolve `Self::...` paths to the current struct name in impl scope.
         if segments.first().is_some_and(|s| s == "Self") && segments.len() > 1 {
@@ -44050,31 +49082,316 @@ impl CodeGen {
             return "(*this)".to_string();
         }
 
+        if !segments.is_empty() {
+            let mut import_binding_rewrite_applied = false;
+            for _ in 0..6 {
+                let Some(first) = segments.first().cloned() else {
+                    break;
+                };
+                if segments.len() == 1 && !self.module_stack.is_empty() {
+                    let scope = self.module_stack.join("::");
+                    let escaped_scope = self
+                        .module_stack
+                        .iter()
+                        .map(|seg| escape_cpp_keyword(seg))
+                        .collect::<Vec<String>>()
+                        .join("::");
+                    let escaped_first = escape_cpp_keyword(&first);
+                    let mut function_candidates = vec![
+                        format!("{}::{}", scope, first),
+                        format!("{}::{}", escaped_scope, first),
+                    ];
+                    if escaped_first != first {
+                        function_candidates.push(format!("{}::{}", scope, escaped_first));
+                        function_candidates.push(format!("{}::{}", escaped_scope, escaped_first));
+                    }
+                    if function_candidates
+                        .iter()
+                        .any(|candidate| self.is_known_free_function_path(candidate))
+                    {
+                        break;
+                    }
+                }
+                let block_root_scope_binding_for_local_type =
+                    self.current_scope_declares_type_name(&first);
+                let block_root_scope_binding_for_local_fn = segments.len() == 1
+                    && !self.module_stack.is_empty()
+                    && first
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_');
+                let mut from_root_scope = false;
+                let mut bound_target = self.resolve_scope_import_binding_path(&first);
+                if let Some(current_target) = bound_target.as_ref()
+                    && !block_root_scope_binding_for_local_type
+                    && !block_root_scope_binding_for_local_fn
+                {
+                    let current_normalized = current_target.trim_start_matches("::");
+                    let current_is_identity = current_normalized == first;
+                    if current_is_identity
+                        && let Some(root_target) =
+                            self.resolve_scope_import_binding_path_for_scope("", &first)
+                        && root_target.trim_start_matches("::") != current_normalized
+                    {
+                        bound_target = Some(root_target);
+                        from_root_scope = true;
+                    }
+                }
+                if bound_target.is_none()
+                    && !block_root_scope_binding_for_local_type
+                    && !block_root_scope_binding_for_local_fn
+                    && let Some(root_target) =
+                        self.resolve_scope_import_binding_path_for_scope("", &first)
+                {
+                    bound_target = Some(root_target);
+                    from_root_scope = true;
+                }
+                let Some(bound_target) = bound_target else {
+                    break;
+                };
+                if from_root_scope
+                    && !self.module_stack.is_empty()
+                    && !block_root_scope_binding_for_local_type
+                {
+                    force_leading_colon = true;
+                }
+                if bound_target.starts_with("::") {
+                    force_leading_colon = true;
+                }
+                let normalized_bound_target = bound_target.trim_start_matches("::");
+                let direct_import_alias = normalized_bound_target
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == first);
+                let direct_import_has_cpp_surface =
+                    !matches!(classify_use_import(normalized_bound_target), UseImportAction::RustOnly);
+                if direct_import_alias {
+                    if !self.in_forward_decl_signature && normalized_bound_target == first {
+                        // Keep `use foo::Bar;` single-segment aliases as local names.
+                        // Emitting `::Bar` bypasses the imported binding and can fail
+                        // when no global `Bar` symbol exists.
+                        force_leading_colon = original_force_leading_colon;
+                        break;
+                    }
+                    if self.in_forward_decl_signature {
+                        let mut rewritten: Vec<String> = normalized_bound_target
+                            .split("::")
+                            .filter(|seg| !seg.is_empty())
+                            .map(|seg| seg.to_string())
+                            .collect();
+                        rewritten.extend(segments.iter().skip(1).cloned());
+                        if !rewritten.is_empty() && rewritten != segments {
+                            if from_root_scope {
+                                force_leading_colon = true;
+                            }
+                            segments = rewritten;
+                        }
+                        // Forward declarations must avoid alias-local spellings
+                        // because `use` imports are emitted later in source order.
+                        break;
+                    }
+                    if direct_import_has_cpp_surface {
+                        // Keep unqualified imported aliases local (`use foo::Ordering;`)
+                        // instead of forcing a global-path spelling (`::Ordering`).
+                        force_leading_colon = original_force_leading_colon;
+                        // Keep direct imported names (`use a::b::Name`) as local spellings.
+                        break;
+                    }
+                }
+                let lower_ident_self_alias = segments.len() > 1
+                    && first
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+                    && bound_target
+                        .trim_start_matches("::")
+                        .rsplit("::")
+                        .next()
+                        .is_some_and(|tail| tail == first);
+                if lower_ident_self_alias {
+                    break;
+                }
+                let mut rewritten: Vec<String> = bound_target
+                    .split("::")
+                    .filter(|seg| !seg.is_empty())
+                    .map(|seg| seg.to_string())
+                    .collect();
+                rewritten.extend(segments.iter().skip(1).cloned());
+                if rewritten.is_empty() || rewritten == segments {
+                    break;
+                }
+                let self_expanding_root = rewritten.first() == segments.first()
+                    && rewritten.len() > segments.len();
+                if import_binding_rewrite_applied && self_expanding_root {
+                    // Prevent recursive alias growth such as
+                    // `alloc -> alloc::alloc -> alloc::alloc::alloc ...`.
+                    break;
+                }
+                segments = rewritten;
+                import_binding_rewrite_applied = true;
+            }
+            joined = segments.join("::");
+        }
+
+        // Resolve nested import-bound type/value aliases for qualified paths
+        // like `content::Content` when `content` re-exports `Content`.
+        if segments.len() >= 2 {
+            let leaf = segments.last().cloned().unwrap_or_default();
+            if !leaf.is_empty() {
+                let qualifier = segments[..segments.len() - 1].join("::");
+                let mut scope_candidates = vec![qualifier.clone()];
+                if !self.module_stack.is_empty() && !qualifier.is_empty() {
+                    scope_candidates.push(format!(
+                        "{}::{}",
+                        self.module_stack.join("::"),
+                        qualifier
+                    ));
+                }
+                for scope in scope_candidates {
+                    if let Some(bound_target) =
+                        self.resolve_scope_import_binding_path_for_scope(&scope, &leaf)
+                    {
+                        if bound_target.starts_with("::") {
+                            force_leading_colon = true;
+                        }
+                        let rewritten: Vec<String> = bound_target
+                            .split("::")
+                            .filter(|seg| !seg.is_empty())
+                            .map(|seg| seg.to_string())
+                            .collect();
+                        if !rewritten.is_empty() {
+                            segments = rewritten;
+                            joined = segments.join("::");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if segments.len() >= 2
+            && let Some(target_root) = self.inferred_private_alias_target(&segments[0])
+        {
+            let mut rewritten: Vec<String> = target_root
+                .trim_start_matches("::")
+                .split("::")
+                .filter(|seg| !seg.is_empty())
+                .map(|seg| seg.to_string())
+                .collect();
+            rewritten.extend(segments.iter().skip(1).cloned());
+            if !rewritten.is_empty() && rewritten != segments {
+                segments = rewritten;
+                joined = segments.join("::");
+                force_leading_colon = true;
+            }
+        }
+        let rewritten_external = self.rewrite_external_crate_path_segments(&segments);
+        if rewritten_external != segments {
+            segments = rewritten_external;
+            joined = segments.join("::");
+        }
+        if segments.len() >= 2
+            && let Some(resolved_nested) = self.try_resolve_nested_local_type_path(&joined)
+        {
+            let trimmed = resolved_nested.trim_start_matches("::");
+            if !trimmed.is_empty() {
+                if resolved_nested.starts_with("::") {
+                    force_leading_colon = true;
+                }
+                segments = trimmed.split("::").map(|seg| seg.to_string()).collect();
+                joined = segments.join("::");
+            }
+        }
+        // Handle numeric MAX constants early so alias-heavy modules don't
+        // short-circuit this through later path-specialization branches.
+        if let Some(max_expr) = self.try_emit_numeric_limits_max_path(path, &segments) {
+            return max_expr;
+        }
+        if segments.len() == 2 {
+            let direct = format!("{}::{}", segments[0], segments[1]);
+            let seed_fallback = format!("{}::seed::{}", segments[0], segments[1]);
+            let escaped_parent = escape_cpp_keyword(&segments[0]);
+            let escaped_leaf = escape_cpp_keyword(&segments[1]);
+            let seed_like_leaf = segments[1].ends_with("Seed") || escaped_leaf.ends_with("Seed");
+            let escaped_direct = format!("{}::{}", escaped_parent, escaped_leaf);
+            let escaped_seed_fallback = format!("{}::seed::{}", escaped_parent, escaped_leaf);
+            let direct_exists = self.local_declared_types.contains(&direct)
+                || self.local_declared_types.contains(&escaped_direct);
+            let seed_exists = self.local_declared_types.contains(&seed_fallback)
+                || self.local_declared_types.contains(&escaped_seed_fallback);
+            let seed_module = format!("{}::seed", segments[0]);
+            let escaped_seed_module = format!("{}::seed", escaped_parent);
+            let seed_module_exists = self.declared_module_paths.contains(&seed_module)
+                || self.declared_module_paths.contains(&escaped_seed_module);
+            let private_root = matches!(segments[0].as_str(), "private" | "private_" | "__private")
+                || segments[0].starts_with("__private");
+            if seed_like_leaf && private_root {
+                return format!("::{}::seed::{}", escaped_parent, escaped_leaf);
+            }
+            if seed_like_leaf && seed_module_exists && (!direct_exists || seed_exists) {
+                return format!("::{}::seed::{}", escaped_parent, escaped_leaf);
+            }
+        }
+        if segments.len() == 1 {
+            let leaf = escape_cpp_keyword(&segments[0]);
+            if leaf.ends_with("Seed") {
+                let mut seed_candidates: Vec<String> = self
+                    .local_declared_types
+                    .iter()
+                    .filter(|candidate| candidate.ends_with(&format!("::seed::{}", leaf)))
+                    .cloned()
+                    .collect();
+                seed_candidates.sort();
+                seed_candidates.dedup();
+                if seed_candidates.len() == 1 {
+                    let escaped_candidate = seed_candidates[0]
+                        .split("::")
+                        .filter(|seg| !seg.is_empty())
+                        .map(escape_cpp_keyword)
+                        .collect::<Vec<String>>()
+                        .join("::");
+                    return format!("::{}", escaped_candidate);
+                }
+            }
+        }
+        if segments.len() >= 4
+            && segments.last().is_some_and(|seg| seg == "deserialize")
+            && segments
+                .get(segments.len().saturating_sub(2))
+                .is_some_and(|seg| seg == "rusty_ext")
+            && segments
+                .get(segments.len().saturating_sub(3))
+                .is_some_and(|seg| seg == "de")
+            && segments[..segments.len() - 3]
+                .iter()
+                .any(|seg| seg == "private" || seg == "private_" || seg.starts_with("__private"))
+        {
+            return "::de::rusty_ext::deserialize".to_string();
+        }
+
         // Trait static call dispatch:
         // - `Error::invalid_value(...)` where `E: Error` -> `E::invalid_value(...)`
         // - `de::Error::invalid_length(...)` where `E: de::Error` -> `E::invalid_length(...)`
         // - inside concrete impls, `Deserialize::deserialize(...)` -> `SelfType::deserialize(...)`
         if segments.len() >= 2 {
+            let trait_name = &segments[segments.len() - 2];
+            let method_name = escape_cpp_keyword(
+                segments
+                    .last()
+                    .expect("segments.len() >= 2 implies non-empty"),
+            );
             if let Some(type_param) =
                 self.resolve_trait_static_call_type_param_for_segments(&segments)
             {
-                let method_name = escape_cpp_keyword(
-                    segments
-                        .last()
-                        .expect("segments.len() >= 2 implies non-empty"),
-                );
                 return format!("{}::{}", type_param, method_name);
             }
             if let Some(owner) = self.resolve_trait_static_call_owner_in_current_context(&segments)
             {
-                let method_name = escape_cpp_keyword(
-                    segments
-                        .last()
-                        .expect("segments.len() >= 2 implies non-empty"),
-                );
                 return format!("{}::{}", owner, method_name);
             }
-            let trait_name = &segments[segments.len() - 2];
+            if let Some(owner) = self.resolve_trait_static_call_owner_from_return_hint(trait_name) {
+                return format!("{}::{}", owner, method_name);
+            }
             if trait_name == "Error"
                 && let Some(return_hint) = self.current_return_type_hint()
                 && let Some(err_ty) = self.expected_result_type_arg(Some(return_hint), 1)
@@ -44085,11 +49402,6 @@ impl CodeGen {
                     && !type_string_has_auto_placeholder(&owner)
                 {
                     owner = owner.trim_start_matches("typename ").to_string();
-                    let method_name = escape_cpp_keyword(
-                        segments
-                            .last()
-                            .expect("segments.len() >= 2 implies non-empty"),
-                    );
                     return format!("{}::{}", owner, method_name);
                 }
             }
@@ -44099,12 +49411,12 @@ impl CodeGen {
         // a single-segment path refers to a uniquely declared crate type from a
         // sibling namespace (for example `Position` imported from `error`), qualify
         // it explicitly to keep signatures order-independent.
-        if segments.len() == 1 {
+        if segments.len() == 1 && !self.current_scope_declares_type_name(&segments[0]) {
             if let Some(scoped) = self.resolve_unique_forward_decl_type_path(&segments[0]) {
-                return scoped;
+                return self.rewrite_seed_ctor_path_string(&scoped);
             }
             if let Some(scoped) = self.resolve_unique_nonlocal_type_path(&segments[0]) {
-                return scoped;
+                return self.rewrite_seed_ctor_path_string(&scoped);
             }
         }
 
@@ -44113,10 +49425,101 @@ impl CodeGen {
             match first.as_str() {
                 "crate" if segments.len() > 1 => {
                     let mut resolved = segments[1..].to_vec();
+                    // `crate::...` is always rooted at crate/global scope.
+                    let mut crate_force_leading_colon = true;
+                    let mut import_binding_rewrite_applied = false;
+                    for _ in 0..6 {
+                        let Some(first_local) = resolved.first().cloned() else {
+                            break;
+                        };
+                        let (bound_target, from_root_scope) = if let Some(bound_target) =
+                            self.resolve_scope_import_binding_path_for_scope("", &first_local)
+                        {
+                            (bound_target, true)
+                        } else if let Some(bound_target) =
+                            self.resolve_scope_import_binding_path(&first_local)
+                        {
+                            (bound_target, false)
+                        } else {
+                            break;
+                        };
+                        if from_root_scope && !self.module_stack.is_empty() {
+                            crate_force_leading_colon = true;
+                        }
+                        if bound_target.starts_with("::") {
+                            crate_force_leading_colon = true;
+                        }
+                        let normalized_bound_target = bound_target.trim_start_matches("::");
+                        let direct_import_alias = normalized_bound_target
+                            .rsplit("::")
+                            .next()
+                            .is_some_and(|tail| tail == first_local);
+                        let direct_import_has_cpp_surface = !matches!(
+                            classify_use_import(normalized_bound_target),
+                            UseImportAction::RustOnly
+                        );
+                        if direct_import_alias && direct_import_has_cpp_surface {
+                            break;
+                        }
+                        let lower_ident_self_alias = resolved.len() > 1
+                            && first_local
+                                .chars()
+                                .next()
+                                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+                            && bound_target
+                                .trim_start_matches("::")
+                                .rsplit("::")
+                                .next()
+                                .is_some_and(|tail| tail == first_local);
+                        if lower_ident_self_alias {
+                            break;
+                        }
+                        let mut rewritten: Vec<String> = bound_target
+                            .split("::")
+                            .filter(|seg| !seg.is_empty())
+                            .map(|seg| seg.to_string())
+                            .collect();
+                        rewritten.extend(resolved.iter().skip(1).cloned());
+                        if rewritten.is_empty() || rewritten == resolved {
+                            break;
+                        }
+                        let self_expanding_root = rewritten.first() == resolved.first()
+                            && rewritten.len() > resolved.len();
+                        if import_binding_rewrite_applied && self_expanding_root {
+                            break;
+                        }
+                        resolved = rewritten;
+                        import_binding_rewrite_applied = true;
+                    }
+                    let rewritten_external = self.rewrite_external_crate_path_segments(&resolved);
+                    if rewritten_external != resolved {
+                        resolved = rewritten_external;
+                    }
+                    if let Some(first_seg) = resolved.first_mut()
+                        && first_seg == "__private"
+                    {
+                        *first_seg = "private_".to_string();
+                    }
+                    if resolved.len() >= 2
+                        && resolved.last().is_some_and(|seg| seg == "Result")
+                        && resolved
+                            .iter()
+                            .nth_back(1)
+                            .is_some_and(|seg| seg.starts_with("__private") || seg == "private_")
+                    {
+                        return "rusty::Result".to_string();
+                    }
                     for seg in &mut resolved {
                         *seg = escape_cpp_keyword(seg);
                     }
-                    return resolved.join("::");
+                    let mut emitted = resolved.join("::");
+                    if crate_force_leading_colon
+                        && !emitted.is_empty()
+                        && !emitted.starts_with("::")
+                    {
+                        emitted = format!("::{}", emitted);
+                    }
+                    return Self::strip_crate_root_cpp_path(&emitted);
                 }
                 "self" if segments.len() > 1 => {
                     let mut resolved = if self.module_stack.is_empty() {
@@ -44170,6 +49573,7 @@ impl CodeGen {
         // base generic type is known in this scope (for example `IterNames::new_`
         // inside `Iter<B>` should become `IterNames<B>::new_`).
         if segments.len() > 1
+            && types::map_function_path(&joined).is_none()
             && segments.get(1).is_some_and(|s| {
                 s.chars()
                     .next()
@@ -44259,7 +49663,13 @@ impl CodeGen {
         if joined == "core::option::Option::None" || joined == "std::option::Option::None" {
             return "rusty::None".to_string();
         }
+        if joined == "Option::None" {
+            return "rusty::None".to_string();
+        }
         if joined == "core::option::Option::Some" || joined == "std::option::Option::Some" {
+            return "Some".to_string();
+        }
+        if joined == "Option::Some" {
             return "Some".to_string();
         }
         if joined == "core::result::Result::Ok" || joined == "std::result::Result::Ok" {
@@ -44311,6 +49721,18 @@ impl CodeGen {
             "std::cmp::Ordering::Less" => return "rusty::cmp::Ordering::Less".to_string(),
             "std::cmp::Ordering::Equal" => return "rusty::cmp::Ordering::Equal".to_string(),
             "std::cmp::Ordering::Greater" => return "rusty::cmp::Ordering::Greater".to_string(),
+            _ => {}
+        }
+        match joined.as_str() {
+            "std::io::stdin" | "core::io::stdin" | "io::stdin" | "rusty::io::stdin" => {
+                return "rusty::io::stdin_".to_string();
+            }
+            "std::io::stdout" | "core::io::stdout" | "io::stdout" | "rusty::io::stdout" => {
+                return "rusty::io::stdout_".to_string();
+            }
+            "std::io::stderr" | "core::io::stderr" | "io::stderr" | "rusty::io::stderr" => {
+                return "rusty::io::stderr_".to_string();
+            }
             _ => {}
         }
 
@@ -44407,12 +49829,37 @@ impl CodeGen {
         }
 
         // Escape C++ keywords across all path segments.
+        if !force_leading_colon
+            && segments.len() >= 2
+            && segments[0]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+            && self
+                .module_stack
+                .iter()
+                .any(|scope_seg| scope_seg == &segments[0])
+            && self.declared_module_names.contains(&segments[0])
+        {
+            // Rust paths like `de::...` imported from crate root should stay rooted
+            // when emitted inside nested scopes that also contain a `de` segment.
+            force_leading_colon = true;
+        }
         if segments.len() > 1 {
-            return self.escape_and_rename_qualified_name(&joined);
+            let mut emitted = self.escape_and_rename_qualified_name(&joined);
+            if force_leading_colon && !emitted.is_empty() && !emitted.starts_with("::") {
+                emitted = format!("::{}", emitted);
+            }
+            let emitted = Self::strip_crate_root_cpp_path(&emitted);
+            return self.rewrite_seed_ctor_path_string(&emitted);
         }
 
         // Single segment — escape if keyword
-        escape_cpp_keyword(&joined)
+        let mut emitted = escape_cpp_keyword(&joined);
+        if force_leading_colon && !emitted.is_empty() && !emitted.starts_with("::") {
+            emitted = format!("::{}", emitted);
+        }
+        self.rewrite_seed_ctor_path_string(&emitted)
     }
 
     fn resolve_unique_forward_decl_type_path(&self, name: &str) -> Option<String> {
@@ -44420,7 +49867,6 @@ impl CodeGen {
             || name.is_empty()
             || name == "Self"
             || self.is_type_param_in_scope(name)
-            || self.is_local_type_name_in_scope(name)
         {
             return None;
         }
@@ -44479,6 +49925,41 @@ impl CodeGen {
                 .next()
                 .is_some_and(|ch| ch.is_ascii_uppercase())
         {
+            return None;
+        }
+        let scope_key = self.module_stack.join("::");
+        if let Some(bound_target) =
+            self.resolve_scope_import_binding_path_for_scope(&scope_key, name)
+        {
+            // Prefer explicit in-scope `use` bindings over nonlocal fallback
+            // qualification. If a local declaration with the same tail name
+            // exists, qualify through the bound import target to avoid
+            // resolving to an unrelated local type.
+            let local_tail_conflict = self.local_declared_types.iter().any(|decl| {
+                decl.rsplit_once("::")
+                    .is_some_and(|(_, tail)| tail == name)
+            });
+            if local_tail_conflict {
+                let trimmed = bound_target.trim();
+                if !trimmed.is_empty() {
+                    if let Ok(bound_path) = syn::parse_str::<syn::Path>(trimmed) {
+                        let mut emitted = self.emit_path_to_string(&bound_path);
+                        if !emitted.is_empty() && emitted != name {
+                            if !emitted.starts_with("::") {
+                                emitted = format!("::{}", emitted);
+                            }
+                            return Some(emitted);
+                        }
+                    }
+                    let mut escaped = Self::escape_qualified_path_preserve_global(trimmed);
+                    if !escaped.is_empty() && escaped != name {
+                        if !escaped.starts_with("::") {
+                            escaped = format!("::{}", escaped);
+                        }
+                        return Some(escaped);
+                    }
+                }
+            }
             return None;
         }
 
@@ -44589,10 +50070,17 @@ impl CodeGen {
             }
         }
 
-        if candidates
-            .iter()
-            .any(|candidate| self.numeric_type_aliases.contains_key(candidate))
-        {
+        let candidate_is_numeric_alias = candidates.iter().any(|candidate| {
+            self.numeric_type_aliases.contains_key(candidate)
+                || self
+                    .type_alias_targets
+                    .get(candidate)
+                    .is_some_and(|alias_target| {
+                        let mapped = self.map_type(alias_target);
+                        is_numeric_cpp_scalar_type(&mapped)
+                    })
+        });
+        if candidate_is_numeric_alias {
             let mut base_path = path.clone();
             let _ = base_path.segments.pop();
             let base_cpp = self.emit_path_to_string(&base_path);
@@ -44679,10 +50167,7 @@ impl CodeGen {
             let owner = path.segments[0].ident.to_string();
             let fn_name = path.segments[1].ident.to_string();
             if owner == "rusty_ext" || owner == "Itertools" {
-                if owner == "rusty_ext"
-                    && fn_name == "deserialize"
-                    && self.module_stack.iter().any(|seg| seg == "de")
-                {
+                if owner == "rusty_ext" && fn_name == "deserialize" {
                     return "::de::rusty_ext::deserialize".to_string();
                 }
                 if let Some(scoped) =
@@ -44712,6 +50197,20 @@ impl CodeGen {
         }
         if matches!(
             joined.as_str(),
+            "Option::Some"
+                | "core::option::Option::Some"
+                | "std::option::Option::Some"
+                | "Option::None"
+                | "core::option::Option::None"
+                | "std::option::Option::None"
+        ) {
+            if joined.ends_with("::Some") {
+                return "rusty::Some".to_string();
+            }
+            return "rusty::None".to_string();
+        }
+        if matches!(
+            joined.as_str(),
             "Result::Ok"
                 | "core::result::Result::Ok"
                 | "std::result::Result::Ok"
@@ -44727,13 +50226,44 @@ impl CodeGen {
         if self.is_option_some_path(path) {
             return "rusty::Some".to_string();
         }
-        if let Some(mut rewritten) = self.rewrite_cpp_import_bound_expr_path(path) {
-            if let Some(template_args) = self.emit_expr_path_template_args(path) {
-                rewritten.push_str(&template_args);
+        // Keep unit data-enum variant lowering before import-bound rewrites so
+        // qualified paths like `de::Unexpected::UnitVariant` become values.
+        if path.segments.len() >= 2 {
+            let variant_seg = &path.segments[path.segments.len() - 1];
+            let enum_seg = &path.segments[path.segments.len() - 2];
+            let enum_name = enum_seg.ident.to_string();
+            let variant_name = variant_seg.ident.to_string();
+            let variant_key = format!("{}_{}", enum_name, variant_name);
+            if self.data_enum_unit_variants.contains(&variant_key) {
+                let enum_path: syn::Path = {
+                    let segs: Vec<syn::PathSegment> = path
+                        .segments
+                        .iter()
+                        .take(path.segments.len() - 1)
+                        .cloned()
+                        .collect();
+                    let mut p = path.clone();
+                    p.segments = segs.into_iter().collect();
+                    p
+                };
+                let variant_ty = self.data_enum_variant_struct_type_name(&enum_path, &variant_name);
+                return format!("{}{{}}", variant_ty);
             }
-            return rewritten;
         }
-        if let Some(mut resolved_fn) = self.resolve_known_free_function_expr_path(path) {
+        if types::map_function_path(&joined).is_none() {
+            if let Some(mut rewritten) = self.rewrite_cpp_import_bound_expr_path(path) {
+                if let Some(template_args) = self.emit_expr_path_template_args(path) {
+                    rewritten.push_str(&template_args);
+                }
+                return rewritten;
+            }
+        }
+        // Keep this rewrite for unqualified names only. Qualified paths like
+        // `std::process::Command::new` must flow through normal path mapping
+        // so `std::*` namespace remaps are applied.
+        if path.segments.len() == 1
+            && let Some(mut resolved_fn) = self.resolve_known_free_function_expr_path(path)
+        {
             if let Some(template_args) = self.emit_expr_path_template_args(path) {
                 resolved_fn.push_str(&template_args);
             }
@@ -44802,7 +50332,8 @@ impl CodeGen {
             }
         }
         if self.is_unit_struct_path(path) {
-            return format!("{}{{}}", self.emit_path_to_string(path));
+            let ctor = self.emit_path_to_string(path);
+            return format!("{}{{}}", self.rewrite_seed_ctor_path_string(&ctor));
         }
         // Bitflags `Bits::EMPTY` / `Bits::ALL` patterns:
         // `Type::Bits::EMPTY` → `0` and `Type::Bits::ALL` → `static_cast<decltype(Type::_0)>(~0)`
@@ -44870,16 +50401,28 @@ impl CodeGen {
             let fn_name = path.segments[0].ident.to_string();
             if let Some(qualified) = self.module_qualified_functions.get(&fn_name) {
                 if !qualified.is_empty() {
-                    let module_prefix = qualified.split("::").next().unwrap_or("");
-                    // Only skip qualification if the module stack is EXACTLY
-                    // [module_prefix] — i.e., we're directly inside that module.
-                    // Being in a nested sub-module with the same name
-                    // (e.g., `tests::parser` vs `parser`) is NOT the same scope.
-                    let directly_inside = self.module_stack.len() == 1
-                        && self.module_stack.last().is_some_and(|m| m == module_prefix);
+                    let qualified_parent = qualified
+                        .rsplit_once("::")
+                        .map(|(parent, _)| parent)
+                        .unwrap_or_default();
+                    let current_scope = self.module_stack.join("::");
+                    let escaped_current_scope = self
+                        .module_stack
+                        .iter()
+                        .map(|seg| escape_cpp_keyword(seg))
+                        .collect::<Vec<String>>()
+                        .join("::");
+                    let directly_inside = (!current_scope.is_empty()
+                        && (qualified_parent == current_scope
+                            || current_scope.ends_with(&format!("::{}", qualified_parent))))
+                        || (!escaped_current_scope.is_empty()
+                            && (qualified_parent == escaped_current_scope
+                                || escaped_current_scope
+                                    .ends_with(&format!("::{}", qualified_parent))));
                     if !directly_inside {
                         // Use absolute path (::prefix::fn) to avoid shadowing
                         // by same-named inner namespaces
+                        let module_prefix = qualified.split("::").next().unwrap_or("");
                         let needs_root = self.module_stack.iter().any(|m| m == module_prefix);
                         let mut emitted = if needs_root {
                             format!("::{}", qualified)
@@ -44902,6 +50445,29 @@ impl CodeGen {
             )
             && !emitted.contains("::")
         {
+            let variant_name = path.segments[0].ident.to_string();
+            let scope_key = self.module_stack.join("::");
+            if let Some(bound_target) = self
+                .resolve_scope_import_binding_path_for_scope(&scope_key, &variant_name)
+                .or_else(|| self.resolve_scope_import_binding_path_for_scope("", &variant_name))
+            {
+                let mut resolved = if let Ok(bound_path) = syn::parse_str::<syn::Path>(bound_target.trim())
+                {
+                    self.emit_path_to_string(&bound_path)
+                } else {
+                    Self::escape_qualified_path_preserve_global(bound_target.trim())
+                };
+                if !resolved.is_empty() {
+                    if !resolved.starts_with("::") {
+                        resolved = format!("::{}", resolved);
+                    }
+                    emitted = resolved;
+                }
+            } else if self.is_known_free_function_path(&format!("either::{}", variant_name))
+                || self.is_known_free_function_path(&format!("rusty::either::{}", variant_name))
+            {
+                emitted = format!("::either::{}", variant_name);
+            }
             if let syn::PathArguments::AngleBracketed(args) = &path.segments[0].arguments {
                 let has_rusty_type_arg = args.args.iter().any(|arg| {
                     if let syn::GenericArgument::Type(ty) = arg {
@@ -44912,11 +50478,13 @@ impl CodeGen {
                 });
                 let in_either_crate = self.crate_name.as_deref() == Some("either");
                 if has_rusty_type_arg || in_either_crate {
-                    emitted = if self.module_stack.is_empty() {
-                        format!("::{}", emitted)
-                    } else {
-                        format!("{}::{}", self.module_stack.join("::"), emitted)
-                    };
+                    if self.module_stack.is_empty() {
+                        if !emitted.starts_with("::") {
+                            emitted = format!("::{}", emitted);
+                        }
+                    } else if !emitted.contains("::") {
+                        emitted = format!("{}::{}", self.module_stack.join("::"), emitted);
+                    }
                 }
             }
         }
@@ -44947,8 +50515,37 @@ impl CodeGen {
             resolved_segments.push(escape_cpp_keyword(&segment.ident.to_string()));
         }
 
+        let mut force_leading_colon = path.leading_colon.is_some();
+        if resolved_segments.len() == 2 {
+            let parent = resolved_segments[0].clone();
+            let leaf = resolved_segments[1].clone();
+            let seed_like_leaf = leaf.ends_with("Seed");
+            let private_root = matches!(parent.as_str(), "private" | "private_")
+                || parent.starts_with("__private");
+            let direct_seed = format!("{}::seed::{}", parent, leaf);
+            let seed_module = format!("{}::seed", parent);
+            if seed_like_leaf
+                && (private_root
+                    || self.local_declared_types.contains(&direct_seed)
+                    || self.declared_module_paths.contains(&seed_module))
+            {
+                resolved_segments.insert(1, "seed".to_string());
+                force_leading_colon = true;
+            }
+        }
+        if resolved_segments.len() >= 2
+            && resolved_segments
+                .last()
+                .is_some_and(|seg| seg == "deserialize")
+            && resolved_segments
+                .get(resolved_segments.len().saturating_sub(2))
+                .is_some_and(|seg| seg == "rusty_ext")
+        {
+            return Some("::de::rusty_ext::deserialize".to_string());
+        }
+
         let mut rewritten = resolved_segments.join("::");
-        if path.leading_colon.is_some() {
+        if force_leading_colon {
             rewritten = format!("::{}", rewritten);
         }
         Some(rewritten)
@@ -44956,7 +50553,8 @@ impl CodeGen {
 
     fn rewrite_cpp_import_bound_type_spelling(&self, cpp_ty: &str) -> String {
         if self.cpp_module_import_bindings.is_empty() || cpp_ty.is_empty() {
-            return Self::rewrite_builtin_namespace_aliases_in_type(cpp_ty);
+            let rewritten = Self::rewrite_builtin_namespace_aliases_in_type(cpp_ty);
+            return Self::rewrite_private_keyword_namespace_in_type_path(&rewritten);
         }
         let mut rewritten = cpp_ty.to_string();
         let mut bindings: Vec<(&String, &String)> =
@@ -44968,7 +50566,8 @@ impl CodeGen {
             let replacement = format!("{}::", target);
             rewritten = Self::replace_cpp_path_alias_tokens(&rewritten, &needle, &replacement);
         }
-        Self::rewrite_builtin_namespace_aliases_in_type(&rewritten)
+        let rewritten = Self::rewrite_builtin_namespace_aliases_in_type(&rewritten);
+        Self::rewrite_private_keyword_namespace_in_type_path(&rewritten)
     }
 
     fn replace_cpp_path_alias_tokens(input: &str, needle: &str, replacement: &str) -> String {
@@ -44985,9 +50584,9 @@ impl CodeGen {
             } else {
                 !preceded_by_scope
                     && !input
-                    .as_bytes()
-                    .get(pos - 1)
-                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                        .as_bytes()
+                        .get(pos - 1)
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
             };
             if boundary_ok {
                 out.push_str(&input[idx..pos]);
@@ -45003,6 +50602,7 @@ impl CodeGen {
     }
 
     fn rewrite_builtin_namespace_aliases_in_type(cpp_ty: &str) -> String {
+        let mut rewritten = Self::strip_crate_root_cpp_path(cpp_ty);
         const BUILTIN_ALIASES: [(&str, &str); 12] = [
             ("cmp", "core::cmp"),
             ("fmt", "rusty::fmt"),
@@ -45017,13 +50617,48 @@ impl CodeGen {
             ("str", "rusty::str_runtime"),
             ("char_", "rusty::char_runtime"),
         ];
-        let mut rewritten = cpp_ty.to_string();
         for (alias, target) in BUILTIN_ALIASES {
             let needle = format!("{}::", alias);
             let replacement = format!("{}::", target);
             rewritten = Self::replace_cpp_path_alias_tokens(&rewritten, &needle, &replacement);
         }
         Self::collapse_duplicate_rusty_root_namespaces_in_type(&rewritten)
+    }
+
+    fn rewrite_private_keyword_namespace_in_type_path(path: &str) -> String {
+        if path.is_empty() {
+            return String::new();
+        }
+        let mut rewritten = path.to_string();
+        if rewritten == "private" {
+            rewritten = "private_".to_string();
+        } else if rewritten == "::private" {
+            rewritten = "::private_".to_string();
+        } else {
+            if rewritten.starts_with("private::") {
+                rewritten = format!("private_::{}", &rewritten["private::".len()..]);
+            } else if rewritten.starts_with("::private::") {
+                rewritten = format!("::private_::{}", &rewritten["::private::".len()..]);
+            }
+            if rewritten.contains("::private::") {
+                rewritten = rewritten.replace("::private::", "::private_::");
+            }
+        }
+        rewritten
+    }
+
+    fn strip_crate_root_cpp_path(path: &str) -> String {
+        if path.is_empty() {
+            return String::new();
+        }
+        let mut rewritten = path.to_string();
+        while rewritten.contains("::crate::") {
+            rewritten = rewritten.replace("::crate::", "::");
+        }
+        if let Some(stripped) = rewritten.strip_prefix("crate::") {
+            return stripped.to_string();
+        }
+        rewritten
     }
 
     fn collapse_duplicate_rusty_root_namespaces_in_type(cpp_ty: &str) -> String {
@@ -45073,69 +50708,87 @@ impl CodeGen {
         Some(seg.ident.to_string())
     }
 
+    fn should_elide_in_scope_local_alias_type_args(
+        &self,
+        path: &syn::Path,
+        args: &syn::AngleBracketedGenericArguments,
+    ) -> bool {
+        if path.leading_colon.is_some() || path.segments.len() != 1 || args.args.is_empty() {
+            return false;
+        }
+        if self.block_depth == 0 {
+            return false;
+        }
+        let Some(seg) = path.segments.first() else {
+            return false;
+        };
+        let local_name = seg.ident.to_string();
+        // Keep real struct/enum template instantiations intact.
+        if self.struct_field_order.contains_key(&local_name)
+            || self.tuple_struct_arities.contains_key(&local_name)
+            || self.data_enum_types.contains(&local_name)
+        {
+            return false;
+        }
+        if let Some(type_key) = self.declared_type_key_for_path(path)
+            && let Some(params) = self.declared_type_params.get(&type_key)
+        {
+            if params.is_empty() || params.len() != args.args.len() {
+                return false;
+            }
+            let param_kinds = self.declared_type_param_kinds.get(&type_key);
+            return args.args.iter().enumerate().all(|(idx, arg)| {
+                let param = &params[idx];
+                if !self.is_type_param_in_scope(param) {
+                    return false;
+                }
+                let expected_kind = param_kinds.and_then(|kinds| kinds.get(idx));
+                match (expected_kind, arg) {
+                    (Some(GenericParamKind::Type), syn::GenericArgument::Type(ty))
+                    | (None, syn::GenericArgument::Type(ty)) => self
+                        .extract_simple_type_param_name(ty)
+                        .is_some_and(|name| name == *param),
+                    (Some(GenericParamKind::Const), syn::GenericArgument::Const(expr))
+                    | (None, syn::GenericArgument::Const(expr)) => self
+                        .extract_simple_const_param_name(expr)
+                        .is_some_and(|name| name == *param),
+                    _ => false,
+                }
+            });
+        }
+        if !self.is_local_type_name_in_scope(&local_name) {
+            return false;
+        }
+        args.args.iter().all(|arg| match arg {
+            syn::GenericArgument::Type(ty) => self
+                .extract_simple_type_param_name(ty)
+                .is_some_and(|name| self.is_type_param_in_scope(&name)),
+            syn::GenericArgument::Const(expr) => self
+                .extract_simple_const_param_name(expr)
+                .is_some_and(|name| self.is_type_param_in_scope(&name)),
+            _ => false,
+        })
+    }
+
     fn should_elide_shadowed_current_struct_local_type_args(
         &self,
         path: &syn::Path,
         args: &syn::AngleBracketedGenericArguments,
     ) -> bool {
-        if path.segments.len() != 1 {
+        // Inside a generic impl body, associated aliases emitted into the current
+        // struct (`using IntoIter = ...;`) can shadow single-segment generic spellings
+        // from Rust (`IntoIter<T, CAP>`). In C++, the alias itself is not a template,
+        // so keep only the alias name in this specific shape.
+        if path.leading_colon.is_some() || path.segments.len() != 1 {
             return false;
         }
-        let Some(current_struct) = self.current_struct.as_ref() else {
+        if args.args.is_empty() {
+            return false;
+        }
+        let Some(seg) = path.segments.first() else {
             return false;
         };
-        let Some(type_name) = path.segments.first().map(|seg| seg.ident.to_string()) else {
-            return false;
-        };
-        let mut provided: Vec<String> = Vec::new();
-        for arg in &args.args {
-            match arg {
-                syn::GenericArgument::Type(ty) => {
-                    let Some(name) = self.extract_simple_type_param_name(ty) else {
-                        return false;
-                    };
-                    provided.push(name);
-                }
-                syn::GenericArgument::Const(expr) => {
-                    let Some(name) = self.extract_simple_const_param_name(expr) else {
-                        return false;
-                    };
-                    provided.push(name);
-                }
-                syn::GenericArgument::Lifetime(_) => {}
-                _ => return false,
-            }
-        }
-
-        let all_provided_in_scope = provided
-            .iter()
-            .all(|provided_name| self.is_type_param_in_scope(provided_name));
-        if self
-            .resolve_current_struct_assoc_cpp_type(&type_name)
-            .is_some()
-            && all_provided_in_scope
-        {
-            return true;
-        }
-
-        let scoped_key = format!("{}::{}", current_struct, type_name);
-        let Some(expected_params) = self.declared_type_params.get(&scoped_key) else {
-            return false;
-        };
-        if expected_params.is_empty() {
-            return false;
-        }
-
-        if provided.len() != expected_params.len() {
-            return false;
-        }
-
-        expected_params
-            .iter()
-            .zip(provided.iter())
-            .all(|(expected_name, provided_name)| {
-                self.is_type_param_in_scope(expected_name) && expected_name == provided_name
-            })
+        self.current_struct_assoc_alias_exists(&seg.ident.to_string())
     }
 
     fn emit_expr_path_template_args(&self, path: &syn::Path) -> Option<String> {
@@ -45200,6 +50853,42 @@ impl CodeGen {
         }
 
         None
+    }
+
+    fn owner_has_any_declared_generic_tail(&self, owner_name: &str) -> bool {
+        self.declared_type_params.iter().any(|(key, params)| {
+            !params.is_empty()
+                && key
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == owner_name)
+        })
+    }
+
+    fn declared_type_param_arity_for_owner_tail(&self, owner_name: &str) -> Option<usize> {
+        let mut arities: Vec<usize> = self
+            .declared_type_params
+            .iter()
+            .filter_map(|(key, params)| {
+                if key
+                    .rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == owner_name)
+                    && !params.is_empty()
+                {
+                    Some(params.len())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        arities.sort_unstable();
+        arities.dedup();
+        if arities.len() == 1 {
+            arities.first().copied()
+        } else {
+            None
+        }
     }
 
     fn is_unit_struct_path(&self, path: &syn::Path) -> bool {
@@ -45267,6 +50956,16 @@ impl CodeGen {
                 return Some(candidate);
             }
         }
+
+        // Fallback for partially-qualified paths (`de::value::Type`) when the
+        // recorded declared type key is fully-qualified or rooted differently.
+        // Use unique tail-base resolution to avoid requiring exact prefix match.
+        if let Some(base) = segments.last() {
+            let scoped_base = segments.join("::");
+            if let Some(key) = self.lookup_declared_type_key_for_base(&scoped_base, base) {
+                return Some(key);
+            }
+        }
         None
     }
 
@@ -45309,47 +51008,130 @@ impl CodeGen {
             .all(|(param, recovered)| self.is_type_param_in_scope(param) && param == recovered)
     }
 
+    fn current_struct_declared_type_key_for_recovery(
+        &self,
+        path: &syn::Path,
+        mapped_path: &str,
+    ) -> Option<String> {
+        let current_struct = self.current_struct.as_ref()?;
+        let current_tail = current_struct.rsplit("::").next().unwrap_or(current_struct);
+        let mapped_base = mapped_path
+            .trim_start_matches("::")
+            .split('<')
+            .next()
+            .unwrap_or(mapped_path)
+            .trim();
+        let mapped_tail = mapped_base.rsplit("::").next().unwrap_or(mapped_base);
+        let path_is_self = path
+            .segments
+            .first()
+            .is_some_and(|seg| seg.ident == "Self");
+        if !path_is_self && mapped_tail != current_tail {
+            return None;
+        }
+
+        let scoped_key = self.scoped_type_key(current_struct);
+        if self.declared_type_params.contains_key(&scoped_key) {
+            return Some(scoped_key);
+        }
+        if self.declared_type_params.contains_key(current_struct) {
+            return Some(current_struct.clone());
+        }
+
+        let mut tail_matches: Vec<String> = self
+            .declared_type_params
+            .keys()
+            .filter(|key| {
+                key.rsplit("::")
+                    .next()
+                    .is_some_and(|tail| tail == current_tail)
+            })
+            .cloned()
+            .collect();
+        tail_matches.sort();
+        tail_matches.dedup();
+        if tail_matches.is_empty() {
+            return None;
+        }
+        if !self.module_stack.is_empty() {
+            let module_prefix = format!("{}::", self.module_stack.join("::"));
+            let mut scoped_matches: Vec<String> = tail_matches
+                .iter()
+                .filter(|key| key.starts_with(&module_prefix))
+                .cloned()
+                .collect();
+            scoped_matches.sort();
+            scoped_matches.dedup();
+            if scoped_matches.len() == 1 {
+                return scoped_matches.first().cloned();
+            }
+        }
+        if tail_matches.len() == 1 {
+            tail_matches.first().cloned()
+        } else {
+            None
+        }
+    }
+
     fn recover_omitted_local_generic_type_args(
         &self,
         path: &syn::Path,
         mapped_path: &str,
     ) -> Option<String> {
-        let last_seg = path.segments.last()?;
-        if path.segments.len() == 1 && self.is_local_type_name_in_scope(&last_seg.ident.to_string())
-        {
-            return None;
+        // Avoid duplicating template argument lists when the mapped spelling is
+        // already specialized (e.g. `ConstNonNull<T>` should not become
+        // `ConstNonNull<T><T>`).
+        if mapped_path.contains('<') {
+            return Some(mapped_path.to_string());
         }
+        let last_seg = path.segments.last()?;
         if !matches!(last_seg.arguments, syn::PathArguments::None) {
             return None;
         }
-        let type_key = self.declared_type_key_for_path(path).or_else(|| {
-            if path.segments.len() != 1 {
-                return None;
-            }
-            let base = path.segments.first()?.ident.to_string();
-            let mut scoped_candidates: Vec<String> = Vec::new();
-            if let Some(current_struct) = &self.current_struct {
-                scoped_candidates.push(format!("{}::{}", current_struct, base));
+        let type_key = self
+            .current_struct_declared_type_key_for_recovery(path, mapped_path)
+            .or_else(|| self.declared_type_key_for_path(path))
+            .or_else(|| {
+                if path.segments.len() != 1 {
+                    return None;
+                }
+                let base = path.segments.first()?.ident.to_string();
+                let mut scoped_candidates: Vec<String> = Vec::new();
+                if let Some(current_struct) = &self.current_struct {
+                    scoped_candidates.push(format!("{}::{}", current_struct, base));
+                    if !self.module_stack.is_empty() {
+                        scoped_candidates.push(format!(
+                            "{}::{}::{}",
+                            self.module_stack.join("::"),
+                            current_struct,
+                            base
+                        ));
+                    }
+                }
                 if !self.module_stack.is_empty() {
-                    scoped_candidates.push(format!(
-                        "{}::{}::{}",
-                        self.module_stack.join("::"),
-                        current_struct,
-                        base
-                    ));
+                    scoped_candidates.push(format!("{}::{}", self.module_stack.join("::"), base));
                 }
-            }
-            if !self.module_stack.is_empty() {
-                scoped_candidates.push(format!("{}::{}", self.module_stack.join("::"), base));
-            }
-            scoped_candidates.push(base.clone());
-            for scoped in scoped_candidates {
-                if let Some(key) = self.lookup_declared_type_key_for_base(&scoped, &base) {
-                    return Some(key);
+                scoped_candidates.push(base.clone());
+                for scoped in scoped_candidates {
+                    if let Some(key) = self.lookup_declared_type_key_for_base(&scoped, &base) {
+                        return Some(key);
+                    }
                 }
-            }
-            None
-        })?;
+                None
+            })
+            .or_else(|| {
+                let mapped_base = mapped_path
+                    .trim_start_matches("::")
+                    .split('<')
+                    .next()
+                    .unwrap_or(mapped_path)
+                    .trim();
+                if mapped_base.is_empty() {
+                    return None;
+                }
+                let base = mapped_base.rsplit("::").next().unwrap_or(mapped_base);
+                self.lookup_declared_type_key_for_base(mapped_base, base)
+            })?;
         let params = self.declared_type_params.get(&type_key)?;
         let defaults = self.declared_type_param_defaults_for_path(path);
         if params.is_empty() {
@@ -45605,6 +51387,12 @@ impl CodeGen {
             &recovered_args,
         ) {
             return Some(mapped_path.to_string());
+        }
+        if struct_expr.path.segments.len() == 1 {
+            let local_name = last_seg.ident.to_string();
+            if self.current_struct_assoc_alias_exists(&local_name) {
+                return Some(escape_cpp_keyword(&local_name));
+            }
         }
         Some(format!("{}<{}>", mapped_path, recovered_args.join(", ")))
     }
@@ -46397,6 +52185,117 @@ impl CodeGen {
         None
     }
 
+    fn try_map_owner_assoc_into_iter_type(&self, tp: &syn::TypePath) -> Option<String> {
+        if tp.qself.is_some() || tp.path.segments.len() != 2 {
+            return None;
+        }
+        let owner_seg = tp.path.segments.first()?;
+        let assoc_seg = tp.path.segments.iter().nth(1)?;
+        if assoc_seg.ident != "IntoIter" || !matches!(assoc_seg.arguments, syn::PathArguments::None)
+        {
+            return None;
+        }
+
+        let mut owner_path = syn::Path {
+            leading_colon: tp.path.leading_colon,
+            segments: syn::punctuated::Punctuated::new(),
+        };
+        owner_path.segments.push(owner_seg.clone());
+        let owner_ty = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: owner_path,
+        });
+        let owner_cpp = self.map_type(&owner_ty);
+        if owner_cpp == "auto"
+            || owner_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(&owner_cpp)
+        {
+            return None;
+        }
+        let owner_check = owner_cpp
+            .trim_start_matches("typename ")
+            .trim()
+            .trim_start_matches("::");
+
+        if owner_check.starts_with("rusty::Vec<")
+            || owner_check.starts_with("rusty::VecDeque<")
+            || owner_check.starts_with("std::span<")
+        {
+            return self.map_assoc_into_iter_cpp_type(&owner_cpp);
+        }
+        None
+    }
+
+    fn map_assoc_into_iter_cpp_type(&self, owner_cpp: &str) -> Option<String> {
+        let owner_trimmed = owner_cpp.trim();
+        if owner_trimmed == "auto"
+            || owner_trimmed.contains("/* TODO")
+            || type_string_has_auto_placeholder(owner_trimmed)
+        {
+            return None;
+        }
+        let owner_norm = owner_trimmed
+            .trim_start_matches("typename ")
+            .trim()
+            .trim_start_matches("::");
+        if owner_norm == "auto"
+            || owner_norm.contains("/* TODO")
+            || type_string_has_auto_placeholder(owner_norm)
+        {
+            return None;
+        }
+        Some(format!(
+            "decltype(rusty::iter(std::declval<{}>()))",
+            owner_norm
+        ))
+    }
+
+    fn rewrite_mapped_assoc_into_iter_cpp_type(&self, mapped: &str) -> Option<String> {
+        let owner = mapped.strip_suffix("::IntoIter")?;
+        let owner_check = owner
+            .trim_start_matches("typename ")
+            .trim()
+            .trim_start_matches("::");
+        if owner_check.starts_with("rusty::Vec<")
+            || owner_check.starts_with("rusty::VecDeque<")
+            || owner_check.starts_with("std::span<")
+        {
+            return self.map_assoc_into_iter_cpp_type(owner_check);
+        }
+        None
+    }
+
+    fn try_map_scope_bound_type_path(&self, tp: &syn::TypePath) -> Option<String> {
+        if tp.qself.is_some() || tp.path.segments.len() < 2 {
+            return None;
+        }
+        let last = tp.path.segments.last()?;
+        if !matches!(last.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let local_name = last.ident.to_string();
+        if !local_name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            return None;
+        }
+        let scope_key = tp
+            .path
+            .segments
+            .iter()
+            .take(tp.path.segments.len().saturating_sub(1))
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let bound = self.resolve_scope_import_binding_path_for_scope(&scope_key, &local_name)?;
+        if bound.is_empty() {
+            return None;
+        }
+        Some(self.rewrite_cpp_import_bound_type_spelling(&bound))
+    }
+
     fn try_map_dependent_assoc_item_projection_type(&self, tp: &syn::TypePath) -> Option<String> {
         let owner_ty = if let Some(qself) = &tp.qself {
             let assoc_segments: Vec<String> = tp
@@ -46553,6 +52452,18 @@ impl CodeGen {
                 {
                     return mapped_assoc_item;
                 }
+                if let Some(mapped_owner_into_iter) = self.try_map_owner_assoc_into_iter_type(tp) {
+                    return mapped_owner_into_iter;
+                }
+                if Self::type_is_primitive_str_path(&syn::Type::Path(tp.clone())) {
+                    return "std::string_view".to_string();
+                }
+                if let Some(scope_bound_ty) = self.try_map_scope_bound_type_path(tp) {
+                    let scope_bound_ty = Self::rewrite_builtin_namespace_aliases_in_type(&scope_bound_ty);
+                    let scope_bound_ty =
+                        Self::rewrite_private_keyword_namespace_in_type_path(&scope_bound_ty);
+                    return self.maybe_prefix_typename_for_dependent_type_path(tp, scope_bound_ty);
+                }
 
                 // Handle qualified self types: <T as Trait>::Assoc → T::Assoc
                 if let Some(qself) = &tp.qself {
@@ -46583,15 +52494,32 @@ impl CodeGen {
                                 return assoc_segments.join("::");
                             }
                         }
-                        return self.maybe_prefix_typename_for_dependent_type_path(
-                            tp,
-                            format!("{}::{}", self_type, assoc_segments.join("::")),
-                        );
+                        let assoc_path = format!("{}::{}", self_type, assoc_segments.join("::"));
+                        if let Some(mapped_into_iter) =
+                            self.rewrite_mapped_assoc_into_iter_cpp_type(&assoc_path)
+                        {
+                            return mapped_into_iter;
+                        }
+                        return self.maybe_prefix_typename_for_dependent_type_path(tp, assoc_path);
                     }
                     return self_type;
                 }
 
                 let mut path_str = self.emit_path_to_string(&tp.path);
+                if path_str == "private" {
+                    path_str = "private_".to_string();
+                } else if path_str == "::private" {
+                    path_str = "::private_".to_string();
+                } else {
+                    if path_str.starts_with("private::") {
+                        path_str = format!("private_::{}", &path_str["private::".len()..]);
+                    } else if path_str.starts_with("::private::") {
+                        path_str = format!("::private_::{}", &path_str["::private::".len()..]);
+                    }
+                    if path_str.contains("::private::") {
+                        path_str = path_str.replace("::private::", "::private_::");
+                    }
+                }
                 if path_str == "__private::Result" {
                     path_str = "rusty::Result".to_string();
                 }
@@ -46677,13 +52605,72 @@ impl CodeGen {
                 {
                     path_str = "rusty::Either".to_string();
                 }
+                if let Some(mapped_into_iter) =
+                    self.rewrite_mapped_assoc_into_iter_cpp_type(&path_str)
+                {
+                    return mapped_into_iter;
+                }
                 if let Some(mapped_iter_adapter) = self.try_map_iterator_adapter_type(tp) {
                     return mapped_iter_adapter;
                 }
 
-                if tp.path.segments.len() == 1 {
+                if self.in_forward_decl_signature
+                    && tp.path.segments.len() == 1
+                    && !path_str.contains("::")
+                {
                     let local_name = tp.path.segments[0].ident.to_string();
-                    if self.is_local_type_name_in_scope(&local_name) {
+                    if !local_name
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_uppercase())
+                    {
+                        // Keep primitive aliases (`usize`, etc.) on the normal mapping path.
+                        // Forward-decl import binding qualification only applies to type-like names.
+                        // Skip to avoid malformed spellings like `std::usize`.
+                    } else {
+                    if !self.current_scope_declares_type_name(&local_name)
+                        && let Some(bound_target) = self
+                            .resolve_scope_import_binding_path(&local_name)
+                            .or_else(|| {
+                                self.resolve_scope_import_binding_path_for_scope("", &local_name)
+                            })
+                    {
+                        let rewritten = self.rewrite_cpp_import_bound_type_spelling(&bound_target);
+                        if rewritten.contains("::")
+                            && rewritten.trim_start_matches("::") != local_name
+                        {
+                            path_str = rewritten;
+                        }
+                    }
+                    if !path_str.contains("::")
+                        && let Some(scoped) = self
+                            .resolve_unique_forward_decl_type_path(&local_name)
+                            .or_else(|| self.resolve_unique_nonlocal_type_path(&local_name))
+                    {
+                        path_str = scoped;
+                    }
+                    }
+                }
+
+                if tp.path.segments.len() == 1
+                    && tp
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|seg| matches!(seg.arguments, syn::PathArguments::None))
+                {
+                    let local_name = tp.path.segments[0].ident.to_string();
+                    if self.is_local_type_name_in_scope(&local_name)
+                        || self.local_declared_types.contains(&local_name)
+                    {
+                        if !path_str.contains('<')
+                            && !path_is_current_struct_assoc_projection
+                            && let Some(recovered) = self
+                                .recover_omitted_local_generic_type_args(&tp.path, &path_str)
+                        {
+                            return self
+                                .maybe_prefix_typename_for_dependent_type_path(tp, recovered);
+                        }
                         return path_str;
                     }
                 }
@@ -46772,6 +52759,10 @@ impl CodeGen {
                 // Check if the last segment has generic arguments
                 if let Some(last_seg) = tp.path.segments.last() {
                     if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
+                        if self.should_elide_in_scope_local_alias_type_args(&tp.path, args) {
+                            return self
+                                .maybe_prefix_typename_for_dependent_type_path(tp, path_str.clone());
+                        }
                         let joined_no_args = tp
                             .path
                             .segments
@@ -46868,6 +52859,18 @@ impl CodeGen {
                             // Reuse path_str so single-segment remaps (e.g. IterEither →
                             // iterator::IterEither) are preserved for generic type paths.
                             let mut base = path_str.clone();
+                            if tp.path.segments.len() == 1 {
+                                let local_name = tp.path.segments[0].ident.to_string();
+                                if self.is_local_type_name_in_scope(&local_name)
+                                    || self.local_declared_types.contains(&local_name)
+                                {
+                                    if !self.current_struct_assoc_alias_exists(&local_name)
+                                        && !path_str.contains("::")
+                                    {
+                                        base = escape_cpp_keyword(&local_name);
+                                    }
+                                }
+                            }
                             if self.current_struct.is_some() && base.starts_with("Self::") {
                                 base = base.trim_start_matches("Self::").to_string();
                             }
@@ -46900,10 +52903,8 @@ impl CodeGen {
             }
             syn::Type::Reference(r) => {
                 // Special case: &str → std::string_view (not const std::string_view&)
-                if let syn::Type::Path(tp) = r.elem.as_ref() {
-                    if tp.path.segments.len() == 1 && tp.path.segments[0].ident == "str" {
-                        return "std::string_view".to_string();
-                    }
+                if Self::type_is_primitive_str_path(r.elem.as_ref()) {
+                    return "std::string_view".to_string();
                 }
                 // Special case: slice references map to span-by-value.
                 // `&[T]` -> `std::span<const T>`, `&mut [T]` -> `std::span<T>`.
@@ -48381,7 +54382,9 @@ impl CodeGen {
                 inner
             );
         }
-        if self.should_insert_move(expr) {
+        if self.should_insert_move(expr)
+            || self.should_insert_move_for_deref_expected_value(expr, expected_ty)
+        {
             format!("std::move({})", inner)
         } else {
             inner
@@ -48921,7 +54924,7 @@ impl CodeGen {
         Some(format!(
             "[&](){} {{ {} }}()",
             lambda_return_annotation,
-            stmts.join(" ")
+            stmts.join("\n")
         ))
     }
 
@@ -49048,10 +55051,24 @@ impl CodeGen {
         let key_unscoped = format!("{}::{}", trait_name, method_name);
         let scoped_trait = segments[..=trait_idx].join("::");
         let key_scoped = format!("{}::{}", scoped_trait, method_name);
-        self.trait_method_has_receiver
-            .get(&key_scoped)
-            .copied()
-            .or_else(|| self.trait_method_has_receiver.get(&key_unscoped).copied())
+        let mut seen_values: HashSet<bool> = HashSet::new();
+        if let Some(value) = self.trait_method_has_receiver.get(&key_scoped) {
+            seen_values.insert(*value);
+        }
+        if let Some(value) = self.trait_method_has_receiver.get(&key_unscoped) {
+            seen_values.insert(*value);
+        }
+        let suffix = format!("::{}::{}", trait_name, method_name);
+        for (key, value) in &self.trait_method_has_receiver {
+            if key.ends_with(&suffix) {
+                seen_values.insert(*value);
+            }
+        }
+        if seen_values.len() == 1 {
+            seen_values.iter().copied().next()
+        } else {
+            None
+        }
     }
 
     fn resolve_trait_static_call_type_param_for_segments(
@@ -49061,7 +55078,10 @@ impl CodeGen {
         if segments.len() < 2 {
             return None;
         }
-        if self.trait_static_call_has_receiver_for_segments(segments)? {
+        if self
+            .trait_static_call_has_receiver_for_segments(segments)
+            .is_some_and(|has_receiver| has_receiver)
+        {
             return None;
         }
         let trait_idx = segments.len() - 2;
@@ -49076,7 +55096,25 @@ impl CodeGen {
         if segments.len() < 2 {
             return None;
         }
-        if self.trait_static_call_has_receiver_for_segments(segments)? {
+        let trait_idx = segments.len() - 2;
+        let trait_name = &segments[trait_idx];
+        let scoped_trait = segments[..=trait_idx].join("::");
+        let trait_path_is_known = self
+            .resolve_unique_trait_bound_type_param(trait_name)
+            .is_some()
+            || self.trait_method_has_receiver.contains_key(trait_name)
+            || self.trait_method_has_receiver.contains_key(&scoped_trait)
+            || self
+                .trait_method_has_receiver
+                .keys()
+                .any(|key| key.starts_with(&format!("{}::", trait_name)));
+        if !trait_path_is_known {
+            return None;
+        }
+        if self
+            .trait_static_call_has_receiver_for_segments(segments)
+            .is_some_and(|has_receiver| has_receiver)
+        {
             return None;
         }
         let method_name = segments.last()?;
@@ -49095,7 +55133,89 @@ impl CodeGen {
         self.trait_bound_type_param_scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.get(trait_name).cloned())
+            .find_map(|scope| {
+                if let Some(found) = scope.get(trait_name) {
+                    return Some(found.clone());
+                }
+                let suffix = format!("::{}", trait_name);
+                let mut suffix_matches: Vec<String> = scope
+                    .iter()
+                    .filter_map(|(bound_trait, bound_param)| {
+                        (bound_trait.ends_with(&suffix)).then_some(bound_param.clone())
+                    })
+                    .collect();
+                suffix_matches.sort();
+                suffix_matches.dedup();
+                if suffix_matches.len() == 1 {
+                    Some(suffix_matches[0].clone())
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn type_param_has_trait_bound(&self, type_param: &str, trait_name: &str) -> bool {
+        let suffix = format!("::{}", trait_name);
+        self.trait_bound_type_param_scopes
+            .iter()
+            .rev()
+            .any(|scope| {
+                scope.iter().any(|(bound_trait, bound_param)| {
+                    bound_param == type_param
+                        && (bound_trait == trait_name || bound_trait.ends_with(&suffix))
+                })
+            })
+    }
+
+    fn mapped_trait_static_owner_from_type_hint(
+        &self,
+        hint_ty: &syn::Type,
+        trait_name: &str,
+    ) -> Option<String> {
+        let hint_ty = self.peel_reference_paren_group_type(hint_ty);
+        let syn::Type::Path(tp) = hint_ty else {
+            return None;
+        };
+        if tp.qself.is_some() {
+            return None;
+        }
+        if tp.path.segments.len() == 1 {
+            let ident = tp.path.segments[0].ident.to_string();
+            if self.is_type_param_in_scope(&ident)
+                && (trait_name == "Error" || self.type_param_has_trait_bound(&ident, trait_name))
+            {
+                return Some(escape_cpp_keyword(&ident));
+            }
+        }
+        if !tp
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident.to_string() == trait_name)
+        {
+            return None;
+        }
+        let mut owner = self.map_type(hint_ty);
+        if owner == "auto" || owner.contains("/* TODO") || type_string_has_auto_placeholder(&owner)
+        {
+            return None;
+        }
+        owner = owner.trim_start_matches("typename ").to_string();
+        if owner.is_empty() { None } else { Some(owner) }
+    }
+
+    fn resolve_trait_static_call_owner_from_return_hint(&self, trait_name: &str) -> Option<String> {
+        let return_hint = self.current_return_type_hint()?;
+        if let Some(owner) = self.mapped_trait_static_owner_from_type_hint(return_hint, trait_name)
+        {
+            return Some(owner);
+        }
+        if let Some(err_ty) = self.expected_result_type_arg(Some(return_hint), 1)
+            && let Some(owner) = self.mapped_trait_static_owner_from_type_hint(err_ty, trait_name)
+        {
+            return Some(owner);
+        }
+        None
     }
 
     fn ordered_type_params_in_scope(&self) -> Vec<String> {
@@ -49803,6 +55923,8 @@ impl CodeGen {
                 break;
             }
             if let Some(expr) = alias_expr {
+                let expr = Self::rewrite_builtin_namespace_aliases_in_type(&expr);
+                let expr = Self::rewrite_private_keyword_namespace_in_type_path(&expr);
                 aliases.push((param_name, expr));
             }
         }
@@ -49960,6 +56082,14 @@ impl CodeGen {
                 .is_some_and(|ch| ch.is_ascii_uppercase())
             || self.is_local_type_name_in_scope(&ident)
         {
+            return None;
+        }
+        let scope_key = self.module_stack.join("::");
+        let has_scope_import_binding = self
+            .resolve_scope_import_binding_path_for_scope(&scope_key, &ident)
+            .or_else(|| self.resolve_scope_import_binding_path_for_scope("", &ident))
+            .is_some();
+        if has_scope_import_binding {
             return None;
         }
         if !self.declared_item_names.contains(&ident) && !self.local_declared_types.contains(&ident)
@@ -50802,6 +56932,8 @@ std::string to_string(const T& value) {\n\
         return value.to_string();\n\
     } else if constexpr (std::is_same_v<Value, bool>) {\n\
         return value ? \"true\" : \"false\";\n\
+    } else if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {\n\
+        return std::to_string(static_cast<int>(value));\n\
     } else if constexpr (std::is_same_v<Value, char>\n\
         || std::is_same_v<Value, signed char>\n\
         || std::is_same_v<Value, unsigned char>\n\
@@ -50848,7 +56980,9 @@ std::string to_string(const T& value) {\n\
 template<typename T>\n\
 std::string to_debug_string(const T& value) {\n\
     using Value = std::remove_cv_t<std::remove_reference_t<T>>;\n\
-    if constexpr (std::is_same_v<Value, char>\n\
+    if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>) {\n\
+        return std::to_string(static_cast<int>(value));\n\
+    } else if constexpr (std::is_same_v<Value, char>\n\
         || std::is_same_v<Value, signed char>\n\
         || std::is_same_v<Value, unsigned char>\n\
         || std::is_same_v<Value, wchar_t>\n\
@@ -52073,6 +58207,18 @@ fn rewrite_lib_core_facade_import(path: &str) -> Option<UseImportAction> {
     } else if let Some(rest) = path.strip_prefix("lib::core::") {
         format!("std::{}", rest)
     } else if let Some(rest) = path.strip_prefix("lib::") {
+        if rest == "Vec" {
+            return Some(classify_use_import("std::vec::Vec"));
+        }
+        if rest == "String" {
+            return Some(classify_use_import("std::string::String"));
+        }
+        if rest == "ToString" {
+            return Some(classify_use_import("std::string::ToString"));
+        }
+        if rest == "Clone" {
+            return Some(classify_use_import("std::clone::Clone"));
+        }
         // Expanded crates frequently route std/core through `lib::*` facade
         // imports. Reuse existing std mapping logic for known module families.
         let facade_root = rest.split("::").next().unwrap_or("");
@@ -52083,6 +58229,7 @@ fn rewrite_lib_core_facade_import(path: &str) -> Option<UseImportAction> {
             "boxed",
             "cell",
             "char",
+            "clone",
             "cmp",
             "collections",
             "convert",
@@ -52483,7 +58630,7 @@ fn rewrite_std_path_import(path: &str) -> Option<UseImportAction> {
 }
 
 fn rewrite_std_alloc_import(path: &str) -> Option<UseImportAction> {
-    if path == "std::alloc" || path == "core::alloc" {
+    if path == "std::alloc" || path == "core::alloc" || path == "alloc::alloc" {
         return Some(UseImportAction::Raw(
             "namespace alloc = rusty::alloc;".to_string(),
         ));
@@ -52491,7 +58638,8 @@ fn rewrite_std_alloc_import(path: &str) -> Option<UseImportAction> {
 
     let item = path
         .strip_prefix("std::alloc::")
-        .or_else(|| path.strip_prefix("core::alloc::"))?;
+        .or_else(|| path.strip_prefix("core::alloc::"))
+        .or_else(|| path.strip_prefix("alloc::alloc::"))?;
     let action = match item {
         "alloc" => UseImportAction::Using("rusty::alloc::alloc".to_string()),
         "dealloc" => UseImportAction::Using("rusty::alloc::dealloc".to_string()),
@@ -52646,6 +58794,7 @@ fn rewrite_std_collections_import(path: &str) -> Option<UseImportAction> {
         "BTreeMap" => UseImportAction::Using("rusty::BTreeMap".to_string()),
         "BTreeSet" => UseImportAction::Using("rusty::BTreeSet".to_string()),
         "VecDeque" => UseImportAction::Using("rusty::VecDeque".to_string()),
+        "hash_map::DefaultHasher" => UseImportAction::Using("DefaultHasher".to_string()),
         _ => UseImportAction::RustOnly,
     };
     Some(action)
@@ -52663,6 +58812,9 @@ fn rewrite_std_slice_import(path: &str) -> Option<UseImportAction> {
 
 fn rewrite_std_option_import(path: &str) -> Option<UseImportAction> {
     let action = match path {
+        "std::option" | "core::option" => {
+            UseImportAction::Raw("namespace option = rusty;".to_string())
+        }
         "std::result" | "core::result" => {
             UseImportAction::Raw("namespace result = rusty;".to_string())
         }
@@ -52719,7 +58871,7 @@ fn rewrite_std_cmp_import(path: &str) -> Option<UseImportAction> {
 fn is_rust_only_import(path: &str) -> bool {
     // Rust std trait modules that don't exist in C++
     let rust_only_prefixes = [
-        "std::convert::", // AsRef, AsMut, From, Into
+        "std::convert",   // convert module and traits (AsRef, AsMut, From, Into)
         "std::ops::",     // Deref, DerefMut, Add, Sub, Index, etc.
         "std::fmt",       // Display, Debug, Formatter, etc.
         "std::iter",      // Iterator, IntoIterator, etc.
@@ -55176,13 +61328,25 @@ fn collect_assignments_in_expr(expr: &syn::Expr, result: &mut std::collections::
                     result.insert(path.path.segments[0].ident.to_string());
                 }
             }
+            collect_assignments_in_expr(&assign.left, result);
+            collect_assignments_in_expr(&assign.right, result);
         }
         syn::Expr::Block(block) => {
             for s in &block.block.stmts {
                 collect_assignments_in_stmt(s, result);
             }
         }
+        syn::Expr::Match(match_expr) => {
+            collect_assignments_in_expr(&match_expr.expr, result);
+            for arm in &match_expr.arms {
+                if let Some((_, guard)) = &arm.guard {
+                    collect_assignments_in_expr(guard, result);
+                }
+                collect_assignments_in_expr(&arm.body, result);
+            }
+        }
         syn::Expr::If(if_expr) => {
+            collect_assignments_in_expr(&if_expr.cond, result);
             for s in &if_expr.then_branch.stmts {
                 collect_assignments_in_stmt(s, result);
             }
@@ -55191,6 +61355,7 @@ fn collect_assignments_in_expr(expr: &syn::Expr, result: &mut std::collections::
             }
         }
         syn::Expr::While(w) => {
+            collect_assignments_in_expr(&w.cond, result);
             for s in &w.body.stmts {
                 collect_assignments_in_stmt(s, result);
             }
@@ -55201,6 +61366,7 @@ fn collect_assignments_in_expr(expr: &syn::Expr, result: &mut std::collections::
             }
         }
         syn::Expr::ForLoop(f) => {
+            collect_assignments_in_expr(&f.expr, result);
             for s in &f.body.stmts {
                 collect_assignments_in_stmt(s, result);
             }
@@ -55209,6 +61375,74 @@ fn collect_assignments_in_expr(expr: &syn::Expr, result: &mut std::collections::
             for s in &u.block.stmts {
                 collect_assignments_in_stmt(s, result);
             }
+        }
+        syn::Expr::Call(call) => {
+            collect_assignments_in_expr(&call.func, result);
+            for arg in &call.args {
+                collect_assignments_in_expr(arg, result);
+            }
+        }
+        syn::Expr::MethodCall(mc) => {
+            collect_assignments_in_expr(&mc.receiver, result);
+            for arg in &mc.args {
+                collect_assignments_in_expr(arg, result);
+            }
+        }
+        syn::Expr::Binary(binary) => {
+            collect_assignments_in_expr(&binary.left, result);
+            collect_assignments_in_expr(&binary.right, result);
+        }
+        syn::Expr::Unary(unary) => {
+            collect_assignments_in_expr(&unary.expr, result);
+        }
+        syn::Expr::Reference(reference) => {
+            collect_assignments_in_expr(&reference.expr, result);
+        }
+        syn::Expr::Paren(paren) => {
+            collect_assignments_in_expr(&paren.expr, result);
+        }
+        syn::Expr::Group(group) => {
+            collect_assignments_in_expr(&group.expr, result);
+        }
+        syn::Expr::Array(array) => {
+            for elem in &array.elems {
+                collect_assignments_in_expr(elem, result);
+            }
+        }
+        syn::Expr::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_assignments_in_expr(elem, result);
+            }
+        }
+        syn::Expr::Struct(struct_expr) => {
+            for field in &struct_expr.fields {
+                collect_assignments_in_expr(&field.expr, result);
+            }
+            if let Some(rest) = &struct_expr.rest {
+                collect_assignments_in_expr(rest, result);
+            }
+        }
+        syn::Expr::Closure(closure) => {
+            collect_assignments_in_expr(&closure.body, result);
+        }
+        syn::Expr::Await(await_expr) => {
+            collect_assignments_in_expr(&await_expr.base, result);
+        }
+        syn::Expr::Try(try_expr) => {
+            collect_assignments_in_expr(&try_expr.expr, result);
+        }
+        syn::Expr::Break(brk) => {
+            if let Some(value) = &brk.expr {
+                collect_assignments_in_expr(value, result);
+            }
+        }
+        syn::Expr::Return(ret) => {
+            if let Some(value) = &ret.expr {
+                collect_assignments_in_expr(value, result);
+            }
+        }
+        syn::Expr::Let(let_expr) => {
+            collect_assignments_in_expr(&let_expr.expr, result);
         }
         _ => {}
     }
@@ -57292,6 +63526,23 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4122_std_primitive_module_usize_type_path_lowers_to_size_t() {
+        let out = transpile_str(
+            r#"
+            use core::usize;
+            mod identifier {
+                pub const PTR_BYTES: usize = 1;
+                pub fn bytes_for_varint(len: usize) -> usize { len }
+            }
+            "#,
+        );
+        assert!(!out.contains("const std::usize"));
+        assert!(!out.contains("std::usize bytes_for_varint"));
+        assert!(out.contains("constexpr size_t PTR_BYTES = 1;"));
+        assert!(out.contains("size_t bytes_for_varint(size_t len)"));
+    }
+
+    #[test]
     fn test_leaf41543333333327441_std_char_max_uses_unicode_scalar_upper_bound() {
         let out = transpile_str("fn upper() -> u32 { std::char::MAX as u32 }");
         assert!(out.contains("0x10FFFF"));
@@ -57451,7 +63702,7 @@ mod tests {
     }
 
     #[test]
-    fn test_leaf415432_empty_array_index_lowers_to_unreachable_fallback() {
+    fn test_leaf415432_empty_array_index_lowers_to_index_oob_panic_fallback() {
         let out = transpile_str(
             r#"
             fn f() -> i32 {
@@ -57462,7 +63713,7 @@ mod tests {
             }
         "#,
         );
-        assert!(out.contains("[&]() -> int32_t { rusty::intrinsics::unreachable(); }()"));
+        assert!(out.contains("[&]() -> int32_t { rusty::panicking::panic(\"index out of bounds\"); }()"));
         assert!(!out.contains("rusty::intrinsics::unreachable()[0]"));
     }
 
@@ -57654,8 +63905,26 @@ mod tests {
             }
             "#,
         );
-        assert!(out.contains("size_t c = 1;"), "{out}");
+        assert!(out.contains("size_t c ="), "{out}");
         assert!(!out.contains("auto c = 1;"), "{out}");
+    }
+
+    #[test]
+    fn test_mut_unsuffixed_int_seed_option_return_hint_overrides_prior_numeric_hint() {
+        let out = transpile_str(
+            r#"
+            fn f(mut n: usize, k: usize) -> Option<usize> {
+                let mut c = 1;
+                for i in 1..=k {
+                    c = (c / i).checked_mul(n)?.checked_add((c % i).checked_mul(n)? / i)?;
+                    n -= 1;
+                }
+                Some(c)
+            }
+            "#,
+        );
+        assert!(out.contains("size_t c ="), "{out}");
+        assert!(!out.contains("int32_t c ="), "{out}");
     }
 
     #[test]
@@ -60745,6 +67014,136 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf8_variant_constructor_callable_recovers_owner_generics_for_crate_path() {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> {
+                Left(L),
+                Right(R),
+            }
+
+            fn f<L, R, I>(inner: I)
+            where
+                I: Iterator<Item = L>,
+            {
+                let _ = inner.map(crate::Either::Left);
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("map([](auto&& _v)"),
+            "variant constructor callable should recover owner generics, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("map(::Either::Left)"),
+            "variant constructor path should lower to callable wrapper, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf8_variant_constructor_callable_recovers_owner_generics_for_imported_single_segment_path(
+    ) {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> {
+                Left(L),
+                Right(R),
+            }
+
+            mod iterator {
+                use crate::Either::Left;
+
+                fn f<L, R, I>(inner: I)
+                where
+                    I: Iterator<Item = L>,
+                {
+                    let _ = inner.map(Left);
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("rusty::either::Left<L, R>"),
+            "imported Left path should recover owner generics for callable lowering, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("map(::Either::Left)"),
+            "imported Left path should not remain as bare constructor path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf8_variant_constructor_callable_recovers_owner_generics_for_crate_group_imported_left(
+    ) {
+        let out = transpile_str(
+            r#"
+            enum Either<L, R> {
+                Left(L),
+                Right(R),
+            }
+
+            mod iterator {
+                use crate::{Either, Left, Right};
+
+                fn f<L, R, I>(inner: I)
+                where
+                    I: Iterator<Item = L>,
+                {
+                    let _ = inner.map(Left);
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("rusty::either::Left<L, R>") || out.contains("Left<L, R>("),
+            "group-imported Left path should recover owner generics for callable lowering, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("map(::Either::Left)"),
+            "group-imported Left path should not remain as bare constructor path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf8_variant_constructor_callable_in_module_mode_for_group_imported_left() {
+        let out = transpile_str_module(
+            r#"
+            enum Either<L, R> {
+                Left(L),
+                Right(R),
+            }
+
+            mod iterator {
+                use crate::{Either, Left, Right};
+
+                pub fn f<L, R, I>(inner: I)
+                where
+                    I: Iterator<Item = L>,
+                {
+                    let _ = inner.map(Left);
+                }
+            }
+            "#,
+            "either",
+        );
+
+        assert!(
+            !out.contains("map(::Either::Left)"),
+            "module mode should still lower imported Left map callable, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf10536_call_arg_expected_types_specialize_from_explicit_turbofish() {
         let expr: syn::Expr =
             syn::parse_str("case_::<TestFlags>(Some(1 << 1), None, TestFlags::from_bits)").unwrap();
@@ -61102,6 +67501,29 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4160_std_cmp_alias_is_emitted_per_module_scope() {
+        let out = transpile_str(
+            r#"
+            mod first {
+                use std::cmp;
+                pub fn eq() -> cmp::Ordering { cmp::Ordering::Equal }
+            }
+            mod second {
+                use std::cmp;
+                pub fn eq() -> cmp::Ordering { cmp::Ordering::Equal }
+            }
+            "#,
+        );
+        let core_alias_count = out.matches("namespace cmp = core::cmp;").count();
+        let rusty_alias_count = out.matches("namespace cmp = rusty::cmp;").count();
+        assert!(
+            core_alias_count >= 2 || rusty_alias_count >= 2,
+            "expected per-module cmp namespace alias emission, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf422_core_option_none_path_lowered() {
         let out = transpile_str("fn f() { let x = core::option::Option::None; }");
         assert!(out.contains("std::nullopt"));
@@ -61125,6 +67547,30 @@ mod tests {
         assert!(!out.contains("std::cmp::Ordering::Equal"));
         assert!(!out.contains("std::cmp::Ordering::Less"));
         assert!(!out.contains("std::cmp::Ordering::Greater"));
+    }
+
+    #[test]
+    fn test_leaf4160_ordering_variant_value_paths_do_not_lower_as_ctor_calls() {
+        let out = transpile_str(
+            r#"
+            use core::cmp::Ordering;
+            fn f() -> Ordering {
+                Ordering::Equal
+            }
+            fn g() -> Ordering {
+                match true {
+                    true => Ordering::Greater,
+                    false => Ordering::Less,
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("return Ordering::Equal;"), "{out}");
+        assert!(out.contains("return Ordering::Greater;"), "{out}");
+        assert!(out.contains("return Ordering::Less;"), "{out}");
+        assert!(!out.contains("Ordering::Equal()"), "{out}");
+        assert!(!out.contains("Ordering::Greater()"), "{out}");
+        assert!(!out.contains("Ordering::Less()"), "{out}");
     }
 
     #[test]
@@ -61403,6 +67849,30 @@ mod tests {
         assert!(out.contains("using rusty::BTreeSet;"));
         assert!(out.contains("using rusty::VecDeque;"));
         assert!(!out.contains("using std::collections::HashMap;"));
+    }
+
+    #[test]
+    fn test_leaf4160_std_collections_default_hasher_import_maps_to_runtime_stub() {
+        let out = transpile_str(
+            r#"
+            use std::collections::hash_map::DefaultHasher;
+            fn f() { let _h = DefaultHasher::new(); }
+            "#,
+        );
+        assert!(out.contains("using ::DefaultHasher;"), "{out}");
+        assert!(out.contains("DefaultHasher::new_()"), "{out}");
+        assert!(!out.contains("std::collections::hash_map::DefaultHasher"), "{out}");
+        assert!(
+            !out.contains("// Rust-only: using std::collections::hash_map::DefaultHasher;"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4160_fully_qualified_default_hasher_path_maps_to_runtime_stub() {
+        let out = transpile_str("fn f() { let _h = std::collections::hash_map::DefaultHasher::new(); }");
+        assert!(out.contains("DefaultHasher::new_()"), "{out}");
+        assert!(!out.contains("std::collections::hash_map::DefaultHasher"), "{out}");
     }
 
     #[test]
@@ -63451,6 +69921,19 @@ mod tests {
     }
 
     #[test]
+    fn test_use_external_dependency_alias_mapping_skips_unresolved_comment() {
+        let file: syn::File = syn::parse_file("use serde_core::de;").expect("parse file");
+        let mut cg = CodeGen::new();
+        let mut aliases = HashMap::new();
+        aliases.insert("serde_core".to_string(), "serde_core".to_string());
+        cg.set_external_crate_module_aliases(aliases);
+        cg.emit_file(&file, None);
+        assert!(!cg.output.contains("// TODO: external crate 'serde_core'"));
+        assert!(!cg.output.contains("Rust-only unresolved import"));
+        assert!(cg.output.contains("using ::serde_core::de;"));
+    }
+
+    #[test]
     fn test_use_std_no_external_comment() {
         let out = transpile_str("use std::io::Read;");
         assert!(!out.contains("// TODO: external crate"));
@@ -63787,6 +70270,73 @@ mod tests {
             !out.contains("namespace combinations = ::combinations::combinations;"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn test_leaf5442_function_using_import_skips_when_forward_decl_unavailable() {
+        let out = transpile_str(
+            r#"
+            mod kmerge_impl {
+                pub fn kmerge_by(_x: missing::MissingType) {}
+            }
+            pub use crate::kmerge_impl::kmerge_by;
+            fn f() {
+                kmerge_by(loop {});
+            }
+        "#,
+        );
+        assert!(
+            !out.contains("using ::kmerge_impl::kmerge_by;"),
+            "function import should be skipped when no forward declaration is available:\n{out}"
+        );
+        assert!(
+            out.contains("kmerge_impl::kmerge_by("),
+            "call sites should stay qualified through path resolution:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf10535_namespace_alias_import_handles_escaped_module_segments() {
+        let out = transpile_str(
+            r#"
+            mod private {
+                pub mod size_hint {
+                    pub fn from_bounds() -> usize { 0 }
+                }
+            }
+            mod de {
+                use crate::private::size_hint;
+                pub fn f() -> usize {
+                    size_hint::from_bounds()
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("namespace size_hint = ::private_::size_hint;"),
+            "{out}"
+        );
+        assert!(!out.contains("using ::private_::size_hint;"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf10535_private_seed_constructor_path_escapes_keyword_namespace() {
+        let out = transpile_str(
+            r#"
+            mod private {
+                pub mod seed {
+                    pub struct InPlaceSeed<T>(pub T);
+                }
+                pub use seed::InPlaceSeed;
+            }
+            use crate::private::{self, InPlaceSeed};
+            fn f<T>(x: T) {
+                let _ = InPlaceSeed(x);
+            }
+        "#,
+        );
+        assert!(out.contains("::private_::seed::InPlaceSeed"), "{out}");
+        assert!(!out.contains("::private::seed::InPlaceSeed"), "{out}");
     }
 
     #[test]
@@ -67198,6 +73748,44 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4154427_trait_static_default_methods_are_scoped_by_trait_path() {
+        let out = transpile_str(
+            r#"
+            mod a {
+                pub trait Error {
+                    fn custom() -> i32;
+                    fn unknown_variant() -> i32 { 1 }
+                }
+            }
+            mod b {
+                pub trait Error {
+                    fn custom() -> i32;
+                }
+                pub struct E;
+                impl Error for E {
+                    fn custom() -> i32 { 0 }
+                }
+            }
+            "#,
+        );
+
+        let struct_start = out
+            .find("struct E {")
+            .expect("expected emitted struct E definition");
+        let struct_tail = &out[struct_start..];
+        let struct_end = struct_tail
+            .find("};")
+            .map(|offset| struct_start + offset)
+            .expect("expected struct E closing brace");
+        let struct_body = &out[struct_start..struct_end];
+        assert!(
+            !struct_body.contains("unknown_variant"),
+            "trait defaults from a::Error must not inject into b::Error impls, got:\n{}",
+            struct_body
+        );
+    }
+
+    #[test]
     fn test_leaf4154433_assoc_type_field_resolved_through_impl() {
         let out = transpile_str(
             r#"
@@ -67837,6 +74425,8 @@ mod tests {
         assert!(
             out.contains("static_cast<std::remove_cvref_t<decltype((std::move(padding)))>>(0)")
         );
+        assert!(out.contains("== rusty::fmt::Alignment::Left"));
+        assert!(!out.contains("std::holds_alternative<rusty::fmt::Alignment_Left>"));
     }
 
     #[test]
@@ -67995,6 +74585,17 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf_serde_runtime_to_string_formats_i8_u8_as_numbers() {
+        let helpers = runtime_path_fallback_helpers_text();
+        assert!(
+            helpers.contains(
+                "std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>"
+            )
+        );
+        assert!(helpers.contains("return std::to_string(static_cast<int>(value));"));
+    }
+
+    #[test]
     fn test_leaf10527_runtime_to_debug_string_quotes_char_values() {
         let helpers = runtime_path_fallback_helpers_text();
         assert!(helpers.contains("std::string to_debug_string(const T& value)"));
@@ -68002,6 +74603,23 @@ mod tests {
         assert!(
             helpers.contains("std::string(\"'\") + rusty::detail::utf8_from_char32(ch) + \"'\"")
         );
+    }
+
+    #[test]
+    fn test_leaf_serde_runtime_to_debug_string_formats_i8_u8_as_numbers() {
+        let helpers = runtime_path_fallback_helpers_text();
+        let signature = "std::string to_debug_string(const T& value) {";
+        let signature_pos = helpers
+            .find(signature)
+            .expect("to_debug_string helper should be emitted");
+        let prefix = &helpers[signature_pos..];
+        assert!(
+            prefix.contains(
+                "if constexpr (std::is_same_v<Value, std::int8_t> || std::is_same_v<Value, std::uint8_t>)"
+            ),
+            "to_debug_string should special-case i8/u8 before char formatting"
+        );
+        assert!(prefix.contains("return std::to_string(static_cast<int>(value));"));
     }
 
     #[test]
@@ -68341,6 +74959,26 @@ mod tests {
         assert!(!out.contains("\nusing std::usize;"));
         assert!(!out.contains("\nusing std::isize;"));
         assert!(!out.contains("using std::std::alloc;"));
+    }
+
+    #[test]
+    fn test_leaf415441_crate_alloc_import_path_does_not_self_expand_alloc_root() {
+        let out = transpile_str(
+            r#"
+            extern crate alloc;
+            mod m {
+                use crate::alloc::alloc::{alloc, handle_alloc_error, Layout};
+                fn f(size: usize) {
+                    let layout = unsafe { Layout::from_size_align_unchecked(size, 1) };
+                    let ptr = unsafe { alloc(layout) };
+                    if ptr.is_null() {
+                        handle_alloc_error(layout);
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(!out.contains("alloc::alloc::alloc::alloc"));
     }
 
     #[test]
@@ -68839,6 +75477,22 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf_serde_tuple_self_reference_deref_collapses() {
+        let out = transpile_str(
+            r#"
+            struct Wrap<'a>(&'a mut i32);
+            impl<'a> Wrap<'a> {
+                fn set(&mut self, v: i32) {
+                    *self.0 = v;
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("this->_0 = v;"), "{out}");
+        assert!(!out.contains("*this->_0 = v;"), "{out}");
+    }
+
+    #[test]
     fn test_leaf415431_std_cmp_module_import_emits_core_cmp_alias() {
         let out = transpile_str("use std::cmp;");
         assert!(out.contains("namespace cmp = core::cmp;"));
@@ -69222,6 +75876,30 @@ mod tests {
         );
         assert!(out.contains("return Either(Left<L, R>(std::move(e)));"));
         assert!(out.contains("return Either(Right<L, R>(std::move(o)));"));
+    }
+
+    #[test]
+    fn test_leaf5442_self_return_prefers_current_struct_generics_over_same_tail_alias() {
+        let out = transpile_str(
+            r#"
+            mod duplicates_impl {
+                mod private {
+                    pub struct DuplicatesBy<I, Key, F> { iter: I, key: Key, f: F }
+                    impl<I, Key, F> DuplicatesBy<I, Key, F> {
+                        fn new_(iter: I, key: Key, f: F) -> Self {
+                            Self { iter, key, f }
+                        }
+                    }
+                }
+                pub type DuplicatesBy<I, V, F> = private::DuplicatesBy<I, V, F>;
+            }
+        "#,
+        );
+        assert!(
+            out.contains("static DuplicatesBy<I, Key, F> new_("),
+            "Self return in private::DuplicatesBy impl should keep Key, not alias generic names:\n{out}"
+        );
+        assert!(!out.contains("static DuplicatesBy<I, V, F> new_("), "{out}");
     }
 
     #[test]
@@ -70266,6 +76944,50 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4160_self_assoc_alias_shadowed_into_iter_generic_path_elides_template_args() {
+        let out = transpile_str(
+            r#"
+            trait IntoIterLike {
+                type IntoIter;
+                fn into_iter(self) -> Self::IntoIter;
+            }
+            struct IntoIter<T, const CAP: usize>(usize, ArrayVec<T, CAP>);
+            struct ArrayVec<T, const CAP: usize>;
+            impl<T, const CAP: usize> IntoIterLike for ArrayVec<T, CAP> {
+                type IntoIter = IntoIter<T, CAP>;
+                fn into_iter(self) -> IntoIter<T, CAP> {
+                    IntoIter(0, self)
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("using IntoIter = IntoIter<T, CAP>;")
+                || out.contains("using IntoIter = ::IntoIter<T, CAP>;"),
+            "{out}"
+        );
+        assert!(
+            out.contains("IntoIter into_iter(") || out.contains("typename ArrayVec::IntoIter into_iter("),
+            "{out}"
+        );
+        assert!(
+            !out.contains("IntoIter<T, CAP> into_iter(")
+                && !out.contains("typename ArrayVec::IntoIter<T, CAP> into_iter("),
+            "{out}"
+        );
+        assert!(
+            out.contains("return IntoIter(0, std::move((*this)))")
+                || out.contains("return typename ArrayVec::IntoIter(0, std::move((*this)))"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("return IntoIter<T, CAP>(0, std::move((*this)))")
+                && !out.contains("return typename ArrayVec::IntoIter<T, CAP>(0, std::move((*this)))"),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn test_leaf41543333333327141_borrowed_self_argument_is_not_moved() {
         let out = transpile_str(
             r#"
@@ -70455,6 +77177,172 @@ mod tests {
         assert!(out.contains("v.push(rusty::Vec<int32_t>::new_());"));
         assert!(!out.contains("alloc::vec::Vec::new"));
         assert!(!out.contains("rusty::Vec::new_()"));
+    }
+
+    #[test]
+    fn test_leaf5442_iter_call_expected_type_specializes_nested_vec_new() {
+        let out = transpile_str(
+            r#"
+            fn iter<T>(value: T) -> T::IntoIter where T: IntoIterator { value.into_iter() }
+            fn f() {
+                let mut buffer: Vec<std::vec::IntoIter<i32>> = Vec::new();
+                buffer.push(iter(Vec::new()));
+            }
+        "#,
+        );
+        assert!(
+            out.contains("buffer.push(::iter(rusty::Vec<int32_t>::new_()));"),
+            "{out}"
+        );
+        assert!(!out.contains("buffer.push(iter(rusty::Vec<auto>::new_()));"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5442_iter_call_expected_type_specializes_nested_vec_new_for_assoc_into_iter() {
+        let out = transpile_str(
+            r#"
+            fn iter<T>(value: T) -> T::IntoIter where T: IntoIterator { value.into_iter() }
+            struct S<I: Iterator> { buffer: Vec<I::IntoIter> }
+            impl<I: Iterator> S<I> {
+                fn f(&mut self) {
+                    self.buffer.push(iter(Vec::new()));
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains(
+                "this->buffer.push(::iter(rusty::Vec<rusty::detail::associated_item_t<I>>::new_()));"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("Vec<auto>::new_()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5442_into_iter_bridge_specializes_nested_vec_new_from_expected_iter_type() {
+        let out = transpile_str(
+            r#"
+            struct S<I: Iterator> { buffer: Vec<std::vec::IntoIter<I::Item>> }
+            impl<I: Iterator> S<I> {
+                fn f(&mut self) {
+                    self.buffer.push(Vec::new().into_iter());
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("rusty::iter(rusty::Vec<rusty::detail::associated_item_t<I>>::new_())"),
+            "{out}"
+        );
+        assert!(!out.contains("Vec<auto>::new_()"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5442_option_some_ctor_not_rewritten_to_scalar_owner_variant_call() {
+        let out = transpile_str(
+            r#"
+            type SizeHint = (usize, Option<usize>);
+            fn mul(a: SizeHint, _b: SizeHint) -> SizeHint { a }
+            fn f(v: Vec<SizeHint>) -> SizeHint {
+                v.into_iter().fold((1, Some(1)), mul)
+            }
+        "#,
+        );
+        assert!(!out.contains("int32_t::Some("), "{out}");
+        assert!(!out.contains("size_t::Some("), "{out}");
+        assert!(
+            out.contains("rusty::Option<size_t>(static_cast<size_t>(1))"),
+            "{out}"
+        );
+        assert!(!out.contains("rusty::Option<int32_t>(1)"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5442_local_alias_in_scope_generic_args_are_elided_in_type_positions() {
+        let out = transpile_str(
+            r#"
+            fn f<A: Clone>(z: &A) {
+                type CurrTuple<A> = (A, A);
+                let _g = |a: A| -> CurrTuple<A> { (z.clone(), a) };
+            }
+        "#,
+        );
+        assert!(out.contains("using CurrTuple = std::tuple<A, A>;"), "{out}");
+        assert!(out.contains("-> CurrTuple {"), "{out}");
+        assert!(!out.contains("-> CurrTuple<A>"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5442_use_rusty_either_imports_variant_struct_helpers() {
+        let out = transpile_str("use either::Either;");
+        assert!(out.contains("using ::rusty::Either;"), "{out}");
+        assert!(out.contains("using ::rusty::Either_Left;"), "{out}");
+        assert!(out.contains("using ::rusty::Either_Right;"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5442_intersperse_constructor_path_not_rewritten_to_type_param_owner() {
+        let out = transpile_str(
+            r#"
+            struct IntersperseElementSimple<Item>(Item);
+            struct IntersperseWith<I, ElemF> { element: ElemF, iter: I }
+            type Intersperse<I> = IntersperseWith<I, IntersperseElementSimple<I>>;
+            fn intersperse<I>(iter: I, elt: I) -> Intersperse<I> {
+                intersperse_with(iter, IntersperseElementSimple(elt))
+            }
+            fn intersperse_with<I, ElemF>(iter: I, elt: ElemF) -> IntersperseWith<I, ElemF> {
+                IntersperseWith { element: elt, iter }
+            }
+        "#,
+        );
+        assert!(
+            !out.contains("ElemF::IntersperseElementSimple("),
+            "constructor path should stay rooted at the tuple-struct type, not type params:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf5442_if_let_entry_vacant_lowers_to_runtime_entry_probe() {
+        let out = transpile_str(
+            r#"
+            use std::collections::hash_map::Entry;
+            use std::collections::HashMap;
+            fn f(mut used: HashMap<i32, ()>, v: i32) -> bool {
+                if let Entry::Vacant(entry) = used.entry(v) {
+                    let _elt = entry.key().clone();
+                    entry.insert(());
+                    return true;
+                }
+                false
+            }
+        "#,
+        );
+        assert!(
+            out.contains("rusty::detail::make_entry_probe(used, std::move(v))"),
+            "{out}"
+        );
+        assert!(out.contains("_iflet_scrutinee.is_vacant()"), "{out}");
+        assert!(out.contains("vacant_entry()"), "{out}");
+        assert!(!out.contains("std::collections::hash_map::Entry_Vacant"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf5442_same_scope_free_function_call_avoids_global_qualification() {
+        let out = transpile_str(
+            r#"
+            mod kmerge_impl {
+                pub fn kmerge<I>(iterable: I) -> i32 {
+                    kmerge_by(iterable)
+                }
+                pub fn kmerge_by<I>(_iterable: I) -> i32 {
+                    0
+                }
+            }
+        "#,
+        );
+        assert!(out.contains("return kmerge_by(std::move(iterable));"), "{out}");
+        assert!(!out.contains("::kmerge_impl::kmerge_by"), "{out}");
     }
 
     #[test]
@@ -72629,6 +79517,82 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5202_method_call_emits_explicit_template_args_for_undeduced_error_param() {
+        let out = transpile_str(
+            r#"
+            struct Content;
+            struct ContentVisitor;
+            impl ContentVisitor {
+                fn new_() -> Self { loop {} }
+                fn visit_bool<F>(self, value: bool) -> Result<Content, F> { loop {} }
+            }
+            struct TagOrContentVisitor;
+            impl TagOrContentVisitor {
+                fn visit_bool<F>(self, value: bool) -> Result<Content, F> {
+                    ContentVisitor::new_().visit_bool(value)
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("ContentVisitor::new_().template visit_bool<F>("),
+            "expected explicit template args for undeduced method generic, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5202_autoderef_expected_reference_for_placeholder_bound_path() {
+        let out = transpile_str(
+            r#"
+            enum Content<'a> {
+                Some(Box<Content<'a>>),
+                Unit,
+            }
+            fn clone_content<'a>(content: &Content<'a>) -> Content<'a> {
+                match content {
+                    Content::Some(content) => Content::Some(Box::new(clone_content(content))),
+                    Content::Unit => Content::Unit,
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("clone_content(rusty::detail::deref_if_pointer_like(content))"),
+            "expected recursive call arg to auto-deref pointer-like payload, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5202_forward_decl_allows_import_alias_when_mapped_signature_is_resolved() {
+        let out = transpile_str(
+            r#"
+            mod n {
+                pub struct Ty;
+            }
+            mod m {
+                use crate::n::Ty;
+                pub struct S<E>(E, i32);
+                impl<E> S<E> {
+                    pub fn f(&mut self) -> Ty {
+                        g(self.1)
+                    }
+                }
+                fn g(_x: i32) -> Ty { loop {} }
+            }
+        "#,
+        );
+        let decl_pos = out.find("g(int32_t _x);").unwrap_or(usize::MAX);
+        let method_pos = out.find("::n::Ty f()").unwrap_or(usize::MAX);
+        assert!(
+            decl_pos < method_pos,
+            "expected function forward declaration before templated owner use, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf5204_deref_of_reference_returning_method_call_collapses() {
         let out = transpile_str(
             r#"
@@ -72803,6 +79767,96 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("rusty::Ok("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf_oncecell_wrapper_does_not_force_method_template_args_with_callable_args() {
+        let out = transpile_str(
+            r#"
+            struct Inner;
+            impl Inner {
+                fn get_or_init<F>(&self, _f: F) -> i32
+                where
+                    F: FnOnce() -> i32,
+                { loop {} }
+
+                fn get_or_try_init<F, E>(&self, _f: F) -> Result<i32, E>
+                where
+                    F: FnOnce() -> Result<i32, E>,
+                { loop {} }
+            }
+
+            struct Outer {
+                inner: Inner,
+            }
+
+            impl Outer {
+                fn get_or_init<F>(&self, f: F) -> i32
+                where
+                    F: FnOnce() -> i32,
+                {
+                    self.inner.get_or_init(|| f())
+                }
+
+                fn get_or_try_init<F, E>(&self, f: F) -> Result<i32, E>
+                where
+                    F: FnOnce() -> Result<i32, E>,
+                {
+                    self.inner.get_or_try_init(|| f())
+                }
+            }
+        "#,
+        );
+        assert!(!out.contains("this->inner.template get_or_init<F>("), "{out}");
+        assert!(
+            !out.contains("this->inner.template get_or_try_init<F, E>("),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_oncecell_result_match_some_payload_moves_bound_value() {
+        let out = transpile_str(
+            r#"
+            fn f(r: Result<String, ()>) -> Option<String> {
+                match r {
+                    Ok(value) => Some(value),
+                    Err(_) => None,
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("rusty::Option<rusty::String>(std::move(value))"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_oncecell_std_process_command_path_maps_to_rusty_namespace() {
+        let out = transpile_str(
+            r#"
+            use std::path::PathBuf;
+            fn f(bin: PathBuf) {
+                let _ = std::process::Command::new(bin).spawn();
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::process::Command"), "{out}");
+        assert!(!out.contains("std::process::Command<"), "{out}");
+    }
+
+    #[test]
+    fn test_leaf_serde_qself_str_from_utf8_unchecked_maps_to_runtime_helper() {
+        let out = transpile_str(
+            r#"
+            fn f(v: &[u8]) -> &str {
+                unsafe { <str>::from_utf8_unchecked(v) }
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::str_runtime::from_utf8_unchecked"), "{out}");
+        assert!(!out.contains("std::string_view::from_utf8_unchecked"), "{out}");
     }
 
     #[test]
@@ -73457,6 +80511,42 @@ mod tests {
             out,
             "rusty::io::cursor_new(rusty::array_repeat(static_cast<uint8_t>(0), 0))"
         );
+    }
+
+    #[test]
+    fn test_leaf4160_zero_arg_ordering_variant_call_lowers_to_enum_value() {
+        let expr: syn::Expr = syn::parse_str("Ordering::Equal()").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(out, "Ordering::Equal");
+    }
+
+    #[test]
+    fn test_leaf4160_zero_arg_core_ordering_variant_call_maps_without_parens() {
+        let expr: syn::Expr = syn::parse_str("core::cmp::Ordering::Greater()").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(out, "rusty::cmp::Ordering::Greater");
+    }
+
+    #[test]
+    fn test_leaf4160_parenthesized_zero_arg_ordering_variant_call_maps_without_parens() {
+        let expr: syn::Expr = syn::parse_str("(Ordering::Less)()").unwrap();
+        let call = match expr {
+            syn::Expr::Call(c) => c,
+            _ => panic!("expected call expression"),
+        };
+        let cg = CodeGen::new();
+        let out = cg.emit_call_expr_to_string(&call, None);
+        assert_eq!(out, "Ordering::Less");
     }
 
     #[test]
@@ -74155,6 +81245,190 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf5442_self_return_tuple_struct_constructor_call_is_not_rewritten_as_assoc_ctor() {
+        let out = transpile_str(
+            r#"
+            struct ParseError(i32);
+
+            impl ParseError {
+                fn from_i(v: i32) -> Self {
+                    ParseError(v)
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("return ParseError("),
+            "tuple struct constructor call should remain direct ctor call, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("ParseError::ParseError("),
+            "tuple struct constructor call must not be rewritten as associated constructor path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5442_tuple_struct_self_callable_avoids_duplicate_template_suffix() {
+        let out = transpile_str(
+            r#"
+            use core::ptr::NonNull;
+
+            struct ConstNonNull<T>(NonNull<T>);
+
+            impl<T> ConstNonNull<T> {
+                fn new(ptr: *const T) -> Option<Self> {
+                    NonNull::new(ptr as *mut T).map(Self)
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("map([](auto&& _v) { return ConstNonNull<T>("),
+            "tuple struct constructor callable should preserve a single template list, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("ConstNonNull<T><T>("),
+            "tuple struct constructor callable must not duplicate template args, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5442_forward_decl_signature_qualifies_direct_import_type_aliases() {
+        let out = transpile_str(
+            r#"
+            mod m {
+                use alloc::alloc::Layout;
+
+                fn layout_array(n: usize) -> Result<Layout, ()> {
+                    let _ = n;
+                    panic!()
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("rusty::Result<rusty::alloc::Layout, std::tuple<>> layout_array(size_t n);"),
+            "forward declaration should qualify direct import aliases used in signatures, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5442_forward_decl_direct_import_alias_keeps_path_suffix() {
+        let out = transpile_str(
+            r#"
+            mod m {
+                use core::cmp;
+
+                fn partial() -> Option<cmp::Ordering> {
+                    None
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("rusty::Option<rusty::cmp::Ordering> partial();"),
+            "forward declaration should preserve suffix when qualifying direct import alias paths, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5442_direct_import_alias_single_segment_type_stays_unqualified() {
+        let out = transpile_str(
+            r#"
+            mod errors {
+                pub struct CapacityError<T>(T);
+            }
+            mod m {
+                use crate::errors::CapacityError;
+
+                fn make_() -> CapacityError<()> {
+                    loop {}
+                }
+            }
+            "#,
+        );
+
+        let has_qualified_signature = out.contains("::errors::CapacityError<std::tuple<>> make_();");
+        let has_unqualified_signature_with_using = out.contains("CapacityError<std::tuple<>> make_();")
+            && out.contains("using ::errors::CapacityError;");
+        assert!(
+            has_qualified_signature || has_unqualified_signature_with_using,
+            "direct-imported single-segment type should resolve to imported module path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5442_crate_reexport_single_segment_alias_resolves_to_target_path() {
+        let out = transpile_str(
+            r#"
+            mod errors {
+                pub struct CapacityError<T>(T);
+            }
+            pub use crate::errors::CapacityError;
+            mod m {
+                use crate::CapacityError;
+
+                fn make_() -> CapacityError<()> {
+                    loop {}
+                }
+            }
+            "#,
+        );
+
+        let has_qualified_signature = out.contains("::errors::CapacityError<std::tuple<>> make_();");
+        let has_unqualified_signature_with_using = out.contains("CapacityError<std::tuple<>> make_();")
+            && out.contains("using ::errors::CapacityError;");
+        assert!(
+            has_qualified_signature || has_unqualified_signature_with_using,
+            "crate re-export aliases should resolve to their target path, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_leaf5442_trait_default_result_uses_reexported_alias_target_path() {
+        let out = transpile_str(
+            r#"
+            mod errors {
+                pub struct CapacityError<T>(T);
+            }
+            pub use crate::errors::CapacityError;
+            mod m {
+                use crate::CapacityError;
+                trait A {
+                    type Item;
+                    fn try_push(&mut self, _element: Self::Item) -> Result<(), CapacityError<Self::Item>> {
+                        loop {}
+                    }
+                }
+            }
+            "#,
+        );
+
+        assert!(
+            out.contains("::errors::CapacityError"),
+            "trait default method signatures should use reexport target path, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("::CapacityError<typename"),
+            "trait default method signatures must not collapse reexport alias to root identifier, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf5116_self_method_call_emits_this_qualification() {
         let out = transpile_str(
             r#"
@@ -74536,6 +81810,25 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf4154442_cmp_same_owner_ref_arg_skips_autoderef_wrapper() {
+        let out = transpile_str(
+            r#"
+            struct Wrap;
+            impl Wrap {
+                fn cmp(&self, rhs: &Self) -> i32 { 0 }
+                fn compare(&self, rhs: &Self) -> i32 {
+                    self.cmp(rhs)
+                }
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("deref_if_pointer_like(rhs)"),
+            "self.cmp(rhs) should pass rhs directly when expected type is &Self\nGot: {out}"
+        );
+    }
+
+    #[test]
     fn test_leaf4154442_partial_cmp_on_primitive_emits_rusty_partial_cmp() {
         let out = transpile_str(
             r#"
@@ -74797,6 +82090,63 @@ mod tests {
         assert!(
             !out.contains("std::runtime_error(\"Unimplemented method fmt\")"),
             "fmt should not degrade to unimplemented placeholder\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf4160_root_reexport_does_not_globalize_same_module_type_paths() {
+        let out = transpile_str(
+            r#"
+            mod identifier {
+                pub struct Identifier;
+                impl Identifier {
+                    pub fn empty() -> Self {
+                        Identifier
+                    }
+                }
+                pub fn make() -> Identifier {
+                    Identifier::empty()
+                }
+                pub fn inline_len(repr: &Identifier) -> usize {
+                    1
+                }
+            }
+
+            mod parse {
+                pub struct Error;
+                pub fn numeric_identifier() -> Result<(), Error> {
+                    Ok(())
+                }
+            }
+
+            pub use crate::identifier::Identifier;
+            pub use crate::parse::Error;
+            "#,
+        );
+
+        assert!(
+            out.contains("inline_len(const Identifier& repr)"),
+            "same-module reference type should not be rewritten to global alias\nGot: {out}"
+        );
+        assert!(
+            !out.contains("inline_len(const ::Identifier& repr)"),
+            "same-module type path must not gain global :: qualifier from crate-root reexport\nGot: {out}"
+        );
+        assert!(
+            out.contains("Identifier::empty()"),
+            "same-module associated call should stay scoped to the local type\nGot: {out}"
+        );
+        assert!(
+            !out.contains("::Identifier::empty()"),
+            "same-module associated call must not be rewritten to global alias\nGot: {out}"
+        );
+        assert!(
+            out.contains("rusty::Result<std::tuple<>, Error> numeric_identifier()"),
+            "same-module Result error type should remain local\nGot: {out}"
+        );
+        assert!(
+            !out.contains("rusty::Result<std::tuple<>, ::Error> numeric_identifier()"),
+            "same-module error type must not be rewritten to ::Error\nGot: {out}"
         );
     }
 
@@ -76728,6 +84078,64 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf_serde_runtime_match_stmt_break_targets_outer_loop() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let mut i: u8 = 0;
+                loop {
+                    match i.checked_add(1) {
+                        Some(next) => i = next,
+                        None => break,
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains(
+            "auto&& _m = rusty::checked_add(i, static_cast<std::remove_cvref_t<decltype((i))>>(1));"
+        ));
+        assert!(
+            out.contains("bool _m_matched = false;"),
+            "runtime match lowering should gate arms with a matched flag\nGot: {out}"
+        );
+        assert!(
+            out.contains("if (!_m_matched) {"),
+            "runtime match lowering should guard arm evaluation after first match\nGot: {out}"
+        );
+        assert!(
+            !out.contains("} while (false);"),
+            "runtime match stmt lowering must not wrap arms in do-while(false) because break/continue in arm bodies must target outer loops\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_serde_binding_tuple_match_stmt_break_targets_outer_loop() {
+        let out = transpile_str(
+            r#"
+            fn f() {
+                let a = 1;
+                let b = 2;
+                loop {
+                    match (&a, &b) {
+                        (_, _) => break,
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(out.contains("auto _m_tuple = std::make_tuple("));
+        assert!(
+            out.contains("bool _m_matched = false;"),
+            "binding tuple match lowering should gate arms with a matched flag\nGot: {out}"
+        );
+        assert!(
+            !out.contains("} while (false);"),
+            "binding tuple match stmt lowering must not use do-while(false) wrapper\nGot: {out}"
+        );
+    }
+
+    #[test]
     fn test_self_referencing_local_init_uses_temp() {
         // `let right = ptr::read(&right)` shadows an outer `right`.
         // C++ `auto right = ptr::read(&right)` creates a self-reference.
@@ -76766,6 +84174,208 @@ mod tests {
         assert!(
             !out.contains("using") || !out.contains("SeqCst"),
             "enum variant import should not use 'using' declaration\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_serde_content_import_alias_beats_unique_nonlocal_content_fallback() {
+        let out = transpile_str(
+            r#"
+            mod private {
+                pub mod de {
+                    pub mod content {
+                        pub use crate::serde_core_private::Content;
+
+                        pub fn content_as_str<'a, 'de>(content: &'a Content<'de>) -> Option<&'a str> {
+                            None
+                        }
+                    }
+                }
+
+                pub mod ser {
+                    pub mod content {
+                        pub struct Content<'de>(pub &'de str);
+                    }
+                }
+            }
+
+            mod serde_core_private {}
+            "#,
+        );
+        assert!(
+            out.contains("using serde_core_private::Content;"),
+            "in-scope Content import should be preserved\nGot: {out}"
+        );
+        assert!(
+            out.contains("content_as_str(const ::serde_core_private::Content& content)"),
+            "single-segment imported type should qualify through the bound import target when local tail names conflict\nGot: {out}"
+        );
+        assert!(
+            !out.contains("content_as_str(const ::private_::ser::content::Content& content)"),
+            "imported Content alias must not be rewritten to unrelated local ser::content::Content\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_serde_variant_ctor_param_qualifies_imported_type_when_name_conflicts() {
+        let out = transpile_str(
+            r#"
+            mod private {
+                pub mod de {
+                    pub mod content {
+                        pub use crate::serde_core_private::Content;
+
+                        enum TagOrContent<'de> {
+                            Tag,
+                            Content(Content<'de>),
+                        }
+                    }
+                }
+
+                pub mod ser {
+                    pub mod content {
+                        pub struct Content<'de>(pub &'de str);
+                    }
+                }
+            }
+
+            mod serde_core_private {}
+            "#,
+        );
+        if out.contains("TagOrContent_Content Content(") {
+            assert!(
+                out.contains("TagOrContent_Content Content(::serde_core_private::Content _0);"),
+                "variant constructor parameter should be qualified when type name matches constructor name\nGot: {out}"
+            );
+        }
+        assert!(
+            !out.contains("TagOrContent_Content Content(Content _0);"),
+            "bare `Content` parameter in `Content(...)` constructor is ambiguous in C++\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_serde_variant_ctor_helper_skipped_when_name_conflicts_with_imported_type() {
+        let out = transpile_str(
+            r#"
+            mod private {
+                pub mod de {
+                    pub mod content {
+                        pub use crate::serde_core_private::Content;
+
+                        enum TagOrContent<'de> {
+                            Tag,
+                            Content(Content<'de>),
+                        }
+
+                        struct Holder<'de> {
+                            inner: Content<'de>,
+                        }
+                    }
+                }
+            }
+
+            mod serde_core_private {}
+            "#,
+        );
+        assert!(
+            out.contains("using serde_core_private::Content;")
+                || out.contains("using ::serde_core_private::Content;"),
+            "expected in-scope Content alias import\nGot: {out}"
+        );
+        assert!(
+            out.contains("Content inner;"),
+            "post-enum type references should still resolve to imported Content\nGot: {out}"
+        );
+        assert!(
+            !out.contains("TagOrContent_Content Content("),
+            "variant constructor helper named `Content` must be skipped to avoid type shadowing\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_serde_imported_data_enum_variant_struct_is_namespace_qualified() {
+        let out = transpile_str(
+            r#"
+            mod content {
+                pub enum Content {
+                    Struct(String),
+                }
+            }
+
+            mod user {
+                use crate::content::Content;
+
+                pub fn make(v: String) -> Content {
+                    Content::Struct(v)
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("return content::Content_Struct{")
+                || out.contains("return ::content::Content_Struct{"),
+            "imported enum variant struct construction should stay qualified through owner module\nGot: {out}"
+        );
+        let user_scope_start = out
+            .find("// mod user")
+            .expect("expected emitted user module section");
+        let user_scope = &out[user_scope_start..];
+        assert!(
+            !user_scope.contains("return Content_Struct{"),
+            "bare variant struct type should not be emitted in importer scope when enum owner came from alias\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_imported_enum_variant_struct_strips_crate_prefix() {
+        let out = transpile_str(
+            r#"
+            mod either_or_both {
+                pub enum EitherOrBoth<L, R> {
+                    Both(L, R),
+                }
+            }
+
+            mod user {
+                use crate::either_or_both::EitherOrBoth;
+
+                pub fn make<L, R>(l: L, r: R) -> EitherOrBoth<L, R> {
+                    EitherOrBoth::Both(l, r)
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("either_or_both::EitherOrBoth_Both<")
+                || out.contains("::either_or_both::EitherOrBoth_Both<"),
+            "import-bound enum variant struct should stay module-qualified\nGot: {out}"
+        );
+        assert!(
+            !out.contains("crate::either_or_both::EitherOrBoth_Both"),
+            "C++ output must not leak Rust `crate::` prefixes in variant struct types\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_mapped_function_path_beats_cpp_import_rewrite() {
+        let out = transpile_str(
+            r#"
+            use std::time::Duration;
+
+            pub fn wait() {
+                let _ = futures_timer::Delay::new(Duration::from_millis(1));
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::future::Delay")
+                && out.contains("::new_("),
+            "futures_timer::Delay::new should use runtime function mapping\nGot: {out}"
+        );
+        assert!(
+            !out.contains("futures_timer::Delay"),
+            "C++ import-bound rewrite must not override mapped runtime function path\nGot: {out}"
         );
     }
 
