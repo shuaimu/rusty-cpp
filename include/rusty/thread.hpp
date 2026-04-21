@@ -29,20 +29,48 @@ inline std::shared_ptr<ParkToken> current_park_token() {
 }
 } // namespace detail
 
+/// Opaque thread identifier.
+/// Maps Rust's std::thread::ThreadId.
+/// Copyable, comparable, hashable. Wraps std::thread::id.
+class ThreadId {
+public:
+    std::thread::id inner_;
+
+    ThreadId() = default;
+    explicit ThreadId(std::thread::id id) : inner_(id) {}
+
+    bool operator==(const ThreadId& other) const { return inner_ == other.inner_; }
+    bool operator!=(const ThreadId& other) const { return inner_ != other.inner_; }
+    bool operator<(const ThreadId& other) const  { return inner_ <  other.inner_; }
+
+    std::thread::id as_std() const { return inner_; }
+};
+
+/// Get the current thread's ID.
+/// Maps Rust's std::thread::current().id().
+inline ThreadId current_id() {
+    return ThreadId{std::this_thread::get_id()};
+}
+
 class Thread {
 private:
     std::shared_ptr<detail::ParkToken> token_;
+    ThreadId id_;
 
     explicit Thread(std::shared_ptr<detail::ParkToken> token)
-        : token_(std::move(token)) {}
+        : token_(std::move(token)), id_(std::this_thread::get_id()) {}
 
 public:
     Thread()
-        : token_(detail::current_park_token()) {}
+        : token_(detail::current_park_token()),
+          id_(std::this_thread::get_id()) {}
 
     static Thread current() {
         return Thread(detail::current_park_token());
     }
+
+    /// Get this thread's ID. Maps Rust's Thread::id().
+    ThreadId id() const { return id_; }
 
     void unpark() const {
         if (!token_) {
@@ -375,3 +403,12 @@ inline void sleep(unsigned long secs) {
 }
 
 } // namespace rusty::thread
+
+namespace std {
+template <>
+struct hash<rusty::thread::ThreadId> {
+    size_t operator()(const rusty::thread::ThreadId& id) const noexcept {
+        return std::hash<std::thread::id>{}(id.inner_);
+    }
+};
+} // namespace std
