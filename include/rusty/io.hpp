@@ -406,9 +406,15 @@ requires(
 
 template<typename Writer>
 Result<size_t> write(Writer& writer, std::span<const uint8_t> buf)
-requires requires(Writer& w, std::span<const uint8_t> b) { w.write(b); }
+requires(
+    requires(Writer& w, std::span<const uint8_t> b) { w.write(b); } ||
+    requires(Writer& w, std::span<const uint8_t> b) { w.write_(b); })
 {
-    return writer.write(buf);
+    if constexpr (requires(Writer& w, std::span<const uint8_t> b) { w.write(b); }) {
+        return writer.write(buf);
+    } else {
+        return writer.write_(buf);
+    }
 }
 
 template<typename Elem, std::size_t Extent>
@@ -435,6 +441,7 @@ template<typename Writer>
 Result<size_t> write(Writer&, std::span<const uint8_t>)
 requires(
     !requires(Writer& w, std::span<const uint8_t> b) { w.write(b); } &&
+    !requires(Writer& w, std::span<const uint8_t> b) { w.write_(b); } &&
     !detail::is_integral_span_v<Writer>)
 {
     return Result<size_t>::err(
@@ -479,11 +486,11 @@ Result<uint64_t> copy(R& reader, W& writer) {
     uint8_t buf[8192];
     uint64_t total = 0;
     while (true) {
-        auto read_result = reader.read(std::span<uint8_t>(buf, sizeof(buf)));
+        auto read_result = read(reader, std::span<uint8_t>(buf, sizeof(buf)));
         if (read_result.is_err()) return Result<uint64_t>::err(read_result.unwrap_err());
         size_t n = read_result.unwrap();
         if (n == 0) break;
-        auto write_result = writer.write(std::span<const uint8_t>(buf, n));
+        auto write_result = write(writer, std::span<const uint8_t>(buf, n));
         if (write_result.is_err()) return Result<uint64_t>::err(write_result.unwrap_err());
         total += n;
     }

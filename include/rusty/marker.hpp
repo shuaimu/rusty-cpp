@@ -7,6 +7,9 @@ namespace rusty {
 template<typename T>
 struct PhantomData {
     constexpr PhantomData() noexcept = default;
+
+    template<typename U>
+    constexpr PhantomData(const PhantomData<U>&) noexcept {}
 };
 
 } // namespace rusty

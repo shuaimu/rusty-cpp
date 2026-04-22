@@ -88,6 +88,20 @@ public:
         return remaining;
     }
 
+    template<typename Pred>
+    rusty::Option<size_t> position(Pred&& pred) {
+        size_t idx = 0;
+        while (cur_ != end_) {
+            pointer current = cur_;
+            ++cur_;
+            if (std::forward<Pred>(pred)(*current)) {
+                return rusty::Option<size_t>(idx);
+            }
+            ++idx;
+        }
+        return rusty::None;
+    }
+
     class ClonedIter {
     public:
         using value_type = std::remove_const_t<T>;
@@ -134,6 +148,7 @@ public:
     };
 
     ClonedIter cloned() const { return ClonedIter(*this); }
+    ClonedIter copied() const { return ClonedIter(*this); }
 
 private:
     pointer cur_;
@@ -395,7 +410,11 @@ public:
 
     auto next() {
         using item_type = next_item_t<Iter>;
-        using entry_type = std::tuple<size_t, item_type>;
+        using entry_item_type = std::conditional_t<
+            std::is_pointer_v<item_type>,
+            decltype(deref_if_pointer(std::declval<item_type>())),
+            item_type>;
+        using entry_type = std::tuple<size_t, entry_item_type>;
         using next_result = rusty::Option<entry_type>;
         auto item = iter_.next();
         if (!option_like_has_value(item)) {
@@ -403,7 +422,7 @@ public:
         }
         return next_result(entry_type(
             index_++,
-            option_like_take_value(item))
+            deref_if_pointer(option_like_take_value(item)))
         );
     }
 
@@ -418,7 +437,11 @@ public:
         );
 
         using item_type = next_item_t<Iter>;
-        using entry_type = std::tuple<size_t, item_type>;
+        using entry_item_type = std::conditional_t<
+            std::is_pointer_v<item_type>,
+            decltype(deref_if_pointer(std::declval<item_type>())),
+            item_type>;
+        using entry_type = std::tuple<size_t, entry_item_type>;
         using next_result = rusty::Option<entry_type>;
 
         const auto hint = iter_.size_hint();
@@ -432,7 +455,7 @@ public:
         }
         return next_result(entry_type(
             index_ + (remaining - 1),
-            option_like_take_value(item))
+            deref_if_pointer(option_like_take_value(item)))
         );
     }
 
@@ -1155,6 +1178,14 @@ decltype(auto) for_in(Range&& range) {
 
 template<typename Range, typename Func>
 decltype(auto) map(Range&& range, Func&& func) {
+    if constexpr (
+        requires {
+            std::forward<Range>(range).is_some();
+            std::forward<Range>(range).map(std::forward<Func>(func));
+        })
+    {
+        return std::forward<Range>(range).map(std::forward<Func>(func));
+    } else
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         return detail::make_map_next_iter(
             std::forward<Range>(range),

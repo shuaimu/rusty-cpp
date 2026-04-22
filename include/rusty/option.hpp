@@ -5,6 +5,7 @@
 #include <utility>
 #include <stdexcept>
 #include <cstdlib>
+#include <iterator>
 #include <type_traits>
 
 // Option<T> - Represents an optional value
@@ -24,6 +25,21 @@ namespace rusty {
 
 // Forward declaration for Result (defined in result.hpp, included later)
 template<typename T, typename E> class Result;
+
+template<typename X>
+struct option_is_result : std::false_type {};
+
+template<typename T, typename E>
+struct option_is_result<Result<T, E>> : std::true_type {};
+
+template<typename X>
+inline constexpr bool option_is_result_v = option_is_result<std::remove_cvref_t<X>>::value;
+
+template<typename X>
+using option_result_ok_t = typename std::remove_cvref_t<X>::ok_type;
+
+template<typename X>
+using option_result_err_t = typename std::remove_cvref_t<X>::err_type;
 
 // Tag types for Option variants
 struct None_t {
@@ -45,6 +61,8 @@ private:
     };
     
 public:
+    using value_type = T;
+
     static Option none() { return Option(None); }
 
     // Constructors
@@ -55,6 +73,16 @@ public:
     Option(std::nullopt_t) : has_value(false), dummy(0) {}
     
     Option(T val) : has_value(true), value(std::move(val)) {}
+
+    template<typename U>
+    requires (!std::is_same_v<U, T> && std::is_constructible_v<T, U&&>)
+    Option(Option<U>&& other) : has_value(other.is_some()) {
+        if (has_value) {
+            new (&value) T(std::move(other.unwrap()));
+        } else {
+            dummy = 0;
+        }
+    }
 
     template<typename U>
     requires std::is_same_v<std::remove_cvref_t<U>, std::optional<T>>
@@ -111,6 +139,21 @@ public:
                 new (&value) T(std::move(other.value));
                 other.has_value = false;
             }
+        }
+        return *this;
+    }
+
+    template<typename U>
+    requires (!std::is_same_v<U, T> && std::is_constructible_v<T, U&&>)
+    Option& operator=(Option<U>&& other) {
+        if (has_value) {
+            value.~T();
+        }
+        has_value = other.is_some();
+        if (has_value) {
+            new (&value) T(std::move(other.unwrap()));
+        } else {
+            dummy = 0;
         }
         return *this;
     }
@@ -267,6 +310,42 @@ public:
         return other;
     }
 
+    // Rust parity: Option::or_else(self, f) -> Option<T>
+    template<typename F>
+    Option or_else(F&& f) {
+        if (has_value) {
+            return Option(std::move(value));
+        }
+        return std::forward<F>(f)();
+    }
+
+    template<typename F>
+    Option or_else(F&& f) const {
+        if (has_value) {
+            return Option(value);
+        }
+        return std::forward<F>(f)();
+    }
+
+    // Rust parity: Option::get_or_insert(self, value) -> &mut T
+    T& get_or_insert(T default_value) {
+        if (!has_value) {
+            new (&value) T(std::move(default_value));
+            has_value = true;
+        }
+        return value;
+    }
+
+    // Rust parity: Option::get_or_insert_with(self, f) -> &mut T
+    template<typename F>
+    T& get_or_insert_with(F&& f) {
+        if (!has_value) {
+            new (&value) T(std::forward<F>(f)());
+            has_value = true;
+        }
+        return value;
+    }
+
     // ok_or_else: convert Option<T> to Result<T, E> using closure for error
     template<typename E>
     auto ok_or(E err) -> Result<T, E> {
@@ -330,6 +409,24 @@ public:
             return f(value);
         }
         return default_fn();
+    }
+
+    // Rust parity: Option<Result<T, E>>::transpose(self) -> Result<Option<T>, E>
+    template<typename Q = T>
+    auto transpose() -> Result<Option<option_result_ok_t<Q>>, option_result_err_t<Q>>
+    requires option_is_result_v<Q> {
+        using InnerOk = option_result_ok_t<Q>;
+        using InnerErr = option_result_err_t<Q>;
+
+        if (!has_value) {
+            return Result<Option<InnerOk>, InnerErr>::Ok(Option<InnerOk>(None));
+        }
+
+        auto inner = std::move(value);
+        if (inner.is_ok()) {
+            return Result<Option<InnerOk>, InnerErr>::Ok(Option<InnerOk>(inner.unwrap()));
+        }
+        return Result<Option<InnerOk>, InnerErr>::Err(inner.unwrap_err());
     }
     
     // Take the value out, leaving None
@@ -395,6 +492,8 @@ private:
     T* ptr;  // nullptr if None, otherwise points to the value
 
 public:
+    using value_type = T&;
+
     static Option none() { return Option(None); }
 
     // Constructors
@@ -630,6 +729,8 @@ private:
     const T* ptr;  // nullptr if None, otherwise points to the value
 
 public:
+    using value_type = const T&;
+
     static Option none() { return Option(None); }
 
     // Constructors
@@ -840,11 +941,35 @@ Option<const T&> SomeRef(const T& ref) {
 }
 
 // Equality operators
+template<typename L, typename R>
+bool option_payload_equals(const L& lhs, const R& rhs) {
+    if constexpr (requires { lhs == rhs; }) {
+        return lhs == rhs;
+    } else if constexpr (requires { rhs == lhs; }) {
+        return rhs == lhs;
+    } else if constexpr (
+        requires { std::begin(lhs); std::end(lhs); std::begin(rhs); std::end(rhs); }
+    ) {
+        auto lit = std::begin(lhs);
+        auto lend = std::end(lhs);
+        auto rit = std::begin(rhs);
+        auto rend = std::end(rhs);
+        for (; lit != lend && rit != rend; ++lit, ++rit) {
+            if (!option_payload_equals(*lit, *rit)) {
+                return false;
+            }
+        }
+        return lit == lend && rit == rend;
+    } else {
+        return false;
+    }
+}
+
 template<typename T>
 bool operator==(const Option<T>& lhs, const Option<T>& rhs) {
     if (lhs.is_none() && rhs.is_none()) return true;
     if (lhs.is_some() && rhs.is_some()) {
-        return lhs.as_ref().unwrap() == rhs.as_ref().unwrap();
+        return option_payload_equals(lhs.as_ref().unwrap(), rhs.as_ref().unwrap());
     }
     return false;
 }

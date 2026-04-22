@@ -318,6 +318,77 @@ public:
         new (&data_[size_]) T(std::move(value));
         ++size_;
     }
+
+    template<typename Iter>
+    void extend(Iter&& iter) {
+        auto option_like_has_value = [](const auto& opt) {
+            if constexpr (requires { opt.is_some(); }) {
+                return opt.is_some();
+            } else if constexpr (requires { opt.has_value(); }) {
+                return opt.has_value();
+            } else {
+                return static_cast<bool>(opt);
+            }
+        };
+        auto option_like_take_value = [](auto& opt) {
+            if constexpr (requires { opt.unwrap(); }) {
+                return opt.unwrap();
+            } else if constexpr (requires { opt.has_value(); opt.reset(); }) {
+                auto value = std::move(*opt);
+                opt.reset();
+                return value;
+            } else {
+                return std::move(*opt);
+            }
+        };
+        auto normalize_item_for_vec = [](auto&& value) -> T {
+            using Value = std::remove_cvref_t<decltype(value)>;
+            if constexpr (std::is_pointer_v<Value> && !std::is_pointer_v<T>) {
+                using Pointee = std::remove_cv_t<std::remove_pointer_t<Value>>;
+                if constexpr (std::is_convertible_v<Pointee, T>) {
+                    return static_cast<T>(*value);
+                } else {
+                    return T(*value);
+                }
+            } else if constexpr (requires { value.get(); } && !std::is_pointer_v<T>) {
+                using GetType = std::remove_cvref_t<decltype(value.get())>;
+                if constexpr (std::is_pointer_v<GetType>) {
+                    using Pointee = std::remove_cv_t<std::remove_pointer_t<GetType>>;
+                    if constexpr (std::is_convertible_v<Pointee, T>) {
+                        return static_cast<T>(*value.get());
+                    } else {
+                        return T(*value.get());
+                    }
+                } else if constexpr (std::is_convertible_v<decltype(value.get()), T>) {
+                    return static_cast<T>(value.get());
+                } else {
+                    return T(value.get());
+                }
+            } else if constexpr (requires { value.clone(); }) {
+                return value.clone();
+            } else if constexpr (std::is_convertible_v<decltype(value), T>) {
+                return static_cast<T>(std::forward<decltype(value)>(value));
+            } else {
+                return T(std::forward<decltype(value)>(value));
+            }
+        };
+        if constexpr (requires { std::forward<Iter>(iter).next(); }) {
+            auto&& next_iter = std::forward<Iter>(iter);
+            while (true) {
+                auto item = next_iter.next();
+                if (!option_like_has_value(item)) {
+                    break;
+                }
+                push(normalize_item_for_vec(option_like_take_value(item)));
+            }
+        } else if constexpr (requires { std::forward<Iter>(iter).into_iter(); }) {
+            extend(std::forward<Iter>(iter).into_iter());
+        } else {
+            for (auto&& item : std::forward<Iter>(iter)) {
+                push(normalize_item_for_vec(std::forward<decltype(item)>(item)));
+            }
+        }
+    }
     
     // Pop element from the back
     // Returns empty Option-like type if vec is empty

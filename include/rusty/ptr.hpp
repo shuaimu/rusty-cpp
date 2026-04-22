@@ -239,6 +239,14 @@ inline void write(T* dst, U&& value) {
     std::construct_at(dst, std::forward<U>(value));
 }
 
+// Some generated call sites may carry escaped identifier spellings (`write_`)
+// when traversing generic path-lowering code paths. Keep a forwarding alias
+// so both spellings map to Rust `ptr::write` semantics.
+template<typename T, typename U>
+inline void write_(T* dst, U&& value) {
+    write(dst, std::forward<U>(value));
+}
+
 template<typename T, typename Count>
 inline void copy(const T* src, T* dst, Count count) {
     const auto element_count = static_cast<std::size_t>(count);
@@ -249,21 +257,41 @@ inline void copy(const T* src, T* dst, Count count) {
         auto byte_count = element_count * sizeof(T);
         std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
     } else if (dst < src) {
-        // Left-shift overlap patterns (`dst` before `src`) map to move-assignment.
+        // Left-shift overlap patterns (`dst` before `src`) move low→high.
         for (std::size_t i = 0; i < element_count; ++i) {
-            dst[i] = std::move(const_cast<T&>(src[i]));
+            T* const dst_i = dst + i;
+            T* const src_i = const_cast<T*>(src) + i;
+            // Destination is currently initialized; destroy it unless a prior
+            // move already marked the slot as forgotten.
+            if (!rusty::mem::consume_forgotten_address(static_cast<const void*>(dst_i))) {
+                std::destroy_at(dst_i);
+            }
+            std::construct_at(dst_i, std::move(*src_i));
+            // Model move-shift semantics for drop-sensitive generated types.
+            rusty::mem::mark_forgotten_address(static_cast<const void*>(src_i));
         }
     } else {
         // Right-shift overlap patterns need reverse order. Slots beyond source
         // coverage are newly opened holes and require placement construction.
         for (std::size_t i = element_count; i-- > 0;) {
             T* const dst_i = dst + i;
-            T& src_i = const_cast<T&>(src[i]);
+            T* const src_i = const_cast<T*>(src) + i;
             if (dst_i < src + element_count) {
-                *dst_i = std::move(src_i);
+                // Destination currently holds an object from the source window.
+                if (!rusty::mem::consume_forgotten_address(static_cast<const void*>(dst_i))) {
+                    std::destroy_at(dst_i);
+                }
             } else {
-                std::construct_at(dst_i, std::move(src_i));
+                // Newly opened hole: ensure stale marker state cannot leak to
+                // the newly constructed destination object.
+                rusty::mem::clear_forgotten_address_range(
+                    static_cast<const void*>(dst_i), sizeof(T));
             }
+            std::construct_at(dst_i, std::move(*src_i));
+            // Rust `ptr::copy` move-shift callers treat this source slot as logically
+            // uninitialized after the move. Mark it forgotten so any later destructor
+            // path skips running user drop code on moved-from state.
+            rusty::mem::mark_forgotten_address(static_cast<const void*>(src_i));
         }
     }
 }

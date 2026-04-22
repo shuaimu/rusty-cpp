@@ -352,14 +352,18 @@ pub fn discover_targets(
     Ok((pkg.name.clone(), targets))
 }
 
-/// Discover resolved local path dependencies for the selected package.
+/// Discover resolved dependency packages for the selected package.
 ///
-/// Returns local dependency packages in deterministic dependency order
+/// Returns dependency packages in deterministic dependency order
 /// (dependencies first), filtered to unconditional normal dependencies
 /// (`kind = null`, `target = null`) and packages exposing a library target.
-pub fn discover_local_path_dependencies(
+///
+/// When `include_registry_packages` is `false`, this preserves legacy behavior
+/// and returns only local path dependencies (`source = null`).
+pub fn discover_library_dependencies(
     manifest_path: &Path,
     package_filter: Option<&str>,
+    include_registry_packages: bool,
 ) -> Result<Vec<LocalDependencyPackage>, String> {
     let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
     let output = std::process::Command::new("cargo")
@@ -418,6 +422,7 @@ pub fn discover_local_path_dependencies(
         root_id: &str,
         packages_by_id: &HashMap<&'a str, &'a ResolvedPackage>,
         edges: &HashMap<&'a str, Vec<&'a str>>,
+        include_registry_packages: bool,
         visiting: &mut HashSet<String>,
         visited: &mut HashSet<String>,
         out: &mut Vec<LocalDependencyPackage>,
@@ -429,7 +434,16 @@ pub fn discover_local_path_dependencies(
 
         if let Some(deps) = edges.get(node_id) {
             for dep in deps {
-                visit(dep, root_id, packages_by_id, edges, visiting, visited, out);
+                visit(
+                    dep,
+                    root_id,
+                    packages_by_id,
+                    edges,
+                    include_registry_packages,
+                    visiting,
+                    visited,
+                    out,
+                );
             }
         }
 
@@ -442,7 +456,7 @@ pub fn discover_local_path_dependencies(
         let Some(pkg) = packages_by_id.get(node_id) else {
             return;
         };
-        if pkg.source.is_some() {
+        if !include_registry_packages && pkg.source.is_some() {
             return;
         }
         if !pkg.targets.iter().any(target_is_library_like) {
@@ -462,6 +476,7 @@ pub fn discover_local_path_dependencies(
         root_id.as_str(),
         &packages_by_id,
         &edges,
+        include_registry_packages,
         &mut visiting,
         &mut visited,
         &mut deps,
@@ -471,6 +486,14 @@ pub fn discover_local_path_dependencies(
     let mut seen_manifests = HashSet::new();
     deps.retain(|dep| seen_manifests.insert(dep.manifest_path.clone()));
     Ok(deps)
+}
+
+/// Backward-compatible helper: local path dependencies only.
+pub fn discover_local_path_dependencies(
+    manifest_path: &Path,
+    package_filter: Option<&str>,
+) -> Result<Vec<LocalDependencyPackage>, String> {
+    discover_library_dependencies(manifest_path, package_filter, false)
 }
 
 #[cfg(test)]

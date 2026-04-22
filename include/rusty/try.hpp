@@ -1,6 +1,8 @@
 #ifndef RUSTY_TRY_HPP
 #define RUSTY_TRY_HPP
 
+#include <type_traits>
+
 // Rust-like ? operator for C++ using GCC/Clang statement expressions.
 //
 // RUSTY_TRY(expr):
@@ -68,7 +70,7 @@
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_none()) { \
-            return rusty::Option<decltype(_rusty_try_result.unwrap())>::none(); \
+            return rusty::None; \
         } \
         _rusty_try_result.unwrap(); \
     })
@@ -78,7 +80,7 @@
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_none()) { \
-            co_return rusty::Option<decltype(_rusty_try_result.unwrap())>::none(); \
+            co_return rusty::None; \
         } \
         _rusty_try_result.unwrap(); \
     })

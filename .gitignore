@@ -11,3 +11,8 @@ build-tests/
 .apas
 .rusty-parity/
 .rusty-parity-matrix/
+gcm.cache/
+tests/transpile_tests/pollster/
+tests/transpile_tests/serde/
+tests/transpile_tests/serde_core/
+tests/transpile_tests/toml/

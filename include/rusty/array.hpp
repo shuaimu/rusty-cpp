@@ -393,16 +393,30 @@ decltype(auto) adapt_as_ptr_result(const Container&, Ptr ptr) {
         using Pointee = std::remove_pointer_t<PtrRaw>;
         using MaybeUninitT = std::remove_cv_t<Pointee>;
         using Payload = typename maybe_uninit_payload<MaybeUninitT>::type;
-        if constexpr (std::is_void_v<Payload>) {
-            return ptr;
-        } else if constexpr (has_container_item<Container>::value) {
-            using Item = std::remove_reference_t<container_item_t<Container>>;
-            if constexpr (std::is_same_v<std::remove_cv_t<Item>, std::remove_cv_t<Payload>>) {
-                using ConstItem = std::add_const_t<container_item_t<Container>>;
-                return reinterpret_cast<std::add_pointer_t<ConstItem>>(ptr);
+        constexpr bool has_associated_item =
+            has_container_item<Container>::value || has_container_value_type<Container>::value;
+        if constexpr (!std::is_void_v<Payload> && has_associated_item) {
+            using Assoc = std::remove_reference_t<associated_item_t<Container>>;
+            using AssocRaw = std::remove_cv_t<Assoc>;
+            if constexpr (std::is_same_v<AssocRaw, MaybeUninitT>) {
+                return ptr;
+            } else {
+                using AssocPayload = typename maybe_uninit_payload<std::remove_cv_t<Assoc>>::type;
+                using AssocValue = std::conditional_t<
+                    std::is_void_v<AssocPayload>,
+                    std::remove_cv_t<Assoc>,
+                    std::remove_cv_t<AssocPayload>>;
+                if constexpr (std::is_same_v<AssocValue, std::remove_cv_t<Payload>>) {
+                    using AdaptedPointee = std::add_const_t<AssocValue>;
+                    using AdaptedPtr = std::add_pointer_t<AdaptedPointee>;
+                    return reinterpret_cast<AdaptedPtr>(ptr);
+                } else {
+                    return ptr;
+                }
             }
+        } else {
+            return ptr;
         }
-        return ptr;
     }
 }
 
@@ -415,15 +429,30 @@ decltype(auto) adapt_as_mut_ptr_result(Container&, Ptr ptr) {
         using Pointee = std::remove_pointer_t<PtrRaw>;
         using MaybeUninitT = std::remove_cv_t<Pointee>;
         using Payload = typename maybe_uninit_payload<MaybeUninitT>::type;
-        if constexpr (std::is_void_v<Payload>) {
-            return ptr;
-        } else if constexpr (has_container_item<Container>::value) {
-            using Item = std::remove_reference_t<container_item_t<Container>>;
-            if constexpr (std::is_same_v<std::remove_cv_t<Item>, std::remove_cv_t<Payload>>) {
-                return reinterpret_cast<std::add_pointer_t<container_item_t<Container>>>(ptr);
+        constexpr bool has_associated_item =
+            has_container_item<Container>::value || has_container_value_type<Container>::value;
+        if constexpr (!std::is_void_v<Payload> && has_associated_item) {
+            using Assoc = std::remove_reference_t<associated_item_t<Container>>;
+            using AssocRaw = std::remove_cv_t<Assoc>;
+            if constexpr (std::is_same_v<AssocRaw, MaybeUninitT>) {
+                return ptr;
+            } else {
+                using AssocPayload = typename maybe_uninit_payload<std::remove_cv_t<Assoc>>::type;
+                using AssocValue = std::conditional_t<
+                    std::is_void_v<AssocPayload>,
+                    std::remove_cv_t<Assoc>,
+                    std::remove_cv_t<AssocPayload>>;
+                if constexpr (std::is_same_v<AssocValue, std::remove_cv_t<Payload>>) {
+                    using AdaptedPointee = AssocValue;
+                    using AdaptedPtr = std::add_pointer_t<AdaptedPointee>;
+                    return reinterpret_cast<AdaptedPtr>(ptr);
+                } else {
+                    return ptr;
+                }
             }
+        } else {
+            return ptr;
         }
-        return ptr;
     }
 }
 } // namespace detail
@@ -478,12 +507,14 @@ void rotate_right(Range&& range, size_t k) {
 
 template<typename A, typename B>
 constexpr auto min(A&& a, B&& b) {
-    return std::min(std::forward<A>(a), std::forward<B>(b));
+    using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
+    return std::min(static_cast<C>(std::forward<A>(a)), static_cast<C>(std::forward<B>(b)));
 }
 
 template<typename A, typename B>
 constexpr auto max(A&& a, B&& b) {
-    return std::max(std::forward<A>(a), std::forward<B>(b));
+    using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
+    return std::max(static_cast<C>(std::forward<A>(a)), static_cast<C>(std::forward<B>(b)));
 }
 
 template<typename T, typename Alloc>
@@ -1222,10 +1253,29 @@ auto slice(Container& container, Start start, End end) {
     }
 }
 
+template<typename Start, typename End>
+auto slice(std::string_view container, Start start, End end) {
+    const size_t start_index = detail::checked_index(start);
+    const size_t end_index = detail::checked_index(end);
+    detail::validate_slice_bounds(container, start_index, end_index);
+    return container.substr(start_index, end_index - start_index);
+}
+
 template<typename Container, typename Start, typename End>
 auto slice_inclusive(Container& container, Start start, End end) {
     const size_t end_index = detail::checked_index(end);
     return slice(container, start, end_index + 1);
+}
+
+template<typename T>
+decltype(auto) field_end(T&& value) {
+    if constexpr (requires { std::forward<T>(value).end_value(); }) {
+        return (std::forward<T>(value).end_value());
+    } else if constexpr (requires { std::forward<T>(value).end; }) {
+        return (std::forward<T>(value).end);
+    } else {
+        return std::forward<T>(value).end();
+    }
 }
 
 /// Iterable range [start, end) — equivalent to Rust's `start..end`.
@@ -1248,10 +1298,18 @@ using Bound = std::variant<Bound_Unbounded<T>, Bound_Included<T>, Bound_Excluded
 template<typename T>
 class range {
 public:
+    template<typename>
+    friend class range;
+
     T start;
 
-    range(T start_value, T end_value)
+    constexpr range(T start_value, T end_value)
         : start(std::move(start_value)), end_(std::move(end_value)) {}
+
+    template<typename U>
+    constexpr range(const range<U>& other)
+    requires std::is_convertible_v<U, T>
+        : start(static_cast<T>(other.start)), end_(static_cast<T>(other.end_)) {}
 
     range into_iter() {
         return std::move(*this);
@@ -1277,6 +1335,8 @@ public:
 
     iterator begin() const { return {start, end_, start >= end_}; }
     iterator end() const { return {end_, end_, true}; }
+    T& end_value() { return end_; }
+    const T& end_value() const { return end_; }
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end_}); }
@@ -1334,10 +1394,20 @@ range(A, B) -> range<std::common_type_t<A, B>>;
 template<typename T>
 class range_inclusive {
 public:
+    template<typename>
+    friend class range_inclusive;
+
     T start;
 
-    range_inclusive(T start_value, T end_value)
+    constexpr range_inclusive(T start_value, T end_value)
         : start(std::move(start_value)), end_(std::move(end_value)) {}
+
+    template<typename U>
+    constexpr range_inclusive(const range_inclusive<U>& other)
+    requires std::is_convertible_v<U, T>
+        : start(static_cast<T>(other.start)),
+          end_(static_cast<T>(other.end_)),
+          done_(other.done_) {}
 
     range_inclusive into_iter() {
         return std::move(*this);
@@ -1357,6 +1427,8 @@ public:
 
     iterator begin() const { return {start, end_, start > end_}; }
     iterator end() const { return {end_, end_, true}; }
+    T& end_value() { return end_; }
+    const T& end_value() const { return end_; }
 
     Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
     Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end_}); }
@@ -1422,6 +1494,28 @@ private:
 
 template<typename A, typename B>
 range_inclusive(A, B) -> range_inclusive<std::common_type_t<A, B>>;
+
+template<typename T>
+auto get(std::string_view container, const range<T>& idx) {
+    const size_t start_index = detail::checked_index(idx.start);
+    const size_t end_index = detail::checked_index(idx.end_value());
+    using Opt = Option<std::string_view>;
+    if (start_index > end_index || end_index > container.size()) {
+        return Opt(None);
+    }
+    return Opt(container.substr(start_index, end_index - start_index));
+}
+
+template<typename T>
+auto get(std::string_view container, const range_inclusive<T>& idx) {
+    const size_t start_index = detail::checked_index(idx.start);
+    const size_t end_index = detail::checked_index(idx.end_value());
+    using Opt = Option<std::string_view>;
+    if (start_index > end_index || end_index >= container.size()) {
+        return Opt(None);
+    }
+    return Opt(container.substr(start_index, end_index - start_index + 1));
+}
 
 /// Open range from start — equivalent to Rust's `start..`.
 template<typename T>

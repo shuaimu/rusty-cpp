@@ -817,6 +817,14 @@ inline std::span<const uint8_t> as_bytes(std::string_view sv) {
     return std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
 }
 
+// Helper equivalent to Rust's u8::is_ascii_digit().
+#ifndef RUSTY_HAS_IS_ASCII_DIGIT
+#define RUSTY_HAS_IS_ASCII_DIGIT 1
+inline bool is_ascii_digit(uint8_t byte) {
+    return byte >= static_cast<uint8_t>('0') && byte <= static_cast<uint8_t>('9');
+}
+#endif
+
 // Helper function: Rust str::split_at() equivalent.
 // Splits a string_view into (left, right) at the provided byte offset.
 // Rust requires UTF-8 character boundaries for `str::split_at`; enforce the

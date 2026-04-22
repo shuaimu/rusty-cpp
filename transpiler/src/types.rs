@@ -315,9 +315,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "io::Stderr" | "std::io::Stderr" => Some(("rusty::io::Stderr", false)),
 
         // str (bare type, not &str — &str handled at Type::Reference level)
-        "str" | "core::primitive::str" | "std::primitive::str" => {
-            Some(("std::string_view", false))
-        }
+        "str" | "core::primitive::str" | "std::primitive::str" => Some(("std::string_view", false)),
 
         _ => None,
     }
@@ -492,7 +490,10 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         | "std::string_view::from_utf8_unchecked_mut" => {
             Some("rusty::str_runtime::from_utf8_unchecked_mut")
         }
-        "std::char::from_u32" | "core::char::from_u32" | "char::from_u32" => {
+        "std::char::from_u32"
+        | "core::char::from_u32"
+        | "char::from_u32"
+        | "char32_t::from_u32" => {
             Some("rusty::char_runtime::from_u32")
         }
         "core::fmt::Formatter::debug_tuple_field1_finish" => {

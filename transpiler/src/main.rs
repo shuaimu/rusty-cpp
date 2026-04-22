@@ -1364,8 +1364,10 @@ fn discover_local_dependencies_with_workspace_fallback(
     package: Option<&str>,
     crate_name: &str,
     work_dir: &Path,
+    include_registry_packages: bool,
 ) -> Result<Vec<metadata::LocalDependencyPackage>, String> {
-    let initial = metadata::discover_local_path_dependencies(manifest, package);
+    let initial =
+        metadata::discover_library_dependencies(manifest, package, include_registry_packages);
     if initial.is_ok() {
         return initial;
     }
@@ -1383,8 +1385,11 @@ fn discover_local_dependencies_with_workspace_fallback(
             workspace_manifest.display(),
             selected_package
         );
-        let workspace_attempt =
-            metadata::discover_local_path_dependencies(&workspace_manifest, Some(selected_package));
+        let workspace_attempt = metadata::discover_library_dependencies(
+            &workspace_manifest,
+            Some(selected_package),
+            include_registry_packages,
+        );
         if workspace_attempt.is_ok() {
             return workspace_attempt;
         }
@@ -1407,7 +1412,7 @@ fn discover_local_dependencies_with_workspace_fallback(
         "  Dependency metadata retry: cargo metadata --manifest-path {}",
         isolated_manifest.display()
     );
-    metadata::discover_local_path_dependencies(&isolated_manifest, package)
+    metadata::discover_library_dependencies(&isolated_manifest, package, include_registry_packages)
 }
 
 fn run_cargo_expand_with_workspace_fallback(
@@ -1501,11 +1506,67 @@ fn clear_stage_outputs(work_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn is_external_crate_root_candidate(root: &str) -> bool {
+    if root.is_empty() || root == "_" {
+        return false;
+    }
+    if !root
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase())
+    {
+        return false;
+    }
+    !matches!(
+        root,
+        "crate" | "self" | "super" | "std" | "core" | "alloc" | "cpp" | "rusty"
+    )
+}
+
+fn is_runtime_provided_external_crate_root(root: &str) -> bool {
+    matches!(root, "winnow" | "memchr")
+}
+
+fn rewrite_winnow_namespace_conflicts(cpp: &str) -> String {
+    cpp.replace("namespace error::", "namespace winnow_error::")
+        .replace("namespace error {", "namespace winnow_error {")
+        .replace("::error::", "::winnow_error::")
+        .replace(" error::", " winnow_error::")
+}
+
+fn collect_external_crate_roots_from_source(source: &str) -> HashSet<String> {
+    struct RootCollector {
+        roots: HashSet<String>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for RootCollector {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            if let Some(first) = path.segments.first() {
+                let root = first.ident.to_string();
+                if is_external_crate_root_candidate(&root) {
+                    self.roots.insert(root);
+                }
+            }
+            syn::visit::visit_path(self, path);
+        }
+    }
+
+    let Ok(file) = syn::parse_file(source) else {
+        return HashSet::new();
+    };
+    let mut collector = RootCollector {
+        roots: HashSet::new(),
+    };
+    syn::visit::Visit::visit_file(&mut collector, &file);
+    collector.roots
+}
+
 #[derive(Debug, Clone)]
 struct ParityDependencyTarget {
     package_name: String,
     manifest_path: PathBuf,
     module_name: String,
+    is_registry: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1785,12 +1846,25 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     if targets.is_empty() {
         return Err("No test-capable targets found".to_string());
     }
+    let local_dependency_packages = discover_local_dependencies_with_workspace_fallback(
+        &manifest,
+        &project_dir,
+        args.package.as_deref(),
+        crate_name,
+        &work_dir,
+        false,
+    )?;
+    let local_dependency_manifests: HashSet<PathBuf> = local_dependency_packages
+        .iter()
+        .map(|dep| dep.manifest_path.clone())
+        .collect();
     let dependency_packages = discover_local_dependencies_with_workspace_fallback(
         &manifest,
         &project_dir,
         args.package.as_deref(),
         crate_name,
         &work_dir,
+        true,
     )?;
     let mut dependency_targets: Vec<ParityDependencyTarget> = Vec::new();
     for dep in dependency_packages {
@@ -1810,21 +1884,24 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             .iter()
             .find(|target| matches!(target.kind, metadata::TargetKind::Lib))
         {
+            let is_registry = !local_dependency_manifests.contains(&dep.manifest_path);
             dependency_targets.push(ParityDependencyTarget {
                 package_name: dep.name,
                 manifest_path: dep.manifest_path,
                 module_name: lib_target.module_name.clone(),
+                is_registry,
             });
         }
     }
     if !dependency_targets.is_empty() {
-        println!("  Local dependencies:");
+        println!("  Dependencies:");
         for dep in &dependency_targets {
             println!(
-                "    {} ({}) → module {}",
+                "    {} ({}) → module {}{}",
                 dep.package_name,
                 dep.manifest_path.display(),
-                dep.module_name
+                dep.module_name,
+                if dep.is_registry { " [registry]" } else { "" }
             );
         }
     }
@@ -1987,6 +2064,91 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
 
         expanded_sources.push((target.clone(), source));
     }
+    if !args.dry_run && !dependency_targets.is_empty() {
+        let registry_roots: HashSet<String> = dependency_targets
+            .iter()
+            .filter(|dep| dep.is_registry)
+            .map(|dep| dep.package_name.replace('-', "_"))
+            .filter(|root| !is_runtime_provided_external_crate_root(root))
+            .collect();
+
+        if !registry_roots.is_empty() {
+            let mut selected_registry_roots: HashSet<String> = HashSet::new();
+            let mut worklist: Vec<String> = Vec::new();
+            let mut seed_roots: HashSet<String> = HashSet::new();
+
+            for (_, source) in &expanded_sources {
+                seed_roots.extend(collect_external_crate_roots_from_source(source));
+            }
+            for (dep, source) in &expanded_dependency_sources {
+                if !dep.is_registry {
+                    seed_roots.extend(collect_external_crate_roots_from_source(source));
+                }
+            }
+
+            for root in seed_roots {
+                if registry_roots.contains(&root) && selected_registry_roots.insert(root.clone()) {
+                    worklist.push(root);
+                }
+            }
+
+            let expanded_registry_sources_by_root: HashMap<String, &String> =
+                expanded_dependency_sources
+                    .iter()
+                    .filter(|(dep, _)| dep.is_registry)
+                    .map(|(dep, source)| (dep.package_name.replace('-', "_"), source))
+                    .collect();
+
+            while let Some(root) = worklist.pop() {
+                let Some(source) = expanded_registry_sources_by_root.get(&root) else {
+                    continue;
+                };
+                for nested_root in collect_external_crate_roots_from_source(source) {
+                    if registry_roots.contains(&nested_root)
+                        && selected_registry_roots.insert(nested_root.clone())
+                    {
+                        worklist.push(nested_root);
+                    }
+                }
+            }
+
+            let dropped_registry: Vec<String> = dependency_targets
+                .iter()
+                .filter(|dep| dep.is_registry)
+                .filter_map(|dep| {
+                    let root = dep.package_name.replace('-', "_");
+                    if selected_registry_roots.contains(&root) {
+                        None
+                    } else {
+                        Some(dep.package_name.clone())
+                    }
+                })
+                .collect();
+
+            dependency_targets.retain(|dep| {
+                if !dep.is_registry {
+                    return true;
+                }
+                selected_registry_roots.contains(&dep.package_name.replace('-', "_"))
+            });
+            expanded_dependency_sources.retain(|(dep, _)| {
+                if !dep.is_registry {
+                    return true;
+                }
+                selected_registry_roots.contains(&dep.package_name.replace('-', "_"))
+            });
+
+            if !dropped_registry.is_empty() {
+                let mut dropped = dropped_registry;
+                dropped.sort();
+                dropped.dedup();
+                println!(
+                    "  Pruned unused registry dependencies: {}",
+                    dropped.join(", ")
+                );
+            }
+        }
+    }
     if should_stop("expand") {
         println!("\nStopped after expand stage.");
         return Ok(());
@@ -2061,7 +2223,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                     }
                 })
                 .collect();
-            let cpp = transpile::transpile_full_with_options(
+            let mut cpp = transpile::transpile_full_with_options(
                 source,
                 Some(&dep.module_name),
                 &type_map,
@@ -2069,6 +2231,9 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 Some(dep.package_name.as_str()),
                 &dep_options,
             )?;
+            if dep.package_name == "winnow" {
+                cpp = rewrite_winnow_namespace_conflicts(&cpp);
+            }
             let dep_dir = dependency_dirs.get(&dep.module_name).ok_or_else(|| {
                 format!(
                     "Missing dependency artifact directory for module '{}'",
@@ -2264,6 +2429,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                     continue;
                 }
                 // Skip using declarations for undefined namespaces
+                let references_target_module_namespace = trimmed.starts_with("using namespace ")
+                    && module_namespace_markers
+                        .iter()
+                        .any(|module_prefix| trimmed.contains(module_prefix));
                 if trimmed.starts_with("using ")
                     && !trimmed.contains('=')
                     && (trimmed.contains("::Left")
@@ -2271,9 +2440,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                         || trimmed.contains("iterator::")
                         || trimmed.contains("into_either::")
                         || trimmed == "using namespace ;"
-                        || module_namespace_markers
-                            .iter()
-                            .any(|module_prefix| trimmed.contains(module_prefix)))
+                        || references_target_module_namespace)
                 {
                     runner_src.push_str(&format!("// skipped: {}\n", trimmed));
                     continue;

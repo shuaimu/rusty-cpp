@@ -18,22 +18,22 @@ void test_range_next_and_count() {
         auto r = rusty::range(0, 3);
 
         auto n0 = r.next();
-        assert(n0.has_value());
-        assert(*n0 == 0);
+        assert(n0.is_some());
+        assert(n0.unwrap() == 0);
         assert(r.count() == 2);
 
         auto n1 = r.next();
-        assert(n1.has_value());
-        assert(*n1 == 1);
+        assert(n1.is_some());
+        assert(n1.unwrap() == 1);
         assert(r.count() == 1);
 
         auto n2 = r.next();
-        assert(n2.has_value());
-        assert(*n2 == 2);
+        assert(n2.is_some());
+        assert(n2.unwrap() == 2);
         assert(r.count() == 0);
 
         auto n3 = r.next();
-        assert(!n3.has_value());
+        assert(!n3.is_some());
         assert(r.count() == 0);
     }
     printf("PASS\n");
@@ -45,12 +45,12 @@ void test_range_from_next_and_count_shape() {
         auto r = rusty::range_from(5);
 
         auto n0 = r.next();
-        assert(n0.has_value());
-        assert(*n0 == 5);
+        assert(n0.is_some());
+        assert(n0.unwrap() == 5);
 
         auto n1 = r.next();
-        assert(n1.has_value());
-        assert(*n1 == 6);
+        assert(n1.is_some());
+        assert(n1.unwrap() == 6);
 
         assert(r.count() == std::numeric_limits<size_t>::max());
     }
@@ -61,8 +61,8 @@ void test_range_empty_when_start_exceeds_end() {
     printf("test_range_empty_when_start_exceeds_end: ");
     {
         auto r = rusty::range<size_t>(3, 1);
-        assert(!r.next().has_value());
-        assert(!r.next_back().has_value());
+        assert(!r.next().is_some());
+        assert(!r.next_back().is_some());
         assert(r.count() == 0);
 
         size_t seen = 0;
@@ -79,8 +79,8 @@ void test_range_inclusive_empty_when_start_exceeds_end() {
     printf("test_range_inclusive_empty_when_start_exceeds_end: ");
     {
         auto r = rusty::range_inclusive<size_t>(3, 1);
-        assert(!r.next().has_value());
-        assert(!r.next_back().has_value());
+        assert(!r.next().is_some());
+        assert(!r.next_back().is_some());
         assert(r.count() == 0);
 
         size_t seen = 0;
@@ -571,8 +571,8 @@ void test_take_iterator_adapter_shape() {
         }
         assert((seen == std::vector<int>{0, 1, 2, 3, 4}));
         auto next = range.next();
-        assert(next.has_value());
-        assert(*next == 5);
+        assert(next.is_some());
+        assert(next.unwrap() == 5);
     }
     {
         auto mapped = rusty::map(rusty::take(OptionalCounterIter{}, 2), [](int value) {
@@ -641,8 +641,8 @@ void test_rev_enumerate_iterator_adapter_shape() {
         std::array<int, 3> values{{10, 20, 30}};
         auto enumerated = rusty::enumerate(rusty::iter(values));
         for (auto&& [i, elt] : rusty::for_in(enumerated)) {
-            assert(*elt == values[i]);
-            *elt += static_cast<int>(i);
+            assert(elt == values[i]);
+            elt += static_cast<int>(i);
         }
         assert((values == std::array<int, 3>{{10, 21, 32}}));
     }
@@ -660,7 +660,7 @@ void test_iter_vec_enumerate_adapter_shape() {
     size_t idx = 0;
     for (auto&& [i, elt] : rusty::for_in(rusty::enumerate(rusty::iter(values_ref)))) {
         assert(i == idx);
-        assert(*elt == static_cast<int>(7 + (static_cast<int>(idx) * 2)));
+        assert(elt == static_cast<int>(7 + (static_cast<int>(idx) * 2)));
         ++idx;
     }
     assert(idx == 3);
@@ -683,7 +683,7 @@ void test_iter_mut_enumerate_preserves_mutability_shape() {
 
     Probe probe{};
     for (auto&& [i, elt] : rusty::for_in(rusty::enumerate(rusty::iter_mut(probe)))) {
-        *elt += static_cast<int>(i);
+        elt += static_cast<int>(i);
     }
     assert((probe.values == std::array<int, 3>{{4, 6, 8}}));
     printf("PASS\n");

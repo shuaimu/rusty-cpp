@@ -2,6 +2,7 @@
 #define RUSTY_HPP
 
 #include <cstddef>
+#include <cmath>
 #include <limits>
 
 // Rusty - Rust-inspired safe types for C++
@@ -47,6 +48,7 @@
 // Arrays and ranges
 #include "rusty/array.hpp"
 #include "rusty/slice.hpp"
+#include "rusty/winnow_stream.hpp"
 
 // I/O (std::io equivalent)
 #include "rusty/io.hpp"
@@ -204,6 +206,14 @@ namespace rusty {
         } else {
             return T(value);
         }
+    }
+
+    template<typename T>
+    Option<std::decay_t<T>> then_some(bool condition, T&& value) {
+        if (condition) {
+            return Option<std::decay_t<T>>(std::forward<T>(value));
+        }
+        return Option<std::decay_t<T>>(None);
     }
 
     namespace boxed {

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <cassert>
 #include <chrono>
+#include <exception>
 
 using namespace rusty;
 
@@ -16,8 +17,9 @@ void test_basic_spawn() {
         return 42;
     });
 
-    int result = handle.join();
-    assert(result == 42);
+    auto result = handle.join();
+    assert(result.is_ok());
+    assert(result.unwrap() == 42);
 
     std::cout << "PASSED\n";
 }
@@ -32,8 +34,9 @@ void test_spawn_with_arguments() {
         20, 22
     );
 
-    int result = handle.join();
-    assert(result == 42);
+    auto result = handle.join();
+    assert(result.is_ok());
+    assert(result.unwrap() == 42);
 
     std::cout << "PASSED\n";
 }
@@ -51,7 +54,8 @@ void test_spawn_void() {
         flag
     );
 
-    handle.join();
+    auto joined = handle.join();
+    assert(joined.is_ok());
 
     auto guard = flag->lock().unwrap();
     assert(*guard == true);
@@ -127,8 +131,9 @@ void test_is_finished() {
     // Should be finished now
     assert(handle.is_finished());
 
-    int result = handle.join();
-    assert(result == 42);
+    auto result = handle.join();
+    assert(result.is_ok());
+    assert(result.unwrap() == 42);
 
     std::cout << "PASSED\n";
 }
@@ -141,10 +146,12 @@ void test_exception_propagation() {
         return 42;
     });
 
+    auto joined = handle.join();
+    assert(joined.is_err());
+
     bool caught = false;
     try {
-        int result = handle.join();
-        assert(false);  // Should not reach here
+        std::rethrow_exception(joined.unwrap_err());
     } catch (const std::runtime_error& e) {
         caught = true;
         assert(std::string(e.what()) == "Test exception");
@@ -174,7 +181,8 @@ void test_multiple_threads() {
     }
 
     for (auto& h : handles) {
-        h.join();
+        auto joined = h.join();
+        assert(joined.is_ok());
     }
 
     auto result = counter->lock().unwrap();
@@ -233,8 +241,9 @@ void test_move_handle() {
     handles.push(std::move(handle1));
 
     // Join from vector
-    int result = handles[0].join();
-    assert(result == 42);
+    auto result = handles[0].join();
+    assert(result.is_ok());
+    assert(result.unwrap() == 42);
 
     std::cout << "PASSED\n";
 }

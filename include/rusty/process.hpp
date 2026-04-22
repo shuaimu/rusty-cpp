@@ -16,6 +16,8 @@ namespace rusty {
 
 namespace path {
 
+using Path = std::string;
+
 class PathBuf {
 private:
     std::filesystem::path inner_;
@@ -51,6 +53,10 @@ public:
 
     const std::filesystem::path& as_std_path() const {
         return inner_;
+    }
+
+    Path as_path() const {
+        return inner_.string();
     }
 
     std::string to_string() const {

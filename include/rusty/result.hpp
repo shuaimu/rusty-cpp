@@ -25,6 +25,18 @@
 // @unsafe
 namespace rusty {
 
+template<typename X>
+struct result_is_option : std::false_type {};
+
+template<typename T>
+struct result_is_option<Option<T>> : std::true_type {};
+
+template<typename X>
+inline constexpr bool result_is_option_v = result_is_option<std::remove_cvref_t<X>>::value;
+
+template<typename X>
+using result_option_value_t = typename std::remove_cvref_t<X>::value_type;
+
 template<typename T, typename E>
 class Result {
 private:
@@ -375,6 +387,21 @@ public:
         } else {
             return Result<T, NewE>::Err(f(err_ref()));
         }
+    }
+
+    // Rust parity: Result<Option<T>, E>::transpose(self) -> Option<Result<T, E>>
+    template<typename Q = T>
+    auto transpose() -> Option<Result<result_option_value_t<Q>, E>>
+    requires result_is_option_v<Q> {
+        using Inner = result_option_value_t<Q>;
+        if (is_ok_value) {
+            auto inner = std::move(ok_ref());
+            if (inner.is_some()) {
+                return Option<Result<Inner, E>>(Result<Inner, E>::Ok(inner.unwrap()));
+            }
+            return Option<Result<Inner, E>>(None);
+        }
+        return Option<Result<Inner, E>>(Result<Inner, E>::Err(std::move(err_ref())));
     }
     
     // Chain operations that return Result

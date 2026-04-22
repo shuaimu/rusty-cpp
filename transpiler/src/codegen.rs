@@ -96,6 +96,51 @@ enum GenericParamDefault {
     Const(syn::Expr),
 }
 
+struct NonlocalTypeResolutionGuard<'a> {
+    in_progress: &'a std::cell::RefCell<HashSet<String>>,
+    name: String,
+}
+
+impl<'a> NonlocalTypeResolutionGuard<'a> {
+    fn enter(in_progress: &'a std::cell::RefCell<HashSet<String>>, name: &str) -> Option<Self> {
+        let mut borrowed = in_progress.borrow_mut();
+        let name = name.to_string();
+        if !borrowed.insert(name.clone()) {
+            return None;
+        }
+        drop(borrowed);
+        Some(Self { in_progress, name })
+    }
+}
+
+impl Drop for NonlocalTypeResolutionGuard<'_> {
+    fn drop(&mut self) {
+        self.in_progress.borrow_mut().remove(&self.name);
+    }
+}
+
+struct ExprTypeInferenceGuard<'a> {
+    in_progress: &'a std::cell::RefCell<HashSet<usize>>,
+    key: usize,
+}
+
+impl<'a> ExprTypeInferenceGuard<'a> {
+    fn enter(in_progress: &'a std::cell::RefCell<HashSet<usize>>, key: usize) -> Option<Self> {
+        let mut borrowed = in_progress.borrow_mut();
+        if !borrowed.insert(key) {
+            return None;
+        }
+        drop(borrowed);
+        Some(Self { in_progress, key })
+    }
+}
+
+impl Drop for ExprTypeInferenceGuard<'_> {
+    fn drop(&mut self) {
+        self.in_progress.borrow_mut().remove(&self.key);
+    }
+}
+
 struct AssocCallOwnerTypeCollector<'a> {
     known_type_names: &'a HashSet<String>,
     owner_type_names: HashSet<String>,
@@ -728,6 +773,12 @@ pub struct CodeGen {
     /// Enables order-independent path lowering for names introduced by `use` items
     /// that may appear later in source order than their first use.
     scope_import_bindings: HashMap<(String, String), HashSet<String>>,
+    /// In-progress guards for nonlocal type-tail resolution.
+    /// Prevents recursive fallback cycles (`emit_path_to_string` <-> nonlocal lookup).
+    nonlocal_type_resolution_in_progress: std::cell::RefCell<HashSet<String>>,
+    /// In-progress guards for simple expression type inference.
+    /// Prevents recursive type-inference loops across match-arm and receiver contexts.
+    expr_type_inference_in_progress: std::cell::RefCell<HashSet<usize>>,
     /// Rust-visible bindings introduced by `use cpp::...` imports.
     /// Maps binding name (alias or tail segment) → imported C++ module path without `cpp::`.
     cpp_module_import_bindings: HashMap<String, String>,
@@ -989,6 +1040,8 @@ impl CodeGen {
             import_alias_names: HashSet::new(),
             module_scope_namespace_aliases: HashSet::new(),
             scope_import_bindings: HashMap::new(),
+            nonlocal_type_resolution_in_progress: std::cell::RefCell::new(HashSet::new()),
+            expr_type_inference_in_progress: std::cell::RefCell::new(HashSet::new()),
             cpp_module_import_bindings: HashMap::new(),
             cpp_module_import_paths: Vec::new(),
             cpp_module_import_path_keys: HashSet::new(),
@@ -7610,13 +7663,17 @@ impl CodeGen {
                 .any(|seg| seg == "private" || seg == "private_" || seg.starts_with("__private"));
             if has_private_prefix {
                 if self.module_stack.iter().any(|seg| seg == "de") {
-                    return Some(format!("::de::rusty_ext::{}", fn_name));
+                    if fn_name == "deserialize" {
+                        return Some("::de::rusty_ext::deserialize".to_string());
+                    }
+                    if fn_name == "fmt" {
+                        return Some("::de::rusty_ext::fmt".to_string());
+                    }
                 }
                 if self.module_stack.iter().any(|seg| seg == "ser") {
                     if fn_name == "serialize" {
                         return Some("::ser::impls::rusty_ext::serialize".to_string());
                     }
-                    return Some(format!("::ser::rusty_ext::{}", fn_name));
                 }
             }
             if fn_name == "deserialize" {
@@ -7644,21 +7701,7 @@ impl CodeGen {
         // existing known free-function path with best module-prefix match; only
         // fall back to lexical qualification when metadata is truly unavailable.
         if candidates.is_empty() && namespace_name == "rusty_ext" {
-            if let Some(resolved) =
-                self.resolve_unscoped_namespace_function_expr_path(namespace_name, fn_name)
-            {
-                return Some(resolved);
-            }
-            if !self.module_stack.is_empty() {
-                let lexical = format!(
-                    "{}::{}::{}",
-                    self.module_stack.join("::"),
-                    namespace_name,
-                    fn_name
-                );
-                let escaped = self.escape_and_rename_qualified_name(&lexical);
-                return Some(format!("::{}", escaped));
-            }
+            return self.resolve_unscoped_namespace_function_expr_path(namespace_name, fn_name);
         }
         candidates.sort();
         candidates.dedup();
@@ -7756,13 +7799,17 @@ impl CodeGen {
                 .any(|seg| seg == "private" || seg == "private_" || seg.starts_with("__private"));
             if has_private_prefix {
                 if self.module_stack.iter().any(|seg| seg == "de") {
-                    return Some(format!("::de::rusty_ext::{}", fn_name));
+                    if fn_name == "deserialize" {
+                        return Some("::de::rusty_ext::deserialize".to_string());
+                    }
+                    if fn_name == "fmt" {
+                        return Some("::de::rusty_ext::fmt".to_string());
+                    }
                 }
                 if self.module_stack.iter().any(|seg| seg == "ser") {
                     if fn_name == "serialize" {
                         return Some("::ser::impls::rusty_ext::serialize".to_string());
                     }
-                    return Some(format!("::ser::rusty_ext::{}", fn_name));
                 }
             }
             if fn_name == "deserialize" {
@@ -34022,6 +34069,9 @@ impl CodeGen {
 
     fn infer_simple_expr_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
         let expr = self.extract_value_expr(expr)?;
+        let expr_key = expr as *const syn::Expr as usize;
+        let _inference_guard =
+            ExprTypeInferenceGuard::enter(&self.expr_type_inference_in_progress, expr_key)?;
         match expr {
             syn::Expr::Lit(lit) => self.infer_literal_type(&lit.lit),
             syn::Expr::Path(path) => {
@@ -41110,7 +41160,12 @@ impl CodeGen {
             if method_name == "push_str" && all_args.len() == 2 {
                 return Some(format!("{}.push_str({})", all_args[0], all_args[1]));
             }
-            if is_cross_source_extension_hint {
+            // Cross-source extension hints are name-only and can collide with
+            // common inherent/runtime methods (`get`, `newline`). Keep these
+            // on receiver method syntax when no concrete extension path exists.
+            let skip_unqualified_cross_source_fallback =
+                matches!(method_name.as_str(), "get" | "newline");
+            if is_cross_source_extension_hint && !skip_unqualified_cross_source_fallback {
                 return Some(format!(
                     "::rusty_ext::{}({})",
                     escape_cpp_keyword(&method_name),
@@ -56240,6 +56295,8 @@ impl CodeGen {
         {
             return None;
         }
+        let _resolution_guard =
+            NonlocalTypeResolutionGuard::enter(&self.nonlocal_type_resolution_in_progress, name)?;
         let scope_key = self.module_stack.join("::");
         if let Some(bound_target) =
             self.resolve_scope_import_binding_path_for_scope(&scope_key, name)
