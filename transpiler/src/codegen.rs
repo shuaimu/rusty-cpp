@@ -2075,7 +2075,42 @@ impl CodeGen {
             }
             emitted[scc_idx] = true;
             let mut component_nodes = sccs[scc_idx].clone();
-            component_nodes.sort_by_key(|&module_pos| inline_modules[module_pos].0);
+            let component_set: HashSet<usize> = component_nodes.iter().copied().collect();
+            let mut local_out_degree: HashMap<usize, usize> = HashMap::new();
+            let mut local_in_degree: HashMap<usize, usize> = HashMap::new();
+            for &module_pos in &component_nodes {
+                let out_count = outgoing[module_pos]
+                    .iter()
+                    .filter(|next| component_set.contains(next))
+                    .count();
+                local_out_degree.insert(module_pos, out_count);
+                local_in_degree.entry(module_pos).or_insert(0);
+            }
+            for &module_pos in &component_nodes {
+                for &next in &outgoing[module_pos] {
+                    if component_set.contains(&next) {
+                        *local_in_degree.entry(next).or_insert(0) += 1;
+                    }
+                }
+            }
+            component_nodes.sort_by(|a, b| {
+                let a_out = *local_out_degree.get(a).unwrap_or(&0);
+                let b_out = *local_out_degree.get(b).unwrap_or(&0);
+                let a_in = *local_in_degree.get(a).unwrap_or(&0);
+                let b_in = *local_in_degree.get(b).unwrap_or(&0);
+                let a_to_b = outgoing[*a].contains(b);
+                let b_to_a = outgoing[*b].contains(a);
+                if a_to_b && b_to_a {
+                    return b_out
+                        .cmp(&a_out)
+                        .then_with(|| b_in.cmp(&a_in))
+                        .then_with(|| inline_modules[*a].0.cmp(&inline_modules[*b].0));
+                }
+                b_out
+                    .cmp(&a_out)
+                    .then_with(|| a_in.cmp(&b_in))
+                    .then_with(|| inline_modules[*a].0.cmp(&inline_modules[*b].0))
+            });
             sorted_positions.extend(component_nodes);
 
             let outgoing_sccs: Vec<usize> = scc_outgoing[scc_idx].iter().copied().collect();
@@ -3846,6 +3881,7 @@ impl CodeGen {
                 &u.tree,
                 &mut prefix,
                 known_modules,
+                forward_declable_types_by_module,
                 &mut imported_name_to_module,
             );
             let mut glob_prefix: Vec<String> = Vec::new();
@@ -3946,13 +3982,6 @@ impl CodeGen {
                             out,
                         );
                     }
-                    self.collect_block_module_dependencies_for_hard_dependencies(
-                        &f.block,
-                        known_modules,
-                        forward_declable_types_by_module,
-                        &imported_name_to_module,
-                        out,
-                    );
                 }
                 syn::Item::Impl(imp) => {
                     for impl_item in &imp.items {
@@ -4006,6 +4035,13 @@ impl CodeGen {
                                         out,
                                     );
                                 }
+                                self.collect_block_module_dependencies_for_hard_dependencies(
+                                    &method.block,
+                                    known_modules,
+                                    forward_declable_types_by_module,
+                                    &imported_name_to_module,
+                                    out,
+                                );
                             }
                             _ => {}
                         }
@@ -4073,6 +4109,7 @@ impl CodeGen {
         tree: &syn::UseTree,
         prefix: &mut Vec<String>,
         known_modules: &HashSet<String>,
+        forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
         imported_name_to_module: &mut HashMap<String, String>,
     ) {
         match tree {
@@ -4082,6 +4119,7 @@ impl CodeGen {
                     &p.tree,
                     prefix,
                     known_modules,
+                    forward_declable_types_by_module,
                     imported_name_to_module,
                 );
                 let _ = prefix.pop();
@@ -4093,6 +4131,7 @@ impl CodeGen {
                     &full,
                     &n.ident.to_string(),
                     known_modules,
+                    forward_declable_types_by_module,
                     imported_name_to_module,
                 );
             }
@@ -4103,6 +4142,7 @@ impl CodeGen {
                     &full,
                     &r.rename.to_string(),
                     known_modules,
+                    forward_declable_types_by_module,
                     imported_name_to_module,
                 );
             }
@@ -4113,6 +4153,7 @@ impl CodeGen {
                         item,
                         prefix,
                         known_modules,
+                        forward_declable_types_by_module,
                         imported_name_to_module,
                     );
                 }
@@ -4160,12 +4201,13 @@ impl CodeGen {
         segments: &[String],
         alias: &str,
         known_modules: &HashSet<String>,
+        forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
         imported_name_to_module: &mut HashMap<String, String>,
     ) {
         if segments.is_empty() {
             return;
         }
-        let module_root = if known_modules.contains(&segments[0]) {
+        let mut module_root = if known_modules.contains(&segments[0]) {
             Some(segments[0].clone())
         } else if matches!(segments[0].as_str(), "crate" | "self" | "super")
             && segments.len() > 1
@@ -4193,6 +4235,87 @@ impl CodeGen {
                 .find(|segment| known_modules.contains(*segment))
                 .cloned()
         };
+        if module_root.is_none() {
+            // Re-exported aliases like `use crate::de::DeString;` can ultimately
+            // resolve to sibling modules (for example `devalue::DeString`).
+            let raw_path = segments.join("::");
+            let resolved = self.resolve_nested_local_reexport_path(&raw_path);
+            if !resolved.is_empty() && !resolved.contains(" = ") {
+                let resolved_segments: Vec<String> = resolved
+                    .trim_start_matches("::")
+                    .split("::")
+                    .filter(|seg| !seg.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                let mut start_idx = 0usize;
+                while start_idx < resolved_segments.len()
+                    && matches!(
+                        resolved_segments[start_idx].as_str(),
+                        "crate" | "self" | "super"
+                    )
+                {
+                    start_idx += 1;
+                }
+                module_root = resolved_segments[start_idx..]
+                    .iter()
+                    .find(|segment| known_modules.contains(*segment))
+                    .cloned();
+            }
+        }
+        if module_root.is_none() {
+            // Fallback: bind aliases to a unique sibling module that declares the
+            // imported type name. This covers re-exported imports where the module
+            // root is not directly visible in the use path.
+            let imported_leaf = segments.last().cloned().unwrap_or_default();
+            let mut owner_modules: Vec<String> = forward_declable_types_by_module
+                .iter()
+                .filter_map(|(module, types)| {
+                    if !known_modules.contains(module) {
+                        return None;
+                    }
+                    (types.contains(alias) || types.contains(&imported_leaf))
+                        .then_some(module.clone())
+                })
+                .collect();
+            owner_modules.sort();
+            owner_modules.dedup();
+            if owner_modules.len() == 1 {
+                module_root = owner_modules.into_iter().next();
+            }
+        }
+        if module_root.is_none() {
+            // Additional fallback for non-c-like declarations that aren't tracked in
+            // `forward_declable_types_by_module` (for example type aliases and
+            // structs): infer a unique owner module from declared local type paths.
+            let imported_leaf = segments.last().cloned().unwrap_or_default();
+            let alias_escaped = escape_cpp_keyword(alias);
+            let leaf_escaped = escape_cpp_keyword(&imported_leaf);
+            let candidate_names = [
+                alias,
+                imported_leaf.as_str(),
+                alias_escaped.as_str(),
+                leaf_escaped.as_str(),
+            ];
+            let mut owner_modules: Vec<String> = known_modules
+                .iter()
+                .filter_map(|module| {
+                    let module_escaped = escape_cpp_keyword(module);
+                    let matches_decl = self.local_declared_types.iter().any(|decl| {
+                        candidate_names.iter().any(|name| {
+                            !name.is_empty()
+                                && (decl.ends_with(&format!("::{}::{}", module, name))
+                                    || decl.ends_with(&format!("::{}::{}", module_escaped, name)))
+                        })
+                    });
+                    matches_decl.then_some(module.clone())
+                })
+                .collect();
+            owner_modules.sort();
+            owner_modules.dedup();
+            if owner_modules.len() == 1 {
+                module_root = owner_modules.into_iter().next();
+            }
+        }
         if let Some(module_name) = module_root {
             imported_name_to_module
                 .entry(alias.to_string())
@@ -4525,6 +4648,44 @@ impl CodeGen {
                 }
             }
         }
+        if resolved_module.is_none() {
+            // Re-exported paths can hide the sibling module root
+            // (for example `crate::de::DeString` -> `devalue::DeString`).
+            let raw_path = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            let resolved = self.resolve_nested_local_reexport_path(&raw_path);
+            if !resolved.is_empty() && !resolved.contains(" = ") {
+                let segments: Vec<String> = resolved
+                    .trim_start_matches("::")
+                    .split("::")
+                    .filter(|seg| !seg.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                if !segments.is_empty() {
+                    let mut start_idx = 0usize;
+                    while start_idx < segments.len()
+                        && matches!(segments[start_idx].as_str(), "crate" | "self" | "super")
+                    {
+                        start_idx += 1;
+                    }
+                    for idx in start_idx..segments.len() {
+                        if !known_modules.contains(&segments[idx]) {
+                            continue;
+                        }
+                        resolved_module = Some(segments[idx].clone());
+                        if let Some(next) = segments.get(idx + 1) {
+                            resolved_type_name = Some(next.clone());
+                            resolved_type_segment_index = Some(idx + 1);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
 
         let Some(module_name) = resolved_module else {
             return;
@@ -4693,6 +4854,31 @@ impl CodeGen {
             syn::Item::Mod(nested) => Self::module_contains_type_alias_recursive(nested),
             _ => false,
         })
+    }
+
+    fn module_contains_concrete_type_decl_recursive(m: &syn::ItemMod) -> bool {
+        let Some((_, items)) = &m.content else {
+            return false;
+        };
+        items.iter().any(|item| match item {
+            syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Union(_) => true,
+            syn::Item::Mod(nested) => Self::module_contains_concrete_type_decl_recursive(nested),
+            _ => false,
+        })
+    }
+
+    fn module_concrete_type_decl_count_recursive(m: &syn::ItemMod) -> usize {
+        let Some((_, items)) = &m.content else {
+            return 0;
+        };
+        items
+            .iter()
+            .map(|item| match item {
+                syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Union(_) => 1usize,
+                syn::Item::Mod(nested) => Self::module_concrete_type_decl_count_recursive(nested),
+                _ => 0usize,
+            })
+            .sum()
     }
 
     fn collect_forward_decl_sibling_dependencies_from_signature(
@@ -5297,13 +5483,76 @@ impl CodeGen {
             emitted_any = true;
         }
 
-        for item in ordered_items.iter().copied() {
-            let syn::Item::Mod(m) = item else {
-                continue;
-            };
-            if Self::has_cfg_test(&m.attrs) || m.content.is_none() {
-                continue;
+        let sibling_module_names: HashSet<String> = ordered_items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Mod(m) if !Self::has_cfg_test(&m.attrs) && m.content.is_some() => {
+                    Some(m.ident.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        let sibling_type_reexports = Self::collect_forward_decl_sibling_type_reexports(
+            &ordered_items,
+            &sibling_module_names,
+        );
+        let nested_mods: Vec<(usize, &syn::ItemMod, bool, bool, HashSet<String>)> = ordered_items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                let syn::Item::Mod(m) = item else {
+                    return None;
+                };
+                if Self::has_cfg_test(&m.attrs) || m.content.is_none() {
+                    return None;
+                }
+                let has_type_alias = Self::module_contains_type_alias_recursive(m);
+                let has_concrete_type_decl = Self::module_contains_concrete_type_decl_recursive(m);
+                let deps = Self::module_forward_decl_sibling_dependencies(
+                    m,
+                    &sibling_module_names,
+                    Some(&sibling_type_reexports),
+                );
+                Some((idx, m, has_type_alias, has_concrete_type_decl, deps))
+            })
+            .collect();
+        let mut remaining: Vec<usize> = (0..nested_mods.len()).collect();
+        let mut emitted_module_names = HashSet::<String>::new();
+        let mut nested_mod_order = Vec::<usize>::new();
+        while !remaining.is_empty() {
+            let mut ready: Vec<usize> = remaining
+                .iter()
+                .copied()
+                .filter(|idx| {
+                    let (_, _, _, _, deps) = &nested_mods[*idx];
+                    deps.iter().all(|dep| emitted_module_names.contains(dep))
+                })
+                .collect();
+            if ready.is_empty() {
+                // Cyclic sibling references: keep stable source order but prioritize
+                // concrete type owners so sibling aliases have declarations to bind to.
+                remaining.sort_by_key(|idx| {
+                    let (src_idx, _, has_type_alias, has_concrete_type_decl, _) = &nested_mods[*idx];
+                    (!*has_concrete_type_decl, !*has_type_alias, *src_idx)
+                });
+                nested_mod_order.extend(remaining.into_iter());
+                break;
             }
+            ready.sort_by_key(|idx| {
+                let (src_idx, _, has_type_alias, has_concrete_type_decl, _) = &nested_mods[*idx];
+                (!*has_concrete_type_decl, !*has_type_alias, *src_idx)
+            });
+            for idx in ready {
+                if !remaining.contains(&idx) {
+                    continue;
+                }
+                remaining.retain(|other| *other != idx);
+                emitted_module_names.insert(nested_mods[idx].1.ident.to_string());
+                nested_mod_order.push(idx);
+            }
+        }
+        for idx in nested_mod_order {
+            let (_, m, _, _, _) = nested_mods[idx];
             let Some((_, nested_items)) = &m.content else {
                 continue;
             };
@@ -5490,8 +5739,15 @@ impl CodeGen {
             self.in_forward_decl_signature = true;
         }
         self.in_forward_decl_signature = prev_forward_decl_signature;
+        let signature_mentions_unqualified_scope_import = self
+            .forward_decl_signature_mentions_unqualified_scope_import_name(&return_type, &params);
+        let signature_has_unqualified_unknown_type = self
+            .forward_decl_signature_has_unqualified_unknown_type_name(&return_type, &params);
         self.pop_type_param_scope();
-        if signature_has_unresolved_scoped_paths {
+        if signature_has_unresolved_scoped_paths
+            || signature_mentions_unqualified_scope_import
+            || signature_has_unqualified_unknown_type
+        {
             return false;
         }
 
@@ -5677,14 +5933,42 @@ impl CodeGen {
                 if local_name.is_empty()
                     || local_name == "_"
                     || self.is_type_param_in_scope(&local_name)
-                    || self.current_scope_declares_type_name(&local_name)
-                    || self.declared_item_names.contains(&local_name)
                 {
                     return false;
                 }
                 Self::cpp_spelling_mentions_identifier_unqualified(return_type, &local_name)
                     || Self::cpp_spelling_mentions_identifier_unqualified(params, &local_name)
             })
+    }
+
+    fn forward_decl_signature_has_unqualified_unknown_type_name(
+        &self,
+        return_type: &str,
+        params: &str,
+    ) -> bool {
+        let mut candidates: HashSet<String> = HashSet::new();
+        for spelling in [return_type, params] {
+            for token in spelling.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+                if token.is_empty() {
+                    continue;
+                }
+                if !token
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+                {
+                    continue;
+                }
+                candidates.insert(token.to_string());
+            }
+        }
+        candidates.into_iter().any(|name| {
+            if self.is_type_param_in_scope(&name) || self.current_scope_declares_type_name(&name) {
+                return false;
+            }
+            Self::cpp_spelling_mentions_identifier_unqualified(return_type, &name)
+                || Self::cpp_spelling_mentions_identifier_unqualified(params, &name)
+        })
     }
 
     fn has_forward_decl_items(items: &[syn::Item]) -> bool {
