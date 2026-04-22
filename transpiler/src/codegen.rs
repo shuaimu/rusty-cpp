@@ -1822,12 +1822,14 @@ impl CodeGen {
             Some(sorted_positions)
         };
 
-        let sorted_positions = topo_positions(true).unwrap_or_else(|| {
-            // Keep original relative module order when dependency analysis is cyclic
-            // or incomplete, but still allow delayable function-only namespaces to
-            // move after sibling type definitions.
-            (0..inline_modules.len()).collect()
-        });
+        let sorted_positions = topo_positions(false)
+            .or_else(|| topo_positions(true))
+            .unwrap_or_else(|| {
+                // Keep original relative module order when dependency analysis is cyclic
+                // or incomplete, but still allow delayable function-only namespaces to
+                // move after sibling type definitions.
+                (0..inline_modules.len()).collect()
+            });
 
         let delayable_module_positions: HashSet<usize> = if delay_function_namespaces {
             (0..inline_modules.len())
@@ -3846,6 +3848,13 @@ impl CodeGen {
                 known_modules,
                 &mut imported_name_to_module,
             );
+            let mut glob_prefix: Vec<String> = Vec::new();
+            self.collect_use_tree_glob_module_dependencies_for_hard_dependencies(
+                &u.tree,
+                &mut glob_prefix,
+                known_modules,
+                out,
+            );
         }
 
         for item in items {
@@ -3946,27 +3955,6 @@ impl CodeGen {
                     );
                 }
                 syn::Item::Impl(imp) => {
-                    let is_extension_impl = imp.trait_.is_some()
-                        && (match imp.self_ty.as_ref() {
-                            syn::Type::Path(tp) => {
-                                let raw_self_name = tp
-                                    .path
-                                    .segments
-                                    .iter()
-                                    .map(|s| s.ident.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("::");
-                                let resolved_raw_self_name =
-                                    self.resolve_nested_local_reexport_path(&raw_self_name);
-                                !self.local_declared_types.contains(&raw_self_name)
-                                    && !self.local_declared_types.contains(&resolved_raw_self_name)
-                            }
-                            _ => false,
-                        });
-                    // Extension impl method bodies can reference cross-module types
-                    // via receiver shims; inherent impls are still scanned for method
-                    // signature dependencies so module ordering respects concrete
-                    // by-value return/argument types used before definitions.
                     for impl_item in &imp.items {
                         match impl_item {
                             syn::ImplItem::Const(c) => {
@@ -4012,15 +4000,6 @@ impl CodeGen {
                                 if let syn::ReturnType::Type(_, ret_ty) = &method.sig.output {
                                     self.collect_type_module_dependencies(
                                         ret_ty,
-                                        known_modules,
-                                        forward_declable_types_by_module,
-                                        &imported_name_to_module,
-                                        out,
-                                    );
-                                }
-                                if is_extension_impl {
-                                    self.collect_block_module_dependencies_for_hard_dependencies(
-                                        &method.block,
                                         known_modules,
                                         forward_declable_types_by_module,
                                         &imported_name_to_module,
@@ -4141,6 +4120,41 @@ impl CodeGen {
         }
     }
 
+    fn collect_use_tree_glob_module_dependencies_for_hard_dependencies(
+        &self,
+        tree: &syn::UseTree,
+        prefix: &mut Vec<String>,
+        known_modules: &HashSet<String>,
+        out: &mut HashSet<String>,
+    ) {
+        match tree {
+            syn::UseTree::Path(p) => {
+                prefix.push(p.ident.to_string());
+                self.collect_use_tree_glob_module_dependencies_for_hard_dependencies(
+                    &p.tree,
+                    prefix,
+                    known_modules,
+                    out,
+                );
+                let _ = prefix.pop();
+            }
+            syn::UseTree::Name(_) | syn::UseTree::Rename(_) => {}
+            syn::UseTree::Glob(_) => {
+                self.record_module_dependency_from_segments(prefix, known_modules, out);
+            }
+            syn::UseTree::Group(g) => {
+                for item in &g.items {
+                    self.collect_use_tree_glob_module_dependencies_for_hard_dependencies(
+                        item,
+                        prefix,
+                        known_modules,
+                        out,
+                    );
+                }
+            }
+        }
+    }
+
     fn record_use_alias_module_for_hard_dependencies(
         &self,
         segments: &[String],
@@ -4168,7 +4182,16 @@ impl CodeGen {
                 .map(str::to_string)
                 .filter(|module| known_modules.contains(module))
         } else {
-            None
+            let mut start_idx = 0usize;
+            while start_idx < segments.len()
+                && matches!(segments[start_idx].as_str(), "crate" | "self" | "super")
+            {
+                start_idx += 1;
+            }
+            segments[start_idx..]
+                .iter()
+                .find(|segment| known_modules.contains(*segment))
+                .cloned()
         };
         if let Some(module_name) = module_root {
             imported_name_to_module
@@ -4247,10 +4270,48 @@ impl CodeGen {
                     out,
                 );
             }
+            syn::Type::Reference(r) => {
+                self.collect_type_module_dependencies(
+                    &r.elem,
+                    known_modules,
+                    forward_declable_types_by_module,
+                    imported_name_to_module,
+                    out,
+                );
+            }
+            syn::Type::Ptr(p) => {
+                self.collect_type_module_dependencies(
+                    &p.elem,
+                    known_modules,
+                    forward_declable_types_by_module,
+                    imported_name_to_module,
+                    out,
+                );
+            }
             syn::Type::Tuple(t) => {
                 for elem in &t.elems {
                     self.collect_type_module_dependencies(
                         elem,
+                        known_modules,
+                        forward_declable_types_by_module,
+                        imported_name_to_module,
+                        out,
+                    );
+                }
+            }
+            syn::Type::BareFn(f) => {
+                for input in &f.inputs {
+                    self.collect_type_module_dependencies(
+                        &input.ty,
+                        known_modules,
+                        forward_declable_types_by_module,
+                        imported_name_to_module,
+                        out,
+                    );
+                }
+                if let syn::ReturnType::Type(_, ret_ty) = &f.output {
+                    self.collect_type_module_dependencies(
+                        ret_ty,
                         known_modules,
                         forward_declable_types_by_module,
                         imported_name_to_module,
@@ -4433,6 +4494,35 @@ impl CodeGen {
             } else {
                 resolved_type_name = Some(first_name.clone());
                 resolved_type_segment_index = Some(0);
+            }
+        }
+        // Nested sibling-module paths (for example `de::parser::prelude::Input`)
+        // can appear in signatures and aliases. When direct first-segment
+        // resolution misses, recover by scanning for any sibling module segment.
+        if resolved_module.is_none() {
+            let segments: Vec<String> = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            if !segments.is_empty() {
+                let mut start_idx = 0usize;
+                while start_idx < segments.len()
+                    && matches!(segments[start_idx].as_str(), "crate" | "self" | "super")
+                {
+                    start_idx += 1;
+                }
+                for idx in start_idx..segments.len() {
+                    if !known_modules.contains(&segments[idx]) {
+                        continue;
+                    }
+                    resolved_module = Some(segments[idx].clone());
+                    if let Some(next) = segments.get(idx + 1) {
+                        resolved_type_name = Some(next.clone());
+                        resolved_type_segment_index = Some(idx + 1);
+                    }
+                    break;
+                }
             }
         }
 
@@ -5134,24 +5224,8 @@ impl CodeGen {
                         ""
                     };
                     if enum_is_c_like(e) {
-                        let scoped_enum_name = self.scoped_type_key(&name);
-                        if self
-                            .forward_emitted_c_like_enums
-                            .contains(&scoped_enum_name)
-                        {
-                            continue;
-                        }
-                        // Emit full c-like enum definitions in the forward-decl pass
-                        // so cross-module users can reference enumerators even when
-                        // module emission order places the defining module later.
                         self.emit_template_prefix_without_type_defaults(&e.generics);
-                        self.writeln(&format!("{}enum class {} {{", export_prefix, name));
-                        self.indent += 1;
-                        let variants = self.render_c_like_enum_variants(e);
-                        self.writeln(&variants.join(",\n    "));
-                        self.indent -= 1;
-                        self.writeln("};");
-                        self.forward_emitted_c_like_enums.insert(scoped_enum_name);
+                        self.writeln(&format!("{}enum class {};", export_prefix, name));
                     } else if self.enum_uses_struct_wrapper(e) {
                         self.emit_template_prefix_without_type_defaults(&e.generics);
                         self.writeln(&format!("{}struct {};", export_prefix, name));
@@ -5223,75 +5297,13 @@ impl CodeGen {
             emitted_any = true;
         }
 
-        let sibling_module_names: HashSet<String> = ordered_items
-            .iter()
-            .filter_map(|item| match item {
-                syn::Item::Mod(m) if !Self::has_cfg_test(&m.attrs) && m.content.is_some() => {
-                    Some(m.ident.to_string())
-                }
-                _ => None,
-            })
-            .collect();
-        let sibling_type_reexports = Self::collect_forward_decl_sibling_type_reexports(
-            &ordered_items,
-            &sibling_module_names,
-        );
-        let nested_mods: Vec<(usize, &syn::ItemMod, bool, HashSet<String>)> = ordered_items
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, item)| {
-                let syn::Item::Mod(m) = item else {
-                    return None;
-                };
-                if Self::has_cfg_test(&m.attrs) || m.content.is_none() {
-                    return None;
-                }
-                let has_type_alias = Self::module_contains_type_alias_recursive(m);
-                let deps = Self::module_forward_decl_sibling_dependencies(
-                    m,
-                    &sibling_module_names,
-                    Some(&sibling_type_reexports),
-                );
-                Some((idx, m, has_type_alias, deps))
-            })
-            .collect();
-        let mut remaining: Vec<usize> = (0..nested_mods.len()).collect();
-        let mut emitted_module_names = HashSet::<String>::new();
-        let mut nested_mod_order = Vec::<usize>::new();
-        while !remaining.is_empty() {
-            let mut ready: Vec<usize> = remaining
-                .iter()
-                .copied()
-                .filter(|idx| {
-                    let (_, _, _, deps) = &nested_mods[*idx];
-                    deps.iter().all(|dep| emitted_module_names.contains(dep))
-                })
-                .collect();
-            if ready.is_empty() {
-                // Cyclic sibling references: keep stable source order with a type-alias
-                // bias so alias-heavy modules still emit first.
-                remaining.sort_by_key(|idx| {
-                    let (src_idx, _, has_type_alias, _) = &nested_mods[*idx];
-                    (!*has_type_alias, *src_idx)
-                });
-                nested_mod_order.extend(remaining.into_iter());
-                break;
+        for item in ordered_items.iter().copied() {
+            let syn::Item::Mod(m) = item else {
+                continue;
+            };
+            if Self::has_cfg_test(&m.attrs) || m.content.is_none() {
+                continue;
             }
-            ready.sort_by_key(|idx| {
-                let (src_idx, _, has_type_alias, _) = &nested_mods[*idx];
-                (!*has_type_alias, *src_idx)
-            });
-            for idx in ready {
-                if !remaining.contains(&idx) {
-                    continue;
-                }
-                remaining.retain(|other| *other != idx);
-                emitted_module_names.insert(nested_mods[idx].1.ident.to_string());
-                nested_mod_order.push(idx);
-            }
-        }
-        for idx in nested_mod_order {
-            let (_, m, _, _) = nested_mods[idx];
             let Some((_, nested_items)) = &m.content else {
                 continue;
             };
@@ -39957,7 +39969,10 @@ impl CodeGen {
                 format!("{}.{}({})", self_expr, escaped_method, args.join(", "))
             };
             let mut free_fn = self
-                .resolve_known_unqualified_free_function_expr_path(&method_name)
+                .resolve_scoped_namespace_function_expr_path("rusty_ext", &method_name)
+                .or_else(|| {
+                    self.resolve_unscoped_namespace_function_expr_path("rusty_ext", &method_name)
+                })
                 .or_else(|| {
                     if self.module_stack.is_empty() {
                         return None;
