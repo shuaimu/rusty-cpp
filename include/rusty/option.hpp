@@ -85,6 +85,22 @@ public:
     }
 
     template<typename U>
+    requires (!std::is_same_v<U, T> && !std::is_constructible_v<T, U&&>)
+    Option(Option<U>&& other) : has_value(false), dummy(0) {
+        if (other.is_some()) {
+            throw std::runtime_error("invalid Option conversion with value");
+        }
+    }
+
+    template<typename U>
+    requires (!std::is_same_v<U, T> && !std::is_constructible_v<T, const U&>)
+    Option(const Option<U>& other) : has_value(false), dummy(0) {
+        if (other.is_some()) {
+            throw std::runtime_error("invalid Option conversion with value");
+        }
+    }
+
+    template<typename U>
     requires std::is_same_v<std::remove_cvref_t<U>, std::optional<T>>
     Option(U&& opt) : has_value(opt.has_value()) {
         if (has_value) {

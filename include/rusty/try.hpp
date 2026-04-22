@@ -70,7 +70,7 @@
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_none()) { \
-            return rusty::None; \
+            return decltype(_rusty_try_result)(rusty::None); \
         } \
         _rusty_try_result.unwrap(); \
     })
@@ -80,7 +80,7 @@
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_none()) { \
-            co_return rusty::None; \
+            co_return decltype(_rusty_try_result)(rusty::None); \
         } \
         _rusty_try_result.unwrap(); \
     })
