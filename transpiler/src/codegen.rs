@@ -1724,10 +1724,17 @@ impl CodeGen {
                 };
                 let mut names: HashSet<String> = HashSet::new();
                 for nested_item in module_items {
-                    if let syn::Item::Enum(e) = nested_item
-                        && e.variants.iter().all(|v| v.fields.is_empty())
-                    {
-                        names.insert(e.ident.to_string());
+                    match nested_item {
+                        syn::Item::Struct(s) => {
+                            names.insert(s.ident.to_string());
+                        }
+                        syn::Item::Enum(e) => {
+                            names.insert(e.ident.to_string());
+                        }
+                        syn::Item::Union(u) => {
+                            names.insert(u.ident.to_string());
+                        }
+                        _ => {}
                     }
                 }
                 if names.is_empty() {
@@ -5419,6 +5426,12 @@ impl CodeGen {
                     if enum_is_c_like(e) {
                         self.emit_template_prefix_without_type_defaults(&e.generics);
                         self.writeln(&format!("{}enum class {};", export_prefix, name));
+                        self.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
+                        self.emit_c_like_enum_inherent_method_forward_decls(
+                            e,
+                            export_prefix,
+                            module_depth,
+                        );
                     } else if self.enum_uses_struct_wrapper(e) {
                         self.emit_template_prefix_without_type_defaults(&e.generics);
                         self.writeln(&format!("{}struct {};", export_prefix, name));
@@ -5612,6 +5625,105 @@ impl CodeGen {
             emitted_any = true;
         }
 
+        // Emit simple type re-export aliases (`using child::Type;`) so forward
+        // signatures can rely on module-level re-exported type names before full
+        // `use` emission runs.
+        for item in ordered_items.iter().copied() {
+            let syn::Item::Use(u) = item else {
+                continue;
+            };
+            if Self::has_cfg_test(&u.attrs) {
+                continue;
+            }
+            let export_prefix = if self.is_exported_at_module_depth(&u.vis, module_depth) {
+                "export "
+            } else {
+                ""
+            };
+            let paths = self.flatten_use_tree(&u.tree, "");
+            for path in paths {
+                if split_use_import_alias(path.as_str()).is_some() {
+                    continue;
+                }
+                let normalized = normalize_use_import_path(path.as_str());
+                let mapped_path = match classify_use_import(normalized) {
+                    UseImportAction::Using(mapped) => mapped,
+                    _ => continue,
+                };
+                if mapped_path.contains(" = ") || mapped_path.starts_with("namespace ") {
+                    continue;
+                }
+                let using_path = make_using_path_cpp_legal(&mapped_path);
+                let using_path = self.apply_module_renames_to_path(&using_path);
+                let using_path = self.rewrite_global_using_path_for_local_alias_root(&using_path);
+                let using_path = self.rewrite_using_path_with_scope_import_root(&using_path);
+                let using_path = Self::strip_crate_root_cpp_path(&using_path);
+                let trimmed = using_path.trim_start_matches("::");
+                let parts: Vec<&str> = trimmed
+                    .split("::")
+                    .filter(|seg| !seg.is_empty())
+                    .collect();
+                if parts.len() != 2 {
+                    continue;
+                }
+                if !parts[0]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+                {
+                    continue;
+                }
+                if !parts[1]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+                {
+                    continue;
+                }
+                let escaped_trimmed = trimmed
+                    .split("::")
+                    .filter(|seg| !seg.is_empty())
+                    .map(escape_cpp_keyword)
+                    .collect::<Vec<String>>()
+                    .join("::");
+                let mut alias_target_candidates = vec![trimmed.to_string(), escaped_trimmed.clone()];
+                if !self.module_stack.is_empty() {
+                    let scope = self.module_stack.join("::");
+                    let escaped_scope = self
+                        .module_stack
+                        .iter()
+                        .map(|seg| escape_cpp_keyword(seg))
+                        .collect::<Vec<String>>()
+                        .join("::");
+                    alias_target_candidates.push(format!("{}::{}", scope, trimmed));
+                    alias_target_candidates
+                        .push(format!("{}::{}", scope, escaped_trimmed));
+                    alias_target_candidates.push(format!("{}::{}", escaped_scope, trimmed));
+                    alias_target_candidates
+                        .push(format!("{}::{}", escaped_scope, escaped_trimmed));
+                }
+                alias_target_candidates.sort();
+                alias_target_candidates.dedup();
+                if alias_target_candidates
+                    .iter()
+                    .any(|candidate| self.type_alias_targets.contains_key(candidate))
+                {
+                    // Forward `using ::mod::Alias;` can reference sibling aliases
+                    // before their defining module forward block is emitted. Skip
+                    // those alias imports here; normal module `use` emission still
+                    // runs after alias declarations are available.
+                    continue;
+                }
+                if !self.local_declared_types.contains(trimmed)
+                    && !self.local_declared_types.contains(&escaped_trimmed)
+                {
+                    continue;
+                }
+                self.writeln(&format!("{}using {};", export_prefix, using_path));
+                emitted_any = true;
+            }
+        }
+
         // Emit type aliases after nested module declarations so aliases can
         // reference nested namespace types (e.g. `private_::Foo`) safely.
         for item in ordered_items.iter().copied() {
@@ -5650,6 +5762,115 @@ impl CodeGen {
             }
         }
         emitted_any
+    }
+
+    fn emit_c_like_enum_variant_helper_forward_decls(
+        &mut self,
+        e: &syn::ItemEnum,
+        export_prefix: &str,
+    ) {
+        let enum_name = escape_cpp_keyword(&e.ident.to_string());
+        let type_params: Vec<String> = e
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let enum_ty = if type_params.is_empty() {
+            enum_name.clone()
+        } else {
+            format!("{}<{}>", enum_name, type_params.join(", "))
+        };
+        for variant in &e.variants {
+            self.emit_template_prefix_without_type_defaults(&e.generics);
+            let helper_name = format!(
+                "{}_{}",
+                enum_name,
+                escape_cpp_keyword(&variant.ident.to_string())
+            );
+            self.writeln(&format!(
+                "{}constexpr {} {}();",
+                export_prefix, enum_ty, helper_name
+            ));
+        }
+    }
+
+    fn emit_c_like_enum_inherent_method_forward_decls(
+        &mut self,
+        e: &syn::ItemEnum,
+        export_prefix: &str,
+        module_depth: usize,
+    ) {
+        let enum_name = e.ident.to_string();
+        let scoped_enum_name = self.scoped_type_key(&enum_name);
+        let enum_impl_items = self
+            .impl_blocks
+            .get(&scoped_enum_name)
+            .or_else(|| self.impl_blocks.get(&enum_name))
+            .cloned();
+        let Some(items) = enum_impl_items else {
+            return;
+        };
+        for item in items {
+            let syn::ImplItem::Fn(method) = item else {
+                continue;
+            };
+            if method.sig.ident == "fmt" {
+                continue;
+            }
+            let Some(syn::FnArg::Receiver(recv)) = method.sig.inputs.first() else {
+                continue;
+            };
+            self.emit_template_prefix_without_type_defaults(&method.sig.generics);
+            self.push_type_param_scope(&method.sig.generics);
+            let prev_forward_decl_signature = self.in_forward_decl_signature;
+            self.in_forward_decl_signature = true;
+            let mut params = Vec::new();
+            let self_param = if recv.reference.is_some() {
+                if recv.mutability.is_some() {
+                    format!("{}& self_", enum_name)
+                } else {
+                    format!("const {}& self_", enum_name)
+                }
+            } else {
+                format!("{} self_", enum_name)
+            };
+            params.push(self_param);
+            for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
+                let syn::FnArg::Typed(pat_type) = arg else {
+                    continue;
+                };
+                let ty = self.resolve_param_cpp_type(&pat_type.ty);
+                let param_name = match pat_type.pat.as_ref() {
+                    syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                    _ => format!("_arg{}", idx),
+                };
+                params.push(format!("{} {}", ty, param_name));
+            }
+            let return_type = self.map_return_type(&method.sig.output);
+            self.in_forward_decl_signature = prev_forward_decl_signature;
+            self.pop_type_param_scope();
+            if return_type.contains("/* TODO") || type_string_has_auto_placeholder(&return_type) {
+                continue;
+            }
+            let method_name = escape_cpp_keyword(&method.sig.ident.to_string());
+            let decl_export_prefix = if self.is_exported_at_module_depth(&e.vis, module_depth) {
+                export_prefix
+            } else {
+                ""
+            };
+            self.writeln(&format!(
+                "{}{} {}({});",
+                decl_export_prefix,
+                return_type,
+                method_name,
+                params.join(", ")
+            ));
+        }
     }
 
     fn is_forward_constexpr_literal_expr(expr: &syn::Expr) -> bool {
@@ -12912,6 +13133,37 @@ impl CodeGen {
                 self.indent -= 1;
                 self.writeln("};");
                 if !is_local_scope {
+                    let enum_cpp_name = escape_cpp_keyword(&name.to_string());
+                    let type_params: Vec<String> = e
+                        .generics
+                        .params
+                        .iter()
+                        .filter_map(|p| match p {
+                            syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                            syn::GenericParam::Const(cp) => Some(cp.ident.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    let enum_ty = if type_params.is_empty() {
+                        enum_cpp_name.clone()
+                    } else {
+                        format!("{}<{}>", enum_cpp_name, type_params.join(", "))
+                    };
+                    for variant in &e.variants {
+                        self.emit_template_prefix_without_type_defaults(&e.generics);
+                        let helper_name = format!(
+                            "{}_{}",
+                            enum_cpp_name,
+                            escape_cpp_keyword(&variant.ident.to_string())
+                        );
+                        let variant_cpp = escape_cpp_keyword(&variant.ident.to_string());
+                        self.writeln(&format!(
+                            "inline constexpr {} {}() {{ return {}::{}; }}",
+                            enum_ty, helper_name, enum_ty, variant_cpp
+                        ));
+                    }
+                }
+                if !is_local_scope {
                     self.forward_emitted_c_like_enums
                         .insert(scoped_enum_name.clone());
                 }
@@ -16131,18 +16383,82 @@ impl CodeGen {
             })
             .cloned()
             .collect();
-        if module_path == "lexer" && (type_name == "Token" || type_name == "TokenKind") {
-            eprintln!(
-                "DEBUG resolve_descendant_type_path_in_module {}::{} -> {:?}",
-                module_path, type_name, candidates
-            );
-        }
         candidates.sort();
         candidates.dedup();
         if candidates.len() == 1 {
             candidates.into_iter().next()
+        } else if self.in_forward_decl_signature {
+            let module_depth = module_path
+                .split("::")
+                .filter(|seg| !seg.is_empty())
+                .count();
+            let mut nested_candidates: Vec<String> = candidates
+                .into_iter()
+                .filter(|candidate| {
+                    candidate
+                        .split("::")
+                        .filter(|seg| !seg.is_empty())
+                        .count()
+                        > module_depth + 1
+                })
+                .collect();
+            nested_candidates.sort();
+            nested_candidates.dedup();
+            if nested_candidates.len() == 1 {
+                nested_candidates.into_iter().next()
+            } else {
+                None
+            }
         } else {
             None
+        }
+    }
+
+    fn remap_forward_decl_qualified_type_path(&self, path: &str) -> Option<String> {
+        if !self.in_forward_decl_signature {
+            return None;
+        }
+        if path.contains('<')
+            || path.contains(' ')
+            || path.contains('(')
+            || path.contains(')')
+            || path.contains('=')
+        {
+            return None;
+        }
+        let has_leading_colon = path.starts_with("::");
+        let normalized = path.trim_start_matches("::");
+        if normalized.is_empty() {
+            return None;
+        }
+        let parts: Vec<&str> = normalized
+            .split("::")
+            .filter(|seg| !seg.is_empty())
+            .collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        let type_name = *parts.last()?;
+        if !type_name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            return None;
+        }
+        if matches!(parts[0], "std" | "core" | "alloc" | "rusty") {
+            return None;
+        }
+        let module_path = parts[..parts.len() - 1].join("::");
+        let resolved = self.resolve_descendant_type_path_in_module(&module_path, type_name)?;
+        let resolved_normalized = resolved.trim_start_matches("::");
+        if resolved_normalized == normalized {
+            return None;
+        }
+        if has_leading_colon {
+            Some(format!("::{}", resolved_normalized))
+        } else {
+            Some(resolved_normalized.to_string())
         }
     }
 
@@ -55907,6 +56223,37 @@ impl CodeGen {
                             .map(|seg| seg.to_string())
                             .collect();
                         rewritten.extend(segments.iter().skip(1).cloned());
+                        if rewritten.len() >= 2 {
+                            let owner_module = rewritten[0].clone();
+                            let owner_type = rewritten[1].clone();
+                            let owner_module_is_namespace_like =
+                                owner_module
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_');
+                            let owner_type_is_type_like = owner_type
+                                .chars()
+                                .next()
+                                .is_some_and(|ch| ch.is_ascii_uppercase());
+                            if owner_module_is_namespace_like
+                                && owner_type_is_type_like
+                                && let Some(resolved_owner) = self
+                                    .resolve_descendant_type_path_in_module(
+                                        &owner_module,
+                                        &owner_type,
+                                    )
+                            {
+                                let mut rebuilt: Vec<String> = resolved_owner
+                                    .split("::")
+                                    .filter(|seg| !seg.is_empty())
+                                    .map(|seg| seg.to_string())
+                                    .collect();
+                                rebuilt.extend(rewritten.iter().skip(2).cloned());
+                                if !rebuilt.is_empty() {
+                                    rewritten = rebuilt;
+                                }
+                            }
+                        }
                         if !rewritten.is_empty() && rewritten != segments {
                             if from_root_scope {
                                 force_leading_colon = true;
@@ -56267,7 +56614,7 @@ impl CodeGen {
         // a single-segment path refers to a uniquely declared crate type from a
         // sibling namespace (for example `Position` imported from `error`), qualify
         // it explicitly to keep signatures order-independent.
-        if segments.len() == 1 && !self.current_scope_declares_type_name(&segments[0]) {
+        if segments.len() == 1 && !self.current_module_declares_type_name_exact(&segments[0]) {
             if let Some(scoped) = self.resolve_unique_forward_decl_type_path(&segments[0]) {
                 return self.rewrite_seed_ctor_path_string(&scoped);
             }
@@ -57368,6 +57715,9 @@ impl CodeGen {
             let variant_name = variant_seg.ident.to_string();
             let variant_key = format!("{}_{}", enum_name, variant_name);
             if self.c_like_enum_variants.contains(&variant_key) {
+                let local_owner_variant = self.block_depth > 0
+                    && path.segments.len() == 2
+                    && self.is_local_type_name_in_scope(&enum_name);
                 let mut owner_path = path.clone();
                 owner_path.segments = path
                     .segments
@@ -57380,7 +57730,27 @@ impl CodeGen {
                 return if owner_cpp.is_empty() {
                     variant_name
                 } else {
-                    format!("{}::{}", owner_cpp, variant_name)
+                    let helper_name = escape_cpp_keyword(&variant_name);
+                    if owner_cpp.contains('<') || local_owner_variant {
+                        // Preserve direct enum-variant spelling for generic owners.
+                        format!("{}::{}", owner_cpp, helper_name)
+                    } else {
+                        let mut helper_owner = owner_cpp.clone();
+                        if !owner_cpp.contains("::")
+                            && let Some(bound_target) = self
+                                .resolve_scope_import_binding_path(&owner_cpp)
+                                .or_else(|| {
+                                    self.resolve_scope_import_binding_path_for_scope("", &owner_cpp)
+                                })
+                        {
+                            let rebound =
+                                self.rewrite_cpp_import_bound_type_spelling(&bound_target);
+                            if !rebound.is_empty() {
+                                helper_owner = rebound.trim_end_matches("::").to_string();
+                            }
+                        }
+                        format!("{}_{}()", helper_owner, helper_name)
+                    }
                 };
             }
             if self.c_like_enum_consts.contains(&variant_key) {
@@ -60044,14 +60414,6 @@ impl CodeGen {
                 }
 
                 let mut path_str = self.emit_path_to_string(&tp.path);
-                if tp.path.segments.len() == 1 && tp.path.segments[0].ident == "Token" {
-                    eprintln!(
-                        "DEBUG map_type token path_str={} in_fwd={} scope={}",
-                        path_str,
-                        self.in_forward_decl_signature,
-                        self.module_stack.join("::")
-                    );
-                }
                 if path_str == "private" {
                     path_str = "private_".to_string();
                 } else if path_str == "::private" {
@@ -60170,14 +60532,6 @@ impl CodeGen {
                     && !path_str.contains("::")
                 {
                     let local_name = tp.path.segments[0].ident.to_string();
-                    if local_name == "Token" {
-                        eprintln!(
-                            "DEBUG map_type forward single {} scope={} initial={}",
-                            local_name,
-                            self.module_stack.join("::"),
-                            path_str
-                        );
-                    }
                     if !local_name
                         .chars()
                         .next()
@@ -60187,7 +60541,7 @@ impl CodeGen {
                         // Forward-decl import binding qualification only applies to type-like names.
                         // Skip to avoid malformed spellings like `std::usize`.
                     } else {
-                        if !self.current_scope_declares_type_name(&local_name)
+                        if !self.current_module_declares_type_name_exact(&local_name)
                             && let Some(bound_target) = self
                                 .resolve_scope_import_binding_path(&local_name)
                                 .or_else(|| {
@@ -60197,12 +60551,6 @@ impl CodeGen {
                                     )
                                 })
                         {
-                            if local_name == "Token" {
-                                eprintln!(
-                                    "DEBUG map_type forward bound {} -> {}",
-                                    local_name, bound_target
-                                );
-                            }
                             let mut rewritten =
                                 self.rewrite_cpp_import_bound_type_spelling(&bound_target);
                             rewritten = self.resolve_nested_local_reexport_path(&rewritten);
@@ -60266,6 +60614,11 @@ impl CodeGen {
                     if self.is_local_type_name_in_scope(&local_name)
                         || self.local_declared_types.contains(&local_name)
                     {
+                        if let Some(remapped) =
+                            self.remap_forward_decl_qualified_type_path(&path_str)
+                        {
+                            path_str = remapped;
+                        }
                         if !path_str.contains('<')
                             && !path_is_current_struct_assoc_projection
                             && let Some(recovered) =
@@ -60499,6 +60852,9 @@ impl CodeGen {
                     {
                         return self.maybe_prefix_typename_for_dependent_type_path(tp, recovered);
                     }
+                }
+                if let Some(remapped) = self.remap_forward_decl_qualified_type_path(&path_str) {
+                    path_str = remapped;
                 }
 
                 if path_str.contains("::") {
