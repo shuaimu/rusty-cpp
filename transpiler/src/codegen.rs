@@ -16149,6 +16149,15 @@ impl CodeGen {
                 let scoped_root = format!("{}::{}", self.module_stack.join("::"), root);
                 self.declared_module_paths.contains(&scoped_root)
             };
+            let root_is_top_level_module = self.declared_module_paths.contains(root);
+            if !self.module_stack.is_empty()
+                && root_is_visible_local_module
+                && root_is_top_level_module
+            {
+                // Keep `::root::...` when a nested scope has its own `root` module.
+                // Stripping global scope would bind to the nested module instead.
+                return using_path.to_string();
+            }
             if !root_is_visible_local_module {
                 return using_path.to_string();
             }
@@ -17070,6 +17079,42 @@ impl CodeGen {
         }
     }
 
+    fn should_rebind_owner_to_descendant(&self, owner_module: &str, owner_type: &str) -> bool {
+        if owner_module.is_empty() || owner_type.is_empty() {
+            return false;
+        }
+        let escaped_owner_module = owner_module
+            .split("::")
+            .filter(|seg| !seg.is_empty())
+            .map(escape_cpp_keyword)
+            .collect::<Vec<String>>()
+            .join("::");
+        let escaped_owner_type = escape_cpp_keyword(owner_type);
+        let direct_candidates = [
+            format!("{}::{}", owner_module, owner_type),
+            format!("{}::{}", owner_module, escaped_owner_type),
+            format!("{}::{}", escaped_owner_module, owner_type),
+            format!("{}::{}", escaped_owner_module, escaped_owner_type),
+        ];
+        if direct_candidates
+            .iter()
+            .any(|candidate| self.local_declared_types.contains(candidate))
+        {
+            return false;
+        }
+        if let Some(bound_owner_type) =
+            self.resolve_scope_import_binding_path_for_scope(owner_module, owner_type)
+        {
+            let normalized = bound_owner_type.trim_start_matches("::");
+            if !normalized.is_empty()
+                && !matches!(classify_use_import(normalized), UseImportAction::RustOnly)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     fn remap_forward_decl_qualified_type_path(&self, path: &str) -> Option<String> {
         if !self.in_forward_decl_signature {
             return None;
@@ -17678,9 +17723,7 @@ impl CodeGen {
             return path.to_string();
         };
         if mapped_root.is_empty() {
-            if rest.contains("::") {
-                rest.to_string()
-            } else if rest.is_empty() {
+            if rest.is_empty() {
                 path.to_string()
             } else {
                 format!("::{}", rest)
@@ -57042,6 +57085,7 @@ impl CodeGen {
                 .is_some_and(|ch| ch.is_ascii_uppercase());
             if owner_module_is_namespace_like
                 && owner_type_is_type_like
+                && self.should_rebind_owner_to_descendant(&owner_module, &owner_type)
                 && let Some(resolved_owner) =
                     self.resolve_descendant_type_path_in_module(&owner_module, &owner_type)
             {
@@ -57096,11 +57140,22 @@ impl CodeGen {
                         .chars()
                         .next()
                         .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_');
+                let block_root_scope_binding_for_rooted_module_path = force_leading_colon
+                    && segments.len() > 1
+                    && first
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+                    && self.declared_module_names.contains(&first);
+                if block_root_scope_binding_for_rooted_module_path {
+                    break;
+                }
                 let mut from_root_scope = false;
                 let mut bound_target = self.resolve_scope_import_binding_path(&first);
                 if let Some(current_target) = bound_target.as_ref()
                     && !block_root_scope_binding_for_local_type
                     && !block_root_scope_binding_for_local_fn
+                    && !block_root_scope_binding_for_rooted_module_path
                 {
                     let current_normalized = current_target.trim_start_matches("::");
                     let current_is_identity = current_normalized == first;
@@ -57116,6 +57171,7 @@ impl CodeGen {
                 if bound_target.is_none()
                     && !block_root_scope_binding_for_local_type
                     && !block_root_scope_binding_for_local_fn
+                    && !block_root_scope_binding_for_rooted_module_path
                     && let Some(root_target) =
                         self.resolve_scope_import_binding_path_for_scope("", &first)
                 {
@@ -57172,6 +57228,8 @@ impl CodeGen {
                                 .is_some_and(|ch| ch.is_ascii_uppercase());
                             if owner_module_is_namespace_like
                                 && owner_type_is_type_like
+                                && self
+                                    .should_rebind_owner_to_descendant(&owner_module, &owner_type)
                                 && let Some(resolved_owner) = self
                                     .resolve_descendant_type_path_in_module(
                                         &owner_module,
@@ -57254,6 +57312,7 @@ impl CodeGen {
                 .is_some_and(|ch| ch.is_ascii_uppercase());
             if owner_module_is_namespace_like
                 && owner_type_is_type_like
+                && self.should_rebind_owner_to_descendant(&owner_module, &owner_type)
                 && let Some(resolved_owner) =
                     self.resolve_descendant_type_path_in_module(&owner_module, &owner_type)
             {
@@ -57277,6 +57336,19 @@ impl CodeGen {
             for _ in 0..4 {
                 let mut rewritten_any = false;
                 for idx in 1..segments.len().saturating_sub(1) {
+                    let rooted_module_assoc_owner_path = force_leading_colon
+                        && idx == segments.len().saturating_sub(2)
+                        && segments
+                            .first()
+                            .is_some_and(|root| self.declared_module_names.contains(root))
+                        && segments.last().is_some_and(|tail| {
+                            tail.chars()
+                                .next()
+                                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+                        });
+                    if rooted_module_assoc_owner_path {
+                        continue;
+                    }
                     let scope = segments[..idx].join("::");
                     let local_name = segments[idx].clone();
                     let Some(bound_target) =
@@ -57317,6 +57389,18 @@ impl CodeGen {
             joined = segments.join("::");
         }
         if segments.len() >= 3 {
+            let rooted_module_assoc_owner_path = force_leading_colon
+                && segments
+                    .first()
+                    .is_some_and(|root| self.declared_module_names.contains(root))
+                && segments.last().is_some_and(|tail| {
+                    tail.chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+                });
+            if rooted_module_assoc_owner_path {
+                joined = segments.join("::");
+            } else {
             let owner_path = segments[..segments.len() - 1].join("::");
             if let Some(resolved_owner) = self.try_resolve_nested_local_type_path(&owner_path) {
                 let tail = segments.last().cloned().unwrap_or_default();
@@ -57336,6 +57420,7 @@ impl CodeGen {
                         joined = segments.join("::");
                     }
                 }
+            }
             }
         }
 
@@ -61650,7 +61735,8 @@ impl CodeGen {
                             if rewritten_parts.len() >= 2 {
                                 let owner_module = rewritten_parts[0];
                                 let owner_type = rewritten_parts[1];
-                                if let Some(resolved_owner) = self
+                                if self.should_rebind_owner_to_descendant(owner_module, owner_type)
+                                    && let Some(resolved_owner) = self
                                     .resolve_descendant_type_path_in_module(owner_module, owner_type)
                                 {
                                     let mut rebuilt: Vec<String> = resolved_owner
