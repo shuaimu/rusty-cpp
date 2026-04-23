@@ -17,6 +17,85 @@ pub use header_cache::HeaderCache;
 use std::fs;
 use std::io::{BufRead, BufReader};
 
+fn is_module_driver_flag(arg: &str) -> bool {
+    arg == "-fmodules"
+        || arg == "-fmodules-ts"
+        || arg == "-fmodule-file"
+        || arg.starts_with("-fmodule-file=")
+        || arg == "-fmodule-map-file"
+        || arg.starts_with("-fmodule-map-file=")
+        || arg == "-fprebuilt-module-path"
+        || arg.starts_with("-fprebuilt-module-path=")
+        || arg == "-fmodule-output"
+        || arg.starts_with("-fmodule-output=")
+}
+
+fn module_file_is_std(value: &str) -> bool {
+    let value = value.trim_matches('"').trim_matches('\'');
+    if let Some((module_name, _module_path)) = value.split_once('=') {
+        module_name == "std" || module_name.starts_with("std.") || module_name.starts_with("std:")
+    } else {
+        value.contains("std.pcm") || value.contains("std.compat.pcm")
+    }
+}
+
+fn filter_module_args_for_recovery(args: &[String], keep_std_module_files: bool) -> Vec<String> {
+    let mut filtered = Vec::with_capacity(args.len());
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = args[i].as_str();
+
+        // Drop explicit module language mode in fallback passes.
+        if arg == "-x" && i + 1 < args.len() && args[i + 1] == "c++-module" {
+            i += 2;
+            continue;
+        }
+        if arg == "c++-module" {
+            i += 1;
+            continue;
+        }
+
+        if arg == "-fmodule-file" && i + 1 < args.len() {
+            let value = args[i + 1].as_str();
+            if keep_std_module_files && module_file_is_std(value) {
+                filtered.push(arg.to_string());
+                filtered.push(args[i + 1].clone());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("-fmodule-file=") {
+            if keep_std_module_files && module_file_is_std(value) {
+                filtered.push(args[i].clone());
+            }
+            i += 1;
+            continue;
+        }
+
+        // Drop module graph wiring in fallback passes.
+        if arg == "-fmodule-map-file" || arg == "-fprebuilt-module-path" || arg == "-fmodule-output"
+        {
+            i += if i + 1 < args.len() { 2 } else { 1 };
+            continue;
+        }
+        if arg == "-fmodules"
+            || arg == "-fmodules-ts"
+            || arg.starts_with("-fmodule-map-file=")
+            || arg.starts_with("-fprebuilt-module-path=")
+            || arg.starts_with("-fmodule-output=")
+        {
+            i += 1;
+            continue;
+        }
+
+        filtered.push(args[i].clone());
+        i += 1;
+    }
+
+    filtered
+}
+
 #[allow(dead_code)]
 pub fn parse_cpp_file(path: &Path) -> Result<CppAst, String> {
     parse_cpp_file_with_includes(path, &[])
@@ -77,28 +156,85 @@ pub fn parse_cpp_file_with_includes_defines_and_args(
         args.push(format!("-D{}", define));
     }
 
-    // Parse the translation unit with skip function bodies option for better error recovery
-    let tu = index
-        .parser(path)
-        .arguments(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
-        .detailed_preprocessing_record(true)
-        .skip_function_bodies(false) // We need function bodies for analysis
-        .incomplete(true) // Allow incomplete translation units
-        .parse()
-        .map_err(|e| format!("Failed to parse file: {:?}", e))?;
+    let parse_with_args = |parse_args: &[String]| {
+        index
+            .parser(path)
+            .arguments(&parse_args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+            .detailed_preprocessing_record(true)
+            .skip_function_bodies(false) // We need function bodies for analysis
+            .incomplete(true) // Allow incomplete translation units
+            .parse()
+    };
+
+    // Parse the translation unit. If prebuilt module deserialization fails, retry with
+    // progressively less module state so analysis can still proceed.
+    let tu = match parse_with_args(&args) {
+        Ok(tu) => tu,
+        Err(first_error) => {
+            let first_error_text = format!("{:?}", first_error);
+            let has_module_args = args.iter().any(|arg| is_module_driver_flag(arg))
+                || args
+                    .windows(2)
+                    .any(|pair| pair[0] == "-x" && pair[1] == "c++-module");
+
+            if !has_module_args || !first_error_text.contains("AstDeserialization") {
+                return Err(format!("Failed to parse file: {:?}", first_error));
+            }
+
+            let std_only_args = filter_module_args_for_recovery(&args, true);
+            if std_only_args != args {
+                eprintln!(
+                    "Warning: module deserialization failed, retrying with std-only module inputs"
+                );
+                match parse_with_args(&std_only_args) {
+                    Ok(tu) => tu,
+                    Err(second_error) => {
+                        let second_error_text = format!("{:?}", second_error);
+                        if !second_error_text.contains("AstDeserialization") {
+                            return Err(format!("Failed to parse file: {:?}", second_error));
+                        }
+
+                        let no_module_args = filter_module_args_for_recovery(&args, false);
+                        if no_module_args != std_only_args {
+                            eprintln!(
+                                "Warning: module deserialization still failed, retrying without prebuilt module inputs"
+                            );
+                        }
+                        parse_with_args(&no_module_args)
+                            .map_err(|e| format!("Failed to parse file: {:?}", e))?
+                    }
+                }
+            } else {
+                return Err(format!("Failed to parse file: {:?}", first_error));
+            }
+        }
+    };
+
+    fn is_module_resolution_fatal(diagnostic_text: &str) -> bool {
+        // C++ module graphs are often incomplete when the checker runs before all PCM files
+        // are produced. Keep analysis running with partial AST in that case.
+        diagnostic_text.contains("module '") && diagnostic_text.contains("not found")
+            || (diagnostic_text.contains("module file") && diagnostic_text.contains("not found"))
+            || diagnostic_text.contains("could not build module")
+    }
 
     // Check for diagnostics but only fail on fatal errors
     let diagnostics = tu.get_diagnostics();
     let mut has_fatal = false;
     if !diagnostics.is_empty() {
         for diag in &diagnostics {
+            let text = diag.get_text();
             // Only fail on fatal errors, ignore regular errors
             if diag.get_severity() >= clang::diagnostic::Severity::Fatal {
-                has_fatal = true;
-                eprintln!("Fatal error: {}", diag.get_text());
+                if is_module_resolution_fatal(&text) {
+                    eprintln!("Warning (suppressed module fatal): {}", text);
+                } else {
+                    has_fatal = true;
+                    eprintln!("Fatal error: {}", text);
+                }
             } else if diag.get_severity() >= clang::diagnostic::Severity::Error {
                 // Log errors but don't fail
-                eprintln!("Warning (suppressed error): {}", diag.get_text());
+                eprintln!("Warning (suppressed error): {}", text);
             }
         }
     }
@@ -387,5 +523,38 @@ mod tests {
 
         let result = parse_cpp_file(&invalid_path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_filter_module_args_for_recovery_std_only() {
+        let args = vec![
+            "-std=gnu++23".to_string(),
+            "-x".to_string(),
+            "c++-module".to_string(),
+            "-fmodule-file=std=/tmp/std.pcm".to_string(),
+            "-fmodule-file=rrr=/tmp/rrr.pcm".to_string(),
+            "-fmodule-map-file=/tmp/map.modulemap".to_string(),
+            "-fmodules".to_string(),
+        ];
+
+        let filtered = filter_module_args_for_recovery(&args, true);
+        assert!(filtered.contains(&"-std=gnu++23".to_string()));
+        assert!(filtered.contains(&"-fmodule-file=std=/tmp/std.pcm".to_string()));
+        assert!(!filtered.iter().any(|arg| arg.contains("rrr.pcm")));
+        assert!(!filtered.iter().any(|arg| arg == "-x"));
+        assert!(!filtered.iter().any(|arg| arg == "c++-module"));
+        assert!(!filtered.iter().any(|arg| arg == "-fmodules"));
+    }
+
+    #[test]
+    fn test_filter_module_args_for_recovery_no_modules() {
+        let args = vec![
+            "-std=gnu++23".to_string(),
+            "-fmodule-file=std=/tmp/std.pcm".to_string(),
+            "-fmodule-file=rrr=/tmp/rrr.pcm".to_string(),
+        ];
+
+        let filtered = filter_module_args_for_recovery(&args, false);
+        assert_eq!(filtered, vec!["-std=gnu++23".to_string()]);
     }
 }

@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::annotations::{FunctionSignature, extract_annotations};
+use super::annotations::{extract_annotations, FunctionSignature};
 use super::external_annotations::ExternalAnnotations;
-use super::safety_annotations::{SafetyMode, parse_entity_safety};
+use super::safety_annotations::{parse_entity_safety, SafetyMode};
 
 /// Cache for storing function signatures from header files
 #[derive(Debug)]

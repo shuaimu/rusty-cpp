@@ -1,7 +1,7 @@
 use crate::ir::{IrFunction, IrProgram, IrStatement, VariableType};
-use crate::parser::HeaderCache;
 use crate::parser::annotations::{FunctionSignature, LifetimeAnnotation, LifetimeBound};
 use crate::parser::safety_annotations::SafetyContext;
+use crate::parser::HeaderCache;
 use std::collections::{HashMap, HashSet};
 
 /// Tracks lifetime information for variables in the current scope

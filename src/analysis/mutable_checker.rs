@@ -1,7 +1,7 @@
-use crate::parser::CppAst;
 use crate::parser::ast_visitor::Class;
 use crate::parser::external_annotations::ExternalAnnotations;
 use crate::parser::safety_annotations::SafetyContext;
+use crate::parser::CppAst;
 
 /// Check for mutable fields in safe functions and classes
 ///

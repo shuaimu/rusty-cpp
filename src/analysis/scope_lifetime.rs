@@ -1,9 +1,9 @@
 use crate::ir::{BasicBlock, IrFunction, IrProgram, IrStatement};
-use crate::parser::HeaderCache;
 use crate::parser::annotations::{FunctionSignature, LifetimeAnnotation};
 use crate::parser::safety_annotations::SafetyContext;
-use petgraph::Direction;
+use crate::parser::HeaderCache;
 use petgraph::graph::NodeIndex;
+use petgraph::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Represents a scope in the program (function, block, loop, etc.)

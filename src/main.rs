@@ -107,20 +107,33 @@ fn analyze_file(
     // Start with CLI-provided include paths
     let mut all_include_paths = include_paths.to_vec();
     let mut extra_clang_args: Vec<String> = Vec::new();
+    let mut should_auto_detect_clang_includes = true;
 
     // Add include paths from environment variables
     all_include_paths.extend(extract_include_paths_from_env());
 
-    // Always auto-detect C++ standard library paths from clang installation
-    // This is needed because compile_commands.json typically doesn't include STL paths
-    // (they're implicit to the compiler, not passed as -I flags)
-    all_include_paths.extend(extract_include_paths_from_clang());
-
     // Extract additional include paths and compile flags from compile_commands.json if provided
     if let Some(cc_path) = compile_commands {
         let extracted = extract_compile_config_from_compile_commands(cc_path, path)?;
+        // For module/libc++ builds we should trust compile_commands include paths.
+        // Injecting auto-detected STL paths can mix libstdc++ and libc++ and produce
+        // ambiguous declarations that break parsing.
+        should_auto_detect_clang_includes = !extracted.clang_args.iter().any(|arg| {
+            arg == "-stdlib"
+                || arg.starts_with("-stdlib=")
+                || arg == "-fmodules"
+                || arg == "-fmodules-ts"
+                || arg.starts_with("-fmodule-file=")
+                || arg.starts_with("-fmodule-map-file=")
+                || arg.starts_with("-fprebuilt-module-path=")
+        });
         all_include_paths.extend(extracted.include_paths);
         extra_clang_args.extend(extracted.clang_args);
+    }
+
+    // Auto-detect C++ standard library paths from clang installation when needed.
+    if should_auto_detect_clang_includes {
+        all_include_paths.extend(extract_include_paths_from_clang());
     }
 
     // Parse included headers for lifetime annotations
@@ -368,12 +381,23 @@ fn extract_compile_config_from_compile_commands(
     for entry in commands {
         if let Some(file) = entry.get("file").and_then(|f| f.as_str()) {
             if file.ends_with(&*source_str) || source_str.ends_with(file) {
+                let directory = entry
+                    .get("directory")
+                    .and_then(|d| d.as_str())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."));
+
+                if let Some(arguments) = entry.get("arguments").and_then(|a| a.as_array()) {
+                    let tokens: Vec<String> = arguments
+                        .iter()
+                        .filter_map(|arg| arg.as_str().map(|s| s.to_string()))
+                        .collect();
+                    if !tokens.is_empty() {
+                        return extract_compile_config_from_tokens(&tokens, &directory);
+                    }
+                }
+
                 if let Some(command) = entry.get("command").and_then(|c| c.as_str()) {
-                    let directory = entry
-                        .get("directory")
-                        .and_then(|d| d.as_str())
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| PathBuf::from("."));
                     return extract_compile_config_from_command(command, &directory);
                 }
             }
@@ -392,64 +416,183 @@ fn absolutize_if_needed(path: &str, base_dir: &Path) -> PathBuf {
     }
 }
 
-fn extract_compile_config_from_command(
-    command: &str,
+fn strip_outer_quotes(s: &str) -> &str {
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        if (bytes[0] == b'"' && bytes[s.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[s.len() - 1] == b'\'')
+        {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+fn merge_compile_configs(base: &mut CompileCommandConfig, extra: CompileCommandConfig) {
+    for include_path in extra.include_paths {
+        if !base.include_paths.contains(&include_path) {
+            base.include_paths.push(include_path);
+        }
+    }
+    for arg in extra.clang_args {
+        if !base.clang_args.contains(&arg) {
+            base.clang_args.push(arg);
+        }
+    }
+}
+
+fn normalize_module_file_arg(value: &str, directory: &Path) -> Option<String> {
+    let value = strip_outer_quotes(value);
+    if let Some((module_name, module_path)) = value.split_once('=') {
+        if module_path.is_empty() {
+            return None;
+        }
+        let module_path = absolutize_if_needed(strip_outer_quotes(module_path), directory);
+        if !module_path.exists() {
+            return None;
+        }
+        return Some(format!("{}={}", module_name, module_path.display()));
+    }
+
+    let module_path = absolutize_if_needed(value, directory);
+    if !module_path.exists() {
+        return None;
+    }
+    Some(module_path.display().to_string())
+}
+
+fn parse_command_tokens(command: &str) -> Vec<String> {
+    command.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+fn extract_compile_config_from_tokens(
+    tokens: &[String],
     directory: &Path,
 ) -> Result<CompileCommandConfig, String> {
     let mut config = CompileCommandConfig::default();
-    let parts: Vec<&str> = command.split_whitespace().collect();
 
     let mut i = 0;
-    while i < parts.len() {
-        if parts[i] == "-I" && i + 1 < parts.len() {
+    while i < tokens.len() {
+        let token = tokens[i].as_str();
+
+        if token == "-I" && i + 1 < tokens.len() {
             // -I /path/to/include
-            config
-                .include_paths
-                .push(absolutize_if_needed(parts[i + 1], directory));
+            let include_dir =
+                absolutize_if_needed(strip_outer_quotes(tokens[i + 1].as_str()), directory);
+            if !config.include_paths.contains(&include_dir) {
+                config.include_paths.push(include_dir);
+            }
             i += 2;
-        } else if parts[i].starts_with("-I") {
+        } else if let Some(path) = token.strip_prefix("-I") {
             // -I/path/to/include
-            let path = &parts[i][2..];
-            config
-                .include_paths
-                .push(absolutize_if_needed(path, directory));
-            i += 1;
-        } else if parts[i] == "-std" && i + 1 < parts.len() {
-            // -std c++23
-            config.clang_args.push("-std".to_string());
-            config.clang_args.push(parts[i + 1].to_string());
-            i += 2;
-        } else if parts[i].starts_with("-std=") {
-            // -std=c++23
-            config.clang_args.push(parts[i].to_string());
-            i += 1;
-        } else if parts[i] == "-fprebuilt-module-path" && i + 1 < parts.len() {
-            // -fprebuilt-module-path /path/to/pcms
-            let module_dir = absolutize_if_needed(parts[i + 1], directory);
-            config.clang_args.push(format!(
-                "-fprebuilt-module-path={}",
-                module_dir.display()
-            ));
-            i += 2;
-        } else if parts[i].starts_with("-fprebuilt-module-path=") {
-            // -fprebuilt-module-path=/path/to/pcms
-            if let Some((_, module_dir)) = parts[i].split_once('=') {
-                let module_dir = absolutize_if_needed(module_dir, directory);
-                config.clang_args.push(format!(
-                    "-fprebuilt-module-path={}",
-                    module_dir.display()
-                ));
-            } else {
-                config.clang_args.push(parts[i].to_string());
+            let path = strip_outer_quotes(path);
+            if !path.is_empty() {
+                let include_dir = absolutize_if_needed(path, directory);
+                if !config.include_paths.contains(&include_dir) {
+                    config.include_paths.push(include_dir);
+                }
             }
             i += 1;
-        } else if parts[i] == "-fmodules"
-            || parts[i] == "-fmodules-ts"
-            || parts[i].starts_with("-fmodule-file=")
-            || parts[i].starts_with("-fmodule-map-file=")
-        {
-            // Keep known module-related clang flags.
-            config.clang_args.push(parts[i].to_string());
+        } else if token == "-std" && i + 1 < tokens.len() {
+            // -std gnu++23
+            config.clang_args.push("-std".to_string());
+            config.clang_args.push(tokens[i + 1].clone());
+            i += 2;
+        } else if token.starts_with("-std=") {
+            // -std=gnu++23
+            config.clang_args.push(token.to_string());
+            i += 1;
+        } else if token == "-stdlib" && i + 1 < tokens.len() {
+            // -stdlib libc++
+            config.clang_args.push("-stdlib".to_string());
+            config.clang_args.push(tokens[i + 1].clone());
+            i += 2;
+        } else if token.starts_with("-stdlib=") {
+            // -stdlib=libc++
+            config.clang_args.push(token.to_string());
+            i += 1;
+        } else if token == "-x" && i + 1 < tokens.len() {
+            // -x c++-module
+            config.clang_args.push("-x".to_string());
+            config.clang_args.push(tokens[i + 1].clone());
+            i += 2;
+        } else if token == "-fprebuilt-module-path" && i + 1 < tokens.len() {
+            // -fprebuilt-module-path /path/to/pcms
+            let raw = strip_outer_quotes(tokens[i + 1].as_str());
+            if !raw.is_empty() {
+                let module_dir = absolutize_if_needed(raw, directory);
+                config
+                    .clang_args
+                    .push(format!("-fprebuilt-module-path={}", module_dir.display()));
+            }
+            i += 2;
+        } else if let Some(module_dir) = token.strip_prefix("-fprebuilt-module-path=") {
+            // -fprebuilt-module-path=/path/to/pcms
+            let module_dir = strip_outer_quotes(module_dir);
+            if !module_dir.is_empty() {
+                let module_dir = absolutize_if_needed(module_dir, directory);
+                config
+                    .clang_args
+                    .push(format!("-fprebuilt-module-path={}", module_dir.display()));
+            }
+            i += 1;
+        } else if token == "-fmodule-file" && i + 1 < tokens.len() {
+            // -fmodule-file std=/path/to/std.pcm or -fmodule-file /path/to/module.pcm
+            if let Some(normalized) = normalize_module_file_arg(tokens[i + 1].as_str(), directory) {
+                config
+                    .clang_args
+                    .push(format!("-fmodule-file={}", normalized));
+            }
+            i += 2;
+        } else if let Some(value) = token.strip_prefix("-fmodule-file=") {
+            // -fmodule-file=std=/path/to/std.pcm
+            if let Some(normalized) = normalize_module_file_arg(value, directory) {
+                config
+                    .clang_args
+                    .push(format!("-fmodule-file={}", normalized));
+            }
+            i += 1;
+        } else if token == "-fmodule-map-file" && i + 1 < tokens.len() {
+            // -fmodule-map-file /path/to/module.modulemap
+            let map_path =
+                absolutize_if_needed(strip_outer_quotes(tokens[i + 1].as_str()), directory);
+            config
+                .clang_args
+                .push(format!("-fmodule-map-file={}", map_path.display()));
+            i += 2;
+        } else if let Some(map_path) = token.strip_prefix("-fmodule-map-file=") {
+            // -fmodule-map-file=/path/to/module.modulemap
+            let map_path = absolutize_if_needed(strip_outer_quotes(map_path), directory);
+            config
+                .clang_args
+                .push(format!("-fmodule-map-file={}", map_path.display()));
+            i += 1;
+        } else if token == "-fmodules" || token == "-fmodules-ts" {
+            config.clang_args.push(token.to_string());
+            i += 1;
+        } else if let Some(response_file) = token.strip_prefix('@') {
+            // CMake/Ninja module support often stores module mappings in response files.
+            // Expand them so libclang sees -fmodule-file/-x flags while parsing.
+            let response_file = strip_outer_quotes(response_file);
+            if !response_file.is_empty() {
+                let response_file = absolutize_if_needed(response_file, directory);
+                match fs::read_to_string(&response_file) {
+                    Ok(content) => {
+                        let response_tokens: Vec<String> =
+                            content.split_whitespace().map(|s| s.to_string()).collect();
+                        let response_config =
+                            extract_compile_config_from_tokens(&response_tokens, directory)?;
+                        merge_compile_configs(&mut config, response_config);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: skipping missing compiler response file '{}': {}",
+                            response_file.display(),
+                            e
+                        );
+                    }
+                }
+            }
             i += 1;
         } else {
             i += 1;
@@ -457,6 +600,14 @@ fn extract_compile_config_from_command(
     }
 
     Ok(config)
+}
+
+fn extract_compile_config_from_command(
+    command: &str,
+    directory: &Path,
+) -> Result<CompileCommandConfig, String> {
+    let tokens = parse_command_tokens(command);
+    extract_compile_config_from_tokens(&tokens, directory)
 }
 
 fn extract_include_paths_from_env() -> Vec<PathBuf> {
@@ -675,5 +826,101 @@ fn add_system_c_include_paths(paths: &mut Vec<PathBuf>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_module_flags_from_response_file() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let build_dir = temp_dir.path().to_path_buf();
+        let response_file = build_dir.join("modules.modmap");
+        let pcm_dir = build_dir.join("CMakeFiles");
+
+        fs::create_dir_all(&pcm_dir).expect("create pcm dir");
+        fs::write(pcm_dir.join("std.pcm"), "").expect("create std pcm");
+        fs::write(pcm_dir.join("rrr.pcm"), "").expect("create rrr pcm");
+
+        fs::write(
+            &response_file,
+            "-x c++-module\n\
+             -fmodule-file=std=CMakeFiles/std.pcm\n\
+             -fmodule-file=rrr=CMakeFiles/rrr.pcm\n",
+        )
+        .expect("write response file");
+
+        let command = "clang++ -Iinclude -std=gnu++23 @modules.modmap -c src/file.cpp";
+        let config =
+            extract_compile_config_from_command(command, &build_dir).expect("extract config");
+
+        assert!(config.include_paths.contains(&build_dir.join("include")));
+        assert!(config.clang_args.contains(&"-x".to_string()));
+        assert!(config.clang_args.contains(&"c++-module".to_string()));
+        assert!(config.clang_args.contains(&format!(
+            "-fmodule-file=std={}",
+            build_dir.join("CMakeFiles/std.pcm").display()
+        )));
+        assert!(config.clang_args.contains(&format!(
+            "-fmodule-file=rrr={}",
+            build_dir.join("CMakeFiles/rrr.pcm").display()
+        )));
+    }
+
+    #[test]
+    fn extracts_from_compile_commands_arguments_field() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let build_dir = temp_dir.path().to_path_buf();
+        let response_file = build_dir.join("modules.modmap");
+        let source_file = build_dir.join("src/file.cpp");
+        let compile_commands = build_dir.join("compile_commands.json");
+        let pcm_dir = build_dir.join("CMakeFiles");
+
+        fs::create_dir_all(source_file.parent().expect("source parent")).expect("create src dir");
+        fs::create_dir_all(&pcm_dir).expect("create pcm dir");
+        fs::write(&source_file, "int main() { return 0; }\n").expect("write source");
+        fs::write(pcm_dir.join("std.pcm"), "").expect("create std pcm");
+        fs::write(pcm_dir.join("rrr.pcm"), "").expect("create rrr pcm");
+        fs::write(
+            &response_file,
+            "-fmodule-file=std=CMakeFiles/std.pcm\n\
+             -fmodule-file=rrr=CMakeFiles/rrr.pcm\n",
+        )
+        .expect("write response file");
+
+        let cc = serde_json::json!([
+            {
+                "directory": build_dir.display().to_string(),
+                "file": source_file.display().to_string(),
+                "arguments": [
+                    "clang++",
+                    "-Iinclude",
+                    "@modules.modmap",
+                    "-std=gnu++23",
+                    "-c",
+                    source_file.display().to_string()
+                ]
+            }
+        ]);
+        fs::write(
+            &compile_commands,
+            serde_json::to_string_pretty(&cc).expect("serialize compile_commands"),
+        )
+        .expect("write compile_commands");
+
+        let config = extract_compile_config_from_compile_commands(&compile_commands, &source_file)
+            .expect("extract config from compile_commands");
+
+        assert!(config.include_paths.contains(&build_dir.join("include")));
+        assert!(config.clang_args.contains(&format!(
+            "-fmodule-file=std={}",
+            build_dir.join("CMakeFiles/std.pcm").display()
+        )));
+        assert!(config.clang_args.contains(&format!(
+            "-fmodule-file=rrr={}",
+            build_dir.join("CMakeFiles/rrr.pcm").display()
+        )));
     }
 }
