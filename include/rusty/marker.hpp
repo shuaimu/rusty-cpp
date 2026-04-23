@@ -12,6 +12,13 @@ struct PhantomData {
     constexpr PhantomData(const PhantomData<U>&) noexcept {}
 };
 
+namespace convert {
+
+// Stand-in for Rust's `core::convert::Infallible`.
+struct Infallible {};
+
+} // namespace convert
+
 } // namespace rusty
 
 #endif // RUSTY_MARKER_HPP

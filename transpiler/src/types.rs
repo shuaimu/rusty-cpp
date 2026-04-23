@@ -80,7 +80,13 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Box" | "std::boxed::Box" => Some(("rusty::Box", true)),
         "Rc" | "std::rc::Rc" => Some(("rusty::Rc", true)),
         "Arc" | "std::sync::Arc" => Some(("rusty::Arc", true)),
-        "Weak" | "std::rc::Weak" | "std::sync::Weak" => Some(("rusty::Weak", true)),
+        "Weak" | "std::rc::Weak" | "alloc::rc::Weak" => Some(("rusty::Weak", true)),
+        "std::sync::Weak" | "core::sync::Weak" | "alloc::sync::Weak" => {
+            Some(("rusty::sync::Weak", true))
+        }
+        // Common import aliases used by serde-style expanded crates.
+        "RcWeak" => Some(("rusty::Weak", true)),
+        "ArcWeak" => Some(("rusty::sync::Weak", true)),
 
         // Interior mutability
         "Cell" | "std::cell::Cell" => Some(("rusty::Cell", true)),
@@ -754,6 +760,12 @@ mod tests {
         assert_eq!(map_std_type("Rc"), Some(("rusty::Rc", true)));
         assert_eq!(map_std_type("Arc"), Some(("rusty::Arc", true)));
         assert_eq!(map_std_type("Weak"), Some(("rusty::Weak", true)));
+        assert_eq!(
+            map_std_type("std::sync::Weak"),
+            Some(("rusty::sync::Weak", true))
+        );
+        assert_eq!(map_std_type("RcWeak"), Some(("rusty::Weak", true)));
+        assert_eq!(map_std_type("ArcWeak"), Some(("rusty::sync::Weak", true)));
     }
 
     #[test]
