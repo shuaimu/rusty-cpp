@@ -3153,6 +3153,14 @@ impl CodeGen {
     }
 
     fn collect_auto_cross_module_by_value_rewrite_plan(&mut self, items: &[syn::Item]) {
+        self.collect_auto_cross_module_by_value_rewrite_plan_in_scope(items, &[]);
+    }
+
+    fn collect_auto_cross_module_by_value_rewrite_plan_in_scope(
+        &mut self,
+        items: &[syn::Item],
+        scope_path: &[String],
+    ) {
         let inline_modules: Vec<&syn::ItemMod> = items
             .iter()
             .filter_map(|item| match item {
@@ -3168,7 +3176,12 @@ impl CodeGen {
                 let Some((_, nested_items)) = &module_item.content else {
                     continue;
                 };
-                this.collect_auto_cross_module_by_value_rewrite_plan(nested_items);
+                let mut nested_scope_path = scope_path.to_vec();
+                nested_scope_path.push(module_item.ident.to_string());
+                this.collect_auto_cross_module_by_value_rewrite_plan_in_scope(
+                    nested_items,
+                    &nested_scope_path,
+                );
             }
         };
         if inline_modules.len() < 2 {
@@ -3214,20 +3227,30 @@ impl CodeGen {
             .enumerate()
             .map(|(idx, name)| (name.clone(), idx))
             .collect();
-        let mut outgoing: Vec<HashSet<usize>> = vec![HashSet::new(); inline_modules.len()];
-        for (module_pos, module_item) in inline_modules.iter().enumerate() {
-            let mut deps: HashSet<String> = HashSet::new();
+        let mut module_by_value_field_deps: HashMap<String, HashSet<String>> = HashMap::new();
+        for module_item in &inline_modules {
+            let owner_module = module_item.ident.to_string();
             let Some((_, module_items)) = &module_item.content else {
                 continue;
             };
-            self.collect_scope_module_hard_dependencies(
+            let mut deps: HashSet<String> = HashSet::new();
+            self.collect_auto_cross_module_by_value_field_dependencies_for_module_items(
                 module_items,
                 &known_modules,
                 &forward_declable_types_by_module,
+                &HashMap::new(),
                 &mut deps,
             );
+            deps.remove(&owner_module);
+            module_by_value_field_deps.insert(owner_module, deps);
+        }
+        let mut outgoing: Vec<HashSet<usize>> = vec![HashSet::new(); inline_modules.len()];
+        for (owner_module, deps) in &module_by_value_field_deps {
+            let Some(&module_pos) = module_index.get(owner_module) else {
+                continue;
+            };
             for dep in deps {
-                let Some(&dep_pos) = module_index.get(&dep) else {
+                let Some(&dep_pos) = module_index.get(dep) else {
                     continue;
                 };
                 if dep_pos != module_pos {
@@ -3299,6 +3322,7 @@ impl CodeGen {
             }
         }
         if module_scc.is_empty() {
+            recurse_nested(self);
             return;
         }
         for module_item in inline_modules {
@@ -3309,53 +3333,16 @@ impl CodeGen {
             let Some((_, module_items)) = &module_item.content else {
                 continue;
             };
-            for nested_item in module_items {
-                match nested_item {
-                    syn::Item::Struct(s) => {
-                        for (field_idx, field) in s.fields.iter().enumerate() {
-                            let field_name = field
-                                .ident
-                                .as_ref()
-                                .map(|ident| ident.to_string())
-                                .unwrap_or_else(|| format!("#{}", field_idx));
-                            self.maybe_mark_auto_cross_module_by_value_rewrite_field(
-                                &s.ident.to_string(),
-                                None,
-                                &field_name,
-                                &field.ty,
-                                &owner_module,
-                                owner_scc,
-                                &module_scc,
-                                &known_modules,
-                            );
-                        }
-                    }
-                    syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
-                        let owner_type = e.ident.to_string();
-                        for variant in &e.variants {
-                            let variant_name = variant.ident.to_string();
-                            for (field_idx, field) in variant.fields.iter().enumerate() {
-                                let field_name = field
-                                    .ident
-                                    .as_ref()
-                                    .map(|ident| ident.to_string())
-                                    .unwrap_or_else(|| format!("#{}", field_idx));
-                                self.maybe_mark_auto_cross_module_by_value_rewrite_field(
-                                    &owner_type,
-                                    Some(variant_name.as_str()),
-                                    &field_name,
-                                    &field.ty,
-                                    &owner_module,
-                                    owner_scc,
-                                    &module_scc,
-                                    &known_modules,
-                                );
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            self.mark_auto_cross_module_rewrite_fields_for_module_items(
+                module_items,
+                &owner_module,
+                scope_path,
+                owner_scc,
+                &module_scc,
+                &known_modules,
+                &forward_declable_types_by_module,
+                &HashMap::new(),
+            );
         }
 
         // Apply the same SCC-based rewrite planning recursively inside nested
@@ -3364,13 +3351,177 @@ impl CodeGen {
         recurse_nested(self);
     }
 
+    fn collect_auto_cross_module_by_value_field_dependencies_for_module_items(
+        &self,
+        items: &[syn::Item],
+        known_modules: &HashSet<String>,
+        forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
+        inherited_imports: &HashMap<String, String>,
+        out: &mut HashSet<String>,
+    ) {
+        let mut imported_name_to_module: HashMap<String, String> = inherited_imports.clone();
+        for item in items {
+            let syn::Item::Use(u) = item else {
+                continue;
+            };
+            let mut prefix: Vec<String> = Vec::new();
+            self.collect_use_tree_module_aliases_for_hard_dependencies(
+                &u.tree,
+                &mut prefix,
+                known_modules,
+                forward_declable_types_by_module,
+                &mut imported_name_to_module,
+            );
+        }
+
+        for item in items {
+            match item {
+                syn::Item::Struct(s) => {
+                    for field in &s.fields {
+                        self.collect_type_module_dependencies(
+                            &field.ty,
+                            known_modules,
+                            forward_declable_types_by_module,
+                            &imported_name_to_module,
+                            true,
+                            out,
+                        );
+                    }
+                }
+                syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
+                    for variant in &e.variants {
+                        for field in &variant.fields {
+                            self.collect_type_module_dependencies(
+                                &field.ty,
+                                known_modules,
+                                forward_declable_types_by_module,
+                                &imported_name_to_module,
+                                true,
+                                out,
+                            );
+                        }
+                    }
+                }
+                syn::Item::Mod(module_item) => {
+                    let Some((_, nested_items)) = &module_item.content else {
+                        continue;
+                    };
+                    self.collect_auto_cross_module_by_value_field_dependencies_for_module_items(
+                        nested_items,
+                        known_modules,
+                        forward_declable_types_by_module,
+                        &imported_name_to_module,
+                        out,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn mark_auto_cross_module_rewrite_fields_for_module_items(
+        &mut self,
+        items: &[syn::Item],
+        owner_module: &str,
+        scope_path: &[String],
+        owner_scc: usize,
+        module_scc: &HashMap<String, usize>,
+        known_modules: &HashSet<String>,
+        forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
+        inherited_imports: &HashMap<String, String>,
+    ) {
+        let mut imported_name_to_module: HashMap<String, String> = inherited_imports.clone();
+        for item in items {
+            let syn::Item::Use(u) = item else {
+                continue;
+            };
+            let mut prefix: Vec<String> = Vec::new();
+            self.collect_use_tree_module_aliases_for_hard_dependencies(
+                &u.tree,
+                &mut prefix,
+                known_modules,
+                forward_declable_types_by_module,
+                &mut imported_name_to_module,
+            );
+        }
+
+        for item in items {
+            match item {
+                syn::Item::Struct(s) => {
+                    for (field_idx, field) in s.fields.iter().enumerate() {
+                        let field_name = field
+                            .ident
+                            .as_ref()
+                            .map(|ident| ident.to_string())
+                            .unwrap_or_else(|| format!("#{}", field_idx));
+                        self.maybe_mark_auto_cross_module_by_value_rewrite_field(
+                            &s.ident.to_string(),
+                            None,
+                            &field_name,
+                            &field.ty,
+                            &imported_name_to_module,
+                            owner_module,
+                            scope_path,
+                            owner_scc,
+                            module_scc,
+                            known_modules,
+                        );
+                    }
+                }
+                syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
+                    let owner_type = e.ident.to_string();
+                    for variant in &e.variants {
+                        let variant_name = variant.ident.to_string();
+                        for (field_idx, field) in variant.fields.iter().enumerate() {
+                            let field_name = field
+                                .ident
+                                .as_ref()
+                                .map(|ident| ident.to_string())
+                                .unwrap_or_else(|| format!("#{}", field_idx));
+                            self.maybe_mark_auto_cross_module_by_value_rewrite_field(
+                                &owner_type,
+                                Some(variant_name.as_str()),
+                                &field_name,
+                                &field.ty,
+                                &imported_name_to_module,
+                                owner_module,
+                                scope_path,
+                                owner_scc,
+                                module_scc,
+                                known_modules,
+                            );
+                        }
+                    }
+                }
+                syn::Item::Mod(module_item) => {
+                    let Some((_, nested_items)) = &module_item.content else {
+                        continue;
+                    };
+                    self.mark_auto_cross_module_rewrite_fields_for_module_items(
+                        nested_items,
+                        owner_module,
+                        scope_path,
+                        owner_scc,
+                        module_scc,
+                        known_modules,
+                        forward_declable_types_by_module,
+                        &imported_name_to_module,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn maybe_mark_auto_cross_module_by_value_rewrite_field(
         &mut self,
         owner_type: &str,
         variant_name: Option<&str>,
         field_name: &str,
         field_ty: &syn::Type,
+        imported_name_to_module: &HashMap<String, String>,
         owner_module: &str,
+        scope_path: &[String],
         owner_scc: usize,
         module_scc: &HashMap<String, usize>,
         known_modules: &HashSet<String>,
@@ -3381,14 +3532,15 @@ impl CodeGen {
         if type_path.qself.is_some() {
             return;
         }
-        let Some(last) = type_path.path.segments.last() else {
-            return;
-        };
-        if !matches!(last.arguments, syn::PathArguments::None) {
+        if type_path.path.segments.is_empty() {
             return;
         }
-        let Some(target_module) =
-            Self::resolve_direct_field_target_module_for_auto_cycle_rewrite(&type_path.path, known_modules)
+        let Some(target_module) = Self::resolve_direct_field_target_module_for_auto_cycle_rewrite(
+            &type_path.path,
+            known_modules,
+            imported_name_to_module,
+            scope_path,
+        )
         else {
             return;
         };
@@ -3411,26 +3563,74 @@ impl CodeGen {
     fn resolve_direct_field_target_module_for_auto_cycle_rewrite(
         path: &syn::Path,
         known_modules: &HashSet<String>,
+        imported_name_to_module: &HashMap<String, String>,
+        scope_path: &[String],
     ) -> Option<String> {
         let segments: Vec<String> = path
             .segments
             .iter()
             .map(|segment| segment.ident.to_string())
             .collect();
+        if let Some(first) = segments.first()
+            && let Some(imported_module) = imported_name_to_module.get(first)
+            && known_modules.contains(imported_module)
+        {
+            return Some(imported_module.clone());
+        }
         if segments.len() < 2 {
             return None;
         }
-        let first = &segments[0];
-        if known_modules.contains(first) {
-            return Some(first.clone());
-        }
-        if matches!(first.as_str(), "crate" | "self" | "super")
-            && let Some(second) = segments.get(1)
-            && known_modules.contains(second)
-        {
-            return Some(second.clone());
+        for module_idx in 0..segments.len() {
+            if module_idx + 1 >= segments.len() {
+                continue;
+            }
+            let module_name = &segments[module_idx];
+            if !known_modules.contains(module_name) {
+                continue;
+            }
+            let prefix = &segments[..module_idx];
+            if Self::auto_cycle_field_path_prefix_matches_scope(prefix, scope_path) {
+                return Some(module_name.clone());
+            }
         }
         None
+    }
+
+    fn auto_cycle_field_path_prefix_matches_scope(
+        prefix: &[String],
+        scope_path: &[String],
+    ) -> bool {
+        if prefix.is_empty() {
+            return true;
+        }
+
+        let mut idx = 0usize;
+        while idx < prefix.len() && matches!(prefix[idx].as_str(), "crate" | "self") {
+            idx += 1;
+        }
+
+        let mut scope_len = scope_path.len();
+        while idx < prefix.len() && prefix[idx] == "super" {
+            if scope_len == 0 {
+                return false;
+            }
+            scope_len -= 1;
+            idx += 1;
+        }
+
+        let remaining = &prefix[idx..];
+        if remaining.is_empty() {
+            return true;
+        }
+        if remaining.len() > scope_len {
+            return false;
+        }
+
+        let scope_suffix = &scope_path[scope_len - remaining.len()..scope_len];
+        scope_suffix
+            .iter()
+            .zip(remaining.iter())
+            .all(|(lhs, rhs)| lhs == rhs)
     }
 
     fn collect_by_value_field_edges(
@@ -5104,14 +5304,18 @@ impl CodeGen {
                     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
                         continue;
                     };
+                    let generic_payloads_are_non_hard =
+                        Self::path_generic_payloads_are_non_hard_for_module_ordering(&tp.path);
                     for arg in &args.args {
                         if let syn::GenericArgument::Type(arg_ty) = arg {
+                            let nested_require_complete =
+                                require_complete_types && !generic_payloads_are_non_hard;
                             self.collect_type_module_dependencies(
                                 arg_ty,
                                 known_modules,
                                 forward_declable_types_by_module,
                                 imported_name_to_module,
-                                require_complete_types,
+                                nested_require_complete,
                                 out,
                             );
                         }
@@ -5214,6 +5418,16 @@ impl CodeGen {
             }
             _ => {}
         }
+    }
+
+    fn path_generic_payloads_are_non_hard_for_module_ordering(path: &syn::Path) -> bool {
+        let Some(last) = path.segments.last() else {
+            return false;
+        };
+        matches!(
+            last.ident.to_string().as_str(),
+            "Vec" | "Box" | "Rc" | "Arc" | "Weak"
+        )
     }
 
     fn collect_expr_module_dependencies_for_hard_dependencies(
@@ -17496,12 +17710,57 @@ impl CodeGen {
                 .collect::<Vec<_>>()
                 .join("::")
         };
-        let normalized = path.trim_start_matches("::");
+        let normalize_lookup_path = |raw: &str| -> String {
+            let mut segments: Vec<String> = raw
+                .split("::")
+                .filter(|seg| !seg.is_empty())
+                .map(str::to_string)
+                .collect();
+            if segments.is_empty() {
+                return String::new();
+            }
+
+            if segments.first().is_some_and(|seg| seg == "crate") {
+                segments.remove(0);
+            } else if let Some(crate_name) = self.crate_name.as_deref()
+                && segments.first().is_some_and(|seg| seg == crate_name)
+            {
+                segments.remove(0);
+            } else {
+                let mut resolved_prefix = self.module_stack.clone();
+                let mut idx = 0usize;
+                let mut had_relative_prefix = false;
+                while idx < segments.len() {
+                    match segments[idx].as_str() {
+                        "self" => {
+                            had_relative_prefix = true;
+                            idx += 1;
+                        }
+                        "super" => {
+                            had_relative_prefix = true;
+                            if !resolved_prefix.is_empty() {
+                                resolved_prefix.pop();
+                            }
+                            idx += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                if had_relative_prefix {
+                    resolved_prefix.extend(segments.into_iter().skip(idx));
+                    segments = resolved_prefix;
+                }
+            }
+
+            segments.join("::")
+        };
+
+        let normalized = normalize_lookup_path(path.trim_start_matches("::"));
         if normalized.is_empty() || normalized.contains(" = ") {
             return None;
         }
-        let normalized_escaped = escape_lookup_path(normalized);
-        if self.local_declared_types.contains(normalized)
+        let normalized_escaped = escape_lookup_path(&normalized);
+        if self.local_declared_types.contains(&normalized)
             || self.local_declared_types.contains(&normalized_escaped)
         {
             return None;
@@ -45276,6 +45535,11 @@ impl CodeGen {
                     }
                 })
                 .collect();
+            let args = self.wrap_data_enum_variant_tuple_constructor_args(
+                &expected_enum,
+                &variant_name,
+                args,
+            );
             let variant_expr = if args.is_empty() {
                 format!("{}{{}}", variant_ty)
             } else {
@@ -45414,6 +45678,26 @@ impl CodeGen {
             return None;
         }
         Some(format!("{}{{{}}}", owner_cpp, variant_expr))
+    }
+
+    fn wrap_data_enum_variant_tuple_constructor_args(
+        &self,
+        owner_type: &str,
+        variant_name: &str,
+        args: Vec<String>,
+    ) -> Vec<String> {
+        args.into_iter()
+            .enumerate()
+            .map(|(idx, arg)| {
+                let rewrite_field_key =
+                    Self::format_by_value_field_name(Some(variant_name), &format!("#{}", idx));
+                self.wrap_by_value_cycle_rewrite_field_initializer(
+                    owner_type,
+                    &rewrite_field_key,
+                    arg,
+                )
+            })
+            .collect()
     }
 
     fn expected_type_last_ident(&self, expected_ty: &syn::Type) -> Option<String> {
@@ -53057,6 +53341,8 @@ impl CodeGen {
             .iter()
             .map(|a| self.emit_expr_maybe_move(a))
             .collect();
+        let args =
+            self.wrap_data_enum_variant_tuple_constructor_args(enum_name, variant_name, args);
 
         if args.is_empty() {
             Some(format!("{}{{}}", cpp_variant_struct))
@@ -69061,6 +69347,13 @@ fn rewrite_std_cmp_import(path: &str) -> Option<UseImportAction> {
 /// Check if a using path refers to a Rust-only trait/module with no C++ equivalent.
 /// These are silently skipped (commented out) since they have no meaning in C++.
 fn is_rust_only_import(path: &str) -> bool {
+    let normalized = path.trim_start_matches("::");
+    // Parser sink traits are lowered to generic `auto&` error receivers in C++;
+    // importing the Rust trait name directly is not meaningful in emitted C++.
+    if normalized == "ErrorSink" {
+        return true;
+    }
+
     // Rust std trait modules that don't exist in C++
     let rust_only_prefixes = [
         "std::convert",   // convert module and traits (AsRef, AsMut, From, Into)
@@ -92201,7 +92494,7 @@ mod tests {
             out
         );
         assert!(
-            !out.contains("::CapacityError<typename"),
+            !out.contains("rusty::Result<std::tuple<>, ::CapacityError<"),
             "trait default method signatures must not collapse reexport alias to root identifier, got:\n{}",
             out
         );
@@ -94587,9 +94880,105 @@ mod tests {
             "Expected data-enum variant struct emission\nGot: {out}"
         );
         assert!(
-            out.contains("rusty::Box<dearray::DeArray> _0;")
-                || out.contains("rusty::Box<::parser::dearray::DeArray> _0;"),
-            "Expected nested cross-module cycle field rewrite to rusty::Box\nGot: {out}"
+            !out.contains("rusty::Box<dearray::DeArray> _0;")
+                && !out.contains("rusty::Box<parser::dearray::DeArray> _0;")
+                && !out.contains("rusty::Box<::parser::dearray::DeArray> _0;"),
+            "Container-mediated module cycles should not force direct field boxing\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1121_nested_cycle_rewrite_recurses_past_non_scc_parent_scope() {
+        let out = transpile_str(
+            r#"
+            mod alpha {
+                mod parser {
+                    mod dearray {
+                        struct DeArray {
+                            items: Vec<super::devalue::DeValue>,
+                        }
+                    }
+
+                    mod devalue {
+                        enum DeValue {
+                            Array(super::dearray::DeArray),
+                            Unit,
+                        }
+                    }
+                }
+            }
+
+            mod beta {
+                struct Marker;
+            }
+            "#,
+        );
+        assert!(
+            !out.contains("rusty::Box<dearray::DeArray> _0;")
+                && !out.contains("rusty::Box<parser::dearray::DeArray> _0;")
+                && !out.contains("rusty::Box<alpha::parser::dearray::DeArray> _0;")
+                && !out.contains("rusty::Box<::alpha::parser::dearray::DeArray> _0;"),
+            "Container-mediated nested cycles should not force enum payload boxing\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1121_auto_cross_module_rewrite_handles_scope_prefixed_paths() {
+        let out = transpile_str(
+            r#"
+            mod parser {
+                mod left {
+                    struct Left {
+                        right: parser::right::Right,
+                    }
+                }
+
+                mod right {
+                    struct Right {
+                        left: parser::left::Left,
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::Box<right::Right> right;")
+                || out.contains("rusty::Box<parser::right::Right> right;")
+                || out.contains("rusty::Box<::parser::right::Right> right;")
+                || out.contains("rusty::Box<left::Left> left;")
+                || out.contains("rusty::Box<parser::left::Left> left;")
+                || out.contains("rusty::Box<::parser::left::Left> left;"),
+            "Expected scope-prefixed cross-module path rewrite to rusty::Box\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1121_auto_cross_module_rewrite_allows_generic_target_paths() {
+        let out = transpile_str(
+            r#"
+            mod parser {
+                mod left {
+                    struct Left<T> {
+                        right: super::right::Right<T>,
+                    }
+                }
+
+                mod right {
+                    struct Right<T> {
+                        left: super::left::Left<T>,
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::Box<right::Right<T>> right;")
+                || out.contains("rusty::Box<parser::right::Right<T>> right;")
+                || out.contains("rusty::Box<::parser::right::Right<T>> right;")
+                || out.contains("rusty::Box<left::Left<T>> left;")
+                || out.contains("rusty::Box<parser::left::Left<T>> left;")
+                || out.contains("rusty::Box<::parser::left::Left<T>> left;"),
+            "Expected generic cross-module field rewrite to rusty::Box\nGot: {out}"
         );
     }
 
@@ -94918,6 +95307,30 @@ mod tests {
         assert!(
             out.contains(".b = rusty::make_box(std::forward<B>(b))"),
             "Expected enum variant constructor helper to wrap rewritten field payload with rusty::make_box\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1127_opt_in_mode_enum_variant_constructor_call_wraps_rewritten_field_with_box_make()
+     {
+        let out = transpile_str_with_by_value_cycle_breaking_prototype(
+            r#"
+            enum A {
+                Hold(B),
+            }
+
+            struct B {
+                a: A,
+            }
+
+            fn mk(b: B) -> A {
+                A::Hold(b)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("A_Hold{rusty::make_box(std::move(b))}"),
+            "Expected enum variant call-site construction to wrap rewritten field payload with rusty::make_box\nGot: {out}"
         );
     }
 
