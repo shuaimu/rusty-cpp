@@ -1752,6 +1752,7 @@ impl CodeGen {
 
         let topo_positions = |hard_only: bool| -> Option<Vec<usize>> {
             let mut outgoing: Vec<HashSet<usize>> = vec![HashSet::new(); inline_modules.len()];
+            let mut strict_outgoing: Vec<HashSet<usize>> = vec![HashSet::new(); inline_modules.len()];
             let mut indegree: Vec<usize> = vec![0; inline_modules.len()];
 
             for (module_pos, (_, item)) in inline_modules.iter().enumerate() {
@@ -1759,6 +1760,7 @@ impl CodeGen {
                     continue;
                 };
                 let mut deps: HashSet<String> = HashSet::new();
+                let mut strict_deps: HashSet<String> = HashSet::new();
                 if let Some((_, module_items)) = &module_item.content {
                     if !hard_only {
                         self.collect_scope_module_dependencies(
@@ -1772,6 +1774,12 @@ impl CodeGen {
                         &known_modules,
                         &forward_declable_types_by_module,
                         &mut deps,
+                    );
+                    self.collect_scope_module_strict_type_dependencies(
+                        module_items,
+                        &known_modules,
+                        &forward_declable_types_by_module,
+                        &mut strict_deps,
                     );
                 }
                 if hard_only && std::env::var_os("RUSTY_CPP_DEBUG_MODULE_DEPS").is_some() {
@@ -1789,6 +1797,15 @@ impl CodeGen {
                     if outgoing[dep_pos].insert(module_pos) {
                         indegree[module_pos] += 1;
                     }
+                }
+                for dep in strict_deps {
+                    let Some(&dep_pos) = name_to_pos.get(&dep) else {
+                        continue;
+                    };
+                    if dep_pos == module_pos {
+                        continue;
+                    }
+                    strict_outgoing[dep_pos].insert(module_pos);
                 }
             }
 
@@ -1823,6 +1840,7 @@ impl CodeGen {
                 Self::append_remaining_module_positions_via_scc(
                     &mut sorted_positions,
                     &outgoing,
+                    &strict_outgoing,
                     &inline_modules,
                 );
             }
@@ -1930,6 +1948,7 @@ impl CodeGen {
     fn append_remaining_module_positions_via_scc<'a>(
         sorted_positions: &mut Vec<usize>,
         outgoing: &[HashSet<usize>],
+        strict_outgoing: &[HashSet<usize>],
         inline_modules: &[(usize, &'a syn::Item)],
     ) {
         let module_count = inline_modules.len();
@@ -2083,41 +2102,82 @@ impl CodeGen {
             emitted[scc_idx] = true;
             let mut component_nodes = sccs[scc_idx].clone();
             let component_set: HashSet<usize> = component_nodes.iter().copied().collect();
-            let mut local_out_degree: HashMap<usize, usize> = HashMap::new();
-            let mut local_in_degree: HashMap<usize, usize> = HashMap::new();
+            let mut strict_in_degree: HashMap<usize, usize> =
+                component_nodes.iter().map(|&n| (n, 0usize)).collect();
             for &module_pos in &component_nodes {
-                let out_count = outgoing[module_pos]
-                    .iter()
-                    .filter(|next| component_set.contains(next))
-                    .count();
-                local_out_degree.insert(module_pos, out_count);
-                local_in_degree.entry(module_pos).or_insert(0);
-            }
-            for &module_pos in &component_nodes {
-                for &next in &outgoing[module_pos] {
+                for &next in &strict_outgoing[module_pos] {
                     if component_set.contains(&next) {
-                        *local_in_degree.entry(next).or_insert(0) += 1;
+                        *strict_in_degree.entry(next).or_insert(0) += 1;
                     }
                 }
             }
-            component_nodes.sort_by(|a, b| {
-                let a_out = *local_out_degree.get(a).unwrap_or(&0);
-                let b_out = *local_out_degree.get(b).unwrap_or(&0);
-                let a_in = *local_in_degree.get(a).unwrap_or(&0);
-                let b_in = *local_in_degree.get(b).unwrap_or(&0);
-                let a_to_b = outgoing[*a].contains(b);
-                let b_to_a = outgoing[*b].contains(a);
-                if a_to_b && b_to_a {
-                    return b_out
-                        .cmp(&a_out)
-                        .then_with(|| b_in.cmp(&a_in))
-                        .then_with(|| inline_modules[*a].0.cmp(&inline_modules[*b].0));
+            let mut strict_ready: BinaryHeap<(Reverse<usize>, usize)> = BinaryHeap::new();
+            for &module_pos in &component_nodes {
+                if strict_in_degree.get(&module_pos).copied().unwrap_or(0) == 0 {
+                    strict_ready.push((Reverse(inline_modules[module_pos].0), module_pos));
                 }
-                b_out
-                    .cmp(&a_out)
-                    .then_with(|| a_in.cmp(&b_in))
-                    .then_with(|| inline_modules[*a].0.cmp(&inline_modules[*b].0))
-            });
+            }
+            let mut strict_ordered: Vec<usize> = Vec::with_capacity(component_nodes.len());
+            while let Some((_, module_pos)) = strict_ready.pop() {
+                if strict_ordered.contains(&module_pos) {
+                    continue;
+                }
+                strict_ordered.push(module_pos);
+                for &next in &strict_outgoing[module_pos] {
+                    if !component_set.contains(&next) {
+                        continue;
+                    }
+                    if let Some(next_in) = strict_in_degree.get_mut(&next) {
+                        if *next_in == 0 {
+                            continue;
+                        }
+                        *next_in -= 1;
+                        if *next_in == 0 {
+                            strict_ready.push((Reverse(inline_modules[next].0), next));
+                        }
+                    }
+                }
+            }
+
+            if strict_ordered.len() == component_nodes.len() {
+                component_nodes = strict_ordered;
+            } else {
+                let mut local_out_degree: HashMap<usize, usize> = HashMap::new();
+                let mut local_in_degree: HashMap<usize, usize> = HashMap::new();
+                for &module_pos in &component_nodes {
+                    let out_count = outgoing[module_pos]
+                        .iter()
+                        .filter(|next| component_set.contains(next))
+                        .count();
+                    local_out_degree.insert(module_pos, out_count);
+                    local_in_degree.entry(module_pos).or_insert(0);
+                }
+                for &module_pos in &component_nodes {
+                    for &next in &outgoing[module_pos] {
+                        if component_set.contains(&next) {
+                            *local_in_degree.entry(next).or_insert(0) += 1;
+                        }
+                    }
+                }
+                component_nodes.sort_by(|a, b| {
+                    let a_out = *local_out_degree.get(a).unwrap_or(&0);
+                    let b_out = *local_out_degree.get(b).unwrap_or(&0);
+                    let a_in = *local_in_degree.get(a).unwrap_or(&0);
+                    let b_in = *local_in_degree.get(b).unwrap_or(&0);
+                    let a_to_b = outgoing[*a].contains(b);
+                    let b_to_a = outgoing[*b].contains(a);
+                    if a_to_b && b_to_a {
+                        return b_out
+                            .cmp(&a_out)
+                            .then_with(|| b_in.cmp(&a_in))
+                            .then_with(|| inline_modules[*a].0.cmp(&inline_modules[*b].0));
+                    }
+                    b_out
+                        .cmp(&a_out)
+                        .then_with(|| a_in.cmp(&b_in))
+                        .then_with(|| inline_modules[*a].0.cmp(&inline_modules[*b].0))
+                });
+            }
             sorted_positions.extend(component_nodes);
 
             let outgoing_sccs: Vec<usize> = scc_outgoing[scc_idx].iter().copied().collect();
@@ -3870,6 +3930,209 @@ impl CodeGen {
         );
     }
 
+    fn collect_scope_module_strict_type_dependencies(
+        &self,
+        items: &[syn::Item],
+        known_modules: &HashSet<String>,
+        forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
+        out: &mut HashSet<String>,
+    ) {
+        let imported_name_to_module: HashMap<String, String> = HashMap::new();
+        self.collect_scope_module_strict_type_dependencies_with_imports(
+            items,
+            known_modules,
+            forward_declable_types_by_module,
+            &imported_name_to_module,
+            out,
+        );
+    }
+
+    fn collect_scope_module_strict_type_dependencies_with_imports(
+        &self,
+        items: &[syn::Item],
+        known_modules: &HashSet<String>,
+        forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
+        inherited_imports: &HashMap<String, String>,
+        out: &mut HashSet<String>,
+    ) {
+        let mut imported_name_to_module: HashMap<String, String> = inherited_imports.clone();
+        for item in items {
+            let syn::Item::Use(u) = item else {
+                continue;
+            };
+            let mut prefix: Vec<String> = Vec::new();
+            self.collect_use_tree_module_aliases_for_hard_dependencies(
+                &u.tree,
+                &mut prefix,
+                known_modules,
+                forward_declable_types_by_module,
+                &mut imported_name_to_module,
+            );
+        }
+
+        for item in items {
+            match item {
+                syn::Item::Struct(s) => match &s.fields {
+                    syn::Fields::Named(fields) => {
+                        for field in &fields.named {
+                            self.collect_type_module_dependencies(
+                                &field.ty,
+                                known_modules,
+                                forward_declable_types_by_module,
+                                &imported_name_to_module,
+                                true,
+                                out,
+                            );
+                        }
+                    }
+                    syn::Fields::Unnamed(fields) => {
+                        for field in &fields.unnamed {
+                            self.collect_type_module_dependencies(
+                                &field.ty,
+                                known_modules,
+                                forward_declable_types_by_module,
+                                &imported_name_to_module,
+                                true,
+                                out,
+                            );
+                        }
+                    }
+                    syn::Fields::Unit => {}
+                },
+                syn::Item::Enum(e) => {
+                    for variant in &e.variants {
+                        match &variant.fields {
+                            syn::Fields::Named(fields) => {
+                                for field in &fields.named {
+                                    self.collect_type_module_dependencies(
+                                        &field.ty,
+                                        known_modules,
+                                        forward_declable_types_by_module,
+                                        &imported_name_to_module,
+                                        true,
+                                        out,
+                                    );
+                                }
+                            }
+                            syn::Fields::Unnamed(fields) => {
+                                for field in &fields.unnamed {
+                                    self.collect_type_module_dependencies(
+                                        &field.ty,
+                                        known_modules,
+                                        forward_declable_types_by_module,
+                                        &imported_name_to_module,
+                                        true,
+                                        out,
+                                    );
+                                }
+                            }
+                            syn::Fields::Unit => {}
+                        }
+                    }
+                }
+                syn::Item::Union(u) => {
+                    for field in &u.fields.named {
+                        self.collect_type_module_dependencies(
+                            &field.ty,
+                            known_modules,
+                            forward_declable_types_by_module,
+                            &imported_name_to_module,
+                            true,
+                            out,
+                        );
+                    }
+                }
+                syn::Item::Const(c) => {
+                    self.collect_type_module_dependencies(
+                        &c.ty,
+                        known_modules,
+                        forward_declable_types_by_module,
+                        &imported_name_to_module,
+                        true,
+                        out,
+                    );
+                }
+                syn::Item::Fn(f) => {
+                    for input in &f.sig.inputs {
+                        let syn::FnArg::Typed(pat_ty) = input else {
+                            continue;
+                        };
+                        self.collect_type_module_dependencies(
+                            &pat_ty.ty,
+                            known_modules,
+                            forward_declable_types_by_module,
+                            &imported_name_to_module,
+                            true,
+                            out,
+                        );
+                    }
+                    if let syn::ReturnType::Type(_, ret_ty) = &f.sig.output {
+                        self.collect_type_module_dependencies(
+                            ret_ty,
+                            known_modules,
+                            forward_declable_types_by_module,
+                            &imported_name_to_module,
+                            true,
+                            out,
+                        );
+                    }
+                }
+                syn::Item::Impl(imp) => {
+                    for impl_item in &imp.items {
+                        let syn::ImplItem::Fn(method) = impl_item else {
+                            continue;
+                        };
+                        for input in &method.sig.inputs {
+                            let syn::FnArg::Typed(pat_ty) = input else {
+                                continue;
+                            };
+                            self.collect_type_module_dependencies(
+                                &pat_ty.ty,
+                                known_modules,
+                                forward_declable_types_by_module,
+                                &imported_name_to_module,
+                                true,
+                                out,
+                            );
+                        }
+                        if let syn::ReturnType::Type(_, ret_ty) = &method.sig.output {
+                            self.collect_type_module_dependencies(
+                                ret_ty,
+                                known_modules,
+                                forward_declable_types_by_module,
+                                &imported_name_to_module,
+                                true,
+                                out,
+                            );
+                        }
+                    }
+                }
+                syn::Item::Static(s) => {
+                    self.collect_type_module_dependencies(
+                        &s.ty,
+                        known_modules,
+                        forward_declable_types_by_module,
+                        &imported_name_to_module,
+                        true,
+                        out,
+                    );
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        self.collect_scope_module_strict_type_dependencies_with_imports(
+                            nested,
+                            known_modules,
+                            forward_declable_types_by_module,
+                            &imported_name_to_module,
+                            out,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn collect_scope_module_hard_dependencies_with_imports(
         &self,
         items: &[syn::Item],
@@ -3910,6 +4173,7 @@ impl CodeGen {
                                 known_modules,
                                 forward_declable_types_by_module,
                                 &imported_name_to_module,
+                                true,
                                 out,
                             );
                         }
@@ -3921,6 +4185,7 @@ impl CodeGen {
                                 known_modules,
                                 forward_declable_types_by_module,
                                 &imported_name_to_module,
+                                true,
                                 out,
                             );
                         }
@@ -3937,6 +4202,7 @@ impl CodeGen {
                                         known_modules,
                                         forward_declable_types_by_module,
                                         &imported_name_to_module,
+                                        true,
                                         out,
                                     );
                                 }
@@ -3948,6 +4214,7 @@ impl CodeGen {
                                         known_modules,
                                         forward_declable_types_by_module,
                                         &imported_name_to_module,
+                                        true,
                                         out,
                                     );
                                 }
@@ -3963,6 +4230,7 @@ impl CodeGen {
                             known_modules,
                             forward_declable_types_by_module,
                             &imported_name_to_module,
+                            true,
                             out,
                         );
                     }
@@ -3977,6 +4245,7 @@ impl CodeGen {
                             known_modules,
                             forward_declable_types_by_module,
                             &imported_name_to_module,
+                            false,
                             out,
                         );
                     }
@@ -3986,6 +4255,7 @@ impl CodeGen {
                             known_modules,
                             forward_declable_types_by_module,
                             &imported_name_to_module,
+                            false,
                             out,
                         );
                     }
@@ -4006,6 +4276,7 @@ impl CodeGen {
                                     known_modules,
                                     forward_declable_types_by_module,
                                     &imported_name_to_module,
+                                    true,
                                     out,
                                 );
                                 self.collect_expr_module_dependencies_for_hard_dependencies(
@@ -4022,6 +4293,7 @@ impl CodeGen {
                                     known_modules,
                                     forward_declable_types_by_module,
                                     &imported_name_to_module,
+                                    false,
                                     out,
                                 );
                             }
@@ -4035,6 +4307,7 @@ impl CodeGen {
                                                 known_modules,
                                                 forward_declable_types_by_module,
                                                 &imported_name_to_module,
+                                                false,
                                                 out,
                                             );
                                         }
@@ -4046,6 +4319,7 @@ impl CodeGen {
                                         known_modules,
                                         forward_declable_types_by_module,
                                         &imported_name_to_module,
+                                        false,
                                         out,
                                     );
                                 }
@@ -4067,6 +4341,7 @@ impl CodeGen {
                         known_modules,
                         forward_declable_types_by_module,
                         &imported_name_to_module,
+                        false,
                         out,
                     );
                 }
@@ -4076,6 +4351,7 @@ impl CodeGen {
                         known_modules,
                         forward_declable_types_by_module,
                         &imported_name_to_module,
+                        true,
                         out,
                     );
                     self.collect_expr_module_dependencies_for_hard_dependencies(
@@ -4092,6 +4368,7 @@ impl CodeGen {
                         known_modules,
                         forward_declable_types_by_module,
                         &imported_name_to_module,
+                        true,
                         out,
                     );
                     self.collect_expr_module_dependencies_for_hard_dependencies(
@@ -4343,6 +4620,7 @@ impl CodeGen {
         known_modules: &HashSet<String>,
         forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
         imported_name_to_module: &HashMap<String, String>,
+        require_complete_types: bool,
         out: &mut HashSet<String>,
     ) {
         match ty {
@@ -4352,6 +4630,7 @@ impl CodeGen {
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
+                    !require_complete_types,
                     out,
                 );
                 for segment in &tp.path.segments {
@@ -4365,6 +4644,7 @@ impl CodeGen {
                                 known_modules,
                                 forward_declable_types_by_module,
                                 imported_name_to_module,
+                                require_complete_types,
                                 out,
                             );
                         }
@@ -4377,6 +4657,7 @@ impl CodeGen {
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
+                    require_complete_types,
                     out,
                 );
             }
@@ -4386,6 +4667,7 @@ impl CodeGen {
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
+                    require_complete_types,
                     out,
                 );
             }
@@ -4395,6 +4677,7 @@ impl CodeGen {
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
+                    require_complete_types,
                     out,
                 );
             }
@@ -4404,6 +4687,7 @@ impl CodeGen {
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
+                    require_complete_types,
                     out,
                 );
             }
@@ -4413,6 +4697,7 @@ impl CodeGen {
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
+                    false,
                     out,
                 );
             }
@@ -4422,6 +4707,7 @@ impl CodeGen {
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
+                    false,
                     out,
                 );
             }
@@ -4432,6 +4718,7 @@ impl CodeGen {
                         known_modules,
                         forward_declable_types_by_module,
                         imported_name_to_module,
+                        require_complete_types,
                         out,
                     );
                 }
@@ -4443,6 +4730,7 @@ impl CodeGen {
                         known_modules,
                         forward_declable_types_by_module,
                         imported_name_to_module,
+                        false,
                         out,
                     );
                 }
@@ -4452,6 +4740,7 @@ impl CodeGen {
                         known_modules,
                         forward_declable_types_by_module,
                         imported_name_to_module,
+                        false,
                         out,
                     );
                 }
@@ -4484,6 +4773,7 @@ impl CodeGen {
                         self.known_modules,
                         self.forward_declable_types_by_module,
                         self.imported_name_to_module,
+                        true,
                         self.out,
                     );
                 visit::visit_path(self, path);
@@ -4495,6 +4785,7 @@ impl CodeGen {
                     self.known_modules,
                     self.forward_declable_types_by_module,
                     self.imported_name_to_module,
+                    false,
                     self.out,
                 );
                 visit::visit_type(self, ty);
@@ -4535,6 +4826,7 @@ impl CodeGen {
                         self.known_modules,
                         self.forward_declable_types_by_module,
                         self.imported_name_to_module,
+                        true,
                         self.out,
                     );
                 visit::visit_path(self, path);
@@ -4546,6 +4838,7 @@ impl CodeGen {
                     self.known_modules,
                     self.forward_declable_types_by_module,
                     self.imported_name_to_module,
+                    false,
                     self.out,
                 );
                 visit::visit_type(self, ty);
@@ -4568,17 +4861,19 @@ impl CodeGen {
         known_modules: &HashSet<String>,
         forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
         imported_name_to_module: &HashMap<String, String>,
+        allow_forward_declable_type_skip: bool,
         out: &mut HashSet<String>,
     ) {
         let Some(first) = path.segments.first() else {
             return;
         };
+        let segment_count = path.segments.len();
         let first_name = first.ident.to_string();
         let mut resolved_module: Option<String> = None;
         let mut resolved_type_name: Option<String> = None;
         let mut resolved_type_segment_index: Option<usize> = None;
 
-        if known_modules.contains(&first_name) {
+        if known_modules.contains(&first_name) && segment_count > 1 {
             resolved_module = Some(first_name.clone());
             if let Some(second) = path.segments.iter().nth(1) {
                 resolved_type_name = Some(second.ident.to_string());
@@ -4636,7 +4931,7 @@ impl CodeGen {
         // Nested sibling-module paths (for example `de::parser::prelude::Input`)
         // can appear in signatures and aliases. When direct first-segment
         // resolution misses, recover by scanning for any sibling module segment.
-        if resolved_module.is_none() {
+        if resolved_module.is_none() && segment_count > 1 {
             let segments: Vec<String> = path
                 .segments
                 .iter()
@@ -4662,7 +4957,7 @@ impl CodeGen {
                 }
             }
         }
-        if resolved_module.is_none() {
+        if resolved_module.is_none() && segment_count > 1 {
             // Re-exported paths can hide the sibling module root
             // (for example `crate::de::DeString` -> `devalue::DeString`).
             let raw_path = path
@@ -4704,7 +4999,8 @@ impl CodeGen {
         let Some(module_name) = resolved_module else {
             return;
         };
-        if let Some(type_name) = resolved_type_name
+        if allow_forward_declable_type_skip
+            && let Some(type_name) = resolved_type_name
             && forward_declable_types_by_module
                 .get(&module_name)
                 .is_some_and(|types| types.contains(&type_name))
@@ -39047,10 +39343,47 @@ impl CodeGen {
             } else {
                 self.emit_expr_to_string(&mc.receiver)
             };
+            let explicit_collect_owner_type = |ty: &syn::Type, mapped: &str| -> Option<String> {
+                if mapped.contains('<') {
+                    return Some(mapped.to_string());
+                }
+                let ty = self.peel_reference_paren_group_type(ty);
+                let syn::Type::Path(tp) = ty else {
+                    return None;
+                };
+                let last = tp.path.segments.last()?;
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    return None;
+                };
+                let mapped_args: Vec<String> = args
+                    .args
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                        syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                        _ => None,
+                    })
+                    .collect();
+                if mapped_args.is_empty() {
+                    return None;
+                }
+                let mut owner_path = tp.path.clone();
+                if let Some(owner_last) = owner_path.segments.last_mut() {
+                    owner_last.arguments = syn::PathArguments::None;
+                }
+                let owner_cpp = self.emit_path_to_string(&owner_path);
+                if owner_cpp.is_empty() {
+                    return None;
+                }
+                Some(format!("{}<{}>", owner_cpp, mapped_args.join(", ")))
+            };
             let mut unresolved_vec_placeholder_collect = false;
             // Try turbofish type arg first: `collect::<T>()` → `T::from_iter(receiver)`
             if let Some(turbofish_ty) = self.method_call_single_turbofish_type(mc) {
-                let collect_type = self.map_type(turbofish_ty);
+                let mut collect_type = self.map_type(turbofish_ty);
+                if let Some(explicit) = explicit_collect_owner_type(turbofish_ty, &collect_type) {
+                    collect_type = explicit;
+                }
                 if collect_type.starts_with("rusty::Vec<")
                     && type_string_has_auto_placeholder(&collect_type)
                 {
@@ -39082,7 +39415,11 @@ impl CodeGen {
             if let Some(expected) = expected_ty {
                 let resolved_expected =
                     self.resolve_expected_type_with_iter_hint(expected, &mc.receiver);
-                let expected_cpp = self.map_type(&resolved_expected);
+                let mut expected_cpp = self.map_type(&resolved_expected);
+                if let Some(explicit) = explicit_collect_owner_type(&resolved_expected, &expected_cpp)
+                {
+                    expected_cpp = explicit;
+                }
                 if expected_cpp.starts_with("rusty::Vec<")
                     && type_string_has_auto_placeholder(&expected_cpp)
                 {
@@ -47904,6 +48241,56 @@ impl CodeGen {
                     self.declared_type_param_arity_for_owner_tail(&owner_name)
                 }
             });
+        let owner_alias_omitted_args: Option<Vec<String>> = if owner_args_omitted {
+            let owner_key = self
+                .declared_type_key_for_path(&owner_path)
+                .or_else(|| self.lookup_declared_type_key_for_base(&owner_name, &owner_name));
+            if let Some(owner_key) = owner_key {
+                let owner_is_alias = self.type_alias_targets.contains_key(&owner_key)
+                    || self.type_alias_targets.contains_key(&owner_name);
+                if owner_is_alias {
+                    if let Some(params) = self.declared_type_params.get(&owner_key) {
+                        if !params.is_empty() {
+                            let defaults = self.declared_type_param_defaults.get(&owner_key);
+                            let requires_explicit_args = defaults.is_none_or(|all| {
+                                params.iter().enumerate().any(|(idx, _)| {
+                                    all.get(idx).is_none_or(|entry| entry.is_none())
+                                })
+                            });
+                            if requires_explicit_args {
+                                Some(params.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if std::env::var_os("RUSTY_CPP_DEBUG_OWNER_RECOVERY").is_some()
+            && owner_name == "MapImpl"
+            && method_name == "from_iter"
+        {
+            eprintln!(
+                "[owner-recovery] owner={} omitted={} declared_generics={} any_tail={} declared_arity={:?} alias_args={:?}",
+                owner_name,
+                owner_args_omitted,
+                owner_has_declared_generics,
+                owner_has_any_declared_generic_tail,
+                owner_declared_arity,
+                owner_alias_omitted_args
+            );
+        }
         let owner_in_std_rusty_submodule = path.segments.len() >= 2
             && path.segments.first().is_some_and(|seg| seg.ident == "std")
             && path.segments.iter().nth(1).is_some_and(|seg| {
@@ -47991,6 +48378,7 @@ impl CodeGen {
             && !(owner_args_omitted && owner_is_supported_omitted_recovery_target)
             && !(owner_args_omitted && vec_from_raw_parts_recovery)
             && !owner_is_qualified_new_like_omitted_target
+            && owner_alias_omitted_args.is_none()
         {
             return base_func;
         }
@@ -48132,6 +48520,17 @@ impl CodeGen {
                         seg_text = format!("{}<{}>", seg_text, mapped_args.join(", "));
                     }
                 } else if matches!(seg.arguments, syn::PathArguments::None) {
+                    if let Some(alias_args) = owner_alias_omitted_args.as_ref()
+                        && !alias_args.is_empty()
+                    {
+                        if owner_name == "Box" {
+                            seg_text = format!("rusty::Box<{}>", alias_args.join(", "));
+                        } else {
+                            seg_text = format!("{}<{}>", seg_text, alias_args.join(", "));
+                        }
+                        rendered.push(seg_text);
+                        continue;
+                    }
                     let mut owner_arity = expected_owner_args
                         .as_ref()
                         .map(|args| args.len())
@@ -57957,6 +58356,76 @@ impl CodeGen {
             }
         }
         let mut emitted = self.emit_path_to_string(path);
+        if path.segments.len() >= 2
+            && path
+                .segments
+                .iter()
+                .take(path.segments.len() - 1)
+                .all(|seg| matches!(seg.arguments, syn::PathArguments::None))
+        {
+            let mut owner_path = path.clone();
+            owner_path.segments = path
+                .segments
+                .iter()
+                .take(path.segments.len() - 1)
+                .cloned()
+                .collect();
+            let owner_cpp = self.emit_path_to_string(&owner_path);
+            let member_name = path
+                .segments
+                .last()
+                .map(|seg| escape_cpp_keyword(&seg.ident.to_string()))
+                .unwrap_or_default();
+            if let Some(recovered_owner_cpp) =
+                self.recover_omitted_local_generic_type_args(&owner_path, &owner_cpp)
+                && recovered_owner_cpp != owner_cpp
+                && !recovered_owner_cpp.is_empty()
+            {
+                if !member_name.is_empty() {
+                    emitted = format!("{}::{}", recovered_owner_cpp, member_name);
+                }
+            } else if !member_name.is_empty()
+                && !owner_cpp.is_empty()
+                && !owner_cpp.contains('<')
+            {
+                // Generic type aliases used as owners in associated calls can
+                // omit template arguments in Rust (`MapImpl::from_iter`), but
+                // C++ requires explicit specialization (`MapImpl<K, V>::...`).
+                // If local recovery above cannot infer from in-scope generics,
+                // synthesize from the alias declaration itself.
+                let owner_name = owner_path
+                    .segments
+                    .last()
+                    .map(|seg| seg.ident.to_string())
+                    .unwrap_or_default();
+                if !owner_name.is_empty() {
+                    let owner_key = self
+                        .declared_type_key_for_path(&owner_path)
+                        .or_else(|| {
+                            self.lookup_declared_type_key_for_base(&owner_name, &owner_name)
+                        });
+                    if let Some(owner_key) = owner_key {
+                        let owner_is_alias = self.type_alias_targets.contains_key(&owner_key)
+                            || self.type_alias_targets.contains_key(&owner_name);
+                        if owner_is_alias
+                            && let Some(params) = self.declared_type_params.get(&owner_key)
+                            && !params.is_empty()
+                        {
+                            let defaults = self.declared_type_param_defaults.get(&owner_key);
+                            let requires_explicit_args = defaults.is_none_or(|all| {
+                                params.iter().enumerate().any(|(idx, _)| {
+                                    all.get(idx).is_none_or(|entry| entry.is_none())
+                                })
+                            });
+                            if requires_explicit_args {
+                                emitted =
+                                    format!("{}<{}>::{}", owner_cpp, params.join(", "), member_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if path.segments.len() > 1 {
             let mut bare_prefix_parts: Vec<String> = Vec::new();
             let mut templated_prefix_parts: Vec<String> = Vec::new();
@@ -58720,11 +59189,18 @@ impl CodeGen {
         if !matches!(last_seg.arguments, syn::PathArguments::None) {
             return None;
         }
-        if self.current_struct.is_some()
-            && path.segments.len() == 1
-            && self.is_local_type_name_in_scope(&last_seg.ident.to_string())
-        {
-            return Some(mapped_path.to_string());
+        if self.current_struct.is_some() && path.segments.len() == 1 {
+            let local_name = last_seg.ident.to_string();
+            if self.is_local_type_name_in_scope(&local_name) {
+                let has_declared_generics = self
+                    .declared_type_key_for_path(path)
+                    .or_else(|| self.lookup_declared_type_key_for_base(&local_name, &local_name))
+                    .and_then(|key| self.declared_type_params.get(&key))
+                    .is_some_and(|params| !params.is_empty());
+                if !has_declared_generics {
+                    return Some(mapped_path.to_string());
+                }
+            }
         }
         let type_key = self
             .current_struct_declared_type_key_for_recovery(path, mapped_path)
