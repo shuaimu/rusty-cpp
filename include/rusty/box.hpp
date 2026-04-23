@@ -220,6 +220,17 @@ Box<T> make_box(Args&&... args) {
     }
 }
 
+// Deduction-friendly overload for call sites that do not spell `<T>`.
+template<typename T>
+// @lifetime: owned
+Box<std::remove_cvref_t<T>> make_box(T&& value) {
+    using U = std::remove_cvref_t<T>;
+    // @unsafe
+    {
+        return Box<U>(new U(std::forward<T>(value)));
+    }
+}
+
 template<typename L, typename R>
 requires (
     requires(const L& lhs, const R& rhs) { lhs == rhs; } ||

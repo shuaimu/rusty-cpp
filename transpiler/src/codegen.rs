@@ -912,6 +912,13 @@ struct ByValueCycleRewriteFieldKey {
     field_name: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GenericPayloadDependencyMode {
+    Hard,
+    NonHardShallow,
+    NonHardTransitive,
+}
+
 impl ByValueCycleFeedbackEdge {
     fn short_label(&self) -> String {
         format!(
@@ -1709,6 +1716,7 @@ impl CodeGen {
             let mut final_result = Vec::with_capacity(early_enums.len() + rest.len());
             final_result.extend(early_enums);
             final_result.extend(rest);
+            Self::delay_functions_after_non_function_items(&mut final_result);
             return final_result;
         }
 
@@ -1812,6 +1820,9 @@ impl CodeGen {
                     };
                     if dep_pos == module_pos {
                         continue;
+                    }
+                    if outgoing[dep_pos].insert(module_pos) {
+                        indegree[module_pos] += 1;
                     }
                     strict_outgoing[dep_pos].insert(module_pos);
                 }
@@ -1950,7 +1961,22 @@ impl CodeGen {
             &trait_default_type_deps,
             ignore_inline_module_fn_deps,
         );
+        Self::delay_functions_after_non_function_items(&mut final_ordered);
         final_ordered
+    }
+
+    fn delay_functions_after_non_function_items<'a>(items: &mut Vec<&'a syn::Item>) {
+        let mut non_functions: Vec<&'a syn::Item> = Vec::with_capacity(items.len());
+        let mut functions: Vec<&'a syn::Item> = Vec::new();
+        for item in items.drain(..) {
+            if matches!(item, syn::Item::Fn(_)) {
+                functions.push(item);
+            } else {
+                non_functions.push(item);
+            }
+        }
+        non_functions.extend(functions);
+        *items = non_functions;
     }
 
     fn append_remaining_module_positions_via_scc<'a>(
@@ -3239,6 +3265,7 @@ impl CodeGen {
                 &known_modules,
                 &forward_declable_types_by_module,
                 &HashMap::new(),
+                &HashMap::new(),
                 &mut deps,
             );
             deps.remove(&owner_module);
@@ -3357,21 +3384,28 @@ impl CodeGen {
         known_modules: &HashSet<String>,
         forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
         inherited_imports: &HashMap<String, String>,
+        inherited_type_aliases: &HashMap<String, syn::Type>,
         out: &mut HashSet<String>,
     ) {
         let mut imported_name_to_module: HashMap<String, String> = inherited_imports.clone();
+        let mut type_aliases: HashMap<String, syn::Type> = inherited_type_aliases.clone();
         for item in items {
-            let syn::Item::Use(u) = item else {
-                continue;
-            };
-            let mut prefix: Vec<String> = Vec::new();
-            self.collect_use_tree_module_aliases_for_hard_dependencies(
-                &u.tree,
-                &mut prefix,
-                known_modules,
-                forward_declable_types_by_module,
-                &mut imported_name_to_module,
-            );
+            match item {
+                syn::Item::Use(u) => {
+                    let mut prefix: Vec<String> = Vec::new();
+                    self.collect_use_tree_module_aliases_for_hard_dependencies(
+                        &u.tree,
+                        &mut prefix,
+                        known_modules,
+                        forward_declable_types_by_module,
+                        &mut imported_name_to_module,
+                    );
+                }
+                syn::Item::Type(t) => {
+                    type_aliases.insert(t.ident.to_string(), (*t.ty).clone());
+                }
+                _ => {}
+            }
         }
 
         for item in items {
@@ -3386,17 +3420,33 @@ impl CodeGen {
                             true,
                             out,
                         );
+                        self.collect_field_alias_module_dependencies_for_auto_cycle_rewrite(
+                            &field.ty,
+                            &type_aliases,
+                            known_modules,
+                            forward_declable_types_by_module,
+                            &imported_name_to_module,
+                            out,
+                        );
                     }
                 }
                 syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
                     for variant in &e.variants {
                         for field in &variant.fields {
-                            self.collect_type_module_dependencies(
+                            self.collect_type_module_dependencies_strict(
                                 &field.ty,
                                 known_modules,
                                 forward_declable_types_by_module,
                                 &imported_name_to_module,
                                 true,
+                                out,
+                            );
+                            self.collect_field_alias_module_dependencies_for_auto_cycle_rewrite(
+                                &field.ty,
+                                &type_aliases,
+                                known_modules,
+                                forward_declable_types_by_module,
+                                &imported_name_to_module,
                                 out,
                             );
                         }
@@ -3411,12 +3461,52 @@ impl CodeGen {
                         known_modules,
                         forward_declable_types_by_module,
                         &imported_name_to_module,
+                        &type_aliases,
                         out,
                     );
                 }
                 _ => {}
             }
         }
+    }
+
+    fn collect_field_alias_module_dependencies_for_auto_cycle_rewrite(
+        &self,
+        ty: &syn::Type,
+        type_aliases: &HashMap<String, syn::Type>,
+        known_modules: &HashSet<String>,
+        forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
+        imported_name_to_module: &HashMap<String, String>,
+        out: &mut HashSet<String>,
+    ) {
+        let syn::Type::Path(type_path) = ty else {
+            return;
+        };
+        if type_path.qself.is_some() {
+            return;
+        }
+        if type_path.path.segments.len() != 1 {
+            return;
+        }
+        let seg = match type_path.path.segments.first() {
+            Some(seg) => seg,
+            None => return,
+        };
+        if !matches!(seg.arguments, syn::PathArguments::None) {
+            return;
+        }
+        let alias_name = seg.ident.to_string();
+        let Some(alias_ty) = type_aliases.get(&alias_name) else {
+            return;
+        };
+        self.collect_type_module_dependencies(
+            alias_ty,
+            known_modules,
+            forward_declable_types_by_module,
+            imported_name_to_module,
+            true,
+            out,
+        );
     }
 
     fn mark_auto_cross_module_rewrite_fields_for_module_items(
@@ -4454,7 +4544,7 @@ impl CodeGen {
                 syn::Item::Struct(s) => match &s.fields {
                     syn::Fields::Named(fields) => {
                         for field in &fields.named {
-                            self.collect_type_module_dependencies(
+                            self.collect_type_module_dependencies_strict(
                                 &field.ty,
                                 known_modules,
                                 forward_declable_types_by_module,
@@ -4466,7 +4556,7 @@ impl CodeGen {
                     }
                     syn::Fields::Unnamed(fields) => {
                         for field in &fields.unnamed {
-                            self.collect_type_module_dependencies(
+                            self.collect_type_module_dependencies_strict(
                                 &field.ty,
                                 known_modules,
                                 forward_declable_types_by_module,
@@ -4483,7 +4573,7 @@ impl CodeGen {
                         match &variant.fields {
                             syn::Fields::Named(fields) => {
                                 for field in &fields.named {
-                                    self.collect_type_module_dependencies(
+                                    self.collect_type_module_dependencies_strict(
                                         &field.ty,
                                         known_modules,
                                         forward_declable_types_by_module,
@@ -4495,7 +4585,7 @@ impl CodeGen {
                             }
                             syn::Fields::Unnamed(fields) => {
                                 for field in &fields.unnamed {
-                                    self.collect_type_module_dependencies(
+                                    self.collect_type_module_dependencies_strict(
                                         &field.ty,
                                         known_modules,
                                         forward_declable_types_by_module,
@@ -4511,7 +4601,7 @@ impl CodeGen {
                 }
                 syn::Item::Union(u) => {
                     for field in &u.fields.named {
-                        self.collect_type_module_dependencies(
+                        self.collect_type_module_dependencies_strict(
                             &field.ty,
                             known_modules,
                             forward_declable_types_by_module,
@@ -4522,7 +4612,7 @@ impl CodeGen {
                     }
                 }
                 syn::Item::Const(c) => {
-                    self.collect_type_module_dependencies(
+                    self.collect_type_module_dependencies_strict(
                         &c.ty,
                         known_modules,
                         forward_declable_types_by_module,
@@ -4543,7 +4633,7 @@ impl CodeGen {
                         let syn::FnArg::Typed(pat_ty) = input else {
                             continue;
                         };
-                        self.collect_type_module_dependencies(
+                        self.collect_type_module_dependencies_strict(
                             &pat_ty.ty,
                             known_modules,
                             forward_declable_types_by_module,
@@ -4553,7 +4643,7 @@ impl CodeGen {
                         );
                     }
                     if let syn::ReturnType::Type(_, ret_ty) = &f.sig.output {
-                        self.collect_type_module_dependencies(
+                        self.collect_type_module_dependencies_strict(
                             ret_ty,
                             known_modules,
                             forward_declable_types_by_module,
@@ -4574,7 +4664,7 @@ impl CodeGen {
                     for impl_item in &imp.items {
                         match impl_item {
                             syn::ImplItem::Const(c) => {
-                                self.collect_type_module_dependencies(
+                                self.collect_type_module_dependencies_strict(
                                     &c.ty,
                                     known_modules,
                                     forward_declable_types_by_module,
@@ -4591,7 +4681,7 @@ impl CodeGen {
                                 );
                             }
                             syn::ImplItem::Type(t) => {
-                                self.collect_type_module_dependencies(
+                                self.collect_type_module_dependencies_strict(
                                     &t.ty,
                                     known_modules,
                                     forward_declable_types_by_module,
@@ -4605,7 +4695,7 @@ impl CodeGen {
                                     let syn::FnArg::Typed(pat_ty) = input else {
                                         continue;
                                     };
-                                    self.collect_type_module_dependencies(
+                                    self.collect_type_module_dependencies_strict(
                                         &pat_ty.ty,
                                         known_modules,
                                         forward_declable_types_by_module,
@@ -4615,7 +4705,7 @@ impl CodeGen {
                                     );
                                 }
                                 if let syn::ReturnType::Type(_, ret_ty) = &method.sig.output {
-                                    self.collect_type_module_dependencies(
+                                    self.collect_type_module_dependencies_strict(
                                         ret_ty,
                                         known_modules,
                                         forward_declable_types_by_module,
@@ -4637,7 +4727,7 @@ impl CodeGen {
                     }
                 }
                 syn::Item::Static(s) => {
-                    self.collect_type_module_dependencies(
+                    self.collect_type_module_dependencies_strict(
                         &s.ty,
                         known_modules,
                         forward_declable_types_by_module,
@@ -5290,6 +5380,50 @@ impl CodeGen {
         require_complete_types: bool,
         out: &mut HashSet<String>,
     ) {
+        self.collect_type_module_dependencies_with_rehardening(
+            ty,
+            known_modules,
+            forward_declable_types_by_module,
+            imported_name_to_module,
+            require_complete_types,
+            true,
+            false,
+            out,
+        );
+    }
+
+    fn collect_type_module_dependencies_strict(
+        &self,
+        ty: &syn::Type,
+        known_modules: &HashSet<String>,
+        forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
+        imported_name_to_module: &HashMap<String, String>,
+        require_complete_types: bool,
+        out: &mut HashSet<String>,
+    ) {
+        self.collect_type_module_dependencies_with_rehardening(
+            ty,
+            known_modules,
+            forward_declable_types_by_module,
+            imported_name_to_module,
+            require_complete_types,
+            true,
+            true,
+            out,
+        );
+    }
+
+    fn collect_type_module_dependencies_with_rehardening(
+        &self,
+        ty: &syn::Type,
+        known_modules: &HashSet<String>,
+        forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
+        imported_name_to_module: &HashMap<String, String>,
+        require_complete_types: bool,
+        allow_rehardening_when_soft: bool,
+        strict_member_ordering: bool,
+        out: &mut HashSet<String>,
+    ) {
         match ty {
             syn::Type::Path(tp) => {
                 self.record_path_module_dependency_for_hard_dependencies(
@@ -5304,18 +5438,33 @@ impl CodeGen {
                     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
                         continue;
                     };
-                    let generic_payloads_are_non_hard =
-                        Self::path_generic_payloads_are_non_hard_for_module_ordering(&tp.path);
+                    let (nested_require_complete, nested_allow_rehardening_when_soft) = if strict_member_ordering {
+                        (
+                            require_complete_types || allow_rehardening_when_soft,
+                            allow_rehardening_when_soft,
+                        )
+                    } else {
+                        match Self::segment_generic_payload_dependency_mode(&segment.ident) {
+                            GenericPayloadDependencyMode::NonHardTransitive => (false, false),
+                            GenericPayloadDependencyMode::NonHardShallow => {
+                                (false, allow_rehardening_when_soft)
+                            }
+                            GenericPayloadDependencyMode::Hard => (
+                                require_complete_types || allow_rehardening_when_soft,
+                                allow_rehardening_when_soft,
+                            ),
+                        }
+                    };
                     for arg in &args.args {
                         if let syn::GenericArgument::Type(arg_ty) = arg {
-                            let nested_require_complete =
-                                require_complete_types && !generic_payloads_are_non_hard;
-                            self.collect_type_module_dependencies(
+                            self.collect_type_module_dependencies_with_rehardening(
                                 arg_ty,
                                 known_modules,
                                 forward_declable_types_by_module,
                                 imported_name_to_module,
                                 nested_require_complete,
+                                nested_allow_rehardening_when_soft,
+                                strict_member_ordering,
                                 out,
                             );
                         }
@@ -5323,95 +5472,131 @@ impl CodeGen {
                 }
             }
             syn::Type::Array(a) => {
-                self.collect_type_module_dependencies(
+                self.collect_type_module_dependencies_with_rehardening(
                     &a.elem,
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
                     require_complete_types,
+                    allow_rehardening_when_soft,
+                    strict_member_ordering,
                     out,
                 );
             }
             syn::Type::Group(g) => {
-                self.collect_type_module_dependencies(
+                self.collect_type_module_dependencies_with_rehardening(
                     &g.elem,
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
                     require_complete_types,
+                    allow_rehardening_when_soft,
+                    strict_member_ordering,
                     out,
                 );
             }
             syn::Type::Paren(p) => {
-                self.collect_type_module_dependencies(
+                self.collect_type_module_dependencies_with_rehardening(
                     &p.elem,
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
                     require_complete_types,
+                    allow_rehardening_when_soft,
+                    strict_member_ordering,
                     out,
                 );
             }
             syn::Type::Slice(s) => {
-                self.collect_type_module_dependencies(
+                self.collect_type_module_dependencies_with_rehardening(
                     &s.elem,
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
                     require_complete_types,
+                    allow_rehardening_when_soft,
+                    strict_member_ordering,
                     out,
                 );
             }
             syn::Type::Reference(r) => {
-                self.collect_type_module_dependencies(
+                let (nested_require_complete, nested_allow_rehardening_when_soft) =
+                    if strict_member_ordering {
+                        (require_complete_types, allow_rehardening_when_soft)
+                    } else {
+                        (false, false)
+                    };
+                self.collect_type_module_dependencies_with_rehardening(
                     &r.elem,
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
-                    false,
+                    nested_require_complete,
+                    nested_allow_rehardening_when_soft,
+                    strict_member_ordering,
                     out,
                 );
             }
             syn::Type::Ptr(p) => {
-                self.collect_type_module_dependencies(
+                let (nested_require_complete, nested_allow_rehardening_when_soft) =
+                    if strict_member_ordering {
+                        (require_complete_types, allow_rehardening_when_soft)
+                    } else {
+                        (false, false)
+                    };
+                self.collect_type_module_dependencies_with_rehardening(
                     &p.elem,
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
-                    false,
+                    nested_require_complete,
+                    nested_allow_rehardening_when_soft,
+                    strict_member_ordering,
                     out,
                 );
             }
             syn::Type::Tuple(t) => {
                 for elem in &t.elems {
-                    self.collect_type_module_dependencies(
+                    self.collect_type_module_dependencies_with_rehardening(
                         elem,
                         known_modules,
                         forward_declable_types_by_module,
                         imported_name_to_module,
                         require_complete_types,
+                        allow_rehardening_when_soft,
+                        strict_member_ordering,
                         out,
                     );
                 }
             }
             syn::Type::BareFn(f) => {
+                let (nested_require_complete, nested_allow_rehardening_when_soft) =
+                    if strict_member_ordering {
+                        (require_complete_types, allow_rehardening_when_soft)
+                    } else {
+                        (false, false)
+                    };
                 for input in &f.inputs {
-                    self.collect_type_module_dependencies(
+                    self.collect_type_module_dependencies_with_rehardening(
                         &input.ty,
                         known_modules,
                         forward_declable_types_by_module,
                         imported_name_to_module,
-                        false,
+                        nested_require_complete,
+                        nested_allow_rehardening_when_soft,
+                        strict_member_ordering,
                         out,
                     );
                 }
                 if let syn::ReturnType::Type(_, ret_ty) = &f.output {
-                    self.collect_type_module_dependencies(
+                    self.collect_type_module_dependencies_with_rehardening(
                         ret_ty,
                         known_modules,
                         forward_declable_types_by_module,
                         imported_name_to_module,
-                        false,
+                        nested_require_complete,
+                        nested_allow_rehardening_when_soft,
+                        strict_member_ordering,
                         out,
                     );
                 }
@@ -5420,14 +5605,20 @@ impl CodeGen {
         }
     }
 
-    fn path_generic_payloads_are_non_hard_for_module_ordering(path: &syn::Path) -> bool {
-        let Some(last) = path.segments.last() else {
-            return false;
-        };
-        matches!(
-            last.ident.to_string().as_str(),
-            "Vec" | "Box" | "Rc" | "Arc" | "Weak"
-        )
+    fn segment_generic_payload_dependency_mode(
+        ident: &syn::Ident,
+    ) -> GenericPayloadDependencyMode {
+        match ident.to_string().as_str() {
+            // `Vec<T>` does not, by itself, force a direct by-value module edge,
+            // but payload wrappers (e.g. `Spanned<T>`) can still require complete
+            // nested types and should re-harden dependency traversal.
+            "Vec" => GenericPayloadDependencyMode::NonHardShallow,
+            // Pointer-like ownership wrappers keep payload dependencies soft.
+            "Box" | "Rc" | "Arc" | "Weak" => {
+                GenericPayloadDependencyMode::NonHardTransitive
+            }
+            _ => GenericPayloadDependencyMode::Hard,
+        }
     }
 
     fn collect_expr_module_dependencies_for_hard_dependencies(
@@ -6950,7 +7141,9 @@ impl CodeGen {
         let signature_has_unqualified_unknown_type = self
             .forward_decl_signature_has_unqualified_unknown_type_name(&return_type, &param_types);
         self.pop_type_param_scope();
-        if signature_has_unresolved_scoped_paths || signature_has_unqualified_unknown_type {
+        if (signature_has_unresolved_scoped_paths || signature_has_unqualified_unknown_type)
+            && !self.module_body_forward_decl_pass
+        {
             return false;
         }
 
@@ -13499,8 +13692,12 @@ impl CodeGen {
             .collect()
     }
 
-    fn map_variant_ctor_param_type(&self, ty: &syn::Type, ctor_name: &str) -> String {
-        let mut mapped = self.map_type(ty);
+    fn normalize_variant_ctor_param_type(
+        &self,
+        ty: &syn::Type,
+        ctor_name: &str,
+        mut mapped: String,
+    ) -> String {
         let ctor_ident = escape_cpp_keyword(ctor_name);
         if mapped != ctor_ident {
             return mapped;
@@ -13518,6 +13715,45 @@ impl CodeGen {
             }
         }
         mapped
+    }
+
+    fn map_variant_ctor_param_type(&self, ty: &syn::Type, ctor_name: &str) -> String {
+        self.normalize_variant_ctor_param_type(ty, ctor_name, self.map_type(ty))
+    }
+
+    fn map_variant_ctor_param_type_for_field(
+        &self,
+        owner_type: &str,
+        variant_name: &str,
+        field_name: &str,
+        ty: &syn::Type,
+        ctor_name: &str,
+    ) -> String {
+        let rewrite_field_key = Self::format_by_value_field_name(Some(variant_name), field_name);
+        let mapped = self.map_field_type_with_by_value_cycle_breaking_rewrite(
+            owner_type,
+            &rewrite_field_key,
+            ty,
+        );
+        self.normalize_variant_ctor_param_type(ty, ctor_name, mapped)
+    }
+
+    fn wrap_variant_ctor_field_initializer(
+        &self,
+        owner_type: &str,
+        variant_name: &str,
+        field_name: &str,
+        param_type: &str,
+        value_expr: String,
+    ) -> String {
+        let rewrite_field_key = Self::format_by_value_field_name(Some(variant_name), field_name);
+        if self.should_rewrite_by_value_cycle_field_declaration(owner_type, &rewrite_field_key)
+            && !param_type.trim_start().starts_with("rusty::Box<")
+        {
+            format!("rusty::make_box({})", value_expr)
+        } else {
+            value_expr
+        }
     }
 
     fn resolve_single_segment_scope_import_bound_type(&self, local_name: &str) -> Option<String> {
@@ -13842,13 +14078,20 @@ impl CodeGen {
                     };
                     match &variant.fields {
                         syn::Fields::Unnamed(fields) => {
-                            let ctor_name = vname.to_string();
+                            let variant_name = vname.to_string();
+                            let ctor_name = variant_name.clone();
                             let params: Vec<String> = fields
                                 .unnamed
                                 .iter()
                                 .enumerate()
                                 .map(|(i, f)| {
-                                    let ty = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
+                                    let ty = self.map_variant_ctor_param_type_for_field(
+                                        &enum_owner_name,
+                                        &variant_name,
+                                        &format!("#{}", i),
+                                        &f.ty,
+                                        &ctor_name,
+                                    );
                                     format!("{} _{}", ty, i)
                                 })
                                 .collect();
@@ -13863,14 +14106,21 @@ impl CodeGen {
                             ));
                         }
                         syn::Fields::Named(fields) => {
-                            let ctor_name = vname.to_string();
+                            let variant_name = vname.to_string();
+                            let ctor_name = variant_name.clone();
                             let params: Vec<String> = fields
                                 .named
                                 .iter()
                                 .map(|f| {
                                     let rust_field_name = f.ident.as_ref().unwrap().to_string();
                                     let cpp_field_name = escape_cpp_keyword(&rust_field_name);
-                                    let ftype = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
+                                    let ftype = self.map_variant_ctor_param_type_for_field(
+                                        &enum_owner_name,
+                                        &variant_name,
+                                        &rust_field_name,
+                                        &f.ty,
+                                        &ctor_name,
+                                    );
                                     format!("{} {}", ftype, cpp_field_name)
                                 })
                                 .collect();
@@ -13925,7 +14175,14 @@ impl CodeGen {
                                 .iter()
                                 .enumerate()
                                 .map(|(i, f)| {
-                                    let ty = self.map_variant_ctor_param_type(&f.ty, &variant_name);
+                                    let field_name = format!("#{}", i);
+                                    let ty = self.map_variant_ctor_param_type_for_field(
+                                        &enum_owner_name,
+                                        &variant_name,
+                                        &field_name,
+                                        &f.ty,
+                                        &variant_name,
+                                    );
                                     format!("{} _{}", ty, i)
                                 })
                                 .collect();
@@ -13934,15 +14191,20 @@ impl CodeGen {
                                 .iter()
                                 .enumerate()
                                 .map(|(i, f)| {
-                                    let _ = f;
+                                    let field_name = format!("#{}", i);
                                     let forwarded = format!("std::forward<decltype(_{i})>(_{i})");
-                                    let rewrite_field_key = Self::format_by_value_field_name(
-                                        Some(variant_name.as_str()),
-                                        &format!("#{}", i),
-                                    );
-                                    self.wrap_by_value_cycle_rewrite_field_initializer(
+                                    let param_type = self.map_variant_ctor_param_type_for_field(
                                         &enum_owner_name,
-                                        &rewrite_field_key,
+                                        &variant_name,
+                                        &field_name,
+                                        &f.ty,
+                                        &variant_name,
+                                    );
+                                    self.wrap_variant_ctor_field_initializer(
+                                        &enum_owner_name,
+                                        &variant_name,
+                                        &field_name,
+                                        &param_type,
                                         forwarded,
                                     )
                                 })
@@ -13965,8 +14227,13 @@ impl CodeGen {
                                 .map(|f| {
                                     let rust_field_name = f.ident.as_ref().unwrap().to_string();
                                     let cpp_field_name = escape_cpp_keyword(&rust_field_name);
-                                    let ftype =
-                                        self.map_variant_ctor_param_type(&f.ty, &variant_name);
+                                    let ftype = self.map_variant_ctor_param_type_for_field(
+                                        &enum_owner_name,
+                                        &variant_name,
+                                        &rust_field_name,
+                                        &f.ty,
+                                        &variant_name,
+                                    );
                                     format!("{} {}", ftype, cpp_field_name)
                                 })
                                 .collect();
@@ -13980,16 +14247,20 @@ impl CodeGen {
                                         "std::forward<decltype({})>({})",
                                         cpp_field_name, cpp_field_name
                                     );
-                                    let rewrite_field_key = Self::format_by_value_field_name(
-                                        Some(variant_name.as_str()),
+                                    let param_type = self.map_variant_ctor_param_type_for_field(
+                                        &enum_owner_name,
+                                        &variant_name,
                                         &rust_field_name,
+                                        &f.ty,
+                                        &variant_name,
                                     );
-                                    let wrapped = self
-                                        .wrap_by_value_cycle_rewrite_field_initializer(
-                                            &enum_owner_name,
-                                            &rewrite_field_key,
-                                            forwarded,
-                                        );
+                                    let wrapped = self.wrap_variant_ctor_field_initializer(
+                                        &enum_owner_name,
+                                        &variant_name,
+                                        &rust_field_name,
+                                        &param_type,
+                                        forwarded,
+                                    );
                                     format!(".{} = {}", cpp_field_name, wrapped)
                                 })
                                 .collect();
@@ -14105,7 +14376,13 @@ impl CodeGen {
                             .iter()
                             .enumerate()
                             .map(|(i, f)| {
-                                let ty = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
+                                let ty = self.map_variant_ctor_param_type_for_field(
+                                    &enum_owner_name,
+                                    &variant_name,
+                                    &format!("#{}", i),
+                                    &f.ty,
+                                    &ctor_name,
+                                );
                                 format!("{} _{}", ty, i)
                             })
                             .collect();
@@ -14114,16 +14391,21 @@ impl CodeGen {
                             .iter()
                             .enumerate()
                             .map(|(i, f)| {
-                                let ty = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
+                                let field_name = format!("#{}", i);
+                                let ty = self.map_variant_ctor_param_type_for_field(
+                                    &enum_owner_name,
+                                    &variant_name,
+                                    &field_name,
+                                    &f.ty,
+                                    &ctor_name,
+                                );
                                 let param = format!("_{}", i);
                                 let forwarded = format!("std::forward<{}>({})", ty, param);
-                                let rewrite_field_key = Self::format_by_value_field_name(
-                                    Some(variant_name.as_str()),
-                                    &format!("#{}", i),
-                                );
-                                self.wrap_by_value_cycle_rewrite_field_initializer(
+                                self.wrap_variant_ctor_field_initializer(
                                     &enum_owner_name,
-                                    &rewrite_field_key,
+                                    &variant_name,
+                                    &field_name,
+                                    &ty,
                                     forwarded,
                                 )
                             })
@@ -14159,7 +14441,13 @@ impl CodeGen {
                             .map(|f| {
                                 let rust_field_name = f.ident.as_ref().unwrap().to_string();
                                 let cpp_field_name = escape_cpp_keyword(&rust_field_name);
-                                let ftype = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
+                                let ftype = self.map_variant_ctor_param_type_for_field(
+                                    &enum_owner_name,
+                                    &variant_name,
+                                    &rust_field_name,
+                                    &f.ty,
+                                    &ctor_name,
+                                );
                                 format!("{} {}", ftype, cpp_field_name)
                             })
                             .collect();
@@ -14169,16 +14457,20 @@ impl CodeGen {
                             .map(|f| {
                                 let rust_field_name = f.ident.as_ref().unwrap().to_string();
                                 let cpp_field_name = escape_cpp_keyword(&rust_field_name);
-                                let ftype = self.map_variant_ctor_param_type(&f.ty, &ctor_name);
+                                let ftype = self.map_variant_ctor_param_type_for_field(
+                                    &enum_owner_name,
+                                    &variant_name,
+                                    &rust_field_name,
+                                    &f.ty,
+                                    &ctor_name,
+                                );
                                 let forwarded =
                                     format!("std::forward<{}>({})", ftype, cpp_field_name);
-                                let rewrite_field_key = Self::format_by_value_field_name(
-                                    Some(variant_name.as_str()),
-                                    &rust_field_name,
-                                );
-                                let wrapped = self.wrap_by_value_cycle_rewrite_field_initializer(
+                                let wrapped = self.wrap_variant_ctor_field_initializer(
                                     &enum_owner_name,
-                                    &rewrite_field_key,
+                                    &variant_name,
+                                    &rust_field_name,
+                                    &ftype,
                                     forwarded,
                                 );
                                 format!(".{} = {}", cpp_field_name, wrapped)
@@ -16218,7 +16510,12 @@ impl CodeGen {
                 // Check if this module has both structs and functions
                 let has_structs = items.iter().any(|i| matches!(i, syn::Item::Struct(_)));
                 let has_fns = items.iter().any(|i| matches!(i, syn::Item::Fn(_)));
-                let should_split = has_structs && has_fns && self.module_stack.is_empty();
+                let has_inline_mods =
+                    items
+                        .iter()
+                        .any(|i| matches!(i, syn::Item::Mod(m) if m.content.is_some()));
+                let should_split =
+                    has_fns && (has_structs || has_inline_mods) && self.module_stack.is_empty();
                 let inherited_recursive_deferral = self.defer_module_functions_recursively;
                 if should_split {
                     self.defer_module_functions_recursively = true;
@@ -16280,7 +16577,9 @@ impl CodeGen {
                     self.emit_item(item);
                     self.newline();
                 }
-                if self.emit_extension_trait_free_functions_for_scope(&scope_path) {
+                if !should_defer_functions_now
+                    && self.emit_extension_trait_free_functions_for_scope(&scope_path)
+                {
                     self.newline();
                 }
                 self.module_stack.pop();
@@ -24971,7 +25270,9 @@ impl CodeGen {
             syn::Pat::TupleStruct(ts) => {
                 // Pattern like `Shape::Circle(r)` → [](const Shape_Circle& _v) { auto r = _v._0; ... }
                 let cpp_type = self.visit_pattern_cpp_type(&ts.path, variant_ctx, visit_value_name);
-                let Some(binding_stmts) = self.tuple_struct_binding_stmts(&ts.elems, "_v") else {
+                let Some(binding_stmts) =
+                    self.tuple_struct_binding_stmts(&ts.path, &ts.elems, "_v", variant_ctx)
+                else {
                     self.writeln("// TODO: complex tuple-struct pattern binding");
                     self.writeln("[&](const auto&) {},");
                     return;
@@ -25178,17 +25479,100 @@ impl CodeGen {
 
     fn tuple_struct_binding_stmts(
         &self,
+        path: &syn::Path,
         elems: &syn::punctuated::Punctuated<syn::Pat, syn::token::Comma>,
         base_expr: &str,
+        variant_ctx: Option<&VariantTypeContext>,
     ) -> Option<Vec<String>> {
         let mut stmts = Vec::new();
         for (i, elem_pat) in elems.iter().enumerate() {
-            let field_expr = format!("{}._{}", base_expr, i);
+            let field_expr =
+                self.data_enum_variant_tuple_field_binding_expr(path, variant_ctx, base_expr, i);
             if !self.collect_pattern_binding_stmts(elem_pat, &field_expr, &mut stmts) {
                 return None;
             }
         }
         Some(stmts)
+    }
+
+    fn data_enum_variant_owner_and_name_from_path_with_ctx(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> Option<(String, String)> {
+        let raw_variant_name = path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        if raw_variant_name.is_empty() {
+            return None;
+        }
+        let canonical_variant_name = self.canonical_variant_name(&raw_variant_name).to_string();
+        if path.segments.len() >= 2 {
+            let enum_name = path
+                .segments
+                .iter()
+                .nth_back(1)
+                .map(|seg| seg.ident.to_string())
+                .unwrap_or_default();
+            if self.data_enum_name_matches(&enum_name)
+                && (self.enum_has_variant_name(&enum_name, &canonical_variant_name)
+                    || self.enum_has_variant_name(&enum_name, &raw_variant_name))
+            {
+                return Some((enum_name, canonical_variant_name));
+            }
+        }
+        if let Some((enum_name, variant_name)) = self
+            .flattened_data_enum_variant_parts(&raw_variant_name)
+            .or_else(|| self.flattened_data_enum_variant_parts(&canonical_variant_name))
+        {
+            return Some((enum_name, variant_name));
+        }
+        if let Some(ctx) = variant_ctx
+            && self.data_enum_name_matches(&ctx.enum_name)
+            && (self.enum_has_variant_name(&ctx.enum_name, &canonical_variant_name)
+                || self.enum_has_variant_name(&ctx.enum_name, &raw_variant_name))
+        {
+            return Some((ctx.enum_name.clone(), canonical_variant_name));
+        }
+        None
+    }
+
+    fn data_enum_variant_field_requires_cycle_rewrite(
+        &self,
+        enum_name: &str,
+        field_key: &str,
+    ) -> bool {
+        self.should_rewrite_by_value_cycle_field_declaration(enum_name, field_key)
+            || enum_name
+                .rsplit("::")
+                .next()
+                .is_some_and(|tail| {
+                    self.should_rewrite_by_value_cycle_field_declaration(tail, field_key)
+                })
+    }
+
+    fn data_enum_variant_tuple_field_binding_expr(
+        &self,
+        path: &syn::Path,
+        variant_ctx: Option<&VariantTypeContext>,
+        payload_base_expr: &str,
+        field_index: usize,
+    ) -> String {
+        let field_expr = format!("{}._{}", payload_base_expr, field_index);
+        let Some((enum_name, variant_name)) =
+            self.data_enum_variant_owner_and_name_from_path_with_ctx(path, variant_ctx)
+        else {
+            return field_expr;
+        };
+        let field_key =
+            Self::format_by_value_field_name(Some(variant_name.as_str()), &format!("#{}", field_index));
+        if self.data_enum_variant_field_requires_cycle_rewrite(&enum_name, &field_key) {
+            format!("rusty::detail::deref_if_pointer_like({})", field_expr)
+        } else {
+            field_expr
+        }
     }
 
     fn peel_pat_type_ref_paren<'a>(&self, mut pat: &'a syn::Pat) -> &'a syn::Pat {
@@ -25610,7 +25994,12 @@ impl CodeGen {
                     scrutinee_base
                 };
                 for (idx, elem_pat) in tuple_struct_pat.elems.iter().enumerate() {
-                    let field_expr = format!("{}._{}", payload_base_expr, idx);
+                    let field_expr = self.data_enum_variant_tuple_field_binding_expr(
+                        &tuple_struct_pat.path,
+                        variant_ctx,
+                        &payload_base_expr,
+                        idx,
+                    );
                     let field_condition = self.collect_runtime_match_binding_stmts_and_condition(
                         elem_pat,
                         &field_expr,
@@ -25934,7 +26323,12 @@ impl CodeGen {
                     scrutinee_base
                 };
                 for (idx, elem_pat) in tuple_struct_pat.elems.iter().enumerate() {
-                    let field_expr = format!("{}._{}", payload_base_expr, idx);
+                    let field_expr = self.data_enum_variant_tuple_field_binding_expr(
+                        &tuple_struct_pat.path,
+                        variant_ctx,
+                        &payload_base_expr,
+                        idx,
+                    );
                     let field_condition = self
                         .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                             elem_pat,
@@ -27883,7 +28277,8 @@ impl CodeGen {
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let cpp_type = scoped.visit_pattern_cpp_type(&ts.path, variant_ctx, Some("_m"));
-                    let Some(binding_stmts) = scoped.tuple_struct_binding_stmts(&ts.elems, "_v")
+                    let Some(binding_stmts) = scoped
+                        .tuple_struct_binding_stmts(&ts.path, &ts.elems, "_v", variant_ctx)
                     else {
                         parts.push(format!(
                             "[&](const auto&) {{ return {}; }}",
@@ -29786,7 +30181,9 @@ impl CodeGen {
                 let cpp_type = self.variant_pattern_cpp_type(&ts.path, variant_ctx);
                 let param_name = format!("_v{}", index);
                 params.push(format!("const {}& {}", cpp_type, param_name));
-                let Some(stmts) = self.tuple_struct_binding_stmts(&ts.elems, &param_name) else {
+                let Some(stmts) =
+                    self.tuple_struct_binding_stmts(&ts.path, &ts.elems, &param_name, variant_ctx)
+                else {
                     return false;
                 };
                 binding_stmts.extend(stmts);
@@ -43484,7 +43881,7 @@ impl CodeGen {
             // common inherent/runtime methods (`get`, `newline`). Keep these
             // on receiver method syntax when no concrete extension path exists.
             let skip_unqualified_cross_source_fallback =
-                matches!(method_name.as_str(), "get" | "newline");
+                matches!(method_name.as_str(), "get" | "newline" | "whitespace");
             if is_cross_source_extension_hint && !skip_unqualified_cross_source_fallback {
                 return Some(format!(
                     "::rusty_ext::{}({})",
@@ -43513,7 +43910,21 @@ impl CodeGen {
     }
 
     fn receiver_has_inherent_method_named(&self, receiver: &syn::Expr, method_name: &str) -> bool {
-        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+        let Some(receiver_ty) = self
+            .infer_simple_expr_type(receiver)
+            .or_else(|| self.infer_local_binding_type_from_initializer(receiver))
+            .or_else(|| {
+                let receiver = self.peel_paren_group_expr(receiver);
+                let syn::Expr::Path(path_expr) = receiver else {
+                    return None;
+                };
+                if path_expr.path.segments.len() != 1 {
+                    return None;
+                }
+                let name = path_expr.path.segments.first()?.ident.to_string();
+                self.lookup_local_binding_type(&name)
+            })
+        else {
             return false;
         };
         let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
