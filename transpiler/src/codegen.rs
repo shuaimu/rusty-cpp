@@ -13097,16 +13097,72 @@ impl CodeGen {
             return mapped;
         }
         let local_name = tp.path.segments[0].ident.to_string();
-        let scope_key = self.module_stack.join("::");
-        if let Some(bound_target) =
-            self.resolve_scope_import_binding_path_for_scope(&scope_key, &local_name)
-        {
-            let rebound = self.rewrite_cpp_import_bound_type_spelling(&bound_target);
+        if let Some(rebound) = self.resolve_single_segment_scope_import_bound_type(&local_name) {
             if !rebound.is_empty() && rebound != mapped {
                 mapped = rebound;
             }
         }
         mapped
+    }
+
+    fn resolve_single_segment_scope_import_bound_type(&self, local_name: &str) -> Option<String> {
+        let scope_key = self.module_stack.join("::");
+        let bound_target = self
+            .resolve_scope_import_binding_path_for_scope(&scope_key, local_name)
+            .or_else(|| self.resolve_scope_import_binding_path_for_scope("", local_name))?;
+        let mut rebound = self.rewrite_cpp_import_bound_type_spelling(&bound_target);
+        rebound = self.resolve_nested_local_reexport_path(&rebound);
+        if let Some(resolved_nested) = self.try_resolve_nested_local_type_path(&rebound) {
+            rebound = resolved_nested;
+        }
+        if rebound.trim_start_matches("::") == local_name
+            && let Some(scoped) = self
+                .resolve_unique_nonlocal_type_path(local_name)
+                .or_else(|| self.resolve_unique_forward_decl_type_path(local_name))
+            && !scoped.is_empty()
+        {
+            rebound = scoped;
+        }
+        if rebound.trim_start_matches("::") == local_name
+            && local_name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            let guessed_module = local_name.to_ascii_lowercase();
+            if let Some(scoped) = self.resolve_descendant_type_path_in_module(&guessed_module, local_name) {
+                rebound = scoped;
+            }
+        }
+        Some(rebound)
+    }
+
+    fn current_struct_has_data_enum_variant_named(&self, name: &str) -> bool {
+        let Some(current_struct) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let scoped_current_struct = self.scoped_type_key(current_struct);
+        self.data_enum_variants_by_enum
+            .get(current_struct)
+            .is_some_and(|variants| variants.contains(name))
+            || self
+                .data_enum_variants_by_enum
+                .get(&scoped_current_struct)
+                .is_some_and(|variants| variants.contains(name))
+    }
+
+    fn current_struct_is_generic(&self) -> bool {
+        let Some(current_struct) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let scoped_current_struct = self.scoped_type_key(current_struct);
+        self.declared_type_params
+            .get(current_struct)
+            .is_some_and(|params| !params.is_empty())
+            || self
+                .declared_type_params
+                .get(&scoped_current_struct)
+                .is_some_and(|params| !params.is_empty())
     }
 
     fn should_emit_data_enum_variant_ctor_helper(&self, ctor_name: &str) -> bool {
@@ -13454,7 +13510,7 @@ impl CodeGen {
                                 .iter()
                                 .enumerate()
                                 .map(|(i, f)| {
-                                    let ty = self.map_type(&f.ty);
+                                    let ty = self.map_variant_ctor_param_type(&f.ty, &variant_name);
                                     format!("{} _{}", ty, i)
                                 })
                                 .collect();
@@ -13463,8 +13519,8 @@ impl CodeGen {
                                 .iter()
                                 .enumerate()
                                 .map(|(i, f)| {
-                                    let ty = self.map_type(&f.ty);
-                                    let forwarded = format!("std::forward<{ty}>(_{i})");
+                                    let _ = f;
+                                    let forwarded = format!("std::forward<decltype(_{i})>(_{i})");
                                     let rewrite_field_key = Self::format_by_value_field_name(
                                         Some(variant_name.as_str()),
                                         &format!("#{}", i),
@@ -13494,7 +13550,8 @@ impl CodeGen {
                                 .map(|f| {
                                     let rust_field_name = f.ident.as_ref().unwrap().to_string();
                                     let cpp_field_name = escape_cpp_keyword(&rust_field_name);
-                                    let ftype = self.map_type(&f.ty);
+                                    let ftype =
+                                        self.map_variant_ctor_param_type(&f.ty, &variant_name);
                                     format!("{} {}", ftype, cpp_field_name)
                                 })
                                 .collect();
@@ -13504,9 +13561,10 @@ impl CodeGen {
                                 .map(|f| {
                                     let rust_field_name = f.ident.as_ref().unwrap().to_string();
                                     let cpp_field_name = escape_cpp_keyword(&rust_field_name);
-                                    let ftype = self.map_type(&f.ty);
-                                    let forwarded =
-                                        format!("std::forward<{}>({})", ftype, cpp_field_name);
+                                    let forwarded = format!(
+                                        "std::forward<decltype({})>({})",
+                                        cpp_field_name, cpp_field_name
+                                    );
                                     let rewrite_field_key = Self::format_by_value_field_name(
                                         Some(variant_name.as_str()),
                                         &rust_field_name,
@@ -17252,6 +17310,7 @@ impl CodeGen {
         if !(self.module_name.is_some() || self.expanded_libtest_mode) {
             return false;
         }
+        let is_explicit_global = using_path.trim_start().starts_with("::");
         let normalized = using_path
             .trim()
             .trim_start_matches("::")
@@ -17262,6 +17321,9 @@ impl CodeGen {
             || normalized.contains(" = ")
             || normalized.starts_with("namespace ")
         {
+            return false;
+        }
+        if is_explicit_global {
             return false;
         }
         if !normalized
@@ -17616,7 +17678,13 @@ impl CodeGen {
             return path.to_string();
         };
         if mapped_root.is_empty() {
-            rest.to_string()
+            if rest.contains("::") {
+                rest.to_string()
+            } else if rest.is_empty() {
+                path.to_string()
+            } else {
+                format!("::{}", rest)
+            }
         } else if rest.is_empty() {
             mapped_root.clone()
         } else {
@@ -17737,6 +17805,12 @@ impl CodeGen {
                 let mut ty =
                     self.normalize_assoc_alias_target_type(&alias_rust_name, self.map_type(&t.ty));
                 ty = Self::rewrite_private_keyword_namespace_in_type_path(&ty);
+                if self.current_struct_is_generic()
+                    && let Some(dependent_ty) =
+                        self.maybe_make_owner_cpp_type_dependent_in_template_scope(&ty)
+                {
+                    ty = dependent_ty;
+                }
                 if (ty == name || ty.starts_with(&format!("{}<", name)))
                     && !(alias_is_type_param && ty == name)
                 {
@@ -18315,6 +18389,18 @@ impl CodeGen {
 
         let mut return_type = self.map_return_type(&method.sig.output);
         if !deduced_return_aliases.is_empty() {
+            return_type = "auto".to_string();
+        }
+        let method_has_type_template_params = method
+            .sig
+            .generics
+            .params
+            .iter()
+            .any(|param| matches!(param, syn::GenericParam::Type(_)));
+        if method_has_type_template_params
+            && return_type.starts_with("rusty::Result<")
+            && !self.cpp_type_mentions_in_scope_type_param(&return_type)
+        {
             return_type = "auto".to_string();
         }
         let method_returns_reference = self.return_type_is_reference(&method.sig.output);
@@ -61407,6 +61493,21 @@ impl CodeGen {
                 let path_is_current_struct_assoc_projection =
                     self.path_is_current_struct_assoc_projection(&tp.path);
                 if path_is_current_struct_assoc_projection {
+                    if self.current_struct_is_generic()
+                        && let Some(assoc_seg) = tp.path.segments.iter().nth(1)
+                    {
+                        let assoc_name = assoc_seg.ident.to_string();
+                        if self.current_struct_assoc_alias_exists(&assoc_name) {
+                            let assoc_cpp_name = escape_cpp_keyword(&assoc_name);
+                            let alias_emitted = self
+                                .emitted_non_method_member_names
+                                .last()
+                                .is_some_and(|scope| scope.contains(&assoc_cpp_name));
+                            if alias_emitted {
+                                return assoc_cpp_name;
+                            }
+                        }
+                    }
                     let assoc_ty = syn::Type::Path(tp.clone());
                     if let Some(resolved_assoc) =
                         self.resolve_current_struct_assoc_projection_cpp_type(&assoc_ty)
@@ -61428,6 +61529,20 @@ impl CodeGen {
                                 path_str = candidate;
                             }
                         }
+                    }
+                }
+                if tp.path.segments.len() == 1
+                    && tp.path.segments[0].ident != "Self"
+                    && !path_str.contains("::")
+                {
+                    let local_name = tp.path.segments[0].ident.to_string();
+                    if self.current_struct_has_data_enum_variant_named(&local_name)
+                        && let Some(rebound) =
+                            self.resolve_single_segment_scope_import_bound_type(&local_name)
+                        && !rebound.is_empty()
+                        && (rebound != local_name || rebound.starts_with("::"))
+                    {
+                        path_str = rebound;
                     }
                 }
                 if tp.path.segments.len() == 1
