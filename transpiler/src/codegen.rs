@@ -880,6 +880,9 @@ pub struct CodeGen {
     by_value_cycle_breaking_prototype_keys: HashSet<String>,
     /// Opt-in declaration rewrite plan for by-value cycle-breaking prototype.
     by_value_cycle_breaking_rewrite_fields: HashSet<ByValueCycleRewriteFieldKey>,
+    /// Always-on declaration rewrite plan for direct by-value fields that target
+    /// sibling modules in the same module SCC (cross-module by-value cycles).
+    auto_cross_module_by_value_rewrite_fields: HashSet<ByValueCycleRewriteFieldKey>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1077,6 +1080,7 @@ impl CodeGen {
             by_value_cycle_breaking_prototype_diagnostics: Vec::new(),
             by_value_cycle_breaking_prototype_keys: HashSet::new(),
             by_value_cycle_breaking_rewrite_fields: HashSet::new(),
+            auto_cross_module_by_value_rewrite_fields: HashSet::new(),
         }
     }
 
@@ -1318,6 +1322,7 @@ impl CodeGen {
         self.by_value_cycle_breaking_prototype_diagnostics.clear();
         self.by_value_cycle_breaking_prototype_keys.clear();
         self.by_value_cycle_breaking_rewrite_fields.clear();
+        self.auto_cross_module_by_value_rewrite_fields.clear();
 
         // Detect expanded libtest output up front so trait emission strategy can be
         // selected consistently regardless of item ordering.
@@ -1366,6 +1371,9 @@ impl CodeGen {
         // Pass 1i.5: collect top-level module names that must be forward-declared so
         // nested bare-module imports can emit valid namespace aliases.
         self.collect_required_top_level_module_aliases(&file.items, &[]);
+        // Pass 1i.7: detect cross-module by-value field edges that participate in
+        // module SCCs and pre-plan declaration rewrites for those direct fields.
+        self.collect_auto_cross_module_by_value_rewrite_plan(&file.items);
         // Pass 1j: detect unsupported by-value circular type SCCs across the
         // full crate/module tree and record deterministic diagnostics.
         let mut all_type_items = Vec::new();
@@ -2613,13 +2621,13 @@ impl CodeGen {
         owner_type: &str,
         field_name: &str,
     ) -> bool {
-        self.enable_by_value_cycle_breaking_prototype
-            && self
-                .by_value_cycle_breaking_rewrite_fields
-                .contains(&ByValueCycleRewriteFieldKey {
-                    owner_type: owner_type.to_string(),
-                    field_name: field_name.to_string(),
-                })
+        let key = ByValueCycleRewriteFieldKey {
+            owner_type: owner_type.to_string(),
+            field_name: field_name.to_string(),
+        };
+        self.auto_cross_module_by_value_rewrite_fields.contains(&key)
+            || (self.enable_by_value_cycle_breaking_prototype
+                && self.by_value_cycle_breaking_rewrite_fields.contains(&key))
     }
 
     fn map_field_type_with_by_value_cycle_breaking_rewrite(
@@ -2643,7 +2651,7 @@ impl CodeGen {
         value_expr: String,
     ) -> String {
         if self.should_rewrite_by_value_cycle_field_declaration(owner_type, field_name) {
-            format!("rusty::Box::make({})", value_expr)
+            format!("rusty::make_box({})", value_expr)
         } else {
             value_expr
         }
@@ -3152,6 +3160,270 @@ impl CodeGen {
                 && a.feedback_edges == b.feedback_edges
         });
         cycle_components
+    }
+
+    fn collect_auto_cross_module_by_value_rewrite_plan(&mut self, items: &[syn::Item]) {
+        let inline_modules: Vec<&syn::ItemMod> = items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Mod(m) if m.content.is_some() => Some(m),
+                _ => None,
+            })
+            .collect();
+        if inline_modules.len() < 2 {
+            return;
+        }
+        let module_names: Vec<String> = inline_modules
+            .iter()
+            .map(|module_item| module_item.ident.to_string())
+            .collect();
+        let known_modules: HashSet<String> = module_names.iter().cloned().collect();
+        let forward_declable_types_by_module: HashMap<String, HashSet<String>> = inline_modules
+            .iter()
+            .filter_map(|module_item| {
+                let module_name = module_item.ident.to_string();
+                let Some((_, module_items)) = &module_item.content else {
+                    return None;
+                };
+                let mut names: HashSet<String> = HashSet::new();
+                for nested_item in module_items {
+                    match nested_item {
+                        syn::Item::Struct(s) => {
+                            names.insert(s.ident.to_string());
+                        }
+                        syn::Item::Enum(e) => {
+                            names.insert(e.ident.to_string());
+                        }
+                        syn::Item::Union(u) => {
+                            names.insert(u.ident.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                if names.is_empty() {
+                    None
+                } else {
+                    Some((module_name, names))
+                }
+            })
+            .collect();
+        let module_index: HashMap<String, usize> = module_names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (name.clone(), idx))
+            .collect();
+        let mut outgoing: Vec<HashSet<usize>> = vec![HashSet::new(); inline_modules.len()];
+        for (module_pos, module_item) in inline_modules.iter().enumerate() {
+            let mut deps: HashSet<String> = HashSet::new();
+            let Some((_, module_items)) = &module_item.content else {
+                continue;
+            };
+            self.collect_scope_module_hard_dependencies(
+                module_items,
+                &known_modules,
+                &forward_declable_types_by_module,
+                &mut deps,
+            );
+            for dep in deps {
+                let Some(&dep_pos) = module_index.get(&dep) else {
+                    continue;
+                };
+                if dep_pos != module_pos {
+                    outgoing[module_pos].insert(dep_pos);
+                }
+            }
+        }
+        let mut reversed: Vec<Vec<usize>> = vec![Vec::new(); inline_modules.len()];
+        for (from, nexts) in outgoing.iter().enumerate() {
+            for &to in nexts {
+                reversed[to].push(from);
+            }
+        }
+        for nexts in &mut reversed {
+            nexts.sort_unstable();
+            nexts.dedup();
+        }
+        fn dfs_order(node: usize, graph: &[HashSet<usize>], seen: &mut [bool], order: &mut Vec<usize>) {
+            if seen[node] {
+                return;
+            }
+            seen[node] = true;
+            let mut nexts: Vec<usize> = graph[node].iter().copied().collect();
+            nexts.sort_unstable();
+            for next in nexts {
+                if !seen[next] {
+                    dfs_order(next, graph, seen, order);
+                }
+            }
+            order.push(node);
+        }
+        fn dfs_collect(node: usize, graph: &[Vec<usize>], seen: &mut [bool], component: &mut Vec<usize>) {
+            if seen[node] {
+                return;
+            }
+            seen[node] = true;
+            component.push(node);
+            let mut nexts = graph[node].clone();
+            nexts.sort_unstable();
+            for next in nexts {
+                if !seen[next] {
+                    dfs_collect(next, graph, seen, component);
+                }
+            }
+        }
+        let mut order: Vec<usize> = Vec::with_capacity(inline_modules.len());
+        let mut seen = vec![false; inline_modules.len()];
+        for node in 0..inline_modules.len() {
+            if !seen[node] {
+                dfs_order(node, &outgoing, &mut seen, &mut order);
+            }
+        }
+        let mut seen_rev = vec![false; inline_modules.len()];
+        let mut module_scc: HashMap<String, usize> = HashMap::new();
+        let mut scc_id = 0usize;
+        while let Some(node) = order.pop() {
+            if seen_rev[node] {
+                continue;
+            }
+            let mut component = Vec::new();
+            dfs_collect(node, &reversed, &mut seen_rev, &mut component);
+            if component.len() > 1 {
+                for idx in component {
+                    if let Some(name) = module_names.get(idx) {
+                        module_scc.insert(name.clone(), scc_id);
+                    }
+                }
+                scc_id += 1;
+            }
+        }
+        if module_scc.is_empty() {
+            return;
+        }
+        for module_item in inline_modules {
+            let owner_module = module_item.ident.to_string();
+            let Some(owner_scc) = module_scc.get(&owner_module).copied() else {
+                continue;
+            };
+            let Some((_, module_items)) = &module_item.content else {
+                continue;
+            };
+            for nested_item in module_items {
+                match nested_item {
+                    syn::Item::Struct(s) => {
+                        for (field_idx, field) in s.fields.iter().enumerate() {
+                            let field_name = field
+                                .ident
+                                .as_ref()
+                                .map(|ident| ident.to_string())
+                                .unwrap_or_else(|| format!("#{}", field_idx));
+                            self.maybe_mark_auto_cross_module_by_value_rewrite_field(
+                                &s.ident.to_string(),
+                                None,
+                                &field_name,
+                                &field.ty,
+                                &owner_module,
+                                owner_scc,
+                                &module_scc,
+                                &known_modules,
+                            );
+                        }
+                    }
+                    syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
+                        let owner_type = e.ident.to_string();
+                        for variant in &e.variants {
+                            let variant_name = variant.ident.to_string();
+                            for (field_idx, field) in variant.fields.iter().enumerate() {
+                                let field_name = field
+                                    .ident
+                                    .as_ref()
+                                    .map(|ident| ident.to_string())
+                                    .unwrap_or_else(|| format!("#{}", field_idx));
+                                self.maybe_mark_auto_cross_module_by_value_rewrite_field(
+                                    &owner_type,
+                                    Some(variant_name.as_str()),
+                                    &field_name,
+                                    &field.ty,
+                                    &owner_module,
+                                    owner_scc,
+                                    &module_scc,
+                                    &known_modules,
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn maybe_mark_auto_cross_module_by_value_rewrite_field(
+        &mut self,
+        owner_type: &str,
+        variant_name: Option<&str>,
+        field_name: &str,
+        field_ty: &syn::Type,
+        owner_module: &str,
+        owner_scc: usize,
+        module_scc: &HashMap<String, usize>,
+        known_modules: &HashSet<String>,
+    ) {
+        let syn::Type::Path(type_path) = field_ty else {
+            return;
+        };
+        if type_path.qself.is_some() {
+            return;
+        }
+        let Some(last) = type_path.path.segments.last() else {
+            return;
+        };
+        if !matches!(last.arguments, syn::PathArguments::None) {
+            return;
+        }
+        let Some(target_module) =
+            Self::resolve_direct_field_target_module_for_auto_cycle_rewrite(&type_path.path, known_modules)
+        else {
+            return;
+        };
+        if target_module == owner_module {
+            return;
+        }
+        let Some(target_scc) = module_scc.get(&target_module).copied() else {
+            return;
+        };
+        if target_scc != owner_scc {
+            return;
+        }
+        self.auto_cross_module_by_value_rewrite_fields
+            .insert(ByValueCycleRewriteFieldKey {
+                owner_type: owner_type.to_string(),
+                field_name: Self::format_by_value_field_name(variant_name, field_name),
+            });
+    }
+
+    fn resolve_direct_field_target_module_for_auto_cycle_rewrite(
+        path: &syn::Path,
+        known_modules: &HashSet<String>,
+    ) -> Option<String> {
+        let segments: Vec<String> = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect();
+        if segments.len() < 2 {
+            return None;
+        }
+        let first = &segments[0];
+        if known_modules.contains(first) {
+            return Some(first.clone());
+        }
+        if matches!(first.as_str(), "crate" | "self" | "super")
+            && let Some(second) = segments.get(1)
+            && known_modules.contains(second)
+        {
+            return Some(second.clone());
+        }
+        None
     }
 
     fn collect_by_value_field_edges(
@@ -7922,6 +8194,32 @@ impl CodeGen {
                         let mut dedup = HashSet::new();
                         owner_keys.retain(|key| dedup.insert(key.clone()));
                     }
+                    let mut trait_keys: Vec<String> = Vec::new();
+                    if let Some((_, trait_path, _)) = &impl_block.trait_
+                        && !trait_path.segments.is_empty()
+                    {
+                        let joined = trait_path
+                            .segments
+                            .iter()
+                            .map(|seg| seg.ident.to_string())
+                            .collect::<Vec<_>>()
+                            .join("::");
+                        if !joined.is_empty() {
+                            trait_keys.push(joined.clone());
+                        }
+                        if let Some(last) = trait_path.segments.last() {
+                            trait_keys.push(last.ident.to_string());
+                        }
+                        if trait_path.segments.len() == 1 && !module_path.is_empty() {
+                            trait_keys.push(format!(
+                                "{}::{}",
+                                module_path.join("::"),
+                                trait_path.segments[0].ident
+                            ));
+                        }
+                        let mut dedup = HashSet::new();
+                        trait_keys.retain(|key| dedup.insert(key.clone()));
+                    }
                     for impl_item in &impl_block.items {
                         let syn::ImplItem::Fn(method) = impl_item else {
                             continue;
@@ -7939,6 +8237,10 @@ impl CodeGen {
                             self.collect_type_param_names_from_generics(&method.sig.generics);
                         let method_return_ty =
                             self.collect_return_type_from_output(&method.sig.output);
+                        for trait_name in &trait_keys {
+                            self.trait_method_has_receiver
+                                .insert(format!("{}::{}", trait_name, method_name), has_receiver);
+                        }
                         for owner in &owner_keys {
                             let owner_method_key = format!("{}::{}", owner, method_name);
                             self.record_function_arg_pass_styles(
@@ -38593,6 +38895,69 @@ impl CodeGen {
         )
     }
 
+    fn receiver_is_box_wrapper_type(&self, receiver: &syn::Expr) -> bool {
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        tp.path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "Box")
+    }
+
+    fn box_wrapper_method_is_inherent(method_name: &str) -> bool {
+        matches!(
+            method_name,
+            "new"
+                | "new_"
+                | "make"
+                | "from_raw"
+                | "into_raw"
+                | "release"
+                | "get"
+                | "is_valid"
+                | "clone"
+        )
+    }
+
+    fn receiver_is_rewritten_by_value_cycle_box_field(&self, receiver: &syn::Expr) -> bool {
+        let receiver = self.peel_paren_group_expr(receiver);
+        let syn::Expr::Field(field) = receiver else {
+            return false;
+        };
+        let syn::Member::Named(member_ident) = &field.member else {
+            return false;
+        };
+        let base = self.peel_paren_group_expr(&field.base);
+        let base_is_self = match base {
+            syn::Expr::Path(path) => {
+                path.path.segments.len() == 1
+                    && path.path.segments.first().is_some_and(|seg| seg.ident == "self")
+            }
+            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+                matches!(
+                    self.peel_paren_group_expr(&unary.expr),
+                    syn::Expr::Path(path)
+                        if path.path.segments.len() == 1
+                            && path.path.segments.first().is_some_and(|seg| seg.ident == "self")
+                )
+            }
+            _ => false,
+        };
+        if !base_is_self {
+            return false;
+        }
+        let Some(owner_type) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let field_key = Self::format_by_value_field_name(None, &member_ident.to_string());
+        self.should_rewrite_by_value_cycle_field_declaration(owner_type, &field_key)
+    }
+
     fn method_receiver_uses_wrapper_autoderef_member_access(
         &self,
         receiver: &syn::Expr,
@@ -38600,6 +38965,9 @@ impl CodeGen {
     ) -> bool {
         self.receiver_is_arc_wrapper_type(receiver)
             && !Self::arc_wrapper_method_is_inherent(method_name)
+            || (self.receiver_is_box_wrapper_type(receiver)
+                && !Self::box_wrapper_method_is_inherent(method_name))
+            || self.receiver_is_rewritten_by_value_cycle_box_field(receiver)
     }
 
     fn method_receiver_uses_wrapper_explicit_deref_call(
@@ -39343,45 +39711,13 @@ impl CodeGen {
             } else {
                 self.emit_expr_to_string(&mc.receiver)
             };
-            let explicit_collect_owner_type = |ty: &syn::Type, mapped: &str| -> Option<String> {
-                if mapped.contains('<') {
-                    return Some(mapped.to_string());
-                }
-                let ty = self.peel_reference_paren_group_type(ty);
-                let syn::Type::Path(tp) = ty else {
-                    return None;
-                };
-                let last = tp.path.segments.last()?;
-                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-                    return None;
-                };
-                let mapped_args: Vec<String> = args
-                    .args
-                    .iter()
-                    .filter_map(|arg| match arg {
-                        syn::GenericArgument::Type(t) => Some(self.map_type(t)),
-                        syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
-                        _ => None,
-                    })
-                    .collect();
-                if mapped_args.is_empty() {
-                    return None;
-                }
-                let mut owner_path = tp.path.clone();
-                if let Some(owner_last) = owner_path.segments.last_mut() {
-                    owner_last.arguments = syn::PathArguments::None;
-                }
-                let owner_cpp = self.emit_path_to_string(&owner_path);
-                if owner_cpp.is_empty() {
-                    return None;
-                }
-                Some(format!("{}<{}>", owner_cpp, mapped_args.join(", ")))
-            };
             let mut unresolved_vec_placeholder_collect = false;
             // Try turbofish type arg first: `collect::<T>()` → `T::from_iter(receiver)`
             if let Some(turbofish_ty) = self.method_call_single_turbofish_type(mc) {
                 let mut collect_type = self.map_type(turbofish_ty);
-                if let Some(explicit) = explicit_collect_owner_type(turbofish_ty, &collect_type) {
+                if let Some(explicit) =
+                    self.recover_explicit_owner_type_from_type(turbofish_ty, &collect_type)
+                {
                     collect_type = explicit;
                 }
                 if collect_type.starts_with("rusty::Vec<")
@@ -39416,7 +39752,8 @@ impl CodeGen {
                 let resolved_expected =
                     self.resolve_expected_type_with_iter_hint(expected, &mc.receiver);
                 let mut expected_cpp = self.map_type(&resolved_expected);
-                if let Some(explicit) = explicit_collect_owner_type(&resolved_expected, &expected_cpp)
+                if let Some(explicit) =
+                    self.recover_explicit_owner_type_from_type(&resolved_expected, &expected_cpp)
                 {
                     expected_cpp = explicit;
                 }
@@ -48277,6 +48614,26 @@ impl CodeGen {
         } else {
             None
         };
+        let method_name = path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let owner_path_name = owner_path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::");
+        let method_has_receiver = self
+            .lookup_owner_method_has_receiver(&owner_path_name, &method_name)
+            .or_else(|| self.lookup_owner_method_has_receiver(&owner_name, &method_name));
+        let owner_looks_like_type = owner_name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase() || ch == '_');
+        let should_defer_static_owner_lookup = owner_looks_like_type
+            && (matches!(method_has_receiver, Some(false)) || method_has_receiver.is_none());
         if std::env::var_os("RUSTY_CPP_DEBUG_OWNER_RECOVERY").is_some()
             && owner_name == "MapImpl"
             && method_name == "from_iter"
@@ -48299,11 +48656,6 @@ impl CodeGen {
                     "time" | "path" | "ffi" | "env" | "process"
                 )
             });
-        let method_name = path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
         if owner_name == "Vec" && method_name == "extend_from_slice" {
             // Keep UFCS Vec::extend_from_slice lowering on the runtime helper path;
             // owner-template recovery here can otherwise produce invalid Vec<auto>.
@@ -48753,7 +49105,22 @@ impl CodeGen {
         if force_leading_colon && !emitted.is_empty() && !emitted.starts_with("::") {
             emitted = format!("::{}", emitted);
         }
-        let emitted = Self::strip_crate_root_cpp_path(&emitted);
+        let mut emitted = Self::strip_crate_root_cpp_path(&emitted);
+        if should_defer_static_owner_lookup
+            && let Some((owner_cpp, method_cpp)) = emitted.rsplit_once("::")
+            && owner_cpp
+                .rsplit("::")
+                .next()
+                .is_some_and(|tail| {
+                    tail.chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_uppercase() || ch == '_')
+                })
+            && let Some(dependent_owner_cpp) =
+                self.maybe_make_owner_cpp_type_dependent_in_template_scope(owner_cpp)
+        {
+            emitted = format!("{}::{}", dependent_owner_cpp, method_cpp);
+        }
         self.rewrite_seed_ctor_path_string(&emitted)
     }
 
@@ -49367,6 +49734,68 @@ impl CodeGen {
         }
     }
 
+    fn maybe_defer_static_owner_lookup_for_path_call(
+        &self,
+        call: &syn::ExprCall,
+        func: String,
+    ) -> String {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return func;
+        };
+        if path_expr.path.segments.len() < 2 {
+            return func;
+        }
+
+        let owner_segments: Vec<String> = path_expr
+            .path
+            .segments
+            .iter()
+            .take(path_expr.path.segments.len().saturating_sub(1))
+            .map(|seg| seg.ident.to_string())
+            .collect();
+        let owner_path = owner_segments.join("::");
+        let owner_tail = owner_segments.last().cloned().unwrap_or_default();
+        let method_name = path_expr
+            .path
+            .segments
+            .last()
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        let method_has_receiver = self
+            .lookup_owner_method_has_receiver(&owner_path, &method_name)
+            .or_else(|| self.lookup_owner_method_has_receiver(&owner_tail, &method_name));
+        let owner_looks_like_type = owner_tail
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase() || ch == '_');
+        let should_defer_static_owner_lookup = owner_looks_like_type
+            && (matches!(method_has_receiver, Some(false)) || method_has_receiver.is_none());
+        if !should_defer_static_owner_lookup {
+            return func;
+        }
+
+        let Some((owner_cpp, method_cpp)) = func.rsplit_once("::") else {
+            return func;
+        };
+        if !owner_cpp
+            .rsplit("::")
+            .next()
+            .is_some_and(|tail| {
+                tail.chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase() || ch == '_')
+            })
+        {
+            return func;
+        }
+        let Some(dependent_owner_cpp) =
+            self.maybe_make_owner_cpp_type_dependent_in_template_scope(owner_cpp)
+        else {
+            return func;
+        };
+        format!("{}::{}", dependent_owner_cpp, method_cpp)
+    }
+
     /// Emit a call expression, optionally using expected type context from parent.
     fn emit_call_expr_to_string(
         &self,
@@ -49503,7 +49932,13 @@ impl CodeGen {
             if call.args.len() == 1 && self.path_is_from_iterator_from_iter(&func_path.path) {
                 let arg = self.emit_expr_maybe_move(&call.args[0]);
                 if let Some(target_ty) = expected_ty.or(self.current_return_type_hint()) {
-                    let target_cpp = self.map_type(self.peel_reference_paren_group_type(target_ty));
+                    let mut target_cpp =
+                        self.map_type(self.peel_reference_paren_group_type(target_ty));
+                    if let Some(explicit) =
+                        self.recover_explicit_owner_type_from_type(target_ty, &target_cpp)
+                    {
+                        target_cpp = explicit;
+                    }
                     if !target_cpp.contains("/* TODO")
                         && !type_string_has_auto_placeholder(&target_cpp)
                     {
@@ -49926,6 +50361,7 @@ impl CodeGen {
 
         let mut func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
         func = self.rewrite_seed_ctor_path_string(&func);
+        func = self.maybe_defer_static_owner_lookup_for_path_call(call, func);
         func = match func.as_str() {
             "std::string_view::from_utf8" | "::std::string_view::from_utf8" => {
                 "rusty::str_runtime::from_utf8".to_string()
@@ -52360,6 +52796,11 @@ impl CodeGen {
         }
 
         let method_name = func_path.segments.last()?.ident.to_string();
+        let path_segments: Vec<String> = func_path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect();
         let owner_segments: Vec<String> = func_path
             .segments
             .iter()
@@ -52368,6 +52809,7 @@ impl CodeGen {
             .collect();
         let owner_leaf = owner_segments.last()?.to_string();
         let owner_path = owner_segments.join("::");
+        let trait_receiver_shape = self.trait_static_call_has_receiver_for_segments(&path_segments);
 
         // In module/expanded modes, local trait runtime helpers are emitted as
         // concrete helper structs. Keep UFCS calls targeting those helpers in
@@ -52379,7 +52821,8 @@ impl CodeGen {
             && (self.module_runtime_helper_traits.contains(&owner_leaf)
                 || self.module_runtime_helper_traits.contains(&owner_path))
             && (self.trait_method_has_receiver.contains_key(&key_scoped)
-                || self.trait_method_has_receiver.contains_key(&key_unscoped));
+                || self.trait_method_has_receiver.contains_key(&key_unscoped)
+                || trait_receiver_shape.is_some());
         let receiver_is_self_path = call
             .args
             .first()
@@ -52398,10 +52841,17 @@ impl CodeGen {
         ) {
             return None;
         }
+        if matches!(
+            self.lookup_owner_method_has_receiver(&owner_path, &method_name),
+            Some(false)
+        ) {
+            return None;
+        }
         let has_receiver = self
-            .trait_method_has_receiver
-            .get(&key_scoped)
-            .copied()
+            .lookup_owner_method_has_receiver(&owner_path, &method_name)
+            .or_else(|| self.lookup_owner_method_has_receiver(&owner_leaf, &method_name))
+            .or(trait_receiver_shape)
+            .or_else(|| self.trait_method_has_receiver.get(&key_scoped).copied())
             .or_else(|| self.trait_method_has_receiver.get(&key_unscoped).copied())
             .unwrap_or(false);
         if !has_receiver {
@@ -59319,6 +59769,48 @@ impl CodeGen {
         Some(format!("{}<{}>", mapped_path, recovered_args.join(", ")))
     }
 
+    fn recover_explicit_owner_type_from_type(
+        &self,
+        ty: &syn::Type,
+        mapped_owner: &str,
+    ) -> Option<String> {
+        if mapped_owner.contains('<') {
+            return Some(mapped_owner.to_string());
+        }
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let mapped_args: Vec<String> = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(self.map_type(t)),
+                syn::GenericArgument::Const(c) => Some(self.emit_expr_to_string(c)),
+                _ => None,
+            })
+            .collect();
+        if mapped_args.is_empty() {
+            return None;
+        }
+        let mut owner_path = tp.path.clone();
+        if let Some(owner_last) = owner_path.segments.last_mut() {
+            owner_last.arguments = syn::PathArguments::None;
+        }
+        let owner_cpp = self.emit_path_to_string(&owner_path);
+        if owner_cpp.is_empty() {
+            return None;
+        }
+        if owner_cpp.contains('<') {
+            return Some(owner_cpp);
+        }
+        Some(format!("{}<{}>", owner_cpp, mapped_args.join(", ")))
+    }
+
     fn recover_omitted_struct_literal_generic_type_args_from_fields(
         &self,
         struct_expr: &syn::ExprStruct,
@@ -63676,6 +64168,33 @@ impl CodeGen {
             }
         }
         ordered
+    }
+
+    fn cpp_type_mentions_in_scope_type_param(&self, cpp_type: &str) -> bool {
+        cpp_type
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .filter(|token| !token.is_empty())
+            .any(|token| self.is_type_param_in_scope(token))
+    }
+
+    fn maybe_make_owner_cpp_type_dependent_in_template_scope(
+        &self,
+        owner_cpp: &str,
+    ) -> Option<String> {
+        if owner_cpp.is_empty()
+            || owner_cpp == "auto"
+            || owner_cpp.contains("/* TODO")
+            || type_string_has_auto_placeholder(owner_cpp)
+            || self.cpp_type_mentions_in_scope_type_param(owner_cpp)
+        {
+            return None;
+        }
+        let dependency_param = self.ordered_type_params_in_scope().into_iter().next()?;
+        Some(format!(
+            "std::conditional_t<true, {}, {}>",
+            owner_cpp,
+            escape_cpp_keyword(&dependency_param)
+        ))
     }
 
     fn is_type_param_in_scope(&self, name: &str) -> bool {
@@ -93038,8 +93557,8 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains("A(B b_init) : b(rusty::Box::make(std::move(b_init))) {}"),
-            "Expected drop-generated constructor to wrap rewritten field initialization with rusty::Box::make\nGot: {out}"
+            out.contains("A(B b_init) : b(rusty::make_box(std::move(b_init))) {}"),
+            "Expected drop-generated constructor to wrap rewritten field initialization with rusty::make_box\nGot: {out}"
         );
     }
 
@@ -93062,8 +93581,8 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains(".b = rusty::Box::make(std::move(b))"),
-            "Expected struct-literal field initialization to wrap rewritten field payload with rusty::Box::make\nGot: {out}"
+            out.contains(".b = rusty::make_box(std::move(b))"),
+            "Expected struct-literal field initialization to wrap rewritten field payload with rusty::make_box\nGot: {out}"
         );
     }
 
@@ -93090,8 +93609,8 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains("return A(rusty::Box::make(std::move(b)));"),
-            "Expected positional constructor path to wrap rewritten field payload with rusty::Box::make\nGot: {out}"
+            out.contains("return A(rusty::make_box(std::move(b)));"),
+            "Expected positional constructor path to wrap rewritten field payload with rusty::make_box\nGot: {out}"
         );
     }
 
@@ -93110,8 +93629,8 @@ mod tests {
             "#,
         );
         assert!(
-            out.contains(".b = rusty::Box::make(std::forward<B>(b))"),
-            "Expected enum variant constructor helper to wrap rewritten field payload with rusty::Box::make\nGot: {out}"
+            out.contains(".b = rusty::make_box(std::forward<B>(b))"),
+            "Expected enum variant constructor helper to wrap rewritten field payload with rusty::make_box\nGot: {out}"
         );
     }
 
