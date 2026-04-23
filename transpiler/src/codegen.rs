@@ -4524,18 +4524,6 @@ impl CodeGen {
                 }
                 visit::visit_path(self, path);
             }
-
-            fn visit_type(&mut self, ty: &'ast syn::Type) {
-                self.codegen.collect_type_module_dependencies(
-                    ty,
-                    self.known_modules,
-                    self.forward_declable_types_by_module,
-                    self.imported_name_to_module,
-                    true,
-                    self.out,
-                );
-                visit::visit_type(self, ty);
-            }
         }
 
         let mut visitor = StrictMemberDependencyExprVisitor {
@@ -4582,18 +4570,6 @@ impl CodeGen {
                         );
                 }
                 visit::visit_path(self, path);
-            }
-
-            fn visit_type(&mut self, ty: &'ast syn::Type) {
-                self.codegen.collect_type_module_dependencies(
-                    ty,
-                    self.known_modules,
-                    self.forward_declable_types_by_module,
-                    self.imported_name_to_module,
-                    true,
-                    self.out,
-                );
-                visit::visit_type(self, ty);
             }
         }
 
@@ -16338,14 +16314,14 @@ impl CodeGen {
                     }
                     // When importing a data enum type, also import its namespace
                     // so variant structs (EnumName_VariantName) are accessible.
+                    // Derive from the final emitted `using_path` so local scope
+                    // rewrites (e.g. `scalar::Type` inside `namespace decoder`)
+                    // are preserved instead of forcing global `::scalar`.
                     let imported_name = mapped_path.rsplit("::").next().unwrap_or(&mapped_path);
-                    if self.data_enum_types.contains(imported_name) {
-                        if let Some(ns) = mapped_path.rsplit_once("::").map(|(ns, _)| ns) {
-                            let ns_path = make_using_path_cpp_legal(ns);
-                            let ns_path =
-                                self.rewrite_global_using_path_for_local_alias_root(&ns_path);
-                            self.writeln(&format!("using namespace {};", ns_path));
-                        }
+                    if self.data_enum_types.contains(imported_name)
+                        && let Some((ns, _)) = using_path.rsplit_once("::")
+                    {
+                        self.emit_namespace_using_import(ns);
                     }
                 }
                 UseImportAction::Raw(statement) => {
@@ -22883,56 +22859,89 @@ impl CodeGen {
     }
 
     fn emit_block(&mut self, block: &syn::Block) {
+        let profile_blocks = std::env::var_os("RUSTY_CPP_PROFILE_BLOCKS").is_some();
+        let profile_this_block = profile_blocks && block.stmts.len() >= 8;
+        let block_profile_start = std::time::Instant::now();
+        let mut block_profile_mark = |label: &str| {
+            if profile_this_block {
+                eprintln!(
+                    "[rusty-cpp][block-profile] stmts={} {}: {:.3}s",
+                    block.stmts.len(),
+                    label,
+                    block_profile_start.elapsed().as_secs_f64()
+                );
+            }
+        };
+        block_profile_mark("start");
         // Pre-scan: find variables used multiple times (skip std::move for these)
         let multi_use = collect_multi_use_vars(&block.stmts);
+        block_profile_mark("collect_multi_use_vars");
         let prev_multi_use = std::mem::replace(&mut self.multi_use_vars, multi_use);
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
+        block_profile_mark("collect_reassigned_vars");
         let consuming =
             self.collect_consuming_method_receiver_vars_with_signature_hints(&block.stmts);
+        block_profile_mark("collect_consuming_method_receiver_vars_with_signature_hints");
         let mutable_pointer_aliased = collect_mutable_pointer_aliased_locals(&block.stmts);
+        block_profile_mark("collect_mutable_pointer_aliased_locals");
         let repeat_hints = collect_repeat_element_type_hints(&block.stmts);
+        block_profile_mark("collect_repeat_element_type_hints");
         let mut placeholder_hints = collect_local_generic_placeholder_hints(&block.stmts);
-        // Seed pre-scan local type knowledge (from earlier locals in this block)
-        // so placeholder augmentation can resolve method-return shapes like:
-        // `let heap = Heap::default(); cell.set(Box::new(heap.new_pebble(...)))`.
-        let pre_scan_known_local_types = self.collect_pre_scan_known_local_type_hints(&block.stmts);
-        let pushed_pre_scan_known_local_scope = if pre_scan_known_local_types.is_empty() {
-            false
-        } else {
-            let pre_scan_scope: HashMap<String, Option<syn::Type>> = pre_scan_known_local_types
-                .into_iter()
-                .map(|(name, ty)| (name, Some(ty)))
-                .collect();
-            self.local_bindings.push(pre_scan_scope);
-            true
-        };
-        self.augment_local_generic_placeholder_hints_from_function_calls(
-            &block.stmts,
-            &mut placeholder_hints,
-        );
-        self.augment_uninitialized_local_type_hints_from_usage(
-            &block.stmts,
-            &mut placeholder_hints,
-        );
-        self.augment_option_none_placeholder_hints_from_return_context(
-            &block.stmts,
-            &mut placeholder_hints,
-        );
-        self.augment_mut_unsuffixed_int_seed_hints_from_option_return_context(
-            &block.stmts,
-            &mut placeholder_hints,
-        );
-        if let Some(fallback_inner_ty) =
-            self.collect_oncecell_fallback_inner_type_hint(&block.stmts)
-        {
-            placeholder_hints.insert(
-                ONCECELL_FALLBACK_INNER_HINT_KEY.to_string(),
-                fallback_inner_ty,
+        block_profile_mark("collect_local_generic_placeholder_hints");
+        // Large expanded test functions can contain massive generated blocks.
+        // Keep default hint augmentation for normal blocks, but skip the
+        // heaviest passes for very large blocks to avoid pathological slowdown.
+        let enable_block_hint_augmentation = block.stmts.len() <= 128;
+        if enable_block_hint_augmentation {
+            // Seed pre-scan local type knowledge (from earlier locals in this block)
+            // so placeholder augmentation can resolve method-return shapes like:
+            // `let heap = Heap::default(); cell.set(Box::new(heap.new_pebble(...)))`.
+            let pre_scan_known_local_types =
+                self.collect_pre_scan_known_local_type_hints(&block.stmts);
+            block_profile_mark("collect_pre_scan_known_local_type_hints");
+            let pushed_pre_scan_known_local_scope = if pre_scan_known_local_types.is_empty() {
+                false
+            } else {
+                let pre_scan_scope: HashMap<String, Option<syn::Type>> = pre_scan_known_local_types
+                    .into_iter()
+                    .map(|(name, ty)| (name, Some(ty)))
+                    .collect();
+                self.local_bindings.push(pre_scan_scope);
+                true
+            };
+            self.augment_local_generic_placeholder_hints_from_function_calls(
+                &block.stmts,
+                &mut placeholder_hints,
             );
-        }
-        if pushed_pre_scan_known_local_scope {
-            self.local_bindings.pop();
+            block_profile_mark("augment_local_generic_placeholder_hints_from_function_calls");
+            self.augment_uninitialized_local_type_hints_from_usage(
+                &block.stmts,
+                &mut placeholder_hints,
+            );
+            block_profile_mark("augment_uninitialized_local_type_hints_from_usage");
+            self.augment_option_none_placeholder_hints_from_return_context(
+                &block.stmts,
+                &mut placeholder_hints,
+            );
+            block_profile_mark("augment_option_none_placeholder_hints_from_return_context");
+            self.augment_mut_unsuffixed_int_seed_hints_from_option_return_context(
+                &block.stmts,
+                &mut placeholder_hints,
+            );
+            block_profile_mark("augment_mut_unsuffixed_int_seed_hints_from_option_return_context");
+            if let Some(fallback_inner_ty) =
+                self.collect_oncecell_fallback_inner_type_hint(&block.stmts)
+            {
+                placeholder_hints.insert(
+                    ONCECELL_FALLBACK_INNER_HINT_KEY.to_string(),
+                    fallback_inner_ty,
+                );
+            }
+            block_profile_mark("collect_oncecell_fallback_inner_type_hint");
+            if pushed_pre_scan_known_local_scope {
+                self.local_bindings.pop();
+            }
         }
         let prev = std::mem::replace(&mut self.reassigned_vars, reassigned);
         let prev_consuming = std::mem::replace(&mut self.consuming_method_receiver_vars, consuming);
@@ -22993,6 +23002,7 @@ impl CodeGen {
             local_operator_overrides,
             local_inherent_method_overrides,
         ) = self.collect_local_impl_overrides(&block.stmts, &local_types);
+        block_profile_mark("collect_local_impl_overrides");
         self.local_function_bindings.push(local_functions);
         self.local_type_bindings.push(local_types);
         self.local_manually_drop_bindings.push(HashSet::new());
@@ -23042,6 +23052,7 @@ impl CodeGen {
                 self.emit_stmt(stmt, false);
             }
         }
+        block_profile_mark("emit_hoisted_type_use_const_static_items");
         // Rust block-scoped `fn` items are also usable across the whole block.
         // Emit them before non-item statements so earlier call sites still resolve.
         for stmt in stmts {
@@ -23049,6 +23060,7 @@ impl CodeGen {
                 self.emit_stmt(stmt, false);
             }
         }
+        block_profile_mark("emit_hoisted_fn_items");
 
         let non_hoisted_stmts: Vec<&syn::Stmt> = stmts
             .iter()
@@ -23070,8 +23082,67 @@ impl CodeGen {
         let len = non_hoisted_stmts.len();
         for (i, stmt) in non_hoisted_stmts.iter().enumerate() {
             let is_last = i == len - 1;
+            let stmt_profile_start = if profile_this_block {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             self.emit_stmt(stmt, is_last);
+            if let Some(start) = stmt_profile_start {
+                let elapsed = start.elapsed().as_secs_f64();
+                if elapsed >= 0.050 {
+                    let stmt_kind = match stmt {
+                        syn::Stmt::Local(_) => "local",
+                        syn::Stmt::Expr(expr, semi) => {
+                            if semi.is_some() {
+                                "expr_semi"
+                            } else {
+                                match self.peel_paren_group_expr(expr) {
+                                    syn::Expr::Call(_) => "expr_call",
+                                    syn::Expr::MethodCall(_) => "expr_method_call",
+                                    syn::Expr::Match(_) => "expr_match",
+                                    syn::Expr::If(_) => "expr_if",
+                                    syn::Expr::Block(_) => "expr_block",
+                                    syn::Expr::Assign(_) => "expr_assign",
+                                    syn::Expr::While(_) => "expr_while",
+                                    syn::Expr::ForLoop(_) => "expr_for",
+                                    syn::Expr::Loop(_) => "expr_loop",
+                                    _ => "expr_other",
+                                }
+                            }
+                        }
+                        syn::Stmt::Item(item) => match item {
+                            syn::Item::Fn(_) => "item_fn",
+                            syn::Item::Struct(_) => "item_struct",
+                            syn::Item::Enum(_) => "item_enum",
+                            syn::Item::Type(_) => "item_type",
+                            syn::Item::Use(_) => "item_use",
+                            syn::Item::Const(_) => "item_const",
+                            syn::Item::Static(_) => "item_static",
+                            syn::Item::Impl(_) => "item_impl",
+                            _ => "item_other",
+                        },
+                        syn::Stmt::Macro(_) => "macro",
+                    };
+                    eprintln!(
+                        "[rusty-cpp][block-profile] stmts={} non_hoisted stmt_idx={} kind={} took {:.3}s snippet={}",
+                        block.stmts.len(),
+                        i,
+                        stmt_kind,
+                        elapsed,
+                        {
+                            let stmt_snippet = stmt.to_token_stream().to_string();
+                            let mut truncated = stmt_snippet.chars().take(120).collect::<String>();
+                            if stmt_snippet.chars().count() > 120 {
+                                truncated.push_str("...");
+                            }
+                            truncated
+                        }
+                    );
+                }
+            }
         }
+        block_profile_mark("emit_non_hoisted_stmts");
 
         for (op_key, prev) in prev_operator_overrides {
             if let Some(prev_value) = prev {
@@ -23118,6 +23189,7 @@ impl CodeGen {
         self.mutable_pointer_aliased_vars = prev_mutable_pointer_aliased;
         self.repeat_elem_type_hints = prev_repeat_hints;
         self.multi_use_vars = prev_multi_use;
+        block_profile_mark("done");
     }
 
     fn emit_stmt(&mut self, stmt: &syn::Stmt, is_tail: bool) {
@@ -49747,6 +49819,89 @@ impl CodeGen {
         }
     }
 
+    fn try_emit_arc_from_assoc_call(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let syn::Expr::Path(func_path) = call.func.as_ref() else {
+            return None;
+        };
+        if call.args.len() != 1 || func_path.path.segments.len() < 2 {
+            return None;
+        }
+        let method = func_path.path.segments.last()?.ident.to_string();
+        if method != "from" {
+            return None;
+        }
+        let owner_seg = func_path.path.segments.iter().nth_back(1)?;
+        if owner_seg.ident != "Arc" {
+            return None;
+        }
+
+        let explicit_owner_inner = match &owner_seg.arguments {
+            syn::PathArguments::AngleBracketed(args) => args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => {
+                    let mapped = self.map_type(t);
+                    (mapped != "auto"
+                        && !mapped.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(&mapped))
+                    .then_some(mapped)
+                }
+                _ => None,
+            }),
+            _ => None,
+        };
+        let expected_owner_inner = expected_ty
+            .and_then(|ty| self.expected_type_generic_args_for_owner(ty, "Arc"))
+            .and_then(|args| args.first().cloned())
+            .filter(|mapped| {
+                mapped != "auto"
+                    && !mapped.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(mapped)
+            });
+        let return_owner_inner = self
+            .current_return_type_hint()
+            .and_then(|ty| self.expected_type_generic_args_for_owner(ty, "Arc"))
+            .and_then(|args| args.first().cloned())
+            .filter(|mapped| {
+                mapped != "auto"
+                    && !mapped.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(mapped)
+            });
+        let inferred_owner_inner = call
+            .args
+            .first()
+            .and_then(|arg| {
+                self.infer_hint_type_from_expr(arg)
+                    .or_else(|| self.infer_simple_expr_type(arg))
+            })
+            .map(|ty| self.map_type(&ty))
+            .filter(|mapped| {
+                mapped != "auto"
+                    && !mapped.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(mapped)
+            })
+            .or_else(|| {
+                call.args
+                    .first()
+                    .and_then(|arg| self.infer_remove_cvref_decltype_from_expr(arg))
+            });
+
+        let owner_inner = explicit_owner_inner
+            .or(expected_owner_inner)
+            .or(return_owner_inner)
+            .or(inferred_owner_inner)?;
+        if self.owner_template_arg_is_value_identifier(&owner_inner) {
+            return None;
+        }
+        let arg = self.emit_expr_maybe_move(call.args.first()?);
+        Some(format!(
+            "rusty::from_into<rusty::sync::Arc<{}>>({})",
+            owner_inner, arg
+        ))
+    }
+
     fn try_emit_to_owned_method_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
         if mc.method != "to_owned" || !mc.args.is_empty() {
             return None;
@@ -50822,6 +50977,9 @@ impl CodeGen {
                     );
                 }
             }
+        }
+        if let Some(emitted) = self.try_emit_arc_from_assoc_call(call, expected_ty) {
+            return emitted;
         }
 
         let mut func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
@@ -66749,22 +66907,26 @@ rusty::Result<CString, rusty::String> cstring_new(const Bytes& bytes) {\n\
     return rusty::Result<CString, rusty::String>::Err(rusty::String::from(\"unsupported CString input\"));\n\
 }\n\
 }\n\
-template<typename Target, typename Input>\n\
-Target from_into(Input&& input) {\n\
-    if constexpr (requires { Target::from(std::forward<Input>(input)); }) {\n\
-        return Target::from(std::forward<Input>(input));\n\
-    } else if constexpr (std::is_constructible_v<Target, Input&&>) {\n\
-        return Target(std::forward<Input>(input));\n\
-    } else if constexpr (std::is_convertible_v<Input&&, Target>) {\n\
-        return static_cast<Target>(std::forward<Input>(input));\n\
-    } else if constexpr (std::is_convertible_v<Input&&, std::string_view>) {\n\
-        auto view = std::string_view(std::forward<Input>(input));\n\
-        if constexpr (requires { Target::from(view); }) {\n\
-            return Target::from(view);\n\
-        } else if constexpr (std::is_constructible_v<Target, std::string_view>) {\n\
-            return Target(view);\n\
-        } else if constexpr (std::is_convertible_v<std::string_view, Target>) {\n\
-            return static_cast<Target>(view);\n\
+	template<typename Target, typename Input>\n\
+	Target from_into(Input&& input) {\n\
+	    if constexpr (requires { Target::from(std::forward<Input>(input)); }) {\n\
+	        return Target::from(std::forward<Input>(input));\n\
+	    } else if constexpr (requires { Target::new_(std::forward<Input>(input)); }) {\n\
+	        return Target::new_(std::forward<Input>(input));\n\
+	    } else if constexpr (std::is_constructible_v<Target, Input&&>) {\n\
+	        return Target(std::forward<Input>(input));\n\
+	    } else if constexpr (std::is_convertible_v<Input&&, Target>) {\n\
+	        return static_cast<Target>(std::forward<Input>(input));\n\
+	    } else if constexpr (std::is_convertible_v<Input&&, std::string_view>) {\n\
+	        auto view = std::string_view(std::forward<Input>(input));\n\
+	        if constexpr (requires { Target::from(view); }) {\n\
+	            return Target::from(view);\n\
+	        } else if constexpr (requires { Target::new_(view); }) {\n\
+	            return Target::new_(view);\n\
+	        } else if constexpr (std::is_constructible_v<Target, std::string_view>) {\n\
+	            return Target(view);\n\
+	        } else if constexpr (std::is_convertible_v<std::string_view, Target>) {\n\
+	            return static_cast<Target>(view);\n\
         } else {\n\
             static_assert(!std::is_same_v<Target, Target>, \"rusty::from_into: unsupported conversion\");\n\
             return Target{};\n\
@@ -81618,6 +81780,27 @@ mod tests {
         assert!(out.contains("total->fetch_sub("), "{out}");
         assert!(!out.contains("total.fetch_add("), "{out}");
         assert!(!out.contains("total.fetch_sub("), "{out}");
+    }
+
+    #[test]
+    fn test_leaf_toml_arc_from_in_get_or_insert_with_lowers_via_from_into() {
+        let out = transpile_str(
+            r#"
+            use std::sync::Arc;
+            fn f(s: &str) {
+                let mut slot: Option<Arc<str>> = None;
+                let _ = slot.get_or_insert_with(|| Arc::from(s));
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::from_into<rusty::sync::Arc<std::string_view>>("),
+            "{out}"
+        );
+        assert!(
+            !out.contains("std::conditional_t<true, rusty::sync::Arc"),
+            "{out}"
+        );
     }
 
     #[test]
