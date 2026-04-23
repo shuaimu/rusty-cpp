@@ -17,6 +17,8 @@ pub struct CrateTarget {
 pub struct LocalDependencyPackage {
     pub name: String,
     pub manifest_path: PathBuf,
+    /// Features resolved by Cargo for this dependency package.
+    pub resolved_features: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,6 +125,8 @@ struct ResolveNode {
     id: String,
     #[serde(default)]
     deps: Vec<ResolveDep>,
+    #[serde(default)]
+    features: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -364,14 +368,19 @@ pub fn discover_library_dependencies(
     manifest_path: &Path,
     package_filter: Option<&str>,
     include_registry_packages: bool,
+    cargo_flags: &[String],
 ) -> Result<Vec<LocalDependencyPackage>, String> {
     let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
-    let output = std::process::Command::new("cargo")
-        .arg("metadata")
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("metadata")
         .arg("--format-version")
         .arg("1")
         .arg("--manifest-path")
-        .arg(manifest_path)
+        .arg(manifest_path);
+    for flag in cargo_flags {
+        cmd.arg(flag);
+    }
+    let output = cmd
         .current_dir(project_dir)
         .output()
         .map_err(|e| format!("Failed to run cargo metadata: {}", e))?;
@@ -392,6 +401,7 @@ pub fn discover_library_dependencies(
     }
 
     let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut resolved_features_by_id: HashMap<&str, Vec<String>> = HashMap::new();
     if let Some(resolve) = &metadata.resolve {
         for node in &resolve.nodes {
             let mut deps = Vec::new();
@@ -414,6 +424,11 @@ pub fn discover_library_dependencies(
             });
             deps.dedup();
             edges.insert(node.id.as_str(), deps);
+
+            let mut features = node.features.clone();
+            features.sort();
+            features.dedup();
+            resolved_features_by_id.insert(node.id.as_str(), features);
         }
     }
 
@@ -422,6 +437,7 @@ pub fn discover_library_dependencies(
         root_id: &str,
         packages_by_id: &HashMap<&'a str, &'a ResolvedPackage>,
         edges: &HashMap<&'a str, Vec<&'a str>>,
+        resolved_features_by_id: &HashMap<&'a str, Vec<String>>,
         include_registry_packages: bool,
         visiting: &mut HashSet<String>,
         visited: &mut HashSet<String>,
@@ -439,6 +455,7 @@ pub fn discover_library_dependencies(
                     root_id,
                     packages_by_id,
                     edges,
+                    resolved_features_by_id,
                     include_registry_packages,
                     visiting,
                     visited,
@@ -465,6 +482,10 @@ pub fn discover_library_dependencies(
         out.push(LocalDependencyPackage {
             name: pkg.name.clone(),
             manifest_path: canonicalized_path(&pkg.manifest_path),
+            resolved_features: resolved_features_by_id
+                .get(node_id)
+                .cloned()
+                .unwrap_or_default(),
         });
     }
 
@@ -476,6 +497,7 @@ pub fn discover_library_dependencies(
         root_id.as_str(),
         &packages_by_id,
         &edges,
+        &resolved_features_by_id,
         include_registry_packages,
         &mut visiting,
         &mut visited,
@@ -493,7 +515,7 @@ pub fn discover_local_path_dependencies(
     manifest_path: &Path,
     package_filter: Option<&str>,
 ) -> Result<Vec<LocalDependencyPackage>, String> {
-    discover_library_dependencies(manifest_path, package_filter, false)
+    discover_library_dependencies(manifest_path, package_filter, false, &[])
 }
 
 #[cfg(test)]

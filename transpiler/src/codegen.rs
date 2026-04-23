@@ -6388,14 +6388,20 @@ impl CodeGen {
             };
             let paths = self.flatten_use_tree(&u.tree, "");
             for path in paths {
-                if split_use_import_alias(path.as_str()).is_some() {
-                    continue;
-                }
                 let normalized = normalize_use_import_path(path.as_str());
                 let mapped_path = match classify_use_import(normalized) {
                     UseImportAction::Using(mapped) => mapped,
                     _ => continue,
                 };
+                if split_use_import_alias(path.as_str()).is_some() {
+                    if let Some(template_alias_stmt) =
+                        self.template_alias_import_statement(&mapped_path)
+                    {
+                        self.writeln(&format!("{}{}", export_prefix, template_alias_stmt));
+                        emitted_any = true;
+                    }
+                    continue;
+                }
                 if mapped_path.contains(" = ") || mapped_path.starts_with("namespace ") {
                     continue;
                 }
@@ -16353,6 +16359,14 @@ impl CodeGen {
             .any(|alias| escape_cpp_keyword(alias) == name)
     }
 
+    fn is_top_level_module_namespace_alias_name(&self, name: &str) -> bool {
+        self.module_namespace_renames.iter().any(|(raw, renamed)| {
+            !raw.contains("::")
+                && raw != renamed
+                && (raw == name || escape_cpp_keyword(raw) == name)
+        })
+    }
+
     fn rewrite_global_using_path_for_local_alias_root(&self, using_path: &str) -> String {
         let trimmed = using_path.trim();
         if !trimmed.starts_with("::") || trimmed.contains(" = ") {
@@ -16363,16 +16377,13 @@ impl CodeGen {
             return using_path.to_string();
         }
         let root = without_global.split("::").next().unwrap_or("");
-        if root.is_empty() || !self.is_local_import_alias_name(root) {
-            let root_is_visible_local_module = if self.module_stack.is_empty() {
-                self.declared_module_paths.contains(root)
-            } else {
-                let scoped_root = format!("{}::{}", self.module_stack.join("::"), root);
-                self.declared_module_paths.contains(&scoped_root)
-            };
-            if !root_is_visible_local_module {
-                return using_path.to_string();
-            }
+        if root.is_empty() {
+            return using_path.to_string();
+        }
+        let root_is_alias_like = self.is_local_import_alias_name(root)
+            || self.is_top_level_module_namespace_alias_name(root);
+        if !root_is_alias_like {
+            return using_path.to_string();
         }
         without_global.to_string()
     }
@@ -16873,6 +16884,11 @@ impl CodeGen {
         let root = trimmed.split("::").next().unwrap_or(trimmed);
         let root_is_known_module = self.declared_module_names.contains(root);
         let root_is_import_alias = self.import_alias_names.contains(root);
+        let root_is_module_namespace_alias = self.is_top_level_module_namespace_alias_name(root);
+        let current_scope_tail_matches_root = self
+            .module_stack
+            .last()
+            .is_some_and(|tail| tail == root);
         let scoped_local_target = if self.module_stack.is_empty() {
             None
         } else {
@@ -16901,7 +16917,11 @@ impl CodeGen {
         }
         if root_is_known_module {
             if !self.module_stack.is_empty() && !trimmed.contains("::") {
-                self.writeln(&format!("using namespace {};", escaped));
+                if current_scope_tail_matches_root && !root_is_module_namespace_alias {
+                    self.writeln(&format!("using namespace ::{};", escaped));
+                } else {
+                    self.writeln(&format!("using namespace {};", escaped));
+                }
                 maybe_emit_private_content_reexport(self, trimmed);
                 return;
             }
@@ -29628,16 +29648,16 @@ impl CodeGen {
         if matches!(enum_name.as_deref(), Some("Either"))
             && !self.is_local_type_name_in_scope("Either")
             && !self.local_declared_types.contains("Either")
-            && !base.starts_with("rusty::")
+            && !base.trim_start_matches("::").starts_with("rusty::")
         {
-            base = format!("rusty::{}", base);
+            base = format!("rusty::{}", base.trim_start_matches("::"));
         }
         if matches!(enum_name.as_deref(), Some("Cow"))
             && !self.is_local_type_name_in_scope("Cow")
             && !self.local_declared_types.contains("Cow")
-            && !base.starts_with("rusty::")
+            && !base.trim_start_matches("::").starts_with("rusty::")
         {
-            base = format!("rusty::{}", base);
+            base = format!("rusty::{}", base.trim_start_matches("::"));
         }
         let template_args =
             self.variant_pattern_template_args(path, enum_name.as_deref(), variant_ctx);
@@ -64882,10 +64902,16 @@ impl CodeGen {
         &self,
         owner_cpp: &str,
     ) -> Option<String> {
+        let owner_tail = owner_cpp
+            .trim_start_matches("::")
+            .rsplit("::")
+            .next()
+            .unwrap_or(owner_cpp);
         if owner_cpp.is_empty()
             || owner_cpp == "auto"
             || owner_cpp.contains("/* TODO")
             || type_string_has_auto_placeholder(owner_cpp)
+            || owner_tail.starts_with("__")
             || self.cpp_type_mentions_in_scope_type_param(owner_cpp)
         {
             return None;
@@ -67990,7 +68016,7 @@ fn parse_namespace_alias_name(statement: &str) -> Option<&str> {
 }
 
 fn alias_target_requires_template_alias(target: &str) -> bool {
-    target == "rusty::Option"
+    matches!(target, "rusty::Option" | "rusty::Weak")
 }
 
 /// C++ `using` declarations require either a nested-name-specifier (`a::b`) or alias
@@ -80290,6 +80316,28 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf10535_glob_namespace_import_keeps_global_when_scope_tail_shadows_root() {
+        let out = transpile_str(
+            r#"
+            mod parser {
+                pub fn to_writer() {}
+            }
+            mod tests {
+                pub mod parser {
+                    use crate::parser::*;
+                    pub fn roundtrip() { to_writer(); }
+                }
+            }
+        "#,
+        );
+        assert!(
+            out.contains("using namespace ::parser;"),
+            "shadowed scope should keep global parser import:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_leaf10535_pub_glob_reexport_avoids_export_using_namespace() {
         let out = transpile_str_module(
             r#"
@@ -81799,6 +81847,26 @@ mod tests {
         );
         assert!(
             !out.contains("std::conditional_t<true, rusty::sync::Arc"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf_bitflags_must_use_namespace_owner_not_wrapped_as_conditional_type() {
+        let out = transpile_str(
+            r#"
+            fn must_keep<T>(value: T) -> T {
+                core::alloc::__export::must_use(value)
+            }
+            "#,
+        );
+        assert!(
+            out.contains("rusty::alloc::__export::must_use(value)")
+                || out.contains("rusty::alloc::__export::must_use(std::move(value))"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("std::conditional_t<true, rusty::alloc::__export"),
             "{out}"
         );
     }
@@ -84322,9 +84390,13 @@ mod tests {
             "#,
         );
 
-        assert!(out.contains("using rusty::Either;"), "{out}");
-        assert!(out.contains("const rusty::Either_Left<A, B>& _v"), "{out}");
-        assert!(out.contains("const rusty::Either_Right<A, B>& _v"), "{out}");
+        assert!(
+            out.contains("using ::rusty::Either;") || out.contains("using rusty::Either;"),
+            "{out}"
+        );
+        assert!(out.contains("rusty::Either_Left<A, B>"), "{out}");
+        assert!(out.contains("rusty::Either_Right<A, B>"), "{out}");
+        assert!(!out.contains("rusty::::Either_"), "{out}");
         assert!(
             !out.contains("Rust-only unresolved import: using either::Either;"),
             "{out}"
@@ -85116,6 +85188,38 @@ mod tests {
         assert!(out.contains("using rusty::Weak;"));
         assert!(!out.contains("using std::boxed::Box;"));
         assert!(!out.contains("using std::rc::Rc;"));
+    }
+
+    #[test]
+    fn test_leaf512_weak_alias_import_emits_template_alias() {
+        let out = transpile_str(
+            r#"
+            use alloc::rc::Weak as RcWeak;
+            fn keep(v: RcWeak<i32>) -> RcWeak<i32> { v }
+        "#,
+        );
+        assert!(
+            out.contains("template<typename... Ts> using RcWeak = rusty::Weak<Ts...>;"),
+            "Weak aliases should stay templated:\n{}",
+            out
+        );
+        assert!(!out.contains("using RcWeak = rusty::Weak;"));
+    }
+
+    #[test]
+    fn test_leaf512_forward_decl_emits_template_alias_before_alias_typed_fn_signature() {
+        let out = transpile_str(
+            r#"
+            use alloc::rc::Weak as RcWeak;
+            fn consume<T>(value: RcWeak<T>) {}
+        "#,
+        );
+        assert!(
+            out.contains("void consume(rusty::Weak<T> value);"),
+            "forward declaration should use resolved Weak surface:\n{}",
+            out
+        );
+        assert!(!out.contains("consume(RcWeak<"), "{out}");
     }
 
     #[test]

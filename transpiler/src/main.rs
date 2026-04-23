@@ -803,6 +803,63 @@ fn parse_running_tests_count(line: &str) -> Option<usize> {
     rest[..digit_len].parse::<usize>().ok()
 }
 
+fn parse_namespace_alias_definition(trimmed: &str) -> Option<(String, String)> {
+    let rest = trimmed.strip_prefix("namespace ")?;
+    let (alias, _target) = rest.split_once('=')?;
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return None;
+    }
+    if !alias
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    let target = _target.trim().trim_end_matches(';').trim();
+    if target.is_empty() {
+        return None;
+    }
+    Some((alias.to_string(), target.to_string()))
+}
+
+fn rewrite_alias_root_global_qualifiers(
+    line: &str,
+    alias_targets: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let mut rewritten = line.to_string();
+    for (alias, target) in alias_targets {
+        let needle = format!("::{}::", alias);
+        let replacement = format!("::{}::", target.trim_start_matches("::"));
+        let mut idx = 0usize;
+        let mut out = String::with_capacity(rewritten.len());
+        while let Some(found) = rewritten[idx..].find(&needle) {
+            let pos = idx + found;
+            let boundary_ok = if pos == 0 {
+                true
+            } else {
+                rewritten
+                    .as_bytes()
+                    .get(pos - 1)
+                    .is_some_and(|b| !b.is_ascii_alphanumeric() && *b != b'_' && *b != b':')
+            };
+            if boundary_ok {
+                out.push_str(&rewritten[idx..pos]);
+                out.push_str(&replacement);
+                idx = pos + needle.len();
+            } else {
+                out.push_str(&rewritten[idx..pos + needle.len()]);
+                idx = pos + needle.len();
+            }
+        }
+        if idx > 0 {
+            out.push_str(&rewritten[idx..]);
+            rewritten = out;
+        }
+    }
+    rewritten
+}
+
 fn baseline_ran_any_tests(work_dir: &Path) -> Option<bool> {
     let baseline_path = work_dir.join("baseline.txt");
     let content = fs::read_to_string(&baseline_path).ok()?;
@@ -1010,6 +1067,42 @@ auto not_a_forward_decl(T value) {
             decls.contains("namespace foo { namespace bar { template<typename T> struct Node; } }")
         );
         assert!(!decls.iter().any(|decl| decl.contains("not_a_forward_decl")));
+    }
+
+    #[test]
+    fn test_dependency_expand_cargo_flags_handles_default_only() {
+        let flags = dependency_expand_cargo_flags(&["default".to_string()]);
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn test_dependency_expand_cargo_flags_handles_no_default_with_named_features() {
+        let flags = dependency_expand_cargo_flags(&[
+            "serde".to_string(),
+            "alloc".to_string(),
+            "serde".to_string(),
+        ]);
+        assert_eq!(
+            flags,
+            vec![
+                "--no-default-features".to_string(),
+                "--features".to_string(),
+                "alloc,serde".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_dependency_expand_cargo_flags_handles_default_plus_extra_features() {
+        let flags = dependency_expand_cargo_flags(&[
+            "default".to_string(),
+            "std".to_string(),
+            "serde".to_string(),
+        ]);
+        assert_eq!(
+            flags,
+            vec!["--features".to_string(), "serde,std".to_string(),]
+        );
     }
 }
 
@@ -1365,9 +1458,14 @@ fn discover_local_dependencies_with_workspace_fallback(
     crate_name: &str,
     work_dir: &Path,
     include_registry_packages: bool,
+    cargo_flags: &[String],
 ) -> Result<Vec<metadata::LocalDependencyPackage>, String> {
-    let initial =
-        metadata::discover_library_dependencies(manifest, package, include_registry_packages);
+    let initial = metadata::discover_library_dependencies(
+        manifest,
+        package,
+        include_registry_packages,
+        cargo_flags,
+    );
     if initial.is_ok() {
         return initial;
     }
@@ -1389,6 +1487,7 @@ fn discover_local_dependencies_with_workspace_fallback(
             &workspace_manifest,
             Some(selected_package),
             include_registry_packages,
+            cargo_flags,
         );
         if workspace_attempt.is_ok() {
             return workspace_attempt;
@@ -1412,7 +1511,12 @@ fn discover_local_dependencies_with_workspace_fallback(
         "  Dependency metadata retry: cargo metadata --manifest-path {}",
         isolated_manifest.display()
     );
-    metadata::discover_library_dependencies(&isolated_manifest, package, include_registry_packages)
+    metadata::discover_library_dependencies(
+        &isolated_manifest,
+        package,
+        include_registry_packages,
+        cargo_flags,
+    )
 }
 
 fn run_cargo_expand_with_workspace_fallback(
@@ -1567,6 +1671,7 @@ struct ParityDependencyTarget {
     manifest_path: PathBuf,
     module_name: String,
     is_registry: bool,
+    cargo_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1597,6 +1702,30 @@ fn dependency_artifacts_root(work_dir: &Path) -> PathBuf {
 
 fn dependency_artifact_dir(work_dir: &Path, module_name: &str) -> PathBuf {
     dependency_artifacts_root(work_dir).join(module_name)
+}
+
+fn dependency_expand_cargo_flags(resolved_features: &[String]) -> Vec<String> {
+    let mut features: Vec<String> = resolved_features
+        .iter()
+        .map(|feature| feature.trim())
+        .filter(|feature| !feature.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    features.sort();
+    features.dedup();
+
+    let default_enabled = features.iter().any(|feature| feature == "default");
+    features.retain(|feature| feature != "default");
+
+    let mut flags = Vec::new();
+    if !default_enabled {
+        flags.push("--no-default-features".to_string());
+    }
+    if !features.is_empty() {
+        flags.push("--features".to_string());
+        flags.push(features.join(","));
+    }
+    flags
 }
 
 fn reset_target_artifacts(
@@ -1853,6 +1982,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         crate_name,
         &work_dir,
         false,
+        &cargo_flags,
     )?;
     let local_dependency_manifests: HashSet<PathBuf> = local_dependency_packages
         .iter()
@@ -1865,6 +1995,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         crate_name,
         &work_dir,
         true,
+        &cargo_flags,
     )?;
     let mut dependency_targets: Vec<ParityDependencyTarget> = Vec::new();
     for dep in dependency_packages {
@@ -1885,23 +2016,31 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             .find(|target| matches!(target.kind, metadata::TargetKind::Lib))
         {
             let is_registry = !local_dependency_manifests.contains(&dep.manifest_path);
+            let dep_cargo_flags = dependency_expand_cargo_flags(&dep.resolved_features);
             dependency_targets.push(ParityDependencyTarget {
                 package_name: dep.name,
                 manifest_path: dep.manifest_path,
                 module_name: lib_target.module_name.clone(),
                 is_registry,
+                cargo_flags: dep_cargo_flags,
             });
         }
     }
     if !dependency_targets.is_empty() {
         println!("  Dependencies:");
         for dep in &dependency_targets {
+            let dep_flags_display = if dep.cargo_flags.is_empty() {
+                String::new()
+            } else {
+                format!(" (flags: {})", dep.cargo_flags.join(" "))
+            };
             println!(
-                "    {} ({}) → module {}{}",
+                "    {} ({}) → module {}{}{}",
                 dep.package_name,
                 dep.manifest_path.display(),
                 dep.module_name,
-                if dep.is_registry { " [registry]" } else { "" }
+                if dep.is_registry { " [registry]" } else { "" },
+                dep_flags_display
             );
         }
     }
@@ -1930,23 +2069,28 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             .unwrap_or(Path::new("."))
             .to_path_buf();
         if args.dry_run {
+            let dep_flags_display = if dep.cargo_flags.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", dep.cargo_flags.join(" "))
+            };
             println!(
-                "  [dry-run] cargo expand -p {} --lib --theme=none in {}",
+                "  [dry-run] cargo expand -p {} --lib{} --theme=none in {}",
                 dep.package_name,
+                dep_flags_display,
                 dep_project_dir.display()
             );
             continue;
         }
 
         let mut dep_expand_isolated_manifest: Option<PathBuf> = None;
-        let dep_cargo_flags: Vec<String> = Vec::new();
         let output = run_cargo_expand_with_workspace_fallback(
             &dep.manifest_path,
             &dep_project_dir,
             Some(dep.package_name.as_str()),
             dep.package_name.as_str(),
             &["--lib".to_string()],
-            &dep_cargo_flags,
+            &dep.cargo_flags,
             &work_dir,
             &mut dep_expand_isolated_manifest,
         )?;
@@ -2364,6 +2508,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         let mut seen_definitions: HashSet<String> = HashSet::new();
         let mut skip_dup_depth: i32 = 0;
         let mut runtime_prelude_emitted = false;
+        let mut alias_targets_from_module_alias_blocks: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         let module_namespace_markers: Vec<String> = targets
             .iter()
             .map(|target| format!("{}::", target.module_name))
@@ -2374,6 +2520,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             let mut pending_overloaded_template = false;
             let mut unit_emitted_runtime_prelude = false;
             let mut skip_shared_prelude = cppm_index > 0 && runtime_prelude_emitted;
+            let mut in_rusty_module_aliases_block = false;
             collect_rusty_test_entries_from_cppm(content, &mut seen_test_fns, &mut test_entries);
 
             let is_test_target = artifact.is_test_target;
@@ -2389,6 +2536,15 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             ));
             for line in content.lines() {
                 let trimmed = line.trim();
+                if trimmed == "namespace rusty_module_aliases {" {
+                    in_rusty_module_aliases_block = true;
+                } else if trimmed.starts_with("} // namespace rusty_module_aliases") {
+                    in_rusty_module_aliases_block = false;
+                } else if in_rusty_module_aliases_block
+                    && let Some((alias, target)) = parse_namespace_alias_definition(trimmed)
+                {
+                    alias_targets_from_module_alias_blocks.insert(alias, target);
+                }
                 if skip_shared_prelude {
                     // For additional module units, skip the duplicated runtime prelude and
                     // resume at crate/test payloads (extern crate/use/export item region).
@@ -2465,6 +2621,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                         line.to_string()
                     }
                 };
+                let line = rewrite_alias_root_global_qualifiers(
+                    &line,
+                    &alias_targets_from_module_alias_blocks,
+                );
                 // Skip duplicate top-level definitions across test targets.
                 // Multiple test targets may define identical helpers (e.g.,
                 // `namespace util { ... }` or `void test_eq() { ... }`).
