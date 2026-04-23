@@ -3160,7 +3160,19 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
+        let recurse_nested = |this: &mut Self| {
+            for item in items {
+                let syn::Item::Mod(module_item) = item else {
+                    continue;
+                };
+                let Some((_, nested_items)) = &module_item.content else {
+                    continue;
+                };
+                this.collect_auto_cross_module_by_value_rewrite_plan(nested_items);
+            }
+        };
         if inline_modules.len() < 2 {
+            recurse_nested(self);
             return;
         }
         let module_names: Vec<String> = inline_modules
@@ -3345,6 +3357,11 @@ impl CodeGen {
                 }
             }
         }
+
+        // Apply the same SCC-based rewrite planning recursively inside nested
+        // inline modules so lower scopes (e.g. `de::parser`) also benefit from
+        // automatic cross-module by-value cycle breaking.
+        recurse_nested(self);
     }
 
     fn maybe_mark_auto_cross_module_by_value_rewrite_field(
@@ -16380,12 +16397,52 @@ impl CodeGen {
         if root.is_empty() {
             return using_path.to_string();
         }
+        let root_is_shadowed_by_enclosing_scope = self
+            .module_stack
+            .iter()
+            .any(|seg| seg == root || escape_cpp_keyword(seg) == root);
+        if root_is_shadowed_by_enclosing_scope {
+            return using_path.to_string();
+        }
         let root_is_alias_like = self.is_local_import_alias_name(root)
             || self.is_top_level_module_namespace_alias_name(root);
-        if !root_is_alias_like {
+        let root_is_visible_local_module = self.current_scope_has_visible_module_root(root);
+        if !root_is_alias_like && !root_is_visible_local_module {
             return using_path.to_string();
         }
         without_global.to_string()
+    }
+
+    fn current_scope_has_visible_module_root(&self, root: &str) -> bool {
+        if root.is_empty() {
+            return false;
+        }
+        let root_variants = Self::scope_binding_key_variants(root);
+        let mut candidate_scopes: Vec<String> = Vec::new();
+        if self.module_stack.is_empty() {
+            candidate_scopes.push(String::new());
+        } else {
+            for depth in (1..=self.module_stack.len()).rev() {
+                candidate_scopes.push(self.module_stack[..depth].join("::"));
+            }
+            // Enclosing namespace lookup can still resolve top-level modules.
+            candidate_scopes.push(String::new());
+        }
+        candidate_scopes.sort();
+        candidate_scopes.dedup();
+        for scope in &candidate_scopes {
+            for root_variant in &root_variants {
+                let candidate = if scope.is_empty() {
+                    root_variant.clone()
+                } else {
+                    format!("{}::{}", scope, root_variant)
+                };
+                if self.matches_declared_module_path(&candidate) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn rewrite_using_path_with_scope_import_root(&self, using_path: &str) -> String {
@@ -18155,6 +18212,36 @@ impl CodeGen {
                 if alias_is_type_param && ty == name {
                     // C++ forbids redeclaring a template parameter name as a nested alias.
                     // The template parameter itself remains the associated type binding.
+                    return;
+                }
+                let alias_conflicts_with_current_struct = self.current_struct.as_ref().is_some_and(
+                    |owner| {
+                        let owner_tail = owner.rsplit("::").next().unwrap_or(owner);
+                        owner == &name
+                            || owner == &alias_rust_name
+                            || owner_tail == name
+                            || owner_tail == alias_rust_name
+                    },
+                );
+                let alias_target_is_current_struct = self.current_struct.as_ref().is_some_and(
+                    |owner| {
+                        let owner_tail = owner.rsplit("::").next().unwrap_or(owner);
+                        let ty_trimmed = ty.trim_start_matches("::");
+                        let ty_tail = ty_trimmed.rsplit("::").next().unwrap_or(ty_trimmed);
+                        ty_trimmed == owner
+                            || ty_trimmed == owner_tail
+                            || ty_tail == owner
+                            || ty_tail == owner_tail
+                            || ty_trimmed.starts_with(&format!("{}<", owner))
+                            || ty_trimmed.starts_with(&format!("{}<", owner_tail))
+                            || ty_tail.starts_with(&format!("{}<", owner))
+                            || ty_tail.starts_with(&format!("{}<", owner_tail))
+                    },
+                );
+                if alias_conflicts_with_current_struct && alias_target_is_current_struct {
+                    // Rust patterns like `type Deserializer = Self;` on `struct Deserializer`
+                    // are identity aliases that collide with the enclosing C++ type name.
+                    // Keep the owner type as the canonical spelling and skip this alias.
                     return;
                 }
                 if !self.mark_emitted_non_method_member_name(&name) {
@@ -40915,6 +41002,35 @@ impl CodeGen {
             }
             return format!("rusty::write_fmt({}, {})", receiver, args[0]);
         }
+        if method_name == "ok_or" && mc.args.len() == 1 {
+            if let Some(expected_err_ty) = self.expected_result_type_arg(expected_ty, 1) {
+                let expected_err_cpp = self.map_type(expected_err_ty);
+                let expected_err_is_unit_tuple =
+                    matches!(expected_err_cpp.trim(), "std::tuple" | "std::tuple<>");
+                if !expected_err_is_unit_tuple
+                    && expected_err_cpp != "auto"
+                    && !expected_err_cpp.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&expected_err_cpp)
+                {
+                    let coerced_arg =
+                        self.emit_from_conversion_to_target(&mc.args[0], &expected_err_cpp);
+                    return self.emit_receiver_member_call(
+                        &mc.receiver,
+                        &method_name,
+                        None,
+                        &[coerced_arg],
+                        expected_ty,
+                    );
+                }
+            }
+            return self.emit_receiver_member_call(
+                &mc.receiver,
+                &method_name,
+                None,
+                &args,
+                expected_ty,
+            );
+        }
         if method_name == "map_err" && mc.args.len() == 1 {
             if let Some(expected_err_ty) = self.expected_result_type_arg(expected_ty, 1) {
                 let callable_arg = self
@@ -52544,6 +52660,34 @@ impl CodeGen {
         None
     }
 
+    fn infer_data_enum_owner_type_from_variant_ctor_expr(&self, expr: &syn::Expr) -> Option<String> {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Call(call) = expr else {
+            return None;
+        };
+        let func = self.peel_paren_group_expr(call.func.as_ref());
+        let syn::Expr::Path(path_expr) = func else {
+            return None;
+        };
+        let path = &path_expr.path;
+        if !self.path_is_known_data_enum_variant(path) {
+            return None;
+        }
+
+        if path.segments.len() >= 2 {
+            let mut owner_path = path.clone();
+            let _ = owner_path.segments.pop();
+            let owner_cpp = self.emit_path_to_string(&owner_path);
+            if !owner_cpp.is_empty() {
+                return Some(owner_cpp);
+            }
+        }
+
+        let variant_name = path.segments.last()?.ident.to_string();
+        let (enum_name, _) = self.flattened_data_enum_variant_parts(&variant_name)?;
+        Some(escape_cpp_keyword(&enum_name))
+    }
+
     fn recover_variant_constructor_owner_generic_args(
         &self,
         path: &syn::Path,
@@ -54882,8 +55026,25 @@ impl CodeGen {
                 || type_string_has_auto_placeholder(&resolved_init_decl_type)
             {
                 let then_tail = self.extract_tail_expr_from_block(&if_expr.then_branch)?;
-                let then_tail_str = self.emit_expr_to_string(then_tail);
-                self.writeln(&format!("decltype({}) {} {{}};", then_tail_str, cpp_name));
+                if let Some(variant_ctx) = self.infer_variant_type_context_from_expr(then_tail) {
+                    let inferred_ty = if variant_ctx.template_args.is_empty() {
+                        variant_ctx.enum_name
+                    } else {
+                        format!(
+                            "{}<{}>",
+                            variant_ctx.enum_name,
+                            variant_ctx.template_args.join(", ")
+                        )
+                    };
+                    self.writeln(&format!("{} {} {{}};", inferred_ty, cpp_name));
+                } else if let Some(enum_owner_ty) =
+                    self.infer_data_enum_owner_type_from_variant_ctor_expr(then_tail)
+                {
+                    self.writeln(&format!("{} {} {{}};", enum_owner_ty, cpp_name));
+                } else {
+                    let then_tail_str = self.emit_expr_to_string(then_tail);
+                    self.writeln(&format!("decltype({}) {} {{}};", then_tail_str, cpp_name));
+                }
             } else {
                 self.writeln(&format!("{} {} {{}};", resolved_init_decl_type, cpp_name));
             }
@@ -54965,9 +55126,30 @@ impl CodeGen {
             self.push_transient_statement_scope();
             if let Some((_, else_expr)) = &if_expr.else_branch {
                 if let syn::Expr::Block(b) = else_expr.as_ref() {
-                    for stmt in &b.block.stmts {
+                    for (idx, stmt) in b.block.stmts.iter().enumerate() {
+                        let is_last = idx + 1 == b.block.stmts.len();
+                        if is_last
+                            && let syn::Stmt::Expr(expr, None) = stmt
+                        {
+                            if let syn::Expr::If(inner_if) = expr {
+                                if self.block_contains_early_return_or_try(&inner_if.then_branch)
+                                    || inner_if.else_branch.as_ref().is_some_and(|(_, e)| {
+                                        self.expr_contains_early_return_or_try(e)
+                                    })
+                                {
+                                    self.emit_if_assign_as_statement_block(cpp_name, inner_if, None);
+                                    continue;
+                                }
+                            }
+                            let else_val = self.emit_expr_to_string(expr);
+                            self.writeln(&format!("{} = {};", cpp_name, else_val));
+                            continue;
+                        }
                         self.emit_stmt(stmt, false);
                     }
+                } else {
+                    let else_val = self.emit_expr_to_string(else_expr);
+                    self.writeln(&format!("{} = {};", cpp_name, else_val));
                 }
             }
             self.pop_transient_statement_scope();
@@ -58589,6 +58771,52 @@ impl CodeGen {
         if segments.len() == 1 {
             if let Some(cpp_prim) = types::map_primitive_type(&segments[0]) {
                 return cpp_prim.to_string();
+            }
+        }
+
+        // Preserve mapped std/core/alloc runtime surfaces for associated paths by
+        // remapping the longest known type-prefix and retaining trailing segments.
+        // Example: `alloc::borrow::Cow::Owned` -> `rusty::Cow::Owned`.
+        if segments.len() >= 2 {
+            let mut mapped_prefix: Option<Vec<String>> = None;
+            for prefix_len in (2..=segments.len()).rev() {
+                let candidate = segments[..prefix_len].join("::");
+                let mapped_std = types::map_std_type(&candidate).or_else(|| {
+                    if segments.first().is_some_and(|seg| seg == "rusty") && prefix_len >= 2 {
+                        let tail = segments[1..prefix_len].join("::");
+                        ["std", "core", "alloc"]
+                            .iter()
+                            .find_map(|root| types::map_std_type(&format!("{}::{}", root, tail)))
+                    } else {
+                        None
+                    }
+                });
+                let Some((mapped, _)) = mapped_std else {
+                    continue;
+                };
+                if mapped.is_empty() || mapped.contains('<') || mapped.contains(' ') {
+                    continue;
+                }
+                let mut rewritten: Vec<String> = mapped
+                    .split("::")
+                    .filter(|seg| !seg.is_empty())
+                    .map(|seg| seg.to_string())
+                    .collect();
+                rewritten.extend(segments.iter().skip(prefix_len).cloned());
+                if rewritten != segments {
+                    mapped_prefix = Some(rewritten);
+                }
+                break;
+            }
+            if let Some(mut rewritten) = mapped_prefix {
+                for seg in &mut rewritten {
+                    *seg = escape_cpp_keyword(seg);
+                }
+                let mut emitted = rewritten.join("::");
+                if force_leading_colon && !emitted.is_empty() && !emitted.starts_with("::") {
+                    emitted = format!("::{}", emitted);
+                }
+                return emitted;
             }
         }
 
@@ -64440,7 +64668,29 @@ impl CodeGen {
         }
     }
 
+    fn try_macro_arg_needs_parens(inner: &str) -> bool {
+        let mut paren_depth: i32 = 0;
+        for ch in inner.chars() {
+            match ch {
+                '(' => paren_depth += 1,
+                ')' => paren_depth = (paren_depth - 1).max(0),
+                ',' if paren_depth == 0 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn wrap_try_macro_expr_arg(inner: &str) -> String {
+        if Self::try_macro_arg_needs_parens(inner) {
+            format!("({})", inner)
+        } else {
+            inner.to_string()
+        }
+    }
+
     fn emit_try_macro_invocation(&self, inner: &str) -> String {
+        let wrapped_inner = Self::wrap_try_macro_expr_arg(inner);
         let returns_option = self
             .current_return_type_hint()
             .map(is_option_type_hint)
@@ -64451,7 +64701,7 @@ impl CodeGen {
             } else {
                 "RUSTY_TRY_OPT"
             };
-            return format!("{}({})", try_macro, inner);
+            return format!("{}({})", try_macro, wrapped_inner);
         }
 
         if let Some(return_cpp_ty) = self.current_try_result_return_cpp_type() {
@@ -64460,11 +64710,11 @@ impl CodeGen {
             } else {
                 "RUSTY_TRY_INTO"
             };
-            return format!("{}({}, {})", try_macro, inner, return_cpp_ty);
+            return format!("{}({}, {})", try_macro, wrapped_inner, return_cpp_ty);
         }
 
         let try_macro = self.current_try_macro();
-        format!("{}({})", try_macro, inner)
+        format!("{}({})", try_macro, wrapped_inner)
     }
 
     /// For pointer-rebound reference locals initialized from `expr?`, emit a
@@ -79468,6 +79718,23 @@ mod tests {
     }
 
     #[test]
+    fn test_try_macro_wraps_first_arg_when_expression_contains_top_level_comma() {
+        let out = transpile_str(
+            r#"
+            fn f() -> Result<i32, String> {
+                let x = Result::<i32, String>::Ok(1)?;
+                Ok(x)
+            }
+        "#,
+        );
+        assert!(
+            out.contains("RUSTY_TRY_INTO((rusty::Result<int32_t, rusty::String>::Ok("),
+            "got:\n{}",
+            out
+        );
+    }
+
+    #[test]
     fn test_try_in_async() {
         let out = transpile_str("async fn f() -> Result<i32, String> { let x = parse()?; Ok(x) }");
         assert!(out.contains("RUSTY_CO_TRY_INTO(parse(), rusty::Result<int32_t, rusty::String>)"));
@@ -79561,6 +79828,35 @@ mod tests {
         assert!(out.contains("RUSTY_TRY_INTO(v.try_push_str("));
         assert!(out.contains(", rusty::Result<ArrayString, CapErr>)"));
         assert!(!out.contains("rusty::Result<std::tuple<>, CapErr> try_from_str"));
+    }
+
+    #[test]
+    fn test_if_let_initializer_else_try_branch_assigns_tail_value_to_result() {
+        let out = transpile_str(
+            r#"
+            enum VisitMap {
+                Datetime(i32),
+                Key(i32),
+            }
+            fn parse_value() -> Result<i32, ()> { Ok(1) }
+            fn next_key_seed(key: Option<i32>) -> Result<Option<VisitMap>, ()> {
+                let result = if let Some(k) = key {
+                    VisitMap::Key(k)
+                } else {
+                    let v = parse_value()?;
+                    VisitMap::Datetime(v)
+                };
+                Ok(Some(result))
+            }
+        "#,
+        );
+        assert!(out.contains("result = VisitMap_Key"), "got:\n{}", out);
+        assert!(out.contains("result = VisitMap_Datetime"), "got:\n{}", out);
+        assert!(
+            !out.contains("decltype(VisitMap_Key{std::move(key)}) result"),
+            "got:\n{}",
+            out
+        );
     }
 
     #[test]
@@ -79856,6 +80152,46 @@ mod tests {
         );
         assert!(out.contains("int32_t add("));
         assert!(!out.contains("operator+"));
+    }
+
+    #[test]
+    fn test_assoc_identity_alias_matching_owner_name_is_skipped() {
+        let out = transpile_str(
+            r#"
+            trait IntoDeserializer {
+                type Deserializer;
+            }
+            struct Deserializer;
+            impl IntoDeserializer for Deserializer {
+                type Deserializer = Self;
+            }
+        "#,
+        );
+        assert!(
+            !out.contains("using Deserializer ="),
+            "self-identity alias should not redeclare owner type name\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_assoc_identity_alias_matching_owner_name_skips_qualified_owner_target() {
+        let out = transpile_str(
+            r#"
+            mod de {
+                trait IntoDeserializer {
+                    type Deserializer;
+                }
+                struct Deserializer;
+                impl IntoDeserializer for Deserializer {
+                    type Deserializer = crate::de::Deserializer;
+                }
+            }
+        "#,
+        );
+        assert!(
+            !out.contains("using Deserializer ="),
+            "qualified owner-path identity alias should not redeclare owner type name\nGot: {out}"
+        );
     }
 
     // ── Function pointer type tests ─────────────────────────────
@@ -80569,6 +80905,26 @@ mod tests {
         let out = transpile_str("use alloc::vec::Vec;");
         assert!(out.contains("using rusty::Vec;"));
         assert!(!out.contains("alloc::"));
+    }
+
+    #[test]
+    fn test_leaf_toml_alloc_string_type_path_maps_to_runtime_string() {
+        let out = transpile_str("fn take_string(_s: alloc::string::String) {}");
+        assert!(out.contains("rusty::String"));
+        assert!(!out.contains("rusty::string::String"));
+    }
+
+    #[test]
+    fn test_leaf_toml_alloc_cow_associated_variant_uses_runtime_cow_prefix() {
+        let out = transpile_str(
+            r#"
+            fn make_cow(s: alloc::string::String) -> alloc::borrow::Cow<'static, str> {
+                alloc::borrow::Cow::Owned(s)
+            }
+        "#,
+        );
+        assert!(out.contains("rusty::Cow::Owned("), "got:\n{}", out);
+        assert!(!out.contains("rusty::borrow::Cow::Owned("), "got:\n{}", out);
     }
 
     #[test]
@@ -91021,6 +91377,20 @@ mod tests {
     }
 
     #[test]
+    fn test_leaf_toml_ok_or_coerces_error_argument_to_expected_result_error_type() {
+        let out = transpile_str(
+            r#"
+            enum SerializerError { InvalidProtocol }
+            fn end(value: Option<i32>) -> Result<i32, SerializerError> {
+                value.ok_or(SerializerError::InvalidProtocol)
+            }
+        "#,
+        );
+        assert!(out.contains("value.ok_or(SerializerError("), "got:\n{}", out);
+        assert!(out.contains("SerializerError_InvalidProtocol"), "got:\n{}", out);
+    }
+
+    #[test]
     fn test_leaf5182_tuple_mut_ref_rebind_uses_pointer_alias_semantics() {
         let out = transpile_str(
             r#"
@@ -92500,6 +92870,62 @@ mod tests {
             !out.contains("std::runtime_error(\"Unimplemented method fmt\")"),
             "fmt should not degrade to unimplemented placeholder\nGot: {out}"
         );
+    }
+
+    #[test]
+    fn test_rewrite_global_using_path_for_local_module_root_in_current_scope() {
+        let mut cg = CodeGen::new();
+        cg.module_stack = vec!["decoder".to_string()];
+        cg.declared_module_paths
+            .insert("decoder::scalar".to_string());
+
+        let rewritten =
+            cg.rewrite_global_using_path_for_local_alias_root("::scalar::IntegerRadix");
+        assert_eq!(rewritten, "scalar::IntegerRadix");
+    }
+
+    #[test]
+    fn test_rewrite_global_using_path_for_local_module_root_in_ancestor_scope() {
+        let mut cg = CodeGen::new();
+        cg.module_stack = vec!["decoder".to_string(), "string".to_string()];
+        cg.declared_module_paths
+            .insert("decoder::scalar".to_string());
+
+        let rewritten = cg.rewrite_global_using_path_for_local_alias_root("::scalar::ScalarKind");
+        assert_eq!(rewritten, "scalar::ScalarKind");
+    }
+
+    #[test]
+    fn test_rewrite_global_using_path_keeps_unknown_global_root() {
+        let mut cg = CodeGen::new();
+        cg.module_stack = vec!["decoder".to_string()];
+        cg.declared_module_paths
+            .insert("decoder::scalar".to_string());
+
+        let rewritten = cg.rewrite_global_using_path_for_local_alias_root("::event::Event");
+        assert_eq!(rewritten, "::event::Event");
+    }
+
+    #[test]
+    fn test_rewrite_global_using_path_keeps_global_when_root_matches_current_scope_tail() {
+        let mut cg = CodeGen::new();
+        cg.module_stack = vec!["private_".to_string()];
+        cg.declared_module_paths
+            .insert("private_::seed".to_string());
+
+        let rewritten =
+            cg.rewrite_global_using_path_for_local_alias_root("::private_::seed::InPlaceSeed");
+        assert_eq!(rewritten, "::private_::seed::InPlaceSeed");
+    }
+
+    #[test]
+    fn test_rewrite_global_using_path_keeps_global_when_root_matches_ancestor_scope() {
+        let mut cg = CodeGen::new();
+        cg.module_stack = vec!["de".to_string(), "parser".to_string(), "key".to_string()];
+        cg.declared_module_paths.insert("de::parser".to_string());
+
+        let rewritten = cg.rewrite_global_using_path_for_local_alias_root("::parser::EventKind");
+        assert_eq!(rewritten, "::parser::EventKind");
     }
 
     #[test]
@@ -94133,6 +94559,37 @@ mod tests {
                 "// UNSUPPORTED: unsupported by-value circular type dependency in scope <crate>: [Error, Prerelease]"
             ),
             "Expected cross-module by-value cycle diagnostic\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_leaf1121_nested_module_cross_cycle_applies_auto_box_rewrite() {
+        let out = transpile_str(
+            r#"
+            mod parser {
+                mod dearray {
+                    struct DeArray {
+                        items: Vec<super::devalue::DeValue>,
+                    }
+                }
+
+                mod devalue {
+                    enum DeValue {
+                        Array(super::dearray::DeArray),
+                        Unit,
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(
+            out.contains("struct DeValue_Array {"),
+            "Expected data-enum variant struct emission\nGot: {out}"
+        );
+        assert!(
+            out.contains("rusty::Box<dearray::DeArray> _0;")
+                || out.contains("rusty::Box<::parser::dearray::DeArray> _0;"),
+            "Expected nested cross-module cycle field rewrite to rusty::Box\nGot: {out}"
         );
     }
 

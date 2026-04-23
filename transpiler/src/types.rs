@@ -101,7 +101,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "LinkedList" | "std::collections::LinkedList" => Some(("rusty::Vec", true)),
 
         // Strings
-        "String" | "std::string::String" => Some(("rusty::String", false)),
+        "String" | "std::string::String" | "alloc::string::String" => {
+            Some(("rusty::String", false))
+        }
         "net::TcpStream" | "std::net::TcpStream" => Some(("rusty::net::TcpStream", false)),
         "net::IpAddr" | "std::net::IpAddr" => Some(("rusty::net::IpAddr", false)),
         "net::Ipv4Addr" | "std::net::Ipv4Addr" => Some(("rusty::net::Ipv4Addr", false)),
@@ -720,6 +722,10 @@ mod tests {
     fn test_std_types_full_path() {
         assert_eq!(map_std_type("std::vec::Vec"), Some(("rusty::Vec", true)));
         assert_eq!(map_std_type("std::sync::Arc"), Some(("rusty::Arc", true)));
+        assert_eq!(
+            map_std_type("alloc::string::String"),
+            Some(("rusty::String", false))
+        );
         assert_eq!(
             map_std_type("std::io::Result"),
             Some(("rusty::io::Result", true))
