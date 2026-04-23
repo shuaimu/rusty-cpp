@@ -127,6 +127,11 @@ namespace rusty {
     template<typename T>
     using RefCounted = Rc<T>;
 
+    namespace sync {
+        template<typename T>
+        using Arc = ::rusty::Arc<T>;
+    } // namespace sync
+
     // Rust `Default::default()` compatibility helper.
     // Prefer a type's `T::default_()` surface when it exists; otherwise
     // fall back to value-initialization.

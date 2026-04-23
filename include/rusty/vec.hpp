@@ -412,6 +412,28 @@ public:
         assert(index < size_);
         return data_[index];
     }
+
+    Option<T&> get(size_t index) {
+        if (index < size_) {
+            return Option<T&>(data_[index]);
+        }
+        return Option<T&>(None);
+    }
+
+    Option<const T&> get(size_t index) const {
+        if (index < size_) {
+            return Option<const T&>(data_[index]);
+        }
+        return Option<const T&>(None);
+    }
+
+    Option<T&> get_mut(size_t index) {
+        return get(index);
+    }
+
+    Option<const T&> get_mut(size_t index) const {
+        return get(index);
+    }
     
     // Get first element
     // @lifetime: (&'a) -> &'a

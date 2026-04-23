@@ -1259,6 +1259,36 @@ decltype(auto) filter(Range&& range, Pred&& pred) {
     }
 }
 
+template<typename Range, typename Pred>
+decltype(auto) find(Range&& range, Pred&& pred) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        auto iter = std::forward<Range>(range);
+        using iter_type = std::remove_reference_t<decltype(iter)>;
+        using next_result = detail::next_result_t<iter_type>;
+        using item_type = detail::next_item_t<iter_type>;
+        while (true) {
+            auto item = iter.next();
+            if (!detail::option_like_has_value(item)) {
+                return next_result(None);
+            }
+            item_type candidate = detail::option_like_take_value(item);
+            if (std::invoke(
+                    pred,
+                    detail::deref_if_pointer_like(std::as_const(candidate)))) {
+                return next_result(std::move(candidate));
+            }
+        }
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return find(
+            std::forward<Range>(range).into_iter(),
+            std::forward<Pred>(pred));
+    } else {
+        return find(
+            iter(std::forward<Range>(range)),
+            std::forward<Pred>(pred));
+    }
+}
+
 template<typename Range>
 decltype(auto) enumerate(Range&& range) {
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
