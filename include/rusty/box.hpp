@@ -1,6 +1,7 @@
 #ifndef RUSTY_BOX_HPP
 #define RUSTY_BOX_HPP
 
+#include <algorithm>
 #include <string_view>
 #include <type_traits>  // for std::enable_if, std::is_convertible, std::is_same
 #include <utility>  // for std::move, std::forward
@@ -16,6 +17,9 @@
 
 // @safe
 namespace rusty {
+
+template<typename Container>
+auto as_slice(Container&& container);
 
 template<typename T>
 class Box {
@@ -232,26 +236,46 @@ Box<std::remove_cvref_t<T>> make_box(T&& value) {
 }
 
 template<typename L, typename R>
-requires (
-    requires(const L& lhs, const R& rhs) { lhs == rhs; } ||
-    requires(const L& lhs, const R& rhs) { rhs == lhs; }
-)
 bool operator==(const Box<L>& lhs, const Box<R>& rhs) {
+    auto slice_like_equal = [](const auto& left_slice, const auto& right_slice) {
+        if (left_slice.size() != right_slice.size()) {
+            return false;
+        }
+        return std::equal(
+            left_slice.begin(),
+            left_slice.end(),
+            right_slice.begin(),
+            [](const auto& l, const auto& r) {
+                using LElem = std::remove_cv_t<std::remove_reference_t<decltype(l)>>;
+                using RElem = std::remove_cv_t<std::remove_reference_t<decltype(r)>>;
+                if constexpr (requires { l == r; }) {
+                    return static_cast<bool>(l == r);
+                } else if constexpr (requires { r == l; }) {
+                    return static_cast<bool>(r == l);
+                } else if constexpr (std::is_empty_v<LElem> && std::is_empty_v<RElem>) {
+                    return true;
+                } else {
+                    return false;
+                }
+            });
+    };
+
     if (!lhs.is_valid() || !rhs.is_valid()) {
         return lhs.get() == rhs.get();
     }
     if constexpr (requires(const L& left, const R& right) { left == right; }) {
         return *lhs == *rhs;
-    } else {
+    } else if constexpr (requires(const L& left, const R& right) { right == left; }) {
         return *rhs == *lhs;
+    } else if constexpr (requires(const L& left) { rusty::as_slice(left); } &&
+                         requires(const R& right) { rusty::as_slice(right); }) {
+        return slice_like_equal(rusty::as_slice(*lhs), rusty::as_slice(*rhs));
+    } else {
+        return static_cast<const void*>(lhs.get()) == static_cast<const void*>(rhs.get());
     }
 }
 
 template<typename L, typename R>
-requires (
-    requires(const L& lhs, const R& rhs) { lhs == rhs; } ||
-    requires(const L& lhs, const R& rhs) { rhs == lhs; }
-)
 bool operator!=(const Box<L>& lhs, const Box<R>& rhs) {
     return !(lhs == rhs);
 }

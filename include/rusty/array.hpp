@@ -4,6 +4,7 @@
 #include <array>
 #include <vector>
 #include <cstddef>
+#include <cstdint>
 #include <algorithm>
 #include <iterator>
 #include <type_traits>
@@ -33,12 +34,29 @@ auto as_slice(Container&& container);
 // Keep a narrow value-comparison overload so transpiled Rust slice assertions compile.
 template<typename L, std::size_t LExtent, typename R, std::size_t RExtent>
 constexpr bool operator==(std::span<L, LExtent> lhs, std::span<R, RExtent> rhs) {
-    return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    if constexpr (requires(const L& l, const R& r) { l == r; }) {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(l == r); });
+    } else if constexpr (requires(const L& l, const R& r) { r == l; }) {
+        return std::equal(
+            lhs.begin(),
+            lhs.end(),
+            rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(r == l); });
+    } else {
+        return std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>;
+    }
 }
 
 template<typename L, std::size_t LExtent, typename R, std::size_t N>
 constexpr bool operator==(std::span<L, LExtent> lhs, const std::array<R, N>& rhs) {
-    return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
+    return lhs == std::span<const R, N>(rhs);
 }
 
 template<typename L, std::size_t N, typename R, std::size_t RExtent>
@@ -475,11 +493,108 @@ decltype(auto) adapt_as_mut_ptr_result(Container&, Ptr ptr) {
 }
 } // namespace detail
 
-/// Create a vector filled with `count` copies of `value`.
+template<typename T>
+class ArrayRepeatResult {
+public:
+    using value_type = T;
+
+    ArrayRepeatResult(T value, size_t count) : values_(count, std::move(value)) {}
+
+    ArrayRepeatResult& operator=(const std::vector<T>& rhs) {
+        values_ = rhs;
+        return *this;
+    }
+
+    ArrayRepeatResult& operator=(std::vector<T>&& rhs) {
+        values_ = std::move(rhs);
+        return *this;
+    }
+
+    ArrayRepeatResult& operator=(const rusty::Vec<T>& rhs) {
+        values_.assign(rhs.begin(), rhs.end());
+        return *this;
+    }
+
+    ArrayRepeatResult& operator=(rusty::Vec<T>&& rhs) {
+        values_.clear();
+        values_.reserve(rhs.size());
+        for (auto& item : rhs) {
+            values_.push_back(std::move(item));
+        }
+        return *this;
+    }
+
+    std::span<const T> as_slice() const noexcept {
+        return std::span<const T>(values_.data(), values_.size());
+    }
+
+    std::span<T> as_mut_slice() noexcept {
+        return std::span<T>(values_.data(), values_.size());
+    }
+
+    auto begin() noexcept { return values_.begin(); }
+    auto begin() const noexcept { return values_.begin(); }
+    auto end() noexcept { return values_.end(); }
+    auto end() const noexcept { return values_.end(); }
+
+    T* data() noexcept { return values_.data(); }
+    const T* data() const noexcept { return values_.data(); }
+
+    T& operator[](size_t idx) noexcept { return values_[idx]; }
+    const T& operator[](size_t idx) const noexcept { return values_[idx]; }
+
+    T& at(size_t idx) { return values_.at(idx); }
+    const T& at(size_t idx) const { return values_.at(idx); }
+
+    size_t size() const noexcept { return values_.size(); }
+    bool empty() const noexcept { return values_.empty(); }
+
+    std::vector<T> Bytes() const { return values_; }
+    std::vector<T> BorrowedBytes() const { return values_; }
+
+    template<typename U = T>
+    operator std::vector<U>() const {
+        if constexpr (std::is_same_v<U, T>) {
+            return values_;
+        } else {
+            std::vector<U> out;
+            out.reserve(values_.size());
+            for (const auto& item : values_) {
+                out.push_back(static_cast<U>(item));
+            }
+            return out;
+        }
+    }
+
+    template<typename U = T>
+    operator rusty::Vec<U>() const {
+        rusty::Vec<U> out = rusty::Vec<U>::with_capacity(values_.size());
+        for (const auto& item : values_) {
+            out.push(static_cast<U>(item));
+        }
+        return out;
+    }
+
+    template<typename U, size_t N>
+    operator std::array<U, N>() const {
+        std::array<U, N> out{};
+        if constexpr (N > 0) {
+            const U seed = values_.empty() ? U{} : static_cast<U>(values_.front());
+            out.fill(seed);
+        }
+        return out;
+    }
+
+private:
+    std::vector<T> values_;
+};
+
+/// Create a repeat sequence filled with `count` copies of `value`.
 /// Equivalent to Rust's `[value; count]` array repeat syntax.
 template<typename T>
-std::vector<T> array_repeat(T value, size_t count) {
-    return std::vector<T>(count, value);
+ArrayRepeatResult<std::remove_cv_t<T>> array_repeat(T value, size_t count) {
+    using Value = std::remove_cv_t<T>;
+    return ArrayRepeatResult<Value>(static_cast<Value>(value), count);
 }
 
 template<size_t N, typename F>
@@ -555,6 +670,11 @@ Box<std::span<T>> into_boxed_slice(Vec<T> values) {
         new (storage + i) T(std::move(values[i]));
     }
     return Box<std::span<T>>::new_(std::span<T>(storage, len));
+}
+
+template<typename T>
+Box<std::span<T>> into_boxed_slice(ArrayRepeatResult<T> values) {
+    return into_boxed_slice(static_cast<std::vector<T>>(values));
 }
 
 /// Collect any iterable range into rusty::Vec<T>.
@@ -1219,6 +1339,46 @@ auto as_mut_slice(Container&& container) {
     return slice_full(std::forward<Container>(container));
 }
 
+// Normalize arbitrary slice-like containers into a byte view.
+// For non-u8 element containers this keeps a thread-local converted buffer.
+template<typename Container>
+std::span<const uint8_t> as_u8_slice(Container&& container) {
+    if constexpr (std::is_pointer_v<std::remove_reference_t<Container>>) {
+        return as_u8_slice(*container);
+    } else {
+        auto slice = rusty::as_slice(std::forward<Container>(container));
+        using Elem = std::remove_cv_t<std::remove_reference_t<decltype(*slice.data())>>;
+        if constexpr (std::is_same_v<Elem, uint8_t>) {
+            return std::span<const uint8_t>(slice.data(), slice.size());
+        } else {
+            thread_local std::vector<uint8_t> _rusty_u8_slice_tmp;
+            _rusty_u8_slice_tmp.clear();
+            _rusty_u8_slice_tmp.reserve(slice.size());
+            for (const auto& item : slice) {
+                _rusty_u8_slice_tmp.push_back(static_cast<uint8_t>(item));
+            }
+            return std::span<const uint8_t>(
+                _rusty_u8_slice_tmp.data(), _rusty_u8_slice_tmp.size());
+        }
+    }
+}
+
+// Convert tuple-size/index-addressable array-like inputs to std::array<uint8_t, N>.
+template<typename ArrayLike>
+auto as_u8_array(ArrayLike&& value) {
+    if constexpr (std::is_pointer_v<std::remove_reference_t<ArrayLike>>) {
+        return as_u8_array(*value);
+    } else {
+        using Raw = std::remove_cv_t<std::remove_reference_t<ArrayLike>>;
+        constexpr std::size_t N = std::tuple_size_v<Raw>;
+        std::array<uint8_t, N> out{};
+        for (std::size_t i = 0; i < N; ++i) {
+            out[i] = static_cast<uint8_t>(value[i]);
+        }
+        return out;
+    }
+}
+
 // Explicit helper surface for Rust-style `.get(index)` lowering on
 // slice-like/Vec-like containers. Returns Option<&T> in const-view form.
 template<typename Container, typename Index>
@@ -1313,6 +1473,84 @@ auto to_vec(const Container& container) {
         }
     }
     return out;
+}
+
+namespace detail {
+template<typename T>
+struct is_std_array_type : std::false_type {};
+
+template<typename Elem, std::size_t N>
+struct is_std_array_type<std::array<Elem, N>> : std::true_type {};
+
+template<typename T>
+inline constexpr bool is_std_array_type_v =
+    is_std_array_type<std::remove_cv_t<std::remove_reference_t<T>>>::value;
+
+template<typename T>
+struct std_array_meta;
+
+template<typename Elem, std::size_t N>
+struct std_array_meta<std::array<Elem, N>> {
+    using elem_type = Elem;
+    static constexpr std::size_t len = N;
+};
+} // namespace detail
+
+// Generic array TryFrom helper used by transpiled `try_into()` lowering:
+// - `std::span<T> -> Result<std::array<T, N>, ()>`
+// - `std::span<T> -> Result<const std::array<T, N>&, ()>` (borrowed view)
+template<typename Target, typename Source>
+requires(detail::is_std_array_type_v<std::remove_reference_t<Target>>)
+auto try_from(Source&& source) {
+    using RawTarget = std::remove_cv_t<std::remove_reference_t<Target>>;
+    using Meta = detail::std_array_meta<RawTarget>;
+    using Elem = typename Meta::elem_type;
+    constexpr std::size_t N = Meta::len;
+    using ResultTy = rusty::Result<Target, std::tuple<>>;
+
+    auto span = rusty::slice_full(source);
+    if (rusty::len(span) != N) {
+        return ResultTy::Err(std::tuple<>{});
+    }
+
+    using SpanElem = std::remove_cv_t<std::remove_reference_t<decltype(*span.data())>>;
+
+    if constexpr (std::is_reference_v<Target>) {
+        if constexpr (!std::is_lvalue_reference_v<Source&&>) {
+            return ResultTy::Err(std::tuple<>{});
+        }
+        if constexpr (!std::is_same_v<SpanElem, Elem>) {
+            return ResultTy::Err(std::tuple<>{});
+        } else if constexpr (std::is_const_v<std::remove_reference_t<Target>>) {
+            if constexpr (N == 0) {
+                static const RawTarget empty{};
+                return ResultTy::Ok(empty);
+            } else {
+                const auto* ptr = reinterpret_cast<const RawTarget*>(span.data());
+                return ResultTy::Ok(*ptr);
+            }
+        } else {
+            if constexpr (std::is_const_v<std::remove_reference_t<decltype(*span.data())>>) {
+                return ResultTy::Err(std::tuple<>{});
+            } else if constexpr (N == 0) {
+                static RawTarget empty{};
+                return ResultTy::Ok(empty);
+            } else {
+                auto* ptr = reinterpret_cast<RawTarget*>(span.data());
+                return ResultTy::Ok(*ptr);
+            }
+        }
+    } else {
+        RawTarget out{};
+        for (std::size_t i = 0; i < N; ++i) {
+            if constexpr (std::is_same_v<SpanElem, Elem> || std::is_convertible_v<SpanElem, Elem>) {
+                out[i] = static_cast<Elem>(span[i]);
+            } else {
+                return ResultTy::Err(std::tuple<>{});
+            }
+        }
+        return ResultTy::Ok(std::move(out));
+    }
 }
 
 // Split a slice-like view/container into `(prefix, suffix)` at `mid`.

@@ -62,6 +62,7 @@ fn test_parity_matrix_dry_run_lists_all_crates_and_run_stage() {
         "smallvec",
         "itertools",
         "once_cell",
+        "serde_bytes",
         "pollster",
     ] {
         assert!(
@@ -307,6 +308,7 @@ fn test_ci_workflow_uploads_per_crate_artifacts_on_failure() {
         "smallvec",
         "itertools",
         "once_cell",
+        "serde_bytes",
         "pollster",
     ] {
         assert!(
