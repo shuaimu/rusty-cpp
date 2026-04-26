@@ -338,6 +338,14 @@ struct TokenSlice {
         return input.size();
     }
 
+    std::span<const T> as_ref() const {
+        return input;
+    }
+
+    std::span<const T> as_slice() const {
+        return input;
+    }
+
     std::size_t eof_offset() const {
         return input.size();
     }
@@ -426,6 +434,13 @@ auto as_bytes(const T& value) {
         return value.as_bytes();
     } else if constexpr (std::is_convertible_v<T, std::string_view>) {
         return rusty::as_bytes(std::string_view(value));
+    } else if constexpr (requires { *value; } && requires { (*value).as_bytes(); }) {
+        return rusty::as_bytes(*value);
+    } else if constexpr (
+        requires { *value; }
+        && std::is_convertible_v<decltype(*value), std::string_view>
+    ) {
+        return rusty::as_bytes(std::string_view(*value));
     } else {
         static_assert(detail::always_false_v<T>, "rusty::as_bytes: unsupported type");
     }
