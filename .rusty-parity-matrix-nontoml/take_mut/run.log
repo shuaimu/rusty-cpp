@@ -1,8 +1,0 @@
-  it_works PASSED
-  it_works_recover PASSED
-  it_works_recover_panic PASSED
-  scoped_panic_on_recovered_panic PASSED
-  scoped_scope_based_take PASSED
-
-Results: 5 passed, 0 failed
-

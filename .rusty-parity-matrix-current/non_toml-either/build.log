@@ -1,4 +1,0 @@
-/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/non_toml-either/runner.cpp: In function ‘void iter()’:
-/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/non_toml-either/runner.cpp:2436:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
- 2436 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
-      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
