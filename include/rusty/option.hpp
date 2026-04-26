@@ -114,15 +114,22 @@ public:
         }
     }
     
-    // Copy constructor - allowed for trivially copyable types (like Rust's Copy),
-    // deleted for non-trivial types to enforce Rust-like move semantics.
-    Option(const Option& other) requires std::is_trivially_copyable_v<T>
-        : has_value(other.has_value) {
+    // Copy constructor with clone()-fallback for move-only Rust-like payloads.
+    Option(const Option& other) : has_value(other.has_value) {
         if (has_value) {
-            new (&value) T(other.value);
+            if constexpr (std::is_copy_constructible_v<T>) {
+                new (&value) T(other.value);
+            } else if constexpr (requires(const T& v) { v.clone(); }) {
+                new (&value) T(other.value.clone());
+            } else {
+                static_assert(
+                    std::is_copy_constructible_v<T>,
+                    "Option copy requires copy-constructible or clone()-able payload");
+            }
+        } else {
+            dummy = 0;
         }
     }
-    Option(const Option& other) requires (!std::is_trivially_copyable_v<T>) = delete;
 
     // Move constructor
     Option(Option&& other) noexcept : has_value(other.has_value) {
@@ -132,16 +139,27 @@ public:
         }
     }
 
-    // Copy assignment - allowed for trivially copyable types.
-    Option& operator=(const Option& other) requires std::is_trivially_copyable_v<T> {
+    // Copy assignment with clone()-fallback for move-only Rust-like payloads.
+    Option& operator=(const Option& other) {
         if (this != &other) {
             if (has_value) value.~T();
             has_value = other.has_value;
-            if (has_value) new (&value) T(other.value);
+            if (has_value) {
+                if constexpr (std::is_copy_constructible_v<T>) {
+                    new (&value) T(other.value);
+                } else if constexpr (requires(const T& v) { v.clone(); }) {
+                    new (&value) T(other.value.clone());
+                } else {
+                    static_assert(
+                        std::is_copy_constructible_v<T>,
+                        "Option copy assignment requires copy-constructible or clone()-able payload");
+                }
+            } else {
+                dummy = 0;
+            }
         }
         return *this;
     }
-    Option& operator=(const Option& other) requires (!std::is_trivially_copyable_v<T>) = delete;
 
     // Move assignment
     // @lifetime: (&'a mut self) -> &'a mut self
@@ -211,7 +229,15 @@ public:
     // @lifetime: owned
     Option clone() const {
         if (has_value) {
-            return Option(T(value));  // Copy construct T
+            if constexpr (std::is_copy_constructible_v<T>) {
+                return Option(T(value));
+            } else if constexpr (requires(const T& v) { v.clone(); }) {
+                return Option(T(value.clone()));
+            } else {
+                static_assert(
+                    std::is_copy_constructible_v<T>,
+                    "Option::clone requires copy-constructible or clone()-able payload");
+            }
         }
         return Option();
     }
@@ -267,6 +293,14 @@ public:
     T unwrap_or(T default_value) {
         if (has_value) {
             return unwrap();
+        }
+        return default_value;
+    }
+
+    // Const fallback for call sites that only have borrowed Option access.
+    T unwrap_or(T default_value) const {
+        if (has_value) {
+            return value;
         }
         return default_value;
     }

@@ -1,0 +1,15 @@
+═══════════════════════════════════════════════════════════════════════
+Parity Matrix
+  crates: arrayvec
+  work root: .rusty-parity-matrix-current
+═══════════════════════════════════════════════════════════════════════
+
+━━ arrayvec ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+crate: arrayvec
+  manifest: /home/shuai/git/rusty-cpp/tests/transpile_tests/arrayvec/Cargo.toml
+  command: cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path /home/shuai/git/rusty-cpp/tests/transpile_tests/arrayvec/Cargo.toml --stop-after run --work-dir .rusty-parity-matrix-current/arrayvec --keep-work-dir
+  PASS: arrayvec
+
+═══════════════════════════════════════════════════════════════════════
+Summary: total=1 pass=1 fail=0
+═══════════════════════════════════════════════════════════════════════

@@ -63,7 +63,6 @@ fn test_parity_matrix_dry_run_lists_all_crates_and_run_stage() {
         "itertools",
         "once_cell",
         "pollster",
-        "toml",
     ] {
         assert!(
             stdout.contains(&format!("crate: {}", crate_name)),
@@ -309,7 +308,6 @@ fn test_ci_workflow_uploads_per_crate_artifacts_on_failure() {
         "itertools",
         "once_cell",
         "pollster",
-        "toml",
     ] {
         assert!(
             workflow.contains(&format!(

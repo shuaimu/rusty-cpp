@@ -1,0 +1,787 @@
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2021:70: error: template argument 1 is invalid
+ 2021 |     auto poll(rusty::Context& cx) -> rusty::Poll<typename Either<L, R>> {
+      |                                                                      ^~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2021:70: error: template argument 1 is invalid
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2021:70: error: template argument 1 is invalid
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2021:70: error: template argument 1 is invalid
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2021:38: error: invalid template-id
+ 2021 |     auto poll(rusty::Context& cx) -> rusty::Poll<typename Either<L, R>> {
+      |                                      ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2021:59: error: expected nested-name-specifier
+ 2021 |     auto poll(rusty::Context& cx) -> rusty::Poll<typename Either<L, R>> {
+      |                                                           ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2021:59: error: expected ‘(’
+ 2021 |     auto poll(rusty::Context& cx) -> rusty::Poll<typename Either<L, R>> {
+      |                                                           ^~~~~~~~~~~
+      |                                                           (
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2021:59: error: expected ‘>’
+ 2021 |     auto poll(rusty::Context& cx) -> rusty::Poll<typename Either<L, R>> {
+      |                                                           ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2021:5: error: deduced class type ‘Poll’ in function return type
+ 2021 |     auto poll(rusty::Context& cx) -> rusty::Poll<typename Either<L, R>> {
+      |     ^~~~
+In file included from /home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:73,
+                 from /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:15:
+/home/shuai/git/rusty-cpp/include/rusty/async.hpp:26:8: note: ‘template<class T> struct rusty::Poll’ declared here
+   26 | struct Poll {
+      |        ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<int, int>’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2247:30:   required from here
+ 2247 |     Either<int32_t, int32_t> e = Either<int32_t, int32_t>{Either_Left<int32_t, int32_t>{2}};
+      |                              ^
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<int, int>’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int, int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<int, int>’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int, int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<int, int>’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int, int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<int, int>’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int, int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<int, int>’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int, int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<int, int>’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int, int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<int, int>’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int, int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: ‘int’ is not a class, struct, or union type
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: ‘int’ is not a class, struct, or union type
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: ‘int’ is not a class, struct, or union type
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: ‘int’ is not a class, struct, or union type
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: ‘int’ is not a class, struct, or union type
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: ‘int’ is not a class, struct, or union type
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘decltype(auto) Either<L, R>::operator*() [with L = int; R = int]’:
+/home/shuai/git/rusty-cpp/include/rusty/slice.hpp:283:52:   required from ‘constexpr decltype(auto) rusty::detail::deref_if_pointer_like(T&&) [with T = Either<int, int>&]’
+  283 |     } else if constexpr (requires(value_type& v) { *v; }) {
+      |                                                    ^~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2258:55:   required from here
+ 2258 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2088:16: error: no class template named ‘Target’ in ‘struct Either<int, int>’
+ 2088 |         return [&]() -> typename Either::Target<L, R>& { auto&& _m = (*this); if (std::holds_alternative<::Either_Left<L, R>>(rusty::detail::deref_if_pointer(_m))) { auto& inner = std::get<::Either_Left<L, R>>(rusty::detail::deref_if_pointer(_m))._0; return rusty::deref_mut(inner); } if (std::holds_alternative<::Either_Right<L, R>>(rusty::detail::deref_if_pointer(_m))) { auto& inner = std::get<::Either_Right<L, R>>(rusty::detail::deref_if_pointer(_m))._0; return rusty::deref_mut(inner); } return [&]() -> typename Either::Target<L, R>& { rusty::intrinsics::unreachable(); }(); }();
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<const int&, const int&>’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2317:34:   required from here
+ 2317 |         auto&& _m0_tmp = e.as_ref().right();
+      |                          ~~~~~~~~^~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<const int&, const int&>’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<const int&, const int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<const int&, const int&>’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<const int&, const int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<const int&, const int&>’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<const int&, const int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<const int&, const int&>’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<const int&, const int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<const int&, const int&>’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<const int&, const int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<const int&, const int&>’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<const int&, const int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<const int&, const int&>’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<const int&, const int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: ‘const int&’ is not a class, struct, or union type
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: ‘const int&’ is not a class, struct, or union type
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: ‘const int&’ is not a class, struct, or union type
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: ‘const int&’ is not a class, struct, or union type
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: ‘const int&’ is not a class, struct, or union type
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: ‘const int&’ is not a class, struct, or union type
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<int&, int&>’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2334:34:   required from here
+ 2334 |         auto&& _m0_tmp = e.as_mut().right();
+      |                          ~~~~~~~~^~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<int&, int&>’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int&, int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<int&, int&>’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int&, int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<int&, int&>’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int&, int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<int&, int&>’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int&, int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<int&, int&>’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int&, int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<int&, int&>’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int&, int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<int&, int&>’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<int&, int&>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: ‘int&’ is not a class, struct, or union type
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: ‘int&’ is not a class, struct, or union type
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: ‘int&’ is not a class, struct, or union type
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: ‘int&’ is not a class, struct, or union type
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: ‘int&’ is not a class, struct, or union type
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: ‘int&’ is not a class, struct, or union type
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<unsigned int, unsigned int>’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2354:68:   required from here
+ 2354 |     const rusty::SafeFn<Either<uint32_t, uint32_t>()> a = +[]() -> Either<uint32_t, uint32_t> {
+      |                                                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<unsigned int, unsigned int>’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<unsigned int, unsigned int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<unsigned int, unsigned int>’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<unsigned int, unsigned int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<unsigned int, unsigned int>’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<unsigned int, unsigned int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<unsigned int, unsigned int>’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<unsigned int, unsigned int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<unsigned int, unsigned int>’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<unsigned int, unsigned int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<unsigned int, unsigned int>’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<unsigned int, unsigned int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<unsigned int, unsigned int>’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<unsigned int, unsigned int>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: ‘unsigned int’ is not a class, struct, or union type
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: ‘unsigned int’ is not a class, struct, or union type
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: ‘unsigned int’ is not a class, struct, or union type
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: ‘unsigned int’ is not a class, struct, or union type
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: ‘unsigned int’ is not a class, struct, or union type
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: ‘unsigned int’ is not a class, struct, or union type
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<rusty::String, std::basic_string_view<char> >’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2360:81:   required from here
+ 2360 |     const rusty::SafeFn<Either<rusty::String, std::string_view>()> b = +[]() -> Either<rusty::String, std::string_view> {
+      |                                                                                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<rusty::String, std::basic_string_view<char> >’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<rusty::String, std::basic_string_view<char> >’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<rusty::String, std::basic_string_view<char> >’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<rusty::String, std::basic_string_view<char> >’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<rusty::String, std::basic_string_view<char> >’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<rusty::String, std::basic_string_view<char> >’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<rusty::String, std::basic_string_view<char> >’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2361:229:   required from here
+ 2361 |         return Either<rusty::String, std::string_view>{Either_Right<rusty::String, std::string_view>{({ auto&& _m = Either<std::string_view, std::string_view>(Left<std::string_view, std::string_view>(std::string_view("foo bar"))); std::string_view _match_value; if (_m.is_right()) { auto&& _mv = _m.unwrap_right(); auto&& val = rusty::detail::deref_if_pointer(_mv);
+      |                                                                                                                                                                                                                                     ^
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<std::basic_string_view<char>, std::basic_string_view<char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: no type named ‘IntoIter’ in ‘class std::basic_string_view<char>’
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: no type named ‘IntoIter’ in ‘class std::basic_string_view<char>’
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: no type named ‘IntoIter’ in ‘class std::basic_string_view<char>’
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: no type named ‘IntoIter’ in ‘class std::basic_string_view<char>’
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: no type named ‘IntoIter’ in ‘class std::basic_string_view<char>’
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: no type named ‘IntoIter’ in ‘class std::basic_string_view<char>’
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘decltype(auto) Either<L, R>::operator*() [with L = unsigned int; R = unsigned int]’:
+/home/shuai/git/rusty-cpp/include/rusty/slice.hpp:283:52:   required from ‘constexpr decltype(auto) rusty::detail::deref_if_pointer_like(T&&) [with T = Either<unsigned int, unsigned int>&]’
+  283 |     } else if constexpr (requires(value_type& v) { *v; }) {
+      |                                                    ^~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2375:55:   required from here
+ 2375 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2088:16: error: no class template named ‘Target’ in ‘struct Either<unsigned int, unsigned int>’
+ 2088 |         return [&]() -> typename Either::Target<L, R>& { auto&& _m = (*this); if (std::holds_alternative<::Either_Left<L, R>>(rusty::detail::deref_if_pointer(_m))) { auto& inner = std::get<::Either_Left<L, R>>(rusty::detail::deref_if_pointer(_m))._0; return rusty::deref_mut(inner); } if (std::holds_alternative<::Either_Right<L, R>>(rusty::detail::deref_if_pointer(_m))) { auto& inner = std::get<::Either_Right<L, R>>(rusty::detail::deref_if_pointer(_m))._0; return rusty::deref_mut(inner); } return [&]() -> typename Either::Target<L, R>& { rusty::intrinsics::unreachable(); }(); }();
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘decltype(auto) Either<L, R>::operator*() [with L = rusty::String; R = std::basic_string_view<char>]’:
+/home/shuai/git/rusty-cpp/include/rusty/slice.hpp:283:52:   required from ‘constexpr decltype(auto) rusty::detail::deref_if_pointer_like(T&&) [with T = Either<rusty::String, std::basic_string_view<char> >&]’
+  283 |     } else if constexpr (requires(value_type& v) { *v; }) {
+      |                                                    ^~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2392:55:   required from here
+ 2392 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2088:16: error: no class template named ‘Target’ in ‘struct Either<rusty::String, std::basic_string_view<char> >’
+ 2088 |         return [&]() -> typename Either::Target<L, R>& { auto&& _m = (*this); if (std::holds_alternative<::Either_Left<L, R>>(rusty::detail::deref_if_pointer(_m))) { auto& inner = std::get<::Either_Left<L, R>>(rusty::detail::deref_if_pointer(_m))._0; return rusty::deref_mut(inner); } if (std::holds_alternative<::Either_Right<L, R>>(rusty::detail::deref_if_pointer(_m))) { auto& inner = std::get<::Either_Right<L, R>>(rusty::detail::deref_if_pointer(_m))._0; return rusty::deref_mut(inner); } return [&]() -> typename Either::Target<L, R>& { rusty::intrinsics::unreachable(); }(); }();
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘decltype(auto) Either<L, R>::operator*() const [with L = rusty::String; R = std::basic_string_view<char>]’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2406:19:   required from here
+ 2406 |     is_str(*(value));
+      |                   ^
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2085:16: error: no class template named ‘Target’ in ‘struct Either<rusty::String, std::basic_string_view<char> >’
+ 2085 |         return [&]() -> const typename Either::Target<L, R>& { auto&& _m = (*this); if (std::holds_alternative<::Either_Left<L, R>>(rusty::detail::deref_if_pointer(_m))) { const auto& inner = std::get<::Either_Left<L, R>>(rusty::detail::deref_if_pointer(_m))._0; return rusty::deref_ref(rusty::deref_ref(inner)); } if (std::holds_alternative<::Either_Right<L, R>>(rusty::detail::deref_if_pointer(_m))) { const auto& inner = std::get<::Either_Right<L, R>>(rusty::detail::deref_if_pointer(_m))._0; return rusty::deref_ref(rusty::deref_ref(inner)); } return [&]() -> const typename Either::Target<L, R>& { rusty::intrinsics::unreachable(); }(); }();
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<rusty::range<int>, rusty::range_from<int> >’:
+/usr/include/c++/14/type_traits:3428:7:   required from ‘constexpr const bool std::is_trivially_copy_constructible_v<Either<rusty::range<int>, rusty::range_from<int> > >’
+ 3428 |     = __is_trivially_constructible(_Tp, __add_lval_ref_t<const _Tp>);
+      |       ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/include/c++/14/optional:703:11:   required from ‘class std::optional<Either<rusty::range<int>, rusty::range_from<int> > >’
+  703 |     class optional
+      |           ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2411:116:   required from here
+ 2411 |     auto iter_shadow1 = ({ auto&& _m = x; std::optional<Either<rusty::range<int32_t>, rusty::range_from<int32_t>>> _match_value; bool _m_matched = false; if (!_m_matched && (_m == 3)) { _match_value.emplace(std::move(Either<rusty::range<int32_t>, rusty::range_from<int32_t>>(Either<rusty::range<int32_t>, rusty::range_from<int32_t>>{Either_Left<rusty::range<int32_t>, rusty::range_from<int32_t>>{rusty::range(0, 10)}}))); _m_matched = true; } if (!_m_matched) { _match_value.emplace(std::move(Either<rusty::range<int32_t>, rusty::range_from<int32_t>>(Either<rusty::range<int32_t>, rusty::range_from<int32_t>>{Either_Right<rusty::range<int32_t>, rusty::range_from<int32_t>>{rusty::range_from(17)}}))); _m_matched = true; } if (!_m_matched) { rusty::intrinsics::unreachable(); } std::move(_match_value).value(); });
+      |                                                                                                                    ^~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<rusty::range<int>, rusty::range_from<int> >’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::range<int>, rusty::range_from<int> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<rusty::range<int>, rusty::range_from<int> >’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::range<int>, rusty::range_from<int> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<rusty::range<int>, rusty::range_from<int> >’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::range<int>, rusty::range_from<int> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<rusty::range<int>, rusty::range_from<int> >’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::range<int>, rusty::range_from<int> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<rusty::range<int>, rusty::range_from<int> >’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::range<int>, rusty::range_from<int> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<rusty::range<int>, rusty::range_from<int> >’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::range<int>, rusty::range_from<int> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<rusty::range<int>, rusty::range_from<int> >’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::range<int>, rusty::range_from<int> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: no type named ‘IntoIter’ in ‘class rusty::range<int>’
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: no type named ‘IntoIter’ in ‘class rusty::range<int>’
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: no type named ‘IntoIter’ in ‘class rusty::range<int>’
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: no type named ‘IntoIter’ in ‘class rusty::range<int>’
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: no type named ‘IntoIter’ in ‘class rusty::range<int>’
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: no type named ‘IntoIter’ in ‘class rusty::range<int>’
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In function ‘void iter()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2413:39: error: ‘struct Either<rusty::range<int>, rusty::range_from<int> >’ has no member named ‘next’
+ 2413 |         auto&& _m0_tmp = iter_shadow1.next();
+      |                                       ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2439:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 2439 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2455:495:   required from here
+ 2455 |     auto reader = (use_empty ? Either<decltype((rusty::io::cursor_new(rusty::array_repeat(static_cast<uint8_t>(0), 0)))), decltype((rusty::io::cursor_new(rusty::slice_full(mockdata))))>(Left<decltype((rusty::io::cursor_new(rusty::array_repeat(static_cast<uint8_t>(0), 0)))), decltype((rusty::io::cursor_new(rusty::slice_full(mockdata))))>(decltype((rusty::io::cursor_new(rusty::array_repeat(static_cast<uint8_t>(0), 0))))(rusty::io::cursor_new(rusty::array_repeat(static_cast<uint8_t>(0), 0))))) : Either<decltype((rusty::io::cursor_new(rusty::array_repeat(static_cast<uint8_t>(0), 0)))), decltype((rusty::io::cursor_new(rusty::slice_full(mockdata))))>(Right<decltype((rusty::io::cursor_new(rusty::array_repeat(static_cast<uint8_t>(0), 0)))), decltype((rusty::io::cursor_new(rusty::slice_full(mockdata))))>(decltype((rusty::io::cursor_new(rusty::slice_full(mockdata))))(rusty::io::cursor_new(rusty::slice_full(mockdata))))));
+      |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               ^
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Cursor<std::vector<unsigned char> >, rusty::io::Cursor<std::span<unsigned char> > >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Cursor<std::vector<unsigned char> >’
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Cursor<std::vector<unsigned char> >’
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Cursor<std::vector<unsigned char> >’
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Cursor<std::vector<unsigned char> >’
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Cursor<std::vector<unsigned char> >’
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Cursor<std::vector<unsigned char> >’
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2566:245:   required from here
+ 2566 |     auto reader = (use_stdio ? Either<decltype((rusty::io::stdin_())), decltype((rusty::slice_full(mockdata)))>(Left<decltype((rusty::io::stdin_())), decltype((rusty::slice_full(mockdata)))>(decltype((rusty::io::stdin_()))(rusty::io::stdin_()))) : Either<decltype((rusty::io::stdin_())), decltype((rusty::slice_full(mockdata)))>(Right<decltype((rusty::io::stdin_())), decltype((rusty::slice_full(mockdata)))>(decltype((rusty::slice_full(mockdata)))(rusty::slice_full(mockdata)))));
+      |                                                                                                                                                                                                                                                     ^
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdin, std::span<const unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdin’
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdin’
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdin’
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdin’
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdin’
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdin’
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2603:247:   required from here
+ 2603 |     auto writer = (use_stdio ? Either<decltype((rusty::io::stdout_())), decltype((rusty::slice_full(mockbuf)))>(Left<decltype((rusty::io::stdout_())), decltype((rusty::slice_full(mockbuf)))>(decltype((rusty::io::stdout_()))(rusty::io::stdout_()))) : Either<decltype((rusty::io::stdout_())), decltype((rusty::slice_full(mockbuf)))>(Right<decltype((rusty::io::stdout_())), decltype((rusty::slice_full(mockbuf)))>(decltype((rusty::slice_full(mockbuf)))(rusty::slice_full(mockbuf)))));
+      |                                                                                                                                                                                                                                                       ^
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::io::Stdout, std::span<unsigned char> >’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdout’
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdout’
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdout’
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdout’
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdout’
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: no type named ‘IntoIter’ in ‘class rusty::io::Stdout’
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp: In instantiation of ‘struct Either<rusty::String, rusty::String>’:
+/home/shuai/git/rusty-cpp/include/rusty/result.hpp:73:39:   required from ‘union rusty::Result<std::tuple<>, Either<rusty::String, rusty::String> >::Storage’
+   73 |         typename std::aligned_storage<sizeof(ErrStored), alignof(ErrStored)>::type err_storage;
+      |                                       ^~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/include/rusty/result.hpp:77:7:   required from ‘class rusty::Result<std::tuple<>, Either<rusty::String, rusty::String> >’
+   77 |     } storage;
+      |       ^~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:2626:290:   required from here
+ 2626 |     auto res = [&]() { auto&& _iflet = rusty::str_runtime::from_utf8(std::move(invalid_utf8)); return (_iflet.is_err() ? ([&]() { auto error = _iflet.unwrap_err(); return rusty::Result<decltype((std::make_tuple())), Either<decltype((_iflet.unwrap_err())), decltype((_iflet.unwrap_err()))>>::Err(Left<decltype((_iflet.unwrap_err())), decltype((_iflet.unwrap_err()))>(decltype((_iflet.unwrap_err()))(std::move(error)))); }()) : [&]() { auto&& _iflet = rusty::str_runtime::parse<int32_t>("x"); return (_iflet.is_err() ? ([&]() { auto error = _iflet.unwrap_err(); return rusty::Result<decltype((std::make_tuple())), Either<decltype((_iflet.unwrap_err())), decltype((_iflet.unwrap_err()))>>::Err(Right<decltype((_iflet.unwrap_err())), decltype((_iflet.unwrap_err()))>(decltype((_iflet.unwrap_err()))(std::move(error)))); }()) : rusty::Result<decltype((std::make_tuple())), Either<decltype((_iflet.unwrap_err())), decltype((_iflet.unwrap_err()))>>::Ok(std::make_tuple())); }()); }();
+      |                                                                                                                                                                                                                                                                                                  ^~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1744:10: error: invalid use of incomplete type ‘struct Either<rusty::String, rusty::String>’
+ 1744 |     auto next() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, rusty::String>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1773:10: error: invalid use of incomplete type ‘struct Either<rusty::String, rusty::String>’
+ 1773 |     auto last() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, rusty::String>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1776:10: error: invalid use of incomplete type ‘struct Either<rusty::String, rusty::String>’
+ 1776 |     auto nth(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, rusty::String>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1796:10: error: invalid use of incomplete type ‘struct Either<rusty::String, rusty::String>’
+ 1796 |     auto find(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, rusty::String>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1807:10: error: invalid use of incomplete type ‘struct Either<rusty::String, rusty::String>’
+ 1807 |     auto next_back() -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, rusty::String>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1810:10: error: invalid use of incomplete type ‘struct Either<rusty::String, rusty::String>’
+ 1810 |     auto nth_back(size_t n) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, rusty::String>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1818:10: error: invalid use of incomplete type ‘struct Either<rusty::String, rusty::String>’
+ 1818 |     auto rfind(P predicate) -> rusty::Option<typename Either::Item<L, R>> {
+      |          ^~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1680:8: note: definition of ‘struct Either<rusty::String, rusty::String>’ is not complete until the closing brace
+ 1680 | struct Either : std::variant<Either_Left<L, R>, Either_Right<L, R>> {
+      |        ^~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1926:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1926 |     auto into_iter() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1929:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1929 |     auto iter() const -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1932:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1932 |     auto iter_mut() -> Either<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1935:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1935 |     auto factor_into_iter() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1938:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1938 |     auto factor_iter() const -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/regression/either/runner.cpp:1941:10: error: no type named ‘IntoIter’ in ‘class rusty::String’
+ 1941 |     auto factor_iter_mut() -> iterator::IterEither<typename L::IntoIter, typename R::IntoIter> {
+      |          ^~~~~~~~~~~~~~~

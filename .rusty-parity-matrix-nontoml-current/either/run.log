@@ -1,0 +1,10 @@
+  basic PASSED
+  deref PASSED
+  error PASSED
+  iter PASSED
+  macros PASSED
+  read_write PASSED
+  seek PASSED
+
+Results: 7 passed, 0 failed
+

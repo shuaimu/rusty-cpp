@@ -213,6 +213,42 @@ namespace rusty {
         }
     }
 
+    template<typename Left, typename Right>
+    auto join(Left&& left, Right&& right) {
+        if constexpr (requires { std::forward<Left>(left).join(std::forward<Right>(right)); }) {
+            return std::forward<Left>(left).join(std::forward<Right>(right));
+        } else {
+            auto&& range = left;
+            std::string delimiter;
+            if constexpr (std::is_convertible_v<Right, std::string_view>) {
+                delimiter = std::string(std::string_view(std::forward<Right>(right)));
+            } else if constexpr (requires { std::forward<Right>(right).as_str(); }) {
+                delimiter = std::string(std::string_view(std::forward<Right>(right).as_str()));
+            } else {
+                delimiter = std::string(std::forward<Right>(right));
+            }
+
+            std::string out;
+            bool first = true;
+            for (const auto& item : range) {
+                if (!first) {
+                    out += delimiter;
+                }
+                first = false;
+                if constexpr (std::is_convertible_v<decltype(item), std::string_view>) {
+                    out += std::string_view(item);
+                } else if constexpr (requires { item.as_str(); }) {
+                    out += std::string_view(item.as_str());
+                } else if constexpr (requires { item.as_ref(); }) {
+                    out += std::string_view(item.as_ref());
+                } else {
+                    out += std::string(item);
+                }
+            }
+            return out;
+        }
+    }
+
     template<typename T>
     Option<std::decay_t<T>> then_some(bool condition, T&& value) {
         if (condition) {
@@ -253,6 +289,114 @@ namespace rusty {
 
     } // namespace boxed
 }
+
+namespace ser::impls::rusty_ext {
+    template<typename S, typename T, std::size_t Extent>
+    requires requires(S serializer, std::span<T, Extent> self_) { serializer.collect_seq(self_); }
+    auto serialize(std::span<T, Extent> self_, S serializer) {
+        return serializer.collect_seq(self_);
+    }
+
+    template<typename S, typename T, std::size_t Extent>
+    requires (
+        !requires(S serializer, std::span<T, Extent> self_) { serializer.collect_seq(self_); }
+        && (
+            requires(S serializer, std::span<T, Extent> self_) {
+                serializer.serialize_seq(static_cast<size_t>(self_.size()));
+            }
+            || requires(S serializer, std::span<T, Extent> self_) {
+                serializer.serialize_seq(rusty::Option<size_t>(self_.size()));
+            }
+        )
+    )
+    auto serialize(std::span<T, Extent> self_, S serializer) {
+        auto state_result = [&]() {
+            if constexpr (requires { serializer.serialize_seq(rusty::Option<size_t>(self_.size())); }) {
+                return serializer.serialize_seq(rusty::Option<size_t>(self_.size()));
+            } else {
+                return serializer.serialize_seq(static_cast<size_t>(self_.size()));
+            }
+        }();
+        using state_type = std::remove_reference_t<decltype(
+            rusty::detail::deref_if_pointer(std::declval<decltype(state_result.unwrap())>())
+        )>;
+        using return_type = decltype(std::declval<state_type&>().end());
+        if (state_result.is_err()) {
+            return return_type::Err(std::move(state_result.unwrap_err()));
+        }
+        auto&& state_ref = state_result.unwrap();
+        auto&& state = rusty::detail::deref_if_pointer(state_ref);
+        for (const auto& item : self_) {
+            auto element_result = state.serialize_element(item);
+            if (element_result.is_err()) {
+                return return_type::Err(std::move(element_result.unwrap_err()));
+            }
+        }
+        return state.end();
+    }
+
+    template<typename S, typename M>
+    requires (
+        requires(const M& m) { m.iter(); }
+        && requires(const M& m) { rusty::len(m); }
+        && (
+            requires(S serializer, const M& m) {
+                serializer.serialize_map(static_cast<size_t>(rusty::len(m)));
+            }
+            || requires(S serializer, const M& m) {
+                serializer.serialize_map(rusty::Option<size_t>(rusty::len(m)));
+            }
+        )
+    )
+    auto serialize(const M& self_, S serializer) {
+        auto state_result = [&]() {
+            if constexpr (requires { serializer.serialize_map(rusty::Option<size_t>(rusty::len(self_))); }) {
+                return serializer.serialize_map(rusty::Option<size_t>(rusty::len(self_)));
+            } else {
+                return serializer.serialize_map(static_cast<size_t>(rusty::len(self_)));
+            }
+        }();
+
+        using state_type = std::remove_reference_t<decltype(
+            rusty::detail::deref_if_pointer(std::declval<decltype(state_result.unwrap())>())
+        )>;
+        using return_type = decltype(std::declval<state_type&>().end());
+
+        if (state_result.is_err()) {
+            return return_type::Err(std::move(state_result.unwrap_err()));
+        }
+
+        auto&& state_ref = state_result.unwrap();
+        auto&& state = rusty::detail::deref_if_pointer(state_ref);
+
+        for (auto&& item : rusty::for_in(rusty::iter(self_))) {
+            auto&& pair_item = rusty::detail::deref_if_pointer(std::forward<decltype(item)>(item));
+            auto&& key = rusty::detail::deref_if_pointer(std::get<0>(pair_item));
+            auto&& value = rusty::detail::deref_if_pointer(std::get<1>(pair_item));
+            if constexpr (requires { state.serialize_entry(key, value); }) {
+                auto entry_result = state.serialize_entry(key, value);
+                if (entry_result.is_err()) {
+                    return return_type::Err(std::move(entry_result.unwrap_err()));
+                }
+            } else if constexpr (requires { state.serialize_key(key); state.serialize_value(value); }) {
+                auto key_result = state.serialize_key(key);
+                if (key_result.is_err()) {
+                    return return_type::Err(std::move(key_result.unwrap_err()));
+                }
+                auto value_result = state.serialize_value(value);
+                if (value_result.is_err()) {
+                    return return_type::Err(std::move(value_result.unwrap_err()));
+                }
+            } else {
+                static_assert(
+                    requires { state.serialize_entry(key, value); },
+                    "serialize_map state must provide serialize_entry or serialize_key/serialize_value");
+            }
+        }
+
+        return state.end();
+    }
+} // namespace ser::impls::rusty_ext
 
 // std::formatter specialization for char32_t (Rust char → C++ char32_t)
 // Required for std::format with char32_t arguments.

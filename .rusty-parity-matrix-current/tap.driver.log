@@ -1,0 +1,15 @@
+═══════════════════════════════════════════════════════════════════════
+Parity Matrix
+  crates: tap
+  work root: .rusty-parity-matrix-current
+═══════════════════════════════════════════════════════════════════════
+
+━━ tap ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+crate: tap
+  manifest: /home/shuai/git/rusty-cpp/tests/transpile_tests/tap/Cargo.toml
+  command: cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path /home/shuai/git/rusty-cpp/tests/transpile_tests/tap/Cargo.toml --stop-after run --work-dir .rusty-parity-matrix-current/tap --keep-work-dir
+  PASS: tap
+
+═══════════════════════════════════════════════════════════════════════
+Summary: total=1 pass=1 fail=0
+═══════════════════════════════════════════════════════════════════════

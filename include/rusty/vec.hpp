@@ -245,9 +245,41 @@ public:
         }
     }
     
-    // No copy constructor - Vec cannot be copied
-    Vec(const Vec&) = delete;
-    Vec& operator=(const Vec&) = delete;
+    // Copy constructor with clone()-fallback for move-only Rust-like payloads.
+    Vec(const Vec& other) : data_(nullptr), size_(0), capacity_(0) {
+        reserve(other.size_);
+        for (size_t i = 0; i < other.size_; ++i) {
+            if constexpr (std::is_copy_constructible_v<T>) {
+                push(other.data_[i]);
+            } else if constexpr (requires(const T& value) { value.clone(); }) {
+                push(other.data_[i].clone());
+            } else {
+                static_assert(
+                    std::is_copy_constructible_v<T>,
+                    "Vec copy requires copy-constructible or clone()-able elements");
+            }
+        }
+    }
+
+    Vec& operator=(const Vec& other) {
+        if (this == &other) {
+            return *this;
+        }
+        clear();
+        reserve(other.size_);
+        for (size_t i = 0; i < other.size_; ++i) {
+            if constexpr (std::is_copy_constructible_v<T>) {
+                push(other.data_[i]);
+            } else if constexpr (requires(const T& value) { value.clone(); }) {
+                push(other.data_[i].clone());
+            } else {
+                static_assert(
+                    std::is_copy_constructible_v<T>,
+                    "Vec copy assignment requires copy-constructible or clone()-able elements");
+            }
+        }
+        return *this;
+    }
     
     // Move constructor
     Vec(Vec&& other) noexcept 
@@ -316,6 +348,25 @@ public:
             grow();
         }
         new (&data_[size_]) T(std::move(value));
+        ++size_;
+    }
+
+    // Insert element at index, shifting trailing elements to the right.
+    void insert(size_t index, T value) {
+        assert(index <= size_);
+        if (size_ >= capacity_) {
+            grow();
+        }
+        if (index == size_) {
+            new (&data_[size_]) T(std::move(value));
+            ++size_;
+            return;
+        }
+        for (size_t i = size_; i > index; --i) {
+            new (&data_[i]) T(std::move(data_[i - 1]));
+            data_[i - 1].~T();
+        }
+        new (&data_[index]) T(std::move(value));
         ++size_;
     }
 
@@ -434,7 +485,29 @@ public:
     Option<const T&> get_mut(size_t index) const {
         return get(index);
     }
-    
+
+    Option<const T&> first() const {
+        return get(0);
+    }
+
+    Option<T&> first_mut() {
+        return get_mut(0);
+    }
+
+    Option<const T&> last() const {
+        if (size_ == 0) {
+            return Option<const T&>(None);
+        }
+        return Option<const T&>(data_[size_ - 1]);
+    }
+
+    Option<T&> last_mut() {
+        if (size_ == 0) {
+            return Option<T&>(None);
+        }
+        return Option<T&>(data_[size_ - 1]);
+    }
+
     // Get first element
     // @lifetime: (&'a) -> &'a
     T& front() {
@@ -526,7 +599,15 @@ public:
     Vec clone() const {
         Vec result = Vec::with_capacity(capacity_);
         for (size_t i = 0; i < size_; ++i) {
-            result.push(data_[i]);  // Requires T to be copyable
+            if constexpr (std::is_copy_constructible_v<T>) {
+                result.push(data_[i]);
+            } else if constexpr (requires(const T& value) { value.clone(); }) {
+                result.push(data_[i].clone());
+            } else {
+                static_assert(
+                    std::is_copy_constructible_v<T>,
+                    "Vec::clone requires copy-constructible or clone()-able elements");
+            }
         }
         return result;
     }

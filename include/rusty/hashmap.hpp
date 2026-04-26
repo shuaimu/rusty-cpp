@@ -975,7 +975,13 @@ public:
 
     template<typename Value>
     decltype(auto) insert(Value&& value) const {
-        auto& slot = map_->entry(std::move(key_));
+        auto& slot = [&]() -> decltype(auto) {
+            if constexpr (requires(Map& m, key_type k) { m.entry_value(std::move(k)); }) {
+                return map_->entry_value(std::move(key_));
+            } else {
+                return map_->entry(std::move(key_));
+            }
+        }();
         slot = std::forward<Value>(value);
         return (slot);
     }
@@ -997,12 +1003,22 @@ public:
     }
 
     decltype(auto) get() const {
-        return map_->entry(key_);
+        if constexpr (requires(Map& m, const key_type& k) { m.entry_value(k); }) {
+            return map_->entry_value(key_);
+        } else {
+            return map_->entry(key_);
+        }
     }
 
     template<typename Value>
     decltype(auto) insert(Value&& value) const {
-        auto& slot = map_->entry(key_);
+        auto& slot = [&]() -> decltype(auto) {
+            if constexpr (requires(Map& m, const key_type& k) { m.entry_value(k); }) {
+                return map_->entry_value(key_);
+            } else {
+                return map_->entry(key_);
+            }
+        }();
         slot = std::forward<Value>(value);
         return (slot);
     }

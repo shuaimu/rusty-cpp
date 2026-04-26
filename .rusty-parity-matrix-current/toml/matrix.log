@@ -1,0 +1,311 @@
+   Compiling rusty-cpp-transpiler v0.1.0 (/home/shuai/git/rusty-cpp/transpiler)
+warning: variable does not need to be mutable
+    --> transpiler/src/codegen.rs:7311:13
+     |
+7311 |         let mut flush = |buf: &mut String, out: &mut Vec<String>| {
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:23898:13
+      |
+23898 |         let mut block_profile_mark = |label: &str| {
+      |             ----^^^^^^^^^^^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:28335:21
+      |
+28335 |                 let mut inner = self.new_inner_for_block();
+      |                     ----^^^^^
+      |                     |
+      |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:28350:21
+      |
+28350 |                 let mut inner = self.new_inner_for_block();
+      |                     ----^^^^^
+      |                     |
+      |                     help: remove this `mut`
+
+warning: unused variable: `scrutinee_expr`
+     --> transpiler/src/codegen.rs:31898:9
+      |
+31898 |         scrutinee_expr: &syn::Expr,
+      |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scrutinee_expr`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:45244:21
+      |
+45244 |                 let mut inner = self.new_inner_for_block();
+      |                     ----^^^^^
+      |                     |
+      |                     help: remove this `mut`
+
+warning: unused variable: `expected_ty`
+     --> transpiler/src/codegen.rs:47238:9
+      |
+47238 |         expected_ty: Option<&syn::Type>,
+      |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected_ty`
+
+warning: value assigned to `joined` is never read
+     --> transpiler/src/codegen.rs:58862:26
+      |
+58862 |         let mut joined = segments.join("::");
+      |                          ^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `joined` is never read
+     --> transpiler/src/codegen.rs:58875:9
+      |
+58875 |         joined = segments.join("::");
+      |         ^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: field `0` is never read
+  --> transpiler/src/cmake.rs:86:11
+   |
+86 |     Table(toml::value::Table),
+   |     ----- ^^^^^^^^^^^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+86 -     Table(toml::value::Table),
+86 +     Table(()),
+   |
+
+warning: struct `OptionSomeNoneExprCollector` is never constructed
+   --> transpiler/src/codegen.rs:369:8
+    |
+369 | struct OptionSomeNoneExprCollector {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `saw_both` is never used
+   --> transpiler/src/codegen.rs:375:8
+    |
+374 | impl OptionSomeNoneExprCollector {
+    | -------------------------------- method in this implementation
+375 |     fn saw_both(&self) -> bool {
+    |        ^^^^^^^^
+
+warning: multiple associated items are never used
+     --> transpiler/src/codegen.rs:6130:8
+      |
+  943 | impl CodeGen {
+      | ------------ associated items in this implementation
+...
+ 6130 |     fn module_concrete_type_decl_count_recursive(m: &syn::ItemMod) -> usize {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7343 |     fn cpp_spelling_mentions_import_alias(&self, spelling: &str) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7399 |     fn forward_decl_signature_mentions_unqualified_scope_import_name(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7454 |     fn has_forward_decl_items(items: &[syn::Item]) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 8361 |     fn resolve_unique_scope_import_binding_path_any_scope(&self, local_name: &str) -> Option<String> {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+11979 |     fn escape_cpp_qualified_name(path: &str) -> String {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+13946 |     fn map_variant_ctor_param_type(&self, ty: &syn::Type, ctor_name: &str) -> String {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+25834 |     fn extract_tuple_struct_bindings(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+29584 |     fn tuple_pattern_elem_supports_value_match(&self, pat: &syn::Pat) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+32022 |     fn if_let_unwrap_binding_should_preserve_reference(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+41047 |     fn receiver_is_hashmap_like_expr(&self, receiver: &syn::Expr) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+47666 |     fn block_contains_option_some_and_none_exprs(&self, block: &syn::Block) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+48112 |     fn option_inner_needs_typed_make_optional(&self, inner_ty: &syn::Type) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+56869 |     fn emit_stmt_to_string_with_expected(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `src_path` is never read
+  --> transpiler/src/metadata.rs:10:9
+   |
+ 7 | pub struct CrateTarget {
+   |            ----------- field in this struct
+...
+10 |     pub src_path: PathBuf,
+   |         ^^^^^^^^
+   |
+   = note: `CrateTarget` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `discover_local_path_dependencies` is never used
+   --> transpiler/src/metadata.rs:514:8
+    |
+514 | pub fn discover_local_path_dependencies(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transpile` is never used
+   --> transpiler/src/transpile.rs:255:8
+    |
+255 | pub fn transpile(rust_source: &str, module_name: Option<&str>) -> Result<String, String> {
+    |        ^^^^^^^^^
+
+warning: function `transpile_with_type_map` is never used
+   --> transpiler/src/transpile.rs:260:8
+    |
+260 | pub fn transpile_with_type_map(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transpile_with_type_map_and_extension_hints` is never used
+   --> transpiler/src/transpile.rs:275:8
+    |
+275 | pub fn transpile_with_type_map_and_extension_hints(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transpile_full` is never used
+   --> transpiler/src/transpile.rs:310:8
+    |
+310 | pub fn transpile_full(
+    |        ^^^^^^^^^^^^^^
+
+warning: `rusty-cpp-transpiler` (bin "rusty-cpp-transpiler") generated 19 warnings (run `cargo fix --bin "rusty-cpp-transpiler" -p rusty-cpp-transpiler` to apply 7 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.83s
+     Running `target/debug/rusty-cpp-transpiler parity-test --manifest-path /home/shuai/git/rusty-cpp/tests/transpile_tests/toml/crates/toml/Cargo.toml --stop-after run --work-dir .rusty-parity-matrix-current/toml --keep-work-dir`
+╔═══════════════════════════════════════════════════╗
+║  Parity Test: toml
+╚═══════════════════════════════════════════════════╝
+
+Stage A: Running cargo test (baseline)...
+  Baseline: PASS (saved to /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/baseline.txt)
+Discovering targets...
+  Skipping target 'decode' (Example): not test-capable
+  Skipping target 'enum_external' (Example): not test-capable
+  Skipping target 'toml2json' (Example): not test-capable
+  Package: toml
+  Target: toml (Lib) → module toml
+  Target: compliance (Test) → module compliance
+  Target: decoder (Test) → module decoder
+  Target: decoder_compliance (Test) → module decoder_compliance
+  Target: encoder (Test) → module encoder
+  Target: encoder_compliance (Test) → module encoder_compliance
+  Target: encoder_pretty_compliance (Test) → module encoder_pretty_compliance
+  Target: serde (Test) → module serde
+  Target: testsuite (Test) → module testsuite
+  Skipping target 'bench' (Bench): not test-capable
+  Skipping target 'insert_unique_unchecked' (Bench): not test-capable
+  Skipping target 'set_ops' (Bench): not test-capable
+  Skipping target 'with_capacity' (Bench): not test-capable
+  Skipping target 'build-script-build' (Other("custom-build")): not test-capable
+  Skipping target 'bench' (Bench): not test-capable
+  Skipping target 'faststring' (Bench): not test-capable
+  Skipping target 'arithmetic' (Example): not test-capable
+  Skipping target 'c_expression' (Example): not test-capable
+  Skipping target 'css' (Example): not test-capable
+  Skipping target 'custom_error' (Example): not test-capable
+  Skipping target 'http' (Example): not test-capable
+  Skipping target 'ini' (Example): not test-capable
+  Skipping target 'iterator' (Example): not test-capable
+  Skipping target 'json' (Example): not test-capable
+  Skipping target 'json_iterator' (Example): not test-capable
+  Skipping target 'ndjson' (Example): not test-capable
+  Skipping target 's_expression' (Example): not test-capable
+  Skipping target 'string' (Example): not test-capable
+  Skipping target 'arithmetic' (Bench): not test-capable
+  Skipping target 'c_expression' (Bench): not test-capable
+  Skipping target 'http' (Bench): not test-capable
+  Skipping target 'ini' (Bench): not test-capable
+  Skipping target 'json' (Bench): not test-capable
+  Dependencies:
+    equivalent (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/equivalent-1.0.2/Cargo.toml) → module equivalent [registry] (flags: --no-default-features)
+    hashbrown (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hashbrown-0.16.1/Cargo.toml) → module hashbrown [registry] (flags: --no-default-features)
+    serde_core (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_core-1.0.228/Cargo.toml) → module serde_core [registry] (flags: --features alloc,result,std)
+    indexmap (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/indexmap-2.13.0/Cargo.toml) → module indexmap [registry] (flags: --features serde,std)
+    serde_spanned (/home/shuai/git/rusty-cpp/tests/transpile_tests/toml/crates/serde_spanned/Cargo.toml) → module serde_spanned (flags: --features alloc,serde,std)
+    toml_datetime (/home/shuai/git/rusty-cpp/tests/transpile_tests/toml/crates/toml_datetime/Cargo.toml) → module toml_datetime (flags: --features alloc,serde,std)
+    memchr (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memchr-2.8.0/Cargo.toml) → module memchr [registry] (flags: --features alloc,std)
+    winnow (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winnow-1.0.0/Cargo.toml) → module winnow [registry] (flags: --features alloc,ascii,binary,parser,std)
+    toml_parser (/home/shuai/git/rusty-cpp/tests/transpile_tests/toml/crates/toml_parser/Cargo.toml) → module toml_parser (flags: --features alloc,std)
+    toml_writer (/home/shuai/git/rusty-cpp/tests/transpile_tests/toml/crates/toml_writer/Cargo.toml) → module toml_writer (flags: --features alloc,std)
+
+Stage B: Running cargo expand per target...
+  dep equivalent (--lib): 112 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/equivalent/expanded.rs
+  dep hashbrown (--lib): 13531 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/hashbrown/expanded.rs
+  dep serde_core (--lib): 38464 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/serde_core/expanded.rs
+  dep indexmap (--lib): 9044 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/indexmap/expanded.rs
+  dep serde_spanned (--lib): 359 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/serde_spanned/expanded.rs
+  dep toml_datetime (--lib): 1757 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/toml_datetime/expanded.rs
+  dep memchr (--lib): 11040 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/memchr/expanded.rs
+  dep winnow (--lib): 18341 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/winnow/expanded.rs
+  dep toml_parser (--lib): 6006 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/toml_parser/expanded.rs
+  dep toml_writer (--lib): 1585 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/toml_writer/expanded.rs
+  toml (--lib --tests): 11053 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/toml/expanded.rs
+  compliance (--test compliance): 4692 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/compliance/expanded.rs
+  decoder (--test decoder): 138 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/decoder/expanded.rs
+  decoder_compliance (--test decoder_compliance): 190 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/decoder_compliance/expanded.rs
+  encoder (--test encoder): 152 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/encoder/expanded.rs
+  encoder_compliance (--test encoder_compliance): 312 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/encoder_compliance/expanded.rs
+  encoder_pretty_compliance (--test encoder_pretty_compliance): 289 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/encoder_pretty_compliance/expanded.rs
+  serde (--test serde): 60108 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/serde/expanded.rs
+  testsuite (--test testsuite): 2542 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/testsuite/expanded.rs
+  Pruned unused registry dependencies: equivalent, hashbrown, indexmap, memchr, winnow
+Stage C: Transpiling to C++...
+  dep serde_core (serde_core): 10810 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/serde_core/serde_core.cppm
+  dep serde_spanned (serde_spanned): 1660 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/serde_spanned/serde_spanned.cppm
+  dep toml_datetime (toml_datetime): 2948 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/toml_datetime/toml_datetime.cppm
+  dep toml_parser (toml_parser): 6761 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/toml_parser/toml_parser.cppm
+  dep toml_writer (toml_writer): 2788 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/deps/toml_writer/toml_writer.cppm
+  toml: 11458 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/toml/toml.cppm
+  compliance: 4258 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/compliance/compliance.cppm
+  decoder: 1533 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/decoder/decoder.cppm
+  decoder_compliance: 1577 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/decoder_compliance/decoder_compliance.cppm
+  encoder: 1551 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/encoder/encoder.cppm
+  encoder_compliance: 1670 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/encoder_compliance/encoder_compliance.cppm
+  encoder_pretty_compliance: 1662 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/encoder_pretty_compliance/encoder_pretty_compliance.cppm
+  serde: 16993 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/serde/serde.cppm
+  testsuite: 2455 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/targets/testsuite/testsuite.cppm
+Stage D: Building with C++ compiler...
+  Generated runner: /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/runner.cpp (228 tests discovered)
+  Build FAILED — see /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/build.log
+    /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/runner.cpp:16705:5: warning: multi-line comment [-Wcomment]
+    16705 |     /// escape = %x5C                   ; \
+          |     ^
+    /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/runner.cpp: In lambda function:
+    /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/runner.cpp:10177:13: warning: statement has no effect [-Wunused-value]
+    10177 |             val;
+          |             ^~~
+    /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/runner.cpp:10201:21: warning: statement has no effect [-Wunused-value]
+    10201 |                     val;
+          |                     ^~~
+    /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/runner.cpp:10222:17: warning: statement has no effect [-Wunused-value]
+    10222 |                 val;
+          |                 ^~~
+    /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/runner.cpp: In member function ‘rusty::fmt::Result de::WithDecimalPoint::fmt(rusty::fmt::Formatter&) const’:
+    /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/runner.cpp:10255:25: warning: statement has no effect [-Wunused-value]
+    10255 |                         val;
+          |                         ^~~
+    /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml/runner.cpp:10276:29: warning: statement has no effect [-Wunused-value]
+    10276 |                             val;
+          |                             ^~~
+Parity test error: C++ compilation failed

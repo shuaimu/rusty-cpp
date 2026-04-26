@@ -70,7 +70,6 @@ jobs:
             ${{ runner.temp }}/rusty-parity-matrix/serde_core/**
             ${{ runner.temp }}/rusty-parity-matrix/serde/**
             ${{ runner.temp }}/rusty-parity-matrix/pollster/**
-            ${{ runner.temp }}/rusty-parity-matrix/toml/**
           if-no-files-found: warn
           retention-days: 14
 

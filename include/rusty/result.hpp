@@ -9,6 +9,8 @@
 #include <array>
 #include <cstdlib>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <rusty/option.hpp>
 
 // Result<T, E> - Represents either success (Ok) or failure (Err)
@@ -146,6 +148,15 @@ private:
             }
         }
     }
+
+    template<typename Msg>
+    [[noreturn]] static void throw_expect_failure(Msg&& msg) {
+        if constexpr (std::is_convertible_v<Msg, std::string_view>) {
+            throw std::runtime_error(std::string(std::string_view(std::forward<Msg>(msg))));
+        } else {
+            throw std::runtime_error("Result expectation failed");
+        }
+    }
     
 public:
     using ok_type = T;
@@ -160,10 +171,29 @@ public:
     }
 
     template<typename U = T>
-    requires (!std::is_reference_v<T> && std::is_constructible_v<OkStored, U&&>)
+    requires (!std::is_reference_v<T> && !std::is_lvalue_reference_v<U> && std::is_constructible_v<OkStored, U&&>)
     static Result Ok(U&& value) {
         Result r(UninitTag{});
         new (&r.storage.ok_storage) OkStored(to_ok_storage(std::forward<U>(value)));
+        r.is_ok_value = true;
+        return r;
+    }
+
+    // Lvalue Ok fallback for move-only payloads that expose clone().
+    template<typename U = std::remove_cvref_t<T>>
+    requires (!std::is_reference_v<T>)
+    static Result Ok(const U& value) {
+        Result r(UninitTag{});
+        if constexpr (std::is_constructible_v<OkStored, const U&>) {
+            new (&r.storage.ok_storage) OkStored(value);
+        } else if constexpr (requires(const U& v) { v.clone(); }
+                             && std::is_constructible_v<OkStored, decltype(value.clone())>) {
+            new (&r.storage.ok_storage) OkStored(value.clone());
+        } else {
+            static_assert(
+                std::is_constructible_v<OkStored, const U&>,
+                "Result::Ok lvalue requires copy-constructible or clone()-able payload");
+        }
         r.is_ok_value = true;
         return r;
     }
@@ -191,10 +221,29 @@ public:
     }
 
     template<typename U = E>
-    requires (!std::is_reference_v<E> && std::is_constructible_v<ErrStored, U&&>)
+    requires (!std::is_reference_v<E> && !std::is_lvalue_reference_v<U> && std::is_constructible_v<ErrStored, U&&>)
     static Result Err(U&& error) {
         Result r(UninitTag{});
         new (&r.storage.err_storage) ErrStored(to_err_storage(std::forward<U>(error)));
+        r.is_ok_value = false;
+        return r;
+    }
+
+    // Lvalue Err fallback for move-only payloads that expose clone().
+    template<typename U = std::remove_cvref_t<E>>
+    requires (!std::is_reference_v<E>)
+    static Result Err(const U& error) {
+        Result r(UninitTag{});
+        if constexpr (std::is_constructible_v<ErrStored, const U&>) {
+            new (&r.storage.err_storage) ErrStored(error);
+        } else if constexpr (requires(const U& e) { e.clone(); }
+                             && std::is_constructible_v<ErrStored, decltype(error.clone())>) {
+            new (&r.storage.err_storage) ErrStored(error.clone());
+        } else {
+            static_assert(
+                std::is_constructible_v<ErrStored, const U&>,
+                "Result::Err lvalue requires copy-constructible or clone()-able payload");
+        }
         r.is_ok_value = false;
         return r;
     }
@@ -323,6 +372,27 @@ public:
         }
         return ok_ref();
     }
+
+    template<typename Msg>
+    T expect(Msg&& msg) {
+        if (!is_ok_value) {
+            throw_expect_failure(std::forward<Msg>(msg));
+        }
+        if constexpr (std::is_reference_v<T>) {
+            return ok_ref();
+        } else {
+            return std::move(ok_ref());
+        }
+    }
+
+    template<typename Msg>
+    auto expect(Msg&& msg) const
+        -> std::conditional_t<std::is_reference_v<T>, T, const std::remove_reference_t<T>&> {
+        if (!is_ok_value) {
+            throw_expect_failure(std::forward<Msg>(msg));
+        }
+        return ok_ref();
+    }
     
     // Unwrap Err value (panics if Ok)
     E unwrap_err() {
@@ -341,6 +411,27 @@ public:
         -> std::conditional_t<std::is_reference_v<E>, E, const std::remove_reference_t<E>&> {
         if (is_ok_value) {
             throw std::runtime_error("Called unwrap_err on an Ok value");
+        }
+        return err_ref();
+    }
+
+    template<typename Msg>
+    E expect_err(Msg&& msg) {
+        if (is_ok_value) {
+            throw_expect_failure(std::forward<Msg>(msg));
+        }
+        if constexpr (std::is_reference_v<E>) {
+            return err_ref();
+        } else {
+            return std::move(err_ref());
+        }
+    }
+
+    template<typename Msg>
+    auto expect_err(Msg&& msg) const
+        -> std::conditional_t<std::is_reference_v<E>, E, const std::remove_reference_t<E>&> {
+        if (is_ok_value) {
+            throw_expect_failure(std::forward<Msg>(msg));
         }
         return err_ref();
     }
@@ -372,9 +463,9 @@ public:
     auto map(F f) -> Result<decltype(f(std::declval<T>())), E> {
         using NewT = decltype(f(std::declval<T>()));
         if (is_ok_value) {
-            return Result<NewT, E>::Ok(f(ok_ref()));
+            return Result<NewT, E>::Ok(f(std::move(ok_ref())));
         } else {
-            return Result<NewT, E>::Err(err_ref());
+            return Result<NewT, E>::Err(std::move(err_ref()));
         }
     }
     
@@ -383,9 +474,9 @@ public:
     auto map_err(F f) -> Result<T, decltype(f(std::declval<E>()))> {
         using NewE = decltype(f(std::declval<E>()));
         if (is_ok_value) {
-            return Result<T, NewE>::Ok(ok_ref());
+            return Result<T, NewE>::Ok(std::move(ok_ref()));
         } else {
-            return Result<T, NewE>::Err(f(err_ref()));
+            return Result<T, NewE>::Err(f(std::move(err_ref())));
         }
     }
 
@@ -409,9 +500,9 @@ public:
     auto and_then(F f) -> decltype(f(std::declval<T>())) {
         using ReturnType = decltype(f(std::declval<T>()));
         if (is_ok_value) {
-            return f(ok_ref());
+            return f(std::move(ok_ref()));
         } else {
-            return ReturnType::Err(err_ref());
+            return ReturnType::Err(std::move(err_ref()));
         }
     }
     
@@ -419,9 +510,9 @@ public:
     template<typename F>
     Result or_else(F f) {
         if (is_ok_value) {
-            return *this;
+            return std::move(*this);
         } else {
-            return f(err_ref());
+            return f(std::move(err_ref()));
         }
     }
     
@@ -466,6 +557,15 @@ private:
             err_ref().~E();
         }
     }
+
+    template<typename Msg>
+    [[noreturn]] static void throw_expect_failure(Msg&& msg) {
+        if constexpr (std::is_convertible_v<Msg, std::string_view>) {
+            throw std::runtime_error(std::string(std::string_view(std::forward<Msg>(msg))));
+        } else {
+            throw std::runtime_error("Result expectation failed");
+        }
+    }
     
 public:
     using ok_type = void;
@@ -487,10 +587,28 @@ public:
     }
 
     template<typename U = E>
-    requires (!std::is_reference_v<E> && std::is_constructible_v<E, U&&>)
+    requires (!std::is_reference_v<E> && !std::is_lvalue_reference_v<U> && std::is_constructible_v<E, U&&>)
     static Result Err(U&& error) {
         Result r;
         new (&r.storage.err_storage) E(std::forward<U>(error));
+        r.is_ok_value = false;
+        return r;
+    }
+
+    template<typename U = std::remove_cvref_t<E>>
+    requires (!std::is_reference_v<E>)
+    static Result Err(const U& error) {
+        Result r;
+        if constexpr (std::is_constructible_v<E, const U&>) {
+            new (&r.storage.err_storage) E(error);
+        } else if constexpr (requires(const U& e) { e.clone(); }
+                             && std::is_constructible_v<E, decltype(error.clone())>) {
+            new (&r.storage.err_storage) E(error.clone());
+        } else {
+            static_assert(
+                std::is_constructible_v<E, const U&>,
+                "Result<void, E>::Err lvalue requires copy-constructible or clone()-able payload");
+        }
         r.is_ok_value = false;
         return r;
     }
@@ -564,6 +682,13 @@ public:
         }
     }
 
+    template<typename Msg>
+    void expect(Msg&& msg) const {
+        if (!is_ok_value) {
+            throw_expect_failure(std::forward<Msg>(msg));
+        }
+    }
+
     // Unwrap Err value (panics if Ok)
     E unwrap_err() {
         if (is_ok_value) {
@@ -579,6 +704,27 @@ public:
     E unwrap_err() const {
         if (is_ok_value) {
             throw std::runtime_error("Called unwrap_err on an Ok value");
+        }
+        return err_ref();
+    }
+
+    template<typename Msg>
+    E expect_err(Msg&& msg) {
+        if (is_ok_value) {
+            throw_expect_failure(std::forward<Msg>(msg));
+        }
+        if constexpr (std::is_reference_v<E>) {
+            return err_ref();
+        } else {
+            return std::move(err_ref());
+        }
+    }
+
+    template<typename Msg>
+    auto expect_err(Msg&& msg) const
+        -> std::conditional_t<std::is_reference_v<E>, E, const std::remove_reference_t<E>&> {
+        if (is_ok_value) {
+            throw_expect_failure(std::forward<Msg>(msg));
         }
         return err_ref();
     }

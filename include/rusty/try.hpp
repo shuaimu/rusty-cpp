@@ -2,6 +2,26 @@
 #define RUSTY_TRY_HPP
 
 #include <type_traits>
+#include <utility>
+
+namespace rusty {
+namespace detail {
+
+template<typename TargetErr, typename SrcErr>
+decltype(auto) convert_try_into_error(SrcErr&& err) {
+    if constexpr (std::is_constructible_v<TargetErr, SrcErr&&>) {
+        return TargetErr(std::forward<SrcErr>(err));
+    } else if constexpr (requires(SrcErr&& candidate) {
+        TargetErr::from(std::forward<SrcErr>(candidate));
+    }) {
+        return TargetErr::from(std::forward<SrcErr>(err));
+    } else {
+        return std::forward<SrcErr>(err);
+    }
+}
+
+} // namespace detail
+} // namespace rusty
 
 // Rust-like ? operator for C++ using GCC/Clang statement expressions.
 //
@@ -40,7 +60,12 @@
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_err()) { \
-            return __VA_ARGS__::Err(_rusty_try_result.unwrap_err()); \
+            using _rusty_target_result_t = __VA_ARGS__; \
+            using _rusty_target_err_t = typename _rusty_target_result_t::err_type; \
+            auto _rusty_try_err = _rusty_try_result.unwrap_err(); \
+            return _rusty_target_result_t::Err( \
+                ::rusty::detail::convert_try_into_error<_rusty_target_err_t>( \
+                    std::forward<decltype(_rusty_try_err)>(_rusty_try_err))); \
         } \
         _rusty_try_result.unwrap(); \
     })
@@ -60,7 +85,12 @@
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_err()) { \
-            co_return __VA_ARGS__::Err(_rusty_try_result.unwrap_err()); \
+            using _rusty_target_result_t = __VA_ARGS__; \
+            using _rusty_target_err_t = typename _rusty_target_result_t::err_type; \
+            auto _rusty_try_err = _rusty_try_result.unwrap_err(); \
+            co_return _rusty_target_result_t::Err( \
+                ::rusty::detail::convert_try_into_error<_rusty_target_err_t>( \
+                    std::forward<decltype(_rusty_try_err)>(_rusty_try_err))); \
         } \
         _rusty_try_result.unwrap(); \
     })

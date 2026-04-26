@@ -1,0 +1,63 @@
+  allow_max_capacity_arrayvec_type PASSED
+  array_clone_from PASSED
+  char_test_encode_utf8 PASSED
+  char_test_encode_utf8_oob PASSED
+  deny_max_capacity_arrayvec_value PASSED (expected panic)
+  deny_max_capacity_arrayvec_value_const PASSED (expected panic)
+  test_arraystring_const_constructible PASSED
+  test_arraystring_zero_filled_has_some_sanity_checks PASSED
+  test_arrayvec_const_constructible PASSED
+  test_capacity_left PASSED
+  test_compact_size PASSED
+  test_default PASSED
+  test_drain PASSED
+  test_drain_oob PASSED (expected panic)
+  test_drain_range_inclusive PASSED
+  test_drain_range_inclusive_oob PASSED (expected panic)
+  test_drop PASSED
+  test_drop_in_insert PASSED
+  test_drop_panic PASSED (expected panic)
+  test_drop_panic_into_iter PASSED (expected panic)
+  test_drop_panics PASSED
+  test_extend PASSED
+  test_extend_capacity_panic_1 PASSED (expected panic)
+  test_extend_capacity_panic_2 PASSED (expected panic)
+  test_extend_from_slice PASSED
+  test_extend_from_slice_error PASSED
+  test_extend_zst PASSED
+  test_insert PASSED
+  test_insert_at_length PASSED
+  test_insert_out_of_bounds PASSED (expected panic)
+  test_into_inner_1 PASSED
+  test_into_inner_2 PASSED
+  test_into_inner_3 PASSED
+  test_is_send_sync PASSED
+  test_iter PASSED
+  test_pop_at PASSED
+  test_retain PASSED
+  test_simple PASSED
+  test_sizes PASSED
+  test_still_works_with_option_arrayvec PASSED
+  test_string PASSED
+  test_string_clone PASSED
+  test_string_from PASSED
+  test_string_from_bytes PASSED
+  test_string_parse_from_str PASSED
+  test_string_push PASSED
+  test_take PASSED
+  test_try_from_argument PASSED
+  test_try_from_slice_error PASSED
+  test_u16_index PASSED
+  test_write PASSED
+
+Results: 51 passed, 0 failed
+
+ArrayVec: largest supported capacity is u32::MAX
+panic
+slice range out of bounds
+slice range out of bounds
+drop
+drop
+ArrayVec: capacity exceeded in extend/from_iter
+ArrayVec: capacity exceeded in extend/from_iter
+panic

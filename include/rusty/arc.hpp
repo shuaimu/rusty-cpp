@@ -127,6 +127,11 @@ public:
         { return Arc<T>(new ControlBlock(std::forward<Args>(args)...)); }
     }
 
+    template<typename U>
+    static Arc<T> from(U&& value) {
+        return Arc<T>::new_(T(std::forward<U>(value)));
+    }
+
     // Private constructor from control block
     explicit Arc(ControlBlock* p) : ptr(p) {}
 

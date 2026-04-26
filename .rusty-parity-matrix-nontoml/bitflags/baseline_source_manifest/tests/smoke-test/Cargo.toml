@@ -1,0 +1,9 @@
+[package]
+name = "bitflags-smoke-test"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies.bitflags]
+path = "../../"
+all-features = true

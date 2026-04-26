@@ -190,6 +190,51 @@ auto checked_div(A a, B b) {
     return checked_div<Common>(static_cast<Common>(a), static_cast<Common>(b));
 }
 
+template<typename Target, typename Source>
+requires(std::is_integral_v<Target> && std::is_integral_v<std::remove_cvref_t<Source>>)
+Result<Target, std::tuple<>> try_from(Source value) {
+    using Src = std::remove_cvref_t<Source>;
+    auto fail = []() { return Result<Target, std::tuple<>>::Err(std::tuple<>{}); };
+
+    if constexpr (std::is_signed_v<Src>) {
+        const __int128 signed_value = static_cast<__int128>(value);
+        if constexpr (std::is_signed_v<Target>) {
+            const __int128 min_target = static_cast<__int128>(std::numeric_limits<Target>::min());
+            const __int128 max_target = static_cast<__int128>(std::numeric_limits<Target>::max());
+            if (signed_value < min_target || signed_value > max_target) {
+                return fail();
+            }
+        } else {
+            if (signed_value < 0) {
+                return fail();
+            }
+            const unsigned __int128 unsigned_value = static_cast<unsigned __int128>(signed_value);
+            const unsigned __int128 max_target =
+                static_cast<unsigned __int128>(std::numeric_limits<Target>::max());
+            if (unsigned_value > max_target) {
+                return fail();
+            }
+        }
+    } else {
+        const unsigned __int128 unsigned_value = static_cast<unsigned __int128>(value);
+        if constexpr (std::is_signed_v<Target>) {
+            const unsigned __int128 max_target =
+                static_cast<unsigned __int128>(std::numeric_limits<Target>::max());
+            if (unsigned_value > max_target) {
+                return fail();
+            }
+        } else {
+            const unsigned __int128 max_target =
+                static_cast<unsigned __int128>(std::numeric_limits<Target>::max());
+            if (unsigned_value > max_target) {
+                return fail();
+            }
+        }
+    }
+
+    return Result<Target, std::tuple<>>::Ok(static_cast<Target>(value));
+}
+
 template<typename T, typename U>
 requires(std::is_integral_v<T> && std::is_integral_v<std::remove_cvref_t<U>>)
 constexpr T pow(T base, U exp) {
@@ -231,8 +276,8 @@ inline Option<std::size_t> checked_next_power_of_two_usize(std::size_t value) {
 
 template<typename T, typename Input, typename Radix>
 requires(
-    std::is_integral_v<std::remove_cvref_t<T>>
-    && std::is_integral_v<std::remove_cvref_t<Radix>>)
+    num::is_nonzero_integral_v<std::remove_cvref_t<T>>
+    && num::is_nonzero_integral_v<std::remove_cvref_t<Radix>>)
 Result<std::remove_cvref_t<T>, std::tuple<>> from_str_radix(Input&& input, Radix radix) {
     using RawT = std::remove_cvref_t<T>;
     using RawRadix = std::remove_cvref_t<Radix>;

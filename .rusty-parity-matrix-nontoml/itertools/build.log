@@ -1,0 +1,95 @@
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In lambda function:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:4260:9: error: statement-expressions are not allowed outside functions nor in template-argument lists
+ 4260 | return (({ auto&& _m = it.next(); std::optional<std::remove_cvref_t<decltype(([&]() -> decltype(auto) { auto _mv = _m.unwrap();
+      |         ^
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In lambda function:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:7562:426: error: ‘new_’ was not declared in this scope
+ 7562 |             return [&]() { auto&& _m = peek; if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& item = rusty::detail::deref_if_pointer(_mv0); return item.take(); } if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (_mv1.is_none()) { return ({ auto&& _m = iter.next(); std::optional<std::remove_cvref_t<std::remove_cvref_t<decltype(([&]() { rusty::detail::deref_if_pointer_like(peek) = rusty::Some(std::move(new_));
+      |                                                                                                                                                                                                                                                                                                                                                                                                                                          ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:7562:426: note: suggested alternatives:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:2350:41: note:   ‘groupbylazy::new_’
+ 2350 |     ChunkBy<K, typename J::IntoIter, F> new_(J iter, F f);
+      |                                         ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:2758:20: note:   ‘grouping_map::new_’
+ 2758 |     GroupingMap<I> new_(I iter);
+      |                    ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:2700:32: note:   ‘tee::new_’
+ 2700 |     std::tuple<Tee<I>, Tee<I>> new_(I iter);
+      |                                ^~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In lambda function:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:8081:391: error: template argument 1 is invalid
+ 8081 |             return [&]() { auto&& _m0 = this->left.next(); auto&& _m1 = this->right.next(); if (_m0.is_none() && _m1.is_none()) { return rusty::None; } if (rusty::detail::deref_if_pointer(_m0).is_some() && _m1.is_none()) { auto&& left = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m0)).unwrap()); return rusty::Option<typename MergeBy::MergeResult<I, J, F>>(F::left(left)); } if (_m0.is_none() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& right = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m1)).unwrap()); return rusty::Option<typename MergeBy::MergeResult<I, J, F>>(F::right(right)); } if (rusty::detail::deref_if_pointer(_m0).is_some() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& left = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m0)).unwrap()); auto&& right = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m1)).unwrap()); return [&]() { auto [not_next, next] = rusty::detail::deref_if_pointer_like(([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::merge_join::rusty_ext::merge(std::forward<decltype(__self)>(__self), left, right); }) { return ::merge_join::rusty_ext::merge(std::forward<decltype(__self)>(__self), left, right); } else { return ::merge_join::rusty_ext::merge(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), left, right); } })(this->cmp_fn));
+      |                                                                                                                                                                                                                                                                                                                                                                                                       ^~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:8081:651: error: template argument 1 is invalid
+ 8081 |             return [&]() { auto&& _m0 = this->left.next(); auto&& _m1 = this->right.next(); if (_m0.is_none() && _m1.is_none()) { return rusty::None; } if (rusty::detail::deref_if_pointer(_m0).is_some() && _m1.is_none()) { auto&& left = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m0)).unwrap()); return rusty::Option<typename MergeBy::MergeResult<I, J, F>>(F::left(left)); } if (_m0.is_none() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& right = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m1)).unwrap()); return rusty::Option<typename MergeBy::MergeResult<I, J, F>>(F::right(right)); } if (rusty::detail::deref_if_pointer(_m0).is_some() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& left = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m0)).unwrap()); auto&& right = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m1)).unwrap()); return [&]() { auto [not_next, next] = rusty::detail::deref_if_pointer_like(([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::merge_join::rusty_ext::merge(std::forward<decltype(__self)>(__self), left, right); }) { return ::merge_join::rusty_ext::merge(std::forward<decltype(__self)>(__self), left, right); } else { return ::merge_join::rusty_ext::merge(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), left, right); } })(this->cmp_fn));
+      |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           ^~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In function ‘void next_array::test::tracked_drop()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12179:39: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12179 |                 builder.push(std::move(TrackedDrop{}));
+      |                              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12179:39: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12235:39: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12235 |                 builder.push(std::move(TrackedDrop{}));
+      |                              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12235:39: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12236:39: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12236 |                 builder.push(std::move(TrackedDrop{}));
+      |                              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12236:39: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12278:39: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12278 |                 builder.push(std::move(TrackedDrop{}));
+      |                              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12278:39: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12279:39: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12279 |                 builder.push(std::move(TrackedDrop{}));
+      |                              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12279:39: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In lambda function:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12281:23: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12281 | builder.push(std::move(TrackedDrop{}));
+      |              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12281:23: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In function ‘void next_array::test::tracked_drop()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12323:39: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12323 |                 builder.push(std::move(TrackedDrop{}));
+      |                              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12323:39: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12324:39: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12324 |                 builder.push(std::move(TrackedDrop{}));
+      |                              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12324:39: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In lambda function:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12326:23: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12326 | builder.push(std::move(TrackedDrop{}));
+      |              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12326:23: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In function ‘void next_array::test::tracked_drop()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12367:39: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12367 |                 builder.push(std::move(TrackedDrop{}));
+      |                              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12367:39: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12368:39: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+12368 |                 builder.push(std::move(TrackedDrop{}));
+      |                              ~~~~~~~~~^~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12368:39: note: remove ‘std::move’ call
+In file included from /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:18:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In lambda function:
+/home/shuai/git/rusty-cpp/include/rusty/try.hpp:52:29: warning: moving a local object in a return statement prevents copy elision [-Wpessimizing-move]
+   52 |             return std::move(_rusty_try_result); \
+      |                    ~~~~~~~~~^~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12994:36: note: in expansion of macro ‘RUSTY_TRY’
+12994 |     } else { _iflet_value0.emplace(RUSTY_TRY([&]() { auto&& _checked_lhs = (n - 1); return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(k))); }())); }
+      |                                    ^~~~~~~~~
+/home/shuai/git/rusty-cpp/include/rusty/try.hpp:52:29: note: remove ‘std::move’ call
+   52 |             return std::move(_rusty_try_result); \
+      |                    ~~~~~~~~~^~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:12994:36: note: in expansion of macro ‘RUSTY_TRY’
+12994 |     } else { _iflet_value0.emplace(RUSTY_TRY([&]() { auto&& _checked_lhs = (n - 1); return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(k))); }())); }
+      |                                    ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp: In instantiation of ‘size_hint::SizeHint size_hint::mul(const auto:85&, const auto:86&) [with auto:85 = std::tuple<long unsigned int, rusty::Option<long unsigned int> >; auto:86 = std::tuple<long unsigned int, rusty::Option<long unsigned int> >; SizeHint = std::tuple<long unsigned int, rusty::Option<long unsigned int> >]’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:4743:33:   required from here
+ 4743 |             auto&& _m0_tmp = mul(std::make_tuple(static_cast<size_t>(3), rusty::Option<size_t>(static_cast<size_t>(4))), std::make_tuple(static_cast<size_t>(3), rusty::Option<size_t>(static_cast<size_t>(4))));
+      |                              ~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml/itertools/runner.cpp:4711:700: warning: suggest parentheses around ‘&&’ within ‘||’ [-Wparentheses]
+ 4711 |         auto hi = [&]() -> rusty::Option<size_t> { auto&& _m0 = std::get<1>(a); auto&& _m1 = std::get<1>(b); if (rusty::detail::deref_if_pointer(_m0).is_some() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& x = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m0)).unwrap()); auto&& y = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_m1)).unwrap()); return [&]() { auto&& _checked_lhs = x; return rusty::checked_mul(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(y)); }(); } if (((rusty::detail::deref_if_pointer(_m0).is_some() && std::as_const(rusty::detail::deref_if_pointer(_m0)).unwrap() == 0) && _m1.is_none() || _m0.is_none() && (rusty::detail::deref_if_pointer(_m1).is_some() && std::as_const(rusty::detail::deref_if_pointer(_m1)).unwrap() == 0))) { return rusty::Option<size_t>(static_cast<size_t>(0)); } if (true) { return rusty::Option<size_t>(rusty::None); } return [&]() -> rusty::Option<size_t> { rusty::intrinsics::unreachable(); }(); }();
+      |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~

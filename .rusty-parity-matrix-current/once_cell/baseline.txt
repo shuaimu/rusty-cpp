@@ -1,0 +1,138 @@
+
+running 5 tests
+test imp::tests::poison_bad ... ok
+test imp::tests::smoke_once ... ok
+test imp::tests::test_size ... ok
+test imp::tests::wait_for_force_to_finish ... ok
+test imp::tests::stampede_once ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 70 tests
+test race::get_unchecked ... ok
+test race::once_bool_get_or_try_init ... ok
+test race::once_bool_set ... ok
+test race::once_non_zero_usize_set ... ok
+test race::once_non_zero_usize_smoke_test ... ok
+test race::once_ref_set ... ok
+test race::once_bool_smoke_test ... ok
+test race::once_ref_smoke_test ... ok
+test race_once_box::once_box_default ... ok
+test race::once_non_zero_usize_first_wins ... ok
+test race_once_box::once_box_reentrant ... ok
+test race_once_box::onece_box_clone ... ok
+test race_once_box::once_box_set ... ok
+test race_once_box::onece_box_with_value ... ok
+test race_once_box::once_box_first_wins ... ok
+test sync_lazy::arrrrrrrrrrrrrrrrrrrrrr ... ok
+test sync_lazy::lazy_default ... ok
+test sync_lazy::lazy_force_mut ... ok
+test sync_lazy::lazy_get_mut ... ok
+test sync_lazy::lazy_into_value ... ok
+test sync_lazy::lazy_deref_mut ... ok
+test sync_lazy::lazy_is_sync_send ... ok
+test sync_lazy::static_lazy_via_fn ... ok
+test sync_lazy::lazy_new ... ok
+test sync_once_cell::arrrrrrrrrrrrrrrrrrrrrr ... ok
+test sync_lazy::static_lazy ... ok
+test sync_once_cell::debug_impl ... ok
+test sync_once_cell::eval_once_macro ... ok
+test sync_once_cell::from_impl ... ok
+test sync_lazy::lazy_poisoning ... ok
+test sync_once_cell::clone ... ok
+test sync_once_cell::once_cell_drop ... ok
+test sync_once_cell::once_cell_drop_empty ... ok
+test sync_once_cell::once_cell ... ok
+test sync_once_cell::get_or_try_init ... ok
+test sync_once_cell::into_inner ... ok
+test sync_once_cell::get_does_not_block ... ok
+test sync_once_cell::once_cell_get_unchecked ... ok
+test sync_once_cell::once_cell_get_mut ... ok
+test sync_once_cell::once_cell_is_sync_send ... ok
+test sync_once_cell::once_cell_with_value ... ok
+test sync_once_cell::wait ... ok
+test sync_once_cell::partialeq_impl ... ok
+test unsync_lazy::arrrrrrrrrrrrrrrrrrrrrr ... ok
+test sync_once_cell::wait_panic ... ok
+test unsync_lazy::lazy_default ... ok
+test unsync_lazy::lazy_deref_mut ... ok
+test unsync_lazy::lazy_force_mut ... ok
+test unsync_lazy::lazy_get_mut ... ok
+test unsync_lazy::lazy_into_value ... ok
+test unsync_lazy::lazy_poisoning ... ok
+test unsync_lazy::lazy_new ... ok
+test unsync_once_cell::aliasing_in_get ... ok
+test unsync_once_cell::clone ... ok
+test unsync_once_cell::arrrrrrrrrrrrrrrrrrrrrr ... ok
+test unsync_once_cell::debug_impl ... ok
+test unsync_once_cell::from_impl ... ok
+test unsync_once_cell::into_inner ... ok
+test unsync_once_cell::get_or_try_init ... ok
+test unsync_once_cell::once_cell_drop ... ok
+test unsync_once_cell::once_cell ... ok
+test unsync_once_cell::once_cell_with_value ... ok
+test unsync_once_cell::once_cell_get_mut ... ok
+test unsync_once_cell::reentrant_init - should panic ... ok
+test unsync_once_cell::once_cell_drop_empty ... ok
+test unsync_once_cell::partialeq_impl ... ok
+test race_once_box::once_box_smoke_test ... ok
+test sync_once_cell::once_cell_does_not_leak_partially_constructed_boxes ... ok
+test sync_once_cell::reentrant_init ... ok
+test sync_once_cell::get_or_init_stress ... ok
+
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.70s
+
+
+running 43 tests
+test src/lib.rs - (line 9) ... ignored
+test src/race.rs - race::OnceRef<'a,T>::_dummy (line 332) - compile fail ... ok
+test src/race.rs - race::once_box::_dummy (line 490) - compile fail ... ok
+test src/lib.rs - sync::_dummy (line 1411) - compile fail ... ok
+test src/lib.rs - sync::_dummy (line 1403) - compile fail ... ok
+test src/lib.rs - sync::OnceCell<T>::get_mut (line 1021) ... ok
+test src/lib.rs - unsync::OnceCell<T>::set (line 529) ... ok
+test src/lib.rs - sync::OnceCell<T>::get_or_init (line 1116) ... ok
+test src/lib.rs - (line 161) ... ok
+test src/lib.rs - (line 136) ... ok
+test src/lib.rs - unsync::OnceCell<T>::into_inner (line 687) ... ok
+test src/lib.rs - sync::OnceCell<T>::get_or_try_init (line 1150) ... ok
+test src/lib.rs - (line 120) ... ok
+test src/lib.rs - (line 71) ... ok
+test src/lib.rs - unsync::Lazy<T,F>::get_mut (line 836) ... ok
+test src/lib.rs - (line 222) ... ok
+test src/lib.rs - (line 179) ... ok
+test src/lib.rs - unsync::OnceCell<T>::take (line 670) ... ok
+test src/lib.rs - sync::Lazy<T,F>::force_mut (line 1330) ... ok
+test src/lib.rs - sync::Lazy<T,F>::get (line 1352) ... ok
+test src/lib.rs - unsync::OnceCell<T>::get_or_init (line 587) ... ok
+test src/lib.rs - unsync::Lazy (line 707) ... ok
+test src/lib.rs - unsync::OnceCell<T>::get_mut (line 509) ... ok
+test src/lib.rs - sync::OnceCell<T>::try_insert (line 1079) ... ok
+test src/lib.rs - unsync::Lazy<T,F>::get (line 819) ... ok
+test src/lib.rs - unsync::OnceCell<T>::take (line 654) ... ok
+test src/lib.rs - (line 36) ... ok
+test src/lib.rs - unsync::OnceCell<T>::try_insert (line 550) ... ok
+test src/lib.rs - sync::Lazy<T,F>::force (line 1310) ... ok
+test src/lib.rs - unsync::Lazy<T,F>::force (line 775) ... ok
+test src/lib.rs - unsync::OnceCell<T>::get_or_try_init (line 620) ... ok
+test src/lib.rs - unsync::Lazy<T,F>::new (line 741) ... ok
+test src/lib.rs - sync::OnceCell<T>::wait (line 985) ... ok
+test src/lib.rs - sync::OnceCell<T>::take (line 1200) ... ok
+test src/lib.rs - unsync::OnceCell (line 409) ... ok
+test src/lib.rs - sync::OnceCell<T>::set (line 1052) ... ok
+test src/lib.rs - (line 92) ... ok
+test src/lib.rs - sync::Lazy<T,F>::get_mut (line 1369) ... ok
+test src/lib.rs - sync::OnceCell<T>::into_inner (line 1216) ... ok
+test src/lib.rs - unsync::Lazy<T,F>::force_mut (line 796) ... ok
+test src/lib.rs - sync::OnceCell<T>::take (line 1184) ... ok
+test src/lib.rs - sync::Lazy (line 1238) ... ok
+test src/lib.rs - sync::OnceCell (line 894) ... ok
+
+test result: ok. 42 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/once_cell-60302a1e601f9db1)
+     Running tests/it/main.rs (target/debug/deps/it-0ad4af71df796820)
+   Doc-tests once_cell

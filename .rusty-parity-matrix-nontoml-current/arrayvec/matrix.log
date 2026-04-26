@@ -1,0 +1,321 @@
+warning: variable does not need to be mutable
+    --> transpiler/src/codegen.rs:7368:13
+     |
+7368 |         let mut flush = |buf: &mut String, out: &mut Vec<String>| {
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `expected_owner`
+     --> transpiler/src/codegen.rs:11621:13
+      |
+11621 |         let expected_owner = match expected_inner {
+      |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected_owner`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:25155:13
+      |
+25155 |         let mut block_profile_mark = |label: &str| {
+      |             ----^^^^^^^^^^^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:29813:21
+      |
+29813 |                 let mut inner = self.new_inner_for_block();
+      |                     ----^^^^^
+      |                     |
+      |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:29828:21
+      |
+29828 |                 let mut inner = self.new_inner_for_block();
+      |                     ----^^^^^
+      |                     |
+      |                     help: remove this `mut`
+
+warning: unused variable: `scrutinee_expr`
+     --> transpiler/src/codegen.rs:33944:9
+      |
+33944 |         scrutinee_expr: &syn::Expr,
+      |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scrutinee_expr`
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:48546:21
+      |
+48546 |                 let mut inner = self.new_inner_for_block();
+      |                     ----^^^^^
+      |                     |
+      |                     help: remove this `mut`
+
+warning: unused variable: `expected_ty`
+     --> transpiler/src/codegen.rs:50541:9
+      |
+50541 |         expected_ty: Option<&syn::Type>,
+      |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected_ty`
+
+warning: value assigned to `joined` is never read
+     --> transpiler/src/codegen.rs:63165:26
+      |
+63165 |         let mut joined = segments.join("::");
+      |                          ^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `joined` is never read
+     --> transpiler/src/codegen.rs:63178:9
+      |
+63178 |         joined = segments.join("::");
+      |         ^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: field `0` is never read
+  --> transpiler/src/cmake.rs:86:11
+   |
+86 |     Table(toml::value::Table),
+   |     ----- ^^^^^^^^^^^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+86 -     Table(toml::value::Table),
+86 +     Table(()),
+   |
+
+warning: struct `OptionSomeNoneExprCollector` is never constructed
+   --> transpiler/src/codegen.rs:369:8
+    |
+369 | struct OptionSomeNoneExprCollector {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `saw_both` is never used
+   --> transpiler/src/codegen.rs:375:8
+    |
+374 | impl OptionSomeNoneExprCollector {
+    | -------------------------------- method in this implementation
+375 |     fn saw_both(&self) -> bool {
+    |        ^^^^^^^^
+
+warning: multiple associated items are never used
+     --> transpiler/src/codegen.rs:6187:8
+      |
+  970 | impl CodeGen {
+      | ------------ associated items in this implementation
+...
+ 6187 |     fn module_concrete_type_decl_count_recursive(m: &syn::ItemMod) -> usize {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7400 |     fn cpp_spelling_mentions_import_alias(&self, spelling: &str) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7456 |     fn forward_decl_signature_mentions_unqualified_scope_import_name(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7511 |     fn has_forward_decl_items(items: &[syn::Item]) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 8447 |     fn resolve_unique_scope_import_binding_path_any_scope(&self, local_name: &str) -> Option<String> {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+12551 |     fn escape_cpp_qualified_name(path: &str) -> String {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+14518 |     fn map_variant_ctor_param_type(&self, ty: &syn::Type, ctor_name: &str) -> String {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+27194 |     fn extract_tuple_struct_bindings(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+31231 |     fn tuple_pattern_elem_supports_value_match(&self, pat: &syn::Pat) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+34068 |     fn if_let_unwrap_binding_should_preserve_reference(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+43724 |     fn receiver_is_hashmap_like_expr(&self, receiver: &syn::Expr) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+50984 |     fn block_contains_option_some_and_none_exprs(&self, block: &syn::Block) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+51430 |     fn option_inner_needs_typed_make_optional(&self, inner_ty: &syn::Type) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+61028 |     fn emit_stmt_to_string_with_expected(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `src_path` is never read
+  --> transpiler/src/metadata.rs:10:9
+   |
+ 7 | pub struct CrateTarget {
+   |            ----------- field in this struct
+...
+10 |     pub src_path: PathBuf,
+   |         ^^^^^^^^
+   |
+   = note: `CrateTarget` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `discover_local_path_dependencies` is never used
+   --> transpiler/src/metadata.rs:514:8
+    |
+514 | pub fn discover_local_path_dependencies(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transpile` is never used
+   --> transpiler/src/transpile.rs:255:8
+    |
+255 | pub fn transpile(rust_source: &str, module_name: Option<&str>) -> Result<String, String> {
+    |        ^^^^^^^^^
+
+warning: function `transpile_with_type_map` is never used
+   --> transpiler/src/transpile.rs:260:8
+    |
+260 | pub fn transpile_with_type_map(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transpile_with_type_map_and_extension_hints` is never used
+   --> transpiler/src/transpile.rs:275:8
+    |
+275 | pub fn transpile_with_type_map_and_extension_hints(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transpile_full` is never used
+   --> transpiler/src/transpile.rs:310:8
+    |
+310 | pub fn transpile_full(
+    |        ^^^^^^^^^^^^^^
+
+warning: `rusty-cpp-transpiler` (bin "rusty-cpp-transpiler") generated 20 warnings (run `cargo fix --bin "rusty-cpp-transpiler" -p rusty-cpp-transpiler` to apply 8 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running `target/debug/rusty-cpp-transpiler parity-test --manifest-path /home/shuai/git/rusty-cpp/tests/transpile_tests/arrayvec/Cargo.toml --stop-after run --work-dir /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec --keep-work-dir`
+╔═══════════════════════════════════════════════════╗
+║  Parity Test: arrayvec
+╚═══════════════════════════════════════════════════╝
+
+Stage A: Running cargo test (baseline)...
+  Baseline retry: detected workspace mismatch from in-place cargo test.
+  Baseline retry: cargo test --manifest-path /home/shuai/git/rusty-cpp/Cargo.toml -p arrayvec
+  Baseline retry: cargo test --manifest-path /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/baseline_source_manifest/Cargo.toml
+  Baseline: PASS (saved to /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/baseline.txt)
+Discovering targets...
+  Metadata retry: detected workspace mismatch from in-place cargo metadata.
+  Metadata retry: cargo metadata --manifest-path /home/shuai/git/rusty-cpp/Cargo.toml -p arrayvec
+  Metadata retry: cargo metadata --manifest-path /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/metadata_source_manifest/Cargo.toml
+  Skipping target 'arraystring' (Bench): not test-capable
+  Skipping target 'extend' (Bench): not test-capable
+  Package: arrayvec
+  Target: arrayvec (Lib) → module arrayvec
+  Target: borsh (Test) → module borsh
+  Target: serde (Test) → module serde
+  Target: tests (Test) → module tests
+  Dependency metadata retry: detected workspace mismatch.
+  Dependency metadata retry: cargo metadata --manifest-path /home/shuai/git/rusty-cpp/Cargo.toml -p arrayvec
+  Dependency metadata retry: cargo metadata --manifest-path /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/dependency_metadata_source_manifest/Cargo.toml
+  Dependency metadata retry: detected workspace mismatch.
+  Dependency metadata retry: cargo metadata --manifest-path /home/shuai/git/rusty-cpp/Cargo.toml -p arrayvec
+  Dependency metadata retry: cargo metadata --manifest-path /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/dependency_metadata_source_manifest/Cargo.toml
+
+Stage B: Running cargo expand per target...
+  Expand retry: detected workspace mismatch from in-place cargo expand.
+  Expand retry: cargo expand --manifest-path /home/shuai/git/rusty-cpp/Cargo.toml -p arrayvec
+  Expand retry: cargo expand --manifest-path /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/expand_source_manifest/Cargo.toml
+  arrayvec (--lib --tests): 2218 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/arrayvec/expanded.rs
+  Expand retry: detected workspace mismatch from in-place cargo expand.
+  Expand retry: cargo expand --manifest-path /home/shuai/git/rusty-cpp/Cargo.toml -p arrayvec
+  Expand retry: cargo expand --manifest-path /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/expand_source_manifest/Cargo.toml
+  borsh (--test borsh): 11 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/borsh/expanded.rs
+  Expand retry: detected workspace mismatch from in-place cargo expand.
+  Expand retry: cargo expand --manifest-path /home/shuai/git/rusty-cpp/Cargo.toml -p arrayvec
+  Expand retry: cargo expand --manifest-path /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/expand_source_manifest/Cargo.toml
+  serde (--test serde): 11 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/serde/expanded.rs
+  Expand retry: detected workspace mismatch from in-place cargo expand.
+  Expand retry: cargo expand --manifest-path /home/shuai/git/rusty-cpp/Cargo.toml -p arrayvec
+  Expand retry: cargo expand --manifest-path /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/expand_source_manifest/Cargo.toml
+  tests (--test tests): 3268 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/tests/expanded.rs
+Stage C: Transpiling to C++...
+  arrayvec: 3061 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/arrayvec/arrayvec.cppm
+  borsh: 36 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/borsh/borsh.cppm
+  serde: 36 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/serde/serde.cppm
+  tests: 4649 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/tests/tests.cppm
+Stage D: Building with C++ compiler...
+  skipping test target unit without wrappers: /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/borsh/borsh.cppm
+  skipping test target unit without wrappers: /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/targets/serde/serde.cppm
+  Generated runner: /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp (51 tests discovered)
+  Build: PASS → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner
+Stage E: Running transpiled tests...
+    allow_max_capacity_arrayvec_type PASSED
+    array_clone_from PASSED
+    char_test_encode_utf8 PASSED
+    char_test_encode_utf8_oob PASSED
+    deny_max_capacity_arrayvec_value PASSED (expected panic)
+    deny_max_capacity_arrayvec_value_const PASSED (expected panic)
+    test_arraystring_const_constructible PASSED
+    test_arraystring_zero_filled_has_some_sanity_checks PASSED
+    test_arrayvec_const_constructible PASSED
+    test_capacity_left PASSED
+    test_compact_size PASSED
+    test_default PASSED
+    test_drain PASSED
+    test_drain_oob PASSED (expected panic)
+    test_drain_range_inclusive PASSED
+    test_drain_range_inclusive_oob PASSED (expected panic)
+    test_drop PASSED
+    test_drop_in_insert PASSED
+    test_drop_panic PASSED (expected panic)
+    test_drop_panic_into_iter PASSED (expected panic)
+    test_drop_panics PASSED
+    test_extend PASSED
+    test_extend_capacity_panic_1 PASSED (expected panic)
+    test_extend_capacity_panic_2 PASSED (expected panic)
+    test_extend_from_slice PASSED
+    test_extend_from_slice_error PASSED
+    test_extend_zst PASSED
+    test_insert PASSED
+    test_insert_at_length PASSED
+    test_insert_out_of_bounds PASSED (expected panic)
+    test_into_inner_1 PASSED
+    test_into_inner_2 PASSED
+    test_into_inner_3 PASSED
+    test_is_send_sync PASSED
+    test_iter PASSED
+    test_pop_at PASSED
+    test_retain PASSED
+    test_simple PASSED
+    test_sizes PASSED
+    test_still_works_with_option_arrayvec PASSED
+    test_string PASSED
+    test_string_clone PASSED
+    test_string_from PASSED
+    test_string_from_bytes PASSED
+    test_string_parse_from_str PASSED
+    test_string_push PASSED
+    test_take PASSED
+    test_try_from_argument PASSED
+    test_try_from_slice_error PASSED
+    test_u16_index PASSED
+    test_write PASSED
+  
+  Results: 51 passed, 0 failed
+  ArrayVec: largest supported capacity is u32::MAX
+  panic
+  slice range out of bounds
+  slice range out of bounds
+  drop
+  drop
+  ArrayVec: capacity exceeded in extend/from_iter
+  ArrayVec: capacity exceeded in extend/from_iter
+  panic
+  Run: PASS
+
+Parity test pipeline complete for 'arrayvec'.
+Artifacts saved in: /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec

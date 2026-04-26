@@ -294,6 +294,21 @@ constexpr decltype(auto) deref_if_pointer_like(T&& value) {
     }
 }
 
+template<typename T, typename = void>
+struct variant_underlying_type {
+    using type = std::remove_cvref_t<T>;
+};
+
+template<typename T>
+struct variant_underlying_type<
+    T,
+    std::void_t<typename std::remove_cvref_t<T>::variant>> {
+    using type = typename std::remove_cvref_t<T>::variant;
+};
+
+template<typename T>
+using variant_underlying_type_t = typename variant_underlying_type<T>::type;
+
 template<typename NextIter>
 class next_iter_range {
 public:
@@ -786,6 +801,39 @@ private:
     bool left_done_;
 };
 
+template<typename Range>
+class range_begin_end_next_iter {
+public:
+    using range_type = std::remove_reference_t<Range>;
+    using iter_type = decltype(std::begin(std::declval<range_type&>()));
+    using sentinel_type = decltype(std::end(std::declval<range_type&>()));
+    using item_type = std::decay_t<decltype(*std::declval<iter_type&>())>;
+    using next_result = rusty::Option<item_type>;
+
+    explicit range_begin_end_next_iter(Range range)
+        : range_(std::forward<Range>(range)),
+          current_(std::begin(range_)),
+          end_(std::end(range_)) {}
+
+    range_begin_end_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    next_result next() {
+        if (current_ == end_) {
+            return next_result(rusty::None);
+        }
+        auto value = item_type(*current_);
+        ++current_;
+        return next_result(std::move(value));
+    }
+
+private:
+    Range range_;
+    iter_type current_;
+    sentinel_type end_;
+};
+
 struct filter_size_hint {
     size_t _0;
     rusty::Option<size_t> _1;
@@ -982,6 +1030,13 @@ auto make_filter_next_iter(Iter&& iter, Pred&& pred) {
     return filter_next_iter<stored_iter, stored_pred>(
         std::forward<Iter>(iter),
         std::forward<Pred>(pred));
+}
+
+template<typename Range>
+auto make_begin_end_next_iter(Range&& range) {
+    using stored_range =
+        std::conditional_t<std::is_lvalue_reference_v<Range>, Range, std::decay_t<Range>>;
+    return range_begin_end_next_iter<stored_range>(std::forward<Range>(range));
 }
 
 template<typename LeftIter, typename RightIter>
@@ -1248,6 +1303,12 @@ decltype(auto) filter(Range&& range, Pred&& pred) {
             detail::dependent_false_v<std::remove_reference_t<Range>>,
             "rusty::filter requires next() to return an Option/optional-like value"
         );
+    } else if constexpr (
+        requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }
+    ) {
+        return detail::make_filter_next_iter(
+            detail::make_begin_end_next_iter(std::forward<Range>(range)),
+            std::forward<Pred>(pred));
     } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
         return filter(
             std::forward<Range>(range).into_iter(),

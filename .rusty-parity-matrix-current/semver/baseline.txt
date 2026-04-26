@@ -1,0 +1,79 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test test ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test test_eq ... ok
+test test_prerelease ... ok
+test test_new ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+
+running 10 tests
+test test_align ... ok
+test test_eq ... ok
+test test_ge ... ok
+test test_gt ... ok
+test test_display ... ok
+test test_le ... ok
+test test_parse ... ok
+test test_ne ... ok
+test test_lt ... ok
+test test_spec_order ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 20 tests
+test test_any ... ok
+test test_caret ... ok
+test test_basic ... ok
+test test_cargo3202 ... ok
+test test_digit_after_wildcard ... ok
+test test_comparator_parse ... ok
+test test_default ... ok
+test test_eq_hash ... ok
+test test_exact ... ok
+test test_greater_than ... ok
+test test_leading_digit_in_pre_and_build ... ok
+test test_logical_or ... ok
+test test_less_than ... ok
+test test_multiple ... ok
+test test_pre ... ok
+test test_tilde ... ok
+test test_parse ... ok
+test test_whitespace_delimited_comparator_sets ... ok
+test test_wildcard ... ok
+test test_wildcard_and_another ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test src/lib.rs - Version::new (line 385) ... ok
+test src/parse.rs - parse::Error (line 11) ... ok
+test src/lib.rs - (line 19) ... ok
+test src/lib.rs - Version::cmp_precedence (line 442) ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+
+    Updating crates.io index
+     Locking 7 packages to latest compatible versions
+   Compiling semver v1.0.24 (/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/semver/baseline_source_manifest)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.94s
+     Running unittests src/lib.rs (target/debug/deps/semver-dc72e5ea8013a2cb)
+     Running tests/test_autotrait.rs (target/debug/deps/test_autotrait-8c231b69e43e788c)
+     Running tests/test_identifier.rs (target/debug/deps/test_identifier-0e59d6001af85b33)
+     Running tests/test_version.rs (target/debug/deps/test_version-5f9633c8602c91d9)
+     Running tests/test_version_req.rs (target/debug/deps/test_version_req-3cc0f427a8bf4dde)
+   Doc-tests semver

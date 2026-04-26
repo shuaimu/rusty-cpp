@@ -1,0 +1,35 @@
+  test PASSED
+  test_align PASSED
+  test_any PASSED
+  test_basic PASSED
+  test_caret PASSED
+  test_cargo3202 PASSED
+  test_comparator_parse PASSED
+  test_default PASSED
+  test_digit_after_wildcard PASSED
+  test_display PASSED
+  test_eq PASSED
+  test_eq_hash PASSED
+  test_exact PASSED
+  test_ge PASSED
+  test_greater_than PASSED
+  test_gt PASSED
+  test_le PASSED
+  test_leading_digit_in_pre_and_build PASSED
+  test_less_than PASSED
+  test_logical_or PASSED
+  test_lt PASSED
+  test_multiple PASSED
+  test_ne PASSED
+  test_new PASSED
+  test_parse PASSED
+  test_pre PASSED
+  test_prerelease PASSED
+  test_spec_order PASSED
+  test_tilde PASSED
+  test_whitespace_delimited_comparator_sets PASSED
+  test_wildcard PASSED
+  test_wildcard_and_another PASSED
+
+Results: 32 passed, 0 failed
+

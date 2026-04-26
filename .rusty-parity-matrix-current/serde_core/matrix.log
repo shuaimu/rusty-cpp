@@ -1,0 +1,220 @@
+warning: variable does not need to be mutable
+    --> transpiler/src/codegen.rs:7311:13
+     |
+7311 |         let mut flush = |buf: &mut String, out: &mut Vec<String>| {
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:23898:13
+      |
+23898 |         let mut block_profile_mark = |label: &str| {
+      |             ----^^^^^^^^^^^^^^^^^^
+      |             |
+      |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:28335:21
+      |
+28335 |                 let mut inner = self.new_inner_for_block();
+      |                     ----^^^^^
+      |                     |
+      |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:28350:21
+      |
+28350 |                 let mut inner = self.new_inner_for_block();
+      |                     ----^^^^^
+      |                     |
+      |                     help: remove this `mut`
+
+warning: unused variable: `scrutinee_expr`
+     --> transpiler/src/codegen.rs:31898:9
+      |
+31898 |         scrutinee_expr: &syn::Expr,
+      |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_scrutinee_expr`
+      |
+      = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+     --> transpiler/src/codegen.rs:45244:21
+      |
+45244 |                 let mut inner = self.new_inner_for_block();
+      |                     ----^^^^^
+      |                     |
+      |                     help: remove this `mut`
+
+warning: unused variable: `expected_ty`
+     --> transpiler/src/codegen.rs:47238:9
+      |
+47238 |         expected_ty: Option<&syn::Type>,
+      |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_expected_ty`
+
+warning: value assigned to `joined` is never read
+     --> transpiler/src/codegen.rs:58862:26
+      |
+58862 |         let mut joined = segments.join("::");
+      |                          ^^^^^^^^^^^^^^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+      = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `joined` is never read
+     --> transpiler/src/codegen.rs:58875:9
+      |
+58875 |         joined = segments.join("::");
+      |         ^^^^^^
+      |
+      = help: maybe it is overwritten before being read?
+
+warning: field `0` is never read
+  --> transpiler/src/cmake.rs:86:11
+   |
+86 |     Table(toml::value::Table),
+   |     ----- ^^^^^^^^^^^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+86 -     Table(toml::value::Table),
+86 +     Table(()),
+   |
+
+warning: struct `OptionSomeNoneExprCollector` is never constructed
+   --> transpiler/src/codegen.rs:369:8
+    |
+369 | struct OptionSomeNoneExprCollector {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `saw_both` is never used
+   --> transpiler/src/codegen.rs:375:8
+    |
+374 | impl OptionSomeNoneExprCollector {
+    | -------------------------------- method in this implementation
+375 |     fn saw_both(&self) -> bool {
+    |        ^^^^^^^^
+
+warning: multiple associated items are never used
+     --> transpiler/src/codegen.rs:6130:8
+      |
+  943 | impl CodeGen {
+      | ------------ associated items in this implementation
+...
+ 6130 |     fn module_concrete_type_decl_count_recursive(m: &syn::ItemMod) -> usize {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7343 |     fn cpp_spelling_mentions_import_alias(&self, spelling: &str) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7399 |     fn forward_decl_signature_mentions_unqualified_scope_import_name(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 7454 |     fn has_forward_decl_items(items: &[syn::Item]) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+ 8361 |     fn resolve_unique_scope_import_binding_path_any_scope(&self, local_name: &str) -> Option<String> {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+11979 |     fn escape_cpp_qualified_name(path: &str) -> String {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+13946 |     fn map_variant_ctor_param_type(&self, ty: &syn::Type, ctor_name: &str) -> String {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+25834 |     fn extract_tuple_struct_bindings(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+29584 |     fn tuple_pattern_elem_supports_value_match(&self, pat: &syn::Pat) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+32022 |     fn if_let_unwrap_binding_should_preserve_reference(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+41047 |     fn receiver_is_hashmap_like_expr(&self, receiver: &syn::Expr) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+47666 |     fn block_contains_option_some_and_none_exprs(&self, block: &syn::Block) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+48112 |     fn option_inner_needs_typed_make_optional(&self, inner_ty: &syn::Type) -> bool {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+56869 |     fn emit_stmt_to_string_with_expected(
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `src_path` is never read
+  --> transpiler/src/metadata.rs:10:9
+   |
+ 7 | pub struct CrateTarget {
+   |            ----------- field in this struct
+...
+10 |     pub src_path: PathBuf,
+   |         ^^^^^^^^
+   |
+   = note: `CrateTarget` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `discover_local_path_dependencies` is never used
+   --> transpiler/src/metadata.rs:514:8
+    |
+514 | pub fn discover_local_path_dependencies(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transpile` is never used
+   --> transpiler/src/transpile.rs:255:8
+    |
+255 | pub fn transpile(rust_source: &str, module_name: Option<&str>) -> Result<String, String> {
+    |        ^^^^^^^^^
+
+warning: function `transpile_with_type_map` is never used
+   --> transpiler/src/transpile.rs:260:8
+    |
+260 | pub fn transpile_with_type_map(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transpile_with_type_map_and_extension_hints` is never used
+   --> transpiler/src/transpile.rs:275:8
+    |
+275 | pub fn transpile_with_type_map_and_extension_hints(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `transpile_full` is never used
+   --> transpiler/src/transpile.rs:310:8
+    |
+310 | pub fn transpile_full(
+    |        ^^^^^^^^^^^^^^
+
+warning: `rusty-cpp-transpiler` (bin "rusty-cpp-transpiler") generated 19 warnings (run `cargo fix --bin "rusty-cpp-transpiler" -p rusty-cpp-transpiler` to apply 7 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running `target/debug/rusty-cpp-transpiler parity-test --manifest-path /home/shuai/git/rusty-cpp/tests/transpile_tests/serde_core/serde_core/Cargo.toml --stop-after run --work-dir .rusty-parity-matrix-current/serde_core --keep-work-dir`
+╔═══════════════════════════════════════════════════╗
+║  Parity Test: serde_core
+╚═══════════════════════════════════════════════════╝
+
+Stage A: Running cargo test (baseline)...
+  Baseline: PASS (saved to /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde_core/baseline.txt)
+Discovering targets...
+  Skipping target 'build-script-build' (Other("custom-build")): not test-capable
+  Package: serde_core
+  Target: serde_core (Lib) → module serde_core
+
+Stage B: Running cargo expand per target...
+  serde_core (--lib --tests): 38517 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde_core/targets/serde_core/expanded.rs
+Stage C: Transpiling to C++...
+  serde_core: 10866 lines → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde_core/targets/serde_core/serde_core.cppm
+Stage D: Building with C++ compiler...
+  Generated runner: /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde_core/runner.cpp (1 tests discovered)
+  Build: PASS → /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde_core/runner
+Stage E: Running transpiled tests...
+    ser_impls_test_format_u8 PASSED
+  
+  Results: 1 passed, 0 failed
+  Run: PASS
+
+Parity test pipeline complete for 'serde_core'.
+Artifacts saved in: /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde_core

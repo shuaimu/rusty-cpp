@@ -299,7 +299,7 @@ bool option_has_value(const Opt& opt) {
 }
 
 template<typename Opt>
-auto option_take_value(Opt& opt) {
+decltype(auto) option_take_value(Opt& opt) {
     if constexpr (has_unwrap<Opt>::value) {
         return opt.unwrap();
     } else if constexpr (has_has_value<Opt>::value && has_reset<Opt>::value) {
@@ -313,6 +313,24 @@ auto option_take_value(Opt& opt) {
 
 template<typename Opt>
 using option_value_t = std::decay_t<decltype(option_take_value(std::declval<Opt&>()))>;
+
+template<typename VecLike, typename Item>
+void push_collect_item(VecLike& out, Item&& item) {
+    using ItemRef = Item&&;
+    using ItemValue = std::remove_cvref_t<ItemRef>;
+    if constexpr (requires(VecLike& v, Item&& i) { v.push(std::forward<Item>(i)); }) {
+        out.push(std::forward<Item>(item));
+    } else if constexpr (requires(const ItemValue& value) { value.clone(); }) {
+        out.push(item.clone());
+    } else if constexpr (!std::is_const_v<std::remove_reference_t<ItemRef>>
+                         && std::is_move_constructible_v<ItemValue>) {
+        out.push(std::move(item));
+    } else {
+        static_assert(
+            std::is_copy_constructible_v<ItemValue>,
+            "cannot collect/filter_map non-copy, non-cloneable elements");
+    }
+}
 
 template<typename Range>
 using range_storage_t =
@@ -550,7 +568,7 @@ auto collect_range(Range&& range_like) {
         using Elem = std::decay_t<decltype(*std::begin(range_like))>;
         Vec<Elem> out = Vec<Elem>::new_();
         for (auto&& item : range_like) {
-            out.push(std::forward<decltype(item)>(item));
+            detail::push_collect_item(out, std::forward<decltype(item)>(item));
         }
         return out;
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
@@ -573,7 +591,8 @@ auto collect_range(Range&& range_like) {
             if (!detail::option_has_value(item)) {
                 break;
             }
-            out.push(detail::option_take_value(item));
+            decltype(auto) value = detail::option_take_value(item);
+            detail::push_collect_item(out, std::forward<decltype(value)>(value));
         }
         return out;
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
@@ -924,10 +943,47 @@ template<typename Range, typename Func>
 auto filter_map(Range&& range, Func&& func) {
     using StoredRange = detail::range_storage_t<Range&&>;
     using StoredFunc = std::decay_t<Func>;
-    return filter_map_view<StoredRange, StoredFunc>(
-        std::forward<Range>(range),
-        std::forward<Func>(func)
-    );
+    if constexpr (requires(StoredRange& r) { std::begin(r); std::end(r); }) {
+        return filter_map_view<StoredRange, StoredFunc>(
+            std::forward<Range>(range),
+            std::forward<Func>(func)
+        );
+    } else if constexpr (requires(StoredRange& r) { r.next(); }) {
+        auto iter = std::forward<Range>(range);
+        auto mapper = std::forward<Func>(func);
+        using NextResult = std::decay_t<decltype(iter.next())>;
+        static_assert(
+            detail::has_is_some<NextResult>::value || detail::has_has_value<NextResult>::value,
+            "rusty::filter_map iterator fallback requires next() to return Option-like value"
+        );
+        using Item = detail::option_value_t<NextResult>;
+        using MapResult = std::decay_t<decltype(mapper(std::declval<Item>()))>;
+        static_assert(
+            detail::has_is_some<MapResult>::value || detail::has_has_value<MapResult>::value,
+            "rusty::filter_map mapper must return Option-like value"
+        );
+        using Value = detail::option_value_t<MapResult>;
+        rusty::Vec<Value> out;
+        while (true) {
+            auto item = iter.next();
+            if (!detail::option_has_value(item)) {
+                break;
+            }
+            auto mapped = mapper(detail::option_take_value(item));
+            if (detail::option_has_value(mapped)) {
+                decltype(auto) value = detail::option_take_value(mapped);
+                detail::push_collect_item(out, std::forward<decltype(value)>(value));
+            }
+        }
+        return out;
+    } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
+        return filter_map(std::forward<Range>(range).into_iter(), std::forward<Func>(func));
+    } else {
+        static_assert(
+            detail::collect_range_dependent_false_v<Range>,
+            "rusty::filter_map requires a range, into_iter(), or iterator-like next()"
+        );
+    }
 }
 
 /// Slice helpers used by transpiled Rust range-index expressions.
@@ -1085,6 +1141,14 @@ auto slice_full(Container& container) {
         } else {
             return container.as_mut_slice();
         }
+    } else if constexpr (requires { container.as_mut(); }) {
+        using Slice = std::remove_cv_t<std::remove_reference_t<decltype(container.as_mut())>>;
+        if constexpr (std::is_same_v<Slice, Base>) {
+            using Elem = std::remove_reference_t<decltype(*rusty::as_mut_ptr(container))>;
+            return std::span<Elem>(rusty::as_mut_ptr(container), rusty::len(container));
+        } else {
+            return container.as_mut();
+        }
     } else if constexpr (requires { container.as_slice(); }) {
         using Slice = std::remove_cv_t<std::remove_reference_t<decltype(container.as_slice())>>;
         if constexpr (std::is_same_v<Slice, Base>) {
@@ -1109,6 +1173,14 @@ auto slice_full(const Container& container) {
             return std::span<const Elem>(rusty::as_ptr(container), rusty::len(container));
         } else {
             return container.as_slice();
+        }
+    } else if constexpr (requires { container.as_ref(); }) {
+        using Slice = std::remove_cv_t<std::remove_reference_t<decltype(container.as_ref())>>;
+        if constexpr (std::is_same_v<Slice, Base>) {
+            using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(container))>;
+            return std::span<const Elem>(rusty::as_ptr(container), rusty::len(container));
+        } else {
+            return container.as_ref();
         }
     } else {
         using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(container))>;
@@ -1155,10 +1227,75 @@ auto get(const Container& container, Index idx) {
     const size_t index = detail::checked_index(idx);
     using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(span))>;
     using Opt = Option<Elem&>;
+    if constexpr (requires { container.get(index); }) {
+        using GetResult = decltype(container.get(index));
+        if constexpr (std::is_convertible_v<GetResult, Opt>) {
+            return Opt(container.get(index));
+        }
+    }
     if (index < rusty::len(span)) {
         return Opt(*(rusty::as_ptr(span) + index));
     }
     return Opt(None);
+}
+
+// Mutable counterpart for Rust-style `.get_mut(index)` lowering.
+template<typename Container, typename Index>
+auto get_mut(Container& container, Index idx) {
+    auto span = slice_full(container);
+    const size_t index = detail::checked_index(idx);
+    using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(span))>;
+    using Opt = Option<Elem&>;
+    if constexpr (requires { container.get_mut(index); }) {
+        using GetMutResult = decltype(container.get_mut(index));
+        if constexpr (std::is_convertible_v<GetMutResult, Opt>) {
+            return Opt(container.get_mut(index));
+        }
+    }
+    if constexpr (requires { container.get(index); }) {
+        using GetResult = decltype(container.get(index));
+        if constexpr (std::is_convertible_v<GetResult, Opt>) {
+            return Opt(container.get(index));
+        }
+    }
+    if (index < rusty::len(span)) {
+        return Opt(*(rusty::as_ptr(span) + index));
+    }
+    return Opt(None);
+}
+
+template<typename Container>
+auto first(const Container& container) {
+    return get(container, size_t{0});
+}
+
+template<typename Container>
+auto first_mut(Container& container) {
+    return get_mut(container, size_t{0});
+}
+
+template<typename Container>
+auto last(const Container& container) {
+    const auto span = slice_full(container);
+    using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(span))>;
+    using Opt = Option<Elem&>;
+    if (rusty::len(span) == 0) {
+        return Opt(None);
+    }
+    const size_t last_index = rusty::len(span) - 1;
+    return Opt(*(rusty::as_ptr(span) + last_index));
+}
+
+template<typename Container>
+auto last_mut(Container& container) {
+    auto span = slice_full(container);
+    using Elem = std::remove_reference_t<decltype(*rusty::as_ptr(span))>;
+    using Opt = Option<Elem&>;
+    if (rusty::len(span) == 0) {
+        return Opt(None);
+    }
+    const size_t last_index = rusty::len(span) - 1;
+    return Opt(*(rusty::as_ptr(span) + last_index));
 }
 
 // Collect a slice-like container into rusty::Vec by value-cloning elements.
@@ -1593,6 +1730,70 @@ struct range_to_inclusive {
         return value <= end;
     }
 };
+
+// Runtime helper used by transpiled dynamic range indexing (`base[idx]` where
+// `idx` is a range-shaped value). This mirrors Rust indexing semantics while
+// supporting both string-backed and slice-backed bases.
+template<typename Base, typename T>
+auto index_with_range(Base&& base, const range<T>& idx) {
+    if constexpr (std::is_convertible_v<Base&&, std::string_view>) {
+        return slice(
+            std::string_view(std::forward<Base>(base)),
+            idx.start,
+            idx.end_value()
+        );
+    } else {
+        return slice(std::forward<Base>(base), idx.start, idx.end_value());
+    }
+}
+
+template<typename Base, typename T>
+auto index_with_range(Base&& base, const range_inclusive<T>& idx) {
+    if constexpr (std::is_convertible_v<Base&&, std::string_view>) {
+        auto view = std::string_view(std::forward<Base>(base));
+        return slice_inclusive(view, idx.start, idx.end_value());
+    } else {
+        return slice_inclusive(std::forward<Base>(base), idx.start, idx.end_value());
+    }
+}
+
+template<typename Base, typename T>
+auto index_with_range(Base&& base, const range_from<T>& idx) {
+    if constexpr (std::is_convertible_v<Base&&, std::string_view>) {
+        return slice_from(std::string_view(std::forward<Base>(base)), idx.start);
+    } else {
+        return slice_from(std::forward<Base>(base), idx.start);
+    }
+}
+
+template<typename Base, typename T>
+auto index_with_range(Base&& base, const range_to<T>& idx) {
+    if constexpr (std::is_convertible_v<Base&&, std::string_view>) {
+        auto view = std::string_view(std::forward<Base>(base));
+        return slice(view, static_cast<size_t>(0), idx.end);
+    } else {
+        return slice_to(std::forward<Base>(base), idx.end);
+    }
+}
+
+template<typename Base, typename T>
+auto index_with_range(Base&& base, const range_to_inclusive<T>& idx) {
+    if constexpr (std::is_convertible_v<Base&&, std::string_view>) {
+        auto view = std::string_view(std::forward<Base>(base));
+        return slice_inclusive(view, static_cast<size_t>(0), idx.end);
+    } else {
+        return slice_to_inclusive(std::forward<Base>(base), idx.end);
+    }
+}
+
+template<typename Base>
+auto index_with_range(Base&& base, const range_full&) {
+    if constexpr (std::is_convertible_v<Base&&, std::string_view>) {
+        return std::string_view(std::forward<Base>(base));
+    } else {
+        return slice_full(std::forward<Base>(base));
+    }
+}
 
 } // namespace rusty
 

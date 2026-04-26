@@ -1,0 +1,83 @@
+
+running 1 test
+test ser::impls::test_format_u8 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 68 tests
+test serde_core/src/ser/mod.rs - ser::Serializer::is_human_readable (line 1419) ... ok
+test serde_core/src/de/mod.rs - de::DeserializeOwned (line 603) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_i8 (line 435) ... ok
+test serde_core/src/de/mod.rs - de::VariantAccess::newtype_variant_seed (line 2138) ... ok
+test serde_core/src/de/mod.rs - de::Error::custom (line 308) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_u32 (line 586) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_struct (line 1198) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_bool (line 413) ... ok
+test serde_core/src/de/mod.rs - de::DeserializeSeed (line 662) ... ok
+test serde_core/src/de/mod.rs - de::VariantAccess::struct_variant (line 2237) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_tuple (line 1043) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_newtype_struct (line 902) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_f64 (line 667) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_none (line 759) ... ok
+test serde_core/src/ser/mod.rs - ser::Serialize::serialize (line 240) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_u64 (line 604) ... ok
+test serde_core/src/de/mod.rs - de::VariantAccess::tuple_variant (line 2194) ... ok
+test serde_core/src/ser/mod.rs - ser::Error::custom (line 201) ... ok
+test serde_core/src/de/mod.rs - de::DeserializeSeed (line 695) ... ok
+test serde_core/src/ser/mod.rs - ser::SerializeMap (line 1759) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::collect_seq (line 1278) ... ok
+test serde_core/src/macros.rs - macros::forward_to_deserialize_any (line 13) ... ok
+test serde_core/src/de/mod.rs - de::Visitor::expecting (line 1328) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_str (line 706) ... ok
+test serde_core/src/de/mod.rs - de::VariantAccess::unit_variant (line 2098) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_u16 (line 564) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_i128 (line 515) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_f32 (line 649) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_i64 (line 497) ... ok
+test serde_core/src/macros.rs - macros::forward_to_deserialize_any (line 49) ... ok
+test serde_core/src/de/mod.rs - de::Expected (line 440) ... ok
+test serde_core/src/de/mod.rs - de::Deserializer::is_human_readable (line 1195) ... ok
+test serde_core/src/ser/impossible.rs - ser::impossible::Impossible (line 18) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_newtype_variant (line 930) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_map (line 1149) ... ok
+test serde_core/src/de/mod.rs - de::DeserializeSeed (line 648) ... ok
+test serde_core/src/ser/mod.rs - ser::SerializeTupleStruct (line 1644) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_bytes (line 730) ... ok
+test serde_core/src/de/mod.rs - de::Expected (line 464) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::collect_str (line 1351) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_i16 (line 457) ... ok
+test serde_core/src/de/mod.rs - de::Visitor (line 1282) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::collect_map (line 1313) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_u128 (line 622) ... ok
+test serde_core/src/ser/mod.rs - ser::SerializeSeq (line 1468) ... ok
+test serde_core/src/de/ignored_any.rs - de::ignored_any::IgnoredAny (line 13) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_tuple_struct (line 1071) ... ok
+test serde_core/src/ser/mod.rs - ser::SerializeStructVariant (line 1936) ... ok
+test serde_core/src/ser/fmt.rs - ser::fmt::&'_mutfmt::Formatter<'a> (line 20) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_tuple_variant (line 1103) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_tuple (line 1013) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_char (line 688) ... ok
+test serde_core/src/de/mod.rs - de::Unexpected (line 315) ... ok
+test serde_core/src/de/value.rs - de::value (line 4) ... ok
+test serde_core/src/ser/mod.rs - ser::SerializeStruct (line 1872) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_struct_variant (line 1236) ... ok
+test serde_core/src/ser/mod.rs - ser::SerializeTuple (line 1568) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_some (line 792) ... ok
+test serde_core/src/macros.rs - macros::forward_to_deserialize_any (line 80) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_seq (line 968) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_i32 (line 479) ... ok
+test serde_core/src/ser/mod.rs - ser::SerializeTupleVariant (line 1695) ... ok
+test serde_core/src/ser/mod.rs - ser::SerializeTuple (line 1538) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_unit (line 827) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_u8 (line 542) ... ok
+test serde_core/src/de/mod.rs - de::IntoDeserializer (line 2297) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_unit_struct (line 847) ... ok
+test serde_core/src/ser/mod.rs - ser::Serializer::serialize_unit_variant (line 869) ... ok
+
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (/home/shuai/git/rusty-cpp/tests/transpile_tests/serde_core/target/debug/deps/serde_core-43160b6e8f206467)
+   Doc-tests serde_core

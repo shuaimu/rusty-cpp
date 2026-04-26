@@ -1,0 +1,20 @@
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde/runner.cpp: In lambda function:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde/runner.cpp:10152:13: warning: statement has no effect [-Wunused-value]
+10152 |             val;
+      |             ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde/runner.cpp:10176:21: warning: statement has no effect [-Wunused-value]
+10176 |                     val;
+      |                     ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde/runner.cpp:10197:17: warning: statement has no effect [-Wunused-value]
+10197 |                 val;
+      |                 ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde/runner.cpp: In member function ‘rusty::fmt::Result de::WithDecimalPoint::fmt(rusty::fmt::Formatter&) const’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde/runner.cpp:10230:25: warning: statement has no effect [-Wunused-value]
+10230 |                         val;
+      |                         ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde/runner.cpp:10251:29: warning: statement has no effect [-Wunused-value]
+10251 |                             val;
+      |                             ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/serde/runner.cpp:10273:25: warning: statement has no effect [-Wunused-value]
+10273 |                         val;
+      |                         ^~~

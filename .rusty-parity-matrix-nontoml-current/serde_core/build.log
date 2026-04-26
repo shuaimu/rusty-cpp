@@ -1,0 +1,27 @@
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp: In function ‘void ser::impls::test_format_u8()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp:9356:28: warning: possibly dangling reference to a temporary [-Wdangling-reference]
+ 9356 |                     auto&& _m0_tmp = rusty::as_bytes(rusty::to_string(i));
+      |                            ^~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp:9356:53: note: the temporary was destroyed at the end of the full expression ‘rusty::as_bytes<std::__cxx11::basic_string<char> >(rusty::to_string(const T&) [with T = unsigned char; std::string = std::__cxx11::basic_string<char>]())’
+ 9356 |                     auto&& _m0_tmp = rusty::as_bytes(rusty::to_string(i));
+      |                                      ~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp: In lambda function:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp:10245:13: warning: statement has no effect [-Wunused-value]
+10245 |             val;
+      |             ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp:10269:21: warning: statement has no effect [-Wunused-value]
+10269 |                     val;
+      |                     ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp:10290:17: warning: statement has no effect [-Wunused-value]
+10290 |                 val;
+      |                 ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp: In member function ‘rusty::fmt::Result de::WithDecimalPoint::fmt(rusty::fmt::Formatter&) const’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp:10323:25: warning: statement has no effect [-Wunused-value]
+10323 |                         val;
+      |                         ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp:10344:29: warning: statement has no effect [-Wunused-value]
+10344 |                             val;
+      |                             ^~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/serde_core/runner.cpp:10366:25: warning: statement has no effect [-Wunused-value]
+10366 |                         val;
+      |                         ^~~

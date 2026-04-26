@@ -1,0 +1,71 @@
+  tests_drain PASSED
+  tests_drain_forget PASSED
+  tests_drain_overflow PASSED (expected panic)
+  tests_drain_rev PASSED
+  tests_empty_macro PASSED
+  tests_grow_spilled_same_size PASSED
+  tests_grow_to_shrink PASSED
+  tests_insert_many_panic_panic_early_at_end PASSED
+  tests_insert_many_panic_panic_early_at_start PASSED
+  tests_insert_many_panic_panic_early_in_middle PASSED
+  tests_insert_many_panic_panic_late_at_end PASSED
+  tests_insert_many_panic_panic_late_at_start PASSED
+  tests_into_iter PASSED
+  tests_into_iter_drop PASSED
+  tests_into_iter_rev PASSED
+  tests_issue_4 PASSED
+  tests_issue_5 PASSED
+  tests_max_dont_panic PASSED
+  tests_max_remove PASSED (expected panic)
+  tests_max_swap_remove PASSED (expected panic)
+  tests_resumable_extend PASSED
+  tests_shrink_to_fit_unspill PASSED
+  tests_test_as_mut PASSED
+  tests_test_as_ref PASSED
+  tests_test_borrow PASSED
+  tests_test_borrow_mut PASSED
+  tests_test_capacity PASSED
+  tests_test_clone_from PASSED
+  tests_test_dedup PASSED
+  tests_test_double_spill PASSED
+  tests_test_drop_panic_smallvec PASSED (expected panic)
+  tests_test_eq PASSED
+  tests_test_exact_size_iterator PASSED
+  tests_test_extend_from_slice PASSED
+  tests_test_from PASSED
+  tests_test_from_slice PASSED
+  tests_test_from_vec PASSED
+  tests_test_hash PASSED
+  tests_test_inline PASSED
+  tests_test_insert_from_slice PASSED
+  tests_test_insert_many PASSED
+  tests_test_insert_many_long_hint PASSED
+  tests_test_insert_many_overflow PASSED
+  tests_test_insert_many_short_hint PASSED
+  tests_test_insert_out_of_bounds PASSED (expected panic)
+  tests_test_into_inner PASSED
+  tests_test_into_iter_as_slice PASSED
+  tests_test_into_iter_clone PASSED
+  tests_test_into_iter_clone_empty_smallvec PASSED
+  tests_test_into_iter_clone_partially_consumed_iterator PASSED
+  tests_test_into_vec PASSED
+  tests_test_invalid_grow PASSED (expected panic)
+  tests_test_ord PASSED
+  tests_test_resize PASSED
+  tests_test_retain PASSED
+  tests_test_size PASSED
+  tests_test_spill PASSED
+  tests_test_truncate PASSED
+  tests_test_with_capacity PASSED
+  tests_test_zero PASSED
+  tests_uninhabited PASSED
+  tests_zero_size_items PASSED
+
+Results: 62 passed, 0 failed
+
+Range end out of bounds
+panic
+panic
+panic
+panic
+panic

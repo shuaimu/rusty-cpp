@@ -1,0 +1,84 @@
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void char_::test_encode_utf8_oob()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:3065:74: warning: comparison of integer expressions of different signedness: ‘int’ and ‘long unsigned int’ [-Wsign-compare]
+ 3065 |                     if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void test_capacity_left()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:3386:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 3386 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:3404:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 3404 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:3422:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 3422 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:3440:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 3440 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:3458:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 3458 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void test_extend_from_slice()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:3480:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 3480 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void test_is_send_sync()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:4358:5: warning: statement has no effect [-Wunused-value]
+ 4358 |     static_cast<const void*>(&data);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:4359:5: warning: statement has no effect [-Wunused-value]
+ 4359 |     static_cast<const void*>(&data);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void test_drop_panic()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:4696:25: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+ 4696 |     array.push(std::move(DropPanic{}));
+      |                ~~~~~~~~~^~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:4696:25: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void test_drop_panic_into_iter()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:4732:25: warning: moving a temporary object prevents copy elision [-Wpessimizing-move]
+ 4732 |     array.push(std::move(DropPanic{}));
+      |                ~~~~~~~~~^~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:4732:25: note: remove ‘std::move’ call
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void test_write()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:4987:66: warning: comparison of integer expressions of different signedness: ‘const long unsigned int’ and ‘int’ [-Wsign-compare]
+ 4987 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:18:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In lambda function:
+/home/shuai/git/rusty-cpp/include/rusty/try.hpp:52:29: warning: moving a local object in a return statement prevents copy elision [-Wpessimizing-move]
+   52 |             return std::move(_rusty_try_result); \
+      |                    ~~~~~~~~~^~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:5177:1: note: in expansion of macro ‘RUSTY_TRY’
+ 5177 | RUSTY_TRY(t_shadow1.try_push_str(text));
+      | ^~~~~~~~~
+/home/shuai/git/rusty-cpp/include/rusty/try.hpp:52:29: note: remove ‘std::move’ call
+   52 |             return std::move(_rusty_try_result); \
+      |                    ~~~~~~~~~^~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:5177:1: note: in expansion of macro ‘RUSTY_TRY’
+ 5177 | RUSTY_TRY(t_shadow1.try_push_str(text));
+      | ^~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void test_default()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:5659:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 5659 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:5676:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 5676 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void test_extend_zst()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:5794:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 5794 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp: In function ‘void test_arraystring_zero_filled_has_some_sanity_checks()’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:5962:66: warning: comparison of integer expressions of different signedness: ‘long unsigned int’ and ‘int’ [-Wsign-compare]
+ 5962 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /home/shuai/git/rusty-cpp/include/rusty/arc.hpp:8,
+                 from /home/shuai/git/rusty-cpp/include/rusty/rusty.hpp:21,
+                 from /home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:15:
+/home/shuai/git/rusty-cpp/include/rusty/option.hpp: In instantiation of ‘bool rusty::operator==(const Option<T>&, const Option<U>&) [with T = long unsigned int; U = int]’:
+/home/shuai/git/rusty-cpp/.rusty-parity-matrix-nontoml-current/arrayvec/runner.cpp:3514:115:   required from here
+ 3514 |             if (!(rusty::detail::deref_if_pointer_like(left_val) == rusty::detail::deref_if_pointer_like(right_val))) {
+      |                                                                                                                   ^
+/home/shuai/git/rusty-cpp/include/rusty/option.hpp:1042:22: warning: comparison of integer expressions of different signedness: ‘const long unsigned int’ and ‘const int’ [-Wsign-compare]
+ 1042 |             return l == r;
+      |                    ~~^~~~

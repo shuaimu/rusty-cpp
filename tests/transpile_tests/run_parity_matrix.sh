@@ -18,7 +18,6 @@ declare -a MATRIX_CRATES=(
     "serde_core"
     "serde"
     "pollster"
-    "toml"
 )
 
 declare -A CRATE_REPO=(
@@ -35,7 +34,6 @@ declare -A CRATE_REPO=(
     ["serde_core"]="https://github.com/serde-rs/serde.git"
     ["serde"]="https://github.com/serde-rs/serde.git"
     ["pollster"]="https://github.com/zesterer/pollster.git"
-    ["toml"]="https://github.com/toml-rs/toml.git"
 )
 
 declare -A CRATE_REF=(
@@ -52,13 +50,11 @@ declare -A CRATE_REF=(
     ["serde_core"]="v1.0.228"
     ["serde"]="v1.0.228"
     ["pollster"]="master"
-    ["toml"]="main"
 )
 
 declare -A CRATE_MANIFEST_REL=(
     ["serde_core"]="serde_core/Cargo.toml"
     ["serde"]="serde/Cargo.toml"
-    ["toml"]="crates/toml/Cargo.toml"
 )
 
 TARGET_CRATE=""
@@ -74,7 +70,7 @@ print_usage() {
 Usage: $(basename "$0") [options]
 
 Run parity matrix across crate set:
-  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags, smallvec, itertools, once_cell, serde_core, serde, pollster, toml
+  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags, smallvec, itertools, once_cell, serde_core, serde, pollster
 
 Options:
   --crate <name>      Run only one matrix crate

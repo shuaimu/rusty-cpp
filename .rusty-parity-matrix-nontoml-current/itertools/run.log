@@ -1,0 +1,10 @@
+  adaptors_test_checked_binomial PASSED
+  next_array_test_push_4 PASSED
+  next_array_test_tracked_drop PASSED
+  next_array_test_zero_len_push PASSED (expected panic)
+  next_array_test_zero_len_take PASSED
+  size_hint_mul_size_hints PASSED
+
+Results: 6 passed, 0 failed
+
+array::at: __n (which is 0) >= _Nm (which is 0)

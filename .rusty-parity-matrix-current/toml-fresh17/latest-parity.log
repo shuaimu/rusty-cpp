@@ -1,0 +1,76 @@
+╔═══════════════════════════════════════════════════╗
+║  Parity Test: toml
+╚═══════════════════════════════════════════════════╝
+
+Discovering targets...
+  Skipping target 'decode' (Example): not test-capable
+  Skipping target 'enum_external' (Example): not test-capable
+  Skipping target 'toml2json' (Example): not test-capable
+  Package: toml
+  Target: toml (Lib) → module toml
+  Target: compliance (Test) → module compliance
+  Target: decoder (Test) → module decoder
+  Target: decoder_compliance (Test) → module decoder_compliance
+  Target: encoder (Test) → module encoder
+  Target: encoder_compliance (Test) → module encoder_compliance
+  Target: encoder_pretty_compliance (Test) → module encoder_pretty_compliance
+  Target: serde (Test) → module serde
+  Target: testsuite (Test) → module testsuite
+  Skipping target 'bench' (Bench): not test-capable
+  Skipping target 'insert_unique_unchecked' (Bench): not test-capable
+  Skipping target 'set_ops' (Bench): not test-capable
+  Skipping target 'with_capacity' (Bench): not test-capable
+  Skipping target 'build-script-build' (Other("custom-build")): not test-capable
+  Skipping target 'bench' (Bench): not test-capable
+  Skipping target 'faststring' (Bench): not test-capable
+  Skipping target 'arithmetic' (Example): not test-capable
+  Skipping target 'c_expression' (Example): not test-capable
+  Skipping target 'css' (Example): not test-capable
+  Skipping target 'custom_error' (Example): not test-capable
+  Skipping target 'http' (Example): not test-capable
+  Skipping target 'ini' (Example): not test-capable
+  Skipping target 'iterator' (Example): not test-capable
+  Skipping target 'json' (Example): not test-capable
+  Skipping target 'json_iterator' (Example): not test-capable
+  Skipping target 'ndjson' (Example): not test-capable
+  Skipping target 's_expression' (Example): not test-capable
+  Skipping target 'string' (Example): not test-capable
+  Skipping target 'arithmetic' (Bench): not test-capable
+  Skipping target 'c_expression' (Bench): not test-capable
+  Skipping target 'http' (Bench): not test-capable
+  Skipping target 'ini' (Bench): not test-capable
+  Skipping target 'json' (Bench): not test-capable
+  Dependencies:
+    equivalent (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/equivalent-1.0.2/Cargo.toml) → module equivalent [registry] (flags: --no-default-features)
+    hashbrown (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hashbrown-0.16.1/Cargo.toml) → module hashbrown [registry] (flags: --no-default-features)
+    serde_core (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_core-1.0.228/Cargo.toml) → module serde_core [registry] (flags: --features alloc,result,std)
+    indexmap (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/indexmap-2.13.0/Cargo.toml) → module indexmap [registry] (flags: --features serde,std)
+    serde_spanned (/home/shuai/git/rusty-cpp/tests/transpile_tests/toml/crates/serde_spanned/Cargo.toml) → module serde_spanned (flags: --features alloc,serde,std)
+    toml_datetime (/home/shuai/git/rusty-cpp/tests/transpile_tests/toml/crates/toml_datetime/Cargo.toml) → module toml_datetime (flags: --features alloc,serde,std)
+    memchr (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memchr-2.8.0/Cargo.toml) → module memchr [registry] (flags: --features alloc,std)
+    winnow (/home/shuai/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winnow-1.0.0/Cargo.toml) → module winnow [registry] (flags: --features alloc,ascii,binary,parser,std)
+    toml_parser (/home/shuai/git/rusty-cpp/tests/transpile_tests/toml/crates/toml_parser/Cargo.toml) → module toml_parser (flags: --features alloc,std)
+    toml_writer (/home/shuai/git/rusty-cpp/tests/transpile_tests/toml/crates/toml_writer/Cargo.toml) → module toml_writer (flags: --features alloc,std)
+
+Stage B: Reusing expanded sources from work dir...
+  dep equivalent (--lib): reused 112 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/equivalent/expanded.rs
+  dep hashbrown (--lib): reused 13531 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/hashbrown/expanded.rs
+  dep serde_core (--lib): reused 38464 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/serde_core/expanded.rs
+  dep indexmap (--lib): reused 9044 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/indexmap/expanded.rs
+  dep serde_spanned (--lib): reused 359 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/serde_spanned/expanded.rs
+  dep toml_datetime (--lib): reused 1757 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/toml_datetime/expanded.rs
+  dep memchr (--lib): reused 11040 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/memchr/expanded.rs
+  dep winnow (--lib): reused 18341 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/winnow/expanded.rs
+  dep toml_parser (--lib): reused 6006 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/toml_parser/expanded.rs
+  dep toml_writer (--lib): reused 1585 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/deps/toml_writer/expanded.rs
+  toml: reused 11053 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/targets/toml/expanded.rs
+  compliance: reused 4692 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/targets/compliance/expanded.rs
+  decoder: reused 138 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/targets/decoder/expanded.rs
+  decoder_compliance: reused 190 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/targets/decoder_compliance/expanded.rs
+  encoder: reused 152 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/targets/encoder/expanded.rs
+  encoder_compliance: reused 312 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/targets/encoder_compliance/expanded.rs
+  encoder_pretty_compliance: reused 289 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/targets/encoder_pretty_compliance/expanded.rs
+  serde: reused 60108 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/targets/serde/expanded.rs
+  testsuite: reused 2542 lines ← /home/shuai/git/rusty-cpp/.rusty-parity-matrix-current/toml-fresh17/targets/testsuite/expanded.rs
+  Pruned unused registry dependencies: equivalent, hashbrown, indexmap, memchr, winnow
+Stage C: Transpiling to C++...
