@@ -1562,6 +1562,24 @@ auto split_at(std::span<Elem, Extent> span, Mid mid) {
     return std::make_tuple(span.first(mid_index), span.subspan(mid_index));
 }
 
+// Split a span into `(first, rest)` where `first` is a borrowed element.
+// Mirrors Rust `[T]::split_first`.
+template<typename Elem, std::size_t Extent>
+auto split_first(std::span<Elem, Extent> span) {
+    using Tail = std::span<Elem, std::dynamic_extent>;
+    using Pair = std::tuple<Elem&, Tail>;
+    using Opt = Option<Pair>;
+    if (span.empty()) {
+        return Opt(None);
+    }
+    return Opt(Pair{span[0], Tail(span.subspan(1))});
+}
+
+template<typename Container>
+auto split_first(Container& container) {
+    return split_first(slice_full(container));
+}
+
 template<typename Container, typename Mid>
 requires (!std::is_same_v<std::remove_cvref_t<Container>, std::string_view>)
 auto split_at(Container& container, Mid mid) {

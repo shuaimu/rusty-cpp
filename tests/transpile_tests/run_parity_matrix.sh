@@ -16,6 +16,7 @@ declare -a MATRIX_CRATES=(
     "itertools"
     "once_cell"
     "serde_bytes"
+    "serde_repr"
     "serde_core"
     "serde"
     "pollster"
@@ -33,6 +34,7 @@ declare -A CRATE_REPO=(
     ["itertools"]="https://github.com/rust-itertools/itertools.git"
     ["once_cell"]="https://github.com/matklad/once_cell.git"
     ["serde_bytes"]="https://github.com/serde-rs/bytes.git"
+    ["serde_repr"]="https://github.com/dtolnay/serde-repr.git"
     ["serde_core"]="https://github.com/serde-rs/serde.git"
     ["serde"]="https://github.com/serde-rs/serde.git"
     ["pollster"]="https://github.com/zesterer/pollster.git"
@@ -50,6 +52,7 @@ declare -A CRATE_REF=(
     ["itertools"]="v0.14.0"
     ["once_cell"]="v1.21.4"
     ["serde_bytes"]="0.11.19"
+    ["serde_repr"]="0.1.20"
     ["serde_core"]="v1.0.228"
     ["serde"]="v1.0.228"
     ["pollster"]="master"
@@ -73,7 +76,7 @@ print_usage() {
 Usage: $(basename "$0") [options]
 
 Run parity matrix across crate set:
-  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags, smallvec, itertools, once_cell, serde_bytes, serde_core, serde, pollster
+  either, tap, cfg-if, take_mut, arrayvec, semver, bitflags, smallvec, itertools, once_cell, serde_bytes, serde_repr, serde_core, serde, pollster
 
 Options:
   --crate <name>      Run only one matrix crate

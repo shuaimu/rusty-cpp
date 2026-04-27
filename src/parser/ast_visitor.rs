@@ -921,7 +921,7 @@ pub fn extract_class(entity: &Entity) -> Class {
     let mut has_non_virtual_methods = false;
     let mut all_methods_pure_virtual = true; // Start true, set false if we find non-pure method
     let mut has_any_method = false; // Track if there are any methods to check
-                                    // Copy semantics tracking
+    // Copy semantics tracking
     let mut has_copy_constructor = false;
     let mut has_copy_assignment = false;
     let mut copy_constructor_deleted = false;

@@ -299,6 +299,24 @@ public:
         len_ += other.len_;
         ensure_null_terminated();
     }
+
+    void extend(std::string_view other) {
+        if (other.empty()) return;
+        if (len_ + other.size() >= capacity_) {
+            grow(len_ + other.size() + 1);
+        }
+        std::memcpy(data_ + len_, other.data(), other.size());
+        len_ += other.size();
+        ensure_null_terminated();
+    }
+
+    void extend(const std::string& other) {
+        extend(std::string_view(other));
+    }
+
+    void extend(const String& other) {
+        push_str(other);
+    }
     
     // fmt::Write trait — write string/char into this String.
     fmt::Result write_str(std::string_view s) {
@@ -316,6 +334,21 @@ public:
             throw std::out_of_range("pop from empty String");
         }
         char ch = data_[--len_];
+        ensure_null_terminated();
+        return ch;
+    }
+
+    // Remove and return one byte at index. This mirrors common transpiled
+    // call sites that operate on ASCII punctuation.
+    char remove(size_t idx) {
+        if (idx >= len_) {
+            throw std::out_of_range("remove index out of bounds");
+        }
+        char ch = data_[idx];
+        if (idx + 1 < len_) {
+            std::memmove(data_ + idx, data_ + idx + 1, len_ - idx - 1);
+        }
+        --len_;
         ensure_null_terminated();
         return ch;
     }

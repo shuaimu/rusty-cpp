@@ -409,11 +409,7 @@ fn extract_compile_config_from_compile_commands(
 
 fn absolutize_if_needed(path: &str, base_dir: &Path) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        base_dir.join(p)
-    }
+    if p.is_absolute() { p } else { base_dir.join(p) }
 }
 
 fn strip_outer_quotes(s: &str) -> &str {

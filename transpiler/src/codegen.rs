@@ -15114,6 +15114,16 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             // Reorder static const members so dependencies come before dependents.
             // E.g., `const ABC = A.bits() | B.bits()` must come after `const A`, `const B`.
             let reordered = Self::reorder_const_members_by_dependency(&methods);
+            let mut instance_method_collision_keys: HashSet<String> = HashSet::new();
+            for impl_item in &reordered {
+                let syn::ImplItem::Fn(method) = impl_item else {
+                    continue;
+                };
+                if method_has_receiver(method) {
+                    instance_method_collision_keys
+                        .insert(impl_method_static_instance_collision_key(method));
+                }
+            }
             let struct_has_emitted_template_params = s.generics.params.iter().any(|param| {
                 matches!(
                     param,
@@ -15136,6 +15146,17 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     if let Some(scope) = self.current_struct_assoc_cpp_types.last_mut() {
                         scope.insert(alias_rust_name, alias_cpp_type.clone());
                         scope.insert(alias_name, alias_cpp_type);
+                    }
+                }
+                if let syn::ImplItem::Fn(method) = impl_item
+                    && !method_has_receiver(method)
+                {
+                    let collision_key = impl_method_static_instance_collision_key(method);
+                    if instance_method_collision_keys.contains(&collision_key) {
+                        // C++ cannot overload static and non-static methods with
+                        // the same signature shape; prefer the receiver-bearing
+                        // method for trait-driven call sites.
+                        continue;
                     }
                 }
                 if can_defer_struct_method_definitions && let syn::ImplItem::Fn(method) = impl_item
@@ -20415,14 +20436,27 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
     fn emitted_template_signature_key(&self, generics: &syn::Generics) -> String {
-        let (params, constraints) = self.collect_emitted_template_parts(generics, true);
-        if params.is_empty() {
-            return String::new();
+        // Canonicalize template signature for conflict checks by erasing
+        // parameter *names* while keeping arity/kind. C++ treats
+        // `template<typename S>` and `template<typename D>` as the same
+        // signature shape for overload resolution.
+        let mut params: Vec<String> = Vec::new();
+        for param in &generics.params {
+            match param {
+                syn::GenericParam::Type(tp)
+                    if !self.is_type_param_in_scope(&tp.ident.to_string()) =>
+                {
+                    params.push("type".to_string());
+                }
+                syn::GenericParam::Const(cp)
+                    if !self.is_type_param_in_scope(&cp.ident.to_string()) =>
+                {
+                    params.push(format!("const:{}", self.map_type(&cp.ty)));
+                }
+                _ => {}
+            }
         }
-        if constraints.is_empty() {
-            return params.join(",");
-        }
-        format!("{}|{}", params.join(","), constraints.join(" && "))
+        params.join(",")
     }
 
     /// Returns true if key is first-seen in current type scope, false if duplicate.
@@ -46636,6 +46670,18 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             };
             return format!("rusty::{}({})", method_name, receiver);
         }
+        if method_name == "split_first"
+            && args.is_empty()
+            && self.should_lower_slice_deref_method_call(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::split_first({})", receiver);
+        }
         // Rust slice methods `.first()` and `.get(n)` on std::span.
         // In Rust, &[T]::first() -> Option<&T> and &[T]::get(n) -> Option<&T>.
         // In C++, std::span has no such methods, so we emit equivalent expressions.
@@ -46729,6 +46775,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     "(({} < {}.size()) ? {}({}[{}]) : {}(rusty::None))",
                     idx, receiver, opt_type, receiver, idx, opt_type
                 );
+            }
+            if method_name == "split_first" && args.is_empty() {
+                return format!("rusty::split_first({})", receiver);
             }
         }
         // Rust Vec/ArrayVec/SmallVec-style `.get(index)` fallback surface.
@@ -48835,6 +48884,12 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     all_args.join(", ")
                 ));
             }
+            if method_name == "deserialize_in_place" && all_args.len() == 3 {
+                return Some(format!(
+                    "::de::rusty_ext::deserialize_in_place({})",
+                    all_args.join(", ")
+                ));
+            }
             if method_name == "fmt" && all_args.len() == 2 {
                 return Some(format!(
                     "::de::rusty_ext::fmt({}, {})",
@@ -48906,7 +48961,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
     fn emit_serialize_dispatch_call(&self, value_expr: &str, serializer_expr: &str) -> String {
         format!(
-            "([&](auto&& __self, auto&& __serializer) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }}) {{ return std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }} else {{ return ::ser::impls::rusty_ext::serialize(std::forward<decltype(__self)>(__self), std::forward<decltype(__serializer)>(__serializer)); }} }})({}, {})",
+            "([&](auto&& __self, auto&& __serializer) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }}) {{ return std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }} else {{ return ::ser::rusty_ext::serialize(std::forward<decltype(__self)>(__self), std::forward<decltype(__serializer)>(__serializer)); }} }})({}, {})",
             value_expr, serializer_expr
         )
     }
@@ -74176,6 +74231,38 @@ fn find_impl_method_conflict_index(items: &[syn::ImplItem], key: &str) -> Option
     })
 }
 
+fn method_has_receiver(method: &syn::ImplItemFn) -> bool {
+    matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_)))
+}
+
+/// C++ signature-shape key used to suppress static/member duplicate emissions.
+/// This erases receiver/static distinctions and template parameter names.
+fn impl_method_static_instance_collision_key(method: &syn::ImplItemFn) -> String {
+    let mut params = Vec::new();
+    for arg in &method.sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            params.push(normalize_token_text(pt.ty.to_token_stream().to_string()));
+        }
+    }
+    let params_key = params.join(",");
+    let generics_key = method
+        .sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|param| match param {
+            syn::GenericParam::Type(_) => Some("type".to_string()),
+            syn::GenericParam::Const(cp) => Some(format!(
+                "const:{}",
+                normalize_token_text(cp.ty.to_token_stream().to_string())
+            )),
+            syn::GenericParam::Lifetime(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{}|{}|{}", method.sig.ident, generics_key, params_key)
+}
+
 /// Build a deterministic conflict key for merged impl methods.
 /// Return type is intentionally excluded because C++ cannot overload by return type.
 fn impl_method_conflict_key(method: &syn::ImplItemFn) -> String {
@@ -74608,6 +74695,106 @@ inline bool is_available() {\n\
 }\n\
 }\n\
 } // namespace rusty\n\
+namespace de {\n\
+namespace impls {\n\
+namespace rusty_ext {\n\
+}\n\
+}\n\
+namespace detail {\n\
+template<typename T>\n\
+struct is_phantom_data : std::false_type {};\n\
+template<typename U>\n\
+struct is_phantom_data<rusty::PhantomData<U>> : std::true_type {};\n\
+template<typename T>\n\
+inline constexpr bool is_phantom_data_v =\n\
+    is_phantom_data<std::remove_cv_t<std::remove_reference_t<T>>>::value;\n\
+}\n\
+namespace rusty_ext {\n\
+template<typename Seed, typename Deserializer>\n\
+decltype(auto) deserialize(Seed&& seed, Deserializer&& deserializer) {\n\
+    if constexpr (requires {\n\
+        std::forward<Seed>(seed).deserialize(std::forward<Deserializer>(deserializer));\n\
+    }) {\n\
+        return std::forward<Seed>(seed).deserialize(std::forward<Deserializer>(deserializer));\n\
+    } else if constexpr (detail::is_phantom_data_v<Seed>) {\n\
+        using SeedType = std::remove_cv_t<std::remove_reference_t<Seed>>;\n\
+        using Target = typename SeedType::value_type;\n\
+        if constexpr (requires { Target::deserialize(std::forward<Deserializer>(deserializer)); }) {\n\
+            return Target::deserialize(std::forward<Deserializer>(deserializer));\n\
+        } else if constexpr (requires {\n\
+            de::impls::rusty_ext::deserialize(\n\
+                std::forward<Seed>(seed), std::forward<Deserializer>(deserializer));\n\
+        }) {\n\
+            return de::impls::rusty_ext::deserialize(\n\
+                std::forward<Seed>(seed), std::forward<Deserializer>(deserializer));\n\
+        } else {\n\
+            return std::forward<Seed>(seed).deserialize(std::forward<Deserializer>(deserializer));\n\
+        }\n\
+    } else if constexpr (requires {\n\
+        de::impls::rusty_ext::deserialize(\n\
+            std::forward<Seed>(seed), std::forward<Deserializer>(deserializer));\n\
+    }) {\n\
+        return de::impls::rusty_ext::deserialize(\n\
+            std::forward<Seed>(seed), std::forward<Deserializer>(deserializer));\n\
+    } else if constexpr (requires {\n\
+        std::remove_cv_t<std::remove_reference_t<Seed>>::deserialize(\n\
+            std::forward<Deserializer>(deserializer));\n\
+    }) {\n\
+        using SeedType = std::remove_cv_t<std::remove_reference_t<Seed>>;\n\
+        return SeedType::deserialize(std::forward<Deserializer>(deserializer));\n\
+    } else {\n\
+        return std::forward<Seed>(seed).deserialize(std::forward<Deserializer>(deserializer));\n\
+    }\n\
+}\n\
+template<typename Value, typename Deserializer, typename Place>\n\
+decltype(auto) deserialize_in_place(\n\
+    Value&& value,\n\
+    Deserializer&& deserializer,\n\
+    Place&& place) {\n\
+    if constexpr (requires {\n\
+        std::forward<Value>(value).deserialize_in_place(\n\
+            std::forward<Deserializer>(deserializer), std::forward<Place>(place));\n\
+    }) {\n\
+        return std::forward<Value>(value).deserialize_in_place(\n\
+            std::forward<Deserializer>(deserializer), std::forward<Place>(place));\n\
+    } else if constexpr (requires {\n\
+        std::remove_cv_t<std::remove_reference_t<Value>>::deserialize_in_place(\n\
+            std::forward<Deserializer>(deserializer), std::forward<Place>(place));\n\
+    }) {\n\
+        using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;\n\
+        return ValueType::deserialize_in_place(\n\
+            std::forward<Deserializer>(deserializer), std::forward<Place>(place));\n\
+    } else {\n\
+        return std::forward<Value>(value).deserialize_in_place(\n\
+            std::forward<Deserializer>(deserializer), std::forward<Place>(place));\n\
+    }\n\
+}\n\
+}\n\
+}\n\
+namespace ser {\n\
+namespace impls {\n\
+namespace rusty_ext {\n\
+}\n\
+}\n\
+namespace rusty_ext {\n\
+template<typename Value, typename Serializer>\n\
+decltype(auto) serialize(Value&& value, Serializer&& serializer) {\n\
+    if constexpr (requires {\n\
+        std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));\n\
+    }) {\n\
+        return std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));\n\
+    } else if constexpr (requires {\n\
+        ser::impls::rusty_ext::serialize(\n\
+            std::forward<Value>(value), std::forward<Serializer>(serializer));\n\
+    }) {\n\
+        return ser::impls::rusty_ext::serialize(\n\
+            std::forward<Value>(value), std::forward<Serializer>(serializer));\n\
+    } else {\n\
+        return std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));\n\
+    }\n\
+}\n\
+}\n\
+}\n\
 // DefaultHasher stub — used by expanded #[derive(Hash)] test code.\n\
 struct DefaultHasher {\n\
     std::size_t state = 14695981039346656037ULL;\n\

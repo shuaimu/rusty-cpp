@@ -22,6 +22,7 @@ private:
 
 public:
     Once() = default;
+    static Once new_() { return Once(); }
 
     // Execute the given function exactly once
     // If multiple threads call call_once() simultaneously,

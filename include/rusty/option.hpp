@@ -726,6 +726,15 @@ public:
         return Option<U>(None);
     }
 
+    // Rust parity: Option<&T>::copied() -> Option<T>
+    Option<std::remove_cv_t<T>> copied() const {
+        using U = std::remove_cv_t<T>;
+        if (ptr) {
+            return Option<U>(static_cast<U>(*ptr));
+        }
+        return Option<U>(None);
+    }
+
     Option or_(Option other) const {
         if (ptr) {
             return Option(*ptr);
@@ -917,6 +926,15 @@ public:
         using U = decltype(f(std::declval<const T&>()));
         if (ptr) {
             return Option<U>(f(*ptr));
+        }
+        return Option<U>(None);
+    }
+
+    // Rust parity: Option<&T>::copied() -> Option<T>
+    Option<std::remove_cv_t<T>> copied() const {
+        using U = std::remove_cv_t<T>;
+        if (ptr) {
+            return Option<U>(static_cast<U>(*ptr));
         }
         return Option<U>(None);
     }

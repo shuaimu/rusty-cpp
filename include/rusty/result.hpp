@@ -783,6 +783,48 @@ Result<T, E> Err(U&& error) {
     return Result<T, E>::Err(std::forward<U>(error));
 }
 
+template<typename U>
+struct ok_contextual_value {
+    using stored_t = std::decay_t<U>;
+    stored_t value;
+
+    template<typename T, typename E>
+    operator Result<T, E>() && {
+        return Result<T, E>::Ok(std::move(value));
+    }
+
+    template<typename T, typename E>
+    operator Result<T, E>() const& {
+        return Result<T, E>::Ok(value);
+    }
+};
+
+template<typename U>
+struct err_contextual_value {
+    using stored_t = std::decay_t<U>;
+    stored_t error;
+
+    template<typename T, typename E>
+    operator Result<T, E>() && {
+        return Result<T, E>::Err(std::move(error));
+    }
+
+    template<typename T, typename E>
+    operator Result<T, E>() const& {
+        return Result<T, E>::Err(error);
+    }
+};
+
+template<typename U>
+ok_contextual_value<U> Ok(U&& value) {
+    return ok_contextual_value<U>{std::forward<U>(value)};
+}
+
+template<typename U>
+err_contextual_value<U> Err(U&& error) {
+    return err_contextual_value<U>{std::forward<U>(error)};
+}
+
 } // namespace rusty
 
 #endif // RUSTY_RESULT_HPP

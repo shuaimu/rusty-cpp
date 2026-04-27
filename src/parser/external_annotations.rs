@@ -692,7 +692,7 @@ mod tests {
         // Unqualified name should match qualified annotation
         assert_eq!(annotations.is_function_safe("swap"), Some(true)); // safe
         assert_eq!(annotations.is_function_safe("helper"), Some(false)); // unsafe
-                                                                         // Qualified name should still work
+        // Qualified name should still work
         assert_eq!(annotations.is_function_safe("std::swap"), Some(true)); // safe
     }
 

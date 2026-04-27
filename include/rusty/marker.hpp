@@ -6,6 +6,8 @@ namespace rusty {
 // Zero-sized marker used to carry type/lifetime information in transpiled code.
 template<typename T>
 struct PhantomData {
+    using value_type = T;
+
     constexpr PhantomData() noexcept = default;
 
     template<typename U>

@@ -501,9 +501,7 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "std::char::from_u32"
         | "core::char::from_u32"
         | "char::from_u32"
-        | "char32_t::from_u32" => {
-            Some("rusty::char_runtime::from_u32")
-        }
+        | "char32_t::from_u32" => Some("rusty::char_runtime::from_u32"),
         "core::fmt::Formatter::debug_tuple_field1_finish" => {
             Some("rusty::fmt::Formatter::debug_tuple_field1_finish")
         }
