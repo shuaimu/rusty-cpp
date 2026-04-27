@@ -12,10 +12,32 @@
 #include "../send_trait.hpp"
 #include "../send_impls.hpp"
 
-// Platform-specific CPU pause instruction
+// Platform-specific CPU pause instruction.
+//
+// On x86 we ordinarily emit `_mm_pause()` from `<immintrin.h>`. That
+// header pulls a large set of `static __inline__` intrinsic
+// declarations into every TU and, in C++23 named-module GMFs, can
+// trigger clang21+'s "definition with same mangled name as another
+// definition" error when the importer also reaches `<immintrin.h>`
+// directly (see hashmap.hpp for the full diagnosis).
+//
+// To stay buildable in modular code, callers can define
+// `RUSTY_PORTABLE_INTRINSICS` project-wide; we then fall back to
+// the compiler builtin `__builtin_ia32_pause()` (clang/gcc) which
+// emits the same `pause` instruction without dragging the header
+// into the GMF. Non-modular callers leave the macro undefined and
+// keep the original `<immintrin.h>` path.
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-    #include <immintrin.h>
-    #define CPU_RELAX() _mm_pause()
+    #if defined(RUSTY_PORTABLE_INTRINSICS)
+        #if defined(__GNUC__) || defined(__clang__)
+            #define CPU_RELAX() __builtin_ia32_pause()
+        #else
+            #define CPU_RELAX() std::this_thread::yield()
+        #endif
+    #else
+        #include <immintrin.h>
+        #define CPU_RELAX() _mm_pause()
+    #endif
 #elif defined(__aarch64__) || defined(__arm__)
     #define CPU_RELAX() __asm__ __volatile__("yield" ::: "memory")
 #else

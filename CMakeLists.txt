@@ -40,6 +40,10 @@ set(TEST_SOURCES
     tests/rusty_hashmap_test.cpp
     tests/rusty_hashset_test.cpp
 
+    # Portable-intrinsics opt-out smoke test (HashMap scalar fallback +
+    # mpsc_lockfree CPU_RELAX builtin path under RUSTY_PORTABLE_INTRINSICS).
+    tests/rusty_portable_intrinsics_test.cpp
+
     # BTreeSet tests - RE-ENABLED (fixed range and iterator)
     tests/rusty_btreeset_test.cpp
 

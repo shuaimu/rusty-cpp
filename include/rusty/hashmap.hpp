@@ -8,7 +8,41 @@
 #include <functional>
 #include <stdexcept>
 #include <type_traits>
-#include <immintrin.h>  // For SSE2/AVX2 intrinsics
+
+// SwissTable's `Group` probe ordinarily uses SSE2 intrinsics from
+// `<immintrin.h>` to scan 16 control bytes in a single SIMD pass.
+//
+// Including `<immintrin.h>` here pulls a fleet of `static __inline__`
+// intrinsic declarations (e.g. `_mm_movemask_epi8`) into every TU
+// that includes this header. C++23 named modules surface a clang
+// regression around that: when a module's *global module fragment*
+// pulls in `<immintrin.h>` (typically transitively, e.g. via this
+// header included from a module-interface unit's GMF), and the
+// importer also reaches `<immintrin.h>` directly, clang21+ rejects
+// the duplicate static-inline definitions with
+//
+//   error: definition with same mangled name '_ZL17_mm_movemask_epi8Dv2_x'
+//          as another definition
+//
+// To stay buildable under clang21+ in modular code, callers can opt
+// out of x86 intrinsic headers by defining `RUSTY_PORTABLE_INTRINSICS`
+// project-wide before including any rusty-cpp headers. The portable
+// scalar fallback is functionally identical (a tiny per-scan
+// slowdown — typically single-digit-percent on hot paths). Non-
+// modular callers leave the macro undefined and continue to get the
+// SSE2 path.
+//
+// ODR note: define `RUSTY_PORTABLE_INTRINSICS` consistently across
+// every TU in a single program. Mixing settings produces inline
+// member functions whose bodies differ between TUs, which is an ODR
+// violation. The recommended setup is to set the macro globally via
+// CMake (`add_compile_definitions(RUSTY_PORTABLE_INTRINSICS=1)`) so
+// all object files agree.
+#if !defined(RUSTY_PORTABLE_INTRINSICS) && defined(__SSE2__)
+#  define RUSTY_HASHMAP_USE_SSE2 1
+#  include <immintrin.h>  // For SSE2/AVX2 intrinsics
+#endif
+
 #include "option.hpp"
 #include "vec.hpp"
 
@@ -92,15 +126,16 @@ struct Group {
     // Match bytes equal to value (returns bitmask)
     uint32_t match_byte(uint8_t value) const {
         uint32_t mask = 0;
-        
-#ifdef __SSE2__
+
+#ifdef RUSTY_HASHMAP_USE_SSE2
         // SSE2 accelerated version
         __m128i group = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes));
         __m128i match = _mm_set1_epi8(value);
         __m128i cmp = _mm_cmpeq_epi8(group, match);
         mask = _mm_movemask_epi8(cmp);
 #else
-        // Portable fallback
+        // Portable fallback (also taken when RUSTY_HASHMAP_PORTABLE is
+        // defined, e.g. inside a module's global module fragment).
         for (size_t i = 0; i < GROUP_SIZE; i++) {
             if (bytes[i] == value) {
                 mask |= (1u << i);
@@ -109,19 +144,20 @@ struct Group {
 #endif
         return mask;
     }
-    
+
     // Match empty slots (EMPTY or DELETED)
     uint32_t match_empty_or_deleted() const {
         uint32_t mask = 0;
-        
-#ifdef __SSE2__
+
+#ifdef RUSTY_HASHMAP_USE_SSE2
         // SSE2 version: check if high bit is set
         __m128i group = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bytes));
         __m128i high_bit = _mm_set1_epi8(0x80);
         __m128i cmp = _mm_and_si128(group, high_bit);
         mask = _mm_movemask_epi8(cmp);
 #else
-        // Portable fallback
+        // Portable fallback (also taken when RUSTY_HASHMAP_PORTABLE is
+        // defined, e.g. inside a module's global module fragment).
         for (size_t i = 0; i < GROUP_SIZE; i++) {
             if (is_empty_or_deleted(bytes[i])) {
                 mask |= (1u << i);
