@@ -1467,12 +1467,14 @@ fn discover_local_dependencies_with_workspace_fallback(
     crate_name: &str,
     work_dir: &Path,
     include_registry_packages: bool,
+    include_dev_dependencies: bool,
     cargo_flags: &[String],
 ) -> Result<Vec<metadata::LocalDependencyPackage>, String> {
     let initial = metadata::discover_library_dependencies(
         manifest,
         package,
         include_registry_packages,
+        include_dev_dependencies,
         cargo_flags,
     );
     if initial.is_ok() {
@@ -1496,6 +1498,7 @@ fn discover_local_dependencies_with_workspace_fallback(
             &workspace_manifest,
             Some(selected_package),
             include_registry_packages,
+            include_dev_dependencies,
             cargo_flags,
         );
         if workspace_attempt.is_ok() {
@@ -1524,6 +1527,7 @@ fn discover_local_dependencies_with_workspace_fallback(
         &isolated_manifest,
         package,
         include_registry_packages,
+        include_dev_dependencies,
         cargo_flags,
     )
 }
@@ -1640,6 +1644,39 @@ fn is_runtime_provided_external_crate_root(root: &str) -> bool {
     matches!(root, "winnow" | "memchr")
 }
 
+fn collect_external_crate_todo_markers(cpp: &str) -> Vec<String> {
+    let mut roots = HashSet::new();
+    for line in cpp.lines() {
+        let Some(idx) = line.find("// TODO: external crate '") else {
+            continue;
+        };
+        let marker = &line[idx + "// TODO: external crate '".len()..];
+        let Some(end_idx) = marker.find('\'') else {
+            continue;
+        };
+        let root = marker[..end_idx].trim();
+        if !root.is_empty() {
+            roots.insert(root.to_string());
+        }
+    }
+    let mut out: Vec<String> = roots.into_iter().collect();
+    out.sort();
+    out
+}
+
+fn ensure_no_external_crate_todos(label: &str, cpp: &str, cppm_path: &Path) -> Result<(), String> {
+    let unresolved = collect_external_crate_todo_markers(cpp);
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Transpiled {} still contains unresolved external crate imports: {} (artifact: {})",
+        label,
+        unresolved.join(", "),
+        cppm_path.display()
+    ))
+}
+
 fn rewrite_winnow_namespace_conflicts(cpp: &str) -> String {
     cpp.replace("namespace error::", "namespace winnow_error::")
         .replace("namespace error {", "namespace winnow_error {")
@@ -1648,6 +1685,57 @@ fn rewrite_winnow_namespace_conflicts(cpp: &str) -> String {
 }
 
 fn collect_external_crate_roots_from_source(source: &str) -> HashSet<String> {
+    fn parse_leading_ident(input: &str) -> Option<String> {
+        let mut chars = input.chars();
+        let first = chars.next()?;
+        if !(first == '_' || first.is_ascii_alphabetic()) {
+            return None;
+        }
+        let mut ident = String::new();
+        ident.push(first);
+        for ch in chars {
+            if ch == '_' || ch.is_ascii_alphanumeric() {
+                ident.push(ch);
+            } else {
+                break;
+            }
+        }
+        if ident.is_empty() { None } else { Some(ident) }
+    }
+
+    fn collect_textual_use_root(roots: &mut HashSet<String>, line: &str) {
+        let trimmed = line.trim_start();
+
+        // Handle `extern crate foo;` and `extern crate foo as bar;`.
+        if let Some(rest) = trimmed.strip_prefix("extern crate ") {
+            if let Some(root) = parse_leading_ident(rest.trim_start())
+                && is_external_crate_root_candidate(&root)
+            {
+                roots.insert(root);
+            }
+            return;
+        }
+
+        // Handle `use foo::...;` plus simple `pub use`.
+        let use_rest = if let Some(rest) = trimmed.strip_prefix("use ") {
+            Some(rest)
+        } else if let Some(rest) = trimmed.strip_prefix("pub use ") {
+            Some(rest)
+        } else {
+            None
+        };
+        let Some(rest) = use_rest else {
+            return;
+        };
+
+        let rest = rest.trim_start_matches(':').trim_start_matches(':').trim_start();
+        if let Some(root) = parse_leading_ident(rest)
+            && is_external_crate_root_candidate(&root)
+        {
+            roots.insert(root);
+        }
+    }
+
     struct RootCollector {
         roots: HashSet<String>,
     }
@@ -1664,14 +1752,22 @@ fn collect_external_crate_roots_from_source(source: &str) -> HashSet<String> {
         }
     }
 
-    let Ok(file) = syn::parse_file(source) else {
-        return HashSet::new();
-    };
-    let mut collector = RootCollector {
-        roots: HashSet::new(),
-    };
-    syn::visit::Visit::visit_file(&mut collector, &file);
-    collector.roots
+    let mut roots = HashSet::new();
+    if let Ok(file) = syn::parse_file(source) {
+        let mut collector = RootCollector {
+            roots: HashSet::new(),
+        };
+        syn::visit::Visit::visit_file(&mut collector, &file);
+        roots.extend(collector.roots);
+    }
+
+    // Fallback for expanded snippets `syn` cannot parse (or partially misses):
+    // collect crate roots from textual `use` / `extern crate` lines.
+    for line in source.lines() {
+        collect_textual_use_root(&mut roots, line);
+    }
+
+    roots
 }
 
 #[derive(Debug, Clone)]
@@ -1679,6 +1775,7 @@ struct ParityDependencyTarget {
     package_name: String,
     manifest_path: PathBuf,
     module_name: String,
+    extern_crate_roots: Vec<String>,
     is_registry: bool,
     cargo_flags: Vec<String>,
 }
@@ -2045,6 +2142,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         crate_name,
         &work_dir,
         false,
+        true,
         &cargo_flags,
     )?;
     let local_dependency_manifests: HashSet<PathBuf> = local_dependency_packages
@@ -2058,9 +2156,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         crate_name,
         &work_dir,
         true,
+        true,
         &cargo_flags,
     )?;
     let mut dependency_targets: Vec<ParityDependencyTarget> = Vec::new();
+    let mut non_library_dependency_roots: HashSet<String> = HashSet::new();
     for dep in dependency_packages {
         let dep_project_dir = dep
             .manifest_path
@@ -2080,13 +2180,28 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         {
             let is_registry = !local_dependency_manifests.contains(&dep.manifest_path);
             let dep_cargo_flags = dependency_expand_cargo_flags(&dep.resolved_features);
+            let mut extern_crate_roots = dep.extern_crate_roots.clone();
+            extern_crate_roots.push(dep.name.replace('-', "_"));
+            extern_crate_roots.push(lib_target.module_name.clone());
+            extern_crate_roots.retain(|root| is_external_crate_root_candidate(root));
+            extern_crate_roots.sort();
+            extern_crate_roots.dedup();
             dependency_targets.push(ParityDependencyTarget {
                 package_name: dep.name,
                 manifest_path: dep.manifest_path,
                 module_name: lib_target.module_name.clone(),
+                extern_crate_roots,
                 is_registry,
                 cargo_flags: dep_cargo_flags,
             });
+        } else {
+            let mut extern_crate_roots = dep.extern_crate_roots.clone();
+            extern_crate_roots.push(dep.name.replace('-', "_"));
+            for root in extern_crate_roots {
+                if is_external_crate_root_candidate(&root) {
+                    non_library_dependency_roots.insert(root);
+                }
+            }
         }
     }
     if !dependency_targets.is_empty() {
@@ -2097,15 +2212,30 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             } else {
                 format!(" (flags: {})", dep.cargo_flags.join(" "))
             };
+            let dep_roots_display = if dep.extern_crate_roots.is_empty() {
+                String::new()
+            } else {
+                format!(" (roots: {})", dep.extern_crate_roots.join(","))
+            };
             println!(
-                "    {} ({}) → module {}{}{}",
+                "    {} ({}) → module {}{}{}{}",
                 dep.package_name,
                 dep.manifest_path.display(),
                 dep.module_name,
                 if dep.is_registry { " [registry]" } else { "" },
-                dep_flags_display
+                dep_flags_display,
+                dep_roots_display
             );
         }
+    }
+    if !non_library_dependency_roots.is_empty() {
+        let mut alias_only_roots: Vec<String> = non_library_dependency_roots.iter().cloned().collect();
+        alias_only_roots.sort();
+        alias_only_roots.dedup();
+        println!(
+            "  Non-library dependency roots (alias-only): {}",
+            alias_only_roots.join(", ")
+        );
     }
     let target_dirs = if args.dry_run {
         HashMap::new()
@@ -2130,7 +2260,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     if args.skip_expand {
         println!("Stage B: Reusing expanded sources from work dir...");
         if args.dry_run {
-            println!("  [dry-run] reuse expanded.rs artifacts in {}", work_dir.display());
+            println!(
+                "  [dry-run] reuse expanded.rs artifacts in {}",
+                work_dir.display()
+            );
         } else {
             for dep in &dependency_targets {
                 let dep_dir = dependency_dirs.get(&dep.module_name).ok_or_else(|| {
@@ -2332,7 +2465,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         let registry_roots: HashSet<String> = dependency_targets
             .iter()
             .filter(|dep| dep.is_registry)
-            .map(|dep| dep.package_name.replace('-', "_"))
+            .flat_map(|dep| dep.extern_crate_roots.iter().cloned())
             .filter(|root| !is_runtime_provided_external_crate_root(root))
             .collect();
 
@@ -2360,7 +2493,12 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 expanded_dependency_sources
                     .iter()
                     .filter(|(dep, _)| dep.is_registry)
-                    .map(|(dep, source)| (dep.package_name.replace('-', "_"), source))
+                    .flat_map(|(dep, source)| {
+                        dep.extern_crate_roots
+                            .iter()
+                            .cloned()
+                            .map(move |root| (root, source))
+                    })
                     .collect();
 
             while let Some(root) = worklist.pop() {
@@ -2380,8 +2518,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 .iter()
                 .filter(|dep| dep.is_registry)
                 .filter_map(|dep| {
-                    let root = dep.package_name.replace('-', "_");
-                    if selected_registry_roots.contains(&root) {
+                    let selected = dep
+                        .extern_crate_roots
+                        .iter()
+                        .any(|root| selected_registry_roots.contains(root));
+                    if selected {
                         None
                     } else {
                         Some(dep.package_name.clone())
@@ -2393,13 +2534,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 if !dep.is_registry {
                     return true;
                 }
-                selected_registry_roots.contains(&dep.package_name.replace('-', "_"))
+                dep.extern_crate_roots
+                    .iter()
+                    .any(|root| selected_registry_roots.contains(root))
             });
             expanded_dependency_sources.retain(|(dep, _)| {
                 if !dep.is_registry {
                     return true;
                 }
-                selected_registry_roots.contains(&dep.package_name.replace('-', "_"))
+                dep.extern_crate_roots
+                    .iter()
+                    .any(|root| selected_registry_roots.contains(root))
             });
 
             if !dropped_registry.is_empty() {
@@ -2441,10 +2586,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             &args.cpp_module_index,
         )?)
     };
-    let flattened_dependency_aliases: HashMap<String, String> = dependency_targets
-        .iter()
-        .map(|dep| (dep.package_name.replace('-', "_"), String::new()))
-        .collect();
+    let mut flattened_dependency_aliases: HashMap<String, String> = HashMap::new();
+    for dep in &dependency_targets {
+        for root in &dep.extern_crate_roots {
+            flattened_dependency_aliases.insert(root.clone(), String::new());
+        }
+    }
+    for root in &non_library_dependency_roots {
+        flattened_dependency_aliases
+            .entry(root.clone())
+            .or_insert_with(String::new);
+    }
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
         cpp_module_symbol_index,
@@ -2484,8 +2636,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             let cppm_path = cppm_artifact_path(dep_dir, &dep.module_name);
             if args.incremental_transpile && cppm_path.exists() {
                 let reused = std::fs::read_to_string(&cppm_path).map_err(|e| {
-                    format!("Failed to read transpiled dependency {}: {}", cppm_path.display(), e)
+                    format!(
+                        "Failed to read transpiled dependency {}: {}",
+                        cppm_path.display(),
+                        e
+                    )
                 })?;
+                ensure_no_external_crate_todos(
+                    &format!("dependency '{}'", dep.package_name),
+                    &reused,
+                    &cppm_path,
+                )?;
                 println!(
                     "  dep {} ({}): reused {} lines ← {}",
                     dep.package_name,
@@ -2499,12 +2660,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 });
                 continue;
             }
-            let dep_crate_name = dep.package_name.replace('-', "_");
             let mut dep_options = transpile_options.clone();
             dep_options.external_crate_module_aliases = flattened_dependency_aliases
                 .iter()
                 .filter_map(|(crate_name, mapped)| {
-                    if crate_name == &dep_crate_name {
+                    if dep.extern_crate_roots.iter().any(|root| root == crate_name) {
                         None
                     } else {
                         Some((crate_name.clone(), mapped.clone()))
@@ -2522,6 +2682,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             if dep.package_name == "winnow" {
                 cpp = rewrite_winnow_namespace_conflicts(&cpp);
             }
+            ensure_no_external_crate_todos(
+                &format!("dependency '{}'", dep.package_name),
+                &cpp,
+                &cppm_path,
+            )?;
             std::fs::write(&cppm_path, &cpp)
                 .map_err(|e| format!("Failed to write transpiled dependency: {}", e))?;
             println!(
@@ -2547,8 +2712,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             let cppm_path = cppm_artifact_path(target_dir, &target.module_name);
             if args.incremental_transpile && cppm_path.exists() {
                 let reused = std::fs::read_to_string(&cppm_path).map_err(|e| {
-                    format!("Failed to read transpiled output {}: {}", cppm_path.display(), e)
+                    format!(
+                        "Failed to read transpiled output {}: {}",
+                        cppm_path.display(),
+                        e
+                    )
                 })?;
+                ensure_no_external_crate_todos(
+                    &format!("target '{}'", target.module_name),
+                    &reused,
+                    &cppm_path,
+                )?;
                 println!(
                     "  {}: reused {} lines ← {}",
                     target.module_name,
@@ -2570,6 +2744,11 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 &extension_method_hints,
                 Some(crate_name),
                 &target_options,
+            )?;
+            ensure_no_external_crate_todos(
+                &format!("target '{}'", target.module_name),
+                &cpp,
+                &cppm_path,
             )?;
             std::fs::write(&cppm_path, &cpp)
                 .map_err(|e| format!("Failed to write transpiled output: {}", e))?;
@@ -2860,7 +3039,9 @@ public:
                     }
                     skip_snapbox_position_init = false;
                 }
-                if let Some(position_idx) = line.find("auto position = ::snapbox::data::Position{.file =") {
+                if let Some(position_idx) =
+                    line.find("auto position = ::snapbox::data::Position{.file =")
+                {
                     let prefix = &line[..position_idx];
                     runner_src.push_str(prefix);
                     runner_src.push_str("const auto position = ::snapbox::data::Position{};");
@@ -2959,7 +3140,8 @@ public:
                     }
                 }
                 if trimmed == "return self_.expecting(formatter);" {
-                    runner_src.push_str("if constexpr (requires { self_.expecting(formatter); }) {\n");
+                    runner_src
+                        .push_str("if constexpr (requires { self_.expecting(formatter); }) {\n");
                     runner_src.push_str("    return self_.expecting(formatter);\n");
                     runner_src.push_str("}\n");
                     runner_src.push_str("return formatter.write_str(rusty::to_string(self_));\n");

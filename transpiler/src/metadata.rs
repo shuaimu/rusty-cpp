@@ -19,6 +19,9 @@ pub struct LocalDependencyPackage {
     pub manifest_path: PathBuf,
     /// Features resolved by Cargo for this dependency package.
     pub resolved_features: Vec<String>,
+    /// Crate roots that may reference this package in expanded source
+    /// (including renamed dependency aliases, e.g. `serde` for package `serde_core`).
+    pub extern_crate_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,7 +115,6 @@ struct ResolvedPackage {
     name: String,
     manifest_path: PathBuf,
     source: Option<String>,
-    targets: Vec<Target>,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +133,8 @@ struct ResolveNode {
 
 #[derive(Deserialize)]
 struct ResolveDep {
+    #[serde(default)]
+    name: String,
     pkg: String,
     #[serde(default)]
     dep_kinds: Vec<ResolveDepKind>,
@@ -214,13 +218,6 @@ fn select_resolved_package<'a>(
         .packages
         .first()
         .ok_or_else(|| "No packages found in cargo metadata".to_string())
-}
-
-fn target_is_library_like(target: &Target) -> bool {
-    if target.kind.iter().any(|kind| kind == "proc-macro") {
-        return false;
-    }
-    matches!(TargetKind::from_cargo(&target.kind), TargetKind::Lib)
 }
 
 fn normalize_module_base(name: &str) -> String {
@@ -330,6 +327,20 @@ pub fn discover_targets(
     let mut skipped = Vec::new();
 
     for target in &pkg.targets {
+        if target.kind.iter().any(|kind| kind == "proc-macro") {
+            skipped.push((
+                target.name.clone(),
+                TargetKind::Other("proc-macro".to_string()),
+            ));
+            continue;
+        }
+        if target.kind.iter().any(|kind| kind == "test") && target.name == "compiletest" {
+            skipped.push((
+                target.name.clone(),
+                TargetKind::Other("compiletest-harness".to_string()),
+            ));
+            continue;
+        }
         let kind = TargetKind::from_cargo(&target.kind);
 
         if kind.is_test_capable() {
@@ -360,7 +371,8 @@ pub fn discover_targets(
 ///
 /// Returns dependency packages in deterministic dependency order
 /// (dependencies first), filtered to unconditional normal dependencies
-/// (`kind = null`, `target = null`) and packages exposing a library target.
+/// (`kind = null`, `target = null`; optionally `kind = dev`) from the
+/// resolved graph.
 ///
 /// When `include_registry_packages` is `false`, this preserves legacy behavior
 /// and returns only local path dependencies (`source = null`).
@@ -368,6 +380,7 @@ pub fn discover_library_dependencies(
     manifest_path: &Path,
     package_filter: Option<&str>,
     include_registry_packages: bool,
+    include_dev_dependencies: bool,
     cargo_flags: &[String],
 ) -> Result<Vec<LocalDependencyPackage>, String> {
     let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
@@ -402,6 +415,7 @@ pub fn discover_library_dependencies(
 
     let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut resolved_features_by_id: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut dependency_roots_by_id: HashMap<&str, HashSet<String>> = HashMap::new();
     if let Some(resolve) = &metadata.resolve {
         for node in &resolve.nodes {
             let mut deps = Vec::new();
@@ -412,9 +426,22 @@ pub fn discover_library_dependencies(
                     || dep
                         .dep_kinds
                         .iter()
-                        .any(|kind| kind.kind.is_none() && kind.target.is_none());
+                        .any(|kind| {
+                            if kind.target.is_some() {
+                                return false;
+                            }
+                            kind.kind.is_none()
+                                || (include_dev_dependencies
+                                    && kind.kind.as_deref() == Some("dev"))
+                        });
                 if include {
                     deps.push(dep.pkg.as_str());
+                    if !dep.name.trim().is_empty() {
+                        dependency_roots_by_id
+                            .entry(dep.pkg.as_str())
+                            .or_default()
+                            .insert(dep.name.replace('-', "_"));
+                    }
                 }
             }
             deps.sort_by(|a, b| {
@@ -438,6 +465,7 @@ pub fn discover_library_dependencies(
         packages_by_id: &HashMap<&'a str, &'a ResolvedPackage>,
         edges: &HashMap<&'a str, Vec<&'a str>>,
         resolved_features_by_id: &HashMap<&'a str, Vec<String>>,
+        dependency_roots_by_id: &HashMap<&'a str, HashSet<String>>,
         include_registry_packages: bool,
         visiting: &mut HashSet<String>,
         visited: &mut HashSet<String>,
@@ -456,6 +484,7 @@ pub fn discover_library_dependencies(
                     packages_by_id,
                     edges,
                     resolved_features_by_id,
+                    dependency_roots_by_id,
                     include_registry_packages,
                     visiting,
                     visited,
@@ -476,15 +505,21 @@ pub fn discover_library_dependencies(
         if !include_registry_packages && pkg.source.is_some() {
             return;
         }
-        if !pkg.targets.iter().any(target_is_library_like) {
-            return;
-        }
         out.push(LocalDependencyPackage {
             name: pkg.name.clone(),
             manifest_path: canonicalized_path(&pkg.manifest_path),
             resolved_features: resolved_features_by_id
                 .get(node_id)
                 .cloned()
+                .unwrap_or_default(),
+            extern_crate_roots: dependency_roots_by_id
+                .get(node_id)
+                .map(|roots| {
+                    let mut out: Vec<String> = roots.iter().cloned().collect();
+                    out.sort();
+                    out.dedup();
+                    out
+                })
                 .unwrap_or_default(),
         });
     }
@@ -498,6 +533,7 @@ pub fn discover_library_dependencies(
         &packages_by_id,
         &edges,
         &resolved_features_by_id,
+        &dependency_roots_by_id,
         include_registry_packages,
         &mut visiting,
         &mut visited,
@@ -505,9 +541,28 @@ pub fn discover_library_dependencies(
     );
 
     // Keep deterministic uniqueness in case multiple IDs map to same manifest path.
-    let mut seen_manifests = HashSet::new();
-    deps.retain(|dep| seen_manifests.insert(dep.manifest_path.clone()));
-    Ok(deps)
+    // Merge features and crate roots across IDs that resolve to the same manifest.
+    let mut merged: Vec<LocalDependencyPackage> = Vec::new();
+    let mut by_manifest: HashMap<PathBuf, usize> = HashMap::new();
+    for mut dep in deps {
+        dep.resolved_features.sort();
+        dep.resolved_features.dedup();
+        dep.extern_crate_roots.sort();
+        dep.extern_crate_roots.dedup();
+        if let Some(&idx) = by_manifest.get(&dep.manifest_path) {
+            let existing = &mut merged[idx];
+            existing.resolved_features.extend(dep.resolved_features);
+            existing.resolved_features.sort();
+            existing.resolved_features.dedup();
+            existing.extern_crate_roots.extend(dep.extern_crate_roots);
+            existing.extern_crate_roots.sort();
+            existing.extern_crate_roots.dedup();
+        } else {
+            by_manifest.insert(dep.manifest_path.clone(), merged.len());
+            merged.push(dep);
+        }
+    }
+    Ok(merged)
 }
 
 /// Backward-compatible helper: local path dependencies only.
@@ -515,7 +570,7 @@ pub fn discover_local_path_dependencies(
     manifest_path: &Path,
     package_filter: Option<&str>,
 ) -> Result<Vec<LocalDependencyPackage>, String> {
-    discover_library_dependencies(manifest_path, package_filter, false, &[])
+    discover_library_dependencies(manifest_path, package_filter, false, false, &[])
 }
 
 #[cfg(test)]

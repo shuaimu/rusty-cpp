@@ -18640,27 +18640,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             let resolved_path = self.strip_current_crate_prefix_from_import_path(&resolved_path);
             let resolved_path = self.resolve_nested_local_reexport_path(&resolved_path);
             let normalized_import = normalize_use_import_path(&resolved_path);
-            if normalized_import.starts_with("serde_test::") {
-                let imported = normalized_import
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or_default()
-                    .trim();
-                if imported == "Token" {
-                    self.writeln("using Token = ::rusty::serde_test::Token;");
-                } else if !imported.is_empty() {
-                    self.writeln(&format!(
-                        "using ::rusty::serde_test::{};",
-                        escape_cpp_keyword(imported)
-                    ));
-                } else {
-                    self.writeln(&format!(
-                        "// Rust-only unresolved import: using {};",
-                        resolved_path
-                    ));
-                }
-                continue;
-            }
             if normalized_import.starts_with("std::os::")
                 || normalized_import.starts_with("core::os::")
             {
@@ -75232,83 +75211,6 @@ Target as_ref_into(Input&& input) {\n\
         return static_cast<Target>(std::forward<Input>(input));\n\
     }\n\
 }\n\
-namespace serde_test {\n\
-struct Token {\n\
-    struct Len {\n\
-        rusty::Option<int32_t> value{rusty::None};\n\
-        Len() = default;\n\
-        Len(rusty::None_t) : value(rusty::None) {}\n\
-        Len(rusty::Option<int32_t> v) : value(std::move(v)) {}\n\
-        template<typename I>\n\
-        requires (std::is_integral_v<std::remove_cvref_t<I>>)\n\
-        Len(I v) : value(static_cast<int32_t>(v)) {}\n\
-    };\n\
-    std::string_view name{};\n\
-    std::string_view variant{};\n\
-    Len len{};\n\
-    using Seq = Token;\n\
-    using Map = Token;\n\
-    using Struct = Token;\n\
-    using Enum = Token;\n\
-    using Tuple = Token;\n\
-    using TupleStruct = Token;\n\
-    using TupleVariant = Token;\n\
-    using StructVariant = Token;\n\
-    using UnitStruct = Token;\n\
-    using UnitVariant = Token;\n\
-    using NewtypeStruct = Token;\n\
-    using NewtypeVariant = Token;\n\
-    static const Token None;\n\
-    static const Token Some;\n\
-    static const Token Unit;\n\
-    static const Token SeqEnd;\n\
-    static const Token MapEnd;\n\
-    static const Token StructEnd;\n\
-    static const Token TupleEnd;\n\
-    static const Token TupleStructEnd;\n\
-    static const Token TupleVariantEnd;\n\
-    static const Token StructVariantEnd;\n\
-    template<typename... Args> static Token Bool(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token I8(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token I16(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token I32(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token I64(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token U8(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token U16(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token U32(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token U64(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token F32(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token F64(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token Char(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token Str(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token String(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token BorrowedStr(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token BorrowedBytes(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token Bytes(Args&&...) { return Token{}; }\n\
-    template<typename... Args> static Token ByteBuf(Args&&...) { return Token{}; }\n\
-};\n\
-inline const Token Token::None{};\n\
-inline const Token Token::Some{};\n\
-inline const Token Token::Unit{};\n\
-inline const Token Token::SeqEnd{};\n\
-inline const Token Token::MapEnd{};\n\
-inline const Token Token::StructEnd{};\n\
-inline const Token Token::TupleEnd{};\n\
-inline const Token Token::TupleStructEnd{};\n\
-inline const Token Token::TupleVariantEnd{};\n\
-inline const Token Token::StructVariantEnd{};\n\
-struct Configure {};\n\
-template<typename... Args>\n\
-void assert_tokens(Args&&...) {}\n\
-template<typename... Args>\n\
-void assert_ser_tokens(Args&&...) {}\n\
-template<typename... Args>\n\
-void assert_de_tokens(Args&&...) {}\n\
-template<typename T, typename... Args>\n\
-void assert_de_tokens_error(Args&&...) {}\n\
-template<typename T, typename... Args>\n\
-void assert_ser_tokens_error(Args&&...) {}\n\
-}  // namespace serde_test\n\
 template<typename T>\n\
 constexpr T* addr_of_temp(T& value) {\n\
     return &value;\n\
