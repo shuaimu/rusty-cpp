@@ -532,6 +532,14 @@ public:
         return std::span<T>(values_.data(), values_.size());
     }
 
+    operator std::span<const T>() const noexcept {
+        return as_slice();
+    }
+
+    operator std::span<T>() noexcept {
+        return as_mut_slice();
+    }
+
     auto begin() noexcept { return values_.begin(); }
     auto begin() const noexcept { return values_.begin(); }
     auto end() noexcept { return values_.end(); }
