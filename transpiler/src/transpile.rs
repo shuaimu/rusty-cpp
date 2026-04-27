@@ -334,9 +334,28 @@ pub fn transpile_full_with_options(
     crate_name: Option<&str>,
     options: &TranspileOptions,
 ) -> Result<String, String> {
+    let profile_transpile = std::env::var_os("RUSTY_CPP_PROFILE_TRANSPILE").is_some();
+    let profile_this_call = profile_transpile && rust_source.lines().take(2001).count() >= 2000;
+    let profile_start = std::time::Instant::now();
+    let module_label = module_name.unwrap_or("<none>");
+    let crate_label = crate_name.unwrap_or("<none>");
+    let log_profile = |label: &str| {
+        if profile_this_call {
+            eprintln!(
+                "[rusty-cpp][transpile-full] module={} crate={} {}: {:.3}s",
+                module_label,
+                crate_label,
+                label,
+                profile_start.elapsed().as_secs_f64()
+            );
+        }
+    };
+    log_profile("start");
     let file: syn::File = parse_with_expand_hygiene_fallback(rust_source)
         .map_err(|e| format!("Parse error: {}", e))?;
+    log_profile("parse_with_expand_hygiene_fallback");
     let has_cpp_module_imports = file_contains_cpp_module_imports(&file);
+    log_profile("file_contains_cpp_module_imports");
     if has_cpp_module_imports {
         match options.cpp_module_symbol_index.as_ref() {
             Some(index) if !index.modules.is_empty() => {}
@@ -354,6 +373,7 @@ pub fn transpile_full_with_options(
             }
         }
     }
+    log_profile("cpp_module_index_validation");
     if has_cpp_module_imports {
         if let Some(index) = options.cpp_module_symbol_index.as_ref() {
             let resolution_diagnostics = collect_cpp_foreign_call_resolution_diagnostics(
@@ -369,7 +389,9 @@ pub fn transpile_full_with_options(
             }
         }
     }
+    log_profile("cpp_foreign_call_resolution_diagnostics");
     let cpp_call_unsafe_violations = collect_cpp_foreign_call_unsafe_violations(&file);
+    log_profile("collect_cpp_foreign_call_unsafe_violations");
     if !cpp_call_unsafe_violations.is_empty() {
         return Err(format!(
             "Foreign C++ calls imported through `cpp::` require `unsafe` context:\n- {}",
@@ -391,7 +413,9 @@ pub fn transpile_full_with_options(
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
     }
+    log_profile("codegen_setup");
     codegen.emit_file(&file, module_name);
+    log_profile("codegen_emit_file");
     Ok(codegen.into_output())
 }
 
