@@ -1192,7 +1192,7 @@ struct owned_array_slice {
 template<typename Container>
 struct owned_container_slice {
     using storage_type = std::remove_cv_t<std::remove_reference_t<Container>>;
-    using elem_type = std::remove_cv_t<
+    using elem_type = std::remove_reference_t<
         std::remove_reference_t<decltype(*rusty::as_mut_ptr(std::declval<storage_type&>()))>>;
 
     storage_type storage;
@@ -1353,11 +1353,28 @@ template<typename Container>
 std::span<const uint8_t> as_u8_slice(Container&& container) {
     if constexpr (std::is_pointer_v<std::remove_reference_t<Container>>) {
         return as_u8_slice(*container);
+    } else if constexpr (requires { std::variant_size<std::remove_cvref_t<Container>>::value; }) {
+        return std::visit(
+            [](auto&& value) -> std::span<const uint8_t> {
+                return rusty::as_u8_slice(std::forward<decltype(value)>(value));
+            },
+            std::forward<Container>(container));
+    } else if constexpr (requires { std::forward<Container>(container)._0; }) {
+        return rusty::as_u8_slice(std::forward<Container>(container)._0);
     } else {
         auto slice = rusty::as_slice(std::forward<Container>(container));
         using Elem = std::remove_cv_t<std::remove_reference_t<decltype(*slice.data())>>;
         if constexpr (std::is_same_v<Elem, uint8_t>) {
-            return std::span<const uint8_t>(slice.data(), slice.size());
+            if constexpr (
+                std::is_rvalue_reference_v<Container&&>
+                && !std::is_pointer_v<std::remove_reference_t<Container>>) {
+                thread_local std::vector<uint8_t> _rusty_u8_slice_tmp_owned;
+                _rusty_u8_slice_tmp_owned.assign(slice.begin(), slice.end());
+                return std::span<const uint8_t>(
+                    _rusty_u8_slice_tmp_owned.data(), _rusty_u8_slice_tmp_owned.size());
+            } else {
+                return std::span<const uint8_t>(slice.data(), slice.size());
+            }
         } else {
             thread_local std::vector<uint8_t> _rusty_u8_slice_tmp;
             _rusty_u8_slice_tmp.clear();
