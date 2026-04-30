@@ -290,6 +290,23 @@ public:
     }
     
     // Iterator support (iterate in sorted order)
+    //
+    // The wrapped BTreeMap iterator's `operator*()` returns
+    // `std::tuple<const K&, V&>` (post-Sep-2025 API change from
+    // `std::pair`).  Use `std::get<0>()` to extract the key.
+    //
+    // For `operator->()` we need to return a `const T*` pointing at
+    // a stable address — taking the address of `std::get<0>(*inner_)`
+    // would point at the temporary tuple's first element, which is
+    // a reference (the binding lives only for the expression).
+    // Instead, dereference the underlying std::map iterator directly
+    // (`inner_.it_->first`) — but that field is private. So we go
+    // through the public proxy: bind the tuple to a const-ref local
+    // (which extends the temporary's lifetime to the function scope)
+    // and return the address of its first element. The returned
+    // pointer is valid until the next `operator->` call on the same
+    // iterator instance, matching the existing `auto pair = *inner_`
+    // pattern's lifetime contract.
     class iterator {
     private:
         typename BTreeMap<T, Unit, Compare>::iterator inner_;
@@ -298,12 +315,12 @@ public:
         iterator(typename BTreeMap<T, Unit, Compare>::iterator it) : inner_(it) {}
 
         const T& operator*() {
-            return (*inner_).first;
+            return std::get<0>(*inner_);
         }
 
         const T* operator->() {
             auto pair = *inner_;
-            return &(pair.first);
+            return &std::get<0>(pair);
         }
 
         iterator& operator++() {
@@ -328,12 +345,12 @@ public:
         const_iterator(typename BTreeMap<T, Unit, Compare>::const_iterator it) : inner_(it) {}
 
         const T& operator*() const {
-            return (*inner_).first;
+            return std::get<0>(*inner_);
         }
 
         const T* operator->() const {
             auto pair = *inner_;
-            return &(pair.first);
+            return &std::get<0>(pair);
         }
 
         const_iterator& operator++() {
