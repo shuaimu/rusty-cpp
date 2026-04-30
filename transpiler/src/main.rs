@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Output};
@@ -607,6 +607,95 @@ fn wrap_forward_decl_in_namespaces(namespace_path: &[String], decl: &str) -> Str
     wrapped
 }
 
+fn is_private_namespace_shim(namespace_path: &[String]) -> bool {
+    namespace_path.len() == 1 && namespace_path[0].starts_with("__private")
+}
+
+fn extract_using_namespace_directive(trimmed_no_comment: &str) -> Option<String> {
+    let line = strip_export_prefix(trimmed_no_comment).trim();
+    if !line.starts_with("using namespace ") || !line.ends_with(';') {
+        return None;
+    }
+    Some(line.to_string())
+}
+
+fn using_namespace_target(directive: &str) -> Option<&str> {
+    let target = directive
+        .strip_prefix("using namespace ")?
+        .trim_end_matches(';')
+        .trim();
+    if target.is_empty() {
+        return None;
+    }
+    Some(target)
+}
+
+fn collect_private_namespace_using_shims(content: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut shims: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut namespace_path: Vec<String> = Vec::new();
+    // Stack entries hold how many namespace segments were pushed by this `{`.
+    // `0` means non-namespace scope.
+    let mut brace_stack: Vec<usize> = Vec::new();
+    let has_payload_marker = content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("// extern crate") || trimmed.starts_with("// Rust-only:")
+    });
+    let mut in_payload = !has_payload_marker;
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !in_payload {
+            if trimmed.starts_with("// extern crate") || trimmed.starts_with("// Rust-only:") {
+                in_payload = true;
+                namespace_path.clear();
+                brace_stack.clear();
+            }
+            continue;
+        }
+        let no_comment = trimmed.split("//").next().unwrap_or("").trim();
+        if no_comment.is_empty() {
+            continue;
+        }
+
+        let mut open_braces = no_comment.chars().filter(|ch| *ch == '{').count();
+
+        if let Some(segments) = extract_namespace_segments(no_comment) {
+            let pushed_count = segments.len();
+            namespace_path.extend(segments);
+            brace_stack.push(pushed_count);
+            open_braces = open_braces.saturating_sub(1);
+        }
+
+        if is_private_namespace_shim(&namespace_path)
+            && let Some(directive) = extract_using_namespace_directive(no_comment)
+            && using_namespace_target(&directive).is_some_and(|target| target.starts_with("::private_"))
+        {
+            shims
+                .entry(namespace_path.join("::"))
+                .or_default()
+                .insert(directive);
+        }
+
+        for _ in 0..open_braces {
+            brace_stack.push(0);
+        }
+
+        let close_braces = no_comment.chars().filter(|ch| *ch == '}').count();
+        for _ in 0..close_braces {
+            if let Some(pushed_count) = brace_stack.pop() {
+                for _ in 0..pushed_count {
+                    namespace_path.pop();
+                }
+            }
+        }
+    }
+
+    shims
+}
+
 fn collect_namespace_forward_declarations(content: &str) -> BTreeSet<String> {
     let mut decls = BTreeSet::new();
     let mut namespace_path: Vec<String> = Vec::new();
@@ -1076,6 +1165,31 @@ auto not_a_forward_decl(T value) {
             decls.contains("namespace foo { namespace bar { template<typename T> struct Node; } }")
         );
         assert!(!decls.iter().any(|decl| decl.contains("not_a_forward_decl")));
+    }
+
+    #[test]
+    fn test_collect_private_namespace_using_shims_hoists_private_alias_blocks() {
+        let content = r#"
+namespace __private228 {
+    using namespace ::private_;
+    using namespace ::external::__private;
+}
+
+namespace unrelated {
+    using namespace ::private_;
+}
+
+namespace __private228 {
+    using namespace ::private_::content;
+}
+"#;
+
+        let shims = collect_private_namespace_using_shims(content);
+        let directives = shims.get("__private228").expect("shim directives present");
+        assert!(directives.contains("using namespace ::private_;"));
+        assert!(directives.contains("using namespace ::private_::content;"));
+        assert!(!directives.contains("using namespace ::external::__private;"));
+        assert!(!shims.contains_key("unrelated"));
     }
 
     #[test]
@@ -2597,6 +2711,26 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             .entry(root.clone())
             .or_insert_with(String::new);
     }
+    // Include the root crate's own extern roots so dependency transpilation can
+    // resolve back-edges like `serde -> serde_core` when parity is run for
+    // `serde_core`.
+    let normalized_root_crate = crate_name.replace('-', "_");
+    if is_external_crate_root_candidate(&normalized_root_crate) {
+        flattened_dependency_aliases
+            .entry(normalized_root_crate)
+            .or_insert_with(String::new);
+    }
+    for target in &targets {
+        if !matches!(target.kind, metadata::TargetKind::Lib) {
+            continue;
+        }
+        let root = target.module_name.trim();
+        if is_external_crate_root_candidate(root) {
+            flattened_dependency_aliases
+                .entry(root.to_string())
+                .or_insert_with(String::new);
+        }
+    }
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
         cpp_module_symbol_index,
@@ -2897,14 +3031,37 @@ public:
         runner_src.push_str("template<class... Ts>\n");
         runner_src.push_str("overloaded(Ts...) -> overloaded<Ts...>;\n\n");
         let mut hoisted_forward_decls: BTreeSet<String> = BTreeSet::new();
+        let mut hoisted_private_namespace_shims: BTreeMap<String, BTreeSet<String>> =
+            BTreeMap::new();
         for (_, content) in &cppm_units {
             hoisted_forward_decls.extend(collect_namespace_forward_declarations(content));
+            for (namespace_path, directives) in collect_private_namespace_using_shims(content) {
+                hoisted_private_namespace_shims
+                    .entry(namespace_path)
+                    .or_default()
+                    .extend(directives);
+            }
         }
         if !hoisted_forward_decls.is_empty() {
             runner_src.push_str("// Hoisted namespace forward declarations\n");
             for decl in &hoisted_forward_decls {
                 runner_src.push_str(decl);
                 runner_src.push('\n');
+            }
+            runner_src.push('\n');
+        }
+        if !hoisted_private_namespace_shims.is_empty() {
+            runner_src.push_str("// Hoisted __private namespace using-directive shims\n");
+            for (namespace_path, directives) in &hoisted_private_namespace_shims {
+                runner_src.push_str("namespace ");
+                runner_src.push_str(namespace_path);
+                runner_src.push_str(" {\n");
+                for directive in directives {
+                    runner_src.push_str("    ");
+                    runner_src.push_str(directive);
+                    runner_src.push('\n');
+                }
+                runner_src.push_str("}\n");
             }
             runner_src.push('\n');
         }
