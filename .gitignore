@@ -10,6 +10,7 @@ build/*
 build-tests/
 .apas
 .rusty-parity/
+.rusty-parity-*/
 .rusty-parity-matrix/
 .rusty-parity-matrix*/
 gcm.cache/

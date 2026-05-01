@@ -67,6 +67,8 @@ TARGET_CRATE=""
 WORK_ROOT="${REPO_ROOT}/.rusty-parity-matrix"
 DRY_RUN=0
 KEEP_WORK_DIRS=0
+MODULE_BUILD=1
+CONTINUE_ON_FAIL=0
 FIRST_FAIL_CRATE=""
 FIRST_FAIL_WORK_DIR=""
 FIRST_FAIL_LOG=""
@@ -82,6 +84,9 @@ Options:
   --crate <name>      Run only one matrix crate
   --work-root <dir>   Root directory for per-crate parity work dirs
   --keep-work-dirs    Keep/reuse existing per-crate work dirs
+  --module-build      Force Stage D module build mode (default)
+  --flat-build        Use legacy flat translation-unit Stage D mode
+  --continue-on-fail  Continue running all crates even after failures
   --dry-run           Print planned commands without executing
   --help              Show this help
 EOF
@@ -161,6 +166,18 @@ while [[ $# -gt 0 ]]; do
             KEEP_WORK_DIRS=1
             shift
             ;;
+        --module-build)
+            MODULE_BUILD=1
+            shift
+            ;;
+        --flat-build)
+            MODULE_BUILD=0
+            shift
+            ;;
+        --continue-on-fail)
+            CONTINUE_ON_FAIL=1
+            shift
+            ;;
         --dry-run)
             DRY_RUN=1
             shift
@@ -224,7 +241,11 @@ run_parity_for_crate() {
     if [[ "${DRY_RUN}" -eq 1 ]]; then
         echo "crate: ${crate}"
         echo "  manifest: ${manifest}"
-        echo "  command: cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path ${manifest} --stop-after run --work-dir ${work_dir}"
+        local dry_cmd="cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path ${manifest} --stop-after run --work-dir ${work_dir}"
+        if [[ "${MODULE_BUILD}" -eq 1 ]]; then
+            dry_cmd="${dry_cmd} --module-build"
+        fi
+        echo "  command: ${dry_cmd}"
         return 0
     fi
 
@@ -256,6 +277,9 @@ run_parity_for_crate() {
     if [[ "${KEEP_WORK_DIRS}" -eq 1 ]]; then
         cmd+=(--keep-work-dir)
     fi
+    if [[ "${MODULE_BUILD}" -eq 1 ]]; then
+        cmd+=(--module-build)
+    fi
 
     echo "crate: ${crate}"
     echo "  manifest: ${manifest}"
@@ -283,6 +307,14 @@ echo "  work root: ${WORK_ROOT}"
 if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "  mode: dry-run"
 fi
+if [[ "${MODULE_BUILD}" -eq 1 ]]; then
+    echo "  stage-d: module-build"
+else
+    echo "  stage-d: flat-build"
+fi
+if [[ "${CONTINUE_ON_FAIL}" -eq 1 ]]; then
+    echo "  continue-on-fail: yes"
+fi
 echo "═══════════════════════════════════════════════════════════════════════"
 
 for crate in "${CRATES_TO_RUN[@]}"; do
@@ -292,13 +324,18 @@ for crate in "${CRATES_TO_RUN[@]}"; do
 
     if ! ensure_crate_checkout "${crate}"; then
         FAIL=$((FAIL + 1))
-        break
+        if [[ "${CONTINUE_ON_FAIL}" -eq 0 ]]; then
+            break
+        fi
+        continue
     fi
     if run_parity_for_crate "${crate}"; then
         PASS=$((PASS + 1))
     else
         FAIL=$((FAIL + 1))
-        break
+        if [[ "${CONTINUE_ON_FAIL}" -eq 0 ]]; then
+            break
+        fi
     fi
 done
 

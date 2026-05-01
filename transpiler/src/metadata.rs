@@ -423,17 +423,13 @@ pub fn discover_library_dependencies(
                 // Keep only unconditional normal dependencies; skip dev/build and
                 // target-qualified edges we cannot soundly evaluate here.
                 let include = dep.dep_kinds.is_empty()
-                    || dep
-                        .dep_kinds
-                        .iter()
-                        .any(|kind| {
-                            if kind.target.is_some() {
-                                return false;
-                            }
-                            kind.kind.is_none()
-                                || (include_dev_dependencies
-                                    && kind.kind.as_deref() == Some("dev"))
-                        });
+                    || dep.dep_kinds.iter().any(|kind| {
+                        if kind.target.is_some() {
+                            return false;
+                        }
+                        kind.kind.is_none()
+                            || (include_dev_dependencies && kind.kind.as_deref() == Some("dev"))
+                    });
                 if include {
                     deps.push(dep.pkg.as_str());
                     if !dep.name.trim().is_empty() {
