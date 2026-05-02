@@ -1696,6 +1696,17 @@ decltype(auto) field_end(T&& value) {
     }
 }
 
+template<typename T>
+decltype(auto) field_start(T&& value) {
+    if constexpr (requires { std::forward<T>(value).start_value(); }) {
+        return (std::forward<T>(value).start_value());
+    } else if constexpr (requires { std::forward<T>(value).start; }) {
+        return (std::forward<T>(value).start);
+    } else {
+        return std::forward<T>(value).start();
+    }
+}
+
 /// Iterable range [start, end) — equivalent to Rust's `start..end`.
 template<typename T>
 struct Bound_Unbounded {};

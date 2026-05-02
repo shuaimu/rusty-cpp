@@ -72,6 +72,9 @@ public:
 
     Option(std::nullopt_t) : has_value(false), dummy(0) {}
     
+    template<typename U = T>
+    requires (!std::is_same_v<std::remove_cvref_t<U>, None_t> &&
+              !std::is_same_v<std::remove_cvref_t<U>, std::nullopt_t>)
     Option(T val) : has_value(true), value(std::move(val)) {}
 
     template<typename U>

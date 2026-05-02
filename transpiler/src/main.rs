@@ -857,16 +857,45 @@ fn collect_rusty_test_entries_from_cppm(
     test_entries: &mut Vec<RunnerTestEntry>,
 ) {
     let mut wrapper_should_panic: HashMap<String, bool> = HashMap::new();
+    let mut marker_should_panic: HashMap<String, bool> = HashMap::new();
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some((marker, should_panic)) = parse_libtest_wrapper_metadata(trimmed) {
-            let wrapper = format!("rusty_test_{}", marker_wrapper_suffix(&marker));
+            let marker_suffix = marker_wrapper_suffix(&marker);
+            let wrapper = format!("rusty_test_{}", marker_suffix);
             wrapper_should_panic.insert(wrapper, should_panic);
+            marker_should_panic.insert(marker_suffix, should_panic);
             continue;
         }
         if let Some(fn_name) = extract_rusty_test_wrapper_name(trimmed) {
             if seen_test_fns.insert(fn_name.clone()) {
-                let should_panic = wrapper_should_panic.get(&fn_name).copied().unwrap_or(false);
+                let should_panic = wrapper_should_panic
+                    .get(&fn_name)
+                    .copied()
+                    .or_else(|| {
+                        let label = fn_name.strip_prefix("rusty_test_")?;
+                        marker_should_panic.get(label).copied().or_else(|| {
+                            marker_should_panic
+                                .iter()
+                                .filter_map(|(marker, expected)| {
+                                    if label.len() > marker.len()
+                                        && label.ends_with(marker)
+                                        && label
+                                            .as_bytes()
+                                            .get(label.len() - marker.len() - 1)
+                                            .copied()
+                                            == Some(b'_')
+                                    {
+                                        Some((marker.len(), *expected))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .max_by_key(|(len, _)| *len)
+                                .map(|(_, expected)| expected)
+                        })
+                    })
+                    .unwrap_or(false);
                 test_entries.push(RunnerTestEntry {
                     fn_name: fn_name.clone(),
                     label: test_label_from_fn_name(&fn_name),
@@ -884,14 +913,20 @@ fn test_label_from_fn_name(fn_name: &str) -> String {
         .to_string()
 }
 
-fn parity_cpp_compiler_from_env(cxx: Option<String>) -> String {
+fn parity_cpp_compiler_from_env(cxx: Option<String>, module_build: bool) -> String {
     cxx.map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "g++".to_string())
+        .unwrap_or_else(|| {
+            if module_build {
+                "clang++".to_string()
+            } else {
+                "g++".to_string()
+            }
+        })
 }
 
-fn parity_cpp_compiler() -> String {
-    parity_cpp_compiler_from_env(std::env::var("CXX").ok())
+fn parity_cpp_compiler(module_build: bool) -> String {
+    parity_cpp_compiler_from_env(std::env::var("CXX").ok(), module_build)
 }
 
 fn parse_running_tests_count(line: &str) -> Option<usize> {
@@ -1050,6 +1085,30 @@ export void rusty_test_tests_regular_case() {
     }
 
     #[test]
+    fn test_collect_rusty_test_entries_from_cppm_reads_should_panic_metadata_with_module_prefix() {
+        let content = r#"
+// Rust-only libtest wrapper metadata: marker=tests::panic_case should_panic=yes
+export void rusty_test_arrayvec_tests_panic_case() {
+}
+// Rust-only libtest wrapper metadata: marker=tests::regular_case should_panic=no
+export void rusty_test_arrayvec_tests_regular_case() {
+}
+"#;
+        let mut seen = HashSet::new();
+        let mut entries = Vec::new();
+        collect_rusty_test_entries_from_cppm(content, &mut seen, &mut entries);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].fn_name, "rusty_test_arrayvec_tests_panic_case");
+        assert!(entries[0].should_panic);
+        assert_eq!(
+            entries[1].fn_name,
+            "rusty_test_arrayvec_tests_regular_case"
+        );
+        assert!(!entries[1].should_panic);
+    }
+
+    #[test]
     fn test_is_warning_as_error_failure_detects_attr_based_denials() {
         let stderr = "note: `#[deny(unexpected_cfgs)]` implied by `#[deny(warnings)]`";
         assert!(is_warning_as_error_failure(stderr));
@@ -1068,23 +1127,39 @@ export void rusty_test_tests_regular_case() {
     }
 
     #[test]
-    fn test_parity_cpp_compiler_from_env_defaults_to_gpp() {
-        assert_eq!(parity_cpp_compiler_from_env(None), "g++");
+    fn test_parity_cpp_compiler_from_env_defaults_to_gpp_for_flat_mode() {
+        assert_eq!(parity_cpp_compiler_from_env(None, false), "g++");
+    }
+
+    #[test]
+    fn test_parity_cpp_compiler_from_env_defaults_to_clangpp_for_module_mode() {
+        assert_eq!(parity_cpp_compiler_from_env(None, true), "clang++");
     }
 
     #[test]
     fn test_parity_cpp_compiler_from_env_uses_non_empty_value() {
         assert_eq!(
-            parity_cpp_compiler_from_env(Some("clang++".to_string())),
+            parity_cpp_compiler_from_env(Some("clang++".to_string()), false),
             "clang++"
+        );
+        assert_eq!(
+            parity_cpp_compiler_from_env(Some("g++".to_string()), true),
+            "g++"
         );
     }
 
     #[test]
     fn test_parity_cpp_compiler_from_env_trims_and_falls_back_on_empty() {
-        assert_eq!(parity_cpp_compiler_from_env(Some("  ".to_string())), "g++");
         assert_eq!(
-            parity_cpp_compiler_from_env(Some("  /usr/bin/clang++  ".to_string())),
+            parity_cpp_compiler_from_env(Some("  ".to_string()), false),
+            "g++"
+        );
+        assert_eq!(
+            parity_cpp_compiler_from_env(Some("  ".to_string()), true),
+            "clang++"
+        );
+        assert_eq!(
+            parity_cpp_compiler_from_env(Some("  /usr/bin/clang++  ".to_string()), true),
             "/usr/bin/clang++"
         );
     }
@@ -2185,6 +2260,65 @@ fn collect_named_module_imports(content: &str) -> BTreeSet<String> {
     imports
 }
 
+fn collect_required_named_module_imports(
+    source: &str,
+    current_module: &str,
+    root_to_module_import: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut modules = BTreeSet::new();
+    for root in collect_external_crate_roots_from_source(source) {
+        let Some(module_name) = root_to_module_import.get(&root) else {
+            continue;
+        };
+        let module_name = module_name.trim();
+        if module_name.is_empty() || module_name == current_module {
+            continue;
+        }
+        modules.insert(module_name.to_string());
+    }
+    modules.into_iter().collect()
+}
+
+fn inject_named_module_imports(cpp: &str, required_modules: &[String]) -> String {
+    if required_modules.is_empty() {
+        return cpp.to_string();
+    }
+    let mut missing_modules: BTreeSet<String> = required_modules
+        .iter()
+        .map(|module| module.trim())
+        .filter(|module| !module.is_empty())
+        .map(|module| module.to_string())
+        .collect();
+    if missing_modules.is_empty() {
+        return cpp.to_string();
+    }
+
+    let existing = collect_named_module_imports(cpp);
+    missing_modules.retain(|module| !existing.contains(module));
+    if missing_modules.is_empty() {
+        return cpp.to_string();
+    }
+
+    let mut rewritten = String::new();
+    let mut inserted = false;
+    for line in cpp.split_inclusive('\n') {
+        rewritten.push_str(line);
+        if !inserted && line.trim_start().starts_with("export module ") {
+            for module in &missing_modules {
+                rewritten.push_str("import ");
+                rewritten.push_str(module);
+                rewritten.push_str(";\n");
+            }
+            rewritten.push('\n');
+            inserted = true;
+        }
+    }
+    if !inserted {
+        return cpp.to_string();
+    }
+    rewritten
+}
+
 #[derive(Debug, Clone)]
 struct ModuleBuildUnit {
     module_name: String,
@@ -3205,6 +3339,34 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 .or_insert_with(String::new);
         }
     }
+    let mut root_to_module_import: HashMap<String, String> = HashMap::new();
+    for dep in &dependency_targets {
+        for root in &dep.extern_crate_roots {
+            root_to_module_import.insert(root.clone(), dep.module_name.clone());
+        }
+        let dep_package_root = dep.package_name.replace('-', "_");
+        if is_external_crate_root_candidate(&dep_package_root) {
+            root_to_module_import
+                .entry(dep_package_root)
+                .or_insert_with(|| dep.module_name.clone());
+        }
+    }
+    if let Some(root_lib_target) = targets
+        .iter()
+        .find(|target| matches!(target.kind, metadata::TargetKind::Lib))
+    {
+        let normalized_root_crate = crate_name.replace('-', "_");
+        if is_external_crate_root_candidate(&normalized_root_crate) {
+            root_to_module_import
+                .entry(normalized_root_crate)
+                .or_insert_with(|| root_lib_target.module_name.clone());
+        }
+        if is_external_crate_root_candidate(&root_lib_target.module_name) {
+            root_to_module_import
+                .entry(root_lib_target.module_name.clone())
+                .or_insert_with(|| root_lib_target.module_name.clone());
+        }
+    }
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
         cpp_module_symbol_index,
@@ -3292,6 +3454,12 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             if dep.package_name == "winnow" {
                 cpp = rewrite_winnow_namespace_conflicts(&cpp);
             }
+            let required_imports = collect_required_named_module_imports(
+                source,
+                &dep.module_name,
+                &root_to_module_import,
+            );
+            cpp = inject_named_module_imports(&cpp, &required_imports);
             ensure_no_external_crate_todos(
                 &format!("dependency '{}'", dep.package_name),
                 &cpp,
@@ -3351,7 +3519,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             }
             let mut target_options = transpile_options.clone();
             target_options.external_crate_module_aliases = flattened_dependency_aliases.clone();
-            let cpp = transpile::transpile_full_with_options(
+            let mut cpp = transpile::transpile_full_with_options(
                 source,
                 Some(&target.module_name),
                 &type_map,
@@ -3359,6 +3527,12 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 Some(crate_name),
                 &target_options,
             )?;
+            let required_imports = collect_required_named_module_imports(
+                source,
+                &target.module_name,
+                &root_to_module_import,
+            );
+            cpp = inject_named_module_imports(&cpp, &required_imports);
             ensure_no_external_crate_todos(
                 &format!("target '{}'", target.module_name),
                 &cpp,
@@ -3391,7 +3565,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     // Find rusty-cpp include path (relative to the transpiler binary)
     let include_dir = find_rusty_include_dir();
 
-    let cpp_compiler = parity_cpp_compiler();
+    let cpp_compiler = parity_cpp_compiler(args.module_build);
 
     if args.dry_run {
         if args.module_build {
