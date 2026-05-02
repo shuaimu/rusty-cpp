@@ -153,6 +153,31 @@ struct Target {
     src_path: String,
 }
 
+fn target_has_kind(target: &Target, needle: &str) -> bool {
+    target.kind.iter().any(|kind| kind == needle)
+}
+
+fn target_is_proc_macro(target: &Target) -> bool {
+    target_has_kind(target, "proc-macro")
+}
+
+#[cfg(test)]
+fn target_is_library_like(target: &Target) -> bool {
+    if target_is_proc_macro(target) {
+        return false;
+    }
+    target.kind.iter().any(|kind| {
+        matches!(
+            kind.as_str(),
+            "lib" | "rlib" | "dylib" | "cdylib" | "staticlib"
+        )
+    })
+}
+
+fn target_is_compiletest_harness(target: &Target) -> bool {
+    target_has_kind(target, "test") && target.name == "compiletest"
+}
+
 #[derive(Debug, Clone)]
 struct RawTarget {
     name: String,
@@ -327,14 +352,14 @@ pub fn discover_targets(
     let mut skipped = Vec::new();
 
     for target in &pkg.targets {
-        if target.kind.iter().any(|kind| kind == "proc-macro") {
+        if target_is_proc_macro(target) {
             skipped.push((
                 target.name.clone(),
                 TargetKind::Other("proc-macro".to_string()),
             ));
             continue;
         }
-        if target.kind.iter().any(|kind| kind == "test") && target.name == "compiletest" {
+        if target_is_compiletest_harness(target) {
             skipped.push((
                 target.name.clone(),
                 TargetKind::Other("compiletest-harness".to_string()),
