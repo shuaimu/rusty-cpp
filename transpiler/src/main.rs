@@ -1101,10 +1101,7 @@ export void rusty_test_arrayvec_tests_regular_case() {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].fn_name, "rusty_test_arrayvec_tests_panic_case");
         assert!(entries[0].should_panic);
-        assert_eq!(
-            entries[1].fn_name,
-            "rusty_test_arrayvec_tests_regular_case"
-        );
+        assert_eq!(entries[1].fn_name, "rusty_test_arrayvec_tests_regular_case");
         assert!(!entries[1].should_panic);
     }
 
