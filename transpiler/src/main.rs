@@ -760,6 +760,44 @@ export void rusty_test_arrayvec_tests_regular_case() {
     }
 
     #[test]
+    fn test_collect_named_module_imports_parses_export_import_lines() {
+        let content = "export import serde_core;\nimport serde;\nimport <vector>;\n";
+        let imports = collect_named_module_imports(content);
+        assert!(imports.contains("serde_core"));
+        assert!(imports.contains("serde"));
+        assert!(!imports.contains("<vector>"));
+    }
+
+    #[test]
+    fn test_inject_named_module_imports_emits_export_imports() {
+        let content = "export module my_mod;\n\nexport int f();\n";
+        let out = inject_named_module_imports(
+            content,
+            &["serde".to_string(), "serde_core".to_string()],
+        );
+        assert!(out.contains("export import serde;\n"));
+        assert!(out.contains("export import serde_core;\n"));
+        assert!(!out.lines().any(|line| line.trim() == "import serde;"));
+        assert!(!out
+            .lines()
+            .any(|line| line.trim() == "import serde_core;"));
+    }
+
+    #[test]
+    fn test_inject_named_module_imports_does_not_duplicate_existing_imports() {
+        let content = "export module my_mod;\nimport serde_core;\n\nexport int f();\n";
+        let out = inject_named_module_imports(content, &["serde_core".to_string()]);
+        let count = out
+            .lines()
+            .filter(|line| line.trim() == "import serde_core;")
+            .count();
+        assert_eq!(count, 1);
+        assert!(!out
+            .lines()
+            .any(|line| line.trim() == "export import serde_core;"));
+    }
+
+    #[test]
     fn test_dependency_expand_cargo_flags_handles_default_only() {
         let flags = dependency_expand_cargo_flags(&["default".to_string()]);
         assert!(flags.is_empty());
@@ -1790,7 +1828,7 @@ fn inject_named_module_imports(cpp: &str, required_modules: &[String]) -> String
         rewritten.push_str(line);
         if !inserted && line.trim_start().starts_with("export module ") {
             for module in &missing_modules {
-                rewritten.push_str("import ");
+                rewritten.push_str("export import ");
                 rewritten.push_str(module);
                 rewritten.push_str(";\n");
             }
