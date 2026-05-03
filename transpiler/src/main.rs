@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Output};
@@ -135,10 +135,10 @@ struct ParityTestArgs {
     #[arg(long)]
     allow_empty_tests: bool,
 
-    /// Build Stage D using real C++20 modules (.cppm + import) instead of
-    /// flattening all transpiled units into one translation unit.
-    #[arg(long)]
-    module_build: bool,
+    /// Deprecated no-op: parity build is always module-based.
+    /// Kept only for CLI compatibility with older scripts.
+    #[arg(long, hide = true)]
+    _module_build: bool,
 }
 
 /// Transpile an entire Rust crate in one command.
@@ -440,369 +440,8 @@ fn generate_cmake_from_cargo(cargo_toml_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn is_overloaded_template_line(trimmed: &str) -> bool {
-    trimmed == "template<class... Ts>" || trimmed == "template <class... Ts>"
-}
-
-fn is_overloaded_struct_line(trimmed: &str) -> bool {
-    trimmed.contains("struct overloaded : Ts... { using Ts::operator()...; };")
-}
-
-fn is_overloaded_deduction_line(trimmed: &str) -> bool {
-    trimmed.contains("overloaded(Ts...) -> overloaded<Ts...>;")
-}
-
 fn strip_export_prefix(trimmed: &str) -> &str {
     trimmed.strip_prefix("export ").unwrap_or(trimmed)
-}
-
-fn extract_namespace_segments(trimmed_no_comment: &str) -> Option<Vec<String>> {
-    let line = strip_export_prefix(trimmed_no_comment).trim();
-    let rest = line.strip_prefix("namespace ")?;
-    let brace_idx = rest.find('{')?;
-    let ns_path = rest[..brace_idx].trim();
-    if ns_path.is_empty() || ns_path.contains('=') {
-        return None;
-    }
-    let segments: Vec<String> = ns_path
-        .split("::")
-        .map(|seg| seg.trim())
-        .filter(|seg| !seg.is_empty())
-        .map(|seg| seg.to_string())
-        .collect();
-    if segments.is_empty() {
-        return None;
-    }
-    Some(segments)
-}
-
-fn is_identifier_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
-}
-
-fn is_identifier_char(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
-}
-
-fn parse_type_path(rest: &str) -> usize {
-    let chars: Vec<char> = rest.chars().collect();
-    if chars.is_empty() || !is_identifier_start(chars[0]) {
-        return 0;
-    }
-    let mut i = 1;
-    while i < chars.len() {
-        let ch = chars[i];
-        if is_identifier_char(ch) {
-            i += 1;
-            continue;
-        }
-        if ch == ':' && i + 1 < chars.len() && chars[i + 1] == ':' {
-            // Require a valid identifier start after `::`.
-            if i + 2 >= chars.len() || !is_identifier_start(chars[i + 2]) {
-                break;
-            }
-            i += 2;
-            continue;
-        }
-        break;
-    }
-    i
-}
-
-fn is_named_forward_decl(line: &str, keyword: &str) -> bool {
-    let rest = line.strip_prefix(keyword).map(str::trim_start);
-    let Some(rest) = rest else {
-        return false;
-    };
-    let path_len = parse_type_path(rest);
-    if path_len == 0 {
-        return false;
-    }
-    rest[path_len..].trim() == ";"
-}
-
-fn is_enum_forward_decl(line: &str) -> bool {
-    if let Some(rest) = line.strip_prefix("enum class ").map(str::trim_start) {
-        let path_len = parse_type_path(rest);
-        if path_len == 0 {
-            return false;
-        }
-        let tail = rest[path_len..].trim();
-        if tail == ";" {
-            return true;
-        }
-        if !tail.starts_with(':') || !tail.ends_with(';') {
-            return false;
-        }
-        return !tail.contains('{');
-    }
-    if let Some(rest) = line.strip_prefix("enum ").map(str::trim_start) {
-        let path_len = parse_type_path(rest);
-        if path_len == 0 {
-            return false;
-        }
-        return rest[path_len..].trim() == ";";
-    }
-    false
-}
-
-fn is_simple_forward_decl_line(trimmed_no_comment: &str) -> bool {
-    let line = strip_export_prefix(trimmed_no_comment).trim();
-    if line.is_empty() || line.contains('{') || !line.ends_with(';') {
-        return false;
-    }
-    is_named_forward_decl(line, "struct ")
-        || is_named_forward_decl(line, "class ")
-        || is_named_forward_decl(line, "union ")
-        || is_enum_forward_decl(line)
-}
-
-fn extract_forward_declaration_from_line(
-    trimmed_no_comment: &str,
-    pending_template_line: &mut Option<String>,
-) -> Option<String> {
-    let line = strip_export_prefix(trimmed_no_comment).trim();
-    if line.is_empty() {
-        return None;
-    }
-
-    if line.starts_with("template<") && !line.contains('{') {
-        if line.ends_with('>') && !line.ends_with(";") {
-            *pending_template_line = Some(line.to_string());
-            return None;
-        }
-        if line.ends_with(';')
-            && (line.contains(" struct ")
-                || line.contains(" class ")
-                || line.contains(" union ")
-                || line.contains(" enum "))
-        {
-            *pending_template_line = None;
-            return Some(line.to_string());
-        }
-    }
-
-    if is_simple_forward_decl_line(line) {
-        let decl = if let Some(template) = pending_template_line.take() {
-            format!("{} {}", template, line)
-        } else {
-            line.to_string()
-        };
-        return Some(decl);
-    }
-
-    *pending_template_line = None;
-    None
-}
-
-fn wrap_forward_decl_in_namespaces(namespace_path: &[String], decl: &str) -> String {
-    if namespace_path.is_empty() {
-        return decl.to_string();
-    }
-    let mut wrapped = String::new();
-    for ns in namespace_path {
-        wrapped.push_str("namespace ");
-        wrapped.push_str(ns);
-        wrapped.push_str(" { ");
-    }
-    wrapped.push_str(decl);
-    for _ in namespace_path {
-        wrapped.push_str(" }");
-    }
-    wrapped
-}
-
-fn is_private_namespace_shim(namespace_path: &[String]) -> bool {
-    namespace_path.len() == 1 && namespace_path[0].starts_with("__private")
-}
-
-fn extract_using_namespace_directive(trimmed_no_comment: &str) -> Option<String> {
-    let line = strip_export_prefix(trimmed_no_comment).trim();
-    if !line.starts_with("using namespace ") || !line.ends_with(';') {
-        return None;
-    }
-    Some(line.to_string())
-}
-
-fn using_namespace_target(directive: &str) -> Option<&str> {
-    let target = directive
-        .strip_prefix("using namespace ")?
-        .trim_end_matches(';')
-        .trim();
-    if target.is_empty() {
-        return None;
-    }
-    Some(target)
-}
-
-fn collect_private_namespace_using_shims(content: &str) -> BTreeMap<String, BTreeSet<String>> {
-    let mut shims: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut namespace_path: Vec<String> = Vec::new();
-    // Stack entries hold how many namespace segments were pushed by this `{`.
-    // `0` means non-namespace scope.
-    let mut brace_stack: Vec<usize> = Vec::new();
-    let has_payload_marker = content.lines().any(|line| {
-        let trimmed = line.trim();
-        trimmed.starts_with("// extern crate") || trimmed.starts_with("// Rust-only:")
-    });
-    let mut in_payload = !has_payload_marker;
-
-    for raw_line in content.lines() {
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if !in_payload {
-            if trimmed.starts_with("// extern crate") || trimmed.starts_with("// Rust-only:") {
-                in_payload = true;
-                namespace_path.clear();
-                brace_stack.clear();
-            }
-            continue;
-        }
-        let no_comment = trimmed.split("//").next().unwrap_or("").trim();
-        if no_comment.is_empty() {
-            continue;
-        }
-
-        let mut open_braces = no_comment.chars().filter(|ch| *ch == '{').count();
-
-        if let Some(segments) = extract_namespace_segments(no_comment) {
-            let pushed_count = segments.len();
-            namespace_path.extend(segments);
-            brace_stack.push(pushed_count);
-            open_braces = open_braces.saturating_sub(1);
-        }
-
-        if is_private_namespace_shim(&namespace_path)
-            && let Some(directive) = extract_using_namespace_directive(no_comment)
-            && using_namespace_target(&directive)
-                .is_some_and(|target| target.starts_with("::private_"))
-        {
-            shims
-                .entry(namespace_path.join("::"))
-                .or_default()
-                .insert(directive);
-        }
-
-        for _ in 0..open_braces {
-            brace_stack.push(0);
-        }
-
-        let close_braces = no_comment.chars().filter(|ch| *ch == '}').count();
-        for _ in 0..close_braces {
-            if let Some(pushed_count) = brace_stack.pop() {
-                for _ in 0..pushed_count {
-                    namespace_path.pop();
-                }
-            }
-        }
-    }
-
-    shims
-}
-
-fn collect_namespace_forward_declarations(content: &str) -> BTreeSet<String> {
-    let mut decls = BTreeSet::new();
-    let mut namespace_path: Vec<String> = Vec::new();
-    // Stack entries hold how many namespace segments were pushed by this `{`.
-    // `0` means non-namespace scope.
-    let mut brace_stack: Vec<usize> = Vec::new();
-    let mut pending_template_line: Option<String> = None;
-    let has_payload_marker = content.lines().any(|line| {
-        let trimmed = line.trim();
-        trimmed.starts_with("// extern crate") || trimmed.starts_with("// Rust-only:")
-    });
-    let mut in_payload = !has_payload_marker;
-
-    for raw_line in content.lines() {
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if !in_payload {
-            if trimmed.starts_with("// extern crate") || trimmed.starts_with("// Rust-only:") {
-                in_payload = true;
-                namespace_path.clear();
-                brace_stack.clear();
-                pending_template_line = None;
-            }
-            continue;
-        }
-        let no_comment = trimmed.split("//").next().unwrap_or("").trim();
-        if no_comment.is_empty() {
-            continue;
-        }
-
-        let mut open_braces = no_comment.chars().filter(|ch| *ch == '{').count();
-
-        if let Some(segments) = extract_namespace_segments(no_comment) {
-            let pushed_count = segments.len();
-            namespace_path.extend(segments);
-            brace_stack.push(pushed_count);
-            open_braces = open_braces.saturating_sub(1);
-        }
-
-        if let Some(decl) =
-            extract_forward_declaration_from_line(no_comment, &mut pending_template_line)
-        {
-            decls.insert(wrap_forward_decl_in_namespaces(&namespace_path, &decl));
-        }
-
-        for _ in 0..open_braces {
-            brace_stack.push(0);
-        }
-
-        let close_braces = no_comment.chars().filter(|ch| *ch == '}').count();
-        for _ in 0..close_braces {
-            if let Some(pushed_count) = brace_stack.pop() {
-                for _ in 0..pushed_count {
-                    namespace_path.pop();
-                }
-            }
-        }
-    }
-
-    decls
-}
-
-/// Detect lines that define top-level functions or namespace blocks that
-/// may collide across test targets flattened into one runner.
-/// Note: namespace dedup is cross-file only (within a single cppm,
-/// reopened namespaces with different content are preserved).
-fn is_duplicatable_definition(trimmed: &str) -> bool {
-    let t = strip_export_prefix(trimmed);
-    // `namespace util {`
-    if t.starts_with("namespace ")
-        && t.ends_with('{')
-        && !t.starts_with("namespace rusty")
-        && !t.starts_with("namespace std")
-        && !t.starts_with("namespace core")
-    {
-        return true;
-    }
-    // `void test_eq() {` or `void rusty_test_test_eq() {` or `template<...> void f() {`
-    if (t.starts_with("void ") || t.starts_with("template<"))
-        && t.contains('(')
-        && (t.ends_with('{') || t.ends_with(") {"))
-        && !t.contains("::")
-    {
-        return true;
-    }
-    false
-}
-
-/// Extract a dedup key from a definition line.
-fn extract_definition_key(trimmed: &str) -> Option<String> {
-    let t = strip_export_prefix(trimmed);
-    // For functions and namespaces: use everything before '{'
-    if let Some(before_brace) = t.split('{').next() {
-        let key = before_brace.trim().to_string();
-        if !key.is_empty() {
-            return Some(key);
-        }
-    }
-    None
 }
 
 fn extract_rusty_test_wrapper_name(trimmed: &str) -> Option<String> {
@@ -913,20 +552,14 @@ fn test_label_from_fn_name(fn_name: &str) -> String {
         .to_string()
 }
 
-fn parity_cpp_compiler_from_env(cxx: Option<String>, module_build: bool) -> String {
+fn parity_cpp_compiler_from_env(cxx: Option<String>) -> String {
     cxx.map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            if module_build {
-                "clang++".to_string()
-            } else {
-                "g++".to_string()
-            }
-        })
+        .unwrap_or_else(|| "clang++".to_string())
 }
 
-fn parity_cpp_compiler(module_build: bool) -> String {
-    parity_cpp_compiler_from_env(std::env::var("CXX").ok(), module_build)
+fn parity_cpp_compiler() -> String {
+    parity_cpp_compiler_from_env(std::env::var("CXX").ok())
 }
 
 fn parse_running_tests_count(line: &str) -> Option<usize> {
@@ -940,63 +573,6 @@ fn parse_running_tests_count(line: &str) -> Option<usize> {
         return None;
     }
     rest[..digit_len].parse::<usize>().ok()
-}
-
-fn parse_namespace_alias_definition(trimmed: &str) -> Option<(String, String)> {
-    let rest = trimmed.strip_prefix("namespace ")?;
-    let (alias, _target) = rest.split_once('=')?;
-    let alias = alias.trim();
-    if alias.is_empty() {
-        return None;
-    }
-    if !alias
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    {
-        return None;
-    }
-    let target = _target.trim().trim_end_matches(';').trim();
-    if target.is_empty() {
-        return None;
-    }
-    Some((alias.to_string(), target.to_string()))
-}
-
-fn rewrite_alias_root_global_qualifiers(
-    line: &str,
-    alias_targets: &std::collections::BTreeMap<String, String>,
-) -> String {
-    let mut rewritten = line.to_string();
-    for (alias, target) in alias_targets {
-        let needle = format!("::{}::", alias);
-        let replacement = format!("::{}::", target.trim_start_matches("::"));
-        let mut idx = 0usize;
-        let mut out = String::with_capacity(rewritten.len());
-        while let Some(found) = rewritten[idx..].find(&needle) {
-            let pos = idx + found;
-            let boundary_ok = if pos == 0 {
-                true
-            } else {
-                rewritten
-                    .as_bytes()
-                    .get(pos - 1)
-                    .is_some_and(|b| !b.is_ascii_alphanumeric() && *b != b'_' && *b != b':')
-            };
-            if boundary_ok {
-                out.push_str(&rewritten[idx..pos]);
-                out.push_str(&replacement);
-                idx = pos + needle.len();
-            } else {
-                out.push_str(&rewritten[idx..pos + needle.len()]);
-                idx = pos + needle.len();
-            }
-        }
-        if idx > 0 {
-            out.push_str(&rewritten[idx..]);
-            rewritten = out;
-        }
-    }
-    rewritten
 }
 
 fn baseline_ran_any_tests(work_dir: &Path) -> Option<bool> {
@@ -1124,23 +700,18 @@ export void rusty_test_arrayvec_tests_regular_case() {
     }
 
     #[test]
-    fn test_parity_cpp_compiler_from_env_defaults_to_gpp_for_flat_mode() {
-        assert_eq!(parity_cpp_compiler_from_env(None, false), "g++");
-    }
-
-    #[test]
-    fn test_parity_cpp_compiler_from_env_defaults_to_clangpp_for_module_mode() {
-        assert_eq!(parity_cpp_compiler_from_env(None, true), "clang++");
+    fn test_parity_cpp_compiler_from_env_defaults_to_clangpp() {
+        assert_eq!(parity_cpp_compiler_from_env(None), "clang++");
     }
 
     #[test]
     fn test_parity_cpp_compiler_from_env_uses_non_empty_value() {
         assert_eq!(
-            parity_cpp_compiler_from_env(Some("clang++".to_string()), false),
+            parity_cpp_compiler_from_env(Some("clang++".to_string())),
             "clang++"
         );
         assert_eq!(
-            parity_cpp_compiler_from_env(Some("g++".to_string()), true),
+            parity_cpp_compiler_from_env(Some("g++".to_string())),
             "g++"
         );
     }
@@ -1148,15 +719,11 @@ export void rusty_test_arrayvec_tests_regular_case() {
     #[test]
     fn test_parity_cpp_compiler_from_env_trims_and_falls_back_on_empty() {
         assert_eq!(
-            parity_cpp_compiler_from_env(Some("  ".to_string()), false),
-            "g++"
-        );
-        assert_eq!(
-            parity_cpp_compiler_from_env(Some("  ".to_string()), true),
+            parity_cpp_compiler_from_env(Some("  ".to_string())),
             "clang++"
         );
         assert_eq!(
-            parity_cpp_compiler_from_env(Some("  /usr/bin/clang++  ".to_string()), true),
+            parity_cpp_compiler_from_env(Some("  /usr/bin/clang++  ".to_string())),
             "/usr/bin/clang++"
         );
     }
@@ -1190,84 +757,6 @@ export void rusty_test_arrayvec_tests_regular_case() {
         )
         .expect("write baseline");
         assert_eq!(baseline_ran_any_tests(temp.path()), Some(true));
-    }
-
-    #[test]
-    fn test_collect_namespace_forward_declarations_hoists_nested_structs() {
-        let content = r#"
-namespace private_ {
-    namespace de {
-        namespace content {
-            struct ContentVisitor;
-            rusty::Option<std::string_view> content_as_str(const ::private_::ser::content::Content& content);
-        }
-    }
-    namespace ser {
-        namespace content {
-            struct Content;
-        }
-    }
-}
-"#;
-
-        let decls = collect_namespace_forward_declarations(content);
-        assert!(decls.contains(
-            "namespace private_ { namespace de { namespace content { struct ContentVisitor; } } }"
-        ));
-        assert!(decls.contains(
-            "namespace private_ { namespace ser { namespace content { struct Content; } } }"
-        ));
-    }
-
-    #[test]
-    fn test_collect_namespace_forward_declarations_handles_template_forward_decls() {
-        let content = r#"
-namespace foo {
-namespace bar {
-template<typename E>
-struct Serializer;
-template<typename T> struct Node;
-template<typename T>
-auto not_a_forward_decl(T value) {
-    return value;
-}
-}
-}
-"#;
-
-        let decls = collect_namespace_forward_declarations(content);
-        assert!(decls.contains(
-            "namespace foo { namespace bar { template<typename E> struct Serializer; } }"
-        ));
-        assert!(
-            decls.contains("namespace foo { namespace bar { template<typename T> struct Node; } }")
-        );
-        assert!(!decls.iter().any(|decl| decl.contains("not_a_forward_decl")));
-    }
-
-    #[test]
-    fn test_collect_private_namespace_using_shims_hoists_private_alias_blocks() {
-        let content = r#"
-namespace __private228 {
-    using namespace ::private_;
-    using namespace ::external::__private;
-}
-
-namespace unrelated {
-    using namespace ::private_;
-}
-
-namespace __private228 {
-    using namespace ::private_::content;
-}
-"#;
-
-        let shims = collect_private_namespace_using_shims(content);
-        let directives = shims.get("__private228").expect("shim directives present");
-        assert!(directives.contains("using namespace ::private_;"));
-        assert!(directives.contains("using namespace ::private_::content;"));
-        assert!(!directives.contains("using namespace ::external::__private;"));
-        assert!(!shims.contains_key("unrelated"));
     }
 
     #[test]
@@ -1980,7 +1469,6 @@ struct GeneratedCppmArtifact {
     path: PathBuf,
     module_name: String,
     is_dependency: bool,
-    is_test_target: bool,
 }
 
 fn target_artifacts_root(work_dir: &Path) -> PathBuf {
@@ -3425,7 +2913,6 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                     path: cppm_path,
                     module_name: dep.module_name.clone(),
                     is_dependency: true,
-                    is_test_target: false,
                 });
                 continue;
             }
@@ -3475,11 +2962,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 path: cppm_path,
                 module_name: dep.module_name.clone(),
                 is_dependency: true,
-                is_test_target: false,
             });
         }
 
-        for (target_idx, (target, source)) in expanded_sources.iter().enumerate() {
+        for (target, source) in expanded_sources.iter() {
             let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
                 format!(
                     "Missing target artifact directory for module '{}'",
@@ -3510,7 +2996,6 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                     path: cppm_path,
                     module_name: target.module_name.clone(),
                     is_dependency: false,
-                    is_test_target: target_idx > 0,
                 });
                 continue;
             }
@@ -3547,7 +3032,6 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 path: cppm_path,
                 module_name: target.module_name.clone(),
                 is_dependency: false,
-                is_test_target: target_idx > 0,
             });
         }
     }
@@ -3562,594 +3046,21 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     // Find rusty-cpp include path (relative to the transpiler binary)
     let include_dir = find_rusty_include_dir();
 
-    let cpp_compiler = parity_cpp_compiler(args.module_build);
+    let cpp_compiler = parity_cpp_compiler();
 
     if args.dry_run {
-        if args.module_build {
-            println!(
-                "  [dry-run] module build with {} (precompile .cppm + compile runner imports)",
-                cpp_compiler
-            );
-        } else {
-            println!(
-                "  [dry-run] {} -std=c++20 -I {} -o runner ...",
-                cpp_compiler,
-                include_dir.display(),
-            );
-        }
-    } else {
-        if args.module_build {
-            run_stage_d_module_build(
-                args,
-                &work_dir,
-                &include_dir,
-                &cpp_compiler,
-                &generated_cppm_files,
-            )?;
-        } else {
-            // Generate a runner .cpp that includes all transpiled code + test main
-            let runner_path = work_dir.join("runner.cpp");
-            let binary_path = work_dir.join("runner");
-
-            // Compile only artifacts generated in this run to avoid stale file bleed
-            // when reusing --work-dir with --keep-work-dir.
-            let cppm_files = generated_cppm_files.clone();
-
-            if cppm_files.is_empty() {
-                return Err(
-                    "No .cppm files generated in this run — Stage C may have failed".to_string(),
-                );
-            }
-            let mut cppm_units: Vec<(GeneratedCppmArtifact, String)> = Vec::new();
-            for artifact in &cppm_files {
-                let content = std::fs::read_to_string(&artifact.path)
-                    .map_err(|e| format!("Failed to read {}: {}", artifact.path.display(), e))?;
-                cppm_units.push((artifact.clone(), content));
-            }
-
-            // Generate runner: strip module syntax, add includes, add main
-            let mut runner_src = String::new();
-            runner_src.push_str("// Auto-generated parity test runner\n");
-            runner_src.push_str("#include <cstdint>\n#include <cstddef>\n#include <limits>\n");
-            runner_src.push_str(
-            "#include <variant>\n#include <string>\n#include <optional>\n#include <stdexcept>\n",
+        println!(
+            "  [dry-run] module build with {} (precompile .cppm + compile runner imports)",
+            cpp_compiler
         );
-            runner_src.push_str("#include <iostream>\n#include <cassert>\n#include <vector>\n");
-            runner_src.push_str("#include <functional>\n#include <span>\n#include <cstdlib>\n");
-            runner_src.push_str("#include <rusty/rusty.hpp>\n");
-            runner_src.push_str(
-                "#include <rusty/io.hpp>\n#include <rusty/array.hpp>\n#include <rusty/try.hpp>\n\n",
-            );
-            runner_src.push_str(
-                r#"// Parity shim for external `snapbox` assertions used by upstream Rust tests.
-// This keeps Stage D buildable when registry dependencies are not transpiled.
-namespace snapbox {
-namespace data {
-struct Position {
-    rusty::path::PathBuf file;
-    uint32_t line = 0;
-    uint32_t column = 0;
-};
-
-struct Inline {
-    Position position;
-    std::string_view data;
-
-    std::string_view raw() const { return data; }
-};
-} // namespace data
-
-struct Data {
-    std::string payload;
-
-    std::string_view raw() const { return payload; }
-};
-
-namespace detail {
-template<typename T>
-std::string to_owned_string(T&& value) {
-    if constexpr (requires { value.raw(); }) {
-        return to_owned_string(value.raw());
-    } else if constexpr (std::is_convertible_v<T, std::string_view>) {
-        return std::string(std::string_view(std::forward<T>(value)));
-    } else if constexpr (std::is_convertible_v<T, std::string>) {
-        return std::string(std::forward<T>(value));
     } else {
-        return std::string("<snapbox-data>");
-    }
-}
-} // namespace detail
-
-struct IntoData {
-    template<typename T>
-    static Data into_data(T&& value) {
-        return Data{detail::to_owned_string(std::forward<T>(value))};
-    }
-};
-
-namespace assert_ {
-inline constexpr bool DEFAULT_ACTION_ENV = false;
-} // namespace assert_
-
-class Assert {
-public:
-    static Assert new_() { return Assert{}; }
-
-    Assert& action_env(bool) { return *this; }
-
-    template<typename Left, typename Right>
-    void eq(Left&& left, Right&& right) const {
-        const auto lhs = IntoData::into_data(std::forward<Left>(left)).payload;
-        const auto rhs = IntoData::into_data(std::forward<Right>(right)).payload;
-        if (lhs != rhs) {
-            throw std::runtime_error(
-                std::string("snapbox::Assert::eq failed\nleft:\n")
-                + lhs + "\nright:\n" + rhs
-            );
-        }
-    }
-};
-} // namespace snapbox
-
-"#,
-            );
-            runner_src.push_str("// Overloaded visitor helper\n");
-            runner_src.push_str(
-                "template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };\n",
-            );
-            runner_src.push_str("template<class... Ts>\n");
-            runner_src.push_str("overloaded(Ts...) -> overloaded<Ts...>;\n\n");
-            let mut hoisted_forward_decls: BTreeSet<String> = BTreeSet::new();
-            let mut hoisted_private_namespace_shims: BTreeMap<String, BTreeSet<String>> =
-                BTreeMap::new();
-            for (_, content) in &cppm_units {
-                hoisted_forward_decls.extend(collect_namespace_forward_declarations(content));
-                for (namespace_path, directives) in collect_private_namespace_using_shims(content) {
-                    hoisted_private_namespace_shims
-                        .entry(namespace_path)
-                        .or_default()
-                        .extend(directives);
-                }
-            }
-            if !hoisted_forward_decls.is_empty() {
-                runner_src.push_str("// Hoisted namespace forward declarations\n");
-                for decl in &hoisted_forward_decls {
-                    runner_src.push_str(decl);
-                    runner_src.push('\n');
-                }
-                runner_src.push('\n');
-            }
-            if !hoisted_private_namespace_shims.is_empty() {
-                runner_src.push_str("// Hoisted __private namespace using-directive shims\n");
-                for (namespace_path, directives) in &hoisted_private_namespace_shims {
-                    runner_src.push_str("namespace ");
-                    runner_src.push_str(namespace_path);
-                    runner_src.push_str(" {\n");
-                    for directive in directives {
-                        runner_src.push_str("    ");
-                        runner_src.push_str(directive);
-                        runner_src.push('\n');
-                    }
-                    runner_src.push_str("}\n");
-                }
-                runner_src.push('\n');
-            }
-
-            // Collect test names and transpiled code
-            let mut test_entries: Vec<RunnerTestEntry> = Vec::new();
-            let mut seen_test_fns: HashSet<String> = HashSet::new();
-            let mut seen_definitions: HashSet<String> = HashSet::new();
-            let mut skip_dup_depth: i32 = 0;
-            let mut runtime_prelude_emitted = false;
-            let mut alias_targets_from_module_alias_blocks: std::collections::BTreeMap<
-                String,
-                String,
-            > = std::collections::BTreeMap::new();
-            let module_namespace_markers: Vec<String> = targets
-                .iter()
-                .map(|target| format!("{}::", target.module_name))
-                .collect();
-
-            for (cppm_index, (artifact, content)) in cppm_units.iter().enumerate() {
-                let cppm_path = &artifact.path;
-                let mut pending_overloaded_template = false;
-                let mut skip_snapbox_position_init = false;
-                let mut unit_emitted_runtime_prelude = false;
-                let mut skip_shared_prelude = cppm_index > 0 && runtime_prelude_emitted;
-                let mut in_rusty_module_aliases_block = false;
-                let is_test_target = artifact.is_test_target;
-                let test_entry_start = test_entries.len();
-                collect_rusty_test_entries_from_cppm(
-                    content,
-                    &mut seen_test_fns,
-                    &mut test_entries,
-                );
-                let unit_has_test_wrappers = test_entries.len() > test_entry_start;
-                if is_test_target && !unit_has_test_wrappers {
-                    println!(
-                        "  skipping test target unit without wrappers: {}",
-                        cppm_path.display()
-                    );
-                    continue;
-                }
-                // Known unsupported serde map-key alias template shape in flat runner mode:
-                // nested `using Map = de_key::Map<...>` references appear before the
-                // alias template declaration and fail C++ lookup.
-                let has_alias_template_self_reference = content
-                    .contains("using Map = de_key::Map<")
-                    || content.contains("using Map = ser_key::Map<");
-                if is_test_target && has_alias_template_self_reference {
-                    if test_entries.len() > test_entry_start {
-                        let removed: Vec<String> = test_entries[test_entry_start..]
-                            .iter()
-                            .map(|entry| entry.fn_name.clone())
-                            .collect();
-                        test_entries.truncate(test_entry_start);
-                        for name in removed {
-                            if !test_entries.iter().any(|entry| entry.fn_name == name) {
-                                seen_test_fns.remove(&name);
-                            }
-                        }
-                    }
-                    println!(
-                        "  skipping test target unit with unsupported alias-template map-key declarations: {}",
-                        cppm_path.display()
-                    );
-                    continue;
-                }
-                // Known unsupported testsuite shape: namespace-scope `using ::Value::<Variant>;`
-                // plus map helper imports that currently require enum-variant import
-                // lowering not yet implemented in flat runner mode.
-                let has_unscoped_value_variant_usings =
-                    content.contains("using ::Value::") && content.contains("using ::map::Map;");
-                if is_test_target && has_unscoped_value_variant_usings {
-                    if test_entries.len() > test_entry_start {
-                        let removed: Vec<String> = test_entries[test_entry_start..]
-                            .iter()
-                            .map(|entry| entry.fn_name.clone())
-                            .collect();
-                        test_entries.truncate(test_entry_start);
-                        for name in removed {
-                            if !test_entries.iter().any(|entry| entry.fn_name == name) {
-                                seen_test_fns.remove(&name);
-                            }
-                        }
-                    }
-                    println!(
-                        "  skipping test target unit with unsupported enum-variant using declarations: {}",
-                        cppm_path.display()
-                    );
-                    continue;
-                }
-                // Definitions collected from THIS cppm file — added to
-                // `seen_definitions` at end of file so within-file reopened
-                // namespaces are not falsely deduplicated.
-                let mut this_file_definitions: Vec<String> = Vec::new();
-
-                // Strip module syntax and add code
-                runner_src.push_str(&format!(
-                    "// ── from {} ──\n",
-                    cppm_path.file_name().unwrap().to_string_lossy()
-                ));
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed == "namespace rusty_module_aliases {" {
-                        in_rusty_module_aliases_block = true;
-                    } else if trimmed.starts_with("} // namespace rusty_module_aliases") {
-                        in_rusty_module_aliases_block = false;
-                    } else if in_rusty_module_aliases_block
-                        && let Some((alias, target)) = parse_namespace_alias_definition(trimmed)
-                    {
-                        alias_targets_from_module_alias_blocks.insert(alias, target);
-                    }
-                    if skip_shared_prelude {
-                        // For additional module units, skip the duplicated runtime prelude and
-                        // resume at crate/test payloads (extern crate/use/export item region).
-                        // Also stop skipping when encountering user namespace/struct
-                        // definitions that precede the extern crate marker (e.g.,
-                        // `namespace util { forward decls }` in test targets).
-                        if trimmed.starts_with("// extern crate")
-                            || trimmed.starts_with("// Rust-only:")
-                            || (trimmed.starts_with("export ")
-                                && !trimmed.starts_with("export module "))
-                        {
-                            skip_shared_prelude = false;
-                        } else {
-                            continue;
-                        }
-                    }
-                    if pending_overloaded_template {
-                        if is_overloaded_struct_line(trimmed)
-                            || is_overloaded_deduction_line(trimmed)
-                        {
-                            pending_overloaded_template = false;
-                            continue;
-                        }
-                        runner_src.push_str("template<class... Ts>\n");
-                        pending_overloaded_template = false;
-                    }
-                    if skip_snapbox_position_init {
-                        if !line.contains("const auto inline_ = ::snapbox::data::Inline{") {
-                            continue;
-                        }
-                        skip_snapbox_position_init = false;
-                    }
-                    if let Some(position_idx) =
-                        line.find("auto position = ::snapbox::data::Position{.file =")
-                    {
-                        let prefix = &line[..position_idx];
-                        runner_src.push_str(prefix);
-                        runner_src.push_str("const auto position = ::snapbox::data::Position{};");
-                        runner_src.push('\n');
-                        skip_snapbox_position_init = true;
-                        continue;
-                    }
-                    // Skip module/import/include lines (we provide our own)
-                    if trimmed.starts_with("export module ")
-                        || trimmed.starts_with("import ")
-                        || trimmed.starts_with("export import ")
-                        || trimmed.starts_with("#include ")
-                        || trimmed.starts_with("// Auto-generated")
-                        || trimmed.starts_with("// Do not edit")
-                        || trimmed == "module;"
-                    {
-                        continue;
-                    }
-                    // Skip Rust-only using declarations
-                    if trimmed.starts_with("// Rust-only:")
-                        || trimmed.starts_with("// extern crate")
-                    {
-                        continue;
-                    }
-                    // Skip using declarations for undefined namespaces
-                    let references_target_module_namespace = trimmed
-                        .starts_with("using namespace ")
-                        && module_namespace_markers
-                            .iter()
-                            .any(|module_prefix| trimmed.contains(module_prefix));
-                    if trimmed.starts_with("using ")
-                        && !trimmed.contains('=')
-                        && (trimmed.contains("::Left")
-                            || trimmed.contains("::Right")
-                            || trimmed.contains("iterator::")
-                            || trimmed.contains("into_either::")
-                            || trimmed == "using namespace ;"
-                            || references_target_module_namespace)
-                    {
-                        runner_src.push_str(&format!("// skipped: {}\n", trimmed));
-                        continue;
-                    }
-                    // Skip redefinitions of overloaded helper from transpiled modules.
-                    if is_overloaded_template_line(trimmed) {
-                        pending_overloaded_template = true;
-                        continue;
-                    }
-                    if is_overloaded_struct_line(trimmed) || is_overloaded_deduction_line(trimmed) {
-                        continue;
-                    }
-                    // Strip `export` from declarations, preserving indentation.
-                    // C++ `export` is module syntax; the parity runner is a flat TU.
-                    let line = {
-                        let trimmed_start = line.trim_start();
-                        if let Some(rest) = trimmed_start.strip_prefix("export ") {
-                            let indent_len = line.len() - trimmed_start.len();
-                            let indent = &line[..indent_len];
-                            format!("{}{}", indent, rest)
-                        } else {
-                            line.to_string()
-                        }
-                    };
-                    let line = rewrite_alias_root_global_qualifiers(
-                        &line,
-                        &alias_targets_from_module_alias_blocks,
-                    );
-                    // Skip duplicate top-level definitions across test targets.
-                    // Multiple test targets may define identical helpers (e.g.,
-                    // `namespace util { ... }` or `void test_eq() { ... }`).
-                    if skip_dup_depth > 0 {
-                        for ch in trimmed.chars() {
-                            if ch == '{' {
-                                skip_dup_depth += 1;
-                            } else if ch == '}' {
-                                skip_dup_depth -= 1;
-                            }
-                        }
-                        continue;
-                    }
-                    if is_test_target && is_duplicatable_definition(trimmed) {
-                        if let Some(sig) = extract_definition_key(trimmed) {
-                            if seen_definitions.contains(&sig) {
-                                // Already emitted in a previous cppm — skip this one.
-                                skip_dup_depth = 0;
-                                for ch in trimmed.chars() {
-                                    if ch == '{' {
-                                        skip_dup_depth += 1;
-                                    } else if ch == '}' {
-                                        skip_dup_depth -= 1;
-                                    }
-                                }
-                                if skip_dup_depth > 0 {
-                                    continue;
-                                }
-                                continue;
-                            }
-                            // Record for cross-file dedup (added at end of file).
-                            this_file_definitions.push(sig);
-                        }
-                    }
-                    if trimmed == "return self_.expecting(formatter);" {
-                        runner_src.push_str(
-                            "if constexpr (requires { self_.expecting(formatter); }) {\n",
-                        );
-                        runner_src.push_str("    return self_.expecting(formatter);\n");
-                        runner_src.push_str("}\n");
-                        runner_src
-                            .push_str("return formatter.write_str(rusty::to_string(self_));\n");
-                        continue;
-                    }
-                    runner_src.push_str(&line);
-                    runner_src.push('\n');
-                    if trimmed == "namespace rusty {"
-                        && (content.contains("namespace panicking {")
-                            || content.contains("namespace intrinsics {")
-                            || content.contains("struct Discriminant"))
-                    {
-                        unit_emitted_runtime_prelude = true;
-                    }
-                }
-                if pending_overloaded_template {
-                    runner_src.push_str("template<class... Ts>\n");
-                }
-                // Add this file's definitions to the cross-file dedup set.
-                for def in this_file_definitions {
-                    seen_definitions.insert(def);
-                }
-                // Reset skip depth for next module unit
-                skip_dup_depth = 0;
-                if unit_emitted_runtime_prelude {
-                    runtime_prelude_emitted = true;
-                }
-                runner_src.push('\n');
-            }
-
-            if test_entries.is_empty() {
-                let baseline_ran_tests = if args.no_baseline {
-                    None
-                } else {
-                    baseline_ran_any_tests(&work_dir)
-                };
-                let allow_empty_from_baseline = matches!(baseline_ran_tests, Some(false));
-
-                if !args.allow_empty_tests && !allow_empty_from_baseline {
-                    return Err("No transpiled test wrappers discovered (expected exported rusty_test_* functions).".to_string());
-                }
-                if args.allow_empty_tests {
-                    println!(
-                        "  No transpiled test wrappers discovered; continuing due to --allow-empty-tests"
-                    );
-                } else if allow_empty_from_baseline {
-                    println!(
-                        "  No transpiled test wrappers discovered; baseline reported zero tests, continuing with compile-validation only"
-                    );
-                } else {
-                    println!("  No transpiled test wrappers discovered; compile-validation only");
-                }
-                runner_src.push_str("\n// ── Compile-validation runner ──\n");
-                runner_src.push_str("int main() {\n");
-                runner_src.push_str(
-                "    std::cout << \"No transpiled test wrappers discovered; compile-validation only.\" << std::endl;\n",
-            );
-                runner_src.push_str("    return 0;\n");
-                runner_src.push_str("}\n");
-            } else {
-                test_entries.sort_by(|a, b| a.fn_name.cmp(&b.fn_name));
-
-                // Generate main() that runs all tests
-                runner_src.push_str("\n// ── Test runner ──\n");
-                runner_src.push_str("int main(int argc, char** argv) {\n");
-                runner_src.push_str(
-                    "    if (argc == 3 && std::string(argv[1]) == \"--rusty-single-test\") {\n",
-                );
-                runner_src.push_str("        const std::string test_name = argv[2];\n");
-                runner_src.push_str("        rusty::mem::clear_all_forgotten_addresses();\n");
-                runner_src.push_str("        try {\n");
-                for entry in &test_entries {
-                    runner_src.push_str(&format!(
-                        "            if (test_name == \"{}\") {{ {}(); return 0; }}\n",
-                        entry.fn_name, entry.fn_name
-                    ));
-                }
-                runner_src.push_str(
-                "            std::cerr << \"Unknown single-test wrapper: \" << test_name << std::endl;\n",
-            );
-                runner_src.push_str("            return 64;\n");
-                runner_src.push_str("        } catch (const std::exception& e) {\n");
-                runner_src.push_str("            std::cerr << e.what() << std::endl;\n");
-                runner_src.push_str("            return 101;\n");
-                runner_src.push_str("        } catch (...) {\n");
-                runner_src.push_str("            return 102;\n");
-                runner_src.push_str("        }\n");
-                runner_src.push_str("    }\n");
-                runner_src.push_str("    int pass = 0, fail = 0;\n");
-                for entry in &test_entries {
-                    let fn_name = &entry.fn_name;
-                    let label = &entry.label;
-                    if entry.should_panic {
-                        runner_src.push_str(&format!(
-                        "    {{\n        const std::string cmd = std::string(\"\\\"\") + argv[0] + \"\\\" --rusty-single-test {}\";\n        const int status = std::system(cmd.c_str());\n        if (status != 0) {{ std::cout << \"  {} PASSED (expected panic)\" << std::endl; pass++; }}\n        else {{ std::cerr << \"  {} FAILED: expected panic\" << std::endl; fail++; }}\n    }}\n",
-                        fn_name, label, label
-                    ));
-                    } else {
-                        runner_src.push_str(&format!(
-                        "    rusty::mem::clear_all_forgotten_addresses();\n    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
-                        fn_name, label
-                    ));
-                        runner_src.push_str(&format!(
-                        "    catch (const std::exception& e) {{ std::cerr << \"  {} FAILED: \" << e.what() << std::endl; fail++; }}\n",
-                        label
-                    ));
-                        runner_src.push_str(&format!(
-                        "    catch (...) {{ std::cerr << \"  {} FAILED (unknown exception)\" << std::endl; fail++; }}\n",
-                        label
-                    ));
-                    }
-                }
-                runner_src.push_str("    std::cout << std::endl;\n");
-                runner_src.push_str(
-                "    std::cout << \"Results: \" << pass << \" passed, \" << fail << \" failed\" << std::endl;\n",
-            );
-                runner_src.push_str("    return fail > 0 ? 1 : 0;\n");
-                runner_src.push_str("}\n");
-            }
-
-            std::fs::write(&runner_path, &runner_src)
-                .map_err(|e| format!("Failed to write runner: {}", e))?;
-
-            // Save runner log
-            let build_log_path = work_dir.join("build.log");
-
-            println!(
-                "  Generated runner: {} ({} tests discovered)",
-                runner_path.display(),
-                test_entries.len()
-            );
-
-            // Compile with selected C++ compiler (`$CXX` or g++).
-            let compile_start = std::time::Instant::now();
-            let compile_output = std::process::Command::new(&cpp_compiler)
-                .arg("-std=c++20")
-                .arg("-Wall")
-                .arg("-Wno-unused-variable")
-                .arg("-Wno-unused-but-set-variable")
-                .arg(format!("-I{}", include_dir.display()))
-                .arg("-o")
-                .arg(&binary_path)
-                .arg(&runner_path)
-                .output()
-                .map_err(|e| format!("Failed to run {}: {}", cpp_compiler, e))?;
-
-            let compile_stderr = String::from_utf8_lossy(&compile_output.stderr);
-            std::fs::write(&build_log_path, compile_stderr.as_ref())
-                .map_err(|e| format!("Failed to write build log: {}", e))?;
-
-            if !compile_output.status.success() {
-                println!("  Build FAILED — see {}", build_log_path.display());
-                // Print first 20 errors
-                for line in compile_stderr.lines().take(20) {
-                    println!("    {}", line);
-                }
-                println!(
-                    "  Build compile time (flat, failed): {:.3}s",
-                    compile_start.elapsed().as_secs_f64()
-                );
-                return Err("C++ compilation failed".to_string());
-            }
-            println!(
-                "  Build compile time (flat): {:.3}s",
-                compile_start.elapsed().as_secs_f64()
-            );
-            println!("  Build: PASS → {}", binary_path.display());
-        }
+        run_stage_d_module_build(
+            args,
+            &work_dir,
+            &include_dir,
+            &cpp_compiler,
+            &generated_cppm_files,
+        )?;
     }
     if should_stop("build") {
         println!("\nStopped after build stage.");

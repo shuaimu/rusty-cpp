@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cmath>
 #include <limits>
+#include <type_traits>
+#include <variant>
 
 // Rusty - Rust-inspired safe types for C++
 //
@@ -164,6 +166,127 @@ namespace rusty {
             return N;
         }
     }
+
+    namespace detail {
+        template<typename T>
+        struct is_std_variant : std::false_type {};
+
+        template<typename... Ts>
+        struct is_std_variant<std::variant<Ts...>> : std::true_type {};
+
+        template<typename T>
+        inline constexpr bool is_std_variant_v =
+            is_std_variant<std::remove_cv_t<std::remove_reference_t<T>>>::value;
+
+        template<typename Variant>
+        constexpr decltype(auto) as_variant_ref(Variant&& value) {
+            using Raw = std::remove_reference_t<Variant>;
+            using Bare = std::remove_cv_t<Raw>;
+            if constexpr (requires { typename Bare::variant; }) {
+                using Underlying = typename Bare::variant;
+                if constexpr (std::is_const_v<Raw>) {
+                    return static_cast<const Underlying&>(value);
+                } else {
+                    return static_cast<Underlying&>(value);
+                }
+            } else {
+                return std::forward<Variant>(value);
+            }
+        }
+
+        template<typename T, typename Variant, std::size_t Index = 0>
+        constexpr bool variant_holds_impl(const Variant& value) {
+            if constexpr (Index >= std::variant_size_v<Variant>) {
+                return false;
+            } else {
+                if constexpr (std::is_same_v<T, std::variant_alternative_t<Index, Variant>>) {
+                    if (value.index() == Index) {
+                        return true;
+                    }
+                }
+                return variant_holds_impl<T, Variant, Index + 1>(value);
+            }
+        }
+
+        // `std::holds_alternative<T>` rejects variants with duplicate `T`.
+        // This helper returns true if *any* matching alternative index is active.
+        template<typename T, typename VariantLike>
+        constexpr bool variant_holds(VariantLike&& value) {
+            auto&& variant_ref = as_variant_ref(std::forward<VariantLike>(value));
+            using Variant = std::remove_cv_t<std::remove_reference_t<decltype(variant_ref)>>;
+            if constexpr (!is_std_variant_v<Variant>) {
+                return false;
+            } else {
+                return variant_holds_impl<T, Variant>(variant_ref);
+            }
+        }
+
+        template<typename T, typename Variant, std::size_t Index = 0>
+        constexpr T* variant_get_if_impl(Variant& value) {
+            if constexpr (Index >= std::variant_size_v<Variant>) {
+                return nullptr;
+            } else {
+                if constexpr (std::is_same_v<T, std::variant_alternative_t<Index, Variant>>) {
+                    if (value.index() == Index) {
+                        return &std::get<Index>(value);
+                    }
+                }
+                return variant_get_if_impl<T, Variant, Index + 1>(value);
+            }
+        }
+
+        template<typename T, typename Variant, std::size_t Index = 0>
+        constexpr const T* variant_get_if_impl(const Variant& value) {
+            if constexpr (Index >= std::variant_size_v<Variant>) {
+                return nullptr;
+            } else {
+                if constexpr (std::is_same_v<T, std::variant_alternative_t<Index, Variant>>) {
+                    if (value.index() == Index) {
+                        return &std::get<Index>(value);
+                    }
+                }
+                return variant_get_if_impl<T, Variant, Index + 1>(value);
+            }
+        }
+
+        template<typename T, typename VariantLike>
+        constexpr decltype(auto) variant_get(VariantLike&& value) {
+            auto&& variant_ref = as_variant_ref(std::forward<VariantLike>(value));
+            using Variant = std::remove_cv_t<std::remove_reference_t<decltype(variant_ref)>>;
+            static_assert(
+                is_std_variant_v<Variant>,
+                "variant_get requires a std::variant-like value");
+            if constexpr (std::is_const_v<std::remove_reference_t<decltype(variant_ref)>>) {
+                if (const T* ptr = variant_get_if_impl<T, Variant>(variant_ref)) {
+                    return *ptr;
+                }
+            } else {
+                if (T* ptr = variant_get_if_impl<T, Variant>(variant_ref)) {
+                    return *ptr;
+                }
+            }
+            throw std::bad_variant_access();
+        }
+
+        // Parse decimal literals into 128-bit integers without relying on host
+        // integer literal width (which can reject valid Rust u128/i128 values).
+        template<typename Int>
+        constexpr Int parse_decimal_int_literal(const char* digits) {
+            static_assert(
+                std::is_same_v<Int, unsigned __int128> || std::is_same_v<Int, __int128>,
+                "parse_decimal_int_literal supports 128-bit integer types only");
+            unsigned __int128 value = 0;
+            for (const char* p = digits; *p != '\0'; ++p) {
+                value = (value * static_cast<unsigned __int128>(10))
+                    + static_cast<unsigned __int128>(*p - '0');
+            }
+            if constexpr (std::is_same_v<Int, unsigned __int128>) {
+                return value;
+            } else {
+                return static_cast<__int128>(value);
+            }
+        }
+    } // namespace detail
 
     // String-view compatibility helper for transpiled Rust `&str` coercions.
     // Prefer deref-style surfaces first to avoid recursive `.as_str() -> to_string_view`

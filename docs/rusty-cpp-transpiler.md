@@ -467,6 +467,143 @@ void extend_panic();
 5. Merge `impl` methods into owning type declarations before emitting inline module bodies.
    This avoids invalid free-function fallbacks for methods that should live on the type.
 
+#### Cross-Module Declarations/Definitions: Rust vs C++
+
+Rust and C++ modules look similar at a distance, but they have different ownership rules for declarations. This difference is a frequent source of parity failures when lowering expanded crates.
+
+**Rust model**:
+
+- Items are defined once at a module path (`crate::a::Type`).
+- The compiler resolves the whole crate item graph; declaration order across files is mostly irrelevant.
+- Other modules reference by path/import; they do not create competing declarations for the same nominal item.
+
+**C++20 module model**:
+
+- A declaration is attached to a named module unit.
+- Redeclaring or defining the same nominal type in different named modules is tightly constrained by linkage rules.
+- A forward declaration emitted in helper text is still a declaration surface, and can conflict with the owning module if emitted in the wrong place.
+
+This is why valid Rust can fail after transpilation: we may accidentally duplicate declaration ownership while trying to make generated code compile in multiple modules.
+
+##### Example A: Rust Cross-Module Type Usage (Always Legal in Rust)
+
+```rust
+// src/token.rs
+pub struct Token {
+    pub kind: u8,
+}
+
+// src/de.rs
+use crate::token::Token;
+pub fn peek_kind(t: &Token) -> u8 { t.kind }
+```
+
+Rust has one owner for `Token` (`crate::token`), and `de` only imports it.
+
+##### Example B: C++ Module Lowering That Preserves Ownership (Good)
+
+```cpp
+// crate.token.cppm
+export module crate.token;
+export namespace token {
+struct Token {
+    uint8_t kind;
+};
+}
+
+// crate.de.cppm
+export module crate.de;
+import crate.token;
+export namespace de {
+uint8_t peek_kind(const token::Token& t) { return t.kind; }
+}
+```
+
+Only `crate.token` declares/defines `token::Token`. `crate.de` imports and uses it.
+
+##### Example C: Anti-Pattern That Breaks in C++ Modules (Bad)
+
+```cpp
+// crate.de.cppm
+export module crate.de;
+namespace token { struct Token; }  // accidental helper predecl in non-owner module
+```
+
+```cpp
+// crate.token.cppm
+export module crate.token;
+namespace token { struct Token { uint8_t kind; }; }
+```
+
+This pattern can trigger named-module attachment/linkage diagnostics because declaration ownership is now split across module units.
+
+##### Why This Happens in Transpilers
+
+Common triggers:
+
+1. Emitting broad runtime helpers into many modules, where helpers contain nominal predeclarations (`namespace token { struct Token; }`).
+2. Generating nominal type checks (`std::holds_alternative<token::Token_X>(...)`) in shared helpers that force foreign type declarations.
+3. Flattened fallback assumptions carried into module mode (where declaration ownership matters more).
+
+##### Solution Patterns (With Tradeoffs)
+
+1. **Single-owner declaration rule (recommended default)**
+   - Emit each nominal type declaration only in its owning module.
+   - In non-owner modules, only `import` and reference.
+   - Tradeoff: requires stronger owner tracking in codegen.
+
+2. **Helper splitting by ownership**
+   - Keep generic helper block type-agnostic and globally reusable.
+   - Emit token-family/type-family helper overloads only in owner modules.
+   - Tradeoff: slightly more complex helper selection logic.
+
+3. **Index-based variant discrimination in shared code**
+   - Prefer `variant.index() == I` and `std::get<I>(...)` when an index is known.
+   - Fall back to constrained nominal checks only when safe.
+   - Tradeoff: requires stable mapping from Rust variant path to C++ variant index.
+
+4. **Consistent external linkage when sharing declarations across modules**
+   - If a shared declaration must appear in multiple modules, keep declaration and definition under the same external linkage strategy.
+   - Do not mix module-attached declarations with differently linked definitions for the same nominal type.
+   - Tradeoff: can reduce strict module encapsulation and should be used sparingly.
+
+5. **Dependency-ordered module graph + extraction module for cycles**
+   - Build owner modules first.
+   - For cycles, extract common nominal type surfaces into a smaller base module and import from both sides.
+   - Tradeoff: introduces an extra module but keeps ownership explicit.
+
+##### Transpiler-Level Rules of Thumb
+
+Use this checklist when a crate fails with module attachment or cross-module type diagnostics:
+
+1. Identify the first declaration site of the conflicting nominal type in generated `.cppm` files.
+2. Confirm there is exactly one owner module for that type.
+3. Remove/helper-gate foreign forward declarations in non-owner modules.
+4. Replace nominal shared-helper checks with index/shape checks where possible.
+5. Rebuild with deterministic module order and verify no non-serde regressions in the parity matrix.
+
+##### Minimal Before/After for Helper Emission
+
+Before (fragile):
+
+```cpp
+// injected everywhere
+namespace token { struct Token; }
+if (std::holds_alternative<token::Token_SeqEnd>(tok)) { ... }
+```
+
+After (robust):
+
+```cpp
+// generic helper injected everywhere
+if (tok.index() == 7) { ... }  // or helper using known variant index
+
+// token nominal declarations emitted only in token owner module
+export namespace token { struct Token { ... }; }
+```
+
+Design rule: when Rust says "one item, many paths to it," emit C++ as "one owning module declaration surface, many importers."
+
 ### 2.6 Impl Blocks
 
 Rust splits methods across multiple `impl` blocks. In C++, all methods must be declared in the class body. The transpiler must **merge all `impl` blocks** for a type into a single class definition.

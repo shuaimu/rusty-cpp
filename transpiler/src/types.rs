@@ -400,6 +400,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         // Expanded-Rust runtime compatibility shims.
         "core::intrinsics::discriminant_value" => Some("rusty::intrinsics::discriminant_value"),
         "core::intrinsics::unreachable" => Some("rusty::intrinsics::unreachable"),
+        "core::panicking::panic" | "panicking::panic" | "std::panicking::panic" => {
+            Some("rusty::panicking::panic")
+        }
         "core::panicking::panic_fmt" => Some("rusty::panicking::panic_fmt"),
         "core::panicking::assert_failed" => Some("rusty::panicking::assert_failed"),
         "core::panicking::unreachable_display" => Some("rusty::panicking::unreachable_display"),
@@ -904,6 +907,10 @@ mod tests {
         assert_eq!(
             map_function_path("core::intrinsics::discriminant_value"),
             Some("rusty::intrinsics::discriminant_value")
+        );
+        assert_eq!(
+            map_function_path("core::panicking::panic"),
+            Some("rusty::panicking::panic")
         );
         assert_eq!(
             map_function_path("core::panicking::panic_fmt"),
