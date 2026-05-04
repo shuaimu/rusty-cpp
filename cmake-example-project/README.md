@@ -67,6 +67,26 @@ Notes:
 - The script prefers `clang++` (precompiled module flow) and falls back to `g++ -fmodules-ts`.
 - Fixture sources are under `cmake-example-project/src/`.
 
+### Optional: Inline Rust DSL Check/Rewrite Example
+
+This example project also includes inline Rust DSL blocks in:
+
+- `src/inline_header_example.hpp`
+- `src/inline_local_example.cpp`
+
+From `cmake-example-project/build`:
+
+```bash
+cmake --build . --target inline_rust_example_check
+cmake --build . --target inline_rust_example_rewrite
+```
+
+Notes:
+
+- `inline_rust_example_check` validates marker structure and `rust_sha256`.
+- `inline_rust_example_rewrite` rewrites only `RUSTYCPP:GEN` regions.
+- The `.cpp` example demonstrates TU-local placement; no automatic cross-TU declaration surfacing is performed in v1.
+
 ## CMakeLists.txt Integration
 
 Minimal example:
@@ -111,6 +131,9 @@ cmake -DBORROW_CHECK_FATAL=ON ..
 
 # Disable C++ <-> Rust interop smoke test wiring
 cmake -DENABLE_CPP_RUST_MEMBER_INTEROP_TEST=OFF ..
+
+# Disable inline Rust example targets
+cmake -DENABLE_INLINE_RUST_EXAMPLES=OFF ..
 ```
 
 ## Keeping rusty-cpp Updated

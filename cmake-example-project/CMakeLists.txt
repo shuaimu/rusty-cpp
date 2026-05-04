@@ -143,6 +143,43 @@ else()
 endif()
 
 # =============================================================================
+# Inline Rust DSL Example Targets
+# =============================================================================
+
+option(
+    ENABLE_INLINE_RUST_EXAMPLES
+    "Enable inline Rust DSL check/rewrite example targets"
+    ON
+)
+
+set(INLINE_RUST_TOOL "${RUSTYCPP_DIR}/tools/rustycpp-inline")
+set(INLINE_RUST_EXAMPLE_FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/inline_header_example.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/inline_local_example.cpp"
+)
+
+if(ENABLE_INLINE_RUST_EXAMPLES AND EXISTS "${INLINE_RUST_TOOL}")
+    add_custom_target(inline_rust_example_check
+        COMMAND "${INLINE_RUST_TOOL}" --check --files ${INLINE_RUST_EXAMPLE_FILES}
+        WORKING_DIRECTORY "${RUSTYCPP_DIR}"
+        COMMENT "Validating inline Rust markers and rust_sha256 hashes"
+        USES_TERMINAL
+    )
+
+    add_custom_target(inline_rust_example_rewrite
+        COMMAND "${INLINE_RUST_TOOL}" --rewrite --files ${INLINE_RUST_EXAMPLE_FILES}
+        WORKING_DIRECTORY "${RUSTYCPP_DIR}"
+        COMMENT "Rewriting inline Rust generated regions"
+        USES_TERMINAL
+    )
+else()
+    message(
+        STATUS
+        "Skipping inline Rust example targets (ENABLE_INLINE_RUST_EXAMPLES=${ENABLE_INLINE_RUST_EXAMPLES}, tool=${INLINE_RUST_TOOL})"
+    )
+endif()
+
+# =============================================================================
 # Build Summary
 # =============================================================================
 
@@ -151,5 +188,6 @@ message(STATUS "=== Build Configuration ===")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Borrow Checking: ${ENABLE_BORROW_CHECKING}")
 message(STATUS "  Interop Test: ${ENABLE_CPP_RUST_MEMBER_INTEROP_TEST}")
+message(STATUS "  Inline Rust Example Targets: ${ENABLE_INLINE_RUST_EXAMPLES}")
 message(STATUS "  RustyCpp Dir: ${RUSTYCPP_DIR}")
 message(STATUS "")
