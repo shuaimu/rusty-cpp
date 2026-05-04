@@ -5513,28 +5513,19 @@ Each migration unit MUST use this shape:
 
 ```cpp
 #if RUSTYCPP_RUST
-/*RUSTYCPP:RUST-BEGIN id=<stable_id>*/
-@rust {
-    // Rust subset code
-}
-/*RUSTYCPP:RUST-END id=<stable_id>*/
-#else
+// Rust subset code (raw Rust grammar, no @rust wrapper required)
+#endif
 /*RUSTYCPP:GEN-BEGIN id=<stable_id> version=1 rust_sha256=<hex>*/
 // generated C++ fallback (read-only)
 /*RUSTYCPP:GEN-END id=<stable_id>*/
-#endif
 ```
 
 Grammar (EBNF-like):
 
 ```text
-RustyBlock      := IfRust RustRegion ElseCpp GenRegion EndIf
+RustyBlock      := IfRust RustRegion EndIf GenRegion
 IfRust          := "#if" "RUSTYCPP_RUST"
-RustRegion      := RustBegin RustDsl RustEnd
-RustBegin       := "/*RUSTYCPP:RUST-BEGIN id=" StableId "*/"
-RustEnd         := "/*RUSTYCPP:RUST-END id=" StableId "*/"
-RustDsl         := "@rust" "{" RustToken* "}"
-ElseCpp         := "#else"
+RustRegion      := RustToken*
 GenRegion       := GenBegin CppToken* GenEnd
 GenBegin        := "/*RUSTYCPP:GEN-BEGIN id=" StableId
                    " version=1 rust_sha256=" HexDigest "*/"
@@ -5546,14 +5537,14 @@ HexDigest       := [0-9a-f]+
 
 Validity rules:
 
-1. `StableId` in `RUST-BEGIN`, `RUST-END`, `GEN-BEGIN`, `GEN-END` MUST match exactly.
-2. `rust_sha256` MUST be computed from the normalized Rust payload (`@rust { ... }` body only).
-3. Generator MUST overwrite only the `GEN` region and MUST NOT modify text outside markers.
-4. Manual edits inside `GEN` region are allowed locally but are non-authoritative and overwritten on next generation.
+1. `rust_sha256` MUST be computed from the normalized Rust payload in the `#if RUSTYCPP_RUST` region.
+2. Generator MUST overwrite only the `GEN` region and MUST NOT modify text outside the inline block + generated region pair.
+3. Manual edits inside `GEN` region are allowed locally but are non-authoritative and overwritten on next generation.
+4. Legacy `#else` + `RUST-BEGIN/END` forms may be accepted for migration, but rewrite output is canonicalized to the post-`#endif` generated-region layout above.
 
 ### 12.5 Allowed Rust Subset (V1)
 
-Only this subset is accepted in `@rust {}`:
+Only this subset is accepted in the first branch (`#if RUSTYCPP_RUST ... #endif`):
 
 1. Item forms:
    - `fn` (free functions)

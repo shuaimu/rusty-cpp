@@ -46,21 +46,29 @@ fn process_file(path: &Path, mode: InlineRustMode) -> Result<(), String> {
     match mode {
         InlineRustMode::Check => {
             for block in &blocks {
-                if block.gen_version != "1" {
+                let generated = block.generated_region.as_ref().ok_or_else(|| {
+                    format!(
+                        "{}:{}: missing generated region for block id={} (run --rewrite)",
+                        path.display(),
+                        block.if_line,
+                        block.id
+                    )
+                })?;
+                if generated.version != "1" {
                     return Err(format!(
                         "{}:{}: unsupported GEN marker version {}; expected 1",
                         path.display(),
                         block.if_line,
-                        block.gen_version
+                        generated.version
                     ));
                 }
-                if block.gen_hash != block.rust_hash {
+                if generated.rust_sha256 != block.rust_hash {
                     return Err(format!(
                         "{}:{}: hash mismatch for id={} (marker={}, expected={})",
                         path.display(),
                         block.if_line,
                         block.id,
-                        block.gen_hash,
+                        generated.rust_sha256,
                         block.rust_hash
                     ));
                 }
@@ -177,29 +185,87 @@ fn parse_gen_begin_marker(trimmed: &str) -> Option<GenBeginMarker> {
     })
 }
 
-fn extract_rust_payload(region: &str) -> Result<String, String> {
-    let rust_at = region
+fn is_if_directive(trimmed: &str) -> bool {
+    trimmed.starts_with("#if")
+}
+
+fn is_endif_directive(trimmed: &str) -> bool {
+    trimmed == ENDIF_DIRECTIVE
+}
+
+#[derive(Debug, Clone)]
+struct ExtractedRustPayload {
+    payload: String,
+    marker_id: Option<String>,
+}
+
+fn unwrap_optional_at_rust_wrapper(region: &str) -> Result<String, String> {
+    let trimmed = region.trim();
+    if !trimmed.starts_with("@rust") {
+        return Ok(region.to_string());
+    }
+    let at = region
         .find("@rust")
-        .ok_or_else(|| "missing `@rust` in Rust region".to_string())?;
-    let tail = &region[rust_at + "@rust".len()..];
+        .ok_or_else(|| "invalid @rust wrapper".to_string())?;
+    let tail = &region[at + "@rust".len()..];
     let open_rel = tail
         .find('{')
         .ok_or_else(|| "missing `{` after `@rust`".to_string())?;
-    let after_open = rust_at + "@rust".len() + open_rel + 1;
-
+    let after_open = at + "@rust".len() + open_rel + 1;
     let close_abs = region
         .rfind('}')
         .ok_or_else(|| "missing closing `}` for `@rust { ... }`".to_string())?;
     if close_abs < after_open {
         return Err("invalid `@rust` block braces".to_string());
     }
-
     let trailing = &region[close_abs + 1..];
     if !trailing.trim().is_empty() {
         return Err("unexpected trailing content after `@rust { ... }`".to_string());
     }
-
     Ok(region[after_open..close_abs].to_string())
+}
+
+fn extract_rust_payload(region: &str) -> Result<ExtractedRustPayload, String> {
+    let lines = collect_line_spans(region);
+    let first_idx = match next_nonempty_line(&lines, region, 0) {
+        Some(idx) => idx,
+        None => {
+            return Ok(ExtractedRustPayload {
+                payload: String::new(),
+                marker_id: None,
+            });
+        }
+    };
+    let first = line_trimmed(region, &lines[first_idx]);
+    if let Some(begin_id) = parse_marker_id(first, RUST_BEGIN_PREFIX) {
+        let mut end_idx: Option<usize> = None;
+        for (i, line) in lines.iter().enumerate().skip(first_idx + 1) {
+            let trimmed = line_trimmed(region, line);
+            if let Some(end_id) = parse_marker_id(trimmed, RUST_END_PREFIX) {
+                if end_id != begin_id {
+                    return Err(format!(
+                        "Rust end marker id mismatch (begin={}, end={})",
+                        begin_id, end_id
+                    ));
+                }
+                end_idx = Some(i);
+                break;
+            }
+        }
+        let end_idx = end_idx.ok_or_else(|| "missing Rust end marker".to_string())?;
+        let inner = &region[lines[first_idx].end..lines[end_idx].start];
+        let payload = unwrap_optional_at_rust_wrapper(inner)?;
+        return Ok(ExtractedRustPayload {
+            payload,
+            marker_id: Some(begin_id),
+        });
+    }
+
+    let payload = unwrap_optional_at_rust_wrapper(region)?;
+    Ok(ExtractedRustPayload {
+        payload,
+        marker_id: None,
+    })
 }
 
 fn normalize_rust_payload(payload: &str) -> String {
@@ -223,21 +289,97 @@ fn sha256_hex(input: &str) -> String {
 }
 
 #[derive(Debug, Clone)]
-struct ParsedBlock {
+struct GenRegion {
+    end_line: usize,
     id: String,
+    version: String,
+    rust_sha256: String,
+}
+
+fn parse_gen_region_from_first_nonempty(
+    path: &Path,
+    content: &str,
+    lines: &[LineSpan],
+    start_idx: usize,
+) -> Result<Option<GenRegion>, String> {
+    let begin_idx = match next_nonempty_line(lines, content, start_idx) {
+        Some(idx) => idx,
+        None => return Ok(None),
+    };
+    let begin_trimmed = line_trimmed(content, &lines[begin_idx]);
+    let marker = match parse_gen_begin_marker(begin_trimmed) {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    let mut end_idx: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate().skip(begin_idx + 1) {
+        let trimmed = line_trimmed(content, line);
+        if let Some(end_id) = parse_marker_id(trimmed, GEN_END_PREFIX) {
+            if end_id != marker.id {
+                return Err(format!(
+                    "{}:{}: GEN end marker id mismatch (begin={}, end={})",
+                    path.display(),
+                    i + 1,
+                    marker.id,
+                    end_id
+                ));
+            }
+            end_idx = Some(i);
+            break;
+        }
+    }
+    let end_idx = end_idx.ok_or_else(|| {
+        format!(
+            "{}:{}: missing GEN end marker for id={}",
+            path.display(),
+            begin_idx + 1,
+            marker.id
+        )
+    })?;
+
+    Ok(Some(GenRegion {
+        end_line: end_idx,
+        id: marker.id,
+        version: marker.version,
+        rust_sha256: marker.rust_sha256,
+    }))
+}
+
+fn make_auto_id(path: &Path, block_index: usize) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("inline_block");
+    let mut sanitized = String::with_capacity(stem.len());
+    for ch in stem.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    if sanitized.is_empty() {
+        sanitized.push_str("inline_block");
+    }
+    format!("{}.{}", sanitized, block_index)
+}
+
+#[derive(Debug, Clone)]
+struct ParsedBlock {
     if_line: usize,
-    gen_version: String,
-    gen_hash: String,
+    id: String,
     rust_hash: String,
     rust_payload_normalized: String,
-    gen_begin_line_start: usize,
-    gen_end_line_end: usize,
-    gen_indent: String,
+    if_indent: String,
+    replace_start: usize,
+    replace_end: usize,
+    generated_region: Option<GenRegion>,
 }
 
 fn parse_blocks(path: &Path, content: &str) -> Result<Vec<ParsedBlock>, String> {
     let lines = collect_line_spans(content);
-    let mut out = Vec::new();
+    let mut blocks = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut i = 0usize;
     while i < lines.len() {
@@ -246,185 +388,115 @@ fn parse_blocks(path: &Path, content: &str) -> Result<Vec<ParsedBlock>, String> 
             continue;
         }
 
-        let if_line = i + 1;
-        let rust_begin_idx = next_nonempty_line(&lines, content, i + 1).ok_or_else(|| {
+        let mut depth = 0usize;
+        let mut else_idx: Option<usize> = None;
+        let mut endif_idx: Option<usize> = None;
+        for j in i + 1..lines.len() {
+            let trimmed = line_trimmed(content, &lines[j]);
+            if is_if_directive(trimmed) {
+                depth += 1;
+                continue;
+            }
+            if is_endif_directive(trimmed) {
+                if depth == 0 {
+                    endif_idx = Some(j);
+                    break;
+                }
+                depth -= 1;
+                continue;
+            }
+            if trimmed == ELSE_DIRECTIVE && depth == 0 && else_idx.is_none() {
+                else_idx = Some(j);
+            }
+        }
+        let endif_idx = endif_idx.ok_or_else(|| {
             format!(
-                "{}:{}: expected Rust begin marker after `{}`",
+                "{}:{}: missing matching `{}` for `{}`",
                 path.display(),
-                if_line,
+                i + 1,
+                ENDIF_DIRECTIVE,
                 IF_RUSTYCPP_RUST
             )
         })?;
-        let rust_begin_line = line_trimmed(content, &lines[rust_begin_idx]);
-        let rust_begin_id =
-            parse_marker_id(rust_begin_line, RUST_BEGIN_PREFIX).ok_or_else(|| {
-                format!(
-                    "{}:{}: expected `{}` marker",
-                    path.display(),
-                    rust_begin_idx + 1,
-                    RUST_BEGIN_PREFIX
-                )
-            })?;
 
-        let mut rust_end_idx: Option<usize> = None;
-        for j in rust_begin_idx + 1..lines.len() {
-            let trimmed = line_trimmed(content, &lines[j]);
-            if let Some(end_id) = parse_marker_id(trimmed, RUST_END_PREFIX) {
-                if end_id != rust_begin_id {
-                    return Err(format!(
-                        "{}:{}: Rust end marker id mismatch (begin={}, end={})",
-                        path.display(),
-                        j + 1,
-                        rust_begin_id,
-                        end_id
-                    ));
-                }
-                rust_end_idx = Some(j);
-                break;
-            }
-        }
-        let rust_end_idx = rust_end_idx.ok_or_else(|| {
+        let rust_region_start = lines[i].end;
+        let rust_region_end = else_idx
+            .map(|idx| lines[idx].start)
+            .unwrap_or(lines[endif_idx].start);
+        let rust_region = &content[rust_region_start..rust_region_end];
+        let extracted = extract_rust_payload(rust_region).map_err(|e| {
             format!(
-                "{}:{}: missing Rust end marker for id={}",
+                "{}:{}: invalid Rust payload: {}",
                 path.display(),
-                rust_begin_idx + 1,
-                rust_begin_id
-            )
-        })?;
-
-        let rust_region = &content[lines[rust_begin_idx].end..lines[rust_end_idx].start];
-        let rust_payload = extract_rust_payload(rust_region).map_err(|e| {
-            format!(
-                "{}:{}: invalid `@rust` region for id={}: {}",
-                path.display(),
-                rust_begin_idx + 1,
-                rust_begin_id,
+                i + 1,
                 e
             )
         })?;
-        let rust_payload_normalized = normalize_rust_payload(&rust_payload);
+        let rust_payload_normalized = normalize_rust_payload(&extracted.payload);
         let rust_hash = sha256_hex(&rust_payload_normalized);
 
-        let else_idx = next_nonempty_line(&lines, content, rust_end_idx + 1).ok_or_else(|| {
-            format!(
-                "{}:{}: expected `{}` after Rust end marker id={}",
-                path.display(),
-                rust_end_idx + 1,
-                ELSE_DIRECTIVE,
-                rust_begin_id
-            )
-        })?;
-        if line_trimmed(content, &lines[else_idx]) != ELSE_DIRECTIVE {
-            return Err(format!(
-                "{}:{}: expected `{}` after Rust end marker id={}",
-                path.display(),
-                else_idx + 1,
-                ELSE_DIRECTIVE,
-                rust_begin_id
-            ));
-        }
+        let generated_region = if let Some(else_line) = else_idx {
+            parse_gen_region_from_first_nonempty(path, content, &lines, else_line + 1)?
+        } else {
+            parse_gen_region_from_first_nonempty(path, content, &lines, endif_idx + 1)?
+        };
 
-        let gen_begin_idx = next_nonempty_line(&lines, content, else_idx + 1).ok_or_else(|| {
-            format!(
-                "{}:{}: expected GEN begin marker after `{}`",
-                path.display(),
-                else_idx + 1,
-                ELSE_DIRECTIVE
-            )
-        })?;
-        let gen_begin_line = line_trimmed(content, &lines[gen_begin_idx]);
-        let gen_marker = parse_gen_begin_marker(gen_begin_line).ok_or_else(|| {
-            format!(
-                "{}:{}: expected valid GEN begin marker",
-                path.display(),
-                gen_begin_idx + 1
-            )
-        })?;
-        if gen_marker.id != rust_begin_id {
-            return Err(format!(
-                "{}:{}: GEN begin id mismatch (rust={}, gen={})",
-                path.display(),
-                gen_begin_idx + 1,
-                rust_begin_id,
-                gen_marker.id
-            ));
-        }
-
-        let mut gen_end_idx: Option<usize> = None;
-        for j in gen_begin_idx + 1..lines.len() {
-            let trimmed = line_trimmed(content, &lines[j]);
-            if let Some(end_id) = parse_marker_id(trimmed, GEN_END_PREFIX) {
-                if end_id != rust_begin_id {
+        let id_from_marker = extracted.marker_id;
+        let id_from_gen = generated_region.as_ref().map(|g| g.id.clone());
+        let id = match (id_from_marker, id_from_gen) {
+            (Some(a), Some(b)) => {
+                if a != b {
                     return Err(format!(
-                        "{}:{}: GEN end marker id mismatch (begin={}, end={})",
+                        "{}:{}: id mismatch between Rust marker ({}) and GEN marker ({})",
                         path.display(),
-                        j + 1,
-                        rust_begin_id,
-                        end_id
+                        i + 1,
+                        a,
+                        b
                     ));
                 }
-                gen_end_idx = Some(j);
-                break;
+                a
             }
-        }
-        let gen_end_idx = gen_end_idx.ok_or_else(|| {
-            format!(
-                "{}:{}: missing GEN end marker for id={}",
-                path.display(),
-                gen_begin_idx + 1,
-                rust_begin_id
-            )
-        })?;
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => make_auto_id(path, blocks.len() + 1),
+        };
 
-        let endif_idx = next_nonempty_line(&lines, content, gen_end_idx + 1).ok_or_else(|| {
-            format!(
-                "{}:{}: expected `{}` after GEN end marker id={}",
-                path.display(),
-                gen_end_idx + 1,
-                ENDIF_DIRECTIVE,
-                rust_begin_id
-            )
-        })?;
-        if line_trimmed(content, &lines[endif_idx]) != ENDIF_DIRECTIVE {
-            return Err(format!(
-                "{}:{}: expected `{}` after GEN end marker id={}",
-                path.display(),
-                endif_idx + 1,
-                ENDIF_DIRECTIVE,
-                rust_begin_id
-            ));
-        }
-
-        if !seen_ids.insert(rust_begin_id.clone()) {
+        if !seen_ids.insert(id.clone()) {
             return Err(format!(
                 "{}:{}: duplicate inline block id={}",
                 path.display(),
-                if_line,
-                rust_begin_id
+                i + 1,
+                id
             ));
         }
 
-        out.push(ParsedBlock {
-            id: rust_begin_id,
-            if_line,
-            gen_version: gen_marker.version,
-            gen_hash: gen_marker.rust_sha256,
+        let replace_start = lines[i].start;
+        let replace_end = if let Some(existing_gen) = &generated_region {
+            lines[existing_gen.end_line].end
+        } else {
+            lines[endif_idx].end
+        };
+
+        blocks.push(ParsedBlock {
+            if_line: i + 1,
+            id,
             rust_hash,
             rust_payload_normalized,
-            gen_begin_line_start: lines[gen_begin_idx].start,
-            gen_end_line_end: lines[gen_end_idx].end,
-            gen_indent: line_indent(content, &lines[gen_begin_idx]),
+            if_indent: line_indent(content, &lines[i]),
+            replace_start,
+            replace_end,
+            generated_region,
         });
 
         i = endif_idx + 1;
     }
 
-    Ok(out)
+    Ok(blocks)
 }
 
 fn render_generated_region(block: &ParsedBlock) -> String {
     let mut out = String::new();
-    let prefix = &block.gen_indent;
+    let prefix = &block.if_indent;
     out.push_str(prefix);
     out.push_str("/*RUSTYCPP:GEN-BEGIN id=");
     out.push_str(&block.id);
@@ -442,8 +514,32 @@ fn render_generated_region(block: &ParsedBlock) -> String {
     out.push_str(prefix);
     out.push_str("/*RUSTYCPP:GEN-END id=");
     out.push_str(&block.id);
-    out.push_str("*/");
+    out.push_str("*/\n");
+    out
+}
+
+fn render_rust_block(block: &ParsedBlock) -> String {
+    let mut out = String::new();
+    let prefix = &block.if_indent;
+    out.push_str(prefix);
+    out.push_str(IF_RUSTYCPP_RUST);
     out.push('\n');
+    if !block.rust_payload_normalized.is_empty() {
+        out.push_str(&block.rust_payload_normalized);
+        if !block.rust_payload_normalized.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str(prefix);
+    out.push_str(ENDIF_DIRECTIVE);
+    out.push('\n');
+    out
+}
+
+fn render_block_rewrite(block: &ParsedBlock) -> String {
+    let mut out = String::new();
+    out.push_str(&render_rust_block(block));
+    out.push_str(&render_generated_region(block));
     out
 }
 
@@ -455,9 +551,9 @@ fn rewrite_content(content: &str, blocks: &[ParsedBlock]) -> String {
     let mut out = String::with_capacity(content.len() + blocks.len() * 128);
     let mut cursor = 0usize;
     for block in blocks {
-        out.push_str(&content[cursor..block.gen_begin_line_start]);
-        out.push_str(&render_generated_region(block));
-        cursor = block.gen_end_line_end;
+        out.push_str(&content[cursor..block.replace_start]);
+        out.push_str(&render_block_rewrite(block));
+        cursor = block.replace_end;
     }
     out.push_str(&content[cursor..]);
     out
@@ -467,7 +563,22 @@ fn rewrite_content(content: &str, blocks: &[ParsedBlock]) -> String {
 mod tests {
     use super::*;
 
-    fn fixture(gen_hash: &str) -> String {
+    fn post_endif_fixture(gen_hash: &str) -> String {
+        format!(
+            r#"#if RUSTYCPP_RUST
+fn add(a: i32, b: i32) -> i32 {{
+    a + b
+}}
+#endif
+/*RUSTYCPP:GEN-BEGIN id=demo.add version=1 rust_sha256={}*/
+// old generated text
+/*RUSTYCPP:GEN-END id=demo.add*/
+"#,
+            gen_hash
+        )
+    }
+
+    fn legacy_else_fixture(gen_hash: &str) -> String {
         format!(
             r#"#if RUSTYCPP_RUST
 /*RUSTYCPP:RUST-BEGIN id=demo.add*/
@@ -488,19 +599,26 @@ fn add(a: i32, b: i32) -> i32 {{
     }
 
     #[test]
-    fn test_parse_blocks_extracts_hash_and_payload() {
-        let content = fixture("deadbeef");
+    fn test_parse_blocks_extracts_hash_for_post_endif_layout() {
+        let content = post_endif_fixture("deadbeef");
         let blocks = parse_blocks(Path::new("demo.hpp"), &content).expect("parse");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].id, "demo.add");
-        assert_eq!(blocks[0].gen_hash, "deadbeef");
+        assert_eq!(
+            blocks[0]
+                .generated_region
+                .as_ref()
+                .expect("gen")
+                .rust_sha256,
+            "deadbeef"
+        );
         assert!(blocks[0].rust_payload_normalized.contains("fn add"));
         assert_eq!(blocks[0].rust_hash.len(), 64);
     }
 
     #[test]
     fn test_rewrite_content_updates_gen_hash_and_body() {
-        let content = fixture("deadbeef");
+        let content = post_endif_fixture("deadbeef");
         let blocks = parse_blocks(Path::new("demo.hpp"), &content).expect("parse");
         let rewritten = rewrite_content(&content, &blocks);
         assert!(rewritten.contains("generated by rusty-cpp-transpiler inline-rust v1"));
@@ -510,9 +628,19 @@ fn add(a: i32, b: i32) -> i32 {{
     }
 
     #[test]
+    fn test_rewrite_migrates_legacy_else_layout_to_post_endif() {
+        let content = legacy_else_fixture("deadbeef");
+        let blocks = parse_blocks(Path::new("demo.hpp"), &content).expect("parse");
+        let rewritten = rewrite_content(&content, &blocks);
+        assert!(!rewritten.contains("\n#else\n"));
+        assert!(!rewritten.contains("RUSTYCPP:RUST-BEGIN"));
+        assert!(!rewritten.contains("@rust {"));
+        assert!(rewritten.contains("#endif\n/*RUSTYCPP:GEN-BEGIN"));
+    }
+
+    #[test]
     fn test_parse_blocks_rejects_duplicate_ids() {
-        let hash = "abc";
-        let single = fixture(hash);
+        let single = post_endif_fixture("abc");
         let dup = format!("{}\n{}", single, single);
         let err = parse_blocks(Path::new("dup.hpp"), &dup).expect_err("duplicate should fail");
         assert!(err.contains("duplicate inline block id=demo.add"));
