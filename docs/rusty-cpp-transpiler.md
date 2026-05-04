@@ -5540,7 +5540,7 @@ Validity rules:
 1. `rust_sha256` MUST be computed from the normalized Rust payload in the `#if RUSTYCPP_RUST` region.
 2. Generator MUST overwrite only the `GEN` region and MUST NOT modify text outside the inline block + generated region pair.
 3. Manual edits inside `GEN` region are allowed locally but are non-authoritative and overwritten on next generation.
-4. Legacy `#else` + `RUST-BEGIN/END` forms may be accepted for migration, but rewrite output is canonicalized to the post-`#endif` generated-region layout above.
+4. Legacy `#else` + `RUST-BEGIN/END` forms are rejected in v1.1+; use only the canonical post-`#endif` generated-region layout above.
 
 ### 12.5 Allowed Rust Subset (V1)
 
@@ -5600,7 +5600,7 @@ Minimal CMake pattern:
 # 1) Tool path
 set(RUSTYCPP_INLINE_TOOL "${CMAKE_SOURCE_DIR}/tools/rustycpp-inline")
 
-# 2) Inputs that may contain @rust blocks
+# 2) Inputs that may contain inline Rust blocks
 set(RUSTYCPP_INLINE_SOURCES
     ${CMAKE_SOURCE_DIR}/include/foo.hpp
     ${CMAKE_SOURCE_DIR}/src/foo.cpp

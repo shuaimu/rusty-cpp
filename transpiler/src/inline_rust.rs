@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 const IF_RUSTYCPP_RUST: &str = "#if RUSTYCPP_RUST";
 const ELSE_DIRECTIVE: &str = "#else";
 const ENDIF_DIRECTIVE: &str = "#endif";
-const RUST_BEGIN_PREFIX: &str = "/*RUSTYCPP:RUST-BEGIN id=";
-const RUST_END_PREFIX: &str = "/*RUSTYCPP:RUST-END id=";
+const RUST_BEGIN_PREFIX: &str = "/*RUSTYCPP:RUST-BEGIN";
+const RUST_END_PREFIX: &str = "/*RUSTYCPP:RUST-END";
+const LEGACY_AT_RUST_PREFIX: &str = "@rust";
 const GEN_BEGIN_PREFIX: &str = "/*RUSTYCPP:GEN-BEGIN ";
 const GEN_END_PREFIX: &str = "/*RUSTYCPP:GEN-END id=";
 
@@ -193,79 +194,19 @@ fn is_endif_directive(trimmed: &str) -> bool {
     trimmed == ENDIF_DIRECTIVE
 }
 
-#[derive(Debug, Clone)]
-struct ExtractedRustPayload {
-    payload: String,
-    marker_id: Option<String>,
-}
-
-fn unwrap_optional_at_rust_wrapper(region: &str) -> Result<String, String> {
-    let trimmed = region.trim();
-    if !trimmed.starts_with("@rust") {
-        return Ok(region.to_string());
-    }
-    let at = region
-        .find("@rust")
-        .ok_or_else(|| "invalid @rust wrapper".to_string())?;
-    let tail = &region[at + "@rust".len()..];
-    let open_rel = tail
-        .find('{')
-        .ok_or_else(|| "missing `{` after `@rust`".to_string())?;
-    let after_open = at + "@rust".len() + open_rel + 1;
-    let close_abs = region
-        .rfind('}')
-        .ok_or_else(|| "missing closing `}` for `@rust { ... }`".to_string())?;
-    if close_abs < after_open {
-        return Err("invalid `@rust` block braces".to_string());
-    }
-    let trailing = &region[close_abs + 1..];
-    if !trailing.trim().is_empty() {
-        return Err("unexpected trailing content after `@rust { ... }`".to_string());
-    }
-    Ok(region[after_open..close_abs].to_string())
-}
-
-fn extract_rust_payload(region: &str) -> Result<ExtractedRustPayload, String> {
-    let lines = collect_line_spans(region);
-    let first_idx = match next_nonempty_line(&lines, region, 0) {
-        Some(idx) => idx,
-        None => {
-            return Ok(ExtractedRustPayload {
-                payload: String::new(),
-                marker_id: None,
-            });
+fn extract_rust_payload(region: &str) -> Result<String, String> {
+    for line in region.lines() {
+        if line.trim() == ELSE_DIRECTIVE {
+            return Err("legacy `#else` inline layout is unsupported".to_string());
         }
-    };
-    let first = line_trimmed(region, &lines[first_idx]);
-    if let Some(begin_id) = parse_marker_id(first, RUST_BEGIN_PREFIX) {
-        let mut end_idx: Option<usize> = None;
-        for (i, line) in lines.iter().enumerate().skip(first_idx + 1) {
-            let trimmed = line_trimmed(region, line);
-            if let Some(end_id) = parse_marker_id(trimmed, RUST_END_PREFIX) {
-                if end_id != begin_id {
-                    return Err(format!(
-                        "Rust end marker id mismatch (begin={}, end={})",
-                        begin_id, end_id
-                    ));
-                }
-                end_idx = Some(i);
-                break;
-            }
-        }
-        let end_idx = end_idx.ok_or_else(|| "missing Rust end marker".to_string())?;
-        let inner = &region[lines[first_idx].end..lines[end_idx].start];
-        let payload = unwrap_optional_at_rust_wrapper(inner)?;
-        return Ok(ExtractedRustPayload {
-            payload,
-            marker_id: Some(begin_id),
-        });
     }
-
-    let payload = unwrap_optional_at_rust_wrapper(region)?;
-    Ok(ExtractedRustPayload {
-        payload,
-        marker_id: None,
-    })
+    if region.contains(RUST_BEGIN_PREFIX) || region.contains(RUST_END_PREFIX) {
+        return Err("legacy `RUST-BEGIN/RUST-END` markers are unsupported".to_string());
+    }
+    if region.trim_start().starts_with(LEGACY_AT_RUST_PREFIX) {
+        return Err("legacy `@rust { ... }` wrapper is unsupported".to_string());
+    }
+    Ok(region.to_string())
 }
 
 fn normalize_rust_payload(payload: &str) -> String {
@@ -419,46 +360,28 @@ fn parse_blocks(path: &Path, content: &str) -> Result<Vec<ParsedBlock>, String> 
             )
         })?;
 
-        let rust_region_start = lines[i].end;
-        let rust_region_end = else_idx
-            .map(|idx| lines[idx].start)
-            .unwrap_or(lines[endif_idx].start);
-        let rust_region = &content[rust_region_start..rust_region_end];
-        let extracted = extract_rust_payload(rust_region).map_err(|e| {
-            format!(
-                "{}:{}: invalid Rust payload: {}",
+        if let Some(else_line) = else_idx {
+            return Err(format!(
+                "{}:{}: legacy `#else` inline layout is unsupported; use `#if RUSTYCPP_RUST ... #endif` followed by `GEN` markers",
                 path.display(),
-                i + 1,
-                e
-            )
-        })?;
-        let rust_payload_normalized = normalize_rust_payload(&extracted.payload);
+                else_line + 1
+            ));
+        }
+
+        let rust_region_start = lines[i].end;
+        let rust_region_end = lines[endif_idx].start;
+        let rust_region = &content[rust_region_start..rust_region_end];
+        let extracted = extract_rust_payload(rust_region)
+            .map_err(|e| format!("{}:{}: invalid Rust payload: {}", path.display(), i + 1, e))?;
+        let rust_payload_normalized = normalize_rust_payload(&extracted);
         let rust_hash = sha256_hex(&rust_payload_normalized);
 
-        let generated_region = if let Some(else_line) = else_idx {
-            parse_gen_region_from_first_nonempty(path, content, &lines, else_line + 1)?
-        } else {
-            parse_gen_region_from_first_nonempty(path, content, &lines, endif_idx + 1)?
-        };
-
-        let id_from_marker = extracted.marker_id;
+        let generated_region =
+            parse_gen_region_from_first_nonempty(path, content, &lines, endif_idx + 1)?;
         let id_from_gen = generated_region.as_ref().map(|g| g.id.clone());
-        let id = match (id_from_marker, id_from_gen) {
-            (Some(a), Some(b)) => {
-                if a != b {
-                    return Err(format!(
-                        "{}:{}: id mismatch between Rust marker ({}) and GEN marker ({})",
-                        path.display(),
-                        i + 1,
-                        a,
-                        b
-                    ));
-                }
-                a
-            }
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
-            (None, None) => make_auto_id(path, blocks.len() + 1),
+        let id = match id_from_gen {
+            Some(id) => id,
+            None => make_auto_id(path, blocks.len() + 1),
         };
 
         if !seen_ids.insert(id.clone()) {
@@ -578,26 +501,6 @@ fn add(a: i32, b: i32) -> i32 {{
         )
     }
 
-    fn legacy_else_fixture(gen_hash: &str) -> String {
-        format!(
-            r#"#if RUSTYCPP_RUST
-/*RUSTYCPP:RUST-BEGIN id=demo.add*/
-@rust {{
-fn add(a: i32, b: i32) -> i32 {{
-    a + b
-}}
-}}
-/*RUSTYCPP:RUST-END id=demo.add*/
-#else
-/*RUSTYCPP:GEN-BEGIN id=demo.add version=1 rust_sha256={}*/
-// old generated text
-/*RUSTYCPP:GEN-END id=demo.add*/
-#endif
-"#,
-            gen_hash
-        )
-    }
-
     #[test]
     fn test_parse_blocks_extracts_hash_for_post_endif_layout() {
         let content = post_endif_fixture("deadbeef");
@@ -628,14 +531,36 @@ fn add(a: i32, b: i32) -> i32 {{
     }
 
     #[test]
-    fn test_rewrite_migrates_legacy_else_layout_to_post_endif() {
-        let content = legacy_else_fixture("deadbeef");
-        let blocks = parse_blocks(Path::new("demo.hpp"), &content).expect("parse");
-        let rewritten = rewrite_content(&content, &blocks);
-        assert!(!rewritten.contains("\n#else\n"));
-        assert!(!rewritten.contains("RUSTYCPP:RUST-BEGIN"));
-        assert!(!rewritten.contains("@rust {"));
-        assert!(rewritten.contains("#endif\n/*RUSTYCPP:GEN-BEGIN"));
+    fn test_parse_blocks_rejects_legacy_else_layout() {
+        let content = r#"#if RUSTYCPP_RUST
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+#else
+/*RUSTYCPP:GEN-BEGIN id=demo.add version=1 rust_sha256=deadbeef*/
+// old generated text
+/*RUSTYCPP:GEN-END id=demo.add*/
+#endif
+"#;
+        let err = parse_blocks(Path::new("demo.hpp"), content).expect_err("legacy should fail");
+        assert!(err.contains("legacy `#else` inline layout is unsupported"));
+    }
+
+    #[test]
+    fn test_parse_blocks_rejects_legacy_rust_begin_marker_layout() {
+        let content = r#"#if RUSTYCPP_RUST
+/*RUSTYCPP:RUST-BEGIN id=demo.add*/
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+/*RUSTYCPP:RUST-END id=demo.add*/
+#endif
+/*RUSTYCPP:GEN-BEGIN id=demo.add version=1 rust_sha256=deadbeef*/
+// old generated text
+/*RUSTYCPP:GEN-END id=demo.add*/
+"#;
+        let err = parse_blocks(Path::new("demo.hpp"), content).expect_err("legacy should fail");
+        assert!(err.contains("legacy `RUST-BEGIN/RUST-END` markers are unsupported"));
     }
 
     #[test]
