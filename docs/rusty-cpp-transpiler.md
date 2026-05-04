@@ -5470,7 +5470,7 @@ Goals:
 1. Allow replacing small C++ regions with Rust semantics incrementally.
 2. Keep generated fallback C++ in the same file for immediate rollback and debugging.
 3. Make generation deterministic so CI can enforce "no manual edits in generated regions."
-4. Support only shapes that compile cleanly in header-only or C++20 module-interface workflows.
+4. Support only shapes that compile cleanly when lowered code stays local to the containing file/translation unit unless users explicitly place shared surfaces.
 
 Non-goals for v1:
 
@@ -5485,13 +5485,15 @@ V1 accepts only:
 
 1. Header-only files (`.h`/`.hpp`) where rewritten functions/templates are inline-safe.
 2. C++20 module interface units (`.cppm`) where definitions can remain in the interface unit.
+3. Source files (`.cpp`/`.cc`/`.cxx`) when the transpiled surfaces are intended to remain local to that translation unit, or when users manually maintain any required external declarations.
 
 V1 rejects:
 
-1. Traditional split ownership requiring synchronized `.h` declarations and `.cpp` out-of-line definitions.
-2. Inline Rust blocks that require emitting non-inline ODR-sensitive globals across multiple translation units.
+1. Automatic `.h`/`.cpp` declaration synchronization or generation across translation-unit boundaries.
+2. Inline Rust blocks that require the transpiler to auto-expose declarations to other translation units.
+3. Inline Rust blocks that require emitting non-inline ODR-sensitive globals across multiple translation units.
 
-Rationale: this avoids the highest-risk mapping problem (Rust item ownership to split C++ declaration/definition surfaces).
+Rationale: this avoids the highest-risk mapping problem (automatic ownership projection across C++ declaration/definition boundaries) while still allowing deliberate `.cpp`-local migration.
 
 ### 12.3 Block Activation Contract
 
@@ -5610,6 +5612,7 @@ set(RUSTYCPP_INLINE_TOOL "${CMAKE_SOURCE_DIR}/tools/rustycpp-inline")
 # 2) Inputs that may contain @rust blocks
 set(RUSTYCPP_INLINE_SOURCES
     ${CMAKE_SOURCE_DIR}/include/foo.hpp
+    ${CMAKE_SOURCE_DIR}/src/foo.cpp
     ${CMAKE_SOURCE_DIR}/src/bar.cppm
 )
 
@@ -5633,18 +5636,19 @@ Operational notes:
 2. For module builds, include regenerated `.cppm` files in the same module pipeline as other interfaces.
 3. Do not compile with `RUSTYCPP_RUST=1` in production targets for v1.
 
-### 12.8 Header/Source Mapping Decision for V1
+### 12.8 Translation-Unit Boundary Decision for V1
 
 V1 mapping rule:
 
-1. If a region needs split declaration/definition ownership, it is out of scope and MUST be rejected with a diagnostic.
-2. Users should keep migrated units header-only or module-interface-only until v2 introduces declaration/definition splitting.
+1. If a region requires the transpiler to automatically surface declarations into other translation units, it is out of scope and MUST be rejected with a diagnostic.
+2. Users may place inline Rust blocks in `.cpp` files, but then they own boundary design: what is local vs what is manually declared/exported elsewhere.
+3. For automatic discoverability by other units in v1, place shared APIs in headers or module interfaces.
 
 Recommended diagnostic text:
 
 ```text
-inline-rust-v1: split declaration/definition emission is unsupported;
-move this block to a header-only or C++20 module-interface unit.
+inline-rust-v1: automatic cross-translation-unit declaration surfacing is unsupported;
+move this block to a header/module interface, or provide matching declarations manually.
 ```
 
 This keeps v1 intentionally strict and prevents silent ODR/linkage regressions during incremental migration.
