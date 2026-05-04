@@ -6,6 +6,7 @@ use std::process::{self, Output};
 
 mod cmake;
 mod codegen;
+mod inline_rust;
 mod metadata;
 mod transpile;
 mod types;
@@ -65,6 +66,8 @@ struct Cli {
 enum Commands {
     /// Run parity test: transpile a Rust crate's tests to C++ and verify same results
     ParityTest(ParityTestArgs),
+    /// Validate or rewrite inline Rust DSL blocks embedded in C++ files
+    InlineRust(InlineRustArgs),
 }
 
 #[derive(Parser)]
@@ -139,6 +142,21 @@ struct ParityTestArgs {
     /// Kept only for CLI compatibility with older scripts.
     #[arg(long, hide = true)]
     _module_build: bool,
+}
+
+#[derive(Parser)]
+struct InlineRustArgs {
+    /// Validate marker structure and rust_sha256 hashes
+    #[arg(long, conflicts_with = "rewrite")]
+    check: bool,
+
+    /// Rewrite GEN regions with deterministic markers and generated fallback text
+    #[arg(long, conflicts_with = "check")]
+    rewrite: bool,
+
+    /// C++ files containing inline Rust blocks
+    #[arg(long = "files", required = true, num_args = 1..)]
+    files: Vec<PathBuf>,
 }
 
 /// Transpile an entire Rust crate in one command.
@@ -710,10 +728,7 @@ export void rusty_test_arrayvec_tests_regular_case() {
             parity_cpp_compiler_from_env(Some("clang++".to_string())),
             "clang++"
         );
-        assert_eq!(
-            parity_cpp_compiler_from_env(Some("g++".to_string())),
-            "g++"
-        );
+        assert_eq!(parity_cpp_compiler_from_env(Some("g++".to_string())), "g++");
     }
 
     #[test]
@@ -771,16 +786,12 @@ export void rusty_test_arrayvec_tests_regular_case() {
     #[test]
     fn test_inject_named_module_imports_emits_export_imports() {
         let content = "export module my_mod;\n\nexport int f();\n";
-        let out = inject_named_module_imports(
-            content,
-            &["serde".to_string(), "serde_core".to_string()],
-        );
+        let out =
+            inject_named_module_imports(content, &["serde".to_string(), "serde_core".to_string()]);
         assert!(out.contains("export import serde;\n"));
         assert!(out.contains("export import serde_core;\n"));
         assert!(!out.lines().any(|line| line.trim() == "import serde;"));
-        assert!(!out
-            .lines()
-            .any(|line| line.trim() == "import serde_core;"));
+        assert!(!out.lines().any(|line| line.trim() == "import serde_core;"));
     }
 
     #[test]
@@ -792,9 +803,10 @@ export void rusty_test_arrayvec_tests_regular_case() {
             .filter(|line| line.trim() == "import serde_core;")
             .count();
         assert_eq!(count, 1);
-        assert!(!out
-            .lines()
-            .any(|line| line.trim() == "export import serde_core;"));
+        assert!(
+            !out.lines()
+                .any(|line| line.trim() == "export import serde_core;")
+        );
     }
 
     #[test]
@@ -3192,6 +3204,28 @@ fn main() {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("Parity test error: {}", e);
+                        process::exit(1);
+                    }
+                }
+                return;
+            }
+            Commands::InlineRust(args) => {
+                let mode = if args.rewrite {
+                    inline_rust::InlineRustMode::Rewrite
+                } else if args.check {
+                    inline_rust::InlineRustMode::Check
+                } else {
+                    eprintln!("inline-rust error: either --check or --rewrite must be provided");
+                    process::exit(2);
+                };
+                let options = inline_rust::InlineRustOptions {
+                    mode,
+                    files: args.files.clone(),
+                };
+                match inline_rust::run_inline_rust(&options) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("inline-rust error: {}", e);
                         process::exit(1);
                     }
                 }
