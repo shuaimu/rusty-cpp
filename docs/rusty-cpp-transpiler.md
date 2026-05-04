@@ -5646,3 +5646,37 @@ move this block to a header/module interface, or provide matching declarations m
 ```
 
 This keeps v1 intentionally strict and prevents silent ODR/linkage regressions during incremental migration.
+
+### 12.9 Assignment Expressions, Unit Semantics, and Statement Peephole
+
+Rust assignment and compound-assignment are expressions, but their value is always unit `()`.
+
+Examples in Rust:
+
+```rust
+let mut x = 1;
+let u = (x = 5);    // u: ()
+let v = (x += 2);   // v: ()
+```
+
+In C++, assignment operators return the assigned lvalue, so the transpiler must preserve Rust unit semantics explicitly in value position.
+
+Value-position lowering keeps a unit wrapper:
+
+```cpp
+[&]() { static_cast<void>(x += 2); return std::make_tuple(); }()
+```
+
+This wrapper guarantees:
+
+1. side effects happen once,
+2. the expression type remains Rust unit (`std::tuple<>` in runtime model),
+3. nested expression typing remains consistent.
+
+For statement-only position, the return value is unused. The transpiler applies a peephole optimization and emits a plain statement:
+
+```cpp
+x += 2;
+```
+
+This reduces noise without changing semantics, while value-position forms continue to use the unit wrapper.

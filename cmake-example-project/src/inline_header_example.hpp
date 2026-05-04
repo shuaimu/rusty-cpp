@@ -93,7 +93,7 @@ Counter Counter::new_(int32_t value) {
 }
 
 void Counter::inc(int32_t delta) {
-    [&]() { static_cast<void>(rusty::detail::deref_if_pointer_like(this->value_field) += delta); return std::make_tuple(); }();
+    rusty::detail::deref_if_pointer_like(this->value_field) += delta;
 }
 
 int32_t Counter::value() const {
