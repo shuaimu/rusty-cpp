@@ -5457,3 +5457,194 @@ Required approach:
 
 - integrate by topic under §10.4/§10.5/§10.6
 - keep this document architectural and operational
+
+## 12. Strict V1 Spec: Inline Rust Blocks in C++ (Low-Risk Profile)
+
+This section defines a strict v1 profile for embedding Rust in C++ files and generating fallback C++ in-place.
+The goal is incremental migration with deterministic, reviewable generated output while avoiding high-risk language surfaces.
+
+### 12.1 Goals and Non-Goals
+
+Goals:
+
+1. Allow replacing small C++ regions with Rust semantics incrementally.
+2. Keep generated fallback C++ in the same file for immediate rollback and debugging.
+3. Make generation deterministic so CI can enforce "no manual edits in generated regions."
+4. Support only shapes that compile cleanly in header-only or C++20 module-interface workflows.
+
+Non-goals for v1:
+
+1. No automatic `.h`/`.cpp` declaration/definition splitting.
+2. No trait objects, async/await, macros, or procedural macro expansion inside inline blocks.
+3. No cross-block type inference or global optimization.
+4. No ABI-compatibility guarantees with pre-existing handwritten C++ layout unless explicitly constrained.
+
+### 12.2 File-Form Constraints (Strict)
+
+V1 accepts only:
+
+1. Header-only files (`.h`/`.hpp`) where rewritten functions/templates are inline-safe.
+2. C++20 module interface units (`.cppm`) where definitions can remain in the interface unit.
+
+V1 rejects:
+
+1. Traditional split ownership requiring synchronized `.h` declarations and `.cpp` out-of-line definitions.
+2. Inline Rust blocks that require emitting non-inline ODR-sensitive globals across multiple translation units.
+
+Rationale: this avoids the highest-risk mapping problem (Rust item ownership to split C++ declaration/definition surfaces).
+
+### 12.3 Block Activation Contract
+
+Use numeric preprocessor gating, not symbol-presence gating:
+
+- `#if RUSTYCPP_RUST` is valid.
+- `#ifdef RUSTYCPP_RUST` is invalid for this workflow because `#define RUSTYCPP_RUST 0` still evaluates true under `#ifdef`.
+
+Required compile modes:
+
+1. Normal builds set `RUSTYCPP_RUST=0` and compile generated C++ fallback.
+2. Authoring/verification tooling may set `RUSTYCPP_RUST=1` for extraction/parsing checks, but production compile remains `0` in v1.
+
+### 12.4 Inline Block Grammar (Normative)
+
+Each migration unit MUST use this shape:
+
+```cpp
+#if RUSTYCPP_RUST
+/*RUSTYCPP:RUST-BEGIN id=<stable_id>*/
+@rust {
+    // Rust subset code
+}
+/*RUSTYCPP:RUST-END id=<stable_id>*/
+#else
+/*RUSTYCPP:GEN-BEGIN id=<stable_id> version=1 rust_sha256=<hex>*/
+// generated C++ fallback (read-only)
+/*RUSTYCPP:GEN-END id=<stable_id>*/
+#endif
+```
+
+Grammar (EBNF-like):
+
+```text
+RustyBlock      := IfRust RustRegion ElseCpp GenRegion EndIf
+IfRust          := "#if" "RUSTYCPP_RUST"
+RustRegion      := RustBegin RustDsl RustEnd
+RustBegin       := "/*RUSTYCPP:RUST-BEGIN id=" StableId "*/"
+RustEnd         := "/*RUSTYCPP:RUST-END id=" StableId "*/"
+RustDsl         := "@rust" "{" RustToken* "}"
+ElseCpp         := "#else"
+GenRegion       := GenBegin CppToken* GenEnd
+GenBegin        := "/*RUSTYCPP:GEN-BEGIN id=" StableId
+                   " version=1 rust_sha256=" HexDigest "*/"
+GenEnd          := "/*RUSTYCPP:GEN-END id=" StableId "*/"
+EndIf           := "#endif"
+StableId        := [A-Za-z0-9_.:-]+
+HexDigest       := [0-9a-f]+
+```
+
+Validity rules:
+
+1. `StableId` in `RUST-BEGIN`, `RUST-END`, `GEN-BEGIN`, `GEN-END` MUST match exactly.
+2. `rust_sha256` MUST be computed from the normalized Rust payload (`@rust { ... }` body only).
+3. Generator MUST overwrite only the `GEN` region and MUST NOT modify text outside markers.
+4. Manual edits inside `GEN` region are allowed locally but are non-authoritative and overwritten on next generation.
+
+### 12.5 Allowed Rust Subset (V1)
+
+Only this subset is accepted in `@rust {}`:
+
+1. Item forms:
+   - `fn` (free functions)
+   - `struct` with named fields
+   - `impl` inherent methods (`impl Type { ... }`), no trait impls
+   - `type` aliases that resolve to supported types
+2. Type forms:
+   - primitives (`i*`, `u*`, `f*`, `bool`, `char`)
+   - `()` and tuples up to arity 4
+   - references `&T`, `&mut T` (no explicit lifetimes in syntax)
+   - `Option<T>`, `Result<T, E>`, `Vec<T>`, `String` where `T/E` are supported
+3. Statements/expressions:
+   - `let` bindings (with optional type ascription)
+   - assignment, arithmetic, comparison, boolean ops
+   - `if`/`else`, `while`, `loop`, `break`, `return`
+   - method calls and associated function calls on supported runtime surfaces
+
+Explicitly unsupported in v1:
+
+1. `async`/`await`, generators, coroutines
+2. `match` with guard-heavy or deep pattern shapes (simple literal/enum matches may be added in v1.1)
+3. trait definitions/impls, trait objects, `dyn`
+4. macros beyond inert attributes; no `macro_rules!` or proc-macro expansion
+5. unsafe blocks and raw-pointer-heavy FFI surfaces in inline mode
+
+### 12.6 Generation Markers and Determinism
+
+Generator requirements:
+
+1. Deterministic output for identical Rust payload and tool version.
+2. Stable formatting profile for generated C++ regions.
+3. Emitted metadata in `GEN-BEGIN`:
+   - `id`
+   - `version=1`
+   - `rust_sha256`
+4. Optional emitted metadata comment in `GEN` body:
+   - transpiler version
+   - generation timestamp (informational only; do not use for cache keys)
+
+CI policy recommendation:
+
+1. Run generator in check mode.
+2. Fail if any `GEN` region diff appears after regeneration.
+3. Fail if marker pairs are malformed or duplicate `id` values exist in one file.
+
+### 12.7 CMake Integration (V1 Contract)
+
+The build flow is "extract/regen first, then compile normally with `RUSTYCPP_RUST=0`."
+
+Minimal CMake pattern:
+
+```cmake
+# 1) Tool path
+set(RUSTYCPP_INLINE_TOOL "${CMAKE_SOURCE_DIR}/tools/rustycpp-inline")
+
+# 2) Inputs that may contain @rust blocks
+set(RUSTYCPP_INLINE_SOURCES
+    ${CMAKE_SOURCE_DIR}/include/foo.hpp
+    ${CMAKE_SOURCE_DIR}/src/bar.cppm
+)
+
+# 3) Regeneration target (in-place update of GEN regions)
+add_custom_target(rustycpp_inline_regen
+    COMMAND ${RUSTYCPP_INLINE_TOOL} --rewrite --files ${RUSTYCPP_INLINE_SOURCES}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Regenerating inline Rust fallback C++ regions"
+)
+
+# 4) Main targets depend on regeneration
+add_dependencies(my_target rustycpp_inline_regen)
+
+# 5) Compile fallback path in normal builds
+target_compile_definitions(my_target PRIVATE RUSTYCPP_RUST=0)
+```
+
+Operational notes:
+
+1. For CI, add a check-only invocation (`--check`) before compile.
+2. For module builds, include regenerated `.cppm` files in the same module pipeline as other interfaces.
+3. Do not compile with `RUSTYCPP_RUST=1` in production targets for v1.
+
+### 12.8 Header/Source Mapping Decision for V1
+
+V1 mapping rule:
+
+1. If a region needs split declaration/definition ownership, it is out of scope and MUST be rejected with a diagnostic.
+2. Users should keep migrated units header-only or module-interface-only until v2 introduces declaration/definition splitting.
+
+Recommended diagnostic text:
+
+```text
+inline-rust-v1: split declaration/definition emission is unsupported;
+move this block to a header-only or C++20 module-interface unit.
+```
+
+This keeps v1 intentionally strict and prevents silent ODR/linkage regressions during incremental migration.
