@@ -150,7 +150,7 @@ struct InlineRustArgs {
     #[arg(long, conflicts_with = "rewrite")]
     check: bool,
 
-    /// Rewrite GEN regions with deterministic markers and generated fallback text
+    /// Rewrite GEN regions with deterministic markers and generated C++ fallback
     #[arg(long, conflicts_with = "check")]
     rewrite: bool,
 
