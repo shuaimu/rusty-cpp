@@ -720,6 +720,7 @@ fn test_inline_rust_rewrite_then_check_passes() {
     let content = std::fs::read_to_string(&file).unwrap();
     assert!(content.contains("int32_t add(int32_t a, int32_t b);"));
     assert!(content.contains("int32_t add(int32_t a, int32_t b) {"));
+    assert!(!content.contains("#include <cstdint>"));
     assert!(!content.contains("// stale generated text"));
     assert!(!content.contains("\n#else\n"));
     assert!(!content.contains("RUSTYCPP:RUST-BEGIN"));

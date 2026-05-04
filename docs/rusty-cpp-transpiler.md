@@ -5583,6 +5583,9 @@ Generator requirements:
 4. Optional emitted metadata comment in `GEN` body:
    - transpiler version
    - generation timestamp (informational only; do not use for cache keys)
+5. Inline mode does not emit `#include` directives into `GEN` regions.
+   - Users own include/import management for inline units.
+   - This keeps inline rewrites local and avoids generator-owned header policy.
 
 CI policy recommendation:
 
