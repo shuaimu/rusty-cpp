@@ -68,6 +68,7 @@ WORK_ROOT="${REPO_ROOT}/.rusty-parity-matrix"
 DRY_RUN=0
 KEEP_WORK_DIRS=0
 MODULE_BUILD=1
+IMPORT_STD=0
 CONTINUE_ON_FAIL=0
 FIRST_FAIL_CRATE=""
 FIRST_FAIL_WORK_DIR=""
@@ -85,6 +86,7 @@ Options:
   --work-root <dir>   Root directory for per-crate parity work dirs
   --keep-work-dirs    Keep/reuse existing per-crate work dirs
   --module-build      Force Stage D module build mode (default)
+  --import-std       Use parity import-std mode (emit import std; and libc++ std module precompile)
   --flat-build        Use legacy flat translation-unit Stage D mode
   --continue-on-fail  Continue running all crates even after failures
   --dry-run           Print planned commands without executing
@@ -170,6 +172,10 @@ while [[ $# -gt 0 ]]; do
             MODULE_BUILD=1
             shift
             ;;
+        --import-std)
+            IMPORT_STD=1
+            shift
+            ;;
         --flat-build)
             MODULE_BUILD=0
             shift
@@ -245,6 +251,9 @@ run_parity_for_crate() {
         if [[ "${MODULE_BUILD}" -eq 1 ]]; then
             dry_cmd="${dry_cmd} --module-build"
         fi
+        if [[ "${IMPORT_STD}" -eq 1 ]]; then
+            dry_cmd="${dry_cmd} --import-std"
+        fi
         echo "  command: ${dry_cmd}"
         return 0
     fi
@@ -279,6 +288,9 @@ run_parity_for_crate() {
     fi
     if [[ "${MODULE_BUILD}" -eq 1 ]]; then
         cmd+=(--module-build)
+    fi
+    if [[ "${IMPORT_STD}" -eq 1 ]]; then
+        cmd+=(--import-std)
     fi
 
     echo "crate: ${crate}"

@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -137,6 +138,11 @@ struct ParityTestArgs {
     /// Useful for library-only crates to validate transpile + C++ compile.
     #[arg(long)]
     allow_empty_tests: bool,
+
+    /// In module mode, emit `import std;` instead of explicit std header includes.
+    /// Also forces Stage D to use `clang++ -stdlib=libc++` and precompile `std.cppm`.
+    #[arg(long)]
+    import_std: bool,
 
     /// Deprecated no-op: parity build is always module-based.
     /// Kept only for CLI compatibility with older scripts.
@@ -1908,12 +1914,194 @@ fn module_build_order(units: &[ModuleBuildUnit]) -> Vec<usize> {
     order
 }
 
+#[derive(Debug, Deserialize)]
+struct LibcxxModulesManifest {
+    modules: Vec<LibcxxModuleEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibcxxModuleEntry {
+    #[serde(rename = "logical-name")]
+    logical_name: String,
+    #[serde(rename = "source-path")]
+    source_path: String,
+    #[serde(rename = "local-arguments", default)]
+    local_arguments: LibcxxLocalArguments,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LibcxxLocalArguments {
+    #[serde(rename = "system-include-directories", default)]
+    system_include_directories: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LibcxxStdModuleConfig {
+    source_path: PathBuf,
+    system_include_directories: Vec<PathBuf>,
+}
+
+fn resolve_libcxx_std_module_config(cpp_compiler: &str) -> Result<LibcxxStdModuleConfig, String> {
+    let probe_output = std::process::Command::new(cpp_compiler)
+        .arg("-print-file-name=libc++.modules.json")
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to probe libc++ modules manifest via '{} -print-file-name=libc++.modules.json': {}",
+                cpp_compiler, e
+            )
+        })?;
+    if !probe_output.status.success() {
+        return Err(format!(
+            "Compiler '{}' failed probing libc++ modules manifest",
+            cpp_compiler
+        ));
+    }
+
+    let manifest_raw = String::from_utf8_lossy(&probe_output.stdout)
+        .trim()
+        .to_string();
+    if manifest_raw.is_empty() || manifest_raw == "libc++.modules.json" {
+        return Err(format!(
+            "Could not resolve libc++ modules manifest for '{}'; install libc++ module sources or choose a compiler/toolchain that provides libc++.modules.json",
+            cpp_compiler
+        ));
+    }
+
+    let manifest_path = PathBuf::from(&manifest_raw);
+    if !manifest_path.is_file() {
+        return Err(format!(
+            "Resolved libc++ modules manifest does not exist: {}",
+            manifest_path.display()
+        ));
+    }
+
+    let manifest_text = fs::read_to_string(&manifest_path).map_err(|e| {
+        format!(
+            "Failed to read libc++ modules manifest {}: {}",
+            manifest_path.display(),
+            e
+        )
+    })?;
+    let manifest: LibcxxModulesManifest = serde_json::from_str(&manifest_text).map_err(|e| {
+        format!(
+            "Failed to parse libc++ modules manifest {}: {}",
+            manifest_path.display(),
+            e
+        )
+    })?;
+    let std_entry = manifest
+        .modules
+        .into_iter()
+        .find(|entry| entry.logical_name == "std")
+        .ok_or_else(|| {
+            format!(
+                "libc++ modules manifest {} does not contain logical module 'std'",
+                manifest_path.display()
+            )
+        })?;
+
+    let manifest_dir = manifest_path.parent().ok_or_else(|| {
+        format!(
+            "Invalid libc++ modules manifest path: {}",
+            manifest_path.display()
+        )
+    })?;
+    let std_source_path = {
+        let raw = Path::new(std_entry.source_path.trim());
+        if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            manifest_dir.join(raw)
+        }
+    };
+    if !std_source_path.is_file() {
+        return Err(format!(
+            "Resolved std module source not found: {}",
+            std_source_path.display()
+        ));
+    }
+
+    let mut system_include_directories: Vec<PathBuf> = Vec::new();
+    for dir in std_entry.local_arguments.system_include_directories {
+        let raw = Path::new(dir.trim());
+        let resolved = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            manifest_dir.join(raw)
+        };
+        system_include_directories.push(resolved);
+    }
+
+    Ok(LibcxxStdModuleConfig {
+        source_path: std_source_path,
+        system_include_directories,
+    })
+}
+
+fn precompile_std_module_for_import_std(
+    cpp_compiler: &str,
+    cxx_standard: &str,
+    pcm_dir: &Path,
+    build_log: &mut String,
+) -> Result<(), String> {
+    let config = resolve_libcxx_std_module_config(cpp_compiler)?;
+    let std_pcm = pcm_dir.join("std.pcm");
+
+    let mut cmd = std::process::Command::new(cpp_compiler);
+    cmd.arg(format!("-std={}", cxx_standard))
+        .arg("-stdlib=libc++")
+        .arg("-x")
+        .arg("c++-module")
+        .arg("--precompile");
+    for dir in &config.system_include_directories {
+        cmd.arg("-isystem").arg(dir);
+    }
+    cmd.arg("-o").arg(&std_pcm).arg(&config.source_path);
+
+    let include_flags = if config.system_include_directories.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            config
+                .system_include_directories
+                .iter()
+                .map(|dir| format!("-isystem {}", dir.display()))
+                .collect::<Vec<String>>()
+                .join(" ")
+        )
+    };
+    let command_str = format!(
+        "{} -std={} -stdlib=libc++ -x c++-module --precompile{} -o {} {}",
+        cpp_compiler,
+        cxx_standard,
+        include_flags,
+        std_pcm.display(),
+        config.source_path.display()
+    );
+    build_log.push_str(&format!("$ {}\n", command_str));
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run {}: {}", cpp_compiler, e))?;
+    build_log.push_str(&String::from_utf8_lossy(&output.stderr));
+    build_log.push_str(&String::from_utf8_lossy(&output.stdout));
+    build_log.push('\n');
+
+    if !output.status.success() {
+        return Err("C++ std module precompile failed".to_string());
+    }
+    Ok(())
+}
+
 fn append_parity_runner_main(
     runner_src: &mut String,
     test_entries: &mut Vec<RunnerTestEntry>,
     no_baseline: bool,
     allow_empty_tests: bool,
     work_dir: &Path,
+    emit_runtime_clear: bool,
 ) -> Result<(), String> {
     if test_entries.is_empty() {
         let baseline_ran_tests = if no_baseline {
@@ -1956,7 +2144,9 @@ fn append_parity_runner_main(
     runner_src
         .push_str("    if (argc == 3 && std::string(argv[1]) == \"--rusty-single-test\") {\n");
     runner_src.push_str("        const std::string test_name = argv[2];\n");
-    runner_src.push_str("        rusty::mem::clear_all_forgotten_addresses();\n");
+    if emit_runtime_clear {
+        runner_src.push_str("        rusty::mem::clear_all_forgotten_addresses();\n");
+    }
     runner_src.push_str("        try {\n");
     for entry in test_entries.iter() {
         runner_src.push_str(&format!(
@@ -1983,10 +2173,17 @@ fn append_parity_runner_main(
                 entry.fn_name, entry.label, entry.label
             ));
         } else {
-            runner_src.push_str(&format!(
-                "    rusty::mem::clear_all_forgotten_addresses();\n    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
-                entry.fn_name, entry.label
-            ));
+            if emit_runtime_clear {
+                runner_src.push_str(&format!(
+                    "    rusty::mem::clear_all_forgotten_addresses();\n    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
+                    entry.fn_name, entry.label
+                ));
+            } else {
+                runner_src.push_str(&format!(
+                    "    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
+                    entry.fn_name, entry.label
+                ));
+            }
             runner_src.push_str(&format!(
                 "    catch (const std::exception& e) {{ std::cerr << \"  {} FAILED: \" << e.what() << std::endl; fail++; }}\n",
                 entry.label
@@ -2061,12 +2258,45 @@ fn run_stage_d_module_build(
     let mut object_files: Vec<PathBuf> = Vec::new();
     let order = module_build_order(&units);
     let portable_intrinsics_define = "-DRUSTY_PORTABLE_INTRINSICS=1";
+    let cxx_standard = if args.import_std { "c++23" } else { "c++20" };
+    let stdlib_flag_suffix = if args.import_std {
+        " -stdlib=libc++"
+    } else {
+        ""
+    };
+
+    if args.import_std {
+        if let Err(err) = precompile_std_module_for_import_std(
+            cpp_compiler,
+            cxx_standard,
+            &pcm_dir,
+            &mut build_log,
+        ) {
+            fs::write(&build_log_path, &build_log)
+                .map_err(|e| format!("Failed to write build log: {}", e))?;
+            println!("  Build FAILED — see {}", build_log_path.display());
+            for line in build_log
+                .lines()
+                .filter(|line| line.contains("error:"))
+                .take(20)
+            {
+                println!("    {}", line);
+            }
+            println!(
+                "  Build compile time (module, failed): {:.3}s",
+                compile_start.elapsed().as_secs_f64()
+            );
+            return Err(err);
+        }
+    }
 
     for idx in order {
         let unit = &units[idx];
         let precompile_cmd = format!(
-            "{} -std=c++20 {} -x c++-module --precompile -I{} -fprebuilt-module-path={} -o {} {}",
+            "{} -std={}{} {} -x c++-module --precompile -I{} -fprebuilt-module-path={} -o {} {}",
             cpp_compiler,
+            cxx_standard,
+            stdlib_flag_suffix,
             portable_intrinsics_define,
             include_dir.display(),
             pcm_dir.display(),
@@ -2074,9 +2304,14 @@ fn run_stage_d_module_build(
             unit.source_path.display()
         );
         build_log.push_str(&format!("$ {}\n", precompile_cmd));
-        let precompile_output = std::process::Command::new(cpp_compiler)
-            .arg("-std=c++20")
-            .arg(portable_intrinsics_define)
+        let mut precompile_command = std::process::Command::new(cpp_compiler);
+        precompile_command
+            .arg(format!("-std={}", cxx_standard))
+            .arg(portable_intrinsics_define);
+        if args.import_std {
+            precompile_command.arg("-stdlib=libc++");
+        }
+        let precompile_output = precompile_command
             .arg("-x")
             .arg("c++-module")
             .arg("--precompile")
@@ -2109,8 +2344,10 @@ fn run_stage_d_module_build(
         }
 
         let object_cmd = format!(
-            "{} -std=c++20 {} -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} -c {} -o {}",
+            "{} -std={}{} {} -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} -c {} -o {}",
             cpp_compiler,
+            cxx_standard,
+            stdlib_flag_suffix,
             portable_intrinsics_define,
             include_dir.display(),
             pcm_dir.display(),
@@ -2118,9 +2355,14 @@ fn run_stage_d_module_build(
             unit.object_path.display()
         );
         build_log.push_str(&format!("$ {}\n", object_cmd));
-        let object_output = std::process::Command::new(cpp_compiler)
-            .arg("-std=c++20")
-            .arg(portable_intrinsics_define)
+        let mut object_command = std::process::Command::new(cpp_compiler);
+        object_command
+            .arg(format!("-std={}", cxx_standard))
+            .arg(portable_intrinsics_define);
+        if args.import_std {
+            object_command.arg("-stdlib=libc++");
+        }
+        let object_output = object_command
             .arg("-Wall")
             .arg("-Wno-unused-variable")
             .arg("-Wno-unused-but-set-variable")
@@ -2158,6 +2400,9 @@ fn run_stage_d_module_build(
 
     let mut runner_src = String::new();
     runner_src.push_str("// Auto-generated parity test runner (module mode)\n");
+    if args.import_std {
+        runner_src.push_str("import std;\n");
+    }
     let mut imported_targets: BTreeSet<String> = BTreeSet::new();
     for artifact in generated_cppm_files {
         if !artifact.is_dependency {
@@ -2167,15 +2412,20 @@ fn run_stage_d_module_build(
     for module_name in imported_targets {
         runner_src.push_str(&format!("import {};\n", module_name));
     }
-    runner_src.push_str(
-        "#include <rusty/rusty.hpp>\n#include <iostream>\n#include <string>\n#include <cstdlib>\n\n",
-    );
+    if args.import_std {
+        runner_src.push_str("\n");
+    } else {
+        runner_src.push_str(
+            "#include <rusty/rusty.hpp>\n#include <iostream>\n#include <string>\n#include <cstdlib>\n\n",
+        );
+    }
     append_parity_runner_main(
         &mut runner_src,
         &mut test_entries,
         args.no_baseline,
         args.allow_empty_tests,
         work_dir,
+        !args.import_std,
     )?;
 
     fs::write(&runner_path, &runner_src).map_err(|e| format!("Failed to write runner: {}", e))?;
@@ -2187,8 +2437,10 @@ fn run_stage_d_module_build(
 
     let runner_object = obj_dir.join("runner.o");
     let runner_compile_cmd = format!(
-        "{} -std=c++20 {} -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} -c {} -o {}",
+        "{} -std={}{} {} -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} -c {} -o {}",
         cpp_compiler,
+        cxx_standard,
+        stdlib_flag_suffix,
         portable_intrinsics_define,
         include_dir.display(),
         pcm_dir.display(),
@@ -2196,9 +2448,14 @@ fn run_stage_d_module_build(
         runner_object.display()
     );
     build_log.push_str(&format!("$ {}\n", runner_compile_cmd));
-    let runner_compile_output = std::process::Command::new(cpp_compiler)
-        .arg("-std=c++20")
-        .arg(portable_intrinsics_define)
+    let mut runner_compile_command = std::process::Command::new(cpp_compiler);
+    runner_compile_command
+        .arg(format!("-std={}", cxx_standard))
+        .arg(portable_intrinsics_define);
+    if args.import_std {
+        runner_compile_command.arg("-stdlib=libc++");
+    }
+    let runner_compile_output = runner_compile_command
         .arg("-Wall")
         .arg("-Wno-unused-variable")
         .arg("-Wno-unused-but-set-variable")
@@ -2232,14 +2489,20 @@ fn run_stage_d_module_build(
     }
 
     let mut link_cmd = std::process::Command::new(cpp_compiler);
-    link_cmd.arg("-std=c++20").arg("-o").arg(&binary_path);
+    link_cmd.arg(format!("-std={}", cxx_standard));
+    if args.import_std {
+        link_cmd.arg("-stdlib=libc++");
+    }
+    link_cmd.arg("-o").arg(&binary_path);
     for obj in &object_files {
         link_cmd.arg(obj);
     }
     link_cmd.arg(&runner_object);
     let link_cmd_str = format!(
-        "{} -std=c++20 -o {} {} {}",
+        "{} -std={}{} -o {} {} {}",
         cpp_compiler,
+        cxx_standard,
+        stdlib_flag_suffix,
         binary_path.display(),
         object_files
             .iter()
@@ -2907,6 +3170,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
+        use_import_std_in_modules: args.import_std,
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -3099,10 +3363,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let cpp_compiler = parity_cpp_compiler();
 
     if args.dry_run {
-        println!(
-            "  [dry-run] module build with {} (precompile .cppm + compile runner imports)",
-            cpp_compiler
-        );
+        if args.import_std {
+            println!(
+                "  [dry-run] module build with {} (import std mode: precompile std.cppm + precompile .cppm + compile runner imports, -stdlib=libc++)",
+                cpp_compiler
+            );
+        } else {
+            println!(
+                "  [dry-run] module build with {} (precompile .cppm + compile runner imports)",
+                cpp_compiler
+            );
+        }
     } else {
         run_stage_d_module_build(
             args,
@@ -3269,6 +3540,7 @@ fn main() {
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
+        use_import_std_in_modules: false,
     };
 
     // Handle --crate: transpile entire crate
