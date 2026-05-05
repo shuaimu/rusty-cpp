@@ -7,6 +7,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(RUSTY_PLATFORM_POSIX "Use POSIX backend for rusty::platform primitives" OFF)
+if(RUSTY_PLATFORM_POSIX)
+    add_compile_definitions(RUSTY_PLATFORM_BACKEND_POSIX=1)
+endif()
+
 set(TEST_SOURCES
     # Basic Rusty types - ALL WORKING
     tests/rusty_arc_test.cpp

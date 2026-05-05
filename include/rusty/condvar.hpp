@@ -1,9 +1,12 @@
 #pragma once
 
-#include <condition_variable>
-#include <mutex>
 #include <chrono>
+#if defined(RUSTY_PLATFORM_BACKEND_POSIX)
+#  include <condition_variable>
+#  include <mutex>
+#endif
 #include "mutex.hpp"
+#include "platform/threading.hpp"
 #include "unsafe_cell.hpp"
 
 namespace rusty {
@@ -53,7 +56,12 @@ public:
 class Condvar {
 private:
     // UnsafeCell provides interior mutability for const methods
-    UnsafeCell<std::condition_variable> cv_;
+    UnsafeCell<platform::threading::condition_variable> cv_;
+#if defined(RUSTY_PLATFORM_BACKEND_POSIX)
+    // Compatibility path for legacy call sites that still pass
+    // std::unique_lock<std::mutex> directly.
+    UnsafeCell<std::condition_variable> std_cv_;
+#endif
 
 public:
     // @safe - Default constructor
@@ -95,10 +103,10 @@ public:
         MutexGuard<T>&& guard,
         const std::chrono::duration<Rep, Period>& duration
     ) const {
-        std::cv_status status;
+        platform::threading::cv_status status;
         // @unsafe
         { status = cv_.get()->wait_for(guard.underlying_lock(), duration); }
-        bool timed_out = (status == std::cv_status::timeout);
+        bool timed_out = (status == platform::threading::cv_status::timeout);
         using ResultType = std::pair<MutexGuard<T>, WaitTimeoutResult>;
         return Result<ResultType, PoisonError<T>>::Ok(
             ResultType(std::move(guard), WaitTimeoutResult(timed_out))
@@ -137,14 +145,14 @@ public:
     // =========================================================================
 
     // @safe - Wait on a unique_lock (C++ style, no return value)
-    void wait(std::unique_lock<std::mutex>& lock) const {
+    void wait(platform::threading::unique_lock<platform::threading::mutex>& lock) const {
         // @unsafe
         { cv_.get()->wait(lock); }
     }
 
     // @safe - Wait with predicate (C++ semantics: waits UNTIL pred is TRUE)
     template<typename Predicate>
-    void wait(std::unique_lock<std::mutex>& lock, Predicate pred) const {
+    void wait(platform::threading::unique_lock<platform::threading::mutex>& lock, Predicate pred) const {
         // @unsafe
         { cv_.get()->wait(lock, pred); }
     }
@@ -152,17 +160,17 @@ public:
     // @safe - Wait for duration
     template<typename Rep, typename Period>
     bool wait_for(
-        std::unique_lock<std::mutex>& lock,
+        platform::threading::unique_lock<platform::threading::mutex>& lock,
         const std::chrono::duration<Rep, Period>& duration
     ) const {
         // @unsafe
-        { return cv_.get()->wait_for(lock, duration) == std::cv_status::no_timeout; }
+        { return cv_.get()->wait_for(lock, duration) == platform::threading::cv_status::no_timeout; }
     }
 
     // @safe - Wait for duration with predicate (C++ semantics)
     template<typename Rep, typename Period, typename Predicate>
     bool wait_for(
-        std::unique_lock<std::mutex>& lock,
+        platform::threading::unique_lock<platform::threading::mutex>& lock,
         const std::chrono::duration<Rep, Period>& duration,
         Predicate pred
     ) const {
@@ -173,14 +181,66 @@ public:
     // @safe - Wait until time point
     template<typename Clock, typename Duration>
     bool wait_until(
+        platform::threading::unique_lock<platform::threading::mutex>& lock,
+        const std::chrono::time_point<Clock, Duration>& timeout_time
+    ) const {
+        // @unsafe
+        { return cv_.get()->wait_until(lock, timeout_time) == platform::threading::cv_status::no_timeout; }
+    }
+
+    // @safe - Wait until time point with predicate
+    template<typename Clock, typename Duration, typename Predicate>
+    bool wait_until(
+        platform::threading::unique_lock<platform::threading::mutex>& lock,
+        const std::chrono::time_point<Clock, Duration>& timeout_time,
+        Predicate pred
+    ) const {
+        // @unsafe
+        { return cv_.get()->wait_until(lock, timeout_time, pred); }
+    }
+
+#if defined(RUSTY_PLATFORM_BACKEND_POSIX)
+    // Temporary compatibility overloads for std::mutex/std::condition_variable
+    // call sites while POSIX backend migration is in progress.
+    void wait(std::unique_lock<std::mutex>& lock) const {
+        // @unsafe
+        { std_cv_.get()->wait(lock); }
+    }
+
+    template<typename Predicate>
+    void wait(std::unique_lock<std::mutex>& lock, Predicate pred) const {
+        // @unsafe
+        { std_cv_.get()->wait(lock, pred); }
+    }
+
+    template<typename Rep, typename Period>
+    bool wait_for(
+        std::unique_lock<std::mutex>& lock,
+        const std::chrono::duration<Rep, Period>& duration
+    ) const {
+        // @unsafe
+        { return std_cv_.get()->wait_for(lock, duration) == std::cv_status::no_timeout; }
+    }
+
+    template<typename Rep, typename Period, typename Predicate>
+    bool wait_for(
+        std::unique_lock<std::mutex>& lock,
+        const std::chrono::duration<Rep, Period>& duration,
+        Predicate pred
+    ) const {
+        // @unsafe
+        { return std_cv_.get()->wait_for(lock, duration, pred); }
+    }
+
+    template<typename Clock, typename Duration>
+    bool wait_until(
         std::unique_lock<std::mutex>& lock,
         const std::chrono::time_point<Clock, Duration>& timeout_time
     ) const {
         // @unsafe
-        { return cv_.get()->wait_until(lock, timeout_time) == std::cv_status::no_timeout; }
+        { return std_cv_.get()->wait_until(lock, timeout_time) == std::cv_status::no_timeout; }
     }
 
-    // @safe - Wait until time point with predicate
     template<typename Clock, typename Duration, typename Predicate>
     bool wait_until(
         std::unique_lock<std::mutex>& lock,
@@ -188,8 +248,9 @@ public:
         Predicate pred
     ) const {
         // @unsafe
-        { return cv_.get()->wait_until(lock, timeout_time, pred); }
+        { return std_cv_.get()->wait_until(lock, timeout_time, pred); }
     }
+#endif
 
     // =========================================================================
     // Notification methods
@@ -198,13 +259,23 @@ public:
     // @safe - Notify one waiting thread
     void notify_one() const {
         // @unsafe
-        { cv_.get()->notify_one(); }
+        {
+            cv_.get()->notify_one();
+#if defined(RUSTY_PLATFORM_BACKEND_POSIX)
+            std_cv_.get()->notify_one();
+#endif
+        }
     }
 
     // @safe - Notify all waiting threads
     void notify_all() const {
         // @unsafe
-        { cv_.get()->notify_all(); }
+        {
+            cv_.get()->notify_all();
+#if defined(RUSTY_PLATFORM_BACKEND_POSIX)
+            std_cv_.get()->notify_all();
+#endif
+        }
     }
 
     // Non-copyable, non-movable

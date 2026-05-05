@@ -1,8 +1,7 @@
 #pragma once
 
-#include <shared_mutex>
-#include <mutex>
 #include "option.hpp"
+#include "platform/threading.hpp"
 #include "unsafe_cell.hpp"
 
 namespace rusty {
@@ -13,19 +12,19 @@ namespace rusty {
 template<typename T>
 class RwLock {
 private:
-    UnsafeCell<std::shared_mutex> mtx_;
+    UnsafeCell<platform::threading::shared_mutex> mtx_;
     T data_;
 
 public:
     // ReadGuard - RAII read guard (shared lock)
     class ReadGuard {
     private:
-        std::shared_lock<std::shared_mutex> lock_;
+        platform::threading::shared_lock<platform::threading::shared_mutex> lock_;
         const T* data_;
 
         friend class RwLock;
 
-        ReadGuard(std::shared_lock<std::shared_mutex>&& lock, const T* data)
+        ReadGuard(platform::threading::shared_lock<platform::threading::shared_mutex>&& lock, const T* data)
             : lock_(std::move(lock)), data_(data) {}
 
     public:
@@ -46,12 +45,12 @@ public:
     // WriteGuard - RAII write guard (exclusive lock)
     class WriteGuard {
     private:
-        std::unique_lock<std::shared_mutex> lock_;
+        platform::threading::unique_lock<platform::threading::shared_mutex> lock_;
         T* data_;
 
         friend class RwLock;
 
-        WriteGuard(std::unique_lock<std::shared_mutex>&& lock, T* data)
+        WriteGuard(platform::threading::unique_lock<platform::threading::shared_mutex>&& lock, T* data)
             : lock_(std::move(lock)), data_(data) {}
 
     public:
@@ -88,12 +87,12 @@ public:
 
     // Acquire read lock (shared)
     [[nodiscard]] ReadGuard read() const {
-        return ReadGuard(std::shared_lock(*mtx_.get()), &data_);
+        return ReadGuard(platform::threading::shared_lock<platform::threading::shared_mutex>(*mtx_.get()), &data_);
     }
 
     // Try to acquire read lock (non-blocking)
     [[nodiscard]] Option<ReadGuard> try_read() const {
-        std::shared_lock lock(*mtx_.get(), std::try_to_lock);
+        platform::threading::shared_lock<platform::threading::shared_mutex> lock(*mtx_.get(), platform::threading::try_to_lock);
         if (lock.owns_lock()) {
             return Some(ReadGuard(std::move(lock), &data_));
         }
@@ -102,17 +101,17 @@ public:
 
     // Acquire write lock (exclusive)
     [[nodiscard]] WriteGuard write() {
-        return WriteGuard(std::unique_lock(*mtx_.get()), &data_);
+        return WriteGuard(platform::threading::unique_lock<platform::threading::shared_mutex>(*mtx_.get()), &data_);
     }
 
     // Acquire write lock (exclusive) - const version
     [[nodiscard]] WriteGuard write() const {
-        return WriteGuard(std::unique_lock(*mtx_.get()), const_cast<T*>(&data_));
+        return WriteGuard(platform::threading::unique_lock<platform::threading::shared_mutex>(*mtx_.get()), const_cast<T*>(&data_));
     }
 
     // Try to acquire write lock (non-blocking)
     [[nodiscard]] Option<WriteGuard> try_write() {
-        std::unique_lock lock(*mtx_.get(), std::try_to_lock);
+        platform::threading::unique_lock<platform::threading::shared_mutex> lock(*mtx_.get(), platform::threading::try_to_lock);
         if (lock.owns_lock()) {
             return Some(WriteGuard(std::move(lock), &data_));
         }
@@ -121,7 +120,7 @@ public:
 
     // Try to acquire write lock (const version)
     [[nodiscard]] Option<WriteGuard> try_write() const {
-        std::unique_lock lock(*mtx_.get(), std::try_to_lock);
+        platform::threading::unique_lock<platform::threading::shared_mutex> lock(*mtx_.get(), platform::threading::try_to_lock);
         if (lock.owns_lock()) {
             return Some(WriteGuard(std::move(lock), const_cast<T*>(&data_)));
         }

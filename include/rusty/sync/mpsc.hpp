@@ -1,13 +1,12 @@
 #pragma once
 
 #include <memory>
-#include <mutex>
-#include <condition_variable>
 #include <queue>
 #include <atomic>
 #include <type_traits>
 #include <tuple>
 #include "../option.hpp"
+#include "../platform/threading.hpp"
 #include "../result.hpp"
 #include "../send_trait.hpp"
 #include "../send_impls.hpp"
@@ -67,8 +66,8 @@ private:
     friend class Sender<T>;
     friend class Receiver<T>;
 
-    mutable std::mutex mutex_;
-    std::condition_variable cv_;
+    mutable platform::threading::mutex mutex_;
+    platform::threading::condition_variable cv_;
     std::queue<T> queue_;
     std::atomic<size_t> sender_count_;
     bool receiver_alive_;
@@ -86,7 +85,7 @@ public:
 
     // Send a value (blocking)
     Result<Unit, TrySendError> send(T value) {
-        std::unique_lock<std::mutex> lock(mutex_);
+        platform::threading::unique_lock<platform::threading::mutex> lock(mutex_);
 
         if (!receiver_alive_) {
             return Result<Unit, TrySendError>::Err(TrySendError::Disconnected);
@@ -99,7 +98,7 @@ public:
 
     // Try to send a value (non-blocking)
     Result<Unit, TrySendError> try_send(T value) {
-        std::unique_lock<std::mutex> lock(mutex_);
+        platform::threading::unique_lock<platform::threading::mutex> lock(mutex_);
 
         if (!receiver_alive_) {
             return Result<Unit, TrySendError>::Err(TrySendError::Disconnected);
@@ -112,7 +111,7 @@ public:
 
     // Receive a value (blocking)
     Result<T, RecvError> recv() {
-        std::unique_lock<std::mutex> lock(mutex_);
+        platform::threading::unique_lock<platform::threading::mutex> lock(mutex_);
 
         // Wait until queue is not empty or all senders are gone
         cv_.wait(lock, [this]() {
@@ -131,7 +130,7 @@ public:
 
     // Try to receive a value (non-blocking)
     Result<T, TryRecvError> try_recv() {
-        std::unique_lock<std::mutex> lock(mutex_);
+        platform::threading::unique_lock<platform::threading::mutex> lock(mutex_);
 
         if (!queue_.empty()) {
             T value = std::move(queue_.front());
@@ -153,18 +152,18 @@ public:
     void decrement_sender() {
         if (sender_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             // Last sender dropped, wake up receiver
-            std::lock_guard<std::mutex> lock(mutex_);
+            platform::threading::lock_guard<platform::threading::mutex> lock(mutex_);
             cv_.notify_one();
         }
     }
 
     void mark_receiver_dropped() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        platform::threading::lock_guard<platform::threading::mutex> lock(mutex_);
         receiver_alive_ = false;
     }
 
     bool is_receiver_alive() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        platform::threading::lock_guard<platform::threading::mutex> lock(mutex_);
         return receiver_alive_;
     }
 

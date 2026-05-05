@@ -1,7 +1,7 @@
 #pragma once
 
-#include <mutex>
 #include <atomic>
+#include "platform/threading.hpp"
 
 namespace rusty {
 
@@ -18,7 +18,7 @@ namespace rusty {
 //
 class Once {
 private:
-    std::once_flag flag_;
+    platform::threading::once_flag flag_;
 
 public:
     Once() = default;
@@ -29,7 +29,7 @@ public:
     // exactly one will execute the function, and the others will wait
     template<typename F>
     void call_once(F&& func) {
-        std::call_once(flag_, std::forward<F>(func));
+        platform::threading::call_once(flag_, std::forward<F>(func));
     }
 
     // Non-copyable, non-movable
@@ -59,7 +59,7 @@ public:
 template<typename T>
 class OnceCell {
 private:
-    std::once_flag flag_;
+    platform::threading::once_flag flag_;
     alignas(T) unsigned char storage_[sizeof(T)];
     std::atomic<bool> initialized_{false};
 
@@ -73,7 +73,7 @@ public:
     // Returns true if the value was set, false if already initialized
     bool set(T value) {
         bool success = false;
-        std::call_once(flag_, [this, &value, &success]() {
+        platform::threading::call_once(flag_, [this, &value, &success]() {
             new (storage_) T(std::move(value));
             initialized_.store(true, std::memory_order_release);
             success = true;
@@ -100,7 +100,7 @@ public:
     // Get or initialize the value
     template<typename F>
     const T& get_or_init(F&& func) {
-        std::call_once(flag_, [this, &func]() {
+        platform::threading::call_once(flag_, [this, &func]() {
             new (storage_) T(func());
             initialized_.store(true, std::memory_order_release);
         });

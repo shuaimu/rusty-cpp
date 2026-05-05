@@ -1,8 +1,8 @@
 #pragma once
 
-#include <mutex>
 #include <type_traits>
 #include "option.hpp"
+#include "platform/threading.hpp"
 #include "result.hpp"
 #include "unsafe_cell.hpp"
 
@@ -93,13 +93,13 @@ using LockResult = Result<MutexGuard<T>, PoisonError<T>>;
 template<typename T>
 class MutexGuard {
 private:
-    std::unique_lock<std::mutex> lock_;
+    platform::threading::unique_lock<platform::threading::mutex> lock_;
     T* data_;
 
     friend class Mutex<T>;
     template<typename U> friend class Mutex;  // Allow all Mutex<U> to create guards
 
-    MutexGuard(std::unique_lock<std::mutex>&& lock, T* data)
+    MutexGuard(platform::threading::unique_lock<platform::threading::mutex>&& lock, T* data)
         : lock_(std::move(lock)), data_(data) {}
 
 public:
@@ -130,9 +130,9 @@ public:
 
     // Access to underlying lock for Condvar integration
     // @safe - Returns reference to the underlying unique_lock
-    std::unique_lock<std::mutex>& underlying_lock() { return lock_; }
+    platform::threading::unique_lock<platform::threading::mutex>& underlying_lock() { return lock_; }
     // @safe
-    const std::unique_lock<std::mutex>& underlying_lock() const { return lock_; }
+    const platform::threading::unique_lock<platform::threading::mutex>& underlying_lock() const { return lock_; }
 
     // Non-copyable, movable
     MutexGuard(const MutexGuard&) = delete;
@@ -159,7 +159,7 @@ public:
 template<typename T>
 class Mutex {
 private:
-    UnsafeCell<std::mutex> mtx_;  // UnsafeCell for interior mutability
+    UnsafeCell<platform::threading::mutex> mtx_;  // UnsafeCell for interior mutability
     T data_;
 
 public:
@@ -184,7 +184,7 @@ public:
     [[nodiscard]] LockResult<T> lock() {
         // @unsafe
         {
-            auto guard = MutexGuard<T>(std::unique_lock<std::mutex>(*mtx_.get()), &data_);
+            auto guard = MutexGuard<T>(platform::threading::unique_lock<platform::threading::mutex>(*mtx_.get()), &data_);
             return LockResult<T>::Ok(std::move(guard));
         }
     }
@@ -193,7 +193,7 @@ public:
     [[nodiscard]] LockResult<T> lock() const {
         // @unsafe
         {
-            auto guard = MutexGuard<T>(std::unique_lock<std::mutex>(*mtx_.get()), const_cast<T*>(&data_));
+            auto guard = MutexGuard<T>(platform::threading::unique_lock<platform::threading::mutex>(*mtx_.get()), const_cast<T*>(&data_));
             return LockResult<T>::Ok(std::move(guard));
         }
     }
@@ -205,7 +205,7 @@ public:
     [[nodiscard]] Option<MutexGuard<T>> try_lock() {
         // @unsafe
         {
-            std::unique_lock<std::mutex> lk(*mtx_.get(), std::try_to_lock);
+            platform::threading::unique_lock<platform::threading::mutex> lk(*mtx_.get(), platform::threading::try_to_lock);
             if (lk.owns_lock()) {
                 return Some(MutexGuard<T>(std::move(lk), &data_));
             }
@@ -217,7 +217,7 @@ public:
     [[nodiscard]] Option<MutexGuard<T>> try_lock() const {
         // @unsafe
         {
-            std::unique_lock<std::mutex> lk(*mtx_.get(), std::try_to_lock);
+            platform::threading::unique_lock<platform::threading::mutex> lk(*mtx_.get(), platform::threading::try_to_lock);
             if (lk.owns_lock()) {
                 return Some(MutexGuard<T>(std::move(lk), const_cast<T*>(&data_)));
             }
@@ -233,7 +233,7 @@ public:
         : mtx_(), data_(std::move(other.data_)) {}
     Mutex& operator=(Mutex&& other) noexcept(std::is_nothrow_move_assignable_v<T>) {
         if (this != &other) {
-            std::scoped_lock lock(*mtx_.get(), *other.mtx_.get());
+            platform::threading::scoped_lock lock(*mtx_.get(), *other.mtx_.get());
             data_ = std::move(other.data_);
         }
         return *this;

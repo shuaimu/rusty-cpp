@@ -7,13 +7,13 @@
 #include <cstring>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <new>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <variant>
+#include <rusty/platform/threading.hpp>
 
 namespace rusty {
 namespace mem {
@@ -45,8 +45,8 @@ forgotten_addresses() {
     return *addresses;
 }
 
-inline std::mutex& forgotten_addresses_mutex() {
-    static auto* mutex = new std::mutex();
+inline platform::threading::mutex& forgotten_addresses_mutex() {
+    static auto* mutex = new platform::threading::mutex();
     return *mutex;
 }
 
@@ -60,7 +60,7 @@ inline void mark_forgotten_key(const void* address, const void* type_tag) noexce
     if (address == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> lock(forgotten_addresses_mutex());
+    platform::threading::lock_guard<platform::threading::mutex> lock(forgotten_addresses_mutex());
     auto& addresses = forgotten_addresses();
     addresses[forgotten_address_key{address, type_tag}] += 1;
 }
@@ -69,7 +69,7 @@ inline bool consume_forgotten_key(const void* address, const void* type_tag) noe
     if (address == nullptr) {
         return false;
     }
-    std::lock_guard<std::mutex> lock(forgotten_addresses_mutex());
+    platform::threading::lock_guard<platform::threading::mutex> lock(forgotten_addresses_mutex());
     auto& addresses = forgotten_addresses();
     const auto it = addresses.find(forgotten_address_key{address, type_tag});
     if (it == addresses.end()) {
@@ -319,7 +319,7 @@ inline void clear_forgotten_address_range(const void* base, std::size_t bytes) n
         end = start + bytes;
     }
 
-    std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
+    platform::threading::lock_guard<platform::threading::mutex> lock(detail::forgotten_addresses_mutex());
     auto& addresses = detail::forgotten_addresses();
     for (auto it = addresses.begin(); it != addresses.end();) {
         const auto current = reinterpret_cast<std::uintptr_t>(it->first.address);
@@ -332,7 +332,7 @@ inline void clear_forgotten_address_range(const void* base, std::size_t bytes) n
 }
 
 inline void clear_all_forgotten_addresses() noexcept {
-    std::lock_guard<std::mutex> lock(detail::forgotten_addresses_mutex());
+    platform::threading::lock_guard<platform::threading::mutex> lock(detail::forgotten_addresses_mutex());
     detail::forgotten_addresses().clear();
 }
 

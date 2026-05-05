@@ -1,10 +1,9 @@
 #pragma once
 
-#include <condition_variable>
 #include <cstddef>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
+#include "platform/threading.hpp"
 
 namespace rusty {
 
@@ -24,8 +23,8 @@ namespace rusty {
 class Barrier {
 private:
     struct State {
-        mutable std::mutex mtx;
-        mutable std::condition_variable cv;
+        mutable platform::threading::mutex mtx;
+        mutable platform::threading::condition_variable cv;
         std::size_t threshold;
         mutable std::size_t count;
         mutable std::size_t generation;
@@ -67,7 +66,7 @@ public:
     // Wait for all threads to arrive at the barrier
     // Returns a BarrierWaitResult indicating if this thread is the leader
     BarrierWaitResult wait() const {
-        std::unique_lock<std::mutex> lock(state_->mtx);
+        platform::threading::unique_lock<platform::threading::mutex> lock(state_->mtx);
         std::size_t gen = state_->generation;
 
         if (--state_->count == 0) {
