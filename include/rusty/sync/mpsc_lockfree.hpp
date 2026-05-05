@@ -3,14 +3,15 @@
 #include <atomic>
 #include <memory>
 #include <type_traits>
-#include <thread>
 #include <chrono>
 #include <iostream>
 #include <vector>
 #include "../option.hpp"
+#include "../platform/threading.hpp"
 #include "../result.hpp"
 #include "../send_trait.hpp"
 #include "../send_impls.hpp"
+#include "../vec.hpp"
 
 // Platform-specific CPU pause instruction.
 //
@@ -32,7 +33,7 @@
         #if defined(__GNUC__) || defined(__clang__)
             #define CPU_RELAX() __builtin_ia32_pause()
         #else
-            #define CPU_RELAX() std::this_thread::yield()
+            #define CPU_RELAX() rusty::platform::threading::yield()
         #endif
     #else
         #include <immintrin.h>
@@ -41,7 +42,7 @@
 #elif defined(__aarch64__) || defined(__arm__)
     #define CPU_RELAX() __asm__ __volatile__("yield" ::: "memory")
 #else
-    #define CPU_RELAX() std::this_thread::yield()
+    #define CPU_RELAX() rusty::platform::threading::yield()
 #endif
 
 // Lock-Free Multi-Producer Single-Consumer (MPSC) Channel
@@ -106,7 +107,7 @@ public:
             step_++;
         } else {
             // After max spins, yield to scheduler
-            std::this_thread::yield();
+            platform::threading::yield();
         }
     }
 
@@ -412,7 +413,7 @@ public:
                 }
 
                 // Sleep briefly (1 microsecond)
-                std::this_thread::sleep_for(std::chrono::microseconds(1));
+                platform::threading::sleep_for(std::chrono::microseconds(1));
             }
         #endif
     }
@@ -561,6 +562,23 @@ public:
     // - Reduces function call overhead
     // - Better cache locality
     // - Amortizes atomic operations
+    rusty::Vec<T> batch_recv_rusty(size_t max_count) {
+        rusty::Vec<T> results = rusty::Vec<T>::with_capacity(max_count);
+        for (size_t i = 0; i < max_count; ++i) {
+            auto value = try_pop();
+            if (value.is_none()) {
+                break;  // Queue empty
+            }
+            results.push(value.unwrap());
+        }
+        return results;
+    }
+
+#if defined(RUSTY_NO_STD_VECTOR_BATCH_API)
+    rusty::Vec<T> batch_recv(size_t max_count) {
+        return batch_recv_rusty(max_count);
+    }
+#else
     std::vector<T> batch_recv(size_t max_count) {
         std::vector<T> results;
         results.reserve(max_count);
@@ -575,6 +593,7 @@ public:
 
         return results;
     }
+#endif
 
     #ifdef RUSTY_MPSC_TRACK_ALLOCATIONS
     // Get memory statistics (only available with RUSTY_MPSC_TRACK_ALLOCATIONS)
@@ -821,12 +840,28 @@ public:
     //   for (const auto& msg : messages) {
     //       process(msg);
     //   }
+    rusty::Vec<T> recv_batch_rusty(size_t max_count) {
+        if (!state_) {
+            return rusty::Vec<T>::new_();
+        }
+        return state_->batch_recv_rusty(max_count);
+    }
+
+#if defined(RUSTY_NO_STD_VECTOR_BATCH_API)
+    rusty::Vec<T> recv_batch(size_t max_count) {
+        if (!state_) {
+            return rusty::Vec<T>::new_();
+        }
+        return state_->batch_recv(max_count);
+    }
+#else
     std::vector<T> recv_batch(size_t max_count) {
         if (!state_) {
             return std::vector<T>();
         }
         return state_->batch_recv(max_count);
     }
+#endif
 
     #ifdef RUSTY_MPSC_TRACK_ALLOCATIONS
     // Get memory statistics (only available with RUSTY_MPSC_TRACK_ALLOCATIONS)
