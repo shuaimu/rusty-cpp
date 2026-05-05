@@ -1,16 +1,14 @@
 #pragma once
 
-#include <thread>
 #include <future>
 #include <memory>
 #include <concepts>
 #include <chrono>
-#include <condition_variable>
-#include <mutex>
 #include <stdexcept>
 #include <vector>
 #include <functional>
 #include <exception>
+#include "platform/threading.hpp"
 #include "result.hpp"
 #include "traits.hpp"
 
@@ -18,8 +16,8 @@ namespace rusty::thread {
 
 namespace detail {
 struct ParkToken {
-    std::mutex mutex;
-    std::condition_variable cv;
+    platform::threading::mutex mutex;
+    platform::threading::condition_variable cv;
     bool notified = false;
 };
 
@@ -31,25 +29,29 @@ inline std::shared_ptr<ParkToken> current_park_token() {
 
 /// Opaque thread identifier.
 /// Maps Rust's std::thread::ThreadId.
-/// Copyable, comparable, hashable. Wraps std::thread::id.
+/// Copyable, comparable, hashable. Wraps backend-native thread identifier.
 class ThreadId {
 public:
-    std::thread::id inner_;
+    platform::threading::thread_id inner_{};
 
     ThreadId() = default;
-    explicit ThreadId(std::thread::id id) : inner_(id) {}
+    explicit ThreadId(platform::threading::thread_id id) : inner_(id) {}
 
-    bool operator==(const ThreadId& other) const { return inner_ == other.inner_; }
-    bool operator!=(const ThreadId& other) const { return inner_ != other.inner_; }
-    bool operator<(const ThreadId& other) const  { return inner_ <  other.inner_; }
+    bool operator==(const ThreadId& other) const {
+        return platform::threading::thread_id_equal(inner_, other.inner_);
+    }
+    bool operator!=(const ThreadId& other) const { return !(*this == other); }
+    bool operator<(const ThreadId& other) const  {
+        return platform::threading::thread_id_less(inner_, other.inner_);
+    }
 
-    std::thread::id as_std() const { return inner_; }
+    platform::threading::thread_id as_native() const { return inner_; }
 };
 
 /// Get the current thread's ID.
 /// Maps Rust's std::thread::current().id().
 inline ThreadId current_id() {
-    return ThreadId{std::this_thread::get_id()};
+    return ThreadId{platform::threading::current_thread_id()};
 }
 
 class Thread {
@@ -58,12 +60,12 @@ private:
     ThreadId id_;
 
     explicit Thread(std::shared_ptr<detail::ParkToken> token)
-        : token_(std::move(token)), id_(std::this_thread::get_id()) {}
+        : token_(std::move(token)), id_(platform::threading::current_thread_id()) {}
 
 public:
     Thread()
         : token_(detail::current_park_token()),
-          id_(std::this_thread::get_id()) {}
+          id_(platform::threading::current_thread_id()) {}
 
     static Thread current() {
         return Thread(detail::current_park_token());
@@ -76,7 +78,7 @@ public:
         if (!token_) {
             return;
         }
-        std::lock_guard<std::mutex> lock(token_->mutex);
+        platform::threading::lock_guard<platform::threading::mutex> lock(token_->mutex);
         token_->notified = true;
         token_->cv.notify_one();
     }
@@ -88,13 +90,13 @@ inline Thread current() {
 
 inline void park() {
     auto token = detail::current_park_token();
-    std::unique_lock<std::mutex> lock(token->mutex);
+    platform::threading::unique_lock<platform::threading::mutex> lock(token->mutex);
     token->cv.wait(lock, [&]() { return token->notified; });
     token->notified = false;
 }
 
 inline void yield_now() {
-    std::this_thread::yield();
+    platform::threading::yield();
 }
 
 // ============================================================================
@@ -104,12 +106,12 @@ inline void yield_now() {
 template<typename T>
 class JoinHandle {
 private:
-    mutable std::thread thread_;
+    mutable platform::threading::thread thread_;
     mutable std::shared_future<T> future_;
     mutable bool joined_ = false;
 
 public:
-    JoinHandle(std::thread&& t, std::future<T>&& f)
+    JoinHandle(platform::threading::thread&& t, std::future<T>&& f)
         : thread_(std::move(t))
         , future_(std::move(f).share())
     {}
@@ -176,12 +178,12 @@ public:
 template<>
 class JoinHandle<void> {
 private:
-    mutable std::thread thread_;
+    mutable platform::threading::thread thread_;
     mutable std::shared_future<void> future_;
     mutable bool joined_ = false;
 
 public:
-    JoinHandle(std::thread&& t, std::future<void>&& f)
+    JoinHandle(platform::threading::thread&& t, std::future<void>&& f)
         : thread_(std::move(t))
         , future_(std::move(f).share())
     {}
@@ -258,8 +260,8 @@ auto spawn(F&& func, Args&&... args) -> JoinHandle<std::invoke_result_t<F, Args.
 
     auto future = task->get_future();
 
-    // Launch thread with std::thread (not jthread)
-    std::thread thread([task = std::move(task)]() {
+    // Launch using active runtime backend.
+    platform::threading::thread thread([task = std::move(task)]() {
         (*task)();
     });
 
@@ -279,11 +281,11 @@ private:
 
     template<typename T>
     struct ScopedThreadState final : ScopedThreadBase {
-        std::thread thread_;
+        platform::threading::thread thread_;
         std::shared_future<T> future_;
         bool joined_ = false;
 
-        ScopedThreadState(std::thread&& t, std::future<T>&& f)
+        ScopedThreadState(platform::threading::thread&& t, std::future<T>&& f)
             : thread_(std::move(t))
             , future_(std::move(f).share())
         {}
@@ -355,7 +357,7 @@ public:
                 return std::invoke(fn, std::forward<Args>(args)...);
             });
         auto future = task->get_future();
-        std::thread t([task = std::move(task)]() mutable { (*task)(); });
+        platform::threading::thread t([task = std::move(task)]() mutable { (*task)(); });
         auto state =
             std::make_shared<ScopedThreadState<ReturnType>>(std::move(t), std::move(future));
         threads_.push_back(state);
@@ -388,18 +390,18 @@ void scope(F&& func) {
 /// Maps Rust's std::thread::sleep(Duration).
 template<typename Rep, typename Period>
 inline void sleep(const std::chrono::duration<Rep, Period>& duration) {
-    std::this_thread::sleep_for(duration);
+    platform::threading::sleep_for(duration);
 }
 
 template<typename DurationLike>
     requires requires(const DurationLike& d) { d.inner; }
 inline void sleep(const DurationLike& duration) {
-    std::this_thread::sleep_for(duration.inner);
+    platform::threading::sleep_for(duration.inner);
 }
 
 /// Convenience overload accepting a raw seconds count.
 inline void sleep(unsigned long secs) {
-    std::this_thread::sleep_for(std::chrono::seconds(secs));
+    platform::threading::sleep_for(std::chrono::seconds(secs));
 }
 
 } // namespace rusty::thread
@@ -408,7 +410,7 @@ namespace std {
 template <>
 struct hash<rusty::thread::ThreadId> {
     size_t operator()(const rusty::thread::ThreadId& id) const noexcept {
-        return std::hash<std::thread::id>{}(id.inner_);
+        return rusty::platform::threading::thread_id_hash(id.inner_);
     }
 };
 } // namespace std
