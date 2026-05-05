@@ -68,6 +68,8 @@ pub struct TranspileOptions {
     /// In module mode, prefer `import std;` over explicit standard-header includes.
     /// Requires Stage D toolchain setup that provides a prebuilt `std` module.
     pub use_import_std_in_modules: bool,
+    /// Prefer `rusty::Unit` alias spelling in generated output.
+    pub prefer_rusty_unit_alias: bool,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -413,6 +415,7 @@ pub fn transpile_full_with_options(
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
+    codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);

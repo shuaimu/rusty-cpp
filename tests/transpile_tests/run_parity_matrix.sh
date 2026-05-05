@@ -69,6 +69,7 @@ DRY_RUN=0
 KEEP_WORK_DIRS=0
 MODULE_BUILD=1
 IMPORT_STD=0
+PREFER_RUSTY_UNIT=0
 CONTINUE_ON_FAIL=0
 FIRST_FAIL_CRATE=""
 FIRST_FAIL_WORK_DIR=""
@@ -87,6 +88,7 @@ Options:
   --keep-work-dirs    Keep/reuse existing per-crate work dirs
   --module-build      Force Stage D module build mode (default)
   --import-std       Use parity import-std mode (emit import std; and libc++ std module precompile)
+  --prefer-rusty-unit  Prefer rusty::Unit spelling in generated output
   --flat-build        Use legacy flat translation-unit Stage D mode
   --continue-on-fail  Continue running all crates even after failures
   --dry-run           Print planned commands without executing
@@ -176,6 +178,10 @@ while [[ $# -gt 0 ]]; do
             IMPORT_STD=1
             shift
             ;;
+        --prefer-rusty-unit)
+            PREFER_RUSTY_UNIT=1
+            shift
+            ;;
         --flat-build)
             MODULE_BUILD=0
             shift
@@ -254,6 +260,9 @@ run_parity_for_crate() {
         if [[ "${IMPORT_STD}" -eq 1 ]]; then
             dry_cmd="${dry_cmd} --import-std"
         fi
+        if [[ "${PREFER_RUSTY_UNIT}" -eq 1 ]]; then
+            dry_cmd="${dry_cmd} --prefer-rusty-unit-alias"
+        fi
         echo "  command: ${dry_cmd}"
         return 0
     fi
@@ -291,6 +300,9 @@ run_parity_for_crate() {
     fi
     if [[ "${IMPORT_STD}" -eq 1 ]]; then
         cmd+=(--import-std)
+    fi
+    if [[ "${PREFER_RUSTY_UNIT}" -eq 1 ]]; then
+        cmd+=(--prefer-rusty-unit-alias)
     fi
 
     echo "crate: ${crate}"

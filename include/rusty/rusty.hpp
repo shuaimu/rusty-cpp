@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cmath>
 #include <limits>
+#include <tuple>
 #include <type_traits>
 #include <variant>
 
@@ -77,6 +78,8 @@
 // Convenience aliases in rusty namespace
 // @safe
 namespace rusty {
+    using Unit = std::tuple<>;
+
     // Common Result types
     template<typename T>
     using ResultVoid = Result<T, void>;

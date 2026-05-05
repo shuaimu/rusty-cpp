@@ -101,6 +101,8 @@ export {
 
 export namespace rusty {
 
+using Unit = std::tuple<>;
+
 template<typename T>
 using ResultVoid = Result<T, void>;
 

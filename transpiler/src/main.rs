@@ -59,6 +59,10 @@ struct Cli {
     #[arg(long)]
     by_value_cycle_breaking_prototype: bool,
 
+    /// Prefer `rusty::Unit` alias for Rust `()` in generated type positions.
+    #[arg(long)]
+    prefer_rusty_unit_alias: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -148,6 +152,10 @@ struct ParityTestArgs {
     /// Kept only for CLI compatibility with older scripts.
     #[arg(long, hide = true)]
     _module_build: bool,
+
+    /// Prefer `rusty::Unit` alias for Rust `()` in generated type positions.
+    #[arg(long)]
+    prefer_rusty_unit_alias: bool,
 }
 
 #[derive(Parser)]
@@ -3171,6 +3179,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
         use_import_std_in_modules: args.import_std,
+        prefer_rusty_unit_alias: args.prefer_rusty_unit_alias,
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -3541,6 +3550,7 @@ fn main() {
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
         use_import_std_in_modules: false,
+        prefer_rusty_unit_alias: cli.prefer_rusty_unit_alias,
     };
 
     // Handle --crate: transpile entire crate
