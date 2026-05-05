@@ -17,7 +17,7 @@
 #include <queue>
 #include <thread>
 #include <utility>
-#include <vector>
+#include <rusty/vec.hpp>
 
 namespace rusty {
 
@@ -258,8 +258,8 @@ auto block_on(FutureLike&& future_like) {
 class Executor {
 public:
     void spawn(Task<void> task) {
-        tasks_.push_back(std::move(task));
-        ready_queue_.push(tasks_.size() - 1);
+        tasks_.push(std::move(task));
+        ready_queue_.push(tasks_.len() - 1);
     }
 
     void run() {
@@ -277,7 +277,7 @@ public:
     }
 
 private:
-    std::vector<Task<void>> tasks_;
+    rusty::Vec<Task<void>> tasks_;
     std::queue<size_t> ready_queue_;
 };
 

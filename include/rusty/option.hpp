@@ -70,7 +70,9 @@ public:
     
     Option(None_t) : has_value(false), dummy(0) {}
 
+#if !defined(RUSTY_NO_STD_OPTIONAL_INTEROP)
     Option(std::nullopt_t) : has_value(false), dummy(0) {}
+#endif
     
     template<typename U = T>
     requires (!std::is_same_v<std::remove_cvref_t<U>, None_t> &&
@@ -103,6 +105,7 @@ public:
         }
     }
 
+#if !defined(RUSTY_NO_STD_OPTIONAL_INTEROP)
     template<typename U>
     requires std::is_same_v<std::remove_cvref_t<U>, std::optional<T>>
     Option(U&& opt) : has_value(opt.has_value()) {
@@ -116,6 +119,7 @@ public:
             dummy = 0;
         }
     }
+#endif
     
     // Copy constructor with clone()-fallback for move-only Rust-like payloads.
     Option(const Option& other) : has_value(other.has_value) {
@@ -195,6 +199,7 @@ public:
         return *this;
     }
 
+#if !defined(RUSTY_NO_STD_OPTIONAL_INTEROP)
     template<typename U>
     requires std::is_same_v<std::remove_cvref_t<U>, std::optional<T>>
     Option& operator=(U&& opt) {
@@ -213,6 +218,7 @@ public:
         }
         return *this;
     }
+#endif
     
     // Destructor
     ~Option() {
@@ -555,7 +561,9 @@ public:
     
     Option(None_t) : ptr(nullptr) {}
 
+#if !defined(RUSTY_NO_STD_OPTIONAL_INTEROP)
     Option(std::nullopt_t) : ptr(nullptr) {}
+#endif
 
     
     Option(T& ref) : ptr(&ref) {}
@@ -801,7 +809,9 @@ public:
     
     Option(None_t) : ptr(nullptr) {}
 
+#if !defined(RUSTY_NO_STD_OPTIONAL_INTEROP)
     Option(std::nullopt_t) : ptr(nullptr) {}
+#endif
 
     
     Option(const T& ref) : ptr(&ref) {}
@@ -1077,16 +1087,6 @@ bool operator!=(const Option<T>& lhs, const Option<U>& rhs) {
 }
 
 template<typename T>
-bool operator==(const Option<T>& lhs, std::nullopt_t) {
-    return lhs.is_none();
-}
-
-template<typename T>
-bool operator==(std::nullopt_t, const Option<T>& rhs) {
-    return rhs.is_none();
-}
-
-template<typename T>
 bool operator==(const Option<T>& lhs, None_t) {
     return lhs.is_none();
 }
@@ -1104,6 +1104,17 @@ bool operator!=(const Option<T>& lhs, None_t) {
 template<typename T>
 bool operator!=(None_t, const Option<T>& rhs) {
     return rhs.is_some();
+}
+
+#if !defined(RUSTY_NO_STD_OPTIONAL_INTEROP)
+template<typename T>
+bool operator==(const Option<T>& lhs, std::nullopt_t) {
+    return lhs.is_none();
+}
+
+template<typename T>
+bool operator==(std::nullopt_t, const Option<T>& rhs) {
+    return rhs.is_none();
 }
 
 template<typename T>
@@ -1143,6 +1154,7 @@ requires requires(const T& l, const U& r) { l == r; }
 bool operator!=(const std::optional<U>& lhs, const Option<T>& rhs) {
     return !(lhs == rhs);
 }
+#endif
 
 } // namespace rusty
 

@@ -70,6 +70,8 @@ pub struct TranspileOptions {
     pub use_import_std_in_modules: bool,
     /// Prefer `rusty::Unit` alias spelling in generated output.
     pub prefer_rusty_unit_alias: bool,
+    /// Prefer `rusty::StrView` / `rusty::Span<...>` spellings in generated output.
+    pub prefer_rusty_view_aliases: bool,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -416,6 +418,7 @@ pub fn transpile_full_with_options(
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
     codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);
+    codegen.set_prefer_rusty_view_aliases(options.prefer_rusty_view_aliases);
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
@@ -1501,6 +1504,48 @@ mod tests {
         assert!(
             opt_in_out.contains("// PROTOTYPE: by-value cycle-breaking flag enabled"),
             "opt-in mode should emit prototype cycle-breaking diagnostics\nGot: {opt_in_out}"
+        );
+    }
+
+    #[test]
+    fn test_transpile_options_prefer_rusty_view_aliases() {
+        let src = r#"
+            fn keep_views(s: &str, b: &[u8]) -> (&str, &[u8]) {
+                (s, b)
+            }
+        "#;
+
+        let default_out = transpile(src, None).expect("default transpile should succeed");
+        assert!(
+            default_out.contains("std::string_view") || default_out.contains("std::span<"),
+            "default output should use std view spellings\nGot: {default_out}"
+        );
+
+        let options = TranspileOptions {
+            prefer_rusty_view_aliases: true,
+            ..TranspileOptions::default()
+        };
+        let alias_out = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("alias mode transpile should succeed");
+
+        assert!(
+            alias_out.contains("rusty::StrView"),
+            "alias mode should use rusty::StrView\nGot: {alias_out}"
+        );
+        assert!(
+            alias_out.contains("rusty::Span<"),
+            "alias mode should use rusty::Span\nGot: {alias_out}"
+        );
+        assert!(
+            !alias_out.contains("std::string_view"),
+            "alias mode should remove std::string_view spellings\nGot: {alias_out}"
         );
     }
 

@@ -8,7 +8,9 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#if !defined(RUSTY_NO_STD_VECTOR_INTEROP)
 #include <vector>
+#endif
 
 #include "option.hpp"
 #include "vec.hpp"
@@ -691,16 +693,27 @@ public:
         return Option<std::pair<K, V>>(std::move(out));
     }
 
-    std::vector<std::pair<K, V>> range(const K& min, const K& max) const {
-        std::vector<std::pair<K, V>> out;
+    rusty::Vec<std::pair<K, V>> range_rusty(const K& min, const K& max) const {
+        rusty::Vec<std::pair<K, V>> out = rusty::Vec<std::pair<K, V>>::new_();
         auto cmp = map_.key_comp();
         auto it = map_.lower_bound(min);
         while (it != map_.end() && cmp(it->first, max)) {
-            out.emplace_back(clone_value(it->first), clone_value(it->second));
+            out.push(std::make_pair(clone_value(it->first), clone_value(it->second)));
             ++it;
         }
         return out;
     }
+
+#if defined(RUSTY_NO_STD_VECTOR_INTEROP)
+    rusty::Vec<std::pair<K, V>> range(const K& min, const K& max) const {
+        return range_rusty(min, max);
+    }
+#else
+    std::vector<std::pair<K, V>> range(const K& min, const K& max) const {
+        auto out = range_rusty(min, max);
+        return static_cast<std::vector<std::pair<K, V>>>(std::move(out));
+    }
+#endif
 
     BTreeMap split_off(const K& key) {
         BTreeMap out;

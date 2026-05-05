@@ -12,7 +12,9 @@
 #include <limits>
 #include <span>
 #include <type_traits>
+#if !defined(RUSTY_NO_STD_VECTOR_INTEROP)
 #include <vector>
+#endif
 #include <rusty/alloc.hpp>
 #include <rusty/function.hpp>
 #include <rusty/mem.hpp>
@@ -324,6 +326,7 @@ public:
         return *this;
     }
 
+    #if !defined(RUSTY_NO_STD_VECTOR_INTEROP)
     // Interop bridge for code paths that still materialize std::vector.
     operator std::vector<T>() && {
         std::vector<T> out;
@@ -334,6 +337,7 @@ public:
         clear();
         return out;
     }
+    #endif
     
     // Destructor
     ~Vec() noexcept(false) {

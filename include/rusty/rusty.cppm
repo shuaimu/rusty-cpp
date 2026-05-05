@@ -102,6 +102,36 @@ export {
 export namespace rusty {
 
 using Unit = std::tuple<>;
+using StrView = std::string_view;
+template<typename T, std::size_t Extent = std::dynamic_extent>
+using Span = std::span<T, Extent>;
+
+template<typename T>
+constexpr T&& forward(std::remove_reference_t<T>& value) noexcept {
+    return static_cast<T&&>(value);
+}
+
+template<typename T>
+constexpr T&& forward(std::remove_reference_t<T>&& value) noexcept {
+    static_assert(
+        !std::is_lvalue_reference_v<T>,
+        "rusty::forward<T>(value) with lvalue-reference T requires an lvalue");
+    return static_cast<T&&>(value);
+}
+
+template<typename T, typename U = T>
+constexpr T exchange(T& target, U&& replacement)
+    noexcept(std::is_nothrow_move_constructible_v<T> && std::is_nothrow_assignable_v<T&, U&&>) {
+    T old = rusty::move(target);
+    target = rusty::forward<U>(replacement);
+    return old;
+}
+
+template<typename T>
+constexpr void swap(T& lhs, T& rhs) noexcept(noexcept(std::swap(lhs, rhs))) {
+    using std::swap;
+    swap(lhs, rhs);
+}
 
 template<typename T>
 using ResultVoid = Result<T, void>;
@@ -210,6 +240,7 @@ Vec<T> into_vec(std::array<T, N> values) {
     return out;
 }
 
+#if !defined(RUSTY_NO_STD_VECTOR_INTEROP)
 template<typename T, typename Alloc>
 Vec<T> into_vec(std::vector<T, Alloc> values) {
     Vec<T> out(values.size());
@@ -218,6 +249,7 @@ Vec<T> into_vec(std::vector<T, Alloc> values) {
     }
     return out;
 }
+#endif
 
 template<typename T>
 constexpr std::decay_t<T> into_vec(T&& value) {

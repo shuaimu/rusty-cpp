@@ -1,6 +1,6 @@
 # Rusty Runtime `std`-Removal Plan
 
-Status: In Progress (Phases 1-5 initial pass complete)
+Status: In Progress (Phases 1-9 implemented; full-matrix verification pending long-running crates)
 Owner: runtime/transpiler
 Last updated: 2026-05-05
 
@@ -86,6 +86,50 @@ Acceptance:
 Acceptance:
 - parity matrix remains stable in module builds.
 
+### Phase 6: Repeatable `std` Audit Tooling
+- Add a repo-local audit script to measure:
+  - `std::...` line and symbol counts,
+  - high-churn files,
+  - forbidden-include hits by profile.
+- Keep output machine-readable for CI handoff.
+
+Acceptance:
+- One-command audit works for runtime/transpiler/all scopes.
+- Host-minimal and strict-no-std forbidden-include profile checks available.
+
+### Phase 7: Runtime Utility/Meta Alias Layer
+- Add runtime-owned alias spellings for view and utility surfaces:
+  - `rusty::StrView`
+  - `rusty::Span<T, Extent>`
+  - `rusty::forward`, `rusty::exchange`, `rusty::swap`
+- Keep semantics compatible with existing `std`-backed runtime behavior.
+
+Acceptance:
+- Default build behavior unchanged.
+- Alias surfaces available for transpiler opt-in and manual runtime use.
+
+### Phase 8: Container Interop Feature Gates
+- Add opt-out gates for remaining `std` container interop surfaces:
+  - `RUSTY_NO_STD_VECTOR_INTEROP`
+  - `RUSTY_NO_STD_OPTIONAL_INTEROP`
+- Preserve default compatibility when gates are unset.
+
+Acceptance:
+- Runtime still builds with default settings.
+- Interop APIs can be removed by macro without touching transpiler output.
+
+### Phase 9: Transpiler View-Alias Opt-In
+- Add transpiler CLI/options flag to prefer runtime view aliases:
+  - `--prefer-rusty-view-aliases`
+- Lower output spellings:
+  - `std::string_view` -> `rusty::StrView`
+  - `std::span<...>` -> `rusty::Span<...>`
+- Extend parity matrix harness flag pass-through.
+
+Acceptance:
+- Flag is fully wired through CLI -> parity harness -> codegen.
+- Default output remains unchanged when flag is not set.
+
 ## CI / Regression Gates
 - Keep current parity matrix pass set green during each phase.
 - Add `std-audit` counters in CI:
@@ -135,12 +179,52 @@ Acceptance:
     - parity matrix script pass-through: `--prefer-rusty-unit`
     - codegen replacement mode: `std::tuple<>` -> `rusty::Unit` (opt-in).
 
+### Phase 6
+- Added audit tool:
+  - `tools/std_audit_cpp.sh`
+- Capabilities:
+  - `--scope runtime|transpiler|all`
+  - `--profile host-minimal|strict-no-std`
+  - `--format text|json`
+
+### Phase 7
+- Added runtime alias/utilities:
+  - `rusty::StrView`
+  - `rusty::Span<T, Extent>`
+  - `rusty::forward`, `rusty::exchange`, `rusty::swap`
+- Implemented in:
+  - `include/rusty/rusty.hpp`
+  - `include/rusty/rusty.cppm`
+
+### Phase 8
+- Added vector interop gates:
+  - `RUSTY_NO_STD_VECTOR_INTEROP`
+  - gated `Vec<T> -> std::vector<T>` conversion
+  - gated `boxed::into_vec(std::vector<...>)`
+- Added optional interop gate:
+  - `RUSTY_NO_STD_OPTIONAL_INTEROP`
+  - gated `Option` nullopt/optional constructors/assignments/comparisons
+- Added `BTreeMap::range_rusty(...)` and gated `range(...)` behavior.
+- Replaced async executor task storage from `std::vector` to `rusty::Vec`.
+
+### Phase 9
+- Added transpiler opt-in flag:
+  - CLI: `--prefer-rusty-view-aliases`
+  - parity matrix script: `--prefer-rusty-views`
+- Added codegen output rewrite mode for view aliases.
+
 ## Known Remaining Blockers
 - We still rely on `std::future`/`std::packaged_task` in `thread.hpp` result plumbing.
-- Many runtime container/string APIs remain `std`-shaped by design for compatibility.
-- Full strict-no-std transpiler output is not complete; current change introduces an opt-in unit-type reduction as first step.
+- Many runtime container/string APIs remain `std`-shaped by design for compatibility (even with interop gates).
+- Full strict-no-std transpiler output is not complete; current changes provide additional opt-in alias paths (`Unit`, view aliases).
+- Strict profile conformance still needs dedicated CI job wiring.
 
 ## Next Implementation Steps
-1. Add CI jobs for `RUSTY_PLATFORM_BACKEND_POSIX=1` and `RUSTY_NO_STD_VECTOR_BATCH_API=1`.
+1. Add CI jobs for:
+   - `RUSTY_PLATFORM_BACKEND_POSIX=1`
+   - `RUSTY_NO_STD_VECTOR_BATCH_API=1`
+   - `RUSTY_NO_STD_VECTOR_INTEROP=1`
+   - `RUSTY_NO_STD_OPTIONAL_INTEROP=1`
+   - `tools/std_audit_cpp.sh --scope runtime --profile host-minimal`
 2. Replace `std::future`/`std::packaged_task` usage with runtime-owned async/result handoff primitives.
-3. Extend transpiler native-type mode beyond unit (`str`/slice/result helper surfaces) behind opt-in flags.
+3. Incrementally reduce high-volume `std::forward`/`std::move` callsites to runtime utilities where semantics are equivalent.

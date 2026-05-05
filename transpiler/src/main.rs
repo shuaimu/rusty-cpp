@@ -63,6 +63,10 @@ struct Cli {
     #[arg(long)]
     prefer_rusty_unit_alias: bool,
 
+    /// Prefer `rusty::StrView` / `rusty::Span<...>` alias spellings in generated output.
+    #[arg(long)]
+    prefer_rusty_view_aliases: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -156,6 +160,10 @@ struct ParityTestArgs {
     /// Prefer `rusty::Unit` alias for Rust `()` in generated type positions.
     #[arg(long)]
     prefer_rusty_unit_alias: bool,
+
+    /// Prefer `rusty::StrView` / `rusty::Span<...>` alias spellings in generated output.
+    #[arg(long)]
+    prefer_rusty_view_aliases: bool,
 }
 
 #[derive(Parser)]
@@ -3180,6 +3188,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         external_crate_module_aliases: HashMap::new(),
         use_import_std_in_modules: args.import_std,
         prefer_rusty_unit_alias: args.prefer_rusty_unit_alias,
+        prefer_rusty_view_aliases: args.prefer_rusty_view_aliases,
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -3551,6 +3560,7 @@ fn main() {
         external_crate_module_aliases: HashMap::new(),
         use_import_std_in_modules: false,
         prefer_rusty_unit_alias: cli.prefer_rusty_unit_alias,
+        prefer_rusty_view_aliases: cli.prefer_rusty_view_aliases,
     };
 
     // Handle --crate: transpile entire crate
