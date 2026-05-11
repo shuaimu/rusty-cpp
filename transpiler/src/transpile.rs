@@ -72,6 +72,10 @@ pub struct TranspileOptions {
     pub prefer_rusty_unit_alias: bool,
     /// Prefer `rusty::StrView` / `rusty::Span<...>` spellings in generated output.
     pub prefer_rusty_view_aliases: bool,
+    /// Lower Rust traits to plain C++ Interface + Adapter classes
+    /// (replaces `pro::proxy<...>` facade emission).
+    /// See docs/rusty-cpp-transpiler.md § 3.2.9 for the design.
+    pub interface_traits: bool,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -419,6 +423,7 @@ pub fn transpile_full_with_options(
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
     codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);
     codegen.set_prefer_rusty_view_aliases(options.prefer_rusty_view_aliases);
+    codegen.set_interface_traits(options.interface_traits);
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);

@@ -67,6 +67,11 @@ struct Cli {
     #[arg(long)]
     prefer_rusty_view_aliases: bool,
 
+    /// Lower Rust traits to plain C++ Interface + Adapter classes
+    /// (replaces `pro::proxy<...>` facade emission). See docs/rusty-cpp-transpiler.md § 3.2.9.
+    #[arg(long)]
+    interface_traits: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -164,6 +169,11 @@ struct ParityTestArgs {
     /// Prefer `rusty::StrView` / `rusty::Span<...>` alias spellings in generated output.
     #[arg(long)]
     prefer_rusty_view_aliases: bool,
+
+    /// Lower Rust traits to plain C++ Interface + Adapter classes
+    /// (replaces `pro::proxy<...>` facade emission). See docs/rusty-cpp-transpiler.md § 3.2.9.
+    #[arg(long)]
+    interface_traits: bool,
 }
 
 #[derive(Parser)]
@@ -3189,6 +3199,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         use_import_std_in_modules: args.import_std,
         prefer_rusty_unit_alias: args.prefer_rusty_unit_alias,
         prefer_rusty_view_aliases: args.prefer_rusty_view_aliases,
+        interface_traits: args.interface_traits,
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -3561,6 +3572,7 @@ fn main() {
         use_import_std_in_modules: false,
         prefer_rusty_unit_alias: cli.prefer_rusty_unit_alias,
         prefer_rusty_view_aliases: cli.prefer_rusty_view_aliases,
+        interface_traits: cli.interface_traits,
     };
 
     // Handle --crate: transpile entire crate
