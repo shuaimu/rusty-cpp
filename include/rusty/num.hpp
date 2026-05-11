@@ -2,13 +2,18 @@
 #define RUSTY_NUM_HPP
 
 #include <bit>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <limits>
+#include <span>
+#include <stdexcept>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 namespace rusty::num {
 
@@ -23,6 +28,10 @@ struct is_nonzero_integral<unsigned __int128> : std::true_type {};
 
 template<typename T>
 inline constexpr bool is_nonzero_integral_v = is_nonzero_integral<T>::value;
+
+template<typename T>
+inline constexpr bool is_rust_integral_v =
+    is_nonzero_integral_v<std::remove_cv_t<std::remove_reference_t<T>>>;
 
 template<typename T>
 class NonZero {
@@ -100,11 +109,145 @@ using NonZeroU16 = NonZero<std::uint16_t>;
 using NonZeroU32 = NonZero<std::uint32_t>;
 using NonZeroU128 = NonZero<unsigned __int128>;
 
+struct FpCategory_Nan {};
+struct FpCategory_Infinite {};
+struct FpCategory_Zero {};
+struct FpCategory_Subnormal {};
+struct FpCategory_Normal {};
+using FpCategory = std::variant<
+    FpCategory_Nan,
+    FpCategory_Infinite,
+    FpCategory_Zero,
+    FpCategory_Subnormal,
+    FpCategory_Normal>;
+
 } // namespace rusty::num
 
 // Checked arithmetic helpers (Rust integer methods returning Option<T>)
 // Note: Option<T> must be defined before including this header (included via rusty.hpp)
 namespace rusty {
+
+template<typename T>
+struct float_traits;
+
+template<>
+struct float_traits<float> {
+    using SigType = std::uint32_t;
+
+    static constexpr std::int32_t NUM_BITS = 32;
+    static constexpr std::int32_t MANTISSA_DIGITS = 24;
+    static constexpr std::int32_t NUM_SIG_BITS = MANTISSA_DIGITS - 1;
+    static constexpr std::int32_t NUM_EXP_BITS = NUM_BITS - NUM_SIG_BITS - 1;
+    static constexpr std::int32_t EXP_MASK = (static_cast<std::int32_t>(1) << NUM_EXP_BITS) - 1;
+    static constexpr std::int32_t EXP_BIAS = (static_cast<std::int32_t>(1) << (NUM_EXP_BITS - 1)) - 1;
+    static constexpr std::int32_t EXP_OFFSET = EXP_BIAS + NUM_SIG_BITS;
+    static constexpr std::int32_t MIN_10_EXP = -37;
+    static constexpr std::int32_t MAX_10_EXP = 38;
+    static constexpr std::uint32_t MAX_DIGITS10 = 9;
+    static constexpr SigType IMPLICIT_BIT = static_cast<SigType>(1) << NUM_SIG_BITS;
+
+    static constexpr SigType to_bits(float value) noexcept {
+        return std::bit_cast<SigType>(value);
+    }
+
+    static constexpr bool is_negative(SigType bits) noexcept {
+        return (bits >> (NUM_BITS - 1)) != static_cast<SigType>(0);
+    }
+
+    static constexpr SigType get_sig(SigType bits) noexcept {
+        return bits & (IMPLICIT_BIT - static_cast<SigType>(1));
+    }
+
+    static constexpr std::int64_t get_exp(SigType bits) noexcept {
+        return static_cast<std::int64_t>((bits << 1u) >> (NUM_SIG_BITS + 1));
+    }
+};
+
+template<>
+struct float_traits<double> {
+    using SigType = std::uint64_t;
+
+    static constexpr std::int32_t NUM_BITS = 64;
+    static constexpr std::int32_t MANTISSA_DIGITS = 53;
+    static constexpr std::int32_t NUM_SIG_BITS = MANTISSA_DIGITS - 1;
+    static constexpr std::int32_t NUM_EXP_BITS = NUM_BITS - NUM_SIG_BITS - 1;
+    static constexpr std::int32_t EXP_MASK = (static_cast<std::int32_t>(1) << NUM_EXP_BITS) - 1;
+    static constexpr std::int32_t EXP_BIAS = (static_cast<std::int32_t>(1) << (NUM_EXP_BITS - 1)) - 1;
+    static constexpr std::int32_t EXP_OFFSET = EXP_BIAS + NUM_SIG_BITS;
+    static constexpr std::int32_t MIN_10_EXP = -307;
+    static constexpr std::int32_t MAX_10_EXP = 308;
+    static constexpr std::uint32_t MAX_DIGITS10 = 17;
+    static constexpr SigType IMPLICIT_BIT = static_cast<SigType>(1) << NUM_SIG_BITS;
+
+    static constexpr SigType to_bits(double value) noexcept {
+        return std::bit_cast<SigType>(value);
+    }
+
+    static constexpr bool is_negative(SigType bits) noexcept {
+        return (bits >> (NUM_BITS - 1)) != static_cast<SigType>(0);
+    }
+
+    static constexpr SigType get_sig(SigType bits) noexcept {
+        return bits & (IMPLICIT_BIT - static_cast<SigType>(1));
+    }
+
+    static constexpr std::int64_t get_exp(SigType bits) noexcept {
+        return static_cast<std::int64_t>((bits << 1u) >> (NUM_SIG_BITS + 1));
+    }
+};
+
+template<typename T>
+constexpr auto float_to_bits(T&& value) noexcept {
+    using Float = std::remove_cvref_t<T>;
+    return float_traits<Float>::to_bits(static_cast<Float>(value));
+}
+
+template<typename T>
+requires std::is_floating_point_v<std::remove_cvref_t<T>>
+inline num::FpCategory classify_float(T value) {
+    switch (std::fpclassify(static_cast<std::remove_cvref_t<T>>(value))) {
+    case FP_NAN:
+        return num::FpCategory{num::FpCategory_Nan{}};
+    case FP_INFINITE:
+        return num::FpCategory{num::FpCategory_Infinite{}};
+    case FP_ZERO:
+        return num::FpCategory{num::FpCategory_Zero{}};
+    case FP_SUBNORMAL:
+        return num::FpCategory{num::FpCategory_Subnormal{}};
+    default:
+        return num::FpCategory{num::FpCategory_Normal{}};
+    }
+}
+
+template<typename T>
+requires std::is_floating_point_v<std::remove_cvref_t<T>>
+inline bool is_finite(T value) {
+    return std::isfinite(static_cast<std::remove_cvref_t<T>>(value));
+}
+
+template<typename T>
+requires std::is_floating_point_v<std::remove_cvref_t<T>>
+inline bool is_nan(T value) {
+    return std::isnan(static_cast<std::remove_cvref_t<T>>(value));
+}
+
+template<typename T>
+requires std::is_floating_point_v<std::remove_cvref_t<T>>
+inline bool is_infinite(T value) {
+    return std::isinf(static_cast<std::remove_cvref_t<T>>(value));
+}
+
+template<typename T>
+requires std::is_floating_point_v<std::remove_cvref_t<T>>
+inline bool is_sign_negative(T value) {
+    return std::signbit(static_cast<std::remove_cvref_t<T>>(value));
+}
+
+template<typename T>
+requires std::is_floating_point_v<std::remove_cvref_t<T>>
+inline bool is_sign_positive(T value) {
+    return !std::signbit(static_cast<std::remove_cvref_t<T>>(value));
+}
 
 template<typename T>
 requires std::is_integral_v<T>
@@ -191,7 +334,7 @@ auto checked_div(A a, B b) {
 }
 
 template<typename Target, typename Source>
-requires(std::is_integral_v<Target> && std::is_integral_v<std::remove_cvref_t<Source>>)
+requires(num::is_rust_integral_v<Target> && num::is_rust_integral_v<Source>)
 Result<Target, std::tuple<>> try_from(Source value) {
     using Src = std::remove_cvref_t<Source>;
     auto fail = []() { return Result<Target, std::tuple<>>::Err(std::tuple<>{}); };
@@ -272,6 +415,128 @@ Option<T> checked_next_power_of_two(T value) {
 
 inline Option<std::size_t> checked_next_power_of_two_usize(std::size_t value) {
     return checked_next_power_of_two<std::size_t>(value);
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr std::uint32_t leading_zeros(T value) {
+    using U = std::make_unsigned_t<T>;
+    return static_cast<std::uint32_t>(std::countl_zero(static_cast<U>(value)));
+}
+
+template<typename T>
+constexpr std::uint32_t leading_zeros(const num::NonZero<T>& value) {
+    return leading_zeros(value.get());
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr std::uint32_t trailing_zeros(T value) {
+    using U = std::make_unsigned_t<T>;
+    return static_cast<std::uint32_t>(std::countr_zero(static_cast<U>(value)));
+}
+
+template<typename T>
+constexpr std::uint32_t trailing_zeros(const num::NonZero<T>& value) {
+    return trailing_zeros(value.get());
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr std::uint32_t count_ones(T value) {
+    using U = std::make_unsigned_t<T>;
+    return static_cast<std::uint32_t>(std::popcount(static_cast<U>(value)));
+}
+
+template<typename T>
+constexpr std::uint32_t count_ones(const num::NonZero<T>& value) {
+    return count_ones(value.get());
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr std::uint32_t count_zeros(T value) {
+    return static_cast<std::uint32_t>(sizeof(T) * 8) - count_ones(value);
+}
+
+template<typename T>
+constexpr std::uint32_t count_zeros(const num::NonZero<T>& value) {
+    return count_zeros(value.get());
+}
+
+template<typename T>
+requires num::is_nonzero_integral_v<std::remove_cvref_t<T>>
+constexpr std::remove_cvref_t<T> wrapping_neg(T value) {
+    using Raw = std::remove_cvref_t<T>;
+    using Unsigned = std::make_unsigned_t<Raw>;
+    return static_cast<Raw>(Unsigned(0) - static_cast<Unsigned>(value));
+}
+
+template<typename T>
+requires num::is_nonzero_integral_v<std::remove_cvref_t<T>>
+constexpr std::remove_cvref_t<T> wrapping_abs(T value) {
+    using Raw = std::remove_cvref_t<T>;
+    if constexpr (std::is_signed_v<Raw>) {
+        return value < static_cast<Raw>(0) ? wrapping_neg(value) : static_cast<Raw>(value);
+    } else {
+        return static_cast<Raw>(value);
+    }
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T byte_swap(T value) {
+    using U = std::make_unsigned_t<T>;
+    U u = static_cast<U>(value);
+    if constexpr (sizeof(U) == 1) {
+        return value;
+    } else if constexpr (sizeof(U) == 2) {
+        u = static_cast<U>(__builtin_bswap16(static_cast<std::uint16_t>(u)));
+    } else if constexpr (sizeof(U) == 4) {
+        u = static_cast<U>(__builtin_bswap32(static_cast<std::uint32_t>(u)));
+    } else if constexpr (sizeof(U) == 8) {
+        u = static_cast<U>(__builtin_bswap64(static_cast<std::uint64_t>(u)));
+    } else {
+        U swapped = 0;
+        for (std::size_t i = 0; i < sizeof(U); ++i) {
+            swapped = static_cast<U>((swapped << 8) | (u & static_cast<U>(0xff)));
+            u = static_cast<U>(u >> 8);
+        }
+        u = swapped;
+    }
+    return static_cast<T>(u);
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T to_le(T value) {
+    if constexpr (std::endian::native == std::endian::little) {
+        return value;
+    } else {
+        return byte_swap(value);
+    }
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T from_le(T value) {
+    return to_le(value);
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T to_be(T value) {
+    if constexpr (std::endian::native == std::endian::big) {
+        return value;
+    } else {
+        return byte_swap(value);
+    }
+}
+
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T from_be(T value) {
+    return to_be(value);
 }
 
 template<typename T, typename Input, typename Radix>
@@ -356,6 +621,23 @@ Result<std::remove_cvref_t<T>, std::tuple<>> from_str_radix(Input&& input, Radix
         }
         return Result<RawT, std::tuple<>>::Ok(static_cast<RawT>(value));
     }
+}
+
+template<typename T, typename Bytes>
+requires std::is_integral_v<std::remove_cvref_t<T>>
+std::remove_cvref_t<T> from_le_bytes(Bytes&& bytes) {
+    using RawT = std::remove_cvref_t<T>;
+    using Unsigned = std::make_unsigned_t<RawT>;
+    auto&& view = std::forward<Bytes>(bytes);
+    const size_t count = std::size(view);
+    if (count < sizeof(RawT)) {
+        throw std::out_of_range("from_le_bytes input is too short");
+    }
+    Unsigned value = 0;
+    for (size_t i = 0; i < sizeof(RawT); ++i) {
+        value |= (static_cast<Unsigned>(static_cast<uint8_t>(std::data(view)[i])) << (i * 8));
+    }
+    return static_cast<RawT>(value);
 }
 
 } // namespace rusty

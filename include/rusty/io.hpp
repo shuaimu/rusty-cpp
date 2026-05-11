@@ -28,10 +28,14 @@
 #include <type_traits>
 #include <tuple>
 #include <utility>
+#include <iterator>
 #include "rusty/result.hpp"
 
 namespace rusty {
 namespace io {
+
+struct Read {};
+struct Write {};
 
 // ── Error ──────────────────────────────────────────────
 
@@ -71,11 +75,14 @@ public:
     Kind kind() const { return kind_; }
     const std::string& to_string() const { return message_; }
     const char* what() const { return message_.c_str(); }
+    Option<const void*&> source() const { return Option<const void*&>{None}; }
 
 private:
     Kind kind_;
     std::string message_;
 };
+
+using ErrorKind = Error::Kind;
 
 // ── Result<T> ──────────────────────────────────────────
 
@@ -84,6 +91,14 @@ class Result {
 public:
     static Result ok(T value) { return Result(std::move(value), true); }
     static Result err(Error error) { return Result(std::move(error)); }
+    static Result Ok(T value) { return ok(std::move(value)); }
+    static Result Err(Error error) { return err(std::move(error)); }
+
+    template<typename U>
+    Result(rusty::ok_contextual_value<U> ok) : Result(static_cast<T>(std::move(ok.value)), true) {}
+
+    template<typename U>
+    Result(rusty::err_contextual_value<U> err) : Result(Error(std::move(err.error))) {}
 
     bool is_ok() const { return ok_; }
     bool is_err() const { return !ok_; }
@@ -109,6 +124,24 @@ public:
         return true;
     }
 
+    template<typename F>
+    auto map(F f) -> rusty::Result<decltype(f(std::declval<T>())), Error> {
+        using NewT = decltype(f(std::declval<T>()));
+        if (ok_) {
+            return rusty::Result<NewT, Error>::Ok(f(std::move(value_)));
+        }
+        return rusty::Result<NewT, Error>::Err(std::move(error_));
+    }
+
+    template<typename F>
+    auto map_err(F f) -> rusty::Result<T, decltype(f(std::declval<Error>()))> {
+        using NewE = decltype(f(std::declval<Error>()));
+        if (ok_) {
+            return rusty::Result<T, NewE>::Ok(std::move(value_));
+        }
+        return rusty::Result<T, NewE>::Err(f(std::move(error_)));
+    }
+
 private:
     Result(T value, bool) : value_(std::move(value)), error_(""), ok_(true) {}
     Result(Error error) : value_{}, error_(std::move(error)), ok_(false) {}
@@ -124,6 +157,14 @@ class Result<void> {
 public:
     static Result ok() { return Result(true); }
     static Result err(Error error) { return Result(std::move(error)); }
+    static Result Ok() { return ok(); }
+    static Result Err(Error error) { return err(std::move(error)); }
+
+    template<typename U>
+    Result(rusty::ok_contextual_value<U>) : Result(true) {}
+
+    template<typename U>
+    Result(rusty::err_contextual_value<U> err) : Result(Error(std::move(err.error))) {}
 
     bool is_ok() const { return ok_; }
     bool is_err() const { return !ok_; }
@@ -137,6 +178,24 @@ public:
         return error_;
     }
 
+    template<typename F>
+    auto map(F f) -> rusty::Result<decltype(f()), Error> {
+        using NewT = decltype(f());
+        if (ok_) {
+            return rusty::Result<NewT, Error>::Ok(f());
+        }
+        return rusty::Result<NewT, Error>::Err(std::move(error_));
+    }
+
+    template<typename F>
+    auto map_err(F f) -> rusty::Result<void, decltype(f(std::declval<Error>()))> {
+        using NewE = decltype(f(std::declval<Error>()));
+        if (ok_) {
+            return rusty::Result<void, NewE>::Ok();
+        }
+        return rusty::Result<void, NewE>::Err(f(std::move(error_)));
+    }
+
 private:
     Result(bool) : error_(""), ok_(true) {}
     Result(Error error) : error_(std::move(error)), ok_(false) {}
@@ -144,6 +203,35 @@ private:
     Error error_;
     bool ok_;
 };
+
+template<typename R>
+class Bytes {
+public:
+    using Item = Result<uint8_t>;
+
+    explicit Bytes(R& reader) : reader_(&reader) {}
+
+    Option<Item> next() {
+        uint8_t byte = 0;
+        std::span<uint8_t> buf(&byte, 1);
+        auto read_result = reader_->read(buf);
+        if (read_result.is_err()) {
+            return Option<Item>(Item::err(read_result.unwrap_err()));
+        }
+        if (read_result.unwrap() == 0) {
+            return None;
+        }
+        return Option<Item>(Item::ok(byte));
+    }
+
+private:
+    R* reader_;
+};
+
+template<typename R>
+Bytes<std::remove_reference_t<R>> bytes(R& reader) {
+    return Bytes<std::remove_reference_t<R>>(reader);
+}
 
 // ── SeekFrom ───────────────────────────────────────────
 
@@ -367,6 +455,18 @@ void advance_dynamic_span(Span& span, std::size_t count) {
     }
 }
 
+template<typename Bytes>
+std::span<const uint8_t> as_write_bytes(Bytes&& bytes) {
+    using std::data;
+    using std::size;
+    auto* ptr = data(bytes);
+    using Elem = std::remove_cv_t<std::remove_pointer_t<decltype(ptr)>>;
+    static_assert(sizeof(Elem) == 1, "io::write_all expects a byte-sized buffer");
+    return std::span<const uint8_t>(
+        reinterpret_cast<const uint8_t*>(ptr),
+        static_cast<std::size_t>(size(bytes)));
+}
+
 } // namespace detail
 
 // ── io::read/io::write dispatch helpers ───────────────
@@ -446,6 +546,50 @@ requires(
 {
     return Result<size_t>::err(
         Error(Error::Kind::Unsupported, "type does not implement io::write"));
+}
+
+template<typename Writer>
+Result<size_t> write(Writer* writer, std::span<const uint8_t> buf) {
+    if (writer == nullptr) {
+        return Result<size_t>::err(Error(Error::Kind::InvalidInput, "io::write null writer"));
+    }
+    return write(*writer, buf);
+}
+
+template<typename Writer, typename Bytes>
+Result<std::tuple<>> write_all(Writer& writer, Bytes&& buf) {
+    auto bytes = detail::as_write_bytes(std::forward<Bytes>(buf));
+    if constexpr (requires(Writer& w, std::span<const uint8_t> b) { w.write_all(b); }) {
+        if constexpr (std::is_void_v<decltype(writer.write_all(bytes))>) {
+            writer.write_all(bytes);
+            return Result<std::tuple<>>::ok(std::make_tuple());
+        } else {
+            return writer.write_all(bytes);
+        }
+    }
+    std::size_t written = 0;
+    while (written < bytes.size()) {
+        auto write_result = write(writer, bytes.subspan(written));
+        if (write_result.is_err()) {
+            return Result<std::tuple<>>::err(write_result.unwrap_err());
+        }
+        auto n = write_result.unwrap();
+        if (n == 0) {
+            return Result<std::tuple<>>::err(
+                Error(Error::Kind::WriteZero, "failed to write whole buffer"));
+        }
+        written += n;
+    }
+    return Result<std::tuple<>>::ok(std::make_tuple());
+}
+
+template<typename Writer, typename Bytes>
+Result<std::tuple<>> write_all(Writer* writer, Bytes&& buf) {
+    if (writer == nullptr) {
+        return Result<std::tuple<>>::err(
+            Error(Error::Kind::InvalidInput, "io::write_all null writer"));
+    }
+    return write_all(*writer, std::forward<Bytes>(buf));
 }
 
 template<typename Writer, typename FmtArg>

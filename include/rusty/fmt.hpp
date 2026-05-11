@@ -10,6 +10,8 @@ namespace fmt {
 /// Formatting error type (infallible in practice for String writes).
 struct Error {};
 
+struct Write {};
+
 /// Result type for formatting operations.
 using Result = rusty::Result<std::tuple<>, Error>;
 

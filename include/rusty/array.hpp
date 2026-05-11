@@ -1349,7 +1349,23 @@ auto as_mut_slice(Container&& container) {
 
 // Normalize arbitrary slice-like containers into a byte view.
 // For non-u8 element containers this keeps a thread-local converted buffer.
+namespace detail {
 template<typename Container>
+concept as_u8_slice_compatible =
+    std::is_pointer_v<std::remove_reference_t<Container>>
+    || requires { std::variant_size<std::remove_cvref_t<Container>>::value; }
+    || requires(Container&& container) { std::forward<Container>(container)._0; }
+    || requires(Container&& container) { std::forward<Container>(container).as_slice(); }
+    || requires(Container&& container) { std::forward<Container>(container).as_ref(); }
+    || requires(Container&& container) { std::data(container); std::size(container); }
+    || requires(Container&& container) {
+        std::forward<Container>(container).len();
+        std::forward<Container>(container).as_ptr();
+    };
+}
+
+template<typename Container>
+    requires detail::as_u8_slice_compatible<Container>
 std::span<const uint8_t> as_u8_slice(Container&& container) {
     if constexpr (std::is_pointer_v<std::remove_reference_t<Container>>) {
         return as_u8_slice(*container);
@@ -1604,6 +1620,114 @@ template<typename Container>
 auto split_first(Container& container) {
     return split_first(slice_full(container));
 }
+
+template<typename Elem, std::size_t Extent = std::dynamic_extent>
+class ChunksExact {
+public:
+    using Span = std::span<Elem, std::dynamic_extent>;
+
+    class iterator {
+    public:
+        using value_type = Span;
+        using difference_type = std::ptrdiff_t;
+
+        iterator(Span span, size_t chunk_size, size_t index)
+            : span_(span), chunk_size_(chunk_size), index_(index) {}
+
+        value_type operator*() const {
+            return span_.subspan(index_ * chunk_size_, chunk_size_);
+        }
+
+        iterator& operator++() {
+            ++index_;
+            return *this;
+        }
+
+        bool operator!=(const iterator& other) const {
+            return index_ != other.index_;
+        }
+
+    private:
+        Span span_;
+        size_t chunk_size_;
+        size_t index_;
+    };
+
+    ChunksExact(std::span<Elem, Extent> span, size_t chunk_size)
+        : span_(span.data(), span.size()), chunk_size_(chunk_size == 0 ? 1 : chunk_size) {}
+
+    iterator begin() const { return iterator(span_, chunk_size_, 0); }
+    iterator end() const { return iterator(span_, chunk_size_, span_.size() / chunk_size_); }
+
+private:
+    Span span_;
+    size_t chunk_size_;
+};
+
+template<typename Elem, std::size_t Extent, typename Size>
+auto chunks_exact(std::span<Elem, Extent> span, Size chunk_size) {
+    return ChunksExact<Elem, Extent>(span, static_cast<size_t>(chunk_size));
+}
+
+template<typename Container, typename Size>
+auto chunks_exact(Container& container, Size chunk_size) {
+    return chunks_exact(slice_full(container), chunk_size);
+}
+
+namespace memchr_runtime {
+
+inline Option<size_t> memchr(uint8_t needle, std::span<const uint8_t> haystack) {
+    for (size_t i = 0; i < haystack.size(); ++i) {
+        if (haystack[i] == needle) {
+            return Option<size_t>(i);
+        }
+    }
+    return Option<size_t>{None};
+}
+
+inline Option<size_t> memrchr(uint8_t needle, std::span<const uint8_t> haystack) {
+    for (size_t i = haystack.size(); i > 0; --i) {
+        if (haystack[i - 1] == needle) {
+            return Option<size_t>(i - 1);
+        }
+    }
+    return Option<size_t>{None};
+}
+
+inline Option<size_t> memchr2(uint8_t a, uint8_t b, std::span<const uint8_t> haystack) {
+    for (size_t i = 0; i < haystack.size(); ++i) {
+        if (haystack[i] == a || haystack[i] == b) {
+            return Option<size_t>(i);
+        }
+    }
+    return Option<size_t>{None};
+}
+
+class MemchrIter {
+public:
+    MemchrIter(uint8_t needle, std::span<const uint8_t> haystack)
+        : needle_(needle), haystack_(haystack) {}
+
+    size_t count() const {
+        size_t total = 0;
+        for (uint8_t byte : haystack_) {
+            if (byte == needle_) {
+                ++total;
+            }
+        }
+        return total;
+    }
+
+private:
+    uint8_t needle_;
+    std::span<const uint8_t> haystack_;
+};
+
+inline MemchrIter memchr_iter(uint8_t needle, std::span<const uint8_t> haystack) {
+    return MemchrIter(needle, haystack);
+}
+
+} // namespace memchr_runtime
 
 template<typename Container, typename Mid>
 requires (!std::is_same_v<std::remove_cvref_t<Container>, std::string_view>)

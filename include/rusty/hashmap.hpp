@@ -1004,6 +1004,9 @@ class HashMapVacantEntryProxy {
 
 public:
     HashMapVacantEntryProxy(Map& map, key_type key) : map_(&map), key_(std::move(key)) {}
+    HashMapVacantEntryProxy(const HashMapVacantEntryProxy& other)
+        : map_(other.map_), key_(clone_key(other.key_)) {}
+    HashMapVacantEntryProxy(HashMapVacantEntryProxy&&) noexcept = default;
 
     const key_type& key() const {
         return key_;
@@ -1023,6 +1026,14 @@ public:
     }
 
 private:
+    static key_type clone_key(const key_type& key) {
+        if constexpr (requires(const key_type& k) { k.clone(); }) {
+            return key.clone();
+        } else {
+            return key_type(key);
+        }
+    }
+
     Map* map_;
     mutable key_type key_;
 };
@@ -1033,33 +1044,67 @@ class HashMapOccupiedEntryProxy {
 
 public:
     HashMapOccupiedEntryProxy(Map& map, key_type key) : map_(&map), key_(std::move(key)) {}
+    HashMapOccupiedEntryProxy(const HashMapOccupiedEntryProxy& other)
+        : map_(other.map_), key_(clone_key(other.key_)) {}
+    HashMapOccupiedEntryProxy(HashMapOccupiedEntryProxy&&) noexcept = default;
 
     const key_type& key() const {
         return key_;
     }
 
     decltype(auto) get() const {
-        if constexpr (requires(Map& m, const key_type& k) { m.entry_value(k); }) {
-            return map_->entry_value(key_);
+        if constexpr (requires(Map& m, const key_type& k) { m.entry_value_ref(k); }) {
+            return map_->entry_value_ref(key_);
+        } else if constexpr (requires(Map& m, const key_type& k) { m.entry_value(k); }) {
+            return map_->entry_value(clone_key(key_));
         } else {
-            return map_->entry(key_);
+            return map_->entry(clone_key(key_));
         }
     }
 
+    decltype(auto) get_mut() const {
+        return get();
+    }
+
+    decltype(auto) into_mut() const {
+        return get();
+    }
+
     template<typename Value>
-    decltype(auto) insert(Value&& value) const {
+    auto insert(Value&& value) const {
         auto& slot = [&]() -> decltype(auto) {
-            if constexpr (requires(Map& m, const key_type& k) { m.entry_value(k); }) {
-                return map_->entry_value(key_);
+            if constexpr (requires(Map& m, const key_type& k) { m.entry_value_ref(k); }) {
+                return map_->entry_value_ref(key_);
+            } else if constexpr (requires(Map& m, const key_type& k) { m.entry_value(k); }) {
+                return map_->entry_value(clone_key(key_));
             } else {
-                return map_->entry(key_);
+                return map_->entry(clone_key(key_));
             }
         }();
+        auto old = std::move(slot);
         slot = std::forward<Value>(value);
-        return (slot);
+        return old;
+    }
+
+    decltype(auto) remove() const {
+        auto removed = map_->remove(key_);
+        return removed.unwrap();
+    }
+
+    decltype(auto) remove_entry() const {
+        auto removed = map_->remove_entry(key_);
+        return removed.unwrap();
     }
 
 private:
+    static key_type clone_key(const key_type& key) {
+        if constexpr (requires(const key_type& k) { k.clone(); }) {
+            return key.clone();
+        } else {
+            return key_type(key);
+        }
+    }
+
     Map* map_;
     mutable key_type key_;
 };

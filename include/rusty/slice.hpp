@@ -7,6 +7,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <tuple>
@@ -1512,9 +1513,52 @@ auto fold(Range&& range, Acc init, Func&& func) {
 }
 
 template<typename Range, typename Acc, typename Func>
-auto try_fold(Range&& range, Acc init, Func&& func) {
+auto try_fold(Range&& range, Acc&& init, Func&& func) {
     using range_iter = decltype(for_in(std::forward<Range>(range)));
     using item_ref = decltype(*std::begin(std::declval<range_iter&>()));
+    if constexpr (std::is_lvalue_reference_v<Acc>) {
+        using acc_ref = Acc;
+        using acc_value = std::remove_reference_t<Acc>;
+        using step_type = std::remove_cvref_t<std::invoke_result_t<Func&, acc_ref, item_ref>>;
+
+        auto* acc = std::addressof(init);
+        for (auto&& item : for_in(std::forward<Range>(range))) {
+            auto step = std::invoke(
+                func,
+                static_cast<acc_ref>(*acc),
+                std::forward<decltype(item)>(item));
+            if constexpr (requires(const step_type& s) {
+                              s.is_ok();
+                              s.is_err();
+                          }) {
+                if (step.is_err()) {
+                    return step;
+                }
+                auto&& next = step.unwrap();
+                acc = std::addressof(next);
+            } else if constexpr (requires(const step_type& s) {
+                                     s.is_some();
+                                     s.is_none();
+                                 }) {
+                if (step.is_none()) {
+                    return step;
+                }
+                auto&& next = step.unwrap();
+                acc = std::addressof(next);
+            } else {
+                auto&& next = step;
+                acc = std::addressof(next);
+            }
+        }
+
+        if constexpr (requires(acc_value& value) { step_type::Ok(value); }) {
+            return step_type::Ok(*acc);
+        } else if constexpr (requires(acc_value& value) { step_type(value); }) {
+            return step_type(*acc);
+        } else {
+            return *acc;
+        }
+    } else {
     using acc_type = std::remove_cvref_t<Acc>;
     using step_type = std::remove_cvref_t<std::invoke_result_t<Func&, acc_type, item_ref>>;
 
@@ -1551,6 +1595,7 @@ auto try_fold(Range&& range, Acc init, Func&& func) {
         return step_type(std::move(acc));
     } else {
         return acc;
+    }
     }
 }
 

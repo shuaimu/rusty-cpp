@@ -356,8 +356,7 @@ inline T take(T& destination) {
 
 template<typename T>
 inline void swap(T& left, T& right) noexcept(noexcept(std::swap(left, right))) {
-    using std::swap;
-    swap(left, right);
+    std::swap(left, right);
 }
 
 // Rust std::mem::drop consumes a value and destroys it at the end of this call.

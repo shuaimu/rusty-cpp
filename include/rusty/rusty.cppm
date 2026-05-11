@@ -182,15 +182,41 @@ constexpr std::size_t sanitize_array_capacity() noexcept {
     }
 }
 
+namespace detail {
+    template<typename T>
+    concept string_view_compatible =
+        requires(T&& value) {
+            { *std::forward<T>(value) } -> std::convertible_to<std::string_view>;
+        } ||
+        requires(T&& value) {
+            std::forward<T>(value).as_str();
+        } ||
+        requires(T&& value) {
+            std::string_view(std::forward<T>(value));
+        };
+}
+
 template<typename T>
+requires detail::string_view_compatible<T>
 std::string_view to_string_view(T&& value) {
-    if constexpr (requires { { *value } -> std::convertible_to<std::string_view>; }) {
-        return std::string_view(*value);
-    } else if constexpr (requires { value.as_str(); }) {
-        return std::string_view(value.as_str());
+    if constexpr (requires(T&& input) { { *std::forward<T>(input) } -> std::convertible_to<std::string_view>; }) {
+        return std::string_view(*std::forward<T>(value));
+    } else if constexpr (requires(T&& input) { std::forward<T>(input).as_str(); }) {
+        auto text = std::forward<T>(value).as_str();
+        if constexpr (requires { text.is_some(); text.unwrap(); }) {
+            return text.is_some() ? std::string_view(text.unwrap()) : std::string_view();
+        } else {
+            return std::string_view(text);
+        }
     } else {
         return std::string_view(std::forward<T>(value));
     }
+}
+
+template<typename T>
+requires requires(T& pointee) { to_string_view(pointee); }
+std::string_view to_string_view(T* value) {
+    return value ? to_string_view(*value) : std::string_view();
 }
 
 inline String to_owned(std::string_view value) {

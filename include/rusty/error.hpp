@@ -2,6 +2,8 @@
 #define RUSTY_ERROR_HPP
 
 #include <concepts>
+#include <cstddef>
+#include <format>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -32,6 +34,23 @@ std::string_view description(const T&)
 requires(!HasSafeDescriptionView<T>)
 {
     return std::string_view{};
+}
+
+template<typename Error, typename Len, typename Expected>
+auto invalid_length(Len&& len, Expected&& expected) {
+    if constexpr (requires {
+                      Error::invalid_length(
+                          static_cast<size_t>(std::forward<Len>(len)),
+                          std::forward<Expected>(expected));
+                  }) {
+        return Error::invalid_length(
+            static_cast<size_t>(std::forward<Len>(len)),
+            std::forward<Expected>(expected));
+    } else {
+        return Error::custom(std::format(
+            "invalid length {}",
+            static_cast<size_t>(std::forward<Len>(len))));
+    }
 }
 
 } // namespace error

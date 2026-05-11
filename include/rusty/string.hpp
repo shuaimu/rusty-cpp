@@ -18,6 +18,8 @@
 #include <utility>
 #include "rusty/box.hpp"
 #include "rusty/fmt.hpp"
+#include "rusty/option.hpp"
+#include "rusty/result.hpp"
 
 // @safe
 namespace rusty {
@@ -431,6 +433,104 @@ public:
         return data_ ? std::string(data_, len_) : std::string();
     }
 
+    class ParsedInteger {
+    public:
+        ParsedInteger() = default;
+        ParsedInteger(bool negative, unsigned __int128 magnitude)
+            : negative_(negative), magnitude_(magnitude) {}
+
+        __int128 to_i128() const {
+            constexpr unsigned __int128 min_abs = static_cast<unsigned __int128>(1) << 127;
+            constexpr unsigned __int128 max_abs = min_abs - 1;
+            if (negative_) {
+                if (magnitude_ > min_abs) {
+                    throw std::out_of_range("parsed integer out of range");
+                }
+                if (magnitude_ == min_abs) {
+                    return -static_cast<__int128>(max_abs) - 1;
+                }
+                return -static_cast<__int128>(magnitude_);
+            }
+            if (magnitude_ > max_abs) {
+                throw std::out_of_range("parsed integer out of range");
+            }
+            return static_cast<__int128>(magnitude_);
+        }
+
+        unsigned __int128 to_u128() const {
+            if (negative_) {
+                throw std::out_of_range("parsed integer is negative");
+            }
+            return magnitude_;
+        }
+
+        operator __int128() const { return to_i128(); }
+        operator unsigned __int128() const { return to_u128(); }
+
+        template<typename T>
+        requires(
+            std::is_integral_v<T>
+            && !std::is_same_v<T, bool>
+            && !std::is_same_v<T, __int128>
+            && !std::is_same_v<T, unsigned __int128>)
+        operator T() const {
+            if constexpr (std::is_signed_v<T>) {
+                const __int128 value = to_i128();
+                const __int128 min_value = static_cast<__int128>(std::numeric_limits<T>::min());
+                const __int128 max_value = static_cast<__int128>(std::numeric_limits<T>::max());
+                if (value < min_value || value > max_value) {
+                    throw std::out_of_range("parsed integer out of range");
+                }
+                return static_cast<T>(value);
+            } else {
+                const unsigned __int128 value = to_u128();
+                const unsigned __int128 max_value =
+                    static_cast<unsigned __int128>(std::numeric_limits<T>::max());
+                if (value > max_value) {
+                    throw std::out_of_range("parsed integer out of range");
+                }
+                return static_cast<T>(value);
+            }
+        }
+
+    private:
+        bool negative_ = false;
+        unsigned __int128 magnitude_ = 0;
+    };
+
+    rusty::Result<ParsedInteger, String> parse() const {
+        const std::string_view text = as_str();
+        if (text.empty()) {
+            return rusty::Result<ParsedInteger, String>::Err(String::from("invalid integer"));
+        }
+
+        size_t idx = 0;
+        bool negative = false;
+        if (text[idx] == '+' || text[idx] == '-') {
+            negative = text[idx] == '-';
+            ++idx;
+            if (idx == text.size()) {
+                return rusty::Result<ParsedInteger, String>::Err(String::from("invalid integer"));
+            }
+        }
+
+        unsigned __int128 value = 0;
+        constexpr unsigned __int128 max_value = ~static_cast<unsigned __int128>(0);
+        for (; idx < text.size(); ++idx) {
+            const unsigned char ch = static_cast<unsigned char>(text[idx]);
+            if (ch < static_cast<unsigned char>('0') || ch > static_cast<unsigned char>('9')) {
+                return rusty::Result<ParsedInteger, String>::Err(String::from("invalid integer"));
+            }
+            const unsigned digit = static_cast<unsigned>(ch - static_cast<unsigned char>('0'));
+            if (value > (max_value - digit) / 10) {
+                return rusty::Result<ParsedInteger, String>::Err(String::from("integer overflow"));
+            }
+            value = value * 10 + digit;
+        }
+
+        return rusty::Result<ParsedInteger, String>::Ok(ParsedInteger(negative, value));
+    }
+
     std::vector<uint8_t> into_bytes() && {
         std::vector<uint8_t> out;
         out.reserve(len_);
@@ -615,6 +715,21 @@ public:
         const char* pos = std::strstr(data_, needle);
         if (!pos) return static_cast<size_t>(-1);
         return pos - data_;
+    }
+
+    Option<size_t> rfind(std::string_view needle) const {
+        const auto pos = as_str().rfind(needle);
+        if (pos == std::string_view::npos) {
+            return Option<size_t>{None};
+        }
+        return Option<size_t>{pos};
+    }
+
+    Option<size_t> rfind(const char* needle) const {
+        if (!needle) {
+            return Option<size_t>{None};
+        }
+        return rfind(std::string_view(needle));
     }
     
     // Replace all occurrences
@@ -842,6 +957,12 @@ public:
     
     bool operator!=(const str& other) const { return !(*this == other); }
 };
+
+inline Result<size_t, String> parse_usize(std::string_view text) {
+    return String::from(text).parse().map([](const String::ParsedInteger& parsed) {
+        return static_cast<size_t>(parsed);
+    });
+}
 
 // Helper function: Rust str::as_bytes() equivalent for std::string_view.
 // Returns a std::span<const uint8_t> representing the raw bytes of the string.

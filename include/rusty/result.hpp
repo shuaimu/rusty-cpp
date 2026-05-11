@@ -42,6 +42,9 @@ using result_option_value_t = typename std::remove_cvref_t<X>::value_type;
 template<typename T, typename E>
 class Result {
 private:
+    template<typename, typename>
+    friend class Result;
+
     template<typename X>
     struct array_meta {
         static constexpr bool is_array = false;
@@ -229,6 +232,15 @@ public:
         return r;
     }
 
+    template<typename U = std::remove_cvref_t<E>>
+    requires (!std::is_reference_v<E> && std::is_constructible_v<ErrStored, U&&>)
+    static Result Err(U& error) {
+        Result r(UninitTag{});
+        new (&r.storage.err_storage) ErrStored(to_err_storage(std::move(error)));
+        r.is_ok_value = false;
+        return r;
+    }
+
     // Lvalue Err fallback for move-only payloads that expose clone().
     template<typename U = std::remove_cvref_t<E>>
     requires (!std::is_reference_v<E>)
@@ -256,9 +268,25 @@ public:
     // Copy constructor
     Result(const Result& other) : is_ok_value(other.is_ok_value) {
         if (is_ok_value) {
-            new (&storage.ok_storage) OkStored(other.ok_stored_ref());
+            if constexpr (std::is_constructible_v<OkStored, const OkStored&>) {
+                new (&storage.ok_storage) OkStored(other.ok_stored_ref());
+            } else if constexpr (requires(const OkStored& value) { value.clone(); }) {
+                new (&storage.ok_storage) OkStored(other.ok_stored_ref().clone());
+            } else if constexpr (std::is_constructible_v<OkStored, OkStored&&>) {
+                new (&storage.ok_storage) OkStored(std::move(const_cast<OkStored&>(other.ok_stored_ref())));
+            } else {
+                static_assert(std::is_constructible_v<OkStored, const OkStored&>, "Result copy requires copy, clone, or movable storage");
+            }
         } else {
-            new (&storage.err_storage) ErrStored(other.err_stored_ref());
+            if constexpr (std::is_constructible_v<ErrStored, const ErrStored&>) {
+                new (&storage.err_storage) ErrStored(other.err_stored_ref());
+            } else if constexpr (requires(const ErrStored& value) { value.clone(); }) {
+                new (&storage.err_storage) ErrStored(other.err_stored_ref().clone());
+            } else if constexpr (std::is_constructible_v<ErrStored, ErrStored&&>) {
+                new (&storage.err_storage) ErrStored(std::move(const_cast<ErrStored&>(other.err_stored_ref())));
+            } else {
+                static_assert(std::is_constructible_v<ErrStored, const ErrStored&>, "Result copy requires copy, clone, or movable storage");
+            }
         }
     }
     
@@ -268,6 +296,17 @@ public:
             new (&storage.ok_storage) OkStored(std::move(other.ok_stored_ref()));
         } else {
             new (&storage.err_storage) ErrStored(std::move(other.err_stored_ref()));
+        }
+    }
+
+    template<typename U>
+    requires (!std::is_same_v<std::remove_cvref_t<U>, std::remove_cvref_t<T>>
+              && std::is_constructible_v<T, U&&>)
+    Result(Result<U, E>&& other) : is_ok_value(other.is_ok_value) {
+        if (is_ok_value) {
+            new (&storage.ok_storage) OkStored(to_ok_storage(other.unwrap()));
+        } else {
+            new (&storage.err_storage) ErrStored(to_err_storage(other.unwrap_err()));
         }
     }
     
@@ -508,9 +547,14 @@ public:
     
     // Provide alternative Result if this is Err
     template<typename F>
-    Result or_else(F f) {
+    auto or_else(F f) -> decltype(f(std::declval<E>())) {
+        using ReturnType = decltype(f(std::declval<E>()));
         if (is_ok_value) {
-            return std::move(*this);
+            if constexpr (std::is_reference_v<T>) {
+                return ReturnType::Ok(ok_ref());
+            } else {
+                return ReturnType::Ok(std::move(ok_ref()));
+            }
         } else {
             return f(std::move(err_ref()));
         }
@@ -787,6 +831,16 @@ template<typename U>
 struct ok_contextual_value {
     using stored_t = std::decay_t<U>;
     stored_t value;
+
+    template<typename F>
+    auto map(F f) && {
+        return ok_contextual_value<decltype(f(std::move(value)))>{f(std::move(value))};
+    }
+
+    template<typename F>
+    auto map(F f) const& {
+        return ok_contextual_value<decltype(f(value))>{f(value)};
+    }
 
     template<typename T, typename E>
     operator Result<T, E>() && {
