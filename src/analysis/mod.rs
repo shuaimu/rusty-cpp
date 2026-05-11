@@ -1393,6 +1393,45 @@ fn process_statement(
             ownership_tracker.mark_as_reference(to.clone(), *kind == BorrowKind::Mutable);
         }
 
+        crate::ir::IrStatement::StructBorrow {
+            struct_var,
+            borrowed_from,
+            struct_type,
+            ..
+        } => {
+            // A struct with reference members holds an immutable borrow of its
+            // constructor arguments for its entire lifetime. Mirror the borrow
+            // tracking used by IrStatement::Borrow with kind=Immutable, but do
+            // NOT mark the struct itself as a reference (it's a value type that
+            // happens to carry a borrow).
+            debug_println!(
+                "DEBUG ANALYSIS: StructBorrow {} (type {}) borrows {}",
+                struct_var,
+                struct_type,
+                borrowed_from
+            );
+
+            if ownership_tracker.is_in_unsafe_block() {
+                return;
+            }
+
+            let from_state = ownership_tracker.get_ownership(borrowed_from);
+            if from_state == Some(&OwnershipState::Moved) {
+                errors.push(format!(
+                    "Cannot construct '{}' borrowing from '{}': '{}' has been moved",
+                    struct_type, borrowed_from, borrowed_from
+                ));
+                return;
+            }
+
+            let kind = BorrowKind::Immutable;
+            if !check_borrow_conflicts(borrowed_from, &kind, ownership_tracker, errors) {
+                return;
+            }
+
+            ownership_tracker.add_borrow(borrowed_from.clone(), struct_var.clone(), kind);
+        }
+
         crate::ir::IrStatement::Assign { lhs, rhs, .. } => {
             // Skip checks if we're in an unsafe block
             if ownership_tracker.is_in_unsafe_block() {
@@ -1405,6 +1444,25 @@ fn process_statement(
                     "Cannot assign to '{}' through const reference",
                     lhs
                 ));
+            }
+
+            // Cannot assign to a variable that is currently borrowed.
+            // In Rust: `let r = &x; x = 100;` => error[E0506].
+            // Only relevant when LHS is a value variable (not a reference being
+            // re-bound — that's pointer aliasing handled below).
+            if !ownership_tracker.is_reference(lhs) {
+                if let Some(borrows) = ownership_tracker.get_active_borrows(lhs) {
+                    if !borrows.is_empty() {
+                        let borrower_names: Vec<String> =
+                            borrows.iter().map(|b| b.borrower.clone()).collect();
+                        errors.push(format!(
+                            "Cannot assign to '{}' because it is borrowed by: {}",
+                            lhs,
+                            borrower_names.join(", ")
+                        ));
+                        return;
+                    }
+                }
             }
 
             // Check if the rhs uses a moved variable

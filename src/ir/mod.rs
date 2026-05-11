@@ -67,6 +67,26 @@ fn is_immutable_pointer_type(type_name: &str) -> bool {
     type_name.starts_with("const ")
 }
 
+/// If `name` looks like a constructor call (just `ClassName` or `ClassName::ClassName`),
+/// return the class name. Otherwise return None.
+fn normalize_constructor_name(name: &str) -> Option<String> {
+    if name.contains("::") {
+        let parts: Vec<&str> = name.split("::").collect();
+        if parts.len() >= 2 {
+            let last = parts[parts.len() - 1];
+            let second_last = parts[parts.len() - 2];
+            if last == second_last {
+                return Some(last.to_string());
+            }
+        }
+        None
+    } else if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
 /// Check if an expression chain originates from a temporary (constructor call).
 /// This handles chained method calls like Builder().set(42).get_value().
 /// Returns true if the ultimate receiver is a constructor call (creating a temporary).
@@ -530,7 +550,7 @@ pub fn build_ir(ast: CppAst) -> Result<IrProgram, String> {
     }
 
     for func in ast.functions {
-        let ir_func = convert_function(&func, &user_defined_raii_types)?;
+        let ir_func = convert_function(&func, &user_defined_raii_types, &types_with_ref_members)?;
         functions.push(ir_func);
     }
 
@@ -568,7 +588,7 @@ pub fn build_ir_with_safety_context(
     }
 
     for func in ast.functions {
-        let ir_func = convert_function(&func, &user_defined_raii_types)?;
+        let ir_func = convert_function(&func, &user_defined_raii_types, &types_with_ref_members)?;
         functions.push(ir_func);
     }
 
@@ -582,6 +602,7 @@ pub fn build_ir_with_safety_context(
 fn convert_function(
     func: &crate::parser::Function,
     user_defined_raii_types: &std::collections::HashSet<String>,
+    types_with_ref_members: &std::collections::HashSet<String>,
 ) -> Result<IrFunction, String> {
     let mut cfg = DiGraph::new();
     let mut variables = HashMap::new();
@@ -597,6 +618,7 @@ fn convert_function(
             &mut variables,
             &mut current_scope_level,
             user_defined_raii_types,
+            types_with_ref_members,
         )? {
             statements.extend(ir_stmts);
         }
@@ -886,6 +908,7 @@ fn convert_statement(
     variables: &mut HashMap<String, VariableInfo>,
     current_scope_level: &mut usize,
     user_defined_raii_types: &std::collections::HashSet<String>,
+    types_with_ref_members: &std::collections::HashSet<String>,
 ) -> Result<Option<Vec<IrStatement>>, String> {
     use crate::parser::Statement;
 
@@ -1681,6 +1704,34 @@ fn convert_statement(
                         receiver_is_temporary: false, // TODO: detect temporaries
                     });
 
+                    // Struct-with-ref-members: if this is a constructor for a type
+                    // that has reference members, the struct borrows from its
+                    // constructor argument(s). Emit StructBorrow so the analyzer
+                    // tracks the borrow for the lifetime of the struct.
+                    let struct_type = normalize_constructor_name(name);
+                    if let Some(struct_type_name) = struct_type {
+                        if types_with_ref_members.contains(&struct_type_name) {
+                            // Use the original parser args to identify which
+                            // arguments are real variables (vs literals/temps).
+                            for arg in args.iter() {
+                                if let crate::parser::Expression::Variable(var) = arg {
+                                    debug_println!(
+                                        "DEBUG IR: StructBorrow {} -> {} (type {})",
+                                        var,
+                                        lhs_var,
+                                        struct_type_name
+                                    );
+                                    statements.push(IrStatement::StructBorrow {
+                                        struct_var: lhs_var.clone(),
+                                        borrowed_from: var.clone(),
+                                        struct_type: struct_type_name.clone(),
+                                        line,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     Ok(Some(statements))
                 }
                 // REASSIGNMENT FIX: Handle literal assignments (e.g., x = 42)
@@ -2278,6 +2329,7 @@ fn convert_statement(
                     variables,
                     current_scope_level,
                     user_defined_raii_types,
+                    types_with_ref_members,
                 )? {
                     then_ir.extend(ir_stmts);
                 }
@@ -2292,6 +2344,7 @@ fn convert_statement(
                         variables,
                         current_scope_level,
                         user_defined_raii_types,
+                        types_with_ref_members,
                     )? {
                         else_ir.extend(ir_stmts);
                     }

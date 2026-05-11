@@ -957,6 +957,273 @@ Practical fallback policy:
 2. soften unresolved/external trait-only surfaces to placeholder-safe forms in module mode,
 3. emit explicit Rust-only comments when a trait item is intentionally not materialized.
 
+#### 3.2.9 Proposed Redesign: Interface + Owning Adapter + Ref Adapter (Replaces Proxy) 🚧
+
+Status: **proposal**, with the analyzer prerequisite (struct-with-ref-members borrow tracking) implemented and tested. This subsection describes a redesign of trait lowering to replace the Proxy facade approach above. The Proxy approach works for runtime polymorphism but is opaque to the rusty-cpp borrow checker — `pro::proxy_view<Facade>` is a type-erased wrapper the analyzer cannot see through, so reference and lifetime tracking on `&dyn Trait` degrades to "unknown handle" semantics.
+
+The proposed design lowers each Rust trait to **three plain C++ classes** that mirror Rust's `Box<dyn T>` vs `&dyn T` distinction at the type level:
+
+1. **`T`** — a non-copyable, non-movable abstract base class with one pure-virtual method per trait method.
+2. **`TAdapter<U>`** — a class template, specialized per `impl T for U`, that holds a `U` **by value** and overrides the interface methods. Used for owning `dyn` (`Box<dyn T>`, `Rc<dyn T>`, `Arc<dyn T>`).
+3. **`TAdapterRef<U>`** — a class template, specialized per `impl T for U`, that holds a `const U&` (or `U&`) **by reference** and overrides the interface methods. Used for borrowed `dyn` (`&dyn T`, `&mut dyn T`) when wrapping a concrete value.
+
+The split mirrors Pro's `pro::proxy` (owning) vs `pro::proxy_view` (non-owning), and Rust's `Box<dyn>` vs `&dyn`. Each shape preserves the right semantics: `TAdapter<U>` puts vtable+U in a single heap allocation matching `Box::new(U)`; `TAdapterRef<U>` is a stack-sized borrow with no allocation matching `&u`. By-value storage is wrong for `&dyn T` because it would force a copy or move of the source on every borrow; by-pointer storage is wrong for `Box<dyn T>` because it would require two heap allocations instead of one.
+
+`&dyn T` then lowers to `const T&`, `&mut dyn T` to `T&`, and `Box<dyn T>` to `rusty::Box<T>`. These are all shapes the existing borrow checker already understands as ordinary references / owning pointers — and `TAdapterRef<U>`'s reference member is automatically tracked as a borrow of the source, so the source cannot be mutated or moved while a `&dyn T` view of it exists.
+
+##### Why the redesign
+
+| Concern | Proxy (current) | Interface + Owning + Ref (proposed) |
+|---------|-----------------|--------------------------------------|
+| Borrow checker can see through `dyn&` | ❌ opaque facade type | ✅ standard `Base&` reference |
+| Lifetime tracking on `&dyn T` | ❌ falls back to opaque handle | ✅ uses existing reference/lifetime rules |
+| Borrow conflict on `&dyn T` view's source | ❌ analyzer cannot see the borrow | ✅ `TAdapterRef<U>`'s ref member surfaces the borrow (see "Borrow-checker integration" below) |
+| External library dependency | Pro library | None (plain C++) |
+| Hand-written C++ can implement traits | needs adapter machinery | ✅ direct inheritance from `T` |
+| Small-buffer / in-place storage for `Box<dyn>` | ✅ Pro optimizes | ❌ heap-allocated adapter |
+| Dispatch cost for `dyn` call | one indirect call | one virtual call (similar) |
+
+The borrow-checker integration is the primary motivation. Performance is comparable (one virtual call vs one Pro indirect call); we lose Pro's small-buffer optimization for `Box<dyn>` but gain analyzer transparency for every `&dyn` use site.
+
+##### Mapping table
+
+| Rust | Proposed C++ |
+|------|--------------|
+| `trait T { fn m(&self) -> R; }` | `class T { virtual R m() const = 0; ... };` plus `template<class U> class TAdapter;` and `template<class U> class TAdapterRef;` (primary, undefined) |
+| `impl T for U { fn m(&self) -> R { body } }` (owning adapter) | `template<> class TAdapter<U> : public T { U value_; explicit TAdapter(U v) : value_(std::move(v)) {} R m() const override { /* body, self → value_ */ } };` |
+| `impl T for U { fn m(&self) -> R { body } }` (ref adapter) | `template<> class TAdapterRef<U> : public T { const U& value_; explicit TAdapterRef(const U& u) : value_(u) {} R m() const override { /* body, self → value_ */ } };` |
+| `&dyn T` from concrete `U` | `TAdapterRef<U>(u)` materialized at the coercion site, bound as `const T&` |
+| `&mut dyn T` from concrete `U` | `TAdapterRefMut<U>(u)` materialized at the coercion site, bound as `T&` |
+| `&dyn T` from `Box<dyn T>` (deref) | `*box` — already a `T&`, no new wrapper needed |
+| `Box<dyn T>` | `rusty::Box<T>` constructed via `rusty::make_box<TAdapter<U>>(u)` |
+| `Rc<dyn T>` / `Arc<dyn T>` | `rusty::Rc<T>` / `rusty::Arc<T>` over `TAdapter<U>` |
+| `T: Trait` (generic bound) | C++ template (unchanged — static dispatch path) |
+| `dyn A + B` | synthesized `AB : public A, public B` plus matching `ABAdapter<U>` and `ABAdapterRef<U>` |
+| Default method `fn d(&self) { ... }` | non-virtual method on `T` calling pure-virtuals |
+| Supertrait `trait B: A` | `class B : public A { ... }` |
+
+##### Worked example: trait, impl, both `Box<dyn>` and `&dyn` use sites
+
+```rust
+trait Animal {
+    fn speak(&self) -> String;
+}
+
+struct Dog;
+impl Animal for Dog {
+    fn speak(&self) -> String { "Woof".to_string() }
+}
+
+fn make_noise(animal: &dyn Animal) {
+    println!("{}", animal.speak());
+}
+
+fn boxed() -> Box<dyn Animal> { Box::new(Dog) }
+
+fn borrowed() {
+    let dog = Dog;
+    make_noise(&dog);            // &dyn Animal from concrete Dog
+}
+```
+
+Lowers to:
+
+```cpp
+// === trait Animal: emitted in animal.hpp ===
+class Animal {
+public:
+    virtual ~Animal() = default;
+    virtual rusty::String speak() const = 0;
+
+    Animal(const Animal&) = delete;
+    Animal& operator=(const Animal&) = delete;
+    Animal(Animal&&) = delete;
+    Animal& operator=(Animal&&) = delete;
+protected:
+    Animal() = default;
+};
+
+template <class U> class AnimalAdapter;     // owning, by-value
+template <class U> class AnimalAdapterRef;  // borrowing, by-reference
+
+// === impl Animal for Dog: emitted in dog.hpp ===
+template <>
+class AnimalAdapter<Dog> final : public Animal {
+    Dog value_;
+public:
+    explicit AnimalAdapter(Dog v) : value_(std::move(v)) {}
+
+    rusty::String speak() const override {
+        // body of impl Animal::speak for Dog, with `self` rewritten to `value_`
+        return rusty::String::from("Woof");
+    }
+};
+
+template <>
+class AnimalAdapterRef<Dog> final : public Animal {
+    const Dog& value_;
+public:
+    // Constructor MUST be explicit — required for the StructBorrow IR node
+    // to fire and for the analyzer to record the borrow on `u`.
+    explicit AnimalAdapterRef(const Dog& u) : value_(u) {}
+
+    rusty::String speak() const override {
+        return rusty::String::from("Woof");  // same body as owning adapter
+    }
+};
+
+// === &dyn use site (function signature) ===
+void make_noise(const Animal& animal) {
+    rusty::println("{}", animal.speak());
+}
+
+// === Box<dyn> construction ===
+rusty::Box<Animal> boxed() {
+    return rusty::make_box<AnimalAdapter<Dog>>(Dog{});
+}
+
+// === &dyn coercion from concrete value ===
+void borrowed() {
+    Dog dog;
+    make_noise(AnimalAdapterRef<Dog>(dog));
+    // dog is now considered borrowed for the duration of the call;
+    // mutating or moving dog before this statement returns is rejected.
+}
+```
+
+The borrow checker sees `const Animal&` as a normal const reference and applies the existing borrow rules. The crucial extra piece is that `AnimalAdapterRef<Dog>` has a `const Dog& value_` member, which puts the type into the analyzer's `types_with_ref_members` set; constructing one therefore records an immutable borrow of the constructor argument. See "Borrow-checker integration" below for the exact mechanics.
+
+##### Borrow-checker integration
+
+The two-flavor adapter design is shaped specifically so the existing rusty-cpp borrow checker can do the work without trait-object-aware extensions. The integration has three pieces:
+
+1. **`TAdapterRef<U>` carries a reference member.** Because the field is declared `const U& value_;`, the IR builder registers `TAdapterRef<U>` in `types_with_ref_members` (`src/ir/mod.rs`). This is the same registry used for any user-defined struct with a reference field.
+
+2. **The constructor call emits a `StructBorrow` IR node.** When codegen produces `TAdapterRef<U>(u)` and `u` is a real variable, the IR conversion emits `IrStatement::StructBorrow { struct_var, borrowed_from, struct_type }` immediately after the constructor's `CallExpr` (added in `src/ir/mod.rs`). The analyzer (`src/analysis/mod.rs`) processes `StructBorrow` by recording an immutable borrow of `borrowed_from` by `struct_var`, mirroring how `IrStatement::Borrow` is handled but **without** marking the struct itself as a reference (it's a value type that happens to carry a borrow).
+
+3. **The existing checks then fire automatically.** With the borrow recorded:
+   - **Move while borrowed**: caught by the existing `is_transitively_borrowed` check at the `Move` handler. `std::move(u)` while a `TAdapterRef<U>` view of `u` is alive is rejected.
+   - **Assignment to borrowed**: caught by a new check in the `Assign` handler that consults `get_active_borrows(lhs)` — direct mutation of the source while a view is alive is rejected.
+   - **Source going out of scope before view**: caught by the existing `types_with_ref_members` return-statement check and by scope-cleanup checks on `ImplicitDrop`.
+   - **Multiple immutable borrows**: still permitted (existing `check_borrow_conflicts`).
+   - **Borrow released on scope exit**: existing `clear_borrows_from` cleanup runs when `struct_var` dies.
+
+**Verified by tests.** `tests/test_struct_ref_member_borrows.rs` pins these behaviors with six tests:
+- `test_assign_to_borrowed_source_fails` — `int x; Holder h(x); x = 100;` is rejected.
+- `test_assign_to_borrowed_source_brace_init_fails` — same with `Holder h{x}` brace syntax.
+- `test_move_borrowed_source_fails` — `std::move(x)` while borrowed is rejected.
+- `test_multiple_immutable_borrows_ok` — multiple `Holder` instances on the same `x` are allowed.
+- `test_borrow_released_at_end_of_scope_ok` — assigning to `x` after the borrowing struct's scope ends is allowed.
+- `test_assign_unrelated_variable_ok` — assigning to a different variable is unaffected.
+
+These six tests run on the cross-function lifetime test infrastructure in `tests/test_cross_function_lifetime.rs` and verify the exact behavior the trait redesign relies on.
+
+**Codegen requirement.** For the integration to fire, codegen MUST emit `TAdapterRef<U>` with an **explicit constructor**. Aggregate brace-initialization without an explicit constructor (`struct H { const int& r; }; H h{x};`) does not surface as a `CallExpr` to the IR builder under libclang, so the `StructBorrow` emission point is bypassed. This is a parser-level limitation that does not affect us because all generated adapter templates declare `explicit TAdapterRef(const U& u) : value_(u) {}`.
+
+##### Where the impl body lives (the colocation question)
+
+Rust permits `impl T for U` in any module where the orphan rule is satisfied — usually a different module from `U`'s definition. C++ cannot retroactively add a base class to an existing class, so we cannot mirror Rust's intrusive feel by emitting `class Dog : public Animal`. The Adapter pattern resolves this: `TAdapter<U>` and `TAdapterRef<U>` are defined wherever the `impl` lives, and are separate types from `U` itself. `U`'s definition stays untouched.
+
+For each `impl T for U`, codegen emits **both** specializations side-by-side in the same header (they share the impl body except for the storage shape). Two viable lowering strategies for the body:
+
+1. **Full Adapter specialization (recommended).** Inline the impl body directly into both `TAdapter<U>::m` and `TAdapterRef<U>::m`, as in the worked example. Self-contained: each `(Trait, Type)` pair is one header file with two specializations and no helpers. Body duplication is minor (a few lines per method) and avoids any indirection. Downside: the specialization header must be `#include`d at every `Box<dyn T>::new(U{...})` or `&dyn T from U` construction site (the C++ analog of needing the impl in scope in Rust).
+
+2. **Shared body via free function called from both adapters.** Emit a free function `TraitMethodImpl(const U&, args...)` near `U`'s namespace, and have both adapter specializations forward to it. Eliminates body duplication. Downside: name collisions across traits with same-named methods, and an extra non-inlinable call layer for the dispatch.
+
+Default to (1). Reserve (2) for cases where the impl bodies are large and duplication is meaningful. The Rust orphan rule guarantees that for any `impl T for U`, either `T` or `U` is in a known crate, so the codegen always has a well-defined module to place the specializations in.
+
+##### Multi-trait bounds (`dyn A + B`)
+
+Synthesize a combined interface and both adapter flavors on demand:
+
+```cpp
+class AB : public A, public B {
+public:
+    ~AB() override = default;
+};
+
+template <class U> class ABAdapter;     // owning, by-value
+template <class U> class ABAdapterRef;  // borrowing, by-reference
+// specializations override A's and B's pure-virtuals
+```
+
+Multiple inheritance of pure-virtual interfaces with no data members is well-behaved (no diamond, no virtual base needed). Synthesis is keyed on the sorted set of trait names, so `dyn A + B` and `dyn B + A` produce the same combined interface and adapters.
+
+##### Default trait methods
+
+Emit as **non-virtual** member functions on `T` that call the pure-virtual primitives. This puts the default body in one place (the interface header), avoids re-emitting it per impl, and matches Rust's "default method calls other trait methods through dispatch" semantics:
+
+```cpp
+class Greet {
+public:
+    virtual ~Greet() = default;
+    virtual rusty::String name() const = 0;
+
+    rusty::String greet() const {                       // default, non-virtual
+        return rusty::String::format("Hello, {}!", name());
+    }
+};
+```
+
+If a Rust impl overrides the default, emit `greet` as `virtual` in the interface and `override` it in the relevant `Adapter`.
+
+##### Object slicing
+
+`T` must be non-copyable and non-movable (deleted as in the example). Without this, `Animal a = some_dog_adapter;` silently slices and the borrow checker will not catch it (the operation looks like an ordinary value copy). Forcing all `dyn` access through reference / `rusty::Box` mirrors Rust's rule that `dyn T` is unsized and cannot be stored by bare value.
+
+`TAdapterRef<U>` is also non-copyable and non-movable as a consequence of holding a reference member — that's exactly what we want, since copying a borrow handle would silently duplicate the borrow without re-recording it. The owning `TAdapter<U>` is movable (so it can be put into a `rusty::Box` or returned from `make_box`).
+
+##### Hand-written C++ interop
+
+Because `T` is a plain abstract class, hand-written C++ code can implement a Rust-defined trait by inheriting it directly:
+
+```cpp
+class MyCustomAnimal : public Animal {
+public:
+    rusty::String speak() const override { return rusty::String::from("Custom"); }
+};
+
+rusty::Box<Animal> b = rusty::make_box<MyCustomAnimal>();
+```
+
+This is a useful side benefit — users writing C++ that consumes Rust-generated headers do not need to wrap their classes through `TAdapter`. The transpiler's own output never uses this path (it always emits `TAdapter<U>`), but the surface is open for hand integration.
+
+##### Migration scope
+
+The analyzer prerequisite is **complete**. The remaining work is in the transpiler codegen:
+
+- `transpiler/src/codegen.rs` trait emission (currently around lines 19023-19208) — replace facade emission with `T` + primary `TAdapter` and `TAdapterRef` templates
+- `transpiler/src/codegen.rs` impl emission (currently around lines 23734-23755) — replace member-method-on-struct emission with paired `TAdapter<U>` and `TAdapterRef<U>` specializations (sharing the impl body)
+- `transpiler/src/codegen.rs` `dyn Trait` type mapping (currently around lines 79646-80007):
+  - `&dyn T` from a concrete `U` → `TAdapterRef<U>(u)` materialized at the coercion site
+  - `&dyn T` from `Box<dyn T>` → just deref the box (no wrapper)
+  - `Box<dyn T>` → `rusty::Box<T>` constructed via `rusty::make_box<TAdapter<U>>(u)`
+- Multi-bound synthesis (currently combined via `pro::facade_builder::add_facade`) — replace with synthesized combined interface plus paired adapters
+- Module-mode fallback (3.2.8) — simplifies because `T` and the adapters are plain classes with no external library dependency
+
+**Analyzer status (complete, see `tests/test_struct_ref_member_borrows.rs`):**
+- `IrStatement::StructBorrow` IR node wired up in `src/ir/mod.rs`
+- `StructBorrow` handler in `src/analysis/mod.rs` records the borrow on the constructor argument
+- Assignment-to-borrowed check added to the `Assign` handler
+- Move-of-borrowed already works via the existing transitive-borrow check on `Move`
+- Six tests pin the new behavior; full regression check across `test_cross_function_lifetime`, `integration_test`, `test_phase4_transitive_borrows`, `test_active_borrow_tracking`, `test_field_borrowing`, `test_method_borrow_return`, `raii_integration_tests`, `test_reassignment_after_move`, `test_rusty_move`, `test_std_move`, `test_field_level_moves`, `test_field_method_borrows`, `test_move_from_reference`, `test_phase2_return_value_borrows`, `test_stl_use_after_move`, `test_mixed_pointer_reference_borrow`, `test_ptr_mutptr_borrow_comprehensive` shows zero regressions.
+
+With the analyzer pieces in place, `T` references and `rusty::Box<T>` flow through existing reference and box rules, and `TAdapterRef<U>` borrows flow through the `types_with_ref_members` + `StructBorrow` path.
+
+##### Open questions
+
+- Whether to emit `T`, `TAdapter`, and `TAdapterRef` primary templates in the same header, or split into separate interface vs. adapter headers for compile-time isolation.
+- `&mut dyn T` lowering — symmetric to `&dyn T` but with a `TAdapterRefMut<U>` holding `U&` (non-const). Same StructBorrow tracking applies, but the borrow recorded should be **mutable** to enforce single-mutable-borrow semantics. Need to extend `StructBorrow` (or add `StructBorrowMut`) to carry the kind, since it currently always records immutable.
+- How to lower `impl Trait` in return position (existential, currently 4.8) — likely stays as static dispatch (`auto`-returned concrete type), unrelated to this redesign.
+- Trait upcasting (`&dyn Sub` to `&dyn Super`): falls out of supertrait inheritance in the interface hierarchy, but needs explicit emission for cross-trait casts.
+- Whether to share impl bodies between `TAdapter<U>` and `TAdapterRef<U>` via a free function (lowering option 2 above) when bodies are large; currently the recommendation is duplicate-and-inline.
+
+##### Resolved (verified during this design pass)
+
+- ✅ Reference vs pointer storage in `TAdapterRef<U>` — settled on **reference member** (`const U& value_`) because it auto-registers in `types_with_ref_members` and lets the existing borrow-checker machinery track the borrow without a new pointer-aware code path.
+- ✅ Borrow-checker visibility into `&dyn T` — the `StructBorrow` IR node + `Assign`-handler check close the gap; assignment and move of a borrowed source are now both rejected.
+- ✅ Adapter constructor must be `explicit` (not aggregate) for `StructBorrow` emission to fire — the codegen always emits explicit constructors so this is satisfied by construction.
+
 ### 3.3 Pattern Matching ⚠️
 
 ```rust
