@@ -1,10 +1,15 @@
 #ifndef RUSTY_HPP
 #define RUSTY_HPP
 
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <concepts>
 #include <cstddef>
 #include <cmath>
 #include <limits>
 #include <span>
+#include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
@@ -328,17 +333,51 @@ namespace rusty {
     // Prefer deref-style surfaces first to avoid recursive `.as_str() -> to_string_view`
     // loops on generated string-like wrappers (for example ArrayString), then
     // fall back to `.as_str()` and direct `std::string_view` construction.
+    inline std::string_view to_string_view(std::span<const char> value) {
+        return std::string_view(value.data(), value.size());
+    }
+
+    inline std::string_view to_string_view(std::span<char> value) {
+        return std::string_view(value.data(), value.size());
+    }
+
+    namespace detail {
+        template<typename T>
+        concept string_view_compatible =
+            requires(T&& value) {
+                { *std::forward<T>(value) } -> std::convertible_to<std::string_view>;
+            } ||
+            requires(T&& value) {
+                std::forward<T>(value).as_str();
+            } ||
+            requires(T&& value) {
+                std::string_view(std::forward<T>(value));
+            };
+    }
+
     template<typename T>
+    requires detail::string_view_compatible<T>
     std::string_view to_string_view(T&& value) {
         // Use a single requires expression so decltype(*value) is not
         // evaluated eagerly when *value is not a valid expression.
-        if constexpr (requires { { *value } -> std::convertible_to<std::string_view>; }) {
-            return std::string_view(*value);
-        } else if constexpr (requires { value.as_str(); }) {
-            return std::string_view(value.as_str());
+        if constexpr (requires(T&& input) { { *std::forward<T>(input) } -> std::convertible_to<std::string_view>; }) {
+            return std::string_view(*std::forward<T>(value));
+        } else if constexpr (requires(T&& input) { std::forward<T>(input).as_str(); }) {
+            auto text = std::forward<T>(value).as_str();
+            if constexpr (requires { text.is_some(); text.unwrap(); }) {
+                return text.is_some() ? std::string_view(text.unwrap()) : std::string_view();
+            } else {
+                return std::string_view(text);
+            }
         } else {
             return std::string_view(std::forward<T>(value));
         }
+    }
+
+    template<typename T>
+    requires requires(T& pointee) { to_string_view(pointee); }
+    std::string_view to_string_view(T* value) {
+        return value ? to_string_view(*value) : std::string_view();
     }
 
     inline String to_owned(std::string_view value) {
@@ -415,6 +454,342 @@ namespace rusty {
         }
         return Option<std::decay_t<T>>(None);
     }
+
+    namespace serde_json_formatter_defaults {
+        namespace detail {
+            inline std::string unsigned_to_decimal(unsigned __int128 value) {
+                if (value == 0) {
+                    return "0";
+                }
+                std::string out;
+                while (value > 0) {
+                    out.push_back(static_cast<char>('0' + static_cast<unsigned>(value % 10)));
+                    value /= 10;
+                }
+                std::reverse(out.begin(), out.end());
+                return out;
+            }
+
+            template<typename T>
+            std::string integer_to_decimal(T value) {
+                if constexpr (std::is_signed_v<T>) {
+                    if (value < 0) {
+                        const auto magnitude =
+                            static_cast<unsigned __int128>(-(value + 1)) + 1;
+                        return "-" + unsigned_to_decimal(magnitude);
+                    }
+                }
+                return unsigned_to_decimal(static_cast<unsigned __int128>(value));
+            }
+
+            template<typename T>
+            std::string number_to_string(T value) {
+                if constexpr (std::is_floating_point_v<T>) {
+                    std::array<char, 128> buffer{};
+                    auto [ptr, ec] = std::to_chars(
+                        buffer.data(), buffer.data() + buffer.size(), value);
+                    if (ec == std::errc()) {
+                        return std::string(buffer.data(), ptr);
+                    }
+                    return std::to_string(value);
+                } else {
+                    return integer_to_decimal(value);
+                }
+            }
+
+            template<typename Writer, std::size_t N>
+            auto write_bytes(Writer&& writer, const std::array<uint8_t, N>& bytes) {
+                return rusty::io::write_all(std::forward<Writer>(writer), bytes);
+            }
+
+            template<typename Writer>
+            auto write_text(Writer&& writer, std::string_view text) {
+                return rusty::io::write_all(
+                    std::forward<Writer>(writer), rusty::as_bytes(text));
+            }
+        } // namespace detail
+
+        template<typename Formatter, typename Writer>
+        auto write_null(Formatter&, Writer&& writer) {
+            return detail::write_bytes(
+                std::forward<Writer>(writer),
+                std::array<uint8_t, 4>{{'n', 'u', 'l', 'l'}});
+        }
+
+        template<typename Formatter, typename Writer>
+        auto write_bool(Formatter&, Writer&& writer, bool value) {
+            if (value) {
+                return detail::write_bytes(
+                    std::forward<Writer>(writer),
+                    std::array<uint8_t, 4>{{'t', 'r', 'u', 'e'}});
+            }
+            return detail::write_bytes(
+                std::forward<Writer>(writer),
+                std::array<uint8_t, 5>{{'f', 'a', 'l', 's', 'e'}});
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_number(Formatter&, Writer&& writer, T value) {
+            return detail::write_text(
+                std::forward<Writer>(writer), detail::number_to_string(value));
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_i8(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_i16(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_i32(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_i64(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_i128(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_u8(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_u16(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_u32(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_u64(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_u128(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_f32(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename T>
+        auto write_f64(Formatter& formatter, Writer&& writer, T value) {
+            return write_number(formatter, std::forward<Writer>(writer), value);
+        }
+
+        template<typename Formatter, typename Writer, typename Value>
+        auto write_number_str(Formatter&, Writer&& writer, Value&& value) {
+            return detail::write_text(
+                std::forward<Writer>(writer),
+                rusty::to_string_view(std::forward<Value>(value)));
+        }
+
+        template<typename Formatter, typename Writer>
+        auto begin_string(Formatter&, Writer&& writer) {
+            return detail::write_bytes(
+                std::forward<Writer>(writer), std::array<uint8_t, 1>{{'"'}});
+        }
+
+        template<typename Formatter, typename Writer>
+        auto end_string(Formatter&, Writer&& writer) {
+            return detail::write_bytes(
+                std::forward<Writer>(writer), std::array<uint8_t, 1>{{'"'}});
+        }
+
+        template<typename Formatter, typename Writer, typename Fragment>
+        auto write_string_fragment(Formatter&, Writer&& writer, Fragment&& fragment) {
+            return detail::write_text(
+                std::forward<Writer>(writer),
+                rusty::to_string_view(std::forward<Fragment>(fragment)));
+        }
+
+        template<typename Formatter, typename Writer, typename CharEscape>
+        auto write_char_escape(Formatter&, Writer&& writer, CharEscape&& char_escape) {
+            auto&& escape = rusty::detail::deref_if_pointer_like(
+                std::forward<CharEscape>(char_escape));
+            const auto escape_char = [&]() -> uint8_t {
+                switch (escape.index()) {
+                    case 0: return static_cast<uint8_t>('"');
+                    case 1: return static_cast<uint8_t>('\\');
+                    case 2: return static_cast<uint8_t>('/');
+                    case 3: return static_cast<uint8_t>('b');
+                    case 4: return static_cast<uint8_t>('f');
+                    case 5: return static_cast<uint8_t>('n');
+                    case 6: return static_cast<uint8_t>('r');
+                    case 7: return static_cast<uint8_t>('t');
+                    case 8: return static_cast<uint8_t>('u');
+                    default: return static_cast<uint8_t>('u');
+                }
+            }();
+            if (escape.index() == 8) {
+                static constexpr std::array<uint8_t, 16> hex_digits{{
+                    '0', '1', '2', '3', '4', '5', '6', '7',
+                    '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'}};
+                const auto byte = static_cast<uint8_t>(
+                    rusty::detail::deref_if_pointer_like(std::get<8>(escape)._0));
+                const std::array<uint8_t, 6> bytes{{
+                    '\\',
+                    escape_char,
+                    '0',
+                    '0',
+                    hex_digits[static_cast<std::size_t>(byte >> 4)],
+                    hex_digits[static_cast<std::size_t>(byte & 0x0f)]}};
+                return detail::write_bytes(std::forward<Writer>(writer), bytes);
+            }
+            const std::array<uint8_t, 2> bytes{{'\\', escape_char}};
+            return detail::write_bytes(std::forward<Writer>(writer), bytes);
+        }
+
+        template<typename Formatter, typename Writer>
+        auto begin_array(Formatter& formatter, Writer&& writer) {
+            if constexpr (requires { formatter.begin_array(writer); }) {
+                return formatter.begin_array(writer);
+            } else {
+                return detail::write_bytes(
+                    std::forward<Writer>(writer), std::array<uint8_t, 1>{{'['}});
+            }
+        }
+
+        template<typename Formatter, typename Writer>
+        auto end_array(Formatter& formatter, Writer&& writer) {
+            if constexpr (requires { formatter.end_array(writer); }) {
+                return formatter.end_array(writer);
+            } else {
+                return detail::write_bytes(
+                    std::forward<Writer>(writer), std::array<uint8_t, 1>{{']'}});
+            }
+        }
+
+        template<typename Formatter, typename Writer>
+        auto begin_array_value(Formatter& formatter, Writer&& writer, bool first) {
+            if constexpr (requires { formatter.begin_array_value(writer, first); }) {
+                return formatter.begin_array_value(writer, first);
+            } else if (first) {
+                return rusty::io::Result<std::tuple<>>::ok(std::make_tuple());
+            } else {
+                return detail::write_bytes(
+                    std::forward<Writer>(writer), std::array<uint8_t, 1>{{','}});
+            }
+        }
+
+        template<typename Formatter, typename Writer>
+        auto end_array_value(Formatter& formatter, Writer&& writer) {
+            if constexpr (requires { formatter.end_array_value(writer); }) {
+                return formatter.end_array_value(writer);
+            } else {
+                return rusty::io::Result<std::tuple<>>::ok(std::make_tuple());
+            }
+        }
+
+        template<typename Formatter, typename Writer, typename Value>
+        auto write_byte_array(Formatter& formatter, Writer&& writer, Value&& value) {
+            auto result = begin_array(formatter, writer);
+            if (result.is_err()) {
+                return result;
+            }
+            bool first = true;
+            for (auto&& byte : rusty::for_in(rusty::iter(std::forward<Value>(value)))) {
+                result = begin_array_value(formatter, writer, first);
+                if (result.is_err()) {
+                    return result;
+                }
+                result = write_u8(formatter, writer, byte);
+                if (result.is_err()) {
+                    return result;
+                }
+                result = end_array_value(formatter, writer);
+                if (result.is_err()) {
+                    return result;
+                }
+                first = false;
+            }
+            return end_array(formatter, writer);
+        }
+
+        template<typename Formatter, typename Writer>
+        auto begin_object(Formatter& formatter, Writer&& writer) {
+            if constexpr (requires { formatter.begin_object(writer); }) {
+                return formatter.begin_object(writer);
+            } else {
+                return detail::write_bytes(
+                    std::forward<Writer>(writer), std::array<uint8_t, 1>{{'{'}});
+            }
+        }
+
+        template<typename Formatter, typename Writer>
+        auto end_object(Formatter& formatter, Writer&& writer) {
+            if constexpr (requires { formatter.end_object(writer); }) {
+                return formatter.end_object(writer);
+            } else {
+                return detail::write_bytes(
+                    std::forward<Writer>(writer), std::array<uint8_t, 1>{{'}'}});
+            }
+        }
+
+        template<typename Formatter, typename Writer>
+        auto begin_object_key(Formatter& formatter, Writer&& writer, bool first) {
+            if constexpr (requires { formatter.begin_object_key(writer, first); }) {
+                return formatter.begin_object_key(writer, first);
+            } else if (first) {
+                return rusty::io::Result<std::tuple<>>::ok(std::make_tuple());
+            } else {
+                return detail::write_bytes(
+                    std::forward<Writer>(writer), std::array<uint8_t, 1>{{','}});
+            }
+        }
+
+        template<typename Formatter, typename Writer>
+        auto end_object_key(Formatter& formatter, Writer&& writer) {
+            if constexpr (requires { formatter.end_object_key(writer); }) {
+                return formatter.end_object_key(writer);
+            } else {
+                return rusty::io::Result<std::tuple<>>::ok(std::make_tuple());
+            }
+        }
+
+        template<typename Formatter, typename Writer>
+        auto begin_object_value(Formatter& formatter, Writer&& writer) {
+            if constexpr (requires { formatter.begin_object_value(writer); }) {
+                return formatter.begin_object_value(writer);
+            } else {
+                return detail::write_bytes(
+                    std::forward<Writer>(writer), std::array<uint8_t, 1>{{':'}});
+            }
+        }
+
+        template<typename Formatter, typename Writer>
+        auto end_object_value(Formatter& formatter, Writer&& writer) {
+            if constexpr (requires { formatter.end_object_value(writer); }) {
+                return formatter.end_object_value(writer);
+            } else {
+                return rusty::io::Result<std::tuple<>>::ok(std::make_tuple());
+            }
+        }
+
+        template<typename Formatter, typename Writer, typename Fragment>
+        auto write_raw_fragment(Formatter&, Writer&& writer, Fragment&& fragment) {
+            return detail::write_text(
+                std::forward<Writer>(writer),
+                rusty::to_string_view(std::forward<Fragment>(fragment)));
+        }
+    } // namespace serde_json_formatter_defaults
 
     namespace boxed {
 

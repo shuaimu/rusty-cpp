@@ -68,6 +68,11 @@ public:
         new (storage_) T(std::forward<Args>(args)...);
     }
 
+    template<typename... Args>
+    void write_(Args&&... args) {
+        write(std::forward<Args>(args)...);
+    }
+
     // Initialize by moving a value in
     void write_value(T value) {
         new (storage_) T(std::move(value));

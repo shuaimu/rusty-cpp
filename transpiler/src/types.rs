@@ -223,6 +223,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
         "core::fmt::Alignment" | "fmt::Alignment" => Some(("rusty::fmt::Alignment", false)),
         "core::fmt::Error" | "std::fmt::Error" | "fmt::Error" => Some(("rusty::fmt::Error", false)),
+        "core::num::FpCategory" | "std::num::FpCategory" | "num::FpCategory" => {
+            Some(("rusty::num::FpCategory", false))
+        }
         "NonNull" | "std::ptr::NonNull" | "core::ptr::NonNull" => {
             Some(("rusty::ptr::NonNull", true))
         }
@@ -316,7 +319,9 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         // I/O types
         "io::Result" | "std::io::Result" => Some(("rusty::io::Result", true)),
         "io::Cursor" | "std::io::Cursor" => Some(("rusty::io::Cursor", true)),
+        "io::Bytes" | "std::io::Bytes" => Some(("rusty::io::Bytes", true)),
         "io::Error" | "std::io::Error" => Some(("rusty::io::Error", false)),
+        "io::ErrorKind" | "std::io::ErrorKind" => Some(("rusty::io::ErrorKind", false)),
         "io::SeekFrom" | "std::io::SeekFrom" => Some(("rusty::io::SeekFrom", false)),
         "io::Stdin" | "std::io::Stdin" => Some(("rusty::io::Stdin", false)),
         "io::Stdout" | "std::io::Stdout" => Some(("rusty::io::Stdout", false)),
@@ -371,6 +376,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
             Some("rusty::future::Delay::new_")
         }
         "Vec::with_capacity" => Some("rusty::Vec::with_capacity"),
+        "usize::from_str" | "std::usize::from_str" | "core::usize::from_str" => {
+            Some("rusty::parse_usize")
+        }
         "DefaultHasher::new"
         | "DefaultHasher::new_"
         | "std::collections::hash_map::DefaultHasher::new"
@@ -485,6 +493,12 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "Add::add" | "core::ops::Add::add" | "std::ops::Add::add" => Some("rusty::ops::add_fn"),
         "cmp::min" | "core::cmp::min" | "std::cmp::min" => Some("rusty::cmp::min"),
         "cmp::max" | "core::cmp::max" | "std::cmp::max" => Some("rusty::cmp::max"),
+        "memchr::memchr" | "memchr_::memchr" => Some("rusty::memchr_runtime::memchr"),
+        "memchr::memrchr" | "memchr_::memrchr" => Some("rusty::memchr_runtime::memrchr"),
+        "memchr::memchr2" | "memchr_::memchr2" => Some("rusty::memchr_runtime::memchr2"),
+        "memchr::memchr_iter" | "memchr_::memchr_iter" => {
+            Some("rusty::memchr_runtime::memchr_iter")
+        }
         "std::str::from_utf8" | "core::str::from_utf8" | "str::from_utf8" => {
             Some("rusty::str_runtime::from_utf8")
         }
@@ -492,6 +506,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "std::str::from_utf8_unchecked"
         | "core::str::from_utf8_unchecked"
         | "str::from_utf8_unchecked"
+        | "String::from_utf8_unchecked"
+        | "std::string::String::from_utf8_unchecked"
+        | "alloc::string::String::from_utf8_unchecked"
         | "std::string_view::from_utf8_unchecked" => {
             Some("rusty::str_runtime::from_utf8_unchecked")
         }

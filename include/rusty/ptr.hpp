@@ -247,6 +247,26 @@ inline void write_(T* dst, U&& value) {
     write(dst, std::forward<U>(value));
 }
 
+template<typename T>
+inline T read_unaligned(const T* src) {
+    T value;
+    std::memcpy(&value, src, sizeof(T));
+    return value;
+}
+
+template<typename T, typename U>
+inline void write_unaligned(T* dst, U&& value) {
+    T tmp = static_cast<T>(std::forward<U>(value));
+    std::memcpy(dst, &tmp, sizeof(T));
+}
+
+template<typename T, typename U, typename Count>
+inline void write_bytes(T* dst, U value, Count count) {
+    const auto byte_value = static_cast<unsigned char>(value);
+    const auto byte_count = static_cast<std::size_t>(count) * sizeof(T);
+    std::memset(static_cast<void*>(dst), byte_value, byte_count);
+}
+
 template<typename T, typename Count>
 inline void copy(const T* src, T* dst, Count count) {
     const auto element_count = static_cast<std::size_t>(count);

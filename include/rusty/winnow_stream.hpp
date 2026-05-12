@@ -539,14 +539,9 @@ inline Option<uint8_t> next_token(std::string_view& value) {
 }
 
 template<typename Stream>
+    requires requires(Stream& stream) { stream.next_token(); }
 auto next_token(Stream& stream) {
-    if constexpr (requires { stream.next_token(); }) {
-        return stream.next_token();
-    } else if constexpr (std::is_same_v<std::remove_cvref_t<Stream>, std::string_view>) {
-        return next_token(stream);
-    } else {
-        static_assert(detail::always_false_v<Stream>, "rusty::next_token: unsupported stream type");
-    }
+    return stream.next_token();
 }
 
 inline Option<uint8_t> peek_token(const std::string_view& value) {
@@ -557,14 +552,9 @@ inline Option<uint8_t> peek_token(const std::string_view& value) {
 }
 
 template<typename Stream>
+    requires requires(const Stream& stream) { stream.peek_token(); }
 auto peek_token(const Stream& stream) {
-    if constexpr (requires { stream.peek_token(); }) {
-        return stream.peek_token();
-    } else if constexpr (std::is_same_v<std::remove_cvref_t<Stream>, std::string_view>) {
-        return peek_token(stream);
-    } else {
-        static_assert(detail::always_false_v<Stream>, "rusty::peek_token: unsupported stream type");
-    }
+    return stream.peek_token();
 }
 
 inline std::size_t offset_from(std::string_view current, const std::string_view& start) {
@@ -587,7 +577,14 @@ std::size_t offset_from(std::span<const T, ExtentA> current, const std::span<con
 
 template<typename Current, typename Start>
 auto offset_from(const Current& current, const Start& start) {
-    if constexpr (requires { current.offset_from(start); }) {
+    using CurrentT = std::remove_cvref_t<Current>;
+    using StartT = std::remove_cvref_t<Start>;
+    if constexpr (std::is_pointer_v<CurrentT> && std::is_pointer_v<StartT>) {
+        using CurrentPointee = std::remove_cv_t<std::remove_pointer_t<CurrentT>>;
+        using StartPointee = std::remove_cv_t<std::remove_pointer_t<StartT>>;
+        static_assert(std::is_same_v<CurrentPointee, StartPointee>, "rusty::offset_from: pointer types differ");
+        return current - start;
+    } else if constexpr (requires { current.offset_from(start); }) {
         return current.offset_from(start);
     } else if constexpr (
         std::is_pointer_v<std::remove_cvref_t<Start>>

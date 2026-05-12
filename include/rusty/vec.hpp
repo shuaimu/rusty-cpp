@@ -12,11 +12,14 @@
 #include <limits>
 #include <span>
 #include <type_traits>
+#include <tuple>
+#include <iterator>
 #if !defined(RUSTY_NO_STD_VECTOR_INTEROP)
 #include <vector>
 #endif
 #include <rusty/alloc.hpp>
 #include <rusty/function.hpp>
+#include <rusty/io.hpp>
 #include <rusty/mem.hpp>
 #include <rusty/option.hpp>
 
@@ -77,6 +80,18 @@ private:
             return std::numeric_limits<size_t>::max();
         }
         return capacity * sizeof(T);
+    }
+
+    template<typename Bytes>
+    static std::span<const uint8_t> write_byte_span(Bytes&& bytes) {
+        using std::data;
+        using std::size;
+        auto* ptr = data(bytes);
+        using Elem = std::remove_cv_t<std::remove_pointer_t<decltype(ptr)>>;
+        static_assert(sizeof(Elem) == 1, "Vec<u8>::write expects a byte-sized buffer");
+        return std::span<const uint8_t>(
+            reinterpret_cast<const uint8_t*>(ptr),
+            static_cast<size_t>(size(bytes)));
     }
 
     void clear_forgotten_storage_marks() noexcept {
@@ -355,6 +370,37 @@ public:
         ++size_;
     }
 
+    template<typename Bytes>
+    io::Result<size_t> write(Bytes&& buf)
+    requires(std::is_same_v<std::remove_cv_t<T>, uint8_t>
+             && requires(std::remove_reference_t<Bytes>& bytes) {
+                    std::data(bytes);
+                    std::size(bytes);
+                })
+    {
+        auto bytes = write_byte_span(buf);
+        reserve(size_ + bytes.size());
+        for (auto byte : bytes) {
+            push(static_cast<T>(byte));
+        }
+        return io::Result<size_t>::ok(bytes.size());
+    }
+
+    template<typename Bytes>
+    io::Result<std::tuple<>> write_all(Bytes&& buf)
+    requires(std::is_same_v<std::remove_cv_t<T>, uint8_t>
+             && requires(std::remove_reference_t<Bytes>& bytes) {
+                    std::data(bytes);
+                    std::size(bytes);
+                })
+    {
+        auto result = write(std::forward<Bytes>(buf));
+        if (result.is_err()) {
+            return io::Result<std::tuple<>>::err(result.unwrap_err());
+        }
+        return io::Result<std::tuple<>>::ok(std::make_tuple());
+    }
+
     // Insert element at index, shifting trailing elements to the right.
     void insert(size_t index, T value) {
         assert(index <= size_);
@@ -444,15 +490,27 @@ public:
             }
         }
     }
+
+    void extend_from_slice(std::span<const T> other) {
+        reserve(size_ + other.size());
+        for (const auto& item : other) {
+            if constexpr (requires { item.clone(); }) {
+                push(item.clone());
+            } else {
+                push(item);
+            }
+        }
+    }
     
     // Pop element from the back
-    // Returns empty Option-like type if vec is empty
-    T pop() {
-        assert(size_ > 0);
+    Option<T> pop() {
+        if (size_ == 0) {
+            return Option<T>(None);
+        }
         --size_;
         T result = std::move(data_[size_]);
         data_[size_].~T();
-        return result;
+        return Option<T>(std::move(result));
     }
     
     // Access element by index

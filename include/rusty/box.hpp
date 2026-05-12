@@ -155,6 +155,24 @@ public:
     const T* operator->() const {
         return ptr;
     }
+
+    template<typename... Args>
+    decltype(auto) insert(Args&&... args)
+        requires requires(T& value, Args&&... forwarded) {
+            value.insert(std::forward<Args>(forwarded)...);
+        }
+    {
+        return ptr->insert(std::forward<Args>(args)...);
+    }
+
+    template<typename... Args>
+    decltype(auto) insert(Args&&... args) const
+        requires requires(const T& value, Args&&... forwarded) {
+            value.insert(std::forward<Args>(forwarded)...);
+        }
+    {
+        return ptr->insert(std::forward<Args>(args)...);
+    }
     
     // Check if box contains a value
     bool is_valid() const {
@@ -222,6 +240,21 @@ Box<T> make_box(Args&&... args) {
         // new and std::forward are unsafe operations
         return Box<T>(new T(std::forward<Args>(args)...));
     }
+}
+
+template<typename T>
+Box<T> make_box(Box<T>& value) {
+    return value.clone();
+}
+
+template<typename T>
+Box<T> make_box(const Box<T>& value) {
+    return value.clone();
+}
+
+template<typename T>
+Box<T> make_box(Box<T>&& value) {
+    return std::move(value);
 }
 
 // Deduction-friendly overload for call sites that do not spell `<T>`.

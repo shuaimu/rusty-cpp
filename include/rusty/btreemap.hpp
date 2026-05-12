@@ -318,6 +318,22 @@ public:
         return map_[std::move(key)];
     }
 
+    V& entry_value_ref(const K& key) {
+        auto it = map_.find(key);
+        if (it == map_.end()) {
+            throw std::out_of_range("rusty::BTreeMap entry_value_ref: key not found");
+        }
+        return it->second;
+    }
+
+    const V& entry_value_ref(const K& key) const {
+        auto it = map_.find(key);
+        if (it == map_.end()) {
+            throw std::out_of_range("rusty::BTreeMap entry_value_ref: key not found");
+        }
+        return it->second;
+    }
+
     auto entry(K key) {
         return detail::make_entry_probe(*this, std::move(key));
     }
@@ -597,6 +613,76 @@ public:
         }
     };
 
+    class values_mut_range {
+    private:
+        iter_mut_range iter_;
+
+    public:
+        using Item = V&;
+
+        explicit values_mut_range(map_type& map) : iter_(map) {}
+
+        Option<Item> next() {
+            auto item = iter_.next();
+            if (item.is_none()) {
+                return None;
+            }
+            return Option<Item>(std::get<1>(item.unwrap()));
+        }
+
+        Option<Item> next_back() {
+            auto item = iter_.next_back();
+            if (item.is_none()) {
+                return None;
+            }
+            return Option<Item>(std::get<1>(item.unwrap()));
+        }
+
+        std::tuple<size_t, Option<size_t>> size_hint() const {
+            return iter_.size_hint();
+        }
+
+        size_t len() const {
+            return iter_.len();
+        }
+    };
+
+    class into_values_range {
+    private:
+        into_iter_range iter_;
+
+    public:
+        using Item = V;
+
+        explicit into_values_range(map_type&& map) : iter_(std::move(map)) {}
+
+        Option<Item> next() {
+            auto item = iter_.next();
+            if (item.is_none()) {
+                return None;
+            }
+            auto tuple = std::move(item.unwrap());
+            return Option<Item>(std::move(std::get<1>(tuple)));
+        }
+
+        Option<Item> next_back() {
+            auto item = iter_.next_back();
+            if (item.is_none()) {
+                return None;
+            }
+            auto tuple = std::move(item.unwrap());
+            return Option<Item>(std::move(std::get<1>(tuple)));
+        }
+
+        std::tuple<size_t, Option<size_t>> size_hint() const {
+            return iter_.size_hint();
+        }
+
+        size_t len() const {
+            return iter_.len();
+        }
+    };
+
     iterator begin() {
         return iterator(map_.begin());
     }
@@ -645,6 +731,20 @@ public:
 
     values_range values() const {
         return values_range(map_);
+    }
+
+    values_mut_range values_mut() {
+        return values_mut_range(map_);
+    }
+
+    into_values_range into_values() & {
+        map_type moved = std::move(map_);
+        map_.clear();
+        return into_values_range(std::move(moved));
+    }
+
+    into_values_range into_values() && {
+        return into_values_range(std::move(map_));
     }
 
     BTreeMap clone() const {
