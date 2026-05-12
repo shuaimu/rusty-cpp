@@ -71,6 +71,7 @@ MODULE_BUILD=1
 IMPORT_STD=0
 PREFER_RUSTY_UNIT=0
 PREFER_RUSTY_VIEWS=0
+INTERFACE_TRAITS=0
 CONTINUE_ON_FAIL=0
 FIRST_FAIL_CRATE=""
 FIRST_FAIL_WORK_DIR=""
@@ -91,6 +92,7 @@ Options:
   --import-std       Use parity import-std mode (emit import std; and libc++ std module precompile)
   --prefer-rusty-unit  Prefer rusty::Unit spelling in generated output
   --prefer-rusty-views  Prefer rusty::StrView / rusty::Span spellings in generated output
+  --interface-traits  Lower traits to plain Interface + Adapter classes (see docs/rusty-cpp-transpiler.md § 3.2.9)
   --flat-build        Use legacy flat translation-unit Stage D mode
   --continue-on-fail  Continue running all crates even after failures
   --dry-run           Print planned commands without executing
@@ -186,6 +188,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --prefer-rusty-views)
             PREFER_RUSTY_VIEWS=1
+            shift
+            ;;
+        --interface-traits)
+            INTERFACE_TRAITS=1
             shift
             ;;
         --flat-build)
@@ -315,6 +321,9 @@ run_parity_for_crate() {
     fi
     if [[ "${PREFER_RUSTY_VIEWS}" -eq 1 ]]; then
         cmd+=(--prefer-rusty-view-aliases)
+    fi
+    if [[ "${INTERFACE_TRAITS}" -eq 1 ]]; then
+        cmd+=(--interface-traits)
     fi
 
     echo "crate: ${crate}"
