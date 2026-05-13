@@ -1339,7 +1339,16 @@ fn run_cargo_expand_with_workspace_fallback(
         }
 
         let workspace_stderr = String::from_utf8_lossy(&workspace_output.stderr);
-        if !is_workspace_package_miss(&workspace_stderr) {
+        // Fall through to isolated-manifest expansion when:
+        //   - The workspace doesn't contain the package (common), OR
+        //   - cargo itself panicked during workspace expansion. The
+        //     resolver at src/tools/cargo/.../features.rs sometimes
+        //     crashes on integration tests of packages excluded from
+        //     the parent workspace (e.g. semver). The isolated manifest
+        //     copy avoids the workspace context entirely.
+        let workspace_panicked =
+            workspace_stderr.contains("panicked at ") && workspace_stderr.contains("cargo");
+        if !is_workspace_package_miss(&workspace_stderr) && !workspace_panicked {
             return Ok(workspace_output);
         }
     }
@@ -2923,6 +2932,14 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             expanded_dependency_sources.push((dep.clone(), source));
         }
 
+        // Cached combined `cargo expand --tests` output. Lazily filled
+        // the first time a per-target `--test X` expansion fails (e.g.
+        // semver's integration tests panic in cargo's feature resolver),
+        // then reused for any other failed test targets in the same
+        // package — the combined form expands all integration tests as
+        // a single TU, so any test target's wrappers are present.
+        let mut combined_tests_expansion: Option<String> = None;
+
         for target in &targets {
             let (expand_args, expand_desc): (Vec<String>, String) = match target.kind {
                 metadata::TargetKind::Lib => (
@@ -2973,18 +2990,78 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 &mut expand_isolated_manifest,
             )?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+            let mut source = if output.status.success() {
+                String::from_utf8(output.stdout)
+                    .map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))?
+            } else {
+                // Per-target `--test X` expansion sometimes panics inside
+                // cargo's feature resolver (semver's integration tests
+                // trip src/tools/cargo/.../features.rs:325). Fall back to
+                // the combined `--tests` form (no target name) which
+                // expands all integration tests as one TU. Cache the
+                // combined output so subsequent failed test targets reuse
+                // it instead of re-running cargo expand.
+                let is_test_target =
+                    matches!(target.kind, metadata::TargetKind::Test);
+                if !is_test_target {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!(
+                        "  Warning: cargo expand failed for target '{}': {}",
+                        target.name,
+                        stderr.lines().next().unwrap_or("")
+                    );
+                    continue;
+                }
+                if combined_tests_expansion.is_none() {
+                    let combined = run_cargo_expand_with_workspace_fallback(
+                        &manifest,
+                        &project_dir,
+                        args.package.as_deref(),
+                        crate_name,
+                        &["--tests".to_string()],
+                        &cargo_flags,
+                        &work_dir,
+                        &mut expand_isolated_manifest,
+                    )?;
+                    if combined.status.success() {
+                        match String::from_utf8(combined.stdout) {
+                            Ok(src) => {
+                                println!(
+                                    "  Combined --tests expansion fallback: {} lines (cached for all failed --test X)",
+                                    src.lines().count()
+                                );
+                                combined_tests_expansion = Some(src);
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "  Warning: combined --tests expansion produced invalid UTF-8: {}",
+                                    e
+                                );
+                            }
+                        }
+                    } else {
+                        let combined_err = String::from_utf8_lossy(&combined.stderr);
+                        eprintln!(
+                            "  Warning: combined --tests fallback also failed: {}",
+                            combined_err.lines().next().unwrap_or("")
+                        );
+                    }
+                }
+                let Some(combined_src) = combined_tests_expansion.as_ref() else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!(
+                        "  Warning: cargo expand failed for target '{}': {}",
+                        target.name,
+                        stderr.lines().next().unwrap_or("")
+                    );
+                    continue;
+                };
                 eprintln!(
-                    "  Warning: cargo expand failed for target '{}': {}",
-                    target.name,
-                    stderr.lines().next().unwrap_or("")
+                    "  Using combined --tests fallback for target '{}'",
+                    target.name
                 );
-                continue;
-            }
-
-            let source = String::from_utf8(output.stdout)
-                .map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))?;
+                combined_src.clone()
+            };
 
             // Save expanded source
             let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
