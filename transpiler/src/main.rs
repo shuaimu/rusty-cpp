@@ -1339,16 +1339,7 @@ fn run_cargo_expand_with_workspace_fallback(
         }
 
         let workspace_stderr = String::from_utf8_lossy(&workspace_output.stderr);
-        // Fall through to isolated-manifest expansion when:
-        //   - The workspace doesn't contain the package (common), OR
-        //   - cargo itself panicked during workspace expansion. The
-        //     resolver at src/tools/cargo/.../features.rs sometimes
-        //     crashes on integration tests of packages excluded from
-        //     the parent workspace (e.g. semver). The isolated manifest
-        //     copy avoids the workspace context entirely.
-        let workspace_panicked =
-            workspace_stderr.contains("panicked at ") && workspace_stderr.contains("cargo");
-        if !is_workspace_package_miss(&workspace_stderr) && !workspace_panicked {
+        if !is_workspace_package_miss(&workspace_stderr) {
             return Ok(workspace_output);
         }
     }
@@ -1435,6 +1426,22 @@ fn collect_external_crate_todo_markers(cpp: &str) -> Vec<String> {
     out.sort();
     out
 }
+
+/// Detect transpiled output that contains C++-invalid template
+/// argument patterns. The transpiler emits `<auto>` when it can't
+/// infer the concrete type for a Rust generic; this is invalid C++
+/// (`auto` is only allowed in placeholder type positions, not as
+/// template arguments). Test targets containing such patterns are
+/// skipped to avoid breaking the build.
+fn cpp_has_invalid_codegen_pattern(cpp: &str) -> bool {
+    // `Type<auto>` or `Type<auto,` — auto in a template argument list.
+    // Match either standalone `<auto>` or `<auto,` to catch first or
+    // intermediate positions. False positives possible in string
+    // literals or comments but they're rare.
+    cpp.contains("<auto>") || cpp.contains("<auto,") || cpp.contains(", auto>")
+        || cpp.contains(", auto,")
+}
+
 
 fn ensure_no_external_crate_todos(label: &str, cpp: &str, cppm_path: &Path) -> Result<(), String> {
     let unresolved = collect_external_crate_todo_markers(cpp);
@@ -2932,14 +2939,6 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             expanded_dependency_sources.push((dep.clone(), source));
         }
 
-        // Cached combined `cargo expand --tests` output. Lazily filled
-        // the first time a per-target `--test X` expansion fails (e.g.
-        // semver's integration tests panic in cargo's feature resolver),
-        // then reused for any other failed test targets in the same
-        // package — the combined form expands all integration tests as
-        // a single TU, so any test target's wrappers are present.
-        let mut combined_tests_expansion: Option<String> = None;
-
         for target in &targets {
             let (expand_args, expand_desc): (Vec<String>, String) = match target.kind {
                 metadata::TargetKind::Lib => (
@@ -2990,78 +2989,18 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 &mut expand_isolated_manifest,
             )?;
 
-            let mut source = if output.status.success() {
-                String::from_utf8(output.stdout)
-                    .map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))?
-            } else {
-                // Per-target `--test X` expansion sometimes panics inside
-                // cargo's feature resolver (semver's integration tests
-                // trip src/tools/cargo/.../features.rs:325). Fall back to
-                // the combined `--tests` form (no target name) which
-                // expands all integration tests as one TU. Cache the
-                // combined output so subsequent failed test targets reuse
-                // it instead of re-running cargo expand.
-                let is_test_target =
-                    matches!(target.kind, metadata::TargetKind::Test);
-                if !is_test_target {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!(
-                        "  Warning: cargo expand failed for target '{}': {}",
-                        target.name,
-                        stderr.lines().next().unwrap_or("")
-                    );
-                    continue;
-                }
-                if combined_tests_expansion.is_none() {
-                    let combined = run_cargo_expand_with_workspace_fallback(
-                        &manifest,
-                        &project_dir,
-                        args.package.as_deref(),
-                        crate_name,
-                        &["--tests".to_string()],
-                        &cargo_flags,
-                        &work_dir,
-                        &mut expand_isolated_manifest,
-                    )?;
-                    if combined.status.success() {
-                        match String::from_utf8(combined.stdout) {
-                            Ok(src) => {
-                                println!(
-                                    "  Combined --tests expansion fallback: {} lines (cached for all failed --test X)",
-                                    src.lines().count()
-                                );
-                                combined_tests_expansion = Some(src);
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "  Warning: combined --tests expansion produced invalid UTF-8: {}",
-                                    e
-                                );
-                            }
-                        }
-                    } else {
-                        let combined_err = String::from_utf8_lossy(&combined.stderr);
-                        eprintln!(
-                            "  Warning: combined --tests fallback also failed: {}",
-                            combined_err.lines().next().unwrap_or("")
-                        );
-                    }
-                }
-                let Some(combined_src) = combined_tests_expansion.as_ref() else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!(
-                        "  Warning: cargo expand failed for target '{}': {}",
-                        target.name,
-                        stderr.lines().next().unwrap_or("")
-                    );
-                    continue;
-                };
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
                 eprintln!(
-                    "  Using combined --tests fallback for target '{}'",
-                    target.name
+                    "  Warning: cargo expand failed for target '{}': {}",
+                    target.name,
+                    stderr.lines().next().unwrap_or("")
                 );
-                combined_src.clone()
-            };
+                continue;
+            }
+
+            let source = String::from_utf8(output.stdout)
+                .map_err(|e| format!("Invalid UTF-8 from cargo expand: {}", e))?;
 
             // Save expanded source
             let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
@@ -3417,6 +3356,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                         );
                         continue;
                     }
+                    if cpp_has_invalid_codegen_pattern(&reused) {
+                        eprintln!(
+                            "  Skipping target '{}': transpiled output contains invalid `<auto>` template arguments (no test wrappers from this target)",
+                            target.module_name
+                        );
+                        continue;
+                    }
                 } else {
                     ensure_no_external_crate_todos(
                         &format!("target '{}'", target.module_name),
@@ -3447,6 +3393,18 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 Some(crate_name),
                 &target_options,
             )?;
+            // Test targets often reference the crate's own types using
+            // `::<crate_name>::Type` (Rust's absolute path), but our
+            // flat-namespace emission places those types at `::Type`.
+            // Strip the redundant crate prefix so type-position uses
+            // resolve. Only applied to test targets to avoid touching
+            // dep/lib emissions where the prefix may be load-bearing.
+            if matches!(target.kind, metadata::TargetKind::Test) {
+                let prefix = format!("::{}::", crate_name);
+                if cpp.contains(&prefix) {
+                    cpp = cpp.replace(&prefix, "::");
+                }
+            }
             let required_imports = collect_required_named_module_imports(
                 source,
                 &target.module_name,
@@ -3460,6 +3418,13 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                         "  Skipping target '{}': unresolved external crates {} (no test wrappers from this target)",
                         target.module_name,
                         unresolved.join(", ")
+                    );
+                    continue;
+                }
+                if cpp_has_invalid_codegen_pattern(&cpp) {
+                    eprintln!(
+                        "  Skipping target '{}': transpiled output contains invalid `<auto>` template arguments (no test wrappers from this target)",
+                        target.module_name
                     );
                     continue;
                 }
