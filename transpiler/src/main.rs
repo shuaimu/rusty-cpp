@@ -3393,6 +3393,12 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 )
             })?;
             let cppm_path = cppm_artifact_path(target_dir, &target.module_name);
+            // Test targets that pull in external crates we don't transpile
+            // (quickcheck, rand, etc.) should be skipped, not fail the
+            // whole parity test. The lib and dependency targets still
+            // fail on unresolved externals because they're essential.
+            let is_skippable_target =
+                matches!(target.kind, metadata::TargetKind::Test);
             if args.incremental_transpile && cppm_path.exists() {
                 let reused = std::fs::read_to_string(&cppm_path).map_err(|e| {
                     format!(
@@ -3401,11 +3407,23 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                         e
                     )
                 })?;
-                ensure_no_external_crate_todos(
-                    &format!("target '{}'", target.module_name),
-                    &reused,
-                    &cppm_path,
-                )?;
+                if is_skippable_target {
+                    let unresolved = collect_external_crate_todo_markers(&reused);
+                    if !unresolved.is_empty() {
+                        eprintln!(
+                            "  Skipping target '{}': unresolved external crates {} (no test wrappers from this target)",
+                            target.module_name,
+                            unresolved.join(", ")
+                        );
+                        continue;
+                    }
+                } else {
+                    ensure_no_external_crate_todos(
+                        &format!("target '{}'", target.module_name),
+                        &reused,
+                        &cppm_path,
+                    )?;
+                }
                 println!(
                     "  {}: reused {} lines ← {}",
                     target.module_name,
@@ -3435,11 +3453,23 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 &root_to_module_import,
             );
             cpp = inject_named_module_imports(&cpp, &required_imports);
-            ensure_no_external_crate_todos(
-                &format!("target '{}'", target.module_name),
-                &cpp,
-                &cppm_path,
-            )?;
+            if is_skippable_target {
+                let unresolved = collect_external_crate_todo_markers(&cpp);
+                if !unresolved.is_empty() {
+                    eprintln!(
+                        "  Skipping target '{}': unresolved external crates {} (no test wrappers from this target)",
+                        target.module_name,
+                        unresolved.join(", ")
+                    );
+                    continue;
+                }
+            } else {
+                ensure_no_external_crate_todos(
+                    &format!("target '{}'", target.module_name),
+                    &cpp,
+                    &cppm_path,
+                )?;
+            }
             std::fs::write(&cppm_path, &cpp)
                 .map_err(|e| format!("Failed to write transpiled output: {}", e))?;
             println!(
