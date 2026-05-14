@@ -408,6 +408,9 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         // Expanded-Rust runtime compatibility shims.
         "core::intrinsics::discriminant_value" => Some("rusty::intrinsics::discriminant_value"),
         "core::intrinsics::unreachable" => Some("rusty::intrinsics::unreachable"),
+        "core::intrinsics::abort" | "intrinsics::abort" | "std::intrinsics::abort" => {
+            Some("rusty::intrinsics::abort")
+        }
         "core::panicking::panic" | "panicking::panic" | "std::panicking::panic" => {
             Some("rusty::panicking::panic")
         }
