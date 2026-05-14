@@ -67,11 +67,9 @@ TARGET_CRATE=""
 WORK_ROOT="${REPO_ROOT}/.rusty-parity-matrix"
 DRY_RUN=0
 KEEP_WORK_DIRS=0
-MODULE_BUILD=1
 IMPORT_STD=0
 PREFER_RUSTY_UNIT=0
 PREFER_RUSTY_VIEWS=0
-INTERFACE_TRAITS=0
 CONTINUE_ON_FAIL=0
 FIRST_FAIL_CRATE=""
 FIRST_FAIL_WORK_DIR=""
@@ -88,12 +86,9 @@ Options:
   --crate <name>      Run only one matrix crate
   --work-root <dir>   Root directory for per-crate parity work dirs
   --keep-work-dirs    Keep/reuse existing per-crate work dirs
-  --module-build      Force Stage D module build mode (default)
   --import-std       Use parity import-std mode (emit import std; and libc++ std module precompile)
   --prefer-rusty-unit  Prefer rusty::Unit spelling in generated output
   --prefer-rusty-views  Prefer rusty::StrView / rusty::Span spellings in generated output
-  --interface-traits  Lower traits to plain Interface + Adapter classes (see docs/rusty-cpp-transpiler.md § 3.2.9)
-  --flat-build        Use legacy flat translation-unit Stage D mode
   --continue-on-fail  Continue running all crates even after failures
   --dry-run           Print planned commands without executing
   --help              Show this help
@@ -174,10 +169,6 @@ while [[ $# -gt 0 ]]; do
             KEEP_WORK_DIRS=1
             shift
             ;;
-        --module-build)
-            MODULE_BUILD=1
-            shift
-            ;;
         --import-std)
             IMPORT_STD=1
             shift
@@ -188,14 +179,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --prefer-rusty-views)
             PREFER_RUSTY_VIEWS=1
-            shift
-            ;;
-        --interface-traits)
-            INTERFACE_TRAITS=1
-            shift
-            ;;
-        --flat-build)
-            MODULE_BUILD=0
             shift
             ;;
         --continue-on-fail)
@@ -266,9 +249,6 @@ run_parity_for_crate() {
         echo "crate: ${crate}"
         echo "  manifest: ${manifest}"
         local dry_cmd="cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path ${manifest} --stop-after run --work-dir ${work_dir}"
-        if [[ "${MODULE_BUILD}" -eq 1 ]]; then
-            dry_cmd="${dry_cmd} --module-build"
-        fi
         if [[ "${IMPORT_STD}" -eq 1 ]]; then
             dry_cmd="${dry_cmd} --import-std"
         fi
@@ -310,9 +290,6 @@ run_parity_for_crate() {
     if [[ "${KEEP_WORK_DIRS}" -eq 1 ]]; then
         cmd+=(--keep-work-dir)
     fi
-    if [[ "${MODULE_BUILD}" -eq 1 ]]; then
-        cmd+=(--module-build)
-    fi
     if [[ "${IMPORT_STD}" -eq 1 ]]; then
         cmd+=(--import-std)
     fi
@@ -321,9 +298,6 @@ run_parity_for_crate() {
     fi
     if [[ "${PREFER_RUSTY_VIEWS}" -eq 1 ]]; then
         cmd+=(--prefer-rusty-view-aliases)
-    fi
-    if [[ "${INTERFACE_TRAITS}" -eq 1 ]]; then
-        cmd+=(--interface-traits)
     fi
 
     echo "crate: ${crate}"
@@ -351,11 +325,6 @@ echo "  crates: $(join_crates "${CRATES_TO_RUN[@]}")"
 echo "  work root: ${WORK_ROOT}"
 if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "  mode: dry-run"
-fi
-if [[ "${MODULE_BUILD}" -eq 1 ]]; then
-    echo "  stage-d: module-build"
-else
-    echo "  stage-d: flat-build"
 fi
 if [[ "${CONTINUE_ON_FAIL}" -eq 1 ]]; then
     echo "  continue-on-fail: yes"

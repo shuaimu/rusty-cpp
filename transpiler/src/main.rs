@@ -67,9 +67,9 @@ struct Cli {
     #[arg(long)]
     prefer_rusty_view_aliases: bool,
 
-    /// Lower Rust traits to plain C++ Interface + Adapter classes
-    /// (replaces `pro::proxy<...>` facade emission). See docs/rusty-cpp-transpiler.md § 3.2.9.
-    #[arg(long)]
+    /// Deprecated no-op: interface+adapter is now the only trait
+    /// lowering path. Kept for CLI compatibility with older scripts.
+    #[arg(long, hide = true)]
     interface_traits: bool,
 
     #[command(subcommand)]
@@ -157,11 +157,6 @@ struct ParityTestArgs {
     #[arg(long)]
     import_std: bool,
 
-    /// Deprecated no-op: parity build is always module-based.
-    /// Kept only for CLI compatibility with older scripts.
-    #[arg(long, hide = true)]
-    _module_build: bool,
-
     /// Prefer `rusty::Unit` alias for Rust `()` in generated type positions.
     #[arg(long)]
     prefer_rusty_unit_alias: bool,
@@ -170,9 +165,9 @@ struct ParityTestArgs {
     #[arg(long)]
     prefer_rusty_view_aliases: bool,
 
-    /// Lower Rust traits to plain C++ Interface + Adapter classes
-    /// (replaces `pro::proxy<...>` facade emission). See docs/rusty-cpp-transpiler.md § 3.2.9.
-    #[arg(long)]
+    /// Deprecated no-op: interface+adapter is now the only trait
+    /// lowering path. Kept for CLI compatibility with older scripts.
+    #[arg(long, hide = true)]
     interface_traits: bool,
 }
 
