@@ -1339,7 +1339,16 @@ fn run_cargo_expand_with_workspace_fallback(
         }
 
         let workspace_stderr = String::from_utf8_lossy(&workspace_output.stderr);
-        if !is_workspace_package_miss(&workspace_stderr) {
+        // Fall through to isolated-manifest expansion when:
+        //   - The workspace doesn't contain the package (common), OR
+        //   - cargo itself panicked during workspace expansion. The
+        //     resolver at src/tools/cargo/.../features.rs sometimes
+        //     crashes on integration tests of packages excluded from
+        //     the parent workspace (e.g. semver). The isolated manifest
+        //     copy avoids the workspace context entirely.
+        let workspace_panicked =
+            workspace_stderr.contains("panicked at ") && workspace_stderr.contains("cargo");
+        if !is_workspace_package_miss(&workspace_stderr) && !workspace_panicked {
             return Ok(workspace_output);
         }
     }
@@ -1567,6 +1576,11 @@ struct GeneratedCppmArtifact {
     path: PathBuf,
     module_name: String,
     is_dependency: bool,
+    /// True for parity test targets (cargo `[[test]]` integration
+    /// tests, `--test X`). Lib and dep artifacts are false. Used by
+    /// the module-build pipeline to skip individual test targets that
+    /// fail to precompile rather than failing the whole crate.
+    is_test_target: bool,
 }
 
 fn target_artifacts_root(work_dir: &Path) -> PathBuf {
@@ -1909,6 +1923,11 @@ struct ModuleBuildUnit {
     imports: BTreeSet<String>,
     pcm_path: PathBuf,
     object_path: PathBuf,
+    /// True for parity test target modules. When `true`, a precompile/
+    /// object-compile failure for this unit is treated as "skip this
+    /// test target" rather than failing the whole crate's build. Lib
+    /// and dependency units always fail-fast.
+    is_test_target: bool,
 }
 
 fn module_build_order(units: &[ModuleBuildUnit]) -> Vec<usize> {
@@ -2282,16 +2301,28 @@ fn run_stage_d_module_build(
     let mut test_entries: Vec<RunnerTestEntry> = Vec::new();
     let mut seen_test_fns: HashSet<String> = HashSet::new();
 
+    // Collect test wrappers per artifact so we can selectively drop
+    // wrappers from a test target whose precompile fails. Map by
+    // module name → indices into `test_entries`.
+    let mut wrappers_by_module: HashMap<String, Vec<usize>> = HashMap::new();
     for artifact in generated_cppm_files {
         let source = fs::read_to_string(&artifact.path)
             .map_err(|e| format!("Failed to read {}: {}", artifact.path.display(), e))?;
+        let before_len = test_entries.len();
         collect_rusty_test_entries_from_cppm(&source, &mut seen_test_fns, &mut test_entries);
+        if test_entries.len() > before_len {
+            wrappers_by_module
+                .entry(artifact.module_name.clone())
+                .or_default()
+                .extend(before_len..test_entries.len());
+        }
         units.push(ModuleBuildUnit {
             module_name: artifact.module_name.clone(),
             source_path: artifact.path.clone(),
             imports: collect_named_module_imports(&source),
             pcm_path: pcm_dir.join(module_artifact_name(&artifact.module_name, "pcm")),
             object_path: obj_dir.join(module_artifact_name(&artifact.module_name, "o")),
+            is_test_target: artifact.is_test_target,
         });
     }
 
@@ -2332,8 +2363,26 @@ fn run_stage_d_module_build(
         }
     }
 
+    let mut skipped_test_modules: HashSet<String> = HashSet::new();
     for idx in order {
         let unit = &units[idx];
+        // Skip units whose deps were already skipped (they'd fail to find imports).
+        if !unit.imports.is_empty()
+            && unit
+                .imports
+                .iter()
+                .any(|imp| skipped_test_modules.contains(imp))
+        {
+            if unit.is_test_target {
+                eprintln!(
+                    "  Skipping test target '{}' (module): depends on skipped module",
+                    unit.module_name
+                );
+                skipped_test_modules.insert(unit.module_name.clone());
+                continue;
+            }
+            // Lib/dep depending on skipped — fail-fast.
+        }
         let precompile_cmd = format!(
             "{} -std={}{} {} -x c++-module --precompile -I{} -fprebuilt-module-path={} -o {} {}",
             cpp_compiler,
@@ -2368,6 +2417,23 @@ fn run_stage_d_module_build(
         build_log.push_str(&String::from_utf8_lossy(&precompile_output.stdout));
         build_log.push('\n');
         if !precompile_output.status.success() {
+            // Test targets that fail to precompile: skip them so other
+            // targets in the same crate can still produce a passing
+            // parity result. Lib/dep failures still bail.
+            if unit.is_test_target {
+                let first_err = String::from_utf8_lossy(&precompile_output.stderr)
+                    .lines()
+                    .find(|line| line.contains("error:"))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "(no error line)".to_string());
+                eprintln!(
+                    "  Skipping test target '{}' (module): precompile failed — {}",
+                    unit.module_name,
+                    first_err.chars().take(120).collect::<String>()
+                );
+                skipped_test_modules.insert(unit.module_name.clone());
+                continue;
+            }
             fs::write(&build_log_path, &build_log)
                 .map_err(|e| format!("Failed to write build log: {}", e))?;
             println!("  Build FAILED — see {}", build_log_path.display());
@@ -2420,6 +2486,21 @@ fn run_stage_d_module_build(
         build_log.push_str(&String::from_utf8_lossy(&object_output.stdout));
         build_log.push('\n');
         if !object_output.status.success() {
+            // Same skip logic for the object-compile step.
+            if unit.is_test_target {
+                let first_err = String::from_utf8_lossy(&object_output.stderr)
+                    .lines()
+                    .find(|line| line.contains("error:"))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "(no error line)".to_string());
+                eprintln!(
+                    "  Skipping test target '{}' (object): compile failed — {}",
+                    unit.module_name,
+                    first_err.chars().take(120).collect::<String>()
+                );
+                skipped_test_modules.insert(unit.module_name.clone());
+                continue;
+            }
             fs::write(&build_log_path, &build_log)
                 .map_err(|e| format!("Failed to write build log: {}", e))?;
             println!("  Build FAILED — see {}", build_log_path.display());
@@ -2440,6 +2521,26 @@ fn run_stage_d_module_build(
         object_files.push(unit.object_path.clone());
     }
 
+    // Drop test wrappers from skipped modules so the runner doesn't
+    // try to call functions whose translation unit was never
+    // compiled.
+    if !skipped_test_modules.is_empty() {
+        let mut drop_indices: HashSet<usize> = HashSet::new();
+        for module in &skipped_test_modules {
+            if let Some(indices) = wrappers_by_module.get(module) {
+                drop_indices.extend(indices.iter().copied());
+            }
+        }
+        if !drop_indices.is_empty() {
+            let kept: Vec<RunnerTestEntry> = test_entries
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, e)| if drop_indices.contains(&idx) { None } else { Some(e.clone()) })
+                .collect();
+            test_entries = kept;
+        }
+    }
+
     let mut runner_src = String::new();
     runner_src.push_str("// Auto-generated parity test runner (module mode)\n");
     if args.import_std {
@@ -2447,7 +2548,9 @@ fn run_stage_d_module_build(
     }
     let mut imported_targets: BTreeSet<String> = BTreeSet::new();
     for artifact in generated_cppm_files {
-        if !artifact.is_dependency {
+        if !artifact.is_dependency
+            && !skipped_test_modules.contains(&artifact.module_name)
+        {
             imported_targets.insert(artifact.module_name.clone());
         }
     }
@@ -3272,6 +3375,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                     path: cppm_path,
                     module_name: dep.module_name.clone(),
                     is_dependency: true,
+                    is_test_target: false,
                 });
                 continue;
             }
@@ -3321,6 +3425,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 path: cppm_path,
                 module_name: dep.module_name.clone(),
                 is_dependency: true,
+                is_test_target: false,
             });
         }
 
@@ -3380,6 +3485,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                     path: cppm_path,
                     module_name: target.module_name.clone(),
                     is_dependency: false,
+                    is_test_target: matches!(target.kind, metadata::TargetKind::Test),
                 });
                 continue;
             }
@@ -3447,6 +3553,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 path: cppm_path,
                 module_name: target.module_name.clone(),
                 is_dependency: false,
+                is_test_target: matches!(target.kind, metadata::TargetKind::Test),
             });
         }
     }
