@@ -1923,11 +1923,15 @@ struct ModuleBuildUnit {
     imports: BTreeSet<String>,
     pcm_path: PathBuf,
     object_path: PathBuf,
-    /// True for parity test target modules. When `true`, a precompile/
-    /// object-compile failure for this unit is treated as "skip this
-    /// test target" rather than failing the whole crate's build. Lib
-    /// and dependency units always fail-fast.
+    /// True for parity test target modules.
     is_test_target: bool,
+    /// True for crate dependencies (e.g. dev-dependencies pulled in
+    /// only by test targets). When a dep's precompile fails, we mark
+    /// it as skipped and rely on cascade-skip to drop any test target
+    /// that imports it. If a non-test, non-dep unit (the lib target)
+    /// depends on the skipped dep, its precompile will fail and we
+    /// fail-fast — the dep was essential.
+    is_dependency: bool,
 }
 
 fn module_build_order(units: &[ModuleBuildUnit]) -> Vec<usize> {
@@ -2323,6 +2327,7 @@ fn run_stage_d_module_build(
             pcm_path: pcm_dir.join(module_artifact_name(&artifact.module_name, "pcm")),
             object_path: obj_dir.join(module_artifact_name(&artifact.module_name, "o")),
             is_test_target: artifact.is_test_target,
+            is_dependency: artifact.is_dependency,
         });
     }
 
@@ -2363,6 +2368,9 @@ fn run_stage_d_module_build(
         }
     }
 
+    // Tracks modules we've decided to skip — both failed test
+    // targets and failed dev-dependencies that aren't reachable from
+    // the lib target. The lib target itself is never skipped.
     let mut skipped_test_modules: HashSet<String> = HashSet::new();
     for idx in order {
         let unit = &units[idx];
@@ -2373,15 +2381,16 @@ fn run_stage_d_module_build(
                 .iter()
                 .any(|imp| skipped_test_modules.contains(imp))
         {
-            if unit.is_test_target {
+            if unit.is_test_target || unit.is_dependency {
                 eprintln!(
-                    "  Skipping test target '{}' (module): depends on skipped module",
+                    "  Skipping {} '{}' (module): depends on skipped module",
+                    if unit.is_test_target { "test target" } else { "dependency" },
                     unit.module_name
                 );
                 skipped_test_modules.insert(unit.module_name.clone());
                 continue;
             }
-            // Lib/dep depending on skipped — fail-fast.
+            // Lib depending on skipped — fail-fast.
         }
         let precompile_cmd = format!(
             "{} -std={}{} {} -x c++-module --precompile -I{} -fprebuilt-module-path={} -o {} {}",
@@ -2417,17 +2426,20 @@ fn run_stage_d_module_build(
         build_log.push_str(&String::from_utf8_lossy(&precompile_output.stdout));
         build_log.push('\n');
         if !precompile_output.status.success() {
-            // Test targets that fail to precompile: skip them so other
-            // targets in the same crate can still produce a passing
-            // parity result. Lib/dep failures still bail.
-            if unit.is_test_target {
+            // Test targets and dev-dependencies that fail to precompile:
+            // skip them so other targets in the same crate can still
+            // produce a passing parity result. If a dep is skipped and
+            // the lib (essential) imports it, the lib's own precompile
+            // will fail — we fall through to the bail path below.
+            if unit.is_test_target || unit.is_dependency {
                 let first_err = String::from_utf8_lossy(&precompile_output.stderr)
                     .lines()
                     .find(|line| line.contains("error:"))
                     .map(|s| s.trim().to_string())
                     .unwrap_or_else(|| "(no error line)".to_string());
                 eprintln!(
-                    "  Skipping test target '{}' (module): precompile failed — {}",
+                    "  Skipping {} '{}' (module): precompile failed — {}",
+                    if unit.is_test_target { "test target" } else { "dependency" },
                     unit.module_name,
                     first_err.chars().take(120).collect::<String>()
                 );
@@ -2487,14 +2499,15 @@ fn run_stage_d_module_build(
         build_log.push('\n');
         if !object_output.status.success() {
             // Same skip logic for the object-compile step.
-            if unit.is_test_target {
+            if unit.is_test_target || unit.is_dependency {
                 let first_err = String::from_utf8_lossy(&object_output.stderr)
                     .lines()
                     .find(|line| line.contains("error:"))
                     .map(|s| s.trim().to_string())
                     .unwrap_or_else(|| "(no error line)".to_string());
                 eprintln!(
-                    "  Skipping test target '{}' (object): compile failed — {}",
+                    "  Skipping {} '{}' (object): compile failed — {}",
+                    if unit.is_test_target { "test target" } else { "dependency" },
                     unit.module_name,
                     first_err.chars().take(120).collect::<String>()
                 );
@@ -2564,11 +2577,16 @@ fn run_stage_d_module_build(
             "#include <rusty/rusty.hpp>\n#include <iostream>\n#include <string>\n#include <cstdlib>\n\n",
         );
     }
+    // If we skipped any test/dep modules, fall through to
+    // compile-validation mode rather than failing with "No
+    // transpiled test wrappers" — the empty wrapper list is a
+    // consequence of the skip, not an actual missing transpile.
+    let allow_empty_due_to_skip = !skipped_test_modules.is_empty();
     append_parity_runner_main(
         &mut runner_src,
         &mut test_entries,
         args.no_baseline,
-        args.allow_empty_tests,
+        args.allow_empty_tests || allow_empty_due_to_skip,
         work_dir,
         !args.import_std,
     )?;
