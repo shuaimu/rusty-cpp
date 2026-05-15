@@ -23,9 +23,6 @@
 #include <rusty/maybe_uninit.hpp>
 
 namespace rusty {
-template<typename T>
-class Box;
-
 template<typename Container>
 auto as_slice(Container&& container);
 }

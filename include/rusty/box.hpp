@@ -5,6 +5,7 @@
 #include <string_view>
 #include <type_traits>  // for std::enable_if, std::is_convertible, std::is_same
 #include <utility>  // for std::move, std::forward
+#include <rusty/alloc.hpp>
 
 // Box<T> - A smart pointer for heap-allocated values with single ownership
 // Equivalent to Rust's Box<T>
@@ -21,11 +22,13 @@ namespace rusty {
 template<typename Container>
 auto as_slice(Container&& container);
 
-template<typename T>
+template<typename T, typename A = rusty::alloc::Global>
 class Box {
 private:
     T* ptr;
-    
+
+    template<typename, typename> friend class Box;
+
 public:
     // Constructors
     // No default constructor - Box must always own a value (non-nullable)
@@ -36,39 +39,53 @@ public:
 
     // Factory method - Box::new_() (Rust's Box::new, renamed because `new` is a C++ keyword)
     // @lifetime: owned
-    static Box<T> new_(T value) {
+    static Box new_(T value) {
         // @unsafe
         {
-            return Box<T>(new T(std::move(value)));
+            return Box(new T(std::move(value)));
+        }
+    }
+
+    // Rust's `Box::new_in(value, alloc)` — currently the allocator argument is
+    // accepted for source-compatibility with the faithful Rust API but is not
+    // consulted at runtime; storage comes from `new T(...)` via the default
+    // allocator. Non-Global allocators are stateless in our current corpus
+    // (`Global` is zero-sized), so this is a safe pragmatic simplification.
+    // @lifetime: owned
+    static Box new_in(T value, A /*alloc*/) {
+        // @unsafe
+        {
+            return Box(new T(std::move(value)));
         }
     }
 
     // Alias for backward compatibility
     // @lifetime: owned
-    static Box<T> make(T value) {
+    static Box make(T value) {
         // @unsafe
         {
             // new and std::move are unsafe operations
-            return Box<T>(new T(std::move(value)));
+            return Box(new T(std::move(value)));
         }
     }
-    
+
     // No copy constructor - Box cannot be copied
     Box(const Box&) = delete;
     Box& operator=(const Box&) = delete;
-    
+
     // Move constructor - transfers ownership
     // @lifetime: owned
     Box(Box&& other) noexcept : ptr(other.ptr) {
         other.ptr = nullptr;  // Other box becomes empty
     }
 
-    // Converting move constructor - allows Box<Derived> to convert to Box<Base>
-    // Only enabled when U* is convertible to T* (i.e., U derives from T)
+    // Converting move constructor - allows Box<Derived, _> to convert to Box<Base, A>.
+    // The source allocator type is dropped; storage continues to be released via
+    // `delete` (the default path used by `new T(...)`).
     // @lifetime: owned
-    template<typename U, typename = typename std::enable_if<
-        std::is_convertible<U*, T*>::value && !std::is_same<U, T>::value>::type>
-    Box(Box<U>&& other) noexcept : ptr(other.release()) {}
+    template<typename U, typename UA, typename = typename std::enable_if<
+        std::is_convertible<U*, T*>::value && !(std::is_same<U, T>::value && std::is_same<UA, A>::value)>::type>
+    Box(Box<U, UA>&& other) noexcept : ptr(other.release()) {}
 
     // Move assignment - transfers ownership
     // @lifetime: owned
@@ -84,11 +101,11 @@ public:
         }
     }
 
-    // Converting move assignment - allows Box<Derived> to assign to Box<Base>
+    // Converting move assignment - allows Box<Derived, _> to assign to Box<Base, A>.
     // @lifetime: owned
-    template<typename U, typename = typename std::enable_if<
-        std::is_convertible<U*, T*>::value && !std::is_same<U, T>::value>::type>
-    Box& operator=(Box<U>&& other) noexcept {
+    template<typename U, typename UA, typename = typename std::enable_if<
+        std::is_convertible<U*, T*>::value && !(std::is_same<U, T>::value && std::is_same<UA, A>::value)>::type>
+    Box& operator=(Box<U, UA>&& other) noexcept {
         // @unsafe
         {
             delete ptr;
@@ -104,12 +121,12 @@ public:
         if constexpr (requires(const T& value) { value.clone(); }) {
             // @unsafe
             {
-                return Box<T>(new T(ptr->clone()));
+                return Box(new T(ptr->clone()));
             }
         } else if constexpr (std::is_copy_constructible<T>::value) {
             // @unsafe
             {
-                return Box<T>(new T(*ptr));
+                return Box(new T(*ptr));
             }
         } else {
             static_assert(
@@ -255,18 +272,18 @@ Box<T> make_box(Args&&... args) {
     }
 }
 
-template<typename T>
-Box<T> make_box(Box<T>& value) {
+template<typename T, typename A>
+Box<T, A> make_box(Box<T, A>& value) {
     return value.clone();
 }
 
-template<typename T>
-Box<T> make_box(const Box<T>& value) {
+template<typename T, typename A>
+Box<T, A> make_box(const Box<T, A>& value) {
     return value.clone();
 }
 
-template<typename T>
-Box<T> make_box(Box<T>&& value) {
+template<typename T, typename A>
+Box<T, A> make_box(Box<T, A>&& value) {
     return std::move(value);
 }
 
@@ -281,8 +298,8 @@ Box<std::remove_cvref_t<T>> make_box(T&& value) {
     }
 }
 
-template<typename L, typename R>
-bool operator==(const Box<L>& lhs, const Box<R>& rhs) {
+template<typename L, typename LA, typename R, typename RA>
+bool operator==(const Box<L, LA>& lhs, const Box<R, RA>& rhs) {
     auto slice_like_equal = [](const auto& left_slice, const auto& right_slice) {
         if (left_slice.size() != right_slice.size()) {
             return false;
@@ -321,8 +338,8 @@ bool operator==(const Box<L>& lhs, const Box<R>& rhs) {
     }
 }
 
-template<typename L, typename R>
-bool operator!=(const Box<L>& lhs, const Box<R>& rhs) {
+template<typename L, typename LA, typename R, typename RA>
+bool operator!=(const Box<L, LA>& lhs, const Box<R, RA>& rhs) {
     return !(lhs == rhs);
 }
 

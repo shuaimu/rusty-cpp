@@ -9,7 +9,7 @@
 namespace rusty {
 
 // Forward declarations
-template<typename T> class Box;
+template<typename T, typename A> class Box;
 template<typename T> class Arc;
 template<typename T> class Rc;  // NOT Send!
 template<typename T> class Vec;

@@ -9,7 +9,7 @@ namespace rusty {
 // Forward declarations for rusty types
 template<typename T> class Arc;
 template<typename T> class Rc;
-template<typename T> class Box;
+template<typename T, typename A> class Box;
 template<typename T> class Cell;
 template<typename T> class RefCell;
 template<typename T> class Mutex;
@@ -65,9 +65,9 @@ struct is_send<Arc<T>> : std::bool_constant<
 template<typename T>
 struct is_send<Rc<T>> : std::false_type {};
 
-// Box<T> is Send if T is Send
-template<typename T>
-struct is_send<Box<T>> : is_send<T> {};
+// Box<T, A> is Send if T is Send
+template<typename T, typename A>
+struct is_send<Box<T, A>> : is_send<T> {};
 
 // std::unique_ptr<T> is Send if T is Send
 template<typename T>
@@ -129,9 +129,9 @@ struct is_sync<Arc<T>> : std::bool_constant<
 template<typename T>
 struct is_sync<Rc<T>> : std::false_type {};
 
-// Box<T> is Sync if T is Sync
-template<typename T>
-struct is_sync<Box<T>> : is_sync<T> {};
+// Box<T, A> is Sync if T is Sync
+template<typename T, typename A>
+struct is_sync<Box<T, A>> : is_sync<T> {};
 
 // std::unique_ptr<T> is Sync if T is Sync
 template<typename T>
