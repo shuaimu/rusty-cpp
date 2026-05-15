@@ -76,6 +76,12 @@ pub struct TranspileOptions {
     /// (replaces `pro::proxy<...>` facade emission).
     /// See docs/rusty-cpp-transpiler.md § 3.2.9 for the design.
     pub interface_traits: bool,
+    /// Cross-file enum declarations collected during a crate-mode pre-pass.
+    /// Used to seed the per-file codegen's `data_enum_variants_by_enum` /
+    /// `c_like_enum_variants` registries so that bare-glob variant patterns
+    /// (`use Foo::*; match { Variant(...) => ... }`) resolve when `Foo` is
+    /// declared in a sibling file. Empty for single-file mode.
+    pub cross_file_enums: Vec<syn::ItemEnum>,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -424,6 +430,7 @@ pub fn transpile_full_with_options(
     codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);
     codegen.set_prefer_rusty_view_aliases(options.prefer_rusty_view_aliases);
     codegen.set_interface_traits(options.interface_traits);
+    codegen.set_cross_file_enums(options.cross_file_enums.clone());
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
@@ -1169,6 +1176,36 @@ fn record_cpp_binding(out: &mut HashMap<String, String>, binding: String, module
 /// Collect extension-method names from a Rust source unit.
 /// A method is treated as extension-shaped when it appears in a trait impl
 /// targeting a non-local type in that same source unit.
+/// Walk a Rust source file and collect every top-level / nested `Item::Enum`
+/// declaration. The result is intended to be threaded across files in
+/// crate-mode transpilation so each per-file codegen can seed its
+/// data-enum / c-like-enum variant tracking from sibling-file enums.
+/// Without this seeding, bare-glob variant patterns
+/// (`use Foo::*; match { Variant(x) => ... }`) silently miscompile when
+/// `Foo` is declared in another file.
+pub fn collect_crate_enum_decls(rust_source: &str) -> Vec<syn::ItemEnum> {
+    let Ok(file) = syn::parse_str::<syn::File>(rust_source) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_enum_decls_recursive(&file.items, &mut out);
+    out
+}
+
+fn collect_enum_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemEnum>) {
+    for item in items {
+        match item {
+            syn::Item::Enum(e) => out.push(e.clone()),
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_enum_decls_recursive(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn collect_extension_method_hints(rust_source: &str) -> HashSet<String> {
     let Ok(file) = syn::parse_str::<syn::File>(rust_source) else {
         return HashSet::new();
