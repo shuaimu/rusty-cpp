@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <new>
+#include <span>
 #include <type_traits>
 #include <utility>
 
@@ -129,6 +130,25 @@ public:
         MaybeUninit<T> mu;
         __builtin_memset(mu.storage_, 0, sizeof(T));
         return mu;
+    }
+
+    // Rust's `MaybeUninit::slice_assume_init_ref(&[MaybeUninit<T>]) -> &[T]`
+    // and `slice_assume_init_mut(&mut [MaybeUninit<T>]) -> &mut [T]`. The
+    // transpiler emits these as `MaybeUninit<T>::slice_assume_init_ref(s)`
+    // (T inferred from the argument's slice element type), so the outer T
+    // here is the same T that parameterizes the input slice.
+    // @unsafe
+    static std::span<const T> slice_assume_init_ref(
+        std::span<const MaybeUninit<T>> slice) noexcept {
+        return std::span<const T>(
+            reinterpret_cast<const T*>(slice.data()), slice.size());
+    }
+
+    // @unsafe
+    static std::span<T> slice_assume_init_mut(
+        std::span<MaybeUninit<T>> slice) noexcept {
+        return std::span<T>(
+            reinterpret_cast<T*>(slice.data()), slice.size());
     }
 };
 
