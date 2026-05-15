@@ -35,12 +35,14 @@
 // @safe
 namespace rusty {
 
-template<typename T>
+template<typename T, typename A = rusty::alloc::Global>
 class Vec {
 private:
     T* data_;
     size_t size_;
     size_t capacity_;
+
+    template<typename, typename> friend class Vec;
 
     static constexpr bool can_materialize_capacity(size_t capacity) noexcept {
         return capacity <= std::numeric_limits<size_t>::max() / sizeof(T);
@@ -306,10 +308,10 @@ public:
         other.capacity_ = 0;
     }
 
-    // Converting move constructor for Vec<U> -> Vec<T> when element conversion exists.
-    template<typename U>
-    requires (!std::is_same_v<U, T> && std::is_constructible_v<T, U>)
-    Vec(Vec<U>&& other) : data_(nullptr), size_(0), capacity_(0) {
+    // Converting move constructor for Vec<U, UA> -> Vec<T, A> when element conversion exists.
+    template<typename U, typename UA>
+    requires (!(std::is_same_v<U, T> && std::is_same_v<UA, A>) && std::is_constructible_v<T, U>)
+    Vec(Vec<U, UA>&& other) : data_(nullptr), size_(0), capacity_(0) {
         reserve(other.len());
         for (size_t i = 0; i < other.len(); ++i) {
             if constexpr (std::is_convertible_v<U, T>) {
@@ -683,8 +685,8 @@ public:
         return true;
     }
 
-    template<typename U>
-    bool operator==(const Vec<U>& other) const {
+    template<typename U, typename UA>
+    bool operator==(const Vec<U, UA>& other) const {
         if (size_ != other.len()) return false;
         for (size_t i = 0; i < size_; ++i) {
             if constexpr (requires(const T& lhs, const U& rhs) { lhs == rhs; }) {
@@ -705,8 +707,8 @@ public:
         return !(*this == other);
     }
 
-    template<typename U>
-    bool operator!=(const Vec<U>& other) const {
+    template<typename U, typename UA>
+    bool operator!=(const Vec<U, UA>& other) const {
         return !(*this == other);
     }
 
