@@ -2737,6 +2737,97 @@ Integrated outcomes from `d67bf42..bb69a16`:
 - runtime/import/module-surface additions needed by parity expansion (`17c59ea`, `577cb20`, `a900f00`, `03b2cb6`, `c198aee`, `e5e3908`, `4e92c3e`, `5689a73`, `806001f`).
 - post-once_cell regression stabilization across transpiler/runtime parity surfaces (`060c66f`, `10d31da`, `ec41837`, `cc8e417`, `bb69a16`).
 
+#### 10.4.9 Allocator Translation Model: `rusty::alloc::Allocator` + `Global`
+
+Goal: transpile Rust APIs that bound generics on `core::alloc::Allocator`
+(notably the rust-lang/rust `library/alloc/src/collections/btree/*` corpus,
+whose public types are `BTreeMap<K, V, A: Allocator + Clone = Global>` and
+companions) into C++ that names the right second type parameter and the
+right concept — not into one-arg shims that silently drop allocator state.
+
+**Design choice (Option 2, faithful):** mirror Rust's allocator surface at the
+type level inside `rusty::alloc::*`, default the second template parameter
+to `Global` on the allocator-aware types so existing one-arg call sites
+remain source-compatible, and route Rust's `<A: Allocator>` and `<A: Clone>`
+bounds to real C++ concepts in the emitted `requires` clause.
+
+Rejected alternatives (kept here so the choice is auditable):
+
+- **Option 1, erase entirely:** drop the second type parameter and emit
+  one-arg `Box<T>` / `Vec<T>` everywhere — loses overload distinction for
+  alloc-parametric code and breaks any `<A: ...>` shape that flows through.
+- **Option 3, alias to `std::allocator`:** rebinds Rust's allocator trait
+  onto STL's allocator concept — mismatched signatures (`allocate(Layout)`
+  vs `allocate(n)`, byte-pointer vs typed-pointer return) cause emitted
+  call sites to silently miscompile.
+- **Option 4, custom marker tag only:** declare `rusty::alloc::Allocator`
+  as a tag struct without a concept body — no actual constraint enforcement,
+  so non-allocator types satisfy `<A: Allocator>` bounds in transpiled C++.
+
+Integrated outcomes (commit chain `fe254c1..33dbbe6`):
+
+- `rusty::alloc::Allocator` is now a faithful C++20 concept requiring
+  `ca.allocate(layout) -> rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>`
+  and `ca.deallocate(p, layout)` on `const A&`. `rusty::alloc::Global`
+  satisfies the concept via `::rusty::alloc::alloc` / `dealloc` and is
+  statically asserted at header-load time.
+- `rusty::alloc::Layout` gains `new_<T>()` (the post-keyword-escape spelling
+  of Rust's `Layout::new::<T>()`), `for_value<T>()` (readable alias), and
+  `array<T>(n)` factories so allocation sites compile by name without
+  per-instance constructor sites.
+- `rusty::alloc::AllocError` is a zero-sized error type, mirroring
+  `core::alloc::AllocError`.
+- `rusty::Box` and `rusty::Vec` are now `Box<T, A = rusty::alloc::Global>`
+  and `Vec<T, A = rusty::alloc::Global>`. `A` is intentionally a phantom
+  type-level marker for the current pragmatic stage — storage still flows
+  through the `Global` path (`new` / `delete` for `Box`, `rusty::alloc::alloc`
+  / `dealloc` for `Vec`) so the change is source-compatible with every
+  call site that doesn't spell `A`. Promotion to split-destruct
+  (`~T(); alloc.deallocate(NonNull{...}, Layout::for_value<T>())`) is the
+  follow-up when a non-Global stateful allocator first lands in a corpus.
+- `Box::new_in(value, alloc)` exists as a faithful spelling of Rust's
+  `Box::new_in`; it currently ignores the allocator argument (consistent
+  with the phantom-A stage) but keeps the call site shape stable for
+  future promotion.
+- Converting move ctor / assignment and `operator==` / `!=` on `Box` /
+  `Vec` now span across allocator types (`<U, UA>` source → `<T, A>`
+  destination), so cross-A construction in transpiled Rust code compiles.
+- Type-map adds `core::alloc::{AllocError, Allocator}`,
+  `alloc::alloc::Global` (and `std::` siblings) so import statements like
+  `use core::alloc::{Allocator, Layout};` lower to using-aliases of the
+  `rusty::alloc::*` surface without per-import special casing.
+- `well_known_concept_for_trait_path` runs before the facade-name lookup
+  in `collect_emitted_template_parts`, so a generic bound that resolves to
+  a known standard concept emits a faithful `requires (concept<T>)`
+  clause even in module mode (where facade-style `…Facade::is_satisfied_by`
+  constraints are deliberately stripped). The current mapping is:
+  `Allocator` (any prefix) → `rusty::alloc::Allocator<T>`,
+  `Clone` (any prefix) → `std::copyable<T>`.
+
+Emitted shape (the target the rust-lang/rust btree corpus requires):
+
+```cpp
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A> && std::copyable<A>)
+rusty::Box<T, A> boxed_in(T value, A alloc);
+```
+
+End-to-end verification: a Rust `fn f<T, A: Allocator + Clone>(value: T, alloc: A) -> Box<T, A>`
+transpiles to the above shape and compiles against the support headers
+without further hand-patching. Stage 3 added two focused codegen tests
+(`test_allocator_bound_lowers_to_rusty_alloc_concept`,
+`test_allocator_plus_clone_bound_emits_concept_pair`) and updated the
+existing `test_trait_bound` / `test_where_clause` to assert
+`std::copyable<T>` (the new faithful target) instead of the prior
+facade-stub text. Net unit-test delta: 1155 → 1157 passing.
+
+Directly supports:
+
+- §1.10 Collections (allocator-parametric containers)
+- §3.11 Generics / Templates (real concept emission for trait bounds)
+- §4.4 Orphan rule (consistent target naming for cross-crate impls of
+  the Allocator trait, which would otherwise route through facades)
+
 ### 10.5 Parity Program Status
 
 #### 10.5.1 Phase 18 (`either`) Consolidated Outcome
