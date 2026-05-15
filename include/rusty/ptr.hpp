@@ -77,6 +77,16 @@ public:
         return NonNull<T>(ptr);
     }
 
+    // Rust's `NonNull::from(&mut T)` / `NonNull::from(&T)` converts a
+    // borrow into a non-null raw-pointer wrapper. In transpiled C++ the
+    // `&mut T` argument arrives as a `T*` (e.g. the return of
+    // `Box::leak(b)`), so the most useful spelling here is `from(T*)`,
+    // accepting an already non-null pointer.
+    // @unsafe
+    static constexpr NonNull<T> from(T* ptr) noexcept {
+        return NonNull<T>(ptr);
+    }
+
     constexpr T* as_ptr() const noexcept {
         return ptr_;
     }

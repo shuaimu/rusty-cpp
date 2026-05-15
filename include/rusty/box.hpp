@@ -219,6 +219,19 @@ public:
         return Box<T>(p);
     }
 
+    // Consume the Box and return the raw pointer, leaking the allocation
+    // (Rust: Box::leak). After this, the Box is empty and the value is never
+    // deallocated by this owner; the returned pointer outlives any Box-based
+    // ownership chain. Modeled as a member method (mirroring `into_raw`) so
+    // the transpiler can lower `Box::leak(b)` to `(std::move(b)).leak()`.
+    // @unsafe
+    // @lifetime: owned
+    T* leak() noexcept {
+        T* p = ptr;
+        ptr = nullptr;
+        return p;
+    }
+
     // Get raw pointer without transferring ownership
     // @unsafe - returns raw pointer, use operator* or operator-> instead
     // @lifetime: (&'a) -> &'a
