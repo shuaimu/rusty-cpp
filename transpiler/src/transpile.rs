@@ -96,6 +96,12 @@ pub struct TranspileOptions {
     /// the methods (and the orphan emission should therefore be
     /// suppressed). Empty for single-file mode.
     pub cross_file_structs: Vec<syn::ItemStruct>,
+    /// Cross-file type-alias declarations (`pub type Foo<K> = Bar<...>;`)
+    /// collected during a crate-mode pre-pass. Used to resolve orphan
+    /// impl blocks targeting a type alias back to the underlying struct
+    /// so the methods are absorbed into the struct's body and the
+    /// orphan emission is suppressed. Empty for single-file mode.
+    pub cross_file_type_aliases: Vec<syn::ItemType>,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -447,6 +453,7 @@ pub fn transpile_full_with_options(
     codegen.set_cross_file_enums(options.cross_file_enums.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
+    codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
@@ -1269,6 +1276,31 @@ fn collect_struct_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemSt
             syn::Item::Mod(m) => {
                 if let Some((_, nested)) = &m.content {
                     collect_struct_decls_recursive(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk a Rust source file and collect every `Item::Type` (type alias).
+/// Cross-file counterpart of `collect_crate_struct_decls`.
+pub fn collect_crate_type_aliases(rust_source: &str) -> Vec<syn::ItemType> {
+    let Ok(file) = syn::parse_str::<syn::File>(rust_source) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_type_aliases_recursive(&file.items, &mut out);
+    out
+}
+
+fn collect_type_aliases_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemType>) {
+    for item in items {
+        match item {
+            syn::Item::Type(t) => out.push(t.clone()),
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_type_aliases_recursive(nested, out);
                 }
             }
             _ => {}
