@@ -82,6 +82,20 @@ pub struct TranspileOptions {
     /// (`use Foo::*; match { Variant(...) => ... }`) resolve when `Foo` is
     /// declared in a sibling file. Empty for single-file mode.
     pub cross_file_enums: Vec<syn::ItemEnum>,
+    /// Cross-file impl blocks collected during a crate-mode pre-pass —
+    /// every `Item::Impl` across the crate. Used by the per-file codegen
+    /// to (a) inject forward declarations for cross-module orphan impl
+    /// methods into the host struct's body when that struct is emitted,
+    /// and (b) emit out-of-line member definitions instead of free-
+    /// standing template functions when an orphan impl block is
+    /// processed. Empty for single-file mode.
+    pub cross_file_impl_blocks: Vec<syn::ItemImpl>,
+    /// Cross-file struct declarations collected during a crate-mode
+    /// pre-pass. Used to determine where each host type is declared so
+    /// the orphan-impl emitter knows whether the host file will absorb
+    /// the methods (and the orphan emission should therefore be
+    /// suppressed). Empty for single-file mode.
+    pub cross_file_structs: Vec<syn::ItemStruct>,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -431,6 +445,8 @@ pub fn transpile_full_with_options(
     codegen.set_prefer_rusty_view_aliases(options.prefer_rusty_view_aliases);
     codegen.set_interface_traits(options.interface_traits);
     codegen.set_cross_file_enums(options.cross_file_enums.clone());
+    codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
+    codegen.set_cross_file_structs(options.cross_file_structs.clone());
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
@@ -1199,6 +1215,60 @@ fn collect_enum_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemEnum
             syn::Item::Mod(m) => {
                 if let Some((_, nested)) = &m.content {
                     collect_enum_decls_recursive(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk a Rust source file and collect every top-level / nested `Item::Impl`
+/// block. The result is intended to be threaded across files in crate-mode
+/// transpilation so the per-file codegen can detect when an impl block's
+/// host type lives in a different file (a cross-module orphan impl) and
+/// emit out-of-line member definitions plus inject the matching forward
+/// declarations into the host struct's body.
+pub fn collect_crate_impl_blocks(rust_source: &str) -> Vec<syn::ItemImpl> {
+    let Ok(file) = syn::parse_str::<syn::File>(rust_source) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_impl_blocks_recursive(&file.items, &mut out);
+    out
+}
+
+fn collect_impl_blocks_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemImpl>) {
+    for item in items {
+        match item {
+            syn::Item::Impl(i) => out.push(i.clone()),
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_impl_blocks_recursive(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk a Rust source file and collect every `Item::Struct`. Cross-file
+/// counterpart of `collect_crate_enum_decls`.
+pub fn collect_crate_struct_decls(rust_source: &str) -> Vec<syn::ItemStruct> {
+    let Ok(file) = syn::parse_str::<syn::File>(rust_source) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    collect_struct_decls_recursive(&file.items, &mut out);
+    out
+}
+
+fn collect_struct_decls_recursive(items: &[syn::Item], out: &mut Vec<syn::ItemStruct>) {
+    for item in items {
+        match item {
+            syn::Item::Struct(s) => out.push(s.clone()),
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_struct_decls_recursive(nested, out);
                 }
             }
             _ => {}

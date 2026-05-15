@@ -318,21 +318,28 @@ fn transpile_crate(
     let mut error_count = 0;
     let mut extension_method_hints = HashSet::new();
     let mut cross_file_enums: Vec<syn::ItemEnum> = Vec::new();
+    let mut cross_file_impl_blocks: Vec<syn::ItemImpl> = Vec::new();
+    let mut cross_file_structs: Vec<syn::ItemStruct> = Vec::new();
     for rs_path in &sources {
         let full_rs_path = project_dir.join(rs_path);
         if let Ok(source) = std::fs::read_to_string(&full_rs_path) {
             extension_method_hints.extend(transpile::collect_extension_method_hints(&source));
             cross_file_enums.extend(transpile::collect_crate_enum_decls(&source));
+            cross_file_impl_blocks.extend(transpile::collect_crate_impl_blocks(&source));
+            cross_file_structs.extend(transpile::collect_crate_struct_decls(&source));
         }
     }
     // Build a per-crate transpile options clone with the collected cross-file
-    // enum decls injected. This lets each file's codegen seed its data-enum
-    // tracking from sibling files so bare-glob variant patterns
-    // (`use Foo::*; match { Variant(...) => ... }`) resolve when `Foo` is
-    // declared in another file.
+    // enum decls and impl blocks injected. This lets each file's codegen seed
+    // its data-enum tracking from sibling files (so bare-glob variant patterns
+    // resolve when `Foo` is declared in another file) and detect orphan-impl
+    // blocks (so out-of-line member definitions can be emitted and matching
+    // forward declarations injected into the host struct's body).
     let crate_transpile_options = {
         let mut opts = transpile_options.clone();
         opts.cross_file_enums = cross_file_enums;
+        opts.cross_file_impl_blocks = cross_file_impl_blocks;
+        opts.cross_file_structs = cross_file_structs;
         opts
     };
 
@@ -3345,6 +3352,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         prefer_rusty_view_aliases: args.prefer_rusty_view_aliases,
         interface_traits: args.interface_traits,
         cross_file_enums: Vec::new(),
+        cross_file_impl_blocks: Vec::new(),
+        cross_file_structs: Vec::new(),
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -3779,6 +3788,8 @@ fn main() {
         prefer_rusty_view_aliases: cli.prefer_rusty_view_aliases,
         interface_traits: cli.interface_traits,
         cross_file_enums: Vec::new(),
+        cross_file_impl_blocks: Vec::new(),
+        cross_file_structs: Vec::new(),
     };
 
     // Handle --crate: transpile entire crate
