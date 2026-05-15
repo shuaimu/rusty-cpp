@@ -285,6 +285,17 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         | "core::alloc::LayoutError"
         | "alloc::alloc::LayoutErr"
         | "alloc::alloc::LayoutError" => Some(("rusty::alloc::LayoutErr", false)),
+        "AllocError"
+        | "std::alloc::AllocError"
+        | "core::alloc::AllocError"
+        | "alloc::alloc::AllocError" => Some(("rusty::alloc::AllocError", false)),
+        "Allocator"
+        | "std::alloc::Allocator"
+        | "core::alloc::Allocator"
+        | "alloc::alloc::Allocator" => Some(("rusty::alloc::Allocator", false)),
+        "Global" | "std::alloc::Global" | "alloc::alloc::Global" => {
+            Some(("rusty::alloc::Global", false))
+        }
         "std::str::Utf8Error" | "core::str::Utf8Error" => {
             Some(("rusty::str_runtime::Utf8Error", false))
         }
