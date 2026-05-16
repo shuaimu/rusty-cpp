@@ -12,19 +12,12 @@ and an estimate of leverage (how many failing tests one fix would clear).
 
 ## High priority — high-leverage generic fixes
 
-- [ ] **A. Strip the leading `::` from `using` imports for already-`rusty::`/`std::`-qualified targets** (≈ 38 failing tests)
-  - Symptom: tests expect `using rusty::HashMap;` (or `using rusty::Vec;`,
-    `using rusty::io::SeekFrom;`, `using rusty::ptr::read;`, etc.); current
-    emit is `using ::rusty::HashMap;`.
-  - Root cause: `transpiler/src/codegen.rs:23715` (the
-    `"{}using ::{};"` format string used by
-    `resolve_crate_single_segment_type_import` and the matching block at
-    23951/23955 for `Cow_*` / `Either_*`).
-  - Suggested fix: when the resolved path already starts with a known
-    top-level namespace (`rusty::`, `std::`, `core::`, `alloc::`),
-    drop the leading `::`. Anchor at root only when emitting bare
-    identifiers that could otherwise resolve to a nested scope.
-  - Confidence: high — likely a one- or two-line change.
+- [x] **A. Strip the leading `::` from `using` imports for already-`rusty::`/`std::`-qualified targets** ✅ Done (commit fb334db, +28 pass / -28 fail)
+  - Fixed in `make_using_path_cpp_legal`: for known top-level namespaces
+    (`rusty::`, `std::`, `core::`, `alloc::`), emit the natural unqualified
+    form (`using rusty::Vec;`). Other qualified paths (`de::Foo`, sibling
+    crates) keep the `::` anchor so nested-module shadowing still works
+    (verified by `test_global_import_keeps_qualifier_when_nested_module_shadows_root`).
 
 - [ ] **B. impl-method dedup count tests** (8 failing tests)
   - Affected: `test_leaf45_duplicate_method_signature_keeps_first`,
