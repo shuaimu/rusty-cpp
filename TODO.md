@@ -31,15 +31,16 @@ and an estimate of leverage (how many failing tests one fix would clear).
     `rewrite_global_using_path_for_local_alias_root`) trades +2 for −5
     use-crate-cluster regressions and needs a context-aware split.
 
-- [ ] **C. `Option::unwrap()` on `None` panics in inline-module impl merging** (4 failing tests, 4 real crashes)
-  - Affected: `test_inline_mod_enum_impl_methods_merged_into_wrapper`,
-    `test_inline_mod_impl_methods_merged_into_struct`, plus 2 in the
-    `test_leaf10541_*` family.
-  - Location: `transpiler/src/codegen.rs:107796` and `107820` (the
-    `Option::unwrap()` calls in the impl-merge pass).
-  - Suggested fix: replace the bare `unwrap()` with the proper
-    `Some(...)` handling for the missing-binding case.
-  - Confidence: high — surfaced by panic stacktrace.
+- [x] **C. `Option::unwrap()` on `None` panics in inline-module impl merging** ✅ Done (commit 09f788a, +2 pass / -2 fail)
+  - Two tests fixed: `test_inline_mod_impl_methods_merged_into_struct` and
+    `test_inline_mod_enum_impl_methods_merged_into_wrapper`. Root cause was
+    the test-side `out.find(...).unwrap()` looking for inline-body shape
+    (`Foo clone() const {`) while codegen emits decl-in-struct + def-out-of-line
+    (`Foo clone() const;` decl + `Foo Foo::clone() const {` def). Replaced the
+    fragile `};` close-bracket bound with ordered decl/def position checks.
+  - The `test_leaf10541_*` failures that were initially grouped here are
+    distinct (no `unwrap()` panic) — they belong to Bucket D (pattern-binding
+    lowering) and are tracked there.
 
 ---
 
