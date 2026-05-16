@@ -41,6 +41,10 @@ private:
     T* data_;
     size_t size_;
     size_t capacity_;
+    // Stored allocator. `[[no_unique_address]]` collapses A to 0 bytes when
+    // A is empty (the common A = Global case), so sizeof(Vec<T>) is
+    // unchanged on all major compilers.
+    [[no_unique_address]] A alloc_;
 
     template<typename, typename> friend class Vec;
 
@@ -53,7 +57,10 @@ private:
             capacity * sizeof(T), alignof(T));
     }
 
-    static T* allocate_storage(size_t capacity) {
+    // Allocate raw storage via the stored allocator. Instance method (not
+    // static) so the same A instance that produced the bytes is the one
+    // that later releases them.
+    T* allocate_storage(size_t capacity) {
         if (capacity == 0) {
             return nullptr;
         }
@@ -61,19 +68,21 @@ private:
             throw std::bad_alloc();
         }
         const auto layout = storage_layout(capacity);
-        auto* bytes = rusty::alloc::alloc(layout);
-        if (bytes == nullptr) {
+        auto result = alloc_.allocate(layout);
+        if (result.is_err()) {
             rusty::alloc::handle_alloc_error(layout);
         }
-        return reinterpret_cast<T*>(bytes);
+        return reinterpret_cast<T*>(result.unwrap().as_ptr());
     }
 
-    static void deallocate_storage(T* ptr, size_t capacity) noexcept {
+    // Release raw storage via the stored allocator.
+    void deallocate_storage(T* ptr, size_t capacity) noexcept {
         if (ptr == nullptr || capacity == 0 || !can_materialize_capacity(capacity)) {
             return;
         }
-        rusty::alloc::dealloc(
-            reinterpret_cast<std::uint8_t*>(ptr),
+        alloc_.deallocate(
+            rusty::NonNull<std::uint8_t>::from(
+                reinterpret_cast<std::uint8_t*>(ptr)),
             storage_layout(capacity));
     }
 
@@ -240,7 +249,7 @@ public:
     static Vec<T> with_capacity(size_t cap) {
         Vec<T> v;
         if (cap > 0) {
-            v.data_ = allocate_storage(cap);
+            v.data_ = v.allocate_storage(cap);
             v.capacity_ = cap;
         }
         return v;
