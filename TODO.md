@@ -72,23 +72,24 @@ and an estimate of leverage (how many failing tests one fix would clear).
     inferred-type `Lazy<int32_t>::new_(...)` / qualified `std::sync::OnceCell<...>::new_()`.
     Tests updated to accept both legacy and current shapes.
 
-- [ ] **F. Interface+adapter completion gaps** (3 failing tests, real codegen bugs)
+- [x] **F. Interface+adapter completion gaps** ✅ 2/3 done
   - `test_interface_traits_default_method_emitted_as_non_pure_virtual`:
-    default trait methods (with body in Rust) currently emit as pure
-    virtual (`= 0;`). Should emit as non-pure virtual with body so an
-    Adapter can either inherit or override.
-  - `test_interface_traits_generic_impl_emits_specialization_with_trait_args`:
+    ✅ Done (commit 57c788e). Codegen now inlines trivial single-expr
+    default-method bodies on the interface class when every `self.<m>()`
+    call resolves to a method on the same trait. Other shapes still
+    defer to the Adapter via `= 0;`.
+  - `test_interface_traits_marker_traits_still_emit_concept`: ✅ Done
+    in commit 7b0c84f (empty marker traits now emit an empty interface
+    class rather than a TODO comment).
+  - **Remaining**: `test_interface_traits_generic_impl_emits_specialization_with_trait_args`.
     `impl Container<i32> for IntBag` should generate
     `class ContainerAdapter<int32_t, IntBag> final : public Container<int32_t>`
-    plus its `Ref`/`RefMut` flavors. Currently only the primary template
+    plus `Ref`/`RefMut` flavors. Currently only the primary-template
     forward decls are emitted; the specialization is skipped with a
     `// TODO(interface_traits): … generic — Adapter specializations
-    require partial-spec template headers, not yet emitted` comment
-    (transpiler/src/codegen.rs:21485).
-  - Default method emission: the codegen path skips trait methods that
-    have bodies; needs a new branch that emits the body as a
-    non-pure-virtual member.
-  - Confidence: medium — both have explicit TODOs in the codegen.
+    require partial-spec template headers, not yet emitted` marker
+    (transpiler/src/codegen.rs near line 21505). Needs deeper codegen
+    work: partial-specialization template-header emission.
 
 ---
 
