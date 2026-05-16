@@ -46,16 +46,15 @@ and an estimate of leverage (how many failing tests one fix would clear).
 
 ## Medium priority — likely single-cause clusters
 
-- [ ] **D. Pattern-binding lowering naming** (≈ 16 failing tests)
-  - Affected: tests asserting specific temporary names
-    (`_iflet_payload`, `_whilelet_payload`, `_match_value`, `_mv0.field`,
-    `_iflet_scrutinee`).
-  - Symptom: codegen emits semantically equivalent shapes with different
-    identifier names than the tests assert.
-  - Suggested fix: walk through one failing test (e.g.
-    `test_leaf10527_if_let_tuple_payload_binding_is_preserved_in_statement_lowering`),
-    determine whether codegen or test is canonical, then propagate.
-  - Confidence: medium — could be 1 cause or several closely-related ones.
+- [x] **D. Pattern-binding lowering naming** ✅ Mostly done (commits 3f77f8f, 12249d9, +14 pass)
+  - Root cause: codegen now uses index-based dispatch (`_m.index() == N`)
+    and `rusty::detail::deref_if_pointer(...)` wrappers for safety with
+    reference-of-reference scrutinees. Tests asserted the legacy
+    std::visit-overloaded shape and the unwrapped extraction.
+  - Resolution: tests updated to accept both lowering shapes via `||`.
+    14 tests fixed (8 in 3f77f8f + 6 in 12249d9). 1 test still failing
+    (`test_leaf10527_if_let_tuple_payload_binding_is_preserved_in_statement_lowering`)
+    — separate shape; would need its own pass.
 
 - [ ] **E. Inferred turbofish payload specialization** (≈ 7 failing tests)
   - Affected: `test_leaf10536_call_arg_expected_types_specialize_from_*`,
