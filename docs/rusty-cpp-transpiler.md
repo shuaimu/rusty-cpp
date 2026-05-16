@@ -2778,17 +2778,27 @@ Integrated outcomes (commit chain `fe254c1..33dbbe6`):
 - `rusty::alloc::AllocError` is a zero-sized error type, mirroring
   `core::alloc::AllocError`.
 - `rusty::Box` and `rusty::Vec` are now `Box<T, A = rusty::alloc::Global>`
-  and `Vec<T, A = rusty::alloc::Global>`. `A` is intentionally a phantom
-  type-level marker for the current pragmatic stage — storage still flows
-  through the `Global` path (`new` / `delete` for `Box`, `rusty::alloc::alloc`
-  / `dealloc` for `Vec`) so the change is source-compatible with every
-  call site that doesn't spell `A`. Promotion to split-destruct
-  (`~T(); alloc.deallocate(NonNull{...}, Layout::for_value<T>())`) is the
-  follow-up when a non-Global stateful allocator first lands in a corpus.
-- `Box::new_in(value, alloc)` exists as a faithful spelling of Rust's
-  `Box::new_in`; it currently ignores the allocator argument (consistent
-  with the phantom-A stage) but keeps the call site shape stable for
-  future promotion.
+  and `Vec<T, A = rusty::alloc::Global>`, with `A` stored as a real field
+  (`[[no_unique_address]] A alloc_;`) that **collapses to zero bytes for
+  empty `A`** thanks to C++20 attribute-driven empty-member optimization.
+  Verified: `sizeof(rusty::Box<int>) == sizeof(int*)` and
+  `sizeof(rusty::Vec<int>) == sizeof(int*) + 2 * sizeof(size_t)` (commit
+  `dae6b7a` / `e44507f`).
+- `Box::new_in(value, alloc)` is now faithful: it asks `alloc.allocate(
+  Layout::for_value<T>())` for raw bytes, placement-news `T` into them,
+  and stores the allocator alongside the pointer. `Box::new_(value)`
+  routes through `new_in` with a default-constructed `A`. A new
+  `Box::emplace<Args...>(args...)` factory avoids the intermediate
+  value-move; `make_box(args...)` calls it.
+- `Box::~Box()` and `Vec::deallocate_storage(...)` perform the **split-
+  destruct** pattern (`ptr->~T(); alloc_.deallocate(NonNull{...}, Layout::
+  for_value<T>())`), matching Rust's `impl Drop for Box<T, A>` and
+  `RawVec<T, A>::dealloc`. Move ctor/asgn transfer both the pointer and
+  the allocator state; converting moves (`Box<U, UA>` → `Box<T, A>`)
+  require matching allocator types so the destination faithfully owns
+  the source's bytes. `Box::clone` requires `std::copyable<A>` and clones
+  the allocator alongside the value, matching Rust's
+  `impl<T: Clone, A: Allocator + Clone> Clone for Box<T, A>`.
 - Converting move ctor / assignment and `operator==` / `!=` on `Box` /
   `Vec` now span across allocator types (`<U, UA>` source → `<T, A>`
   destination), so cross-A construction in transpiled Rust code compiles.
