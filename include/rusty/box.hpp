@@ -2,6 +2,8 @@
 #define RUSTY_BOX_HPP
 
 #include <algorithm>
+#include <concepts>
+#include <new>          // for placement new
 #include <string_view>
 #include <type_traits>  // for std::enable_if, std::is_convertible, std::is_same
 #include <utility>  // for std::move, std::forward
@@ -26,108 +28,160 @@ template<typename T, typename A = rusty::alloc::Global>
 class Box {
 private:
     T* ptr;
+    // Stored allocator. `[[no_unique_address]]` collapses A to zero bytes
+    // whenever A is empty (the common case: A = rusty::alloc::Global), so
+    // sizeof(Box<T>) stays equal to sizeof(T*) on all major compilers.
+    [[no_unique_address]] A alloc_;
 
     template<typename, typename> friend class Box;
+
+    // Private constructor for faithful factories that have already obtained
+    // raw bytes from `alloc_inst.allocate(...)` and placement-new'd a `T`
+    // into them. The Box now owns both the live `T` and the allocator that
+    // produced its storage.
+    Box(T* p, A alloc_inst) noexcept(std::is_nothrow_move_constructible_v<A>)
+        : ptr(p), alloc_(std::move(alloc_inst)) {}
+
+    // The single drop+deallocate path used by the destructor and by move
+    // assignment. Safe to call on a moved-from Box (ptr == nullptr).
+    void drop_in_place_and_deallocate() noexcept {
+        if (ptr != nullptr) {
+            ptr->~T();
+            alloc_.deallocate(
+                rusty::NonNull<std::uint8_t>::from(
+                    reinterpret_cast<std::uint8_t*>(ptr)),
+                rusty::alloc::Layout::for_value<T>());
+            ptr = nullptr;
+        }
+    }
 
 public:
     // Constructors
     // No default constructor - Box must always own a value (non-nullable)
     Box() = delete;
 
+    // @unsafe — caller promises `p` was allocated via a default-constructed
+    // `A`'s allocate path. For A = Global on standard stdlib implementations
+    // this is equivalent to a pointer obtained from `::operator new` of the
+    // same size/alignment.
     // @lifetime: owned
-    explicit Box(T* p) : ptr(p) {}
+    explicit Box(T* p)
+        noexcept(std::is_nothrow_default_constructible_v<A>)
+        requires std::is_default_constructible_v<A>
+        : ptr(p), alloc_() {}
 
     // Factory method - Box::new_() (Rust's Box::new, renamed because `new` is a C++ keyword)
     // @lifetime: owned
-    static Box new_(T value) {
-        // @unsafe
-        {
-            return Box(new T(std::move(value)));
-        }
+    static Box new_(T value) requires std::is_default_constructible_v<A> {
+        return new_in(std::move(value), A{});
     }
 
-    // Rust's `Box::new_in(value, alloc)` — currently the allocator argument is
-    // accepted for source-compatibility with the faithful Rust API but is not
-    // consulted at runtime; storage comes from `new T(...)` via the default
-    // allocator. Non-Global allocators are stateless in our current corpus
-    // (`Global` is zero-sized), so this is a safe pragmatic simplification.
+    // Rust's `Box::new_in(value, alloc)` — faithful: ask `alloc_inst` for raw
+    // bytes sized for T, placement-new T into them, store both the pointer and
+    // the allocator. Destruction undoes exactly this.
     // @lifetime: owned
-    static Box new_in(T value, A /*alloc*/) {
-        // @unsafe
-        {
-            return Box(new T(std::move(value)));
+    static Box new_in(T value, A alloc_inst) {
+        constexpr auto layout = rusty::alloc::Layout::for_value<T>();
+        auto result = alloc_inst.allocate(layout);
+        if (result.is_err()) {
+            rusty::alloc::handle_alloc_error(layout);
         }
+        auto raw = result.unwrap();
+        // @unsafe { placement-new into freshly allocated raw bytes }
+        T* p = ::new (static_cast<void*>(raw.as_ptr())) T(std::move(value));
+        return Box(p, std::move(alloc_inst));
+    }
+
+    // In-place construct a T from forwarded args, without an intermediate
+    // value-move. Used by `make_box(args...)`.
+    template<typename... Args>
+    static Box emplace(Args&&... args)
+        requires std::is_default_constructible_v<A>
+    {
+        return emplace_in(A{}, std::forward<Args>(args)...);
+    }
+
+    template<typename... Args>
+    static Box emplace_in(A alloc_inst, Args&&... args) {
+        constexpr auto layout = rusty::alloc::Layout::for_value<T>();
+        auto result = alloc_inst.allocate(layout);
+        if (result.is_err()) {
+            rusty::alloc::handle_alloc_error(layout);
+        }
+        auto raw = result.unwrap();
+        // @unsafe { placement-new into freshly allocated raw bytes }
+        T* p = ::new (static_cast<void*>(raw.as_ptr())) T(std::forward<Args>(args)...);
+        return Box(p, std::move(alloc_inst));
     }
 
     // Alias for backward compatibility
     // @lifetime: owned
-    static Box make(T value) {
-        // @unsafe
-        {
-            // new and std::move are unsafe operations
-            return Box(new T(std::move(value)));
-        }
+    static Box make(T value) requires std::is_default_constructible_v<A> {
+        return new_(std::move(value));
     }
 
     // No copy constructor - Box cannot be copied
     Box(const Box&) = delete;
     Box& operator=(const Box&) = delete;
 
-    // Move constructor - transfers ownership
+    // Move constructor - transfers both the pointer and the allocator state.
     // @lifetime: owned
-    Box(Box&& other) noexcept : ptr(other.ptr) {
-        other.ptr = nullptr;  // Other box becomes empty
+    Box(Box&& other) noexcept(std::is_nothrow_move_constructible_v<A>)
+        : ptr(other.ptr), alloc_(std::move(other.alloc_)) {
+        other.ptr = nullptr;
     }
 
-    // Converting move constructor - allows Box<Derived, _> to convert to Box<Base, A>.
-    // The source allocator type is dropped; storage continues to be released via
-    // `delete` (the default path used by `new T(...)`).
+    // Converting move constructor — Box<Derived, A> -> Box<Base, A>. Requires
+    // matching allocator type so the destination's `alloc_` faithfully owns
+    // the source's bytes. Caller is responsible for ensuring `~Base()` runs
+    // the right destructor for the dynamic type (typical pattern: `Base` has
+    // a virtual destructor).
     // @lifetime: owned
     template<typename U, typename UA, typename = typename std::enable_if<
-        std::is_convertible<U*, T*>::value && !(std::is_same<U, T>::value && std::is_same<UA, A>::value)>::type>
-    Box(Box<U, UA>&& other) noexcept : ptr(other.release()) {}
+        std::is_convertible<U*, T*>::value
+        && std::is_same<UA, A>::value
+        && !std::is_same<U, T>::value>::type>
+    Box(Box<U, UA>&& other) noexcept(std::is_nothrow_move_constructible_v<A>)
+        : ptr(other.ptr), alloc_(std::move(other.alloc_)) {
+        other.ptr = nullptr;
+    }
 
-    // Move assignment - transfers ownership
+    // Move assignment - transfers ownership of both ptr and allocator.
     // @lifetime: owned
     Box& operator=(Box&& other) noexcept {
-        // @unsafe
-        {
-            if (this != &other) {
-                delete ptr;
-                ptr = other.ptr;
-                other.ptr = nullptr;
-            }
-            return *this;
+        if (this != &other) {
+            drop_in_place_and_deallocate();
+            ptr = other.ptr;
+            alloc_ = std::move(other.alloc_);
+            other.ptr = nullptr;
         }
+        return *this;
     }
 
-    // Converting move assignment - allows Box<Derived, _> to assign to Box<Base, A>.
+    // Converting move assignment — same allocator-type requirement as the
+    // converting move constructor.
     // @lifetime: owned
     template<typename U, typename UA, typename = typename std::enable_if<
-        std::is_convertible<U*, T*>::value && !(std::is_same<U, T>::value && std::is_same<UA, A>::value)>::type>
+        std::is_convertible<U*, T*>::value
+        && std::is_same<UA, A>::value
+        && !std::is_same<U, T>::value>::type>
     Box& operator=(Box<U, UA>&& other) noexcept {
-        // @unsafe
-        {
-            delete ptr;
-            ptr = other.release();
-            return *this;
-        }
+        drop_in_place_and_deallocate();
+        ptr = other.ptr;
+        alloc_ = std::move(other.alloc_);
+        other.ptr = nullptr;
+        return *this;
     }
 
-    // Clone by deep-copying the pointee when the pointee supports cloning.
-    // This mirrors Rust's `Clone for Box<T>` behavior.
+    // Clone by deep-copying the pointee, using a copy of the current
+    // allocator for the new Box. Mirrors Rust's `impl<T: Clone, A: Allocator + Clone>
+    // Clone for Box<T, A>`.
     // @lifetime: owned
-    Box clone() const {
+    Box clone() const requires std::copyable<A> {
         if constexpr (requires(const T& value) { value.clone(); }) {
-            // @unsafe
-            {
-                return Box(new T(ptr->clone()));
-            }
+            return new_in(ptr->clone(), alloc_);
         } else if constexpr (std::is_copy_constructible<T>::value) {
-            // @unsafe
-            {
-                return Box(new T(*ptr));
-            }
+            return new_in(*ptr, alloc_);
         } else {
             static_assert(
                 std::is_copy_constructible<T>::value,
@@ -136,12 +190,11 @@ public:
         }
     }
 
-    // Destructor - automatic cleanup
+    // Destructor - runs T's destructor in place and returns the storage to
+    // the stored allocator. Equivalent to Rust's `impl<T, A: Allocator>
+    // Drop for Box<T, A>` (drop_in_place + alloc.deallocate).
     ~Box() {
-        // @unsafe
-        {
-            delete ptr;
-        }
+        drop_in_place_and_deallocate();
     }
     
     // Dereference - borrow the value
@@ -261,15 +314,12 @@ public:
     // To destroy, let it go out of scope or use std::move
 };
 
-// Factory function following C++ make_* convention
+// Factory function following C++ make_* convention. Routes through Box's
+// allocator path (Box<T>::emplace) so destructor faithfully matches storage.
 template<typename T, typename... Args>
 // @lifetime: owned
 Box<T> make_box(Args&&... args) {
-    // @unsafe
-    {
-        // new and std::forward are unsafe operations
-        return Box<T>(new T(std::forward<Args>(args)...));
-    }
+    return Box<T>::emplace(std::forward<Args>(args)...);
 }
 
 template<typename T, typename A>
@@ -292,10 +342,7 @@ template<typename T>
 // @lifetime: owned
 Box<std::remove_cvref_t<T>> make_box(T&& value) {
     using U = std::remove_cvref_t<T>;
-    // @unsafe
-    {
-        return Box<U>(new U(std::forward<T>(value)));
-    }
+    return Box<U>::new_(std::forward<T>(value));
 }
 
 template<typename L, typename LA, typename R, typename RA>
