@@ -309,6 +309,12 @@ public:
         return ptr;
     }
 
+    // Access the stored allocator. Mirrors Rust's `Box::allocator(&self) -> &A`.
+    // @lifetime: (&'a) -> &'a
+    const A& allocator() const noexcept {
+        return alloc_;
+    }
+
     // Note: No reset() method - Box is non-nullable like Rust's Box<T>
     // To replace the value, use assignment: box = Box::make(new_value)
     // To destroy, let it go out of scope or use std::move

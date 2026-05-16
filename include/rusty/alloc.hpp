@@ -61,6 +61,61 @@ struct Layout {
     static constexpr Layout array(std::size_t n) noexcept {
         return Layout{sizeof(T) * n, alignof(T)};
     }
+
+    // Padding needed to round `self.size` up to the next multiple of `align`.
+    // Mirrors Rust's `Layout::padding_needed_for`.
+    constexpr std::size_t padding_needed_for(std::size_t to_align) const noexcept {
+        const std::size_t mask = to_align - 1;
+        return (to_align - (size & mask)) & mask;
+    }
+
+    // Round `self.size` up to the next multiple of `self.align`. Mirrors
+    // Rust's `Layout::pad_to_align`.
+    constexpr Layout pad_to_align() const noexcept {
+        return Layout{size + padding_needed_for(align), align};
+    }
+
+    // Mirrors Rust's `Layout::extend(self, next) -> Result<(Layout, usize), LayoutErr>`.
+    // Returns the combined layout and the byte-offset of `next` inside the
+    // combined layout. Lossy on alignment overflow: returns Err in that case.
+    rusty::Result<std::tuple<Layout, std::size_t>, LayoutErr>
+    extend(Layout next) const {
+        const std::size_t new_align = align > next.align ? align : next.align;
+        const std::size_t pad = padding_needed_for(next.align);
+        // Overflow checks mirror Rust's behaviour.
+        if (size > std::numeric_limits<std::size_t>::max() - pad) {
+            return rusty::Result<std::tuple<Layout, std::size_t>, LayoutErr>::Err(LayoutErr{});
+        }
+        const std::size_t offset = size + pad;
+        if (offset > std::numeric_limits<std::size_t>::max() - next.size) {
+            return rusty::Result<std::tuple<Layout, std::size_t>, LayoutErr>::Err(LayoutErr{});
+        }
+        const std::size_t new_size = offset + next.size;
+        return rusty::Result<std::tuple<Layout, std::size_t>, LayoutErr>::Ok(
+            std::make_tuple(Layout{new_size, new_align}, offset));
+    }
+
+    // Mirrors Rust's `Layout::repeat(self, n)`. Returns the layout for an
+    // array of `n` copies of `self` (with internal padding) plus the byte
+    // stride between copies.
+    rusty::Result<std::tuple<Layout, std::size_t>, LayoutErr>
+    repeat(std::size_t n) const {
+        const std::size_t padded = pad_to_align().size;
+        if (padded != 0
+            && n != 0
+            && padded > std::numeric_limits<std::size_t>::max() / n) {
+            return rusty::Result<std::tuple<Layout, std::size_t>, LayoutErr>::Err(LayoutErr{});
+        }
+        return rusty::Result<std::tuple<Layout, std::size_t>, LayoutErr>::Ok(
+            std::make_tuple(Layout{padded * n, align}, padded));
+    }
+
+    // Mirrors Rust's `Layout::dangling`. Returns a dangling-but-aligned
+    // raw byte pointer — never deallocate this pointer.
+    rusty::NonNull<std::uint8_t> dangling() const noexcept {
+        return rusty::NonNull<std::uint8_t>::new_unchecked(
+            reinterpret_cast<std::uint8_t*>(align));
+    }
 };
 
 // AllocError mirrors core::alloc::AllocError — a zero-sized error type.
@@ -115,9 +170,13 @@ inline std::uint8_t* realloc(
 }
 
 // Allocator concept — faithful mirror of Rust's `unsafe trait Allocator`.
-// Allocators returning a non-null pointer to at least `layout.size` bytes
-// aligned to `layout.align` are valid. `deallocate` is `unsafe` in Rust;
-// here it is just a non-static member; safety is the caller's responsibility.
+// Required methods are `allocate` and `deallocate`. Rust's trait also
+// provides default `allocate_zeroed`, `grow`, `grow_zeroed`, and `shrink`
+// methods on top of those two; here we expose them as non-member helpers
+// `rusty::alloc::allocate_zeroed_via(a, layout)`, `..::grow_via(...)`,
+// `..::shrink_via(...)` so concept-satisfying types don't have to spell
+// these themselves. `Global` provides direct `allocate_zeroed`/`grow`/
+// `shrink` methods for convenience.
 template<typename A>
 concept Allocator = requires(A const& ca,
                              rusty::NonNull<std::uint8_t> p,
@@ -125,6 +184,80 @@ concept Allocator = requires(A const& ca,
     { ca.allocate(l) } -> std::same_as<rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>>;
     { ca.deallocate(p, l) };
 };
+
+// Default `allocate_zeroed` body usable by any Allocator. Mirrors Rust's
+// `Allocator::allocate_zeroed` default: allocate, then memset.
+template<typename A>
+inline rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>
+allocate_zeroed_via(const A& a, Layout layout) {
+    auto result = a.allocate(layout);
+    if (result.is_ok()) {
+        // `unwrap` consumes; we want to keep the result. Copy NonNull (it is
+        // trivially copyable, so this is cheap) and memset through the copy.
+        // Re-construct an Ok with the same pointer so we hand back exactly
+        // what `allocate` returned.
+        auto p = result.unwrap();
+        std::memset(p.as_ptr(), 0, layout.size);
+        return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Ok(p);
+    }
+    return result;
+}
+
+// Default `grow` body. Mirrors Rust's `Allocator::grow` default: allocate
+// the new size, copy bytes from the old buffer, deallocate the old buffer.
+// Preconditions (unchecked): new_layout.size >= old_layout.size, alignments
+// match. Callers are expected to honour Rust's unsafe contract.
+template<typename A>
+inline rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>
+grow_via(const A& a,
+         rusty::NonNull<std::uint8_t> ptr,
+         Layout old_layout,
+         Layout new_layout) {
+    auto result = a.allocate(new_layout);
+    if (result.is_err()) {
+        return result;
+    }
+    auto p = result.unwrap();
+    std::memcpy(p.as_ptr(), ptr.as_ptr(), old_layout.size);
+    a.deallocate(ptr, old_layout);
+    return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Ok(p);
+}
+
+// Default `grow_zeroed` body: like `grow_via`, then zero the tail. Mirrors
+// Rust's `Allocator::grow_zeroed` default.
+template<typename A>
+inline rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>
+grow_zeroed_via(const A& a,
+                rusty::NonNull<std::uint8_t> ptr,
+                Layout old_layout,
+                Layout new_layout) {
+    auto result = grow_via(a, ptr, old_layout, new_layout);
+    if (result.is_ok() && new_layout.size > old_layout.size) {
+        auto p = result.unwrap();
+        std::memset(p.as_ptr() + old_layout.size, 0, new_layout.size - old_layout.size);
+        return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Ok(p);
+    }
+    return result;
+}
+
+// Default `shrink` body. Mirrors Rust's `Allocator::shrink` default:
+// allocate the new (smaller) size, copy the kept prefix, deallocate the old.
+// Precondition (unchecked): new_layout.size <= old_layout.size.
+template<typename A>
+inline rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>
+shrink_via(const A& a,
+           rusty::NonNull<std::uint8_t> ptr,
+           Layout old_layout,
+           Layout new_layout) {
+    auto result = a.allocate(new_layout);
+    if (result.is_err()) {
+        return result;
+    }
+    auto p = result.unwrap();
+    std::memcpy(p.as_ptr(), ptr.as_ptr(), new_layout.size);
+    a.deallocate(ptr, old_layout);
+    return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Ok(p);
+}
 
 // Global — the default system allocator, satisfies Allocator.
 struct Global {
@@ -138,6 +271,14 @@ struct Global {
 
     rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>
     allocate(Layout layout) const {
+        // Rust's Allocator contract for ZSTs: return a dangling-but-aligned
+        // pointer, never call the underlying allocator. Matching that here
+        // makes `Box<()>` / `Vec<()>` work as expected and avoids passing
+        // `malloc(0)` (whose behaviour is implementation-defined).
+        if (layout.size == 0) {
+            return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Ok(
+                layout.dangling());
+        }
         std::uint8_t* mem = ::rusty::alloc::alloc(layout);
         if (mem == nullptr) {
             return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Err(AllocError{});
@@ -148,6 +289,10 @@ struct Global {
 
     rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>
     allocate_zeroed(Layout layout) const {
+        if (layout.size == 0) {
+            return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Ok(
+                layout.dangling());
+        }
         std::uint8_t* mem = ::rusty::alloc::alloc(layout);
         if (mem == nullptr) {
             return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Err(AllocError{});
@@ -158,7 +303,27 @@ struct Global {
     }
 
     void deallocate(rusty::NonNull<std::uint8_t> ptr, Layout layout) const noexcept {
+        // Mirror the ZST path on the deallocate side — `ptr` came from
+        // `Layout::dangling()` and was never malloc'd, so do nothing.
+        if (layout.size == 0) {
+            return;
+        }
         ::rusty::alloc::dealloc(ptr.as_ptr(), layout);
+    }
+
+    rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>
+    grow(rusty::NonNull<std::uint8_t> ptr, Layout old_layout, Layout new_layout) const {
+        return grow_via(*this, ptr, old_layout, new_layout);
+    }
+
+    rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>
+    grow_zeroed(rusty::NonNull<std::uint8_t> ptr, Layout old_layout, Layout new_layout) const {
+        return grow_zeroed_via(*this, ptr, old_layout, new_layout);
+    }
+
+    rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>
+    shrink(rusty::NonNull<std::uint8_t> ptr, Layout old_layout, Layout new_layout) const {
+        return shrink_via(*this, ptr, old_layout, new_layout);
     }
 };
 

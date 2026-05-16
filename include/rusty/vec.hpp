@@ -139,6 +139,28 @@ public:
         return Vec<T>();
     }
 
+    // Rust's `Vec::new_in(alloc)` — construct an empty Vec that will allocate
+    // through `alloc_inst` when it grows. Zero allocation until first push.
+    // @lifetime: owned
+    static Vec new_in(A alloc_inst) {
+        Vec v;
+        v.alloc_ = std::move(alloc_inst);
+        return v;
+    }
+
+    // Rust's `Vec::with_capacity_in(cap, alloc)` — pre-reserve `cap` slots
+    // through the supplied allocator.
+    // @lifetime: owned
+    static Vec with_capacity_in(size_t cap, A alloc_inst) {
+        Vec v;
+        v.alloc_ = std::move(alloc_inst);
+        if (cap > 0) {
+            v.data_ = v.allocate_storage(cap);
+            v.capacity_ = cap;
+        }
+        return v;
+    }
+
     // Unsafe constructor from raw parts.
     // Caller must guarantee `ptr` points to `cap` contiguous `T` slots with
     // the first `len` elements fully initialized and uniquely owned.
@@ -609,6 +631,10 @@ public:
     
     // Get size
     size_t len() const { return size_; }
+
+    // Access the stored allocator. Mirrors Rust's `Vec::allocator(&self) -> &A`.
+    // @lifetime: (&'a) -> &'a
+    const A& allocator() const noexcept { return alloc_; }
     size_t size() const { return size_; }
 
     // Unsafe-style length override (Rust Vec::set_len semantics).
