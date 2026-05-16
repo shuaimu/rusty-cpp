@@ -1,0 +1,147 @@
+# RustyCpp TODO
+
+Earlier history archived at `docs/TODO-archive.md`. Items in this file are
+the currently open work surface, grouped by the categorization done on
+the failing-test snapshot of 2026-05-16 (transpiler test count at that
+snapshot: 1160 pass / 361 fail).
+
+For each bucket: the symptom, the suspected root cause (where known),
+and an estimate of leverage (how many failing tests one fix would clear).
+
+---
+
+## High priority — high-leverage generic fixes
+
+- [ ] **A. Strip the leading `::` from `using` imports for already-`rusty::`/`std::`-qualified targets** (≈ 38 failing tests)
+  - Symptom: tests expect `using rusty::HashMap;` (or `using rusty::Vec;`,
+    `using rusty::io::SeekFrom;`, `using rusty::ptr::read;`, etc.); current
+    emit is `using ::rusty::HashMap;`.
+  - Root cause: `transpiler/src/codegen.rs:23715` (the
+    `"{}using ::{};"` format string used by
+    `resolve_crate_single_segment_type_import` and the matching block at
+    23951/23955 for `Cow_*` / `Either_*`).
+  - Suggested fix: when the resolved path already starts with a known
+    top-level namespace (`rusty::`, `std::`, `core::`, `alloc::`),
+    drop the leading `::`. Anchor at root only when emitting bare
+    identifiers that could otherwise resolve to a nested scope.
+  - Confidence: high — likely a one- or two-line change.
+
+- [ ] **B. impl-method dedup count tests** (8 failing tests)
+  - Affected: `test_leaf45_duplicate_method_signature_keeps_first`,
+    `test_leaf45_mapped_param_type_collision_is_deduped`,
+    `test_leaf45_methods_with_different_params_not_deduped`,
+    `test_leaf45_same_name_different_return_type_is_deduped`,
+    `test_leaf41542_merged_impl_assoc_items_are_deduplicated`,
+    `test_leaf41543333332_duplicate_forwarder_prefers_non_forwarding_impl_body`,
+    and 2 more.
+  - Symptom: `assert_eq!(out.matches(X).count(), 1)` shapes failing with
+    `left: 0 right: 1` (or similar). The expected method emission isn't
+    happening at all.
+  - Suggested fix: investigate the impl-method dedup / merge pass — one
+    bug likely causes the whole cluster.
+  - Confidence: high (single root cause likely).
+
+- [ ] **C. `Option::unwrap()` on `None` panics in inline-module impl merging** (4 failing tests, 4 real crashes)
+  - Affected: `test_inline_mod_enum_impl_methods_merged_into_wrapper`,
+    `test_inline_mod_impl_methods_merged_into_struct`, plus 2 in the
+    `test_leaf10541_*` family.
+  - Location: `transpiler/src/codegen.rs:107796` and `107820` (the
+    `Option::unwrap()` calls in the impl-merge pass).
+  - Suggested fix: replace the bare `unwrap()` with the proper
+    `Some(...)` handling for the missing-binding case.
+  - Confidence: high — surfaced by panic stacktrace.
+
+---
+
+## Medium priority — likely single-cause clusters
+
+- [ ] **D. Pattern-binding lowering naming** (≈ 16 failing tests)
+  - Affected: tests asserting specific temporary names
+    (`_iflet_payload`, `_whilelet_payload`, `_match_value`, `_mv0.field`,
+    `_iflet_scrutinee`).
+  - Symptom: codegen emits semantically equivalent shapes with different
+    identifier names than the tests assert.
+  - Suggested fix: walk through one failing test (e.g.
+    `test_leaf10527_if_let_tuple_payload_binding_is_preserved_in_statement_lowering`),
+    determine whether codegen or test is canonical, then propagate.
+  - Confidence: medium — could be 1 cause or several closely-related ones.
+
+- [ ] **E. Inferred turbofish payload specialization** (≈ 7 failing tests)
+  - Affected: `test_leaf10536_call_arg_expected_types_specialize_from_*`,
+    `test_leaf5100100_lazy_new_omitted_owner_uses_auto_placeholder`,
+    `test_leaf5100100_oncecell_new_uses_binary_peer_expected_type`.
+  - Symptom: panic messages say "expected Some payload specialization,
+    got: …" — type inference for omitted constructor turbofish.
+  - Root cause hint: `infer_constructor_call_expected_owner_inner_type`
+    likely.
+  - Confidence: medium.
+
+- [ ] **F. Interface+adapter completion gaps** (3 failing tests, real codegen bugs)
+  - `test_interface_traits_default_method_emitted_as_non_pure_virtual`:
+    default trait methods (with body in Rust) currently emit as pure
+    virtual (`= 0;`). Should emit as non-pure virtual with body so an
+    Adapter can either inherit or override.
+  - `test_interface_traits_generic_impl_emits_specialization_with_trait_args`:
+    `impl Container<i32> for IntBag` should generate
+    `class ContainerAdapter<int32_t, IntBag> final : public Container<int32_t>`
+    plus its `Ref`/`RefMut` flavors. Currently only the primary template
+    forward decls are emitted; the specialization is skipped with a
+    `// TODO(interface_traits): … generic — Adapter specializations
+    require partial-spec template headers, not yet emitted` comment
+    (transpiler/src/codegen.rs:21485).
+  - Default method emission: the codegen path skips trait methods that
+    have bodies; needs a new branch that emits the body as a
+    non-pure-virtual member.
+  - Confidence: medium — both have explicit TODOs in the codegen.
+
+---
+
+## Medium-low priority — small per-helper fixes
+
+- [ ] **G. Rusty runtime helper call sites** (≈ 19 failing tests, several sub-fixes)
+  - Tests expect specific runtime helpers to be emitted by name:
+    `rusty::filter_map(values, …)`, `rusty::slice_full(var)`,
+    `rusty::ptr::copy(…)`, `rusty::to_string(…)`, `rusty::checked_add(…)`,
+    `rusty::iter(…)`. Each helper is a separate codegen routing path —
+    these are 4-6 small fixes, not a single generic fix.
+
+- [ ] **H. Closure body / return-expression text** (≈ 12 failing tests)
+  - Tests expect bare `return a + b;` / `return x + 1;` shapes; codegen
+    likely wraps closure bodies in IIFE form. May be 1-2 root causes.
+
+- [ ] **I. Format-string emission** (≈ 5 failing tests)
+  - `std::format("{0}.{1}", ...)` / `std::format("{0:>4}", ...)` —
+    format-spec ordering / argument wrapping issues.
+
+- [ ] **J. Async tail co_return** (≈ 3 failing tests)
+  - `test_async_explicit_return`, `test_async_tail_co_return`, etc.
+    Tail-co_return statement omitted in async lowering.
+
+- [ ] **K. Control-flow whitespace** (≈ 6 failing tests)
+  - `if (x > 0) {` shape vs alternative spacing. Likely a single
+    emit-format change.
+
+---
+
+## Low priority — long tail
+
+- [ ] **L. ~240 long-tail single-test failures**
+  - The remaining failures are spread across `leaf41*`, `leaf42*`,
+    `leaf45*`, `leaf51*`, `leaf52*`, etc. Each leaf test pins a very
+    specific corner case. They don't share enough structure for a single
+    generic fix — each is its own small investigation. Tackle by
+    priority of the underlying feature, not by test count.
+
+---
+
+## Notes
+
+- The 16 "OLD pro::proxy" tests and the 5 `_flag_off_*` interface-traits
+  tests were deleted in commit 7b0c84f (May 2026) because the Pro path
+  was removed in commit 90520f8 and the flag is now hardcoded `true`.
+  See `docs/TODO-archive.md` for the historical state.
+- Snapshot data and bucket analysis: see the conversation transcript
+  for May 16, 2026 in
+  `/home/users/shuai/.claude/projects/-home-users-shuai-rusty-cpp/`
+  (the per-test assertion text and per-bucket counts were extracted
+  from `/tmp/full_test_log.txt` during that session).
