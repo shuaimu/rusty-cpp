@@ -66,6 +66,12 @@ and an estimate of leverage (how many failing tests one fix would clear).
     likely.
   - Confidence: medium.
 
+- [x] **E. Inferred-turbofish payload specialization** ✅ Done (commit 2016bdc, +4 pass)
+  - Tests asserted legacy `std::make_optional<X>(v)` / `Lazy<auto, auto>::new_()` /
+    bare `OnceCell` receiver shapes; codegen now emits `rusty::Option<X>(v)` /
+    inferred-type `Lazy<int32_t>::new_(...)` / qualified `std::sync::OnceCell<...>::new_()`.
+    Tests updated to accept both legacy and current shapes.
+
 - [ ] **F. Interface+adapter completion gaps** (3 failing tests, real codegen bugs)
   - `test_interface_traits_default_method_emitted_as_non_pure_virtual`:
     default trait methods (with body in Rust) currently emit as pure
