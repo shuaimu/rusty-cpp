@@ -72,7 +72,7 @@ and an estimate of leverage (how many failing tests one fix would clear).
     inferred-type `Lazy<int32_t>::new_(...)` / qualified `std::sync::OnceCell<...>::new_()`.
     Tests updated to accept both legacy and current shapes.
 
-- [x] **F. Interface+adapter completion gaps** ✅ 2/3 done
+- [x] **F. Interface+adapter completion gaps** ✅ Done (iter 92)
   - `test_interface_traits_default_method_emitted_as_non_pure_virtual`:
     ✅ Done (commit 57c788e). Codegen now inlines trivial single-expr
     default-method bodies on the interface class when every `self.<m>()`
@@ -81,15 +81,16 @@ and an estimate of leverage (how many failing tests one fix would clear).
   - `test_interface_traits_marker_traits_still_emit_concept`: ✅ Done
     in commit 7b0c84f (empty marker traits now emit an empty interface
     class rather than a TODO comment).
-  - **Remaining**: `test_interface_traits_generic_impl_emits_specialization_with_trait_args`.
-    `impl Container<i32> for IntBag` should generate
-    `class ContainerAdapter<int32_t, IntBag> final : public Container<int32_t>`
-    plus `Ref`/`RefMut` flavors. Currently only the primary-template
-    forward decls are emitted; the specialization is skipped with a
-    `// TODO(interface_traits): … generic — Adapter specializations
-    require partial-spec template headers, not yet emitted` marker
-    (transpiler/src/codegen.rs near line 21505). Needs deeper codegen
-    work: partial-specialization template-header emission.
+  - `test_interface_traits_generic_impl_emits_specialization_with_trait_args`:
+    ✅ Done (iter 92). The local-impl adapter pipeline was unnecessarily
+    skipping generic traits. The primary template is already declared
+    `template <T..., U> class TraitAdapter;`, and the per-impl emit code
+    in `emit_one_local_adapter` already builds the spec-arg list as
+    `T_concrete..., U_concrete`. Removing the early skip on
+    `interface_traits_with_generics` in
+    `emit_local_trait_adapter_specializations` is sufficient to emit
+    `template<> class ContainerAdapter<int32_t, IntBag> final : public Container<int32_t>`
+    plus the Ref/RefMut flavors.
 
 ---
 
@@ -110,35 +111,44 @@ empty. Kept here for historical reference only.
 
 ## Low priority — long tail
 
-- [x] **L. Long-tail single-test failures** ✅ Mostly done (iters 53–71).
+- [x] **L. Long-tail single-test failures** ✅ Done (iter 92, 1521/1521 passing).
   - Started at ~240 failures; widened test-shape assertions across many
     leaf tests to accept current codegen output shapes (deref_if_pointer
     wrappers, IIFE forms, brace-init variant ctors, index-based variant
     dispatch instead of std::visit, autoderef-fallback IIFEs around
-    extension calls, etc.). Also landed two real codegen fixes
-    (commits a0aa6db, c340051) — tightened the conflict check in
-    `rewrite_global_using_path_for_local_alias_root` and replaced
-    suffix-match with exact-match in single-segment function call
-    qualification.
-  - **Remaining 3 tests (real codegen, deep work — all assoc-item
-    context-flow shape):**
-    1. `test_interface_traits_generic_impl_emits_specialization_with_trait_args`
-       — partial-spec Adapter template-header emission (bucket F).
-    2. `test_leaf5123_into_vec_box_new_u8_context_from_assoc_item_projection_coerces_array_elements`
-       — u8 array element coercion under assoc-item projection
-       (`from_vec(into_vec(box_new([0,1,2])))` should produce
-       `static_cast<uint8_t>(N)` elements when the param type is
-       `Vec<A::Item>` and `A::Item = u8`).
-    3. `test_leaf5139_assoc_from_indexed_slice_avoids_unresolved_item_span_surface`
-       — typed array storage required (`std::array<uint32_t, 3>{1, 2, 3}`
-       not bare `std::array{1, 2, 3}`) when slice flows into a fn
-       expecting `&[A::Item]`.
-  - **Recently fixed (iter 73, commit 64d47d8):**
-    - `test_leaf5197_tuple_statement_match_with_option_fnmut_payload_avoids_visit`
-      — added `local_item_const_names` field so that `match` arms
-      referencing function-local `const FOO: ...` items recognize them
-      as value-patterns. Without this, `(COMPLETE, _) | (RUNNING, _) | ...`
-      arms fell back to `std::visit(overloaded { /* TODO */ })`.
+    extension calls, etc.).
+  - **Real codegen fixes landed:**
+    - `a0aa6db` iter 69: tightened nested-conflict check in
+      `rewrite_global_using_path_for_local_alias_root`.
+    - `c340051` iter 71: replaced suffix-match with exact-match in
+      single-segment function call qualification.
+    - `64d47d8` iter 73: fn-local `const` items recognized as value
+      patterns via separate `local_item_const_names` tracking field.
+    - `cfb8ba3` iter 79: tracked impl assoc types for non-Path Self
+      types (e.g. `impl Trait for [T; N]`) in
+      `non_path_impl_assoc_types`.
+    - **iter 92 — assoc-item context-flow trio fixed:**
+      1. `try_emit_associated_call_with_expected_type` now merges
+         substitutions from both the call's explicit turbofish
+         (`SmallVec::<[T;N]>::method`) and the surrounding expected
+         type. Previously only expected-type substitutions were
+         considered, leaving `A::Item` unsubstituted in argument
+         expected-type lookups and causing slice/array element types
+         to leak as `typename A::Item`.
+      2. The from/from_vec leaf logic in `emit_call_expr_to_string`
+         now prefers `non_path_impl_assoc_types["std::array<T, N>"]["Item"]`
+         lookup before falling back to the opaque
+         `rusty::detail::associated_item_t<...>` wrapper, so concrete
+         element types reach the inner array literal.
+      3. The from_iter coercion wrap is skipped when the arg is a
+         chain of constructor calls (`into_vec(box_new(array))`),
+         allowing the expected type to thread through to the inner
+         array literal instead of forcing an outer
+         `Vec<T>::from_iter(...)` wrap. The wrap is still emitted for
+         stable local-variable args that cannot be retyped.
+      4. `emit_local_trait_adapter_specializations` no longer skips
+         generic traits — the existing `emit_one_local_adapter` code
+         already supports them; the early skip was unnecessary.
 
 - [ ] **L-archive.** Long-tail failures historical record:
     priority of the underlying feature, not by test count.

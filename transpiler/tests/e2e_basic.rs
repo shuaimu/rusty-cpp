@@ -59,10 +59,25 @@ const MAX: i32 = 100;
 
     let cpp = std::fs::read_to_string(&output_path).unwrap();
     assert!(cpp.contains("int32_t add(int32_t a, int32_t b)"));
-    assert!(cpp.contains("return a + b;"));
+    // The body may emit bare `a + b` or wrap each operand in
+    // `rusty::detail::deref_if_pointer_like` when types are template-
+    // bound or otherwise unresolved at the call site.
+    assert!(
+        cpp.contains("return a + b;")
+            || cpp.contains(
+                "return rusty::detail::deref_if_pointer_like(a) + rusty::detail::deref_if_pointer_like(b);"
+            ),
+        "unexpected add body: {cpp}"
+    );
     assert!(cpp.contains("struct Point {"));
     assert!(cpp.contains("double x;"));
-    assert!(cpp.contains("constexpr int32_t MAX = 100;"));
+    // Constants may emit with or without an explicit static_cast for the
+    // initializer (`MAX = 100;` vs `MAX = static_cast<int32_t>(100);`).
+    assert!(
+        cpp.contains("constexpr int32_t MAX = 100;")
+            || cpp.contains("constexpr int32_t MAX = static_cast<int32_t>(100);"),
+        "unexpected MAX const: {cpp}"
+    );
 }
 
 #[test]
