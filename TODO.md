@@ -93,30 +93,18 @@ and an estimate of leverage (how many failing tests one fix would clear).
 
 ---
 
-## Medium-low priority — small per-helper fixes
+## Medium-low priority — small per-helper fixes (STALE — see note below)
 
-- [ ] **G. Rusty runtime helper call sites** (≈ 19 failing tests, several sub-fixes)
-  - Tests expect specific runtime helpers to be emitted by name:
-    `rusty::filter_map(values, …)`, `rusty::slice_full(var)`,
-    `rusty::ptr::copy(…)`, `rusty::to_string(…)`, `rusty::checked_add(…)`,
-    `rusty::iter(…)`. Each helper is a separate codegen routing path —
-    these are 4-6 small fixes, not a single generic fix.
+NOTE: Buckets G–K were sized from the 2026-05-16 snapshot (~361 failures).
+After iters 53–72 the failure count dropped to 4; none of the remaining
+failures match these bucket descriptions, so the buckets are effectively
+empty. Kept here for historical reference only.
 
-- [ ] **H. Closure body / return-expression text** (≈ 12 failing tests)
-  - Tests expect bare `return a + b;` / `return x + 1;` shapes; codegen
-    likely wraps closure bodies in IIFE form. May be 1-2 root causes.
-
-- [ ] **I. Format-string emission** (≈ 5 failing tests)
-  - `std::format("{0}.{1}", ...)` / `std::format("{0:>4}", ...)` —
-    format-spec ordering / argument wrapping issues.
-
-- [ ] **J. Async tail co_return** (≈ 3 failing tests)
-  - `test_async_explicit_return`, `test_async_tail_co_return`, etc.
-    Tail-co_return statement omitted in async lowering.
-
-- [ ] **K. Control-flow whitespace** (≈ 6 failing tests)
-  - `if (x > 0) {` shape vs alternative spacing. Likely a single
-    emit-format change.
+- [x] **G. Rusty runtime helper call sites** — no remaining failures.
+- [x] **H. Closure body / return-expression text** — no remaining failures.
+- [x] **I. Format-string emission** — no remaining failures.
+- [x] **J. Async tail co_return** — no remaining failures.
+- [x] **K. Control-flow whitespace** — no remaining failures.
 
 ---
 
@@ -132,7 +120,8 @@ and an estimate of leverage (how many failing tests one fix would clear).
     `rewrite_global_using_path_for_local_alias_root` and replaced
     suffix-match with exact-match in single-segment function call
     qualification.
-  - **Remaining 4 tests (real codegen, deep work):**
+  - **Remaining 3 tests (real codegen, deep work — all assoc-item
+    context-flow shape):**
     1. `test_interface_traits_generic_impl_emits_specialization_with_trait_args`
        — partial-spec Adapter template-header emission (bucket F).
     2. `test_leaf5123_into_vec_box_new_u8_context_from_assoc_item_projection_coerces_array_elements`
@@ -144,11 +133,12 @@ and an estimate of leverage (how many failing tests one fix would clear).
        — typed array storage required (`std::array<uint32_t, 3>{1, 2, 3}`
        not bare `std::array{1, 2, 3}`) when slice flows into a fn
        expecting `&[A::Item]`.
-    4. `test_leaf5197_tuple_statement_match_with_option_fnmut_payload_avoids_visit`
-       — `match (curr_state, &mut init) { (CONST, Some(init)) => ... }`
-       falls back to `std::visit(overloaded {})` with TODO unhandled
-       lambdas; runtime-match lowering needs to handle the const-value
-       + Option-pattern + OR tuple pattern combination.
+  - **Recently fixed (iter 73, commit 64d47d8):**
+    - `test_leaf5197_tuple_statement_match_with_option_fnmut_payload_avoids_visit`
+      — added `local_item_const_names` field so that `match` arms
+      referencing function-local `const FOO: ...` items recognize them
+      as value-patterns. Without this, `(COMPLETE, _) | (RUNNING, _) | ...`
+      arms fell back to `std::visit(overloaded { /* TODO */ })`.
 
 - [ ] **L-archive.** Long-tail failures historical record:
     priority of the underlying feature, not by test count.
