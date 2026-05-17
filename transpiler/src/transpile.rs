@@ -1526,9 +1526,26 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.contains("int32_t add(int32_t a, int32_t b)"));
-        assert!(output.contains("return a + b;"));
+        // Operands may be bare or wrapped via `rusty::detail::deref_if_pointer_like`.
+        assert!(
+            output.contains("return a + b;")
+                || output.contains(
+                    "return rusty::detail::deref_if_pointer_like(a) + rusty::detail::deref_if_pointer_like(b);"
+                ),
+            "{output}"
+        );
         assert!(output.contains("void main()"));
-        assert!(output.contains("add(1, 2)"));
+        // Call site may be unqualified `add(...)` or globally anchored
+        // `::add(...)`, and integer literals may be wrapped in static_cast.
+        assert!(
+            output.contains("add(1, 2)")
+                || output.contains("::add(1, 2)")
+                || output
+                    .contains("::add(static_cast<int32_t>(1), static_cast<int32_t>(2))")
+                || output
+                    .contains("add(static_cast<int32_t>(1), static_cast<int32_t>(2))"),
+            "{output}"
+        );
     }
 
     #[test]
