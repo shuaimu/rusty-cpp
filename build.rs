@@ -30,14 +30,30 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=clang");
         }
         "linux" => {
-            // Common Linux LLVM paths
-            let llvm_paths = vec![
-                "/usr/lib/llvm-14/lib",
-                "/usr/lib/llvm-13/lib",
-                "/usr/lib/llvm-12/lib",
-                "/usr/lib/x86_64-linux-gnu",
-                "/usr/local/lib",
-            ];
+            // Prefer LIBCLANG_PATH when set (standard clang-sys convention).
+            // The hardcoded fallback list trails behind so out-of-tree LLVM
+            // installs (Homebrew/Linuxbrew, custom builds at $HOME/...) win
+            // over a stale /usr/lib/llvm-N that ships an older libclang
+            // missing symbols (e.g. clang_CXXMethod_isDeleted needs LLVM 16+).
+            let mut llvm_paths: Vec<String> = Vec::new();
+            if let Ok(libclang_path) = env::var("LIBCLANG_PATH") {
+                llvm_paths.push(libclang_path);
+            }
+            llvm_paths.extend([
+                "/home/linuxbrew/.linuxbrew/opt/llvm/lib".to_string(),
+                "/usr/lib/llvm-22/lib".to_string(),
+                "/usr/lib/llvm-21/lib".to_string(),
+                "/usr/lib/llvm-20/lib".to_string(),
+                "/usr/lib/llvm-19/lib".to_string(),
+                "/usr/lib/llvm-18/lib".to_string(),
+                "/usr/lib/llvm-17/lib".to_string(),
+                "/usr/lib/llvm-16/lib".to_string(),
+                "/usr/lib/llvm-14/lib".to_string(),
+                "/usr/lib/llvm-13/lib".to_string(),
+                "/usr/lib/llvm-12/lib".to_string(),
+                "/usr/lib/x86_64-linux-gnu".to_string(),
+                "/usr/local/lib".to_string(),
+            ]);
 
             for path in &llvm_paths {
                 if Path::new(path).exists() {

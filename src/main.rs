@@ -134,6 +134,20 @@ fn analyze_file(
     // Auto-detect C++ standard library paths from clang installation when needed.
     if should_auto_detect_clang_includes {
         all_include_paths.extend(extract_include_paths_from_clang());
+    } else {
+        // Even when compile_commands.json owns the STL paths (libc++ / module
+        // builds), libclang needs to know where its builtin resource directory
+        // lives (for `stddef.h`, `stdarg.h`, intrinsics, etc.) so the
+        // wrapper-header dance with libc++ works. Use `-resource-dir=...`
+        // rather than `-I<resource-dir>/include` — passing the dir as a
+        // regular `-I` puts it ahead of libc++ on the search path and breaks
+        // `__has_include_next` patterns in libc++'s wrappers. With
+        // `-resource-dir=`, libclang slots the builtin headers into the
+        // canonical `-isystem` position and the libc++ wrappers resolve
+        // correctly.
+        if let Some(dir) = find_libclang_resource_root() {
+            extra_clang_args.push(format!("-resource-dir={}", dir.display()));
+        }
     }
 
     // Parse included headers for lifetime annotations
@@ -590,6 +604,41 @@ fn extract_compile_config_from_tokens(
                 }
             }
             i += 1;
+        } else if token.starts_with("-D") || token.starts_with("-U") {
+            // Preprocessor define/undefine. Source code often guards on these
+            // (e.g. -DCONFIG_H="..."), so dropping them silently leads to
+            // hard-to-diagnose parse failures.
+            config.clang_args.push(token.to_string());
+            i += 1;
+        } else if token == "-D" || token == "-U" {
+            // Two-token form: -D NAME, -U NAME.
+            if i + 1 < tokens.len() {
+                config.clang_args.push(token.to_string());
+                config.clang_args.push(tokens[i + 1].clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if token.starts_with("-m") || token.starts_with("-march") {
+            // Target / codegen feature flags (-march=native, -mtune=skylake,
+            // -mmmx, -msse4.2, -mavx2, etc.). Without these, clang's bundled
+            // intrinsic headers (mmintrin.h, emmintrin.h, ...) fail to declare
+            // `__builtin_ia32_*` builtins, surfacing as a flood of
+            // "use of undeclared identifier" errors when libc++ headers pull
+            // them in.
+            config.clang_args.push(token.to_string());
+            i += 1;
+        } else if token.starts_with("-f") {
+            // Generic -f flags (e.g. -fno-omit-frame-pointer, -fexceptions).
+            // These rarely break parsing and often gate language behaviour.
+            config.clang_args.push(token.to_string());
+            i += 1;
+        } else if token.starts_with("-O") || token == "-g" || token.starts_with("-g") {
+            // Optimization / debug flags — harmless for parsing, occasionally
+            // affect preprocessor behaviour (NDEBUG via -O passes is rare but
+            // -DNDEBUG itself is in the -D list above).
+            config.clang_args.push(token.to_string());
+            i += 1;
         } else {
             i += 1;
         }
@@ -645,6 +694,41 @@ fn extract_include_paths_from_env() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+/// Return the **root** of the clang resource directory (e.g.
+/// `/path/to/lib/clang/22`) — NOT the `include` subdirectory inside it.
+/// Pass this to libclang via `-resource-dir=...` so it can locate builtin
+/// headers AND wire up the libc++ wrapper-header dance via `__has_include_next`.
+/// Passing the `include` subdir as a plain `-I` does not work for the latter.
+fn find_libclang_resource_root() -> Option<PathBuf> {
+    // Drop the trailing /include from find_libclang_resource_include() if present.
+    if let Some(include_dir) = find_libclang_resource_include() {
+        if include_dir.ends_with("include") {
+            if let Some(parent) = include_dir.parent() {
+                return Some(parent.to_path_buf());
+            }
+        }
+        return Some(include_dir);
+    }
+
+    // Fallback: ask whatever clang is on PATH (or the one clang_sys found).
+    if let Some(clang) = Clang::find(None, &[]) {
+        if let Ok(output) = std::process::Command::new(&clang.path)
+            .arg("-print-resource-dir")
+            .output()
+        {
+            if output.status.success() {
+                let resource_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let root = PathBuf::from(&resource_dir);
+                if root.exists() {
+                    return Some(root);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Extract C++ standard library include paths using clang_sys

@@ -139,6 +139,12 @@ pub fn parse_cpp_file_with_includes_defines_and_args(
         "-Wno-everything".to_string(),
         // Don't fail on missing includes
         "-Wno-error".to_string(),
+        // Don't abort on "too many errors": large module-consuming TUs can
+        // accumulate hundreds of non-fatal libc++ vs. `import std;`
+        // duplicate-decl complaints. We still want a usable AST for borrow
+        // analysis, and the harness above (`is_module_resolution_fatal`)
+        // already filters truly fatal issues.
+        "-ferror-limit=0".to_string(),
     ];
 
     // Add extra compile flags (for example module flags extracted from compile_commands.json).
