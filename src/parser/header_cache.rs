@@ -232,6 +232,86 @@ impl HeaderCache {
             }
         }
 
+        // Process C++23 named-module imports. Each `import X.Y.Z;` is resolved
+        // to the project source file that declares `export module X.Y.Z;`,
+        // then parsed for safety annotations (text pre-pass only — LibClang
+        // can't parse module units without the full module-graph setup).
+        for module_name in extract_module_imports(&content) {
+            if let Some(resolved) = self.resolve_module_import(&module_name) {
+                self.parse_module_source_for_annotations(&resolved)?;
+            } else {
+                debug_println!(
+                    "DEBUG HEADER: Could not resolve module import '{}' to a source file",
+                    module_name
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Locate the project source file that declares `export module <name>;`.
+    /// Searches include paths (and their subdirectories) for files whose last
+    /// path component matches the module name's last segment, then verifies
+    /// the file's `export module ...;` declaration matches the full name.
+    fn resolve_module_import(&self, module_name: &str) -> Option<PathBuf> {
+        // The convention `rrr.foo` maps roughly to `<root>/.../foo.{cpp,cppm,...}`.
+        let last_segment = module_name.split('.').last()?;
+        let extensions = ["cpp", "cppm", "cc", "cxx", "ixx"];
+
+        for include_dir in &self.include_paths {
+            for ext in &extensions {
+                let filename = format!("{}.{}", last_segment, ext);
+                if let Some(found) = find_file_recursive(include_dir, &filename, 5) {
+                    if module_declaration_matches(&found, module_name) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Lightweight annotation-only parse for a C++23 module source unit.
+    /// Skips LibClang (which would fail without the full module graph) and
+    /// runs only the text-based safety-annotation pre-pass, qualifying the
+    /// resulting names against namespace context.
+    fn parse_module_source_for_annotations(&mut self, module_path: &Path) -> Result<(), String> {
+        if self.processed_headers.iter().any(|p| p == module_path) {
+            return Ok(());
+        }
+        self.processed_headers.push(module_path.to_path_buf());
+
+        debug_println!(
+            "DEBUG HEADER: Parsing module source for annotations: {}",
+            module_path.display()
+        );
+
+        if let Ok(ctx) = super::safety_annotations::parse_safety_annotations(module_path) {
+            for (func_sig, safety_mode) in &ctx.function_overrides {
+                debug_println!(
+                    "DEBUG HEADER: Module annotation '{}': {:?}",
+                    func_sig.name,
+                    safety_mode
+                );
+                self.safety_annotations
+                    .insert(func_sig.name.clone(), *safety_mode);
+            }
+        }
+
+        // Also parse external annotations from the module source.
+        if let Ok(content) = fs::read_to_string(module_path) {
+            let _ = self.external_annotations.parse_content(&content);
+
+            // Recursively chase imports.
+            for nested in extract_module_imports(&content) {
+                if let Some(resolved) = self.resolve_module_import(&nested) {
+                    self.parse_module_source_for_annotations(&resolved)?;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -408,6 +488,60 @@ impl HeaderCache {
 }
 
 /// Extract include paths from C++ source, separating quoted and angle bracket includes
+/// Walk `root` up to `max_depth` levels, returning the first file whose final
+/// path component equals `filename`. Cheap depth-limited search used to map
+/// `import X.foo;` → `<somewhere>/foo.cpp` without indexing the whole tree.
+fn find_file_recursive(root: &Path, filename: &str, max_depth: usize) -> Option<PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+    let direct = root.join(filename);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    if max_depth == 0 {
+        return None;
+    }
+    let entries = fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Skip hidden/build directories — common noise that would otherwise
+        // dominate the search (.git, build/, target/).
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with('.') || name == "build" || name == "target" {
+                continue;
+            }
+        }
+        if path.is_dir() {
+            if let Some(found) = find_file_recursive(&path, filename, max_depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Return true if the file's first ~60 lines contain
+/// `export module <module_name>;` (whitespace-tolerant, comment-tolerant).
+fn module_declaration_matches(file: &Path, module_name: &str) -> bool {
+    use std::io::{BufRead, BufReader};
+    let Ok(handle) = fs::File::open(file) else {
+        return false;
+    };
+    let reader = BufReader::new(handle);
+    let target = format!("export module {};", module_name);
+    for (i, line) in reader.lines().enumerate() {
+        if i >= 60 {
+            break;
+        }
+        let Ok(line) = line else { return false };
+        if line.contains(&target) {
+            return true;
+        }
+    }
+    false
+}
+
 fn extract_includes(content: &str) -> (Vec<String>, Vec<String>) {
     let mut quoted_includes = Vec::new();
     let mut angle_includes = Vec::new();
@@ -429,6 +563,31 @@ fn extract_includes(content: &str) -> (Vec<String>, Vec<String>) {
     }
 
     (quoted_includes, angle_includes)
+}
+
+/// Extract C++23 module imports of the form `import X.Y.Z;` from a source file.
+/// Returns the module names. Skips `import std;` (no project source to chase),
+/// `import std.compat;`, header-unit imports (`import <foo>;`,
+/// `import "foo";`), and partition imports (`import :part;`).
+fn extract_module_imports(content: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+    // `import` must be at the start of a logical line (allow leading whitespace).
+    // The dotted module name uses [a-zA-Z_][a-zA-Z_0-9]* segments joined by '.'.
+    // Reject header-unit forms (next non-space char after `import` is `<` or `"`)
+    // and partition forms (`import :name;`).
+    let re = Regex::new(r"(?m)^\s*import\s+([a-zA-Z_][a-zA-Z_0-9.]*)\s*;").unwrap();
+    for cap in re.captures_iter(content) {
+        if let Some(name) = cap.get(1) {
+            let n = name.as_str();
+            // Skip standard library module — analyzed independently as a BMI
+            // via `-fmodule-file=std=...`, not as project source.
+            if n == "std" || n.starts_with("std.") {
+                continue;
+            }
+            imports.push(n.to_string());
+        }
+    }
+    imports
 }
 
 #[cfg(test)]
