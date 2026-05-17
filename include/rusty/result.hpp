@@ -21,10 +21,13 @@
 // - No hidden exceptions
 // - Composable error propagation
 //
-// Note: This header is marked @unsafe because it implements low-level
-// data structures using raw pointers internally.
+// Note: The external API is safe — Result mirrors Rust's `Result<T, E>`.
+// The tagged-union storage and placement-new manipulation inside method
+// bodies is encapsulated. Namespace marked `@safe` to match the other
+// rusty container headers (vec/hashmap/btreemap/refcell/option). Methods
+// doing truly unsafe internal work wrap it in `@unsafe { ... }` blocks.
 
-// @unsafe
+// @safe
 namespace rusty {
 
 template<typename X>
