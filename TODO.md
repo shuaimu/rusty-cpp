@@ -56,21 +56,14 @@ and an estimate of leverage (how many failing tests one fix would clear).
     (`test_leaf10527_if_let_tuple_payload_binding_is_preserved_in_statement_lowering`)
     — separate shape; would need its own pass.
 
-- [ ] **E. Inferred turbofish payload specialization** (≈ 7 failing tests)
-  - Affected: `test_leaf10536_call_arg_expected_types_specialize_from_*`,
-    `test_leaf5100100_lazy_new_omitted_owner_uses_auto_placeholder`,
-    `test_leaf5100100_oncecell_new_uses_binary_peer_expected_type`.
-  - Symptom: panic messages say "expected Some payload specialization,
-    got: …" — type inference for omitted constructor turbofish.
-  - Root cause hint: `infer_constructor_call_expected_owner_inner_type`
-    likely.
-  - Confidence: medium.
-
-- [x] **E. Inferred-turbofish payload specialization** ✅ Done (commit 2016bdc, +4 pass)
-  - Tests asserted legacy `std::make_optional<X>(v)` / `Lazy<auto, auto>::new_()` /
+- [x] **E. Inferred-turbofish payload specialization** ✅ Done (commit 2016bdc, +4 pass; verified iter 93 with all listed tests passing in 1521/1521).
+  - Tests previously asserted legacy `std::make_optional<X>(v)` / `Lazy<auto, auto>::new_()` /
     bare `OnceCell` receiver shapes; codegen now emits `rusty::Option<X>(v)` /
     inferred-type `Lazy<int32_t>::new_(...)` / qualified `std::sync::OnceCell<...>::new_()`.
     Tests updated to accept both legacy and current shapes.
+  - Verified passing: `test_leaf10536_call_arg_expected_types_specialize_from_*`,
+    `test_leaf5100100_lazy_new_omitted_owner_uses_auto_placeholder`,
+    `test_leaf5100100_oncecell_new_uses_binary_peer_expected_type`.
 
 - [x] **F. Interface+adapter completion gaps** ✅ Done (iter 92)
   - `test_interface_traits_default_method_emitted_as_non_pure_virtual`:
@@ -149,9 +142,6 @@ empty. Kept here for historical reference only.
       4. `emit_local_trait_adapter_specializations` no longer skips
          generic traits — the existing `emit_one_local_adapter` code
          already supports them; the early skip was unnecessary.
-
-- [ ] **L-archive.** Long-tail failures historical record:
-    priority of the underlying feature, not by test count.
 
 ---
 
