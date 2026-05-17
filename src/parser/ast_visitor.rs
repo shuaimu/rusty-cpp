@@ -189,39 +189,49 @@ fn check_for_unsafe_annotation(entity: &Entity) -> bool {
     };
 
     let reader = BufReader::new(file_handle);
-    let mut current_line = 0;
-    let mut prev_line = String::new();
+    // Collect all lines up to (but not including) the block's line. We need
+    // to scan upward through the contiguous comment block immediately above
+    // the `{`, because users commonly write multi-line annotations like:
+    //   // @unsafe - long description that
+    //   // continues across several lines
+    //   {
+    //     ...
+    //   }
+    // The old single-line check only saw `// continues across several lines`
+    // and missed the annotation.
+    let mut preceding: Vec<String> = Vec::with_capacity(block_line.saturating_sub(1));
+    for (idx, line_result) in reader.lines().enumerate() {
+        let current_line = idx + 1;
+        if current_line >= block_line {
+            break;
+        }
+        match line_result {
+            Ok(l) => preceding.push(l),
+            Err(_) => preceding.push(String::new()),
+        }
+    }
 
-    for line_result in reader.lines() {
-        current_line += 1;
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        // Check if we're at the block's line
-        if current_line == block_line {
-            // Check the previous line for @unsafe annotation
-            let trimmed = prev_line.trim();
-            if trimmed.starts_with("//") && trimmed.contains("@unsafe") {
-                debug_println!(
-                    "DEBUG UNSAFE: Found @unsafe annotation for block at line {}",
-                    block_line
-                );
-                return true;
-            }
-            // Also check for /* @unsafe */ style comments
-            if trimmed.contains("/*") && trimmed.contains("@unsafe") && trimmed.contains("*/") {
-                debug_println!(
-                    "DEBUG UNSAFE: Found @unsafe annotation for block at line {}",
-                    block_line
-                );
-                return true;
-            }
+    // Walk back through the contiguous comment block that precedes the
+    // brace. Stop at the first blank line OR the first non-comment line.
+    for line in preceding.iter().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             return false;
         }
-
-        prev_line = line;
+        let is_line_comment = trimmed.starts_with("//");
+        let is_block_comment_single_line =
+            trimmed.contains("/*") && trimmed.contains("*/");
+        let is_block_comment_open = trimmed.starts_with("/*") || trimmed.starts_with("*");
+        if !is_line_comment && !is_block_comment_single_line && !is_block_comment_open {
+            return false;
+        }
+        if trimmed.contains("@unsafe") {
+            debug_println!(
+                "DEBUG UNSAFE: Found @unsafe annotation for block at line {}",
+                block_line
+            );
+            return true;
+        }
     }
 
     false
