@@ -76,6 +76,68 @@ if [[ -f "$BTREE_DIR/split.rs" ]]; then
   sed -i 's|^        let (length_a, length_b);$|        let (mut length_a, mut length_b) = (0usize, 0usize);|' "$BTREE_DIR/split.rs"
 fi
 
+# Same uninitialized-binding pattern in append.rs — `let mut open_node;`
+# followed by a loop that unconditionally assigns in both Ok/Err arms.
+# Restructure to use loop-as-expression
+# (`let mut open_node = loop { ...; break value; ... };`) so the
+# binding gets an initializer the transpiler can lower into valid
+# C++. Both `break` sites produce a value of the same type
+# (NodeRef<…marker::Internal>), so the loop-expression form
+# preserves the Rust semantics exactly.
+if [[ -f "$BTREE_DIR/append.rs" ]] && grep -q "let mut open_node;" "$BTREE_DIR/append.rs"; then
+  python3 - "$BTREE_DIR/append.rs" <<'PYEOF'
+import sys, pathlib
+path = pathlib.Path(sys.argv[1])
+src = path.read_text()
+# The transformation: convert
+#   let mut open_node;
+#   let mut test_node = cur_node.forget_type();
+#   loop {
+#       match test_node.ascend() {
+#           Ok(parent) => { ...; open_node = parent; break; ... }
+#           Err(_) => { open_node = self.push_internal_level(alloc.clone()); break; }
+#       }
+#   }
+# into
+#   let mut test_node = cur_node.forget_type();
+#   let mut open_node = loop {
+#       match test_node.ascend() {
+#           Ok(parent) => { ...; break parent; ... }
+#           Err(_) => { break self.push_internal_level(alloc.clone()); }
+#       }
+#   };
+# Targeted line-by-line replacements, anchored on unique pattern text.
+src = src.replace(
+    "                let mut open_node;\n"
+    "                let mut test_node = cur_node.forget_type();\n"
+    "                loop {",
+    "                let mut test_node = cur_node.forget_type();\n"
+    "                let mut open_node = loop {",
+)
+src = src.replace(
+    "                                open_node = parent;\n"
+    "                                break;",
+    "                                break parent;",
+)
+src = src.replace(
+    "                            open_node = self.push_internal_level(alloc.clone());\n"
+    "                            break;",
+    "                            break self.push_internal_level(alloc.clone());",
+)
+# Find the `}` that closes the (now expression) loop and convert to `};`.
+# It sits between the loop body and the comment "// Push key-value pair".
+src = src.replace(
+    "                }\n"
+    "\n"
+    "                // Push key-value pair and new right subtree.",
+    "                };\n"
+    "\n"
+    "                // Push key-value pair and new right subtree.",
+)
+path.write_text(src)
+PYEOF
+fi
+
 if [[ -f "$BTREE_DIR/merge_iter.rs" ]]; then
   sed -i \
     -e 's|^        let mut a_next;$|        let mut a_next = None;|' \
