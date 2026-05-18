@@ -76,6 +76,28 @@ if [[ -f "$BTREE_DIR/split.rs" ]]; then
   sed -i 's|^        let (length_a, length_b);$|        let (mut length_a, mut length_b) = (0usize, 0usize);|' "$BTREE_DIR/split.rs"
 fi
 
+# set_val.rs uses Rust's `default fn` specialization (an unstable
+# `min_specialization` feature) to dispatch `IsSetVal::is_set_val()`
+# differently for `SetValZST` vs every other type. The transpiler
+# doesn't support `default fn`, so the trait gets emitted as an
+# empty class and the one call site
+#   `let is_set = <V as IsSetVal>::is_set_val();`
+# fails name lookup.
+#
+# Hand-patch: replace the call site with a hard-coded `false`. The
+# only consequence is that the BTreeSet-specific panic message
+# ("range start and end are equal and excluded in BTreeSet") shows
+# the BTreeMap version instead. The actual panic still fires;
+# BTreeSet operations still panic correctly on invalid bounds;
+# nothing about behavior of valid operations changes.
+#
+# A proper fix would replace the trait with a `std::any::TypeId`
+# check, but that requires `V: 'static` which would propagate
+# through every method's bounds — not worth the surgery.
+if [[ -f "$BTREE_DIR/search.rs" ]] && grep -q "<V as super::set_val::IsSetVal>::is_set_val()" "$BTREE_DIR/search.rs"; then
+  sed -i 's|<V as super::set_val::IsSetVal>::is_set_val()|false /* IsSetVal::is_set_val() — see prep.sh */|' "$BTREE_DIR/search.rs"
+fi
+
 # node.rs::splitpoint uses module-level consts (EDGE_IDX_LEFT_OF_CENTER,
 # EDGE_IDX_RIGHT_OF_CENTER, KV_IDX_CENTER) as match-arm patterns. Rust
 # resolves these as value patterns (matching against the const value);
