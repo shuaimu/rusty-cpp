@@ -119,6 +119,13 @@ private:
     }
     
 public:
+    // STL-style typedef. Rust iterators express the element type via
+    // `type Item = T`, but several C++ APIs (gtest's ValuesIn,
+    // generic algorithms that probe for value_type) require the
+    // STL-conventional `typename C::value_type`. Exposing it here
+    // costs nothing and lets Vec<T> drop into those APIs unchanged.
+    using value_type = T;
+
     // Default constructor - empty vec
     Vec() : data_(nullptr), size_(0), capacity_(0) {}
     
