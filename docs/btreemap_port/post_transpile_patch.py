@@ -442,6 +442,71 @@ def hide_template_free_misroutes(path: Path) -> None:
         print(f"  no template-free SetValZST misroutes in: {path.name}")
 
 
+def recover_template_args(path: Path) -> None:
+    """Patch call sites that use `NodeRef::new_leaf`, `Root::new_`,
+    or `Handle::into_kv` without their concrete template arguments.
+
+    The transpiler drops template arguments here because Rust resolves
+    them via type inference at call sites; C++ requires them spelled.
+    Inside BTreeMap<K, V, A> methods (the only context these appear
+    in), K and V are in scope, so a textual substitution suffices.
+
+    Substitutions:
+      NodeRef::new_leaf(…)  →  NodeRef<::marker::Owned, K, V, ::marker::Leaf>::new_leaf(…)
+      Root::new_(…)         →  Root<K, V>::new_(…)
+      .map(Handle::into_kv) →  .map([](auto&& __h){ return __h.into_kv(); })
+
+    Idempotent — guarded by a sentinel comment.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: template-args recovered by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (template-args already recovered)")
+        return
+
+    replacements = [
+        # NodeRef::new_leaf is called with a single arg (the allocator).
+        # The receiver is the marker::Owned-leaf NodeRef variant.
+        (
+            "NodeRef::new_leaf(",
+            "NodeRef<::marker::Owned, K, V, ::marker::Leaf>::new_leaf(",
+        ),
+        # Root<K, V> is `NodeRef<marker::Owned, K, V, marker::LeafOrInternal>`.
+        # `Root::new_(alloc)` is the same construction shape, as is
+        # `Root::calc_split_length(...)` (static method, no `self`).
+        (
+            "Root::new_(",
+            "Root<K, V>::new_(",
+        ),
+        (
+            "Root::calc_split_length(",
+            "Root<K, V>::calc_split_length(",
+        ),
+        # `.map(Handle::into_kv)` passes a method pointer; C++ can't
+        # form one without the template args. Rewrite the call site
+        # to a lambda that dispatches on the deduced argument's type.
+        (
+            ".map(Handle::into_kv)",
+            ".map([](auto&& __h) { return __h.into_kv(); })",
+        ),
+    ]
+
+    n_total = 0
+    for old, new in replacements:
+        n = src.count(old)
+        if n == 0:
+            continue
+        src = src.replace(old, new)
+        n_total += n
+        print(f"  recovered {n}× `{old}` → expanded form")
+
+    if n_total:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+    else:
+        print(f"  no template-arg recovery sites in: {path.name}")
+
+
 def fix_boxed_box_path(path: Path) -> None:
     """The transpiler emits `::boxed::Box<…>` (matching Rust's
     `alloc::boxed::Box`) but the C++ side has `rusty::Box` only.
@@ -851,6 +916,10 @@ def main() -> int:
         # `::boxed::Box<…>` is the Rust alloc::boxed::Box path; on
         # the C++ side we have `rusty::Box`. Rewrite.
         fix_boxed_box_path(map_mod)
+        # `NodeRef::new_leaf` / `Root::new_` / `Handle::into_kv` are
+        # emitted without their concrete template arguments. Substitute
+        # the K/V-in-scope forms (phase A1 of the transpile-path plan).
+        recover_template_args(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")

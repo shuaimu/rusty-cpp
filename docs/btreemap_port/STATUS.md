@@ -12,10 +12,12 @@ picks the first `[ ]` and goes.
 
 **Phase A — get the rest of the transpiled modules compiling.**
 
-- [ ] **A1** Patcher rule: `Handle` / `NodeRef` / `Root` template-arg
-      recovery. Walks the enclosing struct's template-param list,
-      substitutes `<K, V[, A]>` at the unqualified call sites. Should
-      clear ~10 errors at once.
+- [x] **A1** Patcher rule: `Handle` / `NodeRef` / `Root` template-arg
+      recovery via 4 textual substitutions (NodeRef::new_leaf,
+      Root::new_, Root::calc_split_length, .map(Handle::into_kv) →
+      lambda). Cleared 11 sites total; revealed downstream errors
+      (SearchBound, DedupSortedIter, debug_map) that A4/later steps
+      will handle. Landed in `recover_template_args()`.
 - [ ] **A2** Investigate `DormantMutRef` unknown-type errors despite
       btree_internal's `export template<…>` declaration. Likely a
       clang module-visibility quirk; either fix on the consumer
