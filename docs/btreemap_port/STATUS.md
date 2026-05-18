@@ -37,40 +37,59 @@ State as of step 19:
   classes tracked in the "Open blockers — set/map/entry" section
   below. ⏳
 
-## Open blockers — set/map/entry submodules (added step 19)
+## Open blockers — set/map/entry submodules (added step 19, updated step 21)
 
-These are the next thing to chip at if/when the port resumes:
+These are the next thing to chip at if/when the port resumes. Status is
+where each stands after step 21:
 
-- **Post-module imports not contiguous.** `set.entry.cppm`,
-  `map.entry.cppm` emit forward-declarations and `using` aliases
-  before the `import btree_port.btree.btree_internal;` line.
-  C++20 modules require all imports to be a contiguous block
-  immediately after `export module`. Fix: reorder emission so
-  imports come first.
+- ✅ **Post-module imports not contiguous.** Resolved by
+  `patch_entry_imports` in `post_transpile_patch.py` (step 20).
+  Collects every `import …;` line in the file, dedups, and re-emits
+  them as one contiguous block immediately after `export module`.
 
-- **Cross-module `as`-rename loses template arity.** The Rust
-  source `use super::map::{OccupiedEntry as MapOccupiedEntry, ...}`
-  produces a 2-arg type alias (`template<typename T, typename A>
-  using MapOccupiedEntry = map::OccupiedEntry<T, A>`) even though
-  `map::OccupiedEntry` has 3 template params (`K, V, A`). Fix:
-  the `as`-rename emitter must propagate the underlying type's
-  template arity, not infer from the surrounding scope.
+- ✅ **Cross-module `as`-rename loses template arity.** Resolved by
+  `patch_entry_arities` in `post_transpile_patch.py` (step 20).
+  `template<typename T, typename A> using MapOccupiedEntry = …<T, A>`
+  rewritten to `template<typename K, typename V, typename A> using
+  MapOccupiedEntry = …<K, V, A>`.
 
-- **Orphan-impl methods routed to wrong host.** In
-  `set.entry.cppm`, methods from `map::VacantEntry` (e.g.
-  `insert_entry(V value) -> OccupiedEntry<K, V, A>`) appear
-  inside the `set::VacantEntry` body with mismatched template
-  params. The cross-file orphan-impl injector landed in commit
-  `1ab0d4d` is matching too loosely — `impl VacantEntry<…>` in
-  `map/entry.rs` should not absorb into `set::VacantEntry`.
-  Fix: tighten the orphan-impl host-type matching to require
-  full type-path agreement, not just the basename.
+- ✅ **`map`/`btree_internal` namespace prefix not resolved.**
+  Resolved by `strip_module_namespace_prefixes` in
+  `post_transpile_patch.py` (step 20). Strips `<module>::`
+  qualifier prefixes since C++20 modules don't put exported symbols
+  in a namespace named after the module path.
 
-- **`map`/`btree_internal` namespace prefix not resolved when
-  import is missing.** `set.entry.cppm` references `map::OccupiedEntry`
-  but doesn't `import btree_port.btree.map`. Fix: the `use
-  super::map::{…}` parser must emit both the import AND the
-  using-declarations together; currently only the latter fires.
+- ✅ **Forward-decl/definition `requires` clause mismatch.**
+  Resolved by `align_requires_clauses` in `post_transpile_patch.py`
+  (step 21). Adds the matching `requires (Allocator<A> &&
+  copyable<A>)` to algebraic-data-type `struct Entry` definitions
+  that inherit from `std::variant<…>` without their forward
+  decl's requires clause.
+
+- ⏳ **Orphan-impl methods routed to wrong host.** Partially
+  worked around in `post_transpile_patch.py` step 21:
+  `remove_setvalzst_methods` wraps misrouted `template<typename T>`
+  method clusters in `#if 0 / #endif`. Tightening the orphan-impl
+  injector itself (the proper fix) is a separate transpiler-side
+  change; the injector landed in commit `1ab0d4d` is matching too
+  loosely — `impl VacantEntry<…>` in `map/entry.rs` should not
+  absorb into `set::VacantEntry`.
+
+- ⏳ **`NodeRef::new_leaf(…)` emitted without template args.**
+  Worked around in step 21 via `stub_nodref_insert_entry` which
+  replaces the body of `OccupiedEntry insert_entry(V value)` with
+  a throw. The transpiler-side fix is to recover the template
+  arguments from the call context (`NodeRef::new_leaf` always
+  returns `NodeRef<marker::Mut, K, V, marker::Leaf>` per the
+  Rust source).
+
+- ⏳ **GCC 14 ICE on `map.entry` module.** Independent of our
+  port: enabling `map.entry.cppm` in the build target triggers a
+  GCC 14 internal compiler error (segfault) at the closing brace
+  of `struct rusty::RcControlBlockBase`. Reproducer would be useful
+  for the GCC bugzilla but it's outside the BTreeMap port scope.
+  Workaround: keep `map.entry` out of the build target until GCC
+  ICE is resolved, or test with clang's module support.
 
 ## Working version delivered (step 13)
 

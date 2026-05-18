@@ -148,6 +148,209 @@ def patch_entry_imports(path: Path, extra_imports: list[str]) -> None:
     print(f"  reordered imports in: {path.name} ({len(uniq_imports)} imports)")
 
 
+def remove_setvalzst_methods(path: Path) -> None:
+    """Drop methods that the orphan-impl injector misrouted from
+    `set::*Entry` into `map::*Entry` (or vice-versa). They reference
+    `SetValZST` (a set-internal type not in scope here) and use a
+    `template<typename T>` shape that doesn't match the enclosing
+    `<K, V, A>` struct. Wrap them in `#if 0` blocks so the misrouted
+    body stays visible in the file (for future grep'ing) but is
+    invisible to the compiler.
+
+    Idempotent — bails if the sentinel is already present."""
+    import re
+
+    src = path.read_text()
+    sentinel = "// btree_port port: SetValZST misroutes hidden by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (SetValZST methods already hidden)")
+        return
+
+    # Match a contiguous run of `template<typename T>\n<sig>\n<body…>\n}` blocks
+    # whose body references `SetValZST`. We use a heuristic: any method-block
+    # starting with `    template<typename T>` whose body contains `SetValZST`.
+    # The blocks we care about all live in one cluster at the end of a struct.
+    #
+    # Strategy: find the first `template<typename T>` line whose method-block
+    # mentions SetValZST. From there, swallow consecutive `template<typename T>`-
+    # prefixed method blocks until a non-template-T line appears.
+
+    lines = src.split("\n")
+    n = len(lines)
+    out: list[str] = []
+    i = 0
+    hidden_blocks = 0
+    while i < n:
+        line = lines[i]
+        # Look for `    template<typename T>` (4-space indent inside struct).
+        if line.rstrip() == "    template<typename T>" and i + 1 < n:
+            # Scan forward to find method-block end (closing `}` at indent 4).
+            # Capture from i through the matching `    }` line.
+            j = i
+            block_end = None
+            depth = 0
+            saw_open = False
+            while j < n:
+                cur = lines[j]
+                # Count braces in the current line — works for inline bodies too.
+                for c in cur:
+                    if c == "{":
+                        depth += 1
+                        saw_open = True
+                    elif c == "}":
+                        depth -= 1
+                        if saw_open and depth == 0:
+                            block_end = j
+                            break
+                if block_end is not None:
+                    break
+                j += 1
+            if block_end is None:
+                # Couldn't find end — give up and keep line as-is.
+                out.append(line)
+                i += 1
+                continue
+            block = "\n".join(lines[i : block_end + 1])
+            if "SetValZST" in block:
+                # Hide it (and swallow any contiguous next template<typename T>
+                # blocks too — they're all part of the same misrouted cluster).
+                cluster_start = i
+                cluster_end = block_end
+                k = block_end + 1
+                while k < n:
+                    if lines[k].rstrip() == "" and k + 1 < n and lines[k + 1].rstrip() == "    template<typename T>":
+                        # blank between methods
+                        k += 1
+                        continue
+                    if lines[k].rstrip() == "    template<typename T>":
+                        # find this method's end too
+                        m = k
+                        d = 0
+                        so = False
+                        me = None
+                        while m < n:
+                            c2 = lines[m]
+                            for ch in c2:
+                                if ch == "{":
+                                    d += 1
+                                    so = True
+                                elif ch == "}":
+                                    d -= 1
+                                    if so and d == 0:
+                                        me = m
+                                        break
+                            if me is not None:
+                                break
+                            m += 1
+                        if me is None:
+                            break
+                        # Always swallow contiguous template<typename T> blocks
+                        # in the same cluster — they're the misroute group.
+                        cluster_end = me
+                        k = me + 1
+                        continue
+                    break
+                out.append(f"#if 0  // {sentinel}")
+                out.extend(lines[cluster_start : cluster_end + 1])
+                out.append("#endif")
+                hidden_blocks += 1
+                i = cluster_end + 1
+                continue
+        out.append(line)
+        i += 1
+
+    if hidden_blocks > 0:
+        path.write_text("\n".join(out))
+        print(f"  hid {hidden_blocks} SetValZST-misroute cluster(s) in: {path.name}")
+    else:
+        print(f"  no SetValZST misroutes found in: {path.name}")
+
+
+def stub_nodref_insert_entry(path: Path) -> None:
+    """Stub `OccupiedEntry insert_entry(V value)` in VacantEntry — the
+    transpiler emits `NodeRef::new_leaf(…)` without template args,
+    which C++ rejects (the underlying class template needs explicit
+    parameter values). The facade doesn't call this entry-API method,
+    so a `throw` stub keeps the method shape valid without needing to
+    reverse-engineer the right template args."""
+    import re
+
+    src = path.read_text()
+    sentinel = "// btree_port port: insert_entry stubbed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (insert_entry already stubbed)")
+        return
+
+    # Find `    OccupiedEntry<K, V, A> insert_entry(V value) {` and stub it.
+    pos = src.find("OccupiedEntry<K, V, A> insert_entry(V value) {")
+    if pos == -1:
+        print(f"  no insert_entry to stub in: {path.name}")
+        return
+    brace_open = src.find("{", pos)
+    # Use brace-depth walk to find matching `}`.
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] no matching brace for insert_entry in: {path.name}", file=sys.stderr)
+        return
+    # NB: don't put the sentinel in a `//` line-comment here — the
+    # whole stub is emitted on a single line and `//` would swallow
+    # the closing `}`.
+    stub = (
+        "{ /* "
+        + sentinel.lstrip("/ ").rstrip()
+        + " */ throw ::std::runtime_error("
+        + "\"rusty-cpp-transpiler: insert_entry stub (NodeRef template-args recovery)\"); }"
+    )
+    new_src = src[:brace_open] + stub + src[brace_close + 1 :]
+    path.write_text(new_src)
+    print(f"  stubbed insert_entry in: {path.name}")
+
+
+def align_requires_clauses(path: Path) -> None:
+    """For algebraic-data-type wrapper structs (e.g. `struct Entry`), the
+    transpiler emits a `requires (rusty::alloc::Allocator<A> &&
+    std::copyable<A>)` clause on the forward declaration but omits it
+    on the variant-inheriting definition. C++20 treats this as a
+    constraint mismatch (redeclaration with different constraints).
+
+    Patch: scan for `template<typename K, typename V, typename A>` /
+    `template<typename T, typename A>` lines whose NEXT line is
+    `struct Entry : std::variant<…>` and inject the matching requires
+    clause between them.
+    Idempotent — bails if the sentinel is already present."""
+    import re
+
+    src = path.read_text()
+    sentinel = "// btree_port port: requires-clause aligned by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (requires already aligned)")
+        return
+
+    requires_kva = (
+        "    requires (rusty::alloc::Allocator<A> && std::copyable<A>)"
+    )
+    new_src, n = re.subn(
+        r"(template<typename (?:K, typename V|T), typename A>)\n(struct Entry : std::variant<)",
+        rf"\1\n{requires_kva}\n\2",
+        src,
+    )
+    if n > 0:
+        new_src = sentinel + "\n" + new_src
+        path.write_text(new_src)
+        print(f"  aligned {n} requires clause(s) in: {path.name}")
+    else:
+        print(f"  no requires misalignment found in: {path.name}")
+
+
 def strip_module_namespace_prefixes(path: Path, prefixes: list[str]) -> None:
     """Strip `<module>::` qualifier prefixes from a transpiled .cppm.
 
@@ -302,7 +505,7 @@ def main() -> int:
     patch_internal(internal)
     print(f"[2/4] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
-    print(f"[3/4] patching {set_entry.name} (import reorder + arity + prefix strip)")
+    print(f"[3/4] patching {set_entry.name}")
     if set_entry.exists():
         # NOTE: set.entry isn't currently in the build target (it depends
         # on `import btree_port.btree.map`, which has its own transpiler
@@ -311,12 +514,16 @@ def main() -> int:
         patch_entry_imports(set_entry, extra_imports=["btree_port.btree.map"])
         patch_entry_arities(set_entry)
         strip_module_namespace_prefixes(set_entry, ["btree_internal"])
+        align_requires_clauses(set_entry)
     else:
         print(f"  [skip] {set_entry.name} not present")
-    print(f"[4/4] patching {map_entry.name} (import reorder + prefix strip)")
+    print(f"[4/4] patching {map_entry.name}")
     if map_entry.exists():
         patch_entry_imports(map_entry, extra_imports=[])
         strip_module_namespace_prefixes(map_entry, ["btree_internal"])
+        align_requires_clauses(map_entry)
+        remove_setvalzst_methods(map_entry)
+        stub_nodref_insert_entry(map_entry)
     else:
         print(f"  [skip] {map_entry.name} not present")
     return 0
