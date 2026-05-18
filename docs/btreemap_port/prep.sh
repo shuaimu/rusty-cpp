@@ -22,9 +22,15 @@ if [[ ! -d "$BTREE_DIR" ]]; then
   exit 1
 fi
 
-# Strip the rustc-internal tests/ subdirectories — they don't transpile
-# (they depend on rand and other test-only crates).
+# Strip the rustc-internal tests — they don't transpile (they depend
+# on rand and other test-only crates). Each btree submodule has both:
+#   1. A `mod tests;` declaration in its parent file (gated by
+#      `#[cfg(test)]` which the transpiler skips anyway), and
+#   2. An adjacent `<submodule>/tests.rs` file that we remove here.
+#      Some btree versions used `tests*/` directories instead of
+#      sibling `*.rs` files; handle both shapes.
 find "$BTREE_DIR" -name "tests*" -type d -exec rm -rf {} + 2>/dev/null || true
+find "$BTREE_DIR" -name "tests.rs" -type f -delete 2>/dev/null || true
 
 # crate::alloc::* → std::alloc::* (Allocator, Global, Layout, AllocError)
 # The btree code uses `crate::alloc::*` to reach the alloc crate's
@@ -50,5 +56,19 @@ find "$BTREE_DIR" -name "*.rs" -exec sed -i \
 find "$BTREE_DIR" -name "*.rs" -exec sed -i \
   -e 's|use crate::vec::Vec|use alloc::vec::Vec|g' \
   {} \;
+
+# Targeted hand-patch: `merge_iter.rs::MergeIterInner::nexts` declares
+# `let mut a_next;` / `let mut b_next;` without initializers (Rust allows
+# this when the compiler can prove definite assignment via match arms;
+# C++'s `auto` requires an initializer). Initialize with `None` so the
+# transpiled output is compilable C++. Semantics unchanged — the
+# variables are unconditionally overwritten in every match arm
+# immediately after.
+if [[ -f "$BTREE_DIR/merge_iter.rs" ]]; then
+  sed -i \
+    -e 's|^        let mut a_next;$|        let mut a_next = None;|' \
+    -e 's|^        let mut b_next;$|        let mut b_next = None;|' \
+    "$BTREE_DIR/merge_iter.rs"
+fi
 
 echo "Port-prep complete for $BTREE_DIR"
