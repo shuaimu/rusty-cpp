@@ -507,6 +507,78 @@ def recover_template_args(path: Path) -> None:
         print(f"  no template-arg recovery sites in: {path.name}")
 
 
+def fix_dormant_mut_ref_calls(path: Path) -> None:
+    """`DormantMutRef::new_(x)` is the same template-args-recovery
+    shape as A1's Root::new_ and NodeRef::new_leaf — except the
+    deduced T varies per call site (BTreeMap, Root, Option<Root>),
+    so a single-target textual substitution doesn't work.
+
+    Approach: inject a deduction helper at the top of the module
+    body, then rewrite call sites to use the helper. The helper
+    template-deduces T from its argument.
+
+    Also fixes a transpiler-side typo at the cursor sites:
+    `DormantMutRef::new_(&this->root)` passes a pointer where
+    `new_` expects a reference. Strip the spurious `&`.
+    """
+    src = path.read_text()
+    sentinel = (
+        "// btree_port port: DormantMutRef deduction helper "
+        "injected by post_transpile_patch.py"
+    )
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (DormantMutRef helper already injected)")
+        return
+
+    n_calls = src.count("DormantMutRef::new_(")
+    if n_calls == 0:
+        print(f"  no DormantMutRef::new_ sites in: {path.name}")
+        return
+
+    # Inject the helper right after the last `import …;` line.
+    helper = (
+        f"\n{sentinel}\n"
+        "// `DormantMutRef::new_(x)` is a static method on a class template\n"
+        "// that the transpiler emits without explicit template arguments.\n"
+        "// The helper template-deduces T from its argument so call sites\n"
+        "// don't have to spell `DormantMutRef<T>::new_(x)` themselves.\n"
+        "template<typename __T>\n"
+        "static auto __btree_port_make_dormant(__T& __t) {\n"
+        "    return DormantMutRef<__T>::new_(__t);\n"
+        "}\n"
+    )
+
+    # Find the position right after the last `import` directive.
+    import re
+    last_import = None
+    for m in re.finditer(r"^import [A-Za-z0-9_.]+;\s*$", src, re.MULTILINE):
+        last_import = m
+    if last_import is None:
+        print(f"  [warn] no import directives in {path.name}; can't place helper", file=sys.stderr)
+        return
+    insertion_pos = last_import.end()
+    src = src[:insertion_pos] + helper + src[insertion_pos:]
+
+    # Now rewrite the call sites. Order matters: the more-specific
+    # pattern (with `&this->root`) must match BEFORE the general one.
+    typo_fix_count = src.count("DormantMutRef::new_(&this->root)")
+    src = src.replace(
+        "DormantMutRef::new_(&this->root)",
+        "__btree_port_make_dormant(this->root)",
+    )
+    n_remaining = src.count("DormantMutRef::new_(")
+    src = src.replace(
+        "DormantMutRef::new_(",
+        "__btree_port_make_dormant(",
+    )
+
+    path.write_text(src)
+    print(
+        f"  injected DormantMutRef deduction helper + rewrote {n_calls} site(s) "
+        f"in: {path.name} (fixed {typo_fix_count} `&this->root` typo)"
+    )
+
+
 def fix_boxed_box_path(path: Path) -> None:
     """The transpiler emits `::boxed::Box<…>` (matching Rust's
     `alloc::boxed::Box`) but the C++ side has `rusty::Box` only.
@@ -920,6 +992,10 @@ def main() -> int:
         # emitted without their concrete template arguments. Substitute
         # the K/V-in-scope forms (phase A1 of the transpile-path plan).
         recover_template_args(map_mod)
+        # `DormantMutRef::new_(x)` is similar but the T varies per call
+        # site (BTreeMap/Root/Option<Root>). Inject a deduction helper
+        # and rewrite call sites to use it (phase A2).
+        fix_dormant_mut_ref_calls(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")

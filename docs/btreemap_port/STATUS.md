@@ -18,10 +18,15 @@ picks the first `[ ]` and goes.
       lambda). Cleared 11 sites total; revealed downstream errors
       (SearchBound, DedupSortedIter, debug_map) that A4/later steps
       will handle. Landed in `recover_template_args()`.
-- [ ] **A2** Investigate `DormantMutRef` unknown-type errors despite
-      btree_internal's `export template<…>` declaration. Likely a
-      clang module-visibility quirk; either fix on the consumer
-      side (qualified-name reference) or re-export.
+- [x] **A2** Diagnosed: NOT a visibility issue — same template-args-
+      recovery shape as A1, but the deduced `T` varies per call site
+      (BTreeMap, Root, Option<Root>). Solution: inject a deduction
+      helper at module scope (`__btree_port_make_dormant<T>(T&)`)
+      and rewrite all `DormantMutRef::new_(x)` to use it. Also
+      fixes a transpiler typo at the cursor sites that emitted
+      `&this->root` (pointer) where a reference was wanted.
+      10 sites rewritten + 2 typo fixes. Landed in
+      `fix_dormant_mut_ref_calls()`.
 - [ ] **A3** Rewrite `clone_subtree` recursive lambdas as `std::function`
       indirection (declare type, then assign). 2 occurrences in
       `BTreeMap::clone()`.
