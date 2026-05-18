@@ -76,6 +76,57 @@ if [[ -f "$BTREE_DIR/split.rs" ]]; then
   sed -i 's|^        let (length_a, length_b);$|        let (mut length_a, mut length_b) = (0usize, 0usize);|' "$BTREE_DIR/split.rs"
 fi
 
+# node.rs::splitpoint uses module-level consts (EDGE_IDX_LEFT_OF_CENTER,
+# EDGE_IDX_RIGHT_OF_CENTER, KV_IDX_CENTER) as match-arm patterns. Rust
+# resolves these as value patterns (matching against the const value);
+# the transpiler currently emits them as fresh variable bindings,
+# shadowing the consts and producing
+#   `const auto& EDGE_IDX_RIGHT_OF_CENTER = _m; return ...;`
+# which then makes the match-IIFE return inconsistent types across
+# arms (one arm returns Left, another Right; the binding capture
+# loses the unifying type info).
+#
+# Rewrite the match to an if-chain so each comparison is explicit.
+# Both shapes have identical semantics in Rust; the if-chain form
+# transpiles cleanly because there are no pattern bindings to confuse.
+if [[ -f "$BTREE_DIR/node.rs" ]] && grep -q "fn splitpoint(edge_idx: usize)" "$BTREE_DIR/node.rs"; then
+  python3 - "$BTREE_DIR/node.rs" <<'PYEOF'
+import sys, pathlib
+path = pathlib.Path(sys.argv[1])
+src = path.read_text()
+old = """fn splitpoint(edge_idx: usize) -> (usize, LeftOrRight<usize>) {
+    debug_assert!(edge_idx <= CAPACITY);
+    // Rust issue #74834 tries to explain these symmetric rules.
+    match edge_idx {
+        0..EDGE_IDX_LEFT_OF_CENTER => (KV_IDX_CENTER - 1, LeftOrRight::Left(edge_idx)),
+        EDGE_IDX_LEFT_OF_CENTER => (KV_IDX_CENTER, LeftOrRight::Left(edge_idx)),
+        EDGE_IDX_RIGHT_OF_CENTER => (KV_IDX_CENTER, LeftOrRight::Right(0)),
+        _ => (KV_IDX_CENTER + 1, LeftOrRight::Right(edge_idx - (KV_IDX_CENTER + 1 + 1))),
+    }
+}"""
+new = """fn splitpoint(edge_idx: usize) -> (usize, LeftOrRight<usize>) {
+    debug_assert!(edge_idx <= CAPACITY);
+    // Rust issue #74834 tries to explain these symmetric rules.
+    // Rewritten from a `match` with const-value patterns to an
+    // if-chain by docs/btreemap_port/prep.sh — the transpiler binds
+    // const patterns as fresh variables, which breaks match-IIFE
+    // return-type unification. Semantics unchanged.
+    if edge_idx < EDGE_IDX_LEFT_OF_CENTER {
+        (KV_IDX_CENTER - 1, LeftOrRight::Left(edge_idx))
+    } else if edge_idx == EDGE_IDX_LEFT_OF_CENTER {
+        (KV_IDX_CENTER, LeftOrRight::Left(edge_idx))
+    } else if edge_idx == EDGE_IDX_RIGHT_OF_CENTER {
+        (KV_IDX_CENTER, LeftOrRight::Right(0))
+    } else {
+        (KV_IDX_CENTER + 1, LeftOrRight::Right(edge_idx - (KV_IDX_CENTER + 1 + 1)))
+    }
+}"""
+if old in src:
+    src = src.replace(old, new)
+    path.write_text(src)
+PYEOF
+fi
+
 # Same uninitialized-binding pattern in append.rs — `let mut open_node;`
 # followed by a loop that unconditionally assigns in both Ok/Err arms.
 # Restructure to use loop-as-expression
