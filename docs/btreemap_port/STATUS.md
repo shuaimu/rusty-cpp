@@ -118,10 +118,21 @@ transpiler-side issues that exceeds the iteration's scope:
   patcher now drops these lines (and the
   `using namespace ::<module>;` /
   `namespace <module> {}` siblings).
-- ⏳ **`Iter<K, V>::iter()` not a member** — the transpiler is
-  conflating the `Iter` struct (a type) with `.iter()` (a method
-  to produce it). 6+ occurrences in map.cppm.
-- ⏳ **`Range<K, V>::iter()` same shape**, ~5 occurrences.
+- ✅ **`Iter<K, V>::iter()` / `Range<K, V>::iter()` not a member.**
+  Resolved in step 27 — these came from orphan-impl methods absorbed
+  into the iterator structs (Iter, IterMut, Range, RangeMut, Keys,
+  Values, IntoIter, …) with `template<typename T>` shape referencing
+  a non-existent `this->iter` field. The patcher's
+  `remove_setvalzst_methods` was extended to run on map.cppm and
+  set.cppm too, hiding 10+2 misroute clusters total.
+
+- ⏳ **More misroutes outside the `template<typename T>` shape.**
+  After hiding the iterator-struct misroutes, map.cppm still has
+  set-style methods at the BTreeMap level (`replace(K key)`,
+  `get_or_insert_with(...)`) that reference `SetValZST` —
+  template-free, so the existing detector misses them. A broader
+  heuristic ("body references `SetValZST` → misroute from
+  set::BTreeSet → hide") would catch these.
 - ⏳ **More `height` method-vs-field clang-strictness errors**
   inside map.cppm — same pattern as the one fixed in
   btree_internal, but at different call sites.

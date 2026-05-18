@@ -637,12 +637,19 @@ def main() -> int:
         # namespace). Strip both prefixes.
         patch_entry_imports(map_mod, extra_imports=[])
         strip_module_namespace_prefixes(map_mod, ["btree_internal", "entry", "node"])
+        # Iterator structs (Iter, IterMut, Range, RangeMut, Keys,
+        # Values, …) inherit orphan-impl methods from the underlying
+        # `BTreeMap::iter()` / `BTreeMap::range()` returning types.
+        # The misrouted methods use `template<typename T>` shape and
+        # reference `this->iter.*` — same pattern as map.entry.
+        remove_setvalzst_methods(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")
     if set_mod.exists():
         patch_entry_imports(set_mod, extra_imports=[])
         strip_module_namespace_prefixes(set_mod, ["btree_internal", "entry", "node"])
+        remove_setvalzst_methods(set_mod)
     else:
         print(f"  [skip] {set_mod.name} not present")
     return 0
