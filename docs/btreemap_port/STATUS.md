@@ -1,5 +1,89 @@
 # rustc-stdlib BTreeMap Port — Status
 
+## Phase plan — transpile-path completion (active)
+
+The /loop is now driving toward the harder goal: replace the facade's
+`std::map` backing with the actual transpiled rustc B-tree, so users
+get Rust-class perf (~3× faster insert/lookup, ~10× iter; see the
+bench numbers below the goal section) through the same public API.
+
+Each step is one iteration. Mark `[x]` when landed. Next iteration
+picks the first `[ ]` and goes.
+
+**Phase A — get the rest of the transpiled modules compiling.**
+
+- [ ] **A1** Patcher rule: `Handle` / `NodeRef` / `Root` template-arg
+      recovery. Walks the enclosing struct's template-param list,
+      substitutes `<K, V[, A]>` at the unqualified call sites. Should
+      clear ~10 errors at once.
+- [ ] **A2** Investigate `DormantMutRef` unknown-type errors despite
+      btree_internal's `export template<…>` declaration. Likely a
+      clang module-visibility quirk; either fix on the consumer
+      side (qualified-name reference) or re-export.
+- [ ] **A3** Rewrite `clone_subtree` recursive lambdas as `std::function`
+      indirection (declare type, then assign). 2 occurrences in
+      `BTreeMap::clone()`.
+- [ ] **A4** Misc parse glitches: undefined `Q`, expected `(` for
+      function-style cast. Per-site fixes.
+- [ ] **A5** Same pass over `set.cppm` / `set.entry.cppm` (currently
+      blocked behind A1–A4 since they import map).
+- [ ] **A6** Add `btree_port.btree.map`, `set`, `set.entry` to the
+      clang build target. Verify libbtree_port.a links.
+
+**Phase B — replace the 5 stubbed methods with real implementations.**
+
+Each currently throws; needed for `insert` / `remove` to work.
+
+- [ ] **B1** `NodeRef::from_new_leaf` — hand-port from
+      `library/alloc/src/collections/btree/node.rs`. Constructs a
+      leaf NodeRef from a Box-allocated LeafNode.
+- [ ] **B2** `NodeRef::from_new_internal` — same shape for internal
+      nodes.
+- [ ] **B3** `NodeRef::push_with_handle` — pushes a K/V into a leaf;
+      used by `BTreeMap::insert`. The most load-bearing of the five.
+- [ ] **B4** `Handle::deallocating_next` — used by `BTreeMap::into_iter`
+      and removal. Walks the tree dropping nodes.
+- [ ] **B5** `Handle::deallocating_next_back` — reverse of B4.
+
+**Phase C — integration test infrastructure.**
+
+- [ ] **C1** Adapter header: point the 24-test facade suite at the
+      transpiled `BTreeMap` instead of `std::map`. Single
+      `#define BTREE_PORT_USE_TRANSPILED 1` toggle.
+- [ ] **C2** Crash-resistant smoke harness: catch throws from any
+      stub still in place so we can see WHICH method gets hit
+      before crashing.
+
+**Phase D — wire the facade.**
+
+- [ ] **D1** Replace each `btree_port::BTreeMap` method body in
+      `include/btree_port/btreemap.hpp` with a delegation to the
+      transpiled symbol. About 15 methods.
+- [ ] **D2** Run the 24-test suite. If green: WORKING TRANSPILED VERSION.
+
+**Phase E — fix correctness bugs surfaced by C/D** (unknown shape).
+
+- [ ] **E*** Per-bug. Most likely culprits per transpiler experience
+      so far: wrong move semantics on moved-in K/V; integer-cast
+      width loss on `usize`/`size_t` boundaries; closure capture
+      mode (`[&]` vs `[=]`) on a recursive callback.
+
+**Risks the iteration loop should keep visible:**
+
+- Phase B stubs were stubbed because the transpiler emitted invalid
+  C++ for them. Hand-porting bypasses the bug but doesn't fix the
+  transpiler — future re-transpiles will re-stub. We accept this for
+  now; transpiler-side fixes are a parallel track.
+- Phase E is unbounded. If a B-tree invariant breaks, the
+  iteration may need to descend into rustc's btree source to
+  understand what the C++ output should have been.
+- GCC 14 ICEs on `map.entry` consumer TUs. Phase D's facade rewire
+  will need to either work around (clang-only build path) or wait
+  for a GCC fix. Worst case: facade ships clang-only, gcc users
+  stay on the `std::map` facade variant.
+
+
+
 ## Modules compile (step 19, expanded step 25)
 
 After [post_transpile_patch.py](post_transpile_patch.py) lands, the
