@@ -49,6 +49,62 @@ cmake -B build -S . -G Ninja \
 cmake --build build
 ```
 
+## Architectural limit — circular C++20 module dependencies
+
+This is the dominant remaining blocker and it isn't a transpiler bug —
+it's a structural mismatch between Rust's module system and C++20
+modules.
+
+**The problem.** Rust's `library/alloc/src/collections/btree/` has
+cyclic dependencies between sibling files:
+
+- `node.rs` defines `NodeRef<…>`, `Handle<…>`, `LeafNode<…>`,
+  `InternalNode<…>`.
+- `navigate.rs` defines `LeafRange<…>`, `LazyLeafRange<…>`,
+  `Position<…>` AND adds `impl<…> NodeRef<…> { … }` orphan-impls
+  that return `LeafRange` values (so node.cppm absorbs those
+  methods and now references `LeafRange`).
+- `search.rs`, `merge_iter.rs`, `fix.rs`, `remove.rs`, `split.rs`,
+  `append.rs` all add similar orphan-impls — each ends up
+  referencing types declared in its own file (or in another
+  sibling) from inside methods that the injector absorbs into
+  node.cppm.
+
+In Rust this resolves cleanly because module references are name-
+lookup, not compilation units. In C++20 modules each `.cppm` is a
+TU, and the import graph must be a DAG. Trying to add the obvious
+`import navigate;` to node.cppm produces:
+
+```
+CMake Error: Circular dependency detected in the C++ module import
+graph. See modules named: "btree_port", "btree_port.btree",
+"btree_port.btree.append", "btree_port.btree.fix", … (12 modules)
+```
+
+**Resolution paths.** Three options, none cheap:
+
+1. **Merge cyclic siblings into one `.cppm`.** Concatenate
+   node.rs/navigate.rs/search.rs/merge_iter.rs/fix.rs/remove.rs/
+   split.rs/append.rs into a single `btree_port.btree.core.cppm`.
+   The transpiler would need a "merge group" config or a coarser
+   one-module-per-cycle-component mode. Loses the Rust-side
+   modularity in the C++ output. Most pragmatic.
+
+2. **Drop C++20 modules; use header-only emission.** Rewrite the
+   crate-mode driver to emit `.hpp`/`.cpp` pairs with forward
+   declarations and traditional include guards. Largest change
+   but matches how `include/rusty/*.hpp` already works.
+
+3. **Restructure the source to break cycles.** Move all
+   `impl` blocks into the file that declares their host type, so
+   `node.rs` owns every `impl NodeRef<…>` regardless of which
+   sibling adds methods. Requires editing the vendored stdlib
+   heavily; defeats the "transpile what's there" approach.
+
+The hand-patch we briefly tried in iter 7 (`use super::navigate::*;`
+etc. added to node.rs via prep.sh) is what surfaced the cycle —
+it's been removed pending an architectural decision.
+
 ## Resolved blockers
 
 Listed by the commit that landed the fix.

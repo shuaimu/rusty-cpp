@@ -57,6 +57,20 @@ find "$BTREE_DIR" -name "*.rs" -exec sed -i \
   -e 's|use crate::vec::Vec|use alloc::vec::Vec|g' \
   {} \;
 
+# NOTE: We tried adding explicit `use super::navigate::*;` /
+# `use super::search::*;` / etc. to node.rs so the transpiler would
+# emit `import` statements for the types the cross-file orphan-impl
+# injector references — but that produced **circular C++20 module
+# dependencies** ("CMake Error: Circular dependency detected in the
+# C++ module import graph") because navigate.rs already imports
+# node.rs (for `NodeRef`), and our hand-patch made node.rs import
+# navigate.rs in turn. C++20 modules forbid cycles by design,
+# whereas Rust's module system resolves them via name-lookup
+# instead of compilation units. See `STATUS.md` § "Architectural
+# limit" for the resolution paths (merge cyclic modules into one
+# .cppm vs drop modules for traditional headers vs restructure the
+# port to break cycles). Hand-patch removed pending decision.
+
 # Targeted hand-patch: `merge_iter.rs::MergeIterInner::nexts` declares
 # `let mut a_next;` / `let mut b_next;` without initializers (Rust allows
 # this when the compiler can prove definite assignment via match arms;
