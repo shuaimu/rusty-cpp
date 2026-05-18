@@ -142,6 +142,64 @@ public:
     }
 
     bool operator==(const BTreeMap& other) const = default;
+
+    // ── Rust-flavored convenience accessors ────────────────────────
+    // These mirror methods that callers familiar with the Rust
+    // `BTreeMap` API expect. They're thin and could equivalently be
+    // written with begin/end iteration; they're here so call sites
+    // read naturally.
+
+    /// First (smallest-key) entry as `Option<(const K&, const V&)>`.
+    rusty::Option<std::pair<std::reference_wrapper<const K>,
+                            std::reference_wrapper<const V>>>
+    first_key_value() const {
+        if (backing_.empty()) {
+            return rusty::Option<
+                std::pair<std::reference_wrapper<const K>,
+                          std::reference_wrapper<const V>>>(rusty::None);
+        }
+        const auto& it = *backing_.begin();
+        return rusty::Option<
+            std::pair<std::reference_wrapper<const K>,
+                      std::reference_wrapper<const V>>>(
+            std::make_pair(std::cref(it.first), std::cref(it.second)));
+    }
+
+    /// Last (largest-key) entry as `Option<(const K&, const V&)>`.
+    rusty::Option<std::pair<std::reference_wrapper<const K>,
+                            std::reference_wrapper<const V>>>
+    last_key_value() const {
+        if (backing_.empty()) {
+            return rusty::Option<
+                std::pair<std::reference_wrapper<const K>,
+                          std::reference_wrapper<const V>>>(rusty::None);
+        }
+        const auto& it = *backing_.rbegin();
+        return rusty::Option<
+            std::pair<std::reference_wrapper<const K>,
+                      std::reference_wrapper<const V>>>(
+            std::make_pair(std::cref(it.first), std::cref(it.second)));
+    }
+
+    /// Range iteration helper: returns a pair `(begin, end)` of
+    /// iterators over the half-open range `[lower, upper)`. Mirrors
+    /// the half-open subset of Rust's `range`. For Rust's full
+    /// `range(bound1..bound2)` shape with mixed inclusive/exclusive
+    /// bounds, callers compose with `std::map::lower_bound` /
+    /// `upper_bound` directly via the exposed iterators.
+    auto range(const K& lower, const K& upper) {
+        return std::make_pair(backing_.lower_bound(lower),
+                              backing_.lower_bound(upper));
+    }
+    auto range(const K& lower, const K& upper) const {
+        return std::make_pair(backing_.lower_bound(lower),
+                              backing_.lower_bound(upper));
+    }
+
+    /// Number of entries — `size()` as an alias for `len()` for STL
+    /// consumers that prefer the C++ spelling.
+    size_type size() const noexcept { return backing_.size(); }
+    bool empty() const noexcept { return backing_.empty(); }
 };
 
 template <typename T, typename Compare = std::less<T>>

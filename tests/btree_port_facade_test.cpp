@@ -125,6 +125,46 @@ static void test_btreeset_basic() {
     assert(s.is_empty());
 }
 
+static void test_btreemap_first_last() {
+    auto m = btree_port::BTreeMap<int, std::string>::new_();
+    // Empty map: both Optionals are None.
+    assert(m.first_key_value().is_none());
+    assert(m.last_key_value().is_none());
+
+    m.insert(5, std::string("five"));
+    m.insert(1, std::string("one"));
+    m.insert(3, std::string("three"));
+
+    auto first = m.first_key_value();
+    assert(!first.is_none());
+    auto [fk, fv] = first.unwrap();
+    assert(fk.get() == 1);
+    assert(fv.get() == "one");
+
+    auto last = m.last_key_value();
+    assert(!last.is_none());
+    auto [lk, lv] = last.unwrap();
+    assert(lk.get() == 5);
+    assert(lv.get() == "five");
+}
+
+static void test_btreemap_range() {
+    auto m = btree_port::BTreeMap<int, int>::new_();
+    for (int i = 0; i < 10; ++i) {
+        m.insert(i, i * 10);
+    }
+    // Range [3, 7) should yield keys 3, 4, 5, 6.
+    int seen = 0;
+    int sum = 0;
+    auto [it, end] = m.range(3, 7);
+    for (; it != end; ++it) {
+        sum += it->first;
+        ++seen;
+    }
+    assert(seen == 4);
+    assert(sum == 3 + 4 + 5 + 6);
+}
+
 static void test_btreeset_ordered_iter() {
     btree_port::BTreeSet<int> s = {3, 1, 4, 1, 5, 9, 2, 6};
     // Set deduplicates "1"; expect 7 unique values in order.
@@ -145,8 +185,10 @@ int main() {
     test_btreemap_clone();
     test_btreemap_clear();
     test_btreemap_initializer_list();
+    test_btreemap_first_last();
+    test_btreemap_range();
     test_btreeset_basic();
     test_btreeset_ordered_iter();
-    std::fprintf(stderr, "btree_port facade: 8 tests passed\n");
+    std::fprintf(stderr, "btree_port facade: 10 tests passed\n");
     return 0;
 }
