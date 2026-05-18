@@ -126,13 +126,37 @@ transpiler-side issues that exceeds the iteration's scope:
   `remove_setvalzst_methods` was extended to run on map.cppm and
   set.cppm too, hiding 10+2 misroute clusters total.
 
-- ⏳ **More misroutes outside the `template<typename T>` shape.**
-  After hiding the iterator-struct misroutes, map.cppm still has
-  set-style methods at the BTreeMap level (`replace(K key)`,
-  `get_or_insert_with(...)`) that reference `SetValZST` —
-  template-free, so the existing detector misses them. A broader
-  heuristic ("body references `SetValZST` → misroute from
-  set::BTreeSet → hide") would catch these.
+- ✅ **More misroutes outside the `template<typename T>` shape.**
+  Resolved in step 28 by `hide_template_free_misroutes` — walks
+  back from any `SetValZST` reference (not already in a `#if 0`
+  block) to the enclosing method signature and forward to the
+  matching `}`, then wraps. Hides 2 misrouted methods (`replace`,
+  `get_or_insert_with`) at the map::BTreeMap level.
+
+- ✅ **`::boxed::Box<…>` → `rusty::Box<…>` mispath.** Resolved
+  in step 28 by `fix_boxed_box_path` — 16 rewrites in map.cppm.
+
+- ⏳ **`Handle` / `NodeRef` / `Root` used without template args**
+  in map.cppm at multiple call sites (lines 4424, 4647, 4664,
+  5188, 5306, 5239, 5252). These are scope-sensitive — the
+  transpiler couldn't recover the right `<K, V[, marker::…]>`
+  parameters from the call context. A patcher could emit
+  `Root<K, V>` substituting the enclosing struct's template
+  params, but it'd need scope-awareness (walk up to find the
+  enclosing struct's template parameter list).
+
+- ⏳ **`DormantMutRef` unknown type** in map.cppm even though
+  btree_internal.cppm exports the template at file scope (lines
+  3654 forward-decl + 3807 def, both `export template<…>`).
+  Likely a visibility issue specific to clang's module
+  implementation; needs investigation.
+
+- ⏳ **Recursive lambda `clone_subtree` self-references in its
+  own initializer.** Rust closures can call themselves; C++
+  lambdas can't with `auto` deduction. Transpiler would need
+  to emit `std::function<…> clone_subtree;` then assign, or
+  use the `auto rec = [&](auto&& self, …){ self(self, …); }`
+  pattern. 2 occurrences.
 - ⏳ **More `height` method-vs-field clang-strictness errors**
   inside map.cppm — same pattern as the one fixed in
   btree_internal, but at different call sites.

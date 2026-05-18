@@ -318,6 +318,151 @@ def remove_setvalzst_methods(path: Path) -> None:
         print(f"  no orphan-impl misroutes found in: {path.name}")
 
 
+def hide_template_free_misroutes(path: Path) -> None:
+    """Catch orphan-impl misroutes that escape `remove_setvalzst_methods`
+    because they're non-template (no `template<typename T>` qualifier).
+    The canonical example is set::BTreeSet::replace(value: T) which the
+    injector landed inside map::BTreeMap with a body that references
+    `SetValZST`. The K-and-V-only host struct doesn't have that
+    symbol, so the body fails to parse.
+
+    Heuristic: for every line containing `SetValZST` not already inside
+    a `#if 0 / #endif` block, walk backward to find the nearest method
+    signature ending in `{` at indent 4, then forward to the matching
+    `}`. Wrap the resulting method body in `#if 0 / #endif`.
+    """
+    src = path.read_text()
+    sentinel = (
+        "// btree_port port: template-free SetValZST misroutes hidden "
+        "by post_transpile_patch.py"
+    )
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (template-free misroutes already hidden)")
+        return
+
+    lines = src.split("\n")
+    n = len(lines)
+
+    # First pass: mark which lines are inside any existing `#if 0` block.
+    inside_skip = [False] * n
+    in_skip = False
+    for i, l in enumerate(lines):
+        if l.startswith("#if 0"):
+            in_skip = True
+        inside_skip[i] = in_skip
+        if l.startswith("#endif"):
+            in_skip = False
+
+    # Walk forward looking for `SetValZST` references not inside #if 0.
+    # For each, snap to method boundaries.
+    out: list[str] = list(lines)  # mutable copy
+    wrapped: list[tuple[int, int]] = []  # (start, end) inclusive of wrapped regions
+    i = 0
+    while i < n:
+        if "SetValZST" in out[i] and not inside_skip[i]:
+            # Walk backward to find method signature.
+            # A method signature at indent 4 ends with `{` on its own
+            # line OR on the signature line. Walk back through prior
+            # non-blank lines whose indent ≥ 6 (body) until we find a
+            # line that ends with `{` and the line before that has the
+            # signature.
+            #
+            # Practical rule: walk back to the first line whose stripped
+            # form ends with `) {` or `const {` or `noexcept {` (or
+            # just `{` if the signature spans multiple lines and the
+            # opening brace is on its own). Then walk back one more if
+            # there's a `template<...>` line directly above.
+            sig_end = None
+            for j in range(i - 1, -1, -1):
+                l = out[j].rstrip()
+                if l.endswith("{") and not l.startswith("//"):
+                    sig_end = j
+                    break
+                # If we hit an outer struct boundary, give up.
+                if l.startswith("};") or l == "};":
+                    sig_end = None
+                    break
+            if sig_end is None:
+                i += 1
+                continue
+            # Now find the method's start (template<...> line above, if
+            # any).
+            sig_start = sig_end
+            while sig_start > 0:
+                prev = out[sig_start - 1].rstrip()
+                if prev.lstrip().startswith("template<"):
+                    sig_start -= 1
+                else:
+                    break
+            # Find matching `}` at the same indent level.
+            depth = 0
+            method_end = None
+            for j in range(sig_end, n):
+                l = out[j]
+                for c in l:
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                        if depth == 0:
+                            method_end = j
+                            break
+                if method_end is not None:
+                    break
+            if method_end is None:
+                i += 1
+                continue
+            # Skip if any of the lines we want to wrap are already
+            # inside an existing #if 0 (e.g., we walked backwards into
+            # a hidden cluster — that means the misroute extends past
+            # a hidden cluster and isn't safe to wrap with this naive
+            # method).
+            if any(inside_skip[k] for k in range(sig_start, method_end + 1)):
+                i = method_end + 1
+                continue
+            # Wrap.
+            out[sig_start] = (
+                f"#if 0  // {sentinel}\n" + out[sig_start]
+            )
+            out[method_end] = out[method_end] + "\n#endif"
+            for k in range(sig_start, method_end + 1):
+                inside_skip[k] = True
+            wrapped.append((sig_start, method_end))
+            i = method_end + 1
+            continue
+        i += 1
+
+    if wrapped:
+        path.write_text("\n".join(out))
+        print(
+            f"  hid {len(wrapped)} template-free SetValZST-misroute "
+            f"method(s) in: {path.name}"
+        )
+    else:
+        print(f"  no template-free SetValZST misroutes in: {path.name}")
+
+
+def fix_boxed_box_path(path: Path) -> None:
+    """The transpiler emits `::boxed::Box<…>` (matching Rust's
+    `alloc::boxed::Box`) but the C++ side has `rusty::Box` only.
+    Rewrite. Idempotent — uses a sentinel comment on first apply."""
+    src = path.read_text()
+    sentinel = "// btree_port port: boxed::Box rewritten to rusty::Box by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (boxed::Box already rewritten)")
+        return
+    n1 = src.count("::boxed::Box<")
+    n2 = src.count("boxed::Box<")
+    if n1 == 0 and n2 == 0:
+        print(f"  no boxed::Box paths in: {path.name}")
+        return
+    src = src.replace("::boxed::Box<", "rusty::Box<")
+    src = src.replace("boxed::Box<", "rusty::Box<")
+    src = sentinel + "\n" + src
+    path.write_text(src)
+    print(f"  rewrote {n1 + n2} boxed::Box path(s) in: {path.name}")
+
+
 def stub_nodref_insert_entry(path: Path) -> None:
     """Stub `OccupiedEntry insert_entry(V value)` in VacantEntry — the
     transpiler emits `NodeRef::new_leaf(…)` without template args,
@@ -643,6 +788,17 @@ def main() -> int:
         # The misrouted methods use `template<typename T>` shape and
         # reference `this->iter.*` — same pattern as map.entry.
         remove_setvalzst_methods(map_mod)
+        # set::BTreeSet methods like `replace(value)` and
+        # `get_or_insert_with(...)` get injected at the
+        # map::BTreeMap level WITHOUT a `template<typename T>`
+        # qualifier (set's BTreeSet uses the SAME generic T,
+        # so the injection doesn't add a new template param).
+        # The body references SetValZST which doesn't exist at
+        # map.cppm's scope; hide them.
+        hide_template_free_misroutes(map_mod)
+        # `::boxed::Box<…>` is the Rust alloc::boxed::Box path; on
+        # the C++ side we have `rusty::Box`. Rewrite.
+        fix_boxed_box_path(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")
@@ -650,6 +806,7 @@ def main() -> int:
         patch_entry_imports(set_mod, extra_imports=[])
         strip_module_namespace_prefixes(set_mod, ["btree_internal", "entry", "node"])
         remove_setvalzst_methods(set_mod)
+        fix_boxed_box_path(set_mod)
     else:
         print(f"  [skip] {set_mod.name} not present")
     return 0
