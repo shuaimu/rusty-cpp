@@ -72,6 +72,26 @@ if [[ -f "$BTREE_DIR/merge_iter.rs" ]]; then
     -e 's|^        let mut a_next;$|        let mut a_next = None;|' \
     -e 's|^        let mut b_next;$|        let mut b_next = None;|' \
     "$BTREE_DIR/merge_iter.rs"
+
+  # `enum Peeked<I> { A(I::Item), B(I::Item) }` collides with the
+  # BTree branching-factor const `B = 6` after the concatenation
+  # (both `B` and `A` become file-scope symbols). Rename the
+  # variants to `Left`/`Right` so the const `B` keeps the name.
+  # Variants are referenced only inside merge_iter.rs, so the
+  # rename is local to this file.
+  sed -i \
+    -e 's|enum Peeked<I: Iterator> {|enum Peeked<I: Iterator> {|' \
+    -e 's|    A(I::Item),|    Left(I::Item),|' \
+    -e 's|    B(I::Item),|    Right(I::Item),|' \
+    -e 's|Peeked::A(|Peeked::Left(|g' \
+    -e 's|Peeked::B(|Peeked::Right(|g' \
+    -e 's|Peeked::A,|Peeked::Left,|g' \
+    -e 's|Peeked::B,|Peeked::Right,|g' \
+    -e 's|Peeked::A)|Peeked::Left)|g' \
+    -e 's|Peeked::B)|Peeked::Right)|g' \
+    -e 's|\.map(Peeked::A\b|.map(Peeked::Left|g' \
+    -e 's|\.map(Peeked::B\b|.map(Peeked::Right|g' \
+    "$BTREE_DIR/merge_iter.rs"
 fi
 
 # ── Cycle-breaking concatenation ──────────────────────────────────
@@ -108,14 +128,12 @@ if [[ ! -f "$INTERNAL" ]]; then
     echo "// type-declaration files (node, search), then files that"
     echo "// add orphan impls (navigate, fix, remove, split, append)."
     echo ""
-    echo "// Module-level consts inlined to avoid a parent↔child"
-    echo "// C++20 module cycle."
-    echo "pub const B: usize = 6;"
-    echo "pub const CAPACITY: usize = 2 * B - 1;"
-    echo "pub const MIN_LEN_AFTER_SPLIT: usize = B - 1;"
-    echo "pub const KV_IDX_CENTER: usize = B - 1;"
-    echo "pub const EDGE_IDX_LEFT_OF_CENTER: usize = B - 1;"
-    echo "pub const EDGE_IDX_RIGHT_OF_CENTER: usize = B;"
+    echo "// MIN_LEN inlined here to avoid a parent↔child C++20 module"
+    echo "// cycle (the original lived in btree/mod.rs and the merged"
+    echo "// content reaches it via super::MIN_LEN; that import would"
+    echo "// create a cycle with the parent module importing this one)."
+    echo "// The other btree-level consts (B, CAPACITY, …) are already"
+    echo "// declared in the merged content via node.rs's verbatim copy."
     echo "pub const MIN_LEN: usize = B - 1;"
     echo ""
   } > "$INTERNAL"
@@ -207,6 +225,21 @@ MOD
     s|\bnode::([A-Z][A-Za-z_]*)|\1|g
     s|\bset_val::([A-Z][A-Za-z_]*)|\1|g
   ' "$INTERNAL"
+
+  # set/entry.rs uses `use super::{SetValZST, map};` and then
+  # references `map::OccupiedEntry` / `map::VacantEntry`. The
+  # transpiler's `import` for a sibling module doesn't surface a
+  # `map::` namespace alias — symbols become reachable at file
+  # scope after import. Rewrite the two references to be
+  # qualified-by-import-name shape that the transpiler does
+  # support: rename them explicitly via use.
+  if [[ -f "$BTREE_DIR/set/entry.rs" ]]; then
+    sed -i \
+      -e 's|use super::{SetValZST, map};|use super::btree_internal::SetValZST; use super::map::{OccupiedEntry as MapOccupiedEntry, VacantEntry as MapVacantEntry};|' \
+      -e 's|map::OccupiedEntry<|MapOccupiedEntry<|g' \
+      -e 's|map::VacantEntry<|MapVacantEntry<|g' \
+      "$BTREE_DIR/set/entry.rs"
+  fi
 
   # Clean up empty subdirectories left after stripping test files.
   rmdir "$BTREE_DIR/borrow" "$BTREE_DIR/node" 2>/dev/null || true
