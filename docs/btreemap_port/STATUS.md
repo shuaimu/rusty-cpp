@@ -27,9 +27,14 @@ picks the first `[ ]` and goes.
       `&this->root` (pointer) where a reference was wanted.
       10 sites rewritten + 2 typo fixes. Landed in
       `fix_dormant_mut_ref_calls()`.
-- [ ] **A3** Rewrite `clone_subtree` recursive lambdas as `std::function`
-      indirection (declare type, then assign). 2 occurrences in
-      `BTreeMap::clone()`.
+- [x] **A3** Rewrote `clone_subtree` as Y-combinator (rather than
+      std::function, which would need a concrete signature instead
+      of `auto` params). Signature `[](auto node, auto alloc)` becomes
+      `[](auto&& __self, auto node, auto alloc)`; recursive calls
+      `clone_subtree(x)` become `__self(__self, x)`; the single
+      external call at the caller site becomes
+      `clone_subtree(clone_subtree, x)`. Landed in
+      `fix_recursive_lambda_clone_subtree()`. Both errors cleared.
 - [ ] **A4** Misc parse glitches: undefined `Q`, expected `(` for
       function-style cast. Per-site fixes.
 - [ ] **A5** Same pass over `set.cppm` / `set.entry.cppm` (currently
