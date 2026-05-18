@@ -107,13 +107,14 @@ API:
 - Entry API (step 22): `entry(k).or_insert(v)`,
   `.or_insert_with(f)`, `.and_modify(f)` — the idiomatic Rust
   counter / upsert pattern, one statement, one lookup.
+- View iterators (step 23): `keys()`, `values()`, `values_mut()` —
+  iterate just the keys or just the values, in ascending order.
+- Bulk operations (step 23): `extend(begin, end)`, `append(other)`,
+  `split_off(key)`.
 
-14-test smoke suite in `tests/btree_port_facade_test.cpp` covers
-insert/displace, remove, ordered iteration, clone independence,
-clear, initializer-list construction, first/last, range, set
-surface, pop_first/pop_last, retain, and entry-API or_insert /
-or_insert_with / and_modify (including the canonical "word
-count" upsert pattern). All pass under `g++ -std=c++23`.
+18-test smoke suite in `tests/btree_port_facade_test.cpp` covers
+the full surface above (and the canonical word-count upsert via
+`entry().or_insert(0) += 1`). All pass under `g++ -std=c++23`.
 
 The intent is **a stable public API while the transpiled
 internals are still being smoothed**. Each method body delegates

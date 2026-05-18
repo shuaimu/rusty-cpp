@@ -16,6 +16,7 @@
 #include <cassert>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 static void test_btreemap_basic_insert_and_get() {
     auto m = btree_port::BTreeMap<int, std::string>::new_();
@@ -267,6 +268,87 @@ static void test_btreemap_entry_or_insert_with_and_modify() {
     assert(m.get(99).unwrap().get() == 42);
 }
 
+static void test_btreemap_keys_values() {
+    auto m = btree_port::BTreeMap<int, std::string>::new_();
+    m.insert(3, std::string("three"));
+    m.insert(1, std::string("one"));
+    m.insert(2, std::string("two"));
+
+    // Keys: ascending order.
+    int expected_k = 1;
+    int seen_k = 0;
+    for (const auto& k : m.keys()) {
+        assert(k == expected_k);
+        ++expected_k;
+        ++seen_k;
+    }
+    assert(seen_k == 3);
+
+    // Values: in key-ascending order.
+    std::string expected_v[] = {"one", "two", "three"};
+    int idx = 0;
+    for (const auto& v : m.values()) {
+        assert(v == expected_v[idx]);
+        ++idx;
+    }
+    assert(idx == 3);
+
+    // values_mut: mutate through the view.
+    for (auto& v : m.values_mut()) {
+        v += "!";
+    }
+    assert(m.get(1).unwrap().get() == "one!");
+    assert(m.get(2).unwrap().get() == "two!");
+    assert(m.get(3).unwrap().get() == "three!");
+}
+
+static void test_btreemap_extend() {
+    auto m = btree_port::BTreeMap<int, int>::new_();
+    m.insert(1, 10);
+    m.insert(2, 20);
+
+    // extend overwrites existing keys (Rust behavior).
+    std::vector<std::pair<int, int>> more = {{2, 999}, {3, 30}, {4, 40}};
+    m.extend(more.begin(), more.end());
+    assert(m.len() == 4);
+    assert(m.get(1).unwrap().get() == 10);
+    assert(m.get(2).unwrap().get() == 999);  // overwritten
+    assert(m.get(3).unwrap().get() == 30);
+    assert(m.get(4).unwrap().get() == 40);
+}
+
+static void test_btreemap_append() {
+    auto a = btree_port::BTreeMap<int, std::string>::new_();
+    a.insert(1, std::string("a-one"));
+    a.insert(2, std::string("a-two"));
+
+    auto b = btree_port::BTreeMap<int, std::string>::new_();
+    b.insert(2, std::string("b-two"));  // collides with a
+    b.insert(3, std::string("b-three"));
+
+    a.append(b);
+    assert(b.is_empty());
+    assert(a.len() == 3);
+    assert(a.get(1).unwrap().get() == "a-one");
+    assert(a.get(2).unwrap().get() == "b-two");  // b wins on collision
+    assert(a.get(3).unwrap().get() == "b-three");
+}
+
+static void test_btreemap_split_off() {
+    auto m = btree_port::BTreeMap<int, int>::new_();
+    for (int i = 0; i < 10; ++i) {
+        m.insert(i, i * 100);
+    }
+    auto upper = m.split_off(5);
+    // `m` keeps 0..5, `upper` gets 5..10.
+    assert(m.len() == 5);
+    assert(upper.len() == 5);
+    assert(m.contains_key(4) && !m.contains_key(5));
+    assert(upper.contains_key(5) && upper.contains_key(9));
+    assert(!upper.contains_key(4));
+    assert(upper.get(7).unwrap().get() == 700);
+}
+
 int main() {
     test_btreemap_basic_insert_and_get();
     test_btreemap_remove();
@@ -282,6 +364,10 @@ int main() {
     test_btreemap_retain();
     test_btreemap_entry_or_insert();
     test_btreemap_entry_or_insert_with_and_modify();
-    std::fprintf(stderr, "btree_port facade: 14 tests passed\n");
+    test_btreemap_keys_values();
+    test_btreemap_extend();
+    test_btreemap_append();
+    test_btreemap_split_off();
+    std::fprintf(stderr, "btree_port facade: 18 tests passed\n");
     return 0;
 }

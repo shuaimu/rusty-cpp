@@ -201,6 +201,116 @@ public:
     size_type size() const noexcept { return backing_.size(); }
     bool empty() const noexcept { return backing_.empty(); }
 
+    // ── View iterators (keys/values) ──────────────────────────────
+    // Each view exposes a lightweight `begin/end` pair built from a
+    // transform_iterator-like wrapper so callers can iterate just
+    // the keys or just the values without copying the whole map.
+    // Mirrors Rust's `BTreeMap::keys()` / `values()` / `values_mut()`.
+
+private:
+    template <typename UnderlyingIt, typename Project>
+    class ProjIter {
+        UnderlyingIt it_;
+        Project proj_;
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = std::remove_reference_t<
+            decltype(std::declval<Project>()(*std::declval<UnderlyingIt>()))>;
+        using difference_type = std::ptrdiff_t;
+        using pointer = void;
+        using reference = decltype(std::declval<Project>()(
+            *std::declval<UnderlyingIt>()));
+
+        ProjIter(UnderlyingIt it, Project proj)
+            : it_(it), proj_(std::move(proj)) {}
+
+        reference operator*() const { return proj_(*it_); }
+        ProjIter& operator++() { ++it_; return *this; }
+        ProjIter operator++(int) { auto tmp = *this; ++it_; return tmp; }
+        bool operator==(const ProjIter& other) const { return it_ == other.it_; }
+        bool operator!=(const ProjIter& other) const { return it_ != other.it_; }
+    };
+
+    template <typename UnderlyingIt, typename Project>
+    struct ProjRange {
+        ProjIter<UnderlyingIt, Project> b;
+        ProjIter<UnderlyingIt, Project> e;
+        auto begin() const { return b; }
+        auto end() const { return e; }
+    };
+
+    static const K& project_key(const value_type& kv) { return kv.first; }
+    static const V& project_const_value(const value_type& kv) { return kv.second; }
+    static V& project_value(value_type& kv) { return kv.second; }
+
+public:
+    /// Range over `const K&`, in ascending key order.
+    /// Use as `for (const auto& k : m.keys()) { … }`.
+    auto keys() const {
+        using It = typename backing_type::const_iterator;
+        using P = const K& (*)(const value_type&);
+        return ProjRange<It, P>{
+            ProjIter<It, P>{backing_.begin(), &project_key},
+            ProjIter<It, P>{backing_.end(), &project_key},
+        };
+    }
+
+    /// Range over `const V&`, in ascending key order.
+    auto values() const {
+        using It = typename backing_type::const_iterator;
+        using P = const V& (*)(const value_type&);
+        return ProjRange<It, P>{
+            ProjIter<It, P>{backing_.begin(), &project_const_value},
+            ProjIter<It, P>{backing_.end(), &project_const_value},
+        };
+    }
+
+    /// Range over `V&`, in ascending key order.
+    auto values_mut() {
+        using It = typename backing_type::iterator;
+        using P = V& (*)(value_type&);
+        return ProjRange<It, P>{
+            ProjIter<It, P>{backing_.begin(), &project_value},
+            ProjIter<It, P>{backing_.end(), &project_value},
+        };
+    }
+
+    /// Bulk-insert from any iterator pair over `std::pair<K, V>`-like
+    /// values. Mirrors Rust's `BTreeMap::extend`. Existing keys are
+    /// overwritten (Rust's behavior); callers wanting to preserve
+    /// originals should use `entry().or_insert(…)` per element.
+    template <typename It>
+    void extend(It first, It last) {
+        for (; first != last; ++first) {
+            auto&& kv = *first;
+            backing_.insert_or_assign(kv.first, kv.second);
+        }
+    }
+
+    /// Move all entries from `other` into this map. After the call
+    /// `other` is empty. Existing keys are overwritten (Rust's
+    /// behavior). Mirrors Rust's `BTreeMap::append`.
+    void append(BTreeMap& other) {
+        for (auto& [k, v] : other.backing_) {
+            backing_.insert_or_assign(std::move(const_cast<K&>(k)),
+                                      std::move(v));
+        }
+        other.backing_.clear();
+    }
+
+    /// Split the map: everything with key `>= key` is moved into a
+    /// new map and returned; entries with key `< key` stay in
+    /// `*this`. Mirrors Rust's `BTreeMap::split_off`.
+    BTreeMap split_off(const K& key) {
+        BTreeMap out;
+        auto it = backing_.lower_bound(key);
+        for (auto i = it; i != backing_.end(); ++i) {
+            out.backing_.emplace(i->first, std::move(i->second));
+        }
+        backing_.erase(it, backing_.end());
+        return out;
+    }
+
     /// Remove and return the first (smallest-key) entry.
     /// Returns `None` if the map is empty. Mirrors Rust's
     /// `BTreeMap::pop_first`.
