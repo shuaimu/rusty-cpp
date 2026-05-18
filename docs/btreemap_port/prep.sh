@@ -67,6 +67,15 @@ find "$BTREE_DIR" -name "*.rs" -exec sed -i \
 #
 # Note: applied BEFORE the cycle-breaking concatenation below; the
 # merge_iter.rs file gets folded into btree_internal.rs.
+# Same uninitialized-binding pattern in split.rs::calc_split_length:
+#   let (length_a, length_b);
+# C++'s auto requires an initializer. Tuple-destructure with zeros;
+# both bindings are unconditionally overwritten immediately after.
+# Must run BEFORE the merge (which consumes and deletes split.rs).
+if [[ -f "$BTREE_DIR/split.rs" ]]; then
+  sed -i 's|^        let (length_a, length_b);$|        let (mut length_a, mut length_b) = (0usize, 0usize);|' "$BTREE_DIR/split.rs"
+fi
+
 if [[ -f "$BTREE_DIR/merge_iter.rs" ]]; then
   sed -i \
     -e 's|^        let mut a_next;$|        let mut a_next = None;|' \
@@ -93,6 +102,9 @@ if [[ -f "$BTREE_DIR/merge_iter.rs" ]]; then
     -e 's|\.map(Peeked::B\b|.map(Peeked::Right|g' \
     "$BTREE_DIR/merge_iter.rs"
 fi
+
+## (length_a/length_b uninit patch is applied above, before the merge
+## consumes node.rs.)
 
 # ── Cycle-breaking concatenation ──────────────────────────────────
 #
