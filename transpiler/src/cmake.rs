@@ -185,7 +185,7 @@ pub fn generate_cmake(cargo: &CargoToml, source_files: &[PathBuf]) -> String {
         "project({} VERSION {} LANGUAGES CXX)\n\n",
         name, version
     ));
-    out.push_str("set(CMAKE_CXX_STANDARD 20)\n");
+    out.push_str("set(CMAKE_CXX_STANDARD 23)\n");
     out.push_str("set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n");
 
     // Include rusty-cpp headers
