@@ -349,6 +349,80 @@ static void test_btreemap_split_off() {
     assert(upper.get(7).unwrap().get() == 700);
 }
 
+static void test_btreeset_pop_and_retain() {
+    auto s = btree_port::BTreeSet<int>::new_();
+    assert(s.pop_first().is_none());
+    assert(s.pop_last().is_none());
+
+    for (int x : {5, 1, 3, 2, 4}) s.insert(x);
+
+    auto first = s.pop_first();
+    assert(!first.is_none() && first.unwrap() == 1);
+    auto last = s.pop_last();
+    assert(!last.is_none() && last.unwrap() == 5);
+
+    // 2, 3, 4 left.
+    assert(s.len() == 3);
+
+    // Retain only odd numbers — drops 2, 4.
+    s.retain([](const int& x) { return x % 2 != 0; });
+    assert(s.len() == 1);
+    assert(s.contains(3));
+}
+
+static void test_btreeset_range() {
+    btree_port::BTreeSet<int> s = {1, 3, 5, 7, 9};
+    auto [it, end] = s.range(3, 8);
+    int count = 0;
+    int last = -1;
+    for (; it != end; ++it) {
+        assert(*it > last);
+        last = *it;
+        ++count;
+    }
+    // [3, 8): expect 3, 5, 7 → 3 elements.
+    assert(count == 3);
+}
+
+static void test_btreeset_union_intersection_difference() {
+    btree_port::BTreeSet<int> a = {1, 2, 3, 4};
+    btree_port::BTreeSet<int> b = {3, 4, 5, 6};
+
+    auto u = a.union_set(b);
+    // 1..6 expected.
+    assert(u.len() == 6);
+    for (int v : {1, 2, 3, 4, 5, 6}) assert(u.contains(v));
+
+    auto i = a.intersection(b);
+    assert(i.len() == 2);
+    assert(i.contains(3) && i.contains(4));
+
+    auto d = a.difference(b);
+    assert(d.len() == 2);
+    assert(d.contains(1) && d.contains(2));
+
+    auto sd = a.symmetric_difference(b);
+    assert(sd.len() == 4);
+    for (int v : {1, 2, 5, 6}) assert(sd.contains(v));
+    assert(!sd.contains(3));
+}
+
+static void test_btreeset_subset_superset_disjoint() {
+    btree_port::BTreeSet<int> small_set = {2, 3};
+    btree_port::BTreeSet<int> big_set = {1, 2, 3, 4};
+    btree_port::BTreeSet<int> other = {10, 11};
+
+    assert(small_set.is_subset(big_set));
+    assert(big_set.is_superset(small_set));
+    assert(!big_set.is_subset(small_set));
+    assert(small_set.is_disjoint(other));
+    assert(!small_set.is_disjoint(big_set));
+
+    // A set is always a subset and superset of itself.
+    assert(small_set.is_subset(small_set));
+    assert(small_set.is_superset(small_set));
+}
+
 int main() {
     test_btreemap_basic_insert_and_get();
     test_btreemap_remove();
@@ -368,6 +442,10 @@ int main() {
     test_btreemap_extend();
     test_btreemap_append();
     test_btreemap_split_off();
-    std::fprintf(stderr, "btree_port facade: 18 tests passed\n");
+    test_btreeset_pop_and_retain();
+    test_btreeset_range();
+    test_btreeset_union_intersection_difference();
+    test_btreeset_subset_superset_disjoint();
+    std::fprintf(stderr, "btree_port facade: 22 tests passed\n");
     return 0;
 }

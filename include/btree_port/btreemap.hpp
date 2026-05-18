@@ -40,11 +40,14 @@
 // `rusty::BTreeMap` (the existing std::map wrapper) so users can
 // migrate code piecemeal.
 
+#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <initializer_list>
+#include <iterator>
 #include <map>
 #include <set>
+#include <type_traits>
 #include <utility>
 
 #include <rusty/option.hpp>
@@ -472,6 +475,125 @@ public:
     }
 
     bool operator==(const BTreeSet& other) const = default;
+
+    /// `size()` as an alias for `len()` for STL spellings.
+    size_type size() const noexcept { return backing_.size(); }
+    bool empty() const noexcept { return backing_.empty(); }
+
+    // ── Pop / retain ─────────────────────────────────────────────
+
+    /// Remove and return the smallest value, or `None` if empty.
+    rusty::Option<T> pop_first() {
+        if (backing_.empty()) {
+            return rusty::Option<T>(rusty::None);
+        }
+        auto it = backing_.begin();
+        T v = std::move(const_cast<T&>(*it));
+        backing_.erase(it);
+        return rusty::Option<T>(std::move(v));
+    }
+
+    /// Remove and return the largest value, or `None` if empty.
+    rusty::Option<T> pop_last() {
+        if (backing_.empty()) {
+            return rusty::Option<T>(rusty::None);
+        }
+        auto it = std::prev(backing_.end());
+        T v = std::move(const_cast<T&>(*it));
+        backing_.erase(it);
+        return rusty::Option<T>(std::move(v));
+    }
+
+    /// In-place removal by predicate `f(const T&) -> bool`.
+    template <typename F>
+    void retain(F&& f) {
+        for (auto it = backing_.begin(); it != backing_.end(); ) {
+            if (!f(*it)) {
+                it = backing_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    /// Half-open range `[lower, upper)` as a (begin, end) iterator
+    /// pair. Mirrors the subset of Rust's `range(bound..bound)` that
+    /// the map facade also exposes.
+    auto range(const T& lower, const T& upper) const {
+        return std::make_pair(backing_.lower_bound(lower),
+                              backing_.lower_bound(upper));
+    }
+
+    // ── Set-theoretic operations ─────────────────────────────────
+    // Rust's BTreeSet exposes `union`, `intersection`, `difference`,
+    // `symmetric_difference` as lazy iterators. Materializing them
+    // to a fresh `BTreeSet` is the most common usage in practice, so
+    // that's what we expose here. (`union` is a C++ keyword
+    // soft-conflict, so we spell it `union_set` to match Rust's
+    // ergonomic intent while staying valid C++.)
+
+    /// All elements in `*this` OR `other`.
+    BTreeSet union_set(const BTreeSet& other) const {
+        BTreeSet out;
+        std::set_union(backing_.begin(), backing_.end(),
+                       other.backing_.begin(), other.backing_.end(),
+                       std::inserter(out.backing_, out.backing_.end()));
+        return out;
+    }
+
+    /// All elements in BOTH `*this` and `other`.
+    BTreeSet intersection(const BTreeSet& other) const {
+        BTreeSet out;
+        std::set_intersection(backing_.begin(), backing_.end(),
+                              other.backing_.begin(), other.backing_.end(),
+                              std::inserter(out.backing_, out.backing_.end()));
+        return out;
+    }
+
+    /// All elements in `*this` but not in `other`.
+    BTreeSet difference(const BTreeSet& other) const {
+        BTreeSet out;
+        std::set_difference(backing_.begin(), backing_.end(),
+                            other.backing_.begin(), other.backing_.end(),
+                            std::inserter(out.backing_, out.backing_.end()));
+        return out;
+    }
+
+    /// All elements in exactly one of `*this` or `other`.
+    BTreeSet symmetric_difference(const BTreeSet& other) const {
+        BTreeSet out;
+        std::set_symmetric_difference(
+            backing_.begin(), backing_.end(),
+            other.backing_.begin(), other.backing_.end(),
+            std::inserter(out.backing_, out.backing_.end()));
+        return out;
+    }
+
+    /// `true` iff every element of `*this` is also in `other`.
+    bool is_subset(const BTreeSet& other) const {
+        return std::includes(other.backing_.begin(), other.backing_.end(),
+                             backing_.begin(), backing_.end());
+    }
+
+    /// `true` iff every element of `other` is also in `*this`.
+    bool is_superset(const BTreeSet& other) const {
+        return other.is_subset(*this);
+    }
+
+    /// `true` iff `*this` and `other` share no element.
+    bool is_disjoint(const BTreeSet& other) const {
+        auto a = backing_.begin();
+        auto b = other.backing_.begin();
+        while (a != backing_.end() && b != other.backing_.end()) {
+            if (*a < *b)
+                ++a;
+            else if (*b < *a)
+                ++b;
+            else
+                return false;
+        }
+        return true;
+    }
 };
 
 }  // namespace btree_port

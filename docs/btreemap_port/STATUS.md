@@ -98,6 +98,8 @@ usable today via `include/btree_port/btreemap.hpp`. The facade is
 a thin wrapper over `std::map`/`std::set` with the Rust-flavored
 API:
 
+**BTreeMap<K, V>:**
+
 - Core: `new_()`, `insert` returning displaced `Option<V>`,
   `get`/`get_mut`/`contains_key`/`remove`/`len`/`is_empty`/`clear`/
   `clone`, plus STL-style begin/end for `for (auto& [k, v] : m)`.
@@ -112,7 +114,18 @@ API:
 - Bulk operations (step 23): `extend(begin, end)`, `append(other)`,
   `split_off(key)`.
 
-18-test smoke suite in `tests/btree_port_facade_test.cpp` covers
+**BTreeSet<T>:**
+
+- Core: `new_()`, `insert`, `contains`, `remove`, `len`, `is_empty`,
+  `clear`, `clone`, begin/end, `size`/`empty` aliases.
+- Mutation (step 24): `pop_first`, `pop_last`, `retain(f)`,
+  `range(lower, upper)`.
+- Set-theoretic ops (step 24): `union_set(other)`,
+  `intersection(other)`, `difference(other)`,
+  `symmetric_difference(other)`, `is_subset(other)`,
+  `is_superset(other)`, `is_disjoint(other)`.
+
+22-test smoke suite in `tests/btree_port_facade_test.cpp` covers
 the full surface above (and the canonical word-count upsert via
 `entry().or_insert(0) += 1`). All pass under `g++ -std=c++23`.
 
