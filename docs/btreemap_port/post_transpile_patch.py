@@ -96,6 +96,122 @@ def patch_internal(path: Path) -> None:
         print(f"  no changes to: {path.name}")
 
 
+def patch_entry_imports(path: Path, extra_imports: list[str]) -> None:
+    """Move all `import …;` lines to immediately after `export module …;`
+    so the post-module imports form a contiguous block (a C++20 module
+    requirement). Add any `extra_imports` that the transpiler missed.
+    Idempotent: skipped if the sentinel is already present."""
+    import re
+
+    src = path.read_text()
+    sentinel = "// btree_port port: imports reordered by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (already reordered)")
+        return
+
+    mod_match = re.search(
+        r"^(export module [A-Za-z0-9_.]+;)\s*$", src, re.MULTILINE
+    )
+    if mod_match is None:
+        print(f"  [warn] no `export module` line in {path.name}", file=sys.stderr)
+        return
+
+    # Collect every `import …;` line in the file (they may be scattered).
+    import_lines = re.findall(r"^import [A-Za-z0-9_.]+;\s*$", src, re.MULTILINE)
+    # Dedup while preserving first-seen order.
+    seen = set()
+    uniq_imports = []
+    for ln in import_lines:
+        ln_clean = ln.rstrip()
+        if ln_clean not in seen:
+            seen.add(ln_clean)
+            uniq_imports.append(ln_clean)
+    # Add any extras the transpiler missed (e.g. set.entry needs map).
+    for extra in extra_imports:
+        extra_line = f"import {extra};"
+        if extra_line not in seen:
+            seen.add(extra_line)
+            uniq_imports.append(extra_line)
+
+    # Strip the original import lines from the body (we'll re-emit them
+    # in one block right after the module declaration).
+    src_without_imports = re.sub(
+        r"^import [A-Za-z0-9_.]+;\s*\n", "", src, flags=re.MULTILINE
+    )
+
+    block = "\n".join(uniq_imports)
+    insertion = f"\n{sentinel}\n{block}\n"
+    new_src = src_without_imports.replace(
+        mod_match.group(1), mod_match.group(1) + insertion, 1
+    )
+    path.write_text(new_src)
+    print(f"  reordered imports in: {path.name} ({len(uniq_imports)} imports)")
+
+
+def strip_module_namespace_prefixes(path: Path, prefixes: list[str]) -> None:
+    """Strip `<module>::` qualifier prefixes from a transpiled .cppm.
+
+    C++20 modules don't put exported symbols inside a namespace named
+    after the module path. When the transpiler emits
+    `btree_internal::Handle<…>` after `import btree_port.btree.btree_internal;`,
+    the qualifier is wrong — it should be plain `Handle<…>`. Strip the
+    prefix to make qualified references resolve via the import.
+
+    Idempotent: skipped if the sentinel is already present."""
+    src = path.read_text()
+    sentinel = "// btree_port port: module prefixes stripped by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (prefixes already stripped)")
+        return
+    changed = 0
+    for prefix in prefixes:
+        # Strip `prefix::` (with two colons), being careful to only match
+        # at identifier boundaries.
+        needle = prefix + "::"
+        before = src.count(needle)
+        src = src.replace(needle, "")
+        changed += before
+    if changed:
+        # Drop the sentinel at the very top to mark idempotency.
+        src = (
+            sentinel + "\n" + src
+        )
+        path.write_text(src)
+        print(f"  stripped {changed} prefix occurrence(s) in: {path.name}")
+    else:
+        print(f"  no prefix occurrences found in: {path.name}")
+
+
+def patch_entry_arities(path: Path) -> None:
+    """Fix the cross-module `as`-rename type aliases in set.entry.cppm
+    that emitted 2 template params instead of 3 — map::OccupiedEntry
+    and map::VacantEntry both have <K, V, A>."""
+    import re
+
+    src = path.read_text()
+    sentinel = "// btree_port port: arity fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (arity already fixed)")
+        return
+
+    old_occ = "template<typename T, typename A> using MapOccupiedEntry = map::OccupiedEntry<T, A>;"
+    new_occ = "template<typename K, typename V, typename A> using MapOccupiedEntry = map::OccupiedEntry<K, V, A>;"
+    old_vac = "template<typename T, typename A> using MapVacantEntry = map::VacantEntry<T, A>;"
+    new_vac = "template<typename K, typename V, typename A> using MapVacantEntry = map::VacantEntry<K, V, A>;"
+
+    if old_occ in src or old_vac in src:
+        src = src.replace(old_occ, new_occ)
+        src = src.replace(old_vac, new_vac)
+        # Mark and write.
+        src = src.replace(
+            new_occ, new_occ + "  " + sentinel, 1
+        )
+        path.write_text(src)
+        print(f"  fixed Map*Entry alias arity in: {path.name}")
+    else:
+        print(f"  no changes to: {path.name} (no Map*Entry aliases found)")
+
+
 def patch_cmake(path: Path, rusty_include_dir: Path) -> None:
     """Trim CMakeLists.txt to btree_internal-only and wire the rusty
     include path so reconfigure doesn't drop -I."""
@@ -178,12 +294,31 @@ def main() -> int:
 
     internal = cpp_out_dir / "btree_port.btree.btree_internal.cppm"
     cmake = cpp_out_dir / "CMakeLists.txt"
+    set_entry = cpp_out_dir / "btree_port.btree.set.entry.cppm"
+    map_entry = cpp_out_dir / "btree_port.btree.map.entry.cppm"
     rusty_include_dir = Path(__file__).resolve().parent.parent.parent / "include"
 
-    print(f"[1/2] patching {internal.name}")
+    print(f"[1/4] patching {internal.name}")
     patch_internal(internal)
-    print(f"[2/2] patching {cmake.name}")
+    print(f"[2/4] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
+    print(f"[3/4] patching {set_entry.name} (import reorder + arity + prefix strip)")
+    if set_entry.exists():
+        # NOTE: set.entry isn't currently in the build target (it depends
+        # on `import btree_port.btree.map`, which has its own transpiler
+        # bugs). The patch logic is left in place so a future iteration
+        # can flip it on by adding set.entry + map.entry to CMakeLists.
+        patch_entry_imports(set_entry, extra_imports=["btree_port.btree.map"])
+        patch_entry_arities(set_entry)
+        strip_module_namespace_prefixes(set_entry, ["btree_internal"])
+    else:
+        print(f"  [skip] {set_entry.name} not present")
+    print(f"[4/4] patching {map_entry.name} (import reorder + prefix strip)")
+    if map_entry.exists():
+        patch_entry_imports(map_entry, extra_imports=[])
+        strip_module_namespace_prefixes(map_entry, ["btree_internal"])
+    else:
+        print(f"  [skip] {map_entry.name} not present")
     return 0
 
 
