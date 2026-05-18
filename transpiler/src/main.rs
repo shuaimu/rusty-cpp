@@ -9,8 +9,20 @@ mod cmake;
 mod codegen;
 mod inline_rust;
 mod metadata;
+mod slots;
 mod transpile;
 mod types;
+
+/// Count distinct .cppm files represented in a slot list. Used only
+/// for the end-of-crate-mode summary line; the manifest does its own
+/// counting internally.
+fn count_slot_files(s: &[slots::Slot]) -> usize {
+    let mut set = BTreeSet::new();
+    for slot in s {
+        set.insert(slot.file.as_str());
+    }
+    set.len()
+}
 
 #[derive(Parser)]
 #[command(name = "rusty-cpp-transpiler")]
@@ -316,6 +328,11 @@ fn transpile_crate(
     // Step 2: Transpile each file with correct module name
     let mut success_count = 0;
     let mut error_count = 0;
+    // Slot manifest: every TODO / "Rust-only … skipped" marker emitted
+    // anywhere in this crate's generated C++ gets recorded here so we
+    // can write a single `rusty_hand_slots.md` summary at the end.
+    // See `slots.rs` for the rationale.
+    let mut hand_slots: Vec<slots::Slot> = Vec::new();
     let mut extension_method_hints = HashSet::new();
     let mut cross_file_enums: Vec<syn::ItemEnum> = Vec::new();
     let mut cross_file_impl_blocks: Vec<syn::ItemImpl> = Vec::new();
@@ -373,6 +390,14 @@ fn transpile_crate(
                     error_count += 1;
                     continue;
                 }
+                // Scan the freshly-generated output for hand-override
+                // slot markers and aggregate them into the crate-wide
+                // list. Use the user-facing relative path as the file
+                // label so the manifest is reproducible regardless of
+                // where the build was invoked from.
+                let cppm_label = cppm_path.to_string_lossy().to_string();
+                let file_slots = slots::detect_slots(&cppm_label, &cpp_output);
+                hand_slots.extend(file_slots);
                 println!(
                     "  {} → {} (module: {})",
                     rs_path.display(),
@@ -429,7 +454,31 @@ fn transpile_crate(
     std::fs::write(&cmake_path, &cmake_content)
         .map_err(|e| format!("Failed to write CMakeLists.txt: {}", e))?;
 
+    // Write the hand-override slot manifest. Always emit it (even when
+    // empty) so the file's presence is a reliable signal that this
+    // crate has been transpiled by a slot-aware build, and so diffs
+    // against a previous run surface changes in the slot count.
+    let slot_manifest_path = output_dir.join("rusty_hand_slots.md");
+    let slot_manifest = slots::format_manifest(&hand_slots);
+    std::fs::write(&slot_manifest_path, &slot_manifest).map_err(|e| {
+        format!(
+            "Failed to write {}: {}",
+            slot_manifest_path.display(),
+            e
+        )
+    })?;
+
     println!("\nGenerated {}", cmake_path.display());
+    if hand_slots.is_empty() {
+        println!("Slot manifest: 0 slots — see {}", slot_manifest_path.display());
+    } else {
+        println!(
+            "Slot manifest: {} slot(s) across {} file(s) — see {}",
+            hand_slots.len(),
+            count_slot_files(&hand_slots),
+            slot_manifest_path.display()
+        );
+    }
     println!(
         "Done: {} files transpiled, {} errors",
         success_count, error_count
