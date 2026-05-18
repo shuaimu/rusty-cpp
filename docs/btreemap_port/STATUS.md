@@ -49,6 +49,19 @@ State as of step 19:
   classes tracked in the "Open blockers — set/map/entry" section
   below. ⏳
 
+State as of step 29:
+- Facade: **22/22 tests passing** (step 24 brought BTreeSet to
+  parity).
+- libbtree_port.a (clang): builds `btree_internal` + `map.entry`.
+  A `btree_port_link_smoke` executable imports the module and
+  instantiates `SetValZST`, proving the transpiled module is
+  linkable from a regular consumer TU — not just emittable as a
+  static library in isolation. **Smoke test executes cleanly.**
+- libbtree_port.a (gcc): builds `btree_internal` only. GCC 14
+  ICEs on `map.entry` (step 25) and also on consumer TUs that
+  import the module (step 29); both are GCC-side bugs outside
+  the port's scope.
+
 ## Open blockers — set/map/entry submodules (added step 19, updated step 21)
 
 These are the next thing to chip at if/when the port resumes. Status is

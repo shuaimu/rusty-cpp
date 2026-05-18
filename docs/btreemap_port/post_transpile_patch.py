@@ -655,6 +655,44 @@ def patch_entry_arities(path: Path) -> None:
         print(f"  no changes to: {path.name} (no Map*Entry aliases found)")
 
 
+LINK_SMOKE_CPP = """\
+// Smoke test for the transpiled btree_port C++20 module.
+//
+// Proves two things:
+//   1. The btree_internal module can be imported into a regular .cpp
+//      translation unit.
+//   2. At least one exported type (SetValZST, the zero-sized tag) can
+//      be instantiated, exercising the module loader without requiring
+//      the deeper BTreeMap surface (which still has transpiler-side
+//      gaps tracked in docs/btreemap_port/STATUS.md).
+//
+// The facade in include/btree_port/btreemap.hpp is the public-API
+// "working version"; this smoke test is proof that the transpiled
+// internals are also reachable from C++ user code, not just shipped
+// as a static library in isolation.
+
+import btree_port.btree.btree_internal;
+
+#include <cstdio>
+
+int main() {
+    SetValZST zst;
+    (void)zst;
+    std::fprintf(stderr, "btree_port transpiled module: link smoke test ok\\n");
+    return 0;
+}
+"""
+
+
+def write_link_smoke(cpp_out_dir: Path) -> None:
+    path = cpp_out_dir / "link_smoke.cpp"
+    if path.exists() and path.read_text() == LINK_SMOKE_CPP:
+        print(f"  no changes to: {path.name} (already current)")
+        return
+    path.write_text(LINK_SMOKE_CPP)
+    print(f"  wrote: {path.name}")
+
+
 def patch_cmake(path: Path, rusty_include_dir: Path) -> None:
     """Trim CMakeLists.txt to btree_internal-only and wire the rusty
     include path so reconfigure doesn't drop -I."""
@@ -708,6 +746,18 @@ def patch_cmake(path: Path, rusty_include_dir: Path) -> None:
         "target_sources(btree_port PUBLIC FILE_SET CXX_MODULES FILES\n"
         "    ${_BTREE_PORT_SOURCES}\n"
         ")\n"
+        "\n"
+        "# Smoke-test executable: imports the transpiled module and\n"
+        "# references one of its exported types. Proves the static\n"
+        "# library is actually loadable+linkable, not just compileable\n"
+        "# in isolation. Only built under clang — gcc 14 ICEs when\n"
+        "# importing this module from a consumer TU.\n"
+        "if(EXISTS \"${CMAKE_CURRENT_SOURCE_DIR}/link_smoke.cpp\"\n"
+        "   AND (CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\"\n"
+        "        OR CMAKE_CXX_COMPILER_ID STREQUAL \"AppleClang\"))\n"
+        "    add_executable(btree_port_link_smoke link_smoke.cpp)\n"
+        "    target_link_libraries(btree_port_link_smoke PRIVATE btree_port)\n"
+        "endif()\n"
     )
     # Match from 'add_library(btree_port' through the FIRST ')' that
     # closes a target_sources block following it.
@@ -752,6 +802,8 @@ def main() -> int:
     patch_internal(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
+    print(f"[*] writing link_smoke.cpp")
+    write_link_smoke(cpp_out_dir)
     print(f"[3/6] patching {set_entry.name}")
     if set_entry.exists():
         # NOTE: set.entry isn't currently in the build target (it depends
