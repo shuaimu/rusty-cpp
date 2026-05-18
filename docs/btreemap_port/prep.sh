@@ -76,6 +76,29 @@ if [[ -f "$BTREE_DIR/split.rs" ]]; then
   sed -i 's|^        let (length_a, length_b);$|        let (mut length_a, mut length_b) = (0usize, 0usize);|' "$BTREE_DIR/split.rs"
 fi
 
+# `append.rs::MergeIter::next` passes a closure to
+# `self.0.nexts(...)` whose Rust signature includes `Cmp: Fn(...) -> Ordering`.
+# The transpiler emits the closure with `-> Cmp` as the C++ return
+# type, taking the trait-parameter name instead of the bound's
+# return type. Add an explicit `-> core::cmp::Ordering` annotation
+# on the closure so the transpiler picks up the concrete type
+# directly from the closure syntax.
+#
+# sed alone is too brittle for the `|...| -> Type { … }` shape
+# (pipe chars need escaping, braces need preservation); use python.
+if [[ -f "$BTREE_DIR/append.rs" ]]; then
+  python3 - "$BTREE_DIR/append.rs" <<'PYEOF'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+old = "self.0.nexts(|a: &(K, V), b: &(K, V)| K::cmp(&a.0, &b.0))"
+new = "self.0.nexts(|a: &(K, V), b: &(K, V)| -> core::cmp::Ordering { K::cmp(&a.0, &b.0) })"
+if old in s and new not in s:
+    s = s.replace(old, new)
+    p.write_text(s)
+PYEOF
+fi
+
 # set_val.rs uses Rust's `default fn` specialization (an unstable
 # `min_specialization` feature) to dispatch `IsSetVal::is_set_val()`
 # differently for `SetValZST` vs every other type. The transpiler
