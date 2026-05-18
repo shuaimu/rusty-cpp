@@ -193,7 +193,8 @@ API:
 
 **BTreeMap<K, V>:**
 
-- Core: `new_()`, `insert` returning displaced `Option<V>`,
+- Core: `new_()`, `from_iter(begin, end)` (step 30), `insert`
+  returning displaced `Option<V>`,
   `get`/`get_mut`/`contains_key`/`remove`/`len`/`is_empty`/`clear`/
   `clone`, plus STL-style begin/end for `for (auto& [k, v] : m)`.
 - Position queries (step 14): `first_key_value`, `last_key_value`,
@@ -209,7 +210,8 @@ API:
 
 **BTreeSet<T>:**
 
-- Core: `new_()`, `insert`, `contains`, `remove`, `len`, `is_empty`,
+- Core: `new_()`, `from_iter(begin, end)` (step 30), `insert`,
+  `contains`, `remove`, `len`, `is_empty`,
   `clear`, `clone`, begin/end, `size`/`empty` aliases.
 - Mutation (step 24): `pop_first`, `pop_last`, `retain(f)`,
   `range(lower, upper)`.
@@ -218,9 +220,11 @@ API:
   `symmetric_difference(other)`, `is_subset(other)`,
   `is_superset(other)`, `is_disjoint(other)`.
 
-22-test smoke suite in `tests/btree_port_facade_test.cpp` covers
-the full surface above (and the canonical word-count upsert via
-`entry().or_insert(0) += 1`). All pass under `g++ -std=c++23`.
+24-test smoke suite in `tests/btree_port_facade_test.cpp` covers
+the full surface above. Includes a realistic end-to-end workflow
+(word-count via `entry().or_insert(0) += 1`, then `retain` /
+ordered iteration / `pop_first` drain). All pass under both
+`g++ -std=c++23` and `clang++ -std=c++23`.
 
 The intent is **a stable public API while the transpiled
 internals are still being smoothed**. Each method body delegates

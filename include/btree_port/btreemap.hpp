@@ -78,6 +78,19 @@ public:
     /// avoids a clash with C++'s `new` keyword.
     static BTreeMap new_() { return BTreeMap{}; }
 
+    /// Build a map from any iterator pair over `pair<K, V>`-like
+    /// values. Mirrors Rust's `BTreeMap::from_iter` / `collect`. On
+    /// duplicate keys the LAST one wins (matches Rust's behavior).
+    template <typename It>
+    static BTreeMap from_iter(It first, It last) {
+        BTreeMap m;
+        for (; first != last; ++first) {
+            auto&& kv = *first;
+            m.backing_.insert_or_assign(kv.first, kv.second);
+        }
+        return m;
+    }
+
     size_type len() const noexcept { return backing_.size(); }
     bool is_empty() const noexcept { return backing_.empty(); }
 
@@ -444,6 +457,18 @@ public:
     BTreeSet(std::initializer_list<T> init) : backing_(init.begin(), init.end()) {}
 
     static BTreeSet new_() { return BTreeSet{}; }
+
+    /// Build a set from any iterator pair over `T`-like values.
+    /// Mirrors Rust's `BTreeSet::from_iter` / `collect`. Duplicates
+    /// are dropped (Rust's behavior).
+    template <typename It>
+    static BTreeSet from_iter(It first, It last) {
+        BTreeSet s;
+        for (; first != last; ++first) {
+            s.backing_.insert(*first);
+        }
+        return s;
+    }
 
     size_type len() const noexcept { return backing_.size(); }
     bool is_empty() const noexcept { return backing_.empty(); }

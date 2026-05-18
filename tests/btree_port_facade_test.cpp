@@ -423,6 +423,85 @@ static void test_btreeset_subset_superset_disjoint() {
     assert(small_set.is_superset(small_set));
 }
 
+static void test_from_iter() {
+    // BTreeMap::from_iter — last-write-wins on duplicates.
+    std::vector<std::pair<int, std::string>> pairs = {
+        {3, "three"}, {1, "one"}, {2, "two"}, {3, "THREE"},  // dup key
+    };
+    auto m = btree_port::BTreeMap<int, std::string>::from_iter(
+        pairs.begin(), pairs.end());
+    assert(m.len() == 3);
+    assert(m.get(1).unwrap().get() == "one");
+    assert(m.get(2).unwrap().get() == "two");
+    assert(m.get(3).unwrap().get() == "THREE");  // last-write-wins
+
+    // BTreeSet::from_iter — duplicates dropped.
+    std::vector<int> ints = {5, 1, 3, 1, 4, 5, 9, 2, 6};
+    auto s = btree_port::BTreeSet<int>::from_iter(ints.begin(), ints.end());
+    assert(s.len() == 7);
+    for (int v : {1, 2, 3, 4, 5, 6, 9}) assert(s.contains(v));
+}
+
+static void test_realistic_workflow() {
+    // Mimics a small log-line frequency analyzer: count word
+    // occurrences, then pick the top-K alphabetically-sorted keys.
+    // Exercises insert / entry().or_insert() upsert / iter / clone /
+    // keys() / values() / pop_first() in one workflow.
+    auto counts = btree_port::BTreeMap<std::string, int>::new_();
+
+    const char* words[] = {
+        "alpha", "beta", "alpha", "gamma", "beta", "alpha",
+        "delta", "epsilon", "gamma", "alpha",
+    };
+    for (const char* w : words) {
+        counts.entry(std::string(w)).or_insert(0) += 1;
+    }
+
+    assert(counts.len() == 5);
+    assert(counts.get(std::string("alpha")).unwrap().get() == 4);
+    assert(counts.get(std::string("beta")).unwrap().get() == 2);
+    assert(counts.get(std::string("delta")).unwrap().get() == 1);
+
+    // Snapshot via clone — original stays usable.
+    auto snapshot = counts.clone();
+    assert(snapshot.len() == counts.len());
+
+    // Keep only words seen >= 2 times.
+    counts.retain([](const std::string&, int& n) { return n >= 2; });
+    assert(counts.len() == 3);
+    assert(!counts.contains_key(std::string("delta")));
+
+    // Snapshot wasn't mutated.
+    assert(snapshot.contains_key(std::string("delta")));
+
+    // Iteration produces alphabetical order: alpha, beta, gamma.
+    std::vector<std::string> seen_keys;
+    for (const auto& [k, _v] : counts) {
+        seen_keys.push_back(k);
+    }
+    assert(seen_keys.size() == 3);
+    assert(seen_keys[0] == "alpha");
+    assert(seen_keys[1] == "beta");
+    assert(seen_keys[2] == "gamma");
+
+    // Sum the values via values() view.
+    int total = 0;
+    for (int n : counts.values()) total += n;
+    assert(total == 4 + 2 + 2);
+
+    // Drain to a vector in order via pop_first.
+    std::vector<std::pair<std::string, int>> drained;
+    while (true) {
+        auto opt = counts.pop_first();
+        if (opt.is_none()) break;
+        drained.push_back(opt.unwrap());
+    }
+    assert(counts.is_empty());
+    assert(drained.size() == 3);
+    assert(drained[0].first == "alpha");
+    assert(drained[2].first == "gamma");
+}
+
 int main() {
     test_btreemap_basic_insert_and_get();
     test_btreemap_remove();
@@ -446,6 +525,8 @@ int main() {
     test_btreeset_range();
     test_btreeset_union_intersection_difference();
     test_btreeset_subset_superset_disjoint();
-    std::fprintf(stderr, "btree_port facade: 22 tests passed\n");
+    test_from_iter();
+    test_realistic_workflow();
+    std::fprintf(stderr, "btree_port facade: 24 tests passed\n");
     return 0;
 }
