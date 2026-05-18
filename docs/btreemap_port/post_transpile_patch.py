@@ -89,6 +89,25 @@ def patch_internal(path: Path) -> None:
             changed_any = True
         else:
             print(f"  [skip]    {sig} (not found or already stubbed)")
+
+    # Clang-strictness fix: NodeRef::eq emits
+    #   `auto&& height = …deref…(_let_pat.height_field);`
+    #   `assert((* height == other . height));`
+    # The `* height` is a spurious deref of a value-type reference; the
+    # `other . height` refers to the METHOD `height()`, not the field
+    # `height_field`. GCC accepts both leniently; clang rejects the
+    # method-ref-without-call. Rewrite the assert to a no-spurious-deref
+    # comparison against the field.
+    bad_assert = "assert((* height == other . height));"
+    good_assert = (
+        "assert((height == other.height_field));"
+        "  /* btree_port port: clang-strictness fix by post_transpile_patch.py */"
+    )
+    if bad_assert in src:
+        src = src.replace(bad_assert, good_assert, 1)
+        changed_any = True
+        print("  [clang-fix] NodeRef::eq assert (spurious *, .height→.height_field)")
+
     if changed_any:
         path.write_text(src)
         print(f"  wrote: {path}")
@@ -161,27 +180,49 @@ def remove_setvalzst_methods(path: Path) -> None:
     import re
 
     src = path.read_text()
-    sentinel = "// btree_port port: SetValZST misroutes hidden by post_transpile_patch.py"
-    if sentinel in src:
-        print(f"  no changes to: {path.name} (SetValZST methods already hidden)")
-        return
+    sentinel = "// btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py"
+    # Drop the old (narrower) SetValZST-only sentinel if a previous run
+    # used it; that way running with the broadened heuristic catches
+    # additional `this->inner.*` clusters that weren't covered before.
+    old_sentinel = "// btree_port port: SetValZST misroutes hidden by post_transpile_patch.py"
+    src = src.replace(old_sentinel, sentinel)
 
     # Match a contiguous run of `template<typename T>\n<sig>\n<body…>\n}` blocks
-    # whose body references `SetValZST`. We use a heuristic: any method-block
-    # starting with `    template<typename T>` whose body contains `SetValZST`.
-    # The blocks we care about all live in one cluster at the end of a struct.
+    # whose body references SET-internal symbols. Two signals:
+    #  - `SetValZST` (set-internal ZST type leaked into map.entry).
+    #  - `this->inner.` (orphan-impl methods absorbed from
+    #    set::OccupiedEntry / set::VacantEntry that destructure
+    #    through their `inner: MapOccupiedEntry<…>` field — which
+    #    doesn't exist on the map-side struct they got placed in).
     #
-    # Strategy: find the first `template<typename T>` line whose method-block
-    # mentions SetValZST. From there, swallow consecutive `template<typename T>`-
-    # prefixed method blocks until a non-template-T line appears.
+    # Strategy: scan the file line-by-line. Skip blocks already
+    # wrapped in `#if 0 / #endif` (re-run safety). For every
+    # `template<typename T>` method-block, peek at the body — if it
+    # contains either signal, wrap the cluster in `#if 0 / #endif`.
 
     lines = src.split("\n")
     n = len(lines)
     out: list[str] = []
     i = 0
     hidden_blocks = 0
+    in_skip = False
     while i < n:
         line = lines[i]
+        # Track #if 0 / #endif so we don't double-wrap.
+        if line.startswith("#if 0"):
+            in_skip = True
+            out.append(line)
+            i += 1
+            continue
+        if line.startswith("#endif") and in_skip:
+            in_skip = False
+            out.append(line)
+            i += 1
+            continue
+        if in_skip:
+            out.append(line)
+            i += 1
+            continue
         # Look for `    template<typename T>` (4-space indent inside struct).
         if line.rstrip() == "    template<typename T>" and i + 1 < n:
             # Scan forward to find method-block end (closing `}` at indent 4).
@@ -211,7 +252,16 @@ def remove_setvalzst_methods(path: Path) -> None:
                 i += 1
                 continue
             block = "\n".join(lines[i : block_end + 1])
-            if "SetValZST" in block:
+            # Inside the entry structs (VacantEntry / OccupiedEntry,
+            # template params <K, V, A>), no legitimate method uses
+            # `template<typename T>` — the struct's own template
+            # parameters cover every legitimate use. Every
+            # 4-space-indented `template<typename T>` block we see
+            # here is an orphan-impl misroute from set::*Entry into
+            # map::*Entry (or vice versa) and references symbols
+            # (`this->inner.*`, `SetValZST`, `this->get()`) that
+            # don't exist on the host struct. Hide them all.
+            if True:
                 # Hide it (and swallow any contiguous next template<typename T>
                 # blocks too — they're all part of the same misrouted cluster).
                 cluster_start = i
@@ -259,11 +309,13 @@ def remove_setvalzst_methods(path: Path) -> None:
         out.append(line)
         i += 1
 
-    if hidden_blocks > 0:
+    if hidden_blocks > 0 or src != "\n".join(out):
         path.write_text("\n".join(out))
-        print(f"  hid {hidden_blocks} SetValZST-misroute cluster(s) in: {path.name}")
+        print(
+            f"  hid {hidden_blocks} orphan-impl misroute cluster(s) in: {path.name}"
+        )
     else:
-        print(f"  no SetValZST misroutes found in: {path.name}")
+        print(f"  no orphan-impl misroutes found in: {path.name}")
 
 
 def stub_nodref_insert_entry(path: Path) -> None:
@@ -445,23 +497,28 @@ def patch_cmake(path: Path, rusty_include_dir: Path) -> None:
 
     trim_block = (
         f"{sentinel}\n"
-        "# Only `btree_port.btree.btree_internal` compiles cleanly today (after\n"
-        "# the 5-method stub patch). The set/map/*.entry modules hit additional\n"
-        "# transpiler bugs (post-module import ordering, cross-module template-\n"
-        "# arity recovery, orphan-impl misrouting). They are kept out of the\n"
-        "# build target until those land; see docs/btreemap_port/STATUS.md.\n"
+        "# `btree_internal` builds cleanly under both g++ and clang++ after\n"
+        "# the post-transpile patches. `map.entry` builds under clang++ but\n"
+        "# hits a GCC 14 ICE (segfault during destructor analysis of\n"
+        "# rusty::RcControlBlockBase) — include it only when building with\n"
+        "# clang. See docs/btreemap_port/STATUS.md.\n"
         "#\n"
         "# The 'working version' is the hand-written facade at\n"
         "# include/btree_port/btreemap.hpp (validated by\n"
-        "# tests/btree_port_facade_test.cpp). The facade does NOT depend on this\n"
-        "# module — building btree_internal is proof the transpiled internals\n"
-        "# are nearly compile-clean and ready for gradual migration.\n"
-        "add_library(btree_port\n"
-        "    btree_port.btree.btree_internal.cppm\n"
-        ")\n"
+        "# tests/btree_port_facade_test.cpp). The facade does NOT depend on\n"
+        "# this module — building btree_internal (+ map.entry on clang) is\n"
+        "# proof the transpiled internals are nearly compile-clean and\n"
+        "# ready for gradual migration.\n"
+        "set(_BTREE_PORT_SOURCES btree_port.btree.btree_internal.cppm)\n"
+        "if(CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\"\n"
+        "   OR CMAKE_CXX_COMPILER_ID STREQUAL \"AppleClang\")\n"
+        "    list(APPEND _BTREE_PORT_SOURCES btree_port.btree.map.entry.cppm)\n"
+        "endif()\n"
+        "\n"
+        "add_library(btree_port ${_BTREE_PORT_SOURCES})\n"
         "\n"
         "target_sources(btree_port PUBLIC FILE_SET CXX_MODULES FILES\n"
-        "    btree_port.btree.btree_internal.cppm\n"
+        "    ${_BTREE_PORT_SOURCES}\n"
         ")\n"
     )
     # Match from 'add_library(btree_port' through the FIRST ')' that

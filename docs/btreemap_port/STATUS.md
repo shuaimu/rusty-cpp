@@ -1,10 +1,22 @@
 # rustc-stdlib BTreeMap Port — Status
 
-## Module also compiles (step 19)
+## Modules compile (step 19, expanded step 25)
 
 After [post_transpile_patch.py](post_transpile_patch.py) lands, the
-`btree_port.btree.btree_internal` module builds cleanly to
-`libbtree_port.a` under `g++ -std=c++23`. The patch does two things:
+transpiled modules build cleanly to `libbtree_port.a`:
+
+- **g++ -std=c++23** builds `btree_port.btree.btree_internal` (the
+  6.4 KLoC merged internal module).
+- **clang++ -std=c++23** builds `btree_port.btree.btree_internal`
+  AND `btree_port.btree.map.entry` (GCC 14 hits an ICE during
+  `RcControlBlockBase` destructor analysis when map.entry is
+  included; clang accepts it cleanly).
+
+The CMakeLists conditionally adds map.entry only under clang. Step
+19 below documents the initial btree_internal-only build; the
+present section captures the broader state after step 25.
+
+`btree_internal.cppm` patch does two things:
 
 1. **Stub 5 methods** that hit transpiler-side template-parameter
    recovery bugs (`from_new_leaf`, `from_new_internal`,
