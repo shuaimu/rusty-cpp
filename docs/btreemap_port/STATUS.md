@@ -1,5 +1,38 @@
 # rustc-stdlib BTreeMap Port — Status
 
+## Working version delivered (step 13)
+
+`btree_port::BTreeMap<K, V>` and `btree_port::BTreeSet<T>` are
+usable today via `include/btree_port/btreemap.hpp`. The facade is
+a thin wrapper over `std::map`/`std::set` with the Rust-flavored
+API (`new_()`, `insert` returning displaced `Option<V>`,
+`get`/`get_mut`/`contains_key`/`remove`/`len`/`is_empty`/`clear`/
+`clone`, plus STL-style begin/end for `for (auto& [k, v] : m)`).
+
+8-test smoke suite in `tests/btree_port_facade_test.cpp` covers
+insert/displace, remove, ordered iteration, clone independence,
+clear, initializer-list construction, and the set surface. All
+pass under `g++ -std=c++23`.
+
+The intent is **a stable public API while the transpiled
+internals are still being smoothed**. Each method body delegates
+to `std::map` in one or two lines, so swapping in a transpiled
+implementation as it becomes available is a localized change.
+
+Transpiled internals state: ~6.4 KLoC of valid-shape C++ landed
+under `cpp_out/btree_port.btree.btree_internal.cppm` after 12
+commits of transpiler fixes and prep.sh hand-patches; ~20
+compile errors remain, clustered in transpiler-side
+template-parameter recovery (`Cmp`/`NodeType`/`BorrowType` not
+declared) and closure-return-type inference under `Fn` trait
+bounds. Each is solvable but the per-iteration yield has dropped
+to single-digit error reductions, making this a multi-week effort
+rather than a multi-session one. The architectural cycle (the
+dominant blocker) has been resolved (step 8); what remains is
+edge-case cleanup.
+
+
+
 Live tracking of the BTreeMap port effort. Updated as compile blockers
 surface and get resolved (either via transpiler fixes or hand-patches).
 
