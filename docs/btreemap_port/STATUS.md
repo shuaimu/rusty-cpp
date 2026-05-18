@@ -35,8 +35,14 @@ picks the first `[ ]` and goes.
       external call at the caller site becomes
       `clone_subtree(clone_subtree, x)`. Landed in
       `fix_recursive_lambda_clone_subtree()`. Both errors cleared.
-- [ ] **A4** Misc parse glitches: undefined `Q`, expected `(` for
-      function-style cast. Per-site fixes.
+- [~] **A4** Partial: MIN_LEN dup dropped (2), merge() `Q`→`K`
+      substitution (1), SearchBound (5) and DedupSortedIter (1)
+      added to template-arg recovery + DedupSortedIter deduction
+      helper. 9 sites cleared. Remaining: T→K in `entry()` body
+      (3 sites on one line), `new_()` method body mismatched A vs
+      Global (2 sites), `debug_map` not in rusty::fmt::Formatter (1),
+      empty `return /* write!… */` (1). Total 7 errors left
+      before A4 fully done.
 - [ ] **A5** Same pass over `set.cppm` / `set.entry.cppm` (currently
       blocked behind A1–A4 since they import map).
 - [ ] **A6** Add `btree_port.btree.map`, `set`, `set.entry` to the

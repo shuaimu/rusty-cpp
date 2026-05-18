@@ -489,6 +489,22 @@ def recover_template_args(path: Path) -> None:
             ".map(Handle::into_kv)",
             ".map([](auto&& __h) { return __h.into_kv(); })",
         ),
+        # SearchBound is `enum class SearchBound<Q>` in Rust (specialized
+        # for borrowed keys). At the call sites in BTreeMap, the lookup
+        # uses K directly. `SearchBound::from_range(b)` → ::from_range
+        # with the concrete K.
+        (
+            "SearchBound::from_range(",
+            "SearchBound<K>::from_range(",
+        ),
+        # DedupSortedIter has template params <K, V, I>. K and V come
+        # from the enclosing BTreeMap; I is the iterator type which
+        # is deducible from the argument. Substitute the helper that
+        # the patcher injects below.
+        (
+            "DedupSortedIter::new_(",
+            "__btree_port_make_dedup<K, V>(",
+        ),
     ]
 
     n_total = 0
@@ -501,10 +517,79 @@ def recover_template_args(path: Path) -> None:
         print(f"  recovered {n}× `{old}` → expanded form")
 
     if n_total:
+        # If `__btree_port_make_dedup<` was substituted in, also
+        # inject the helper definition right after the imports.
+        if "__btree_port_make_dedup<" in src:
+            helper = (
+                "\n// btree_port port: DedupSortedIter deduction helper "
+                "injected by post_transpile_patch.py\n"
+                "template<typename __K, typename __V, typename __It>\n"
+                "static auto __btree_port_make_dedup(__It __it) {\n"
+                "    return DedupSortedIter<__K, __V, __It>"
+                "::new_(std::move(__it));\n"
+                "}\n"
+            )
+            import re
+            last_import = None
+            for m in re.finditer(r"^import [A-Za-z0-9_.]+;\s*$", src, re.MULTILINE):
+                last_import = m
+            if last_import is not None:
+                ins = last_import.end()
+                src = src[:ins] + helper + src[ins:]
         src = sentinel + "\n" + src
         path.write_text(src)
     else:
         print(f"  no template-arg recovery sites in: {path.name}")
+
+
+def drop_duplicate_min_len(path: Path) -> None:
+    """`MIN_LEN` is exported from btree_internal.cppm. The transpiler
+    also emits a re-export in map.cppm — `export extern const size_t
+    MIN_LEN;` followed by `export constexpr size_t MIN_LEN = …;`. This
+    creates a duplicate-declaration error across the two modules.
+    Drop both lines in map.cppm."""
+    src = path.read_text()
+    sentinel = "// btree_port port: MIN_LEN duplicate dropped by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (MIN_LEN dup already dropped)")
+        return
+    targets = [
+        "export extern const size_t MIN_LEN;\n",
+        "export constexpr size_t MIN_LEN = MIN_LEN_AFTER_SPLIT;\n",
+    ]
+    n_dropped = 0
+    for t in targets:
+        if t in src:
+            src = src.replace(t, "", 1)
+            n_dropped += 1
+    if n_dropped:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  dropped {n_dropped} duplicate MIN_LEN line(s) in: {path.name}")
+    else:
+        print(f"  no MIN_LEN duplicates in: {path.name}")
+
+
+def fix_merge_unknown_Q(path: Path) -> None:
+    """`BTreeMap::merge(other, conflict)` body references `Q` (a Rust
+    generic that lets the lookup type be a borrowed view of K), but the
+    transpiler dropped the `template<typename Q>` qualifier. The single
+    use is `rusty::Bound<const Q&>::Included(first_other_key)`. Since
+    K trivially borrows K, substitute Q → K at the merge call site."""
+    src = path.read_text()
+    sentinel = "// btree_port port: merge Q→K by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (merge Q→K already applied)")
+        return
+    target = "this->lower_bound_mut(rusty::Bound<const Q&>::Included("
+    repl = "this->lower_bound_mut(rusty::Bound<const K&>::Included("
+    if target in src:
+        src = src.replace(target, repl, 1)
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  substituted Q→K in merge() in: {path.name}")
+    else:
+        print(f"  no merge Q→K site in: {path.name}")
 
 
 def fix_recursive_lambda_clone_subtree(path: Path) -> None:
@@ -1084,6 +1169,12 @@ def main() -> int:
         # rewrite to Y-combinator form so the lambda's `auto`-deduced
         # name doesn't appear in its own initializer (phase A3).
         fix_recursive_lambda_clone_subtree(map_mod)
+        # MIN_LEN is duplicated between btree_internal and map; drop
+        # the map-side decls (phase A4).
+        drop_duplicate_min_len(map_mod)
+        # `merge(other, conflict)` has an undeclared `Q` from a Rust
+        # `Borrow<Q>` constraint; substitute Q→K (phase A4).
+        fix_merge_unknown_Q(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")
