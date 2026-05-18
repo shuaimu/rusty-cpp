@@ -178,6 +178,95 @@ static void test_btreeset_ordered_iter() {
     assert(count == 7);
 }
 
+static void test_btreemap_pop_first_last() {
+    auto m = btree_port::BTreeMap<int, std::string>::new_();
+    assert(m.pop_first().is_none());
+    assert(m.pop_last().is_none());
+
+    m.insert(2, std::string("two"));
+    m.insert(1, std::string("one"));
+    m.insert(3, std::string("three"));
+
+    auto first = m.pop_first();
+    assert(!first.is_none());
+    auto [fk, fv] = first.unwrap();
+    assert(fk == 1);
+    assert(fv == "one");
+    assert(m.len() == 2);
+
+    auto last = m.pop_last();
+    assert(!last.is_none());
+    auto [lk, lv] = last.unwrap();
+    assert(lk == 3);
+    assert(lv == "three");
+    assert(m.len() == 1);
+    assert(m.contains_key(2));
+}
+
+static void test_btreemap_retain() {
+    auto m = btree_port::BTreeMap<int, int>::new_();
+    for (int i = 1; i <= 10; ++i) {
+        m.insert(i, i * 10);
+    }
+    // Retain even keys only.
+    m.retain([](const int& k, int& /*v*/) { return k % 2 == 0; });
+    assert(m.len() == 5);
+    assert(!m.contains_key(1));
+    assert(m.contains_key(2));
+    assert(!m.contains_key(3));
+    assert(m.contains_key(10));
+}
+
+static void test_btreemap_entry_or_insert() {
+    auto m = btree_port::BTreeMap<std::string, int>::new_();
+
+    // Vacant entry — inserts default.
+    int& v = m.entry(std::string("apple")).or_insert(0);
+    assert(v == 0);
+    v = 5;
+    assert(m.get(std::string("apple")).unwrap().get() == 5);
+
+    // Occupied entry — leaves existing value alone.
+    int& v2 = m.entry(std::string("apple")).or_insert(99);
+    assert(v2 == 5);
+
+    // Idiomatic counter pattern.
+    auto counts = btree_port::BTreeMap<std::string, int>::new_();
+    for (const auto& w : {std::string("a"), std::string("b"),
+                          std::string("a"), std::string("c"),
+                          std::string("a"), std::string("b")}) {
+        counts.entry(w).or_insert(0) += 1;
+    }
+    assert(counts.get(std::string("a")).unwrap().get() == 3);
+    assert(counts.get(std::string("b")).unwrap().get() == 2);
+    assert(counts.get(std::string("c")).unwrap().get() == 1);
+}
+
+static void test_btreemap_entry_or_insert_with_and_modify() {
+    auto m = btree_port::BTreeMap<int, int>::new_();
+
+    int call_count = 0;
+    auto make_default = [&]() { ++call_count; return 100; };
+
+    // Vacant: factory called.
+    int& v = m.entry(7).or_insert_with(make_default);
+    assert(v == 100);
+    assert(call_count == 1);
+
+    // Occupied: factory NOT called.
+    int& v2 = m.entry(7).or_insert_with(make_default);
+    assert(v2 == 100);
+    assert(call_count == 1);  // unchanged
+
+    // and_modify on occupied: closure runs.
+    m.entry(7).and_modify([](int& x) { x *= 2; }).or_insert(0);
+    assert(m.get(7).unwrap().get() == 200);
+
+    // and_modify on vacant: closure does NOT run, then or_insert.
+    m.entry(99).and_modify([](int& x) { x = -1; }).or_insert(42);
+    assert(m.get(99).unwrap().get() == 42);
+}
+
 int main() {
     test_btreemap_basic_insert_and_get();
     test_btreemap_remove();
@@ -189,6 +278,10 @@ int main() {
     test_btreemap_range();
     test_btreeset_basic();
     test_btreeset_ordered_iter();
-    std::fprintf(stderr, "btree_port facade: 10 tests passed\n");
+    test_btreemap_pop_first_last();
+    test_btreemap_retain();
+    test_btreemap_entry_or_insert();
+    test_btreemap_entry_or_insert_with_and_modify();
+    std::fprintf(stderr, "btree_port facade: 14 tests passed\n");
     return 0;
 }

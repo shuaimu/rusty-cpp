@@ -200,6 +200,120 @@ public:
     /// consumers that prefer the C++ spelling.
     size_type size() const noexcept { return backing_.size(); }
     bool empty() const noexcept { return backing_.empty(); }
+
+    /// Remove and return the first (smallest-key) entry.
+    /// Returns `None` if the map is empty. Mirrors Rust's
+    /// `BTreeMap::pop_first`.
+    rusty::Option<std::pair<K, V>> pop_first() {
+        if (backing_.empty()) {
+            return rusty::Option<std::pair<K, V>>(rusty::None);
+        }
+        auto it = backing_.begin();
+        std::pair<K, V> entry{it->first, std::move(it->second)};
+        backing_.erase(it);
+        return rusty::Option<std::pair<K, V>>(std::move(entry));
+    }
+
+    /// Remove and return the last (largest-key) entry.
+    rusty::Option<std::pair<K, V>> pop_last() {
+        if (backing_.empty()) {
+            return rusty::Option<std::pair<K, V>>(rusty::None);
+        }
+        auto it = std::prev(backing_.end());
+        std::pair<K, V> entry{it->first, std::move(it->second)};
+        backing_.erase(it);
+        return rusty::Option<std::pair<K, V>>(std::move(entry));
+    }
+
+    /// Retain only entries for which the predicate `f(k, v)` returns
+    /// true. Mirrors Rust's `BTreeMap::retain`.
+    template <typename F>
+    void retain(F&& f) {
+        for (auto it = backing_.begin(); it != backing_.end(); ) {
+            if (!f(it->first, it->second)) {
+                it = backing_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // ── Entry API ─────────────────────────────────────────────────
+    // Rust's `BTreeMap::entry(k)` returns an `Entry` view that
+    // exposes `or_insert`/`or_insert_with`/`and_modify`. Here we
+    // implement it as a lightweight view holding a backing-map
+    // reference + an iterator (or end-iterator if vacant). The
+    // view's lifetime is tied to the map; misuse after map
+    // mutation is the caller's responsibility (mirrors Rust's
+    // borrow-checker requirement; rusty-cpp catches it via
+    // iterator-invalidation rules).
+
+    class Entry {
+        friend class BTreeMap;
+        backing_type& backing_;
+        K key_;
+        typename backing_type::iterator it_;
+        bool occupied_;
+
+        Entry(backing_type& b, K k, typename backing_type::iterator it,
+              bool occupied)
+            : backing_(b),
+              key_(std::move(k)),
+              it_(it),
+              occupied_(occupied) {}
+
+    public:
+        /// True iff the key was present when the entry was constructed.
+        bool is_occupied() const noexcept { return occupied_; }
+
+        /// Reference to the key the entry was constructed with.
+        const K& key() const noexcept { return key_; }
+
+        /// Insert `default_` if vacant, then return a reference to the
+        /// (possibly new) value. Mirrors Rust's
+        /// `Entry::or_insert`.
+        V& or_insert(V default_) {
+            if (!occupied_) {
+                auto [new_it, _] = backing_.emplace(std::move(key_),
+                                                   std::move(default_));
+                it_ = new_it;
+                occupied_ = true;
+            }
+            return it_->second;
+        }
+
+        /// Same as `or_insert` but lazily computes the default via
+        /// the callable `f()` only when the key is absent.
+        template <typename F>
+        V& or_insert_with(F&& f) {
+            if (!occupied_) {
+                auto [new_it, _] = backing_.emplace(std::move(key_), f());
+                it_ = new_it;
+                occupied_ = true;
+            }
+            return it_->second;
+        }
+
+        /// If the entry is occupied, call `f(value)` on the existing
+        /// value. Returns the entry (for chaining), mirroring Rust's
+        /// `Entry::and_modify`.
+        template <typename F>
+        Entry& and_modify(F&& f) {
+            if (occupied_) {
+                f(it_->second);
+            }
+            return *this;
+        }
+    };
+
+    /// Get an entry view for `key` — vacant if the key is absent,
+    /// occupied otherwise. Lets callers express `m.entry(k).or_insert(0)`-
+    /// style upserts in one statement (no double lookup).
+    Entry entry(K key) {
+        auto it = backing_.find(key);
+        bool occupied = it != backing_.end();
+        return Entry(backing_, std::move(key), it, occupied);
+    }
 };
 
 template <typename T, typename Compare = std::less<T>>

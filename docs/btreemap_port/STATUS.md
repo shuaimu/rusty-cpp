@@ -91,19 +91,29 @@ where each stands after step 21:
   Workaround: keep `map.entry` out of the build target until GCC
   ICE is resolved, or test with clang's module support.
 
-## Working version delivered (step 13)
+## Working version delivered (step 13, expanded through step 22)
 
 `btree_port::BTreeMap<K, V>` and `btree_port::BTreeSet<T>` are
 usable today via `include/btree_port/btreemap.hpp`. The facade is
 a thin wrapper over `std::map`/`std::set` with the Rust-flavored
-API (`new_()`, `insert` returning displaced `Option<V>`,
-`get`/`get_mut`/`contains_key`/`remove`/`len`/`is_empty`/`clear`/
-`clone`, plus STL-style begin/end for `for (auto& [k, v] : m)`).
+API:
 
-8-test smoke suite in `tests/btree_port_facade_test.cpp` covers
+- Core: `new_()`, `insert` returning displaced `Option<V>`,
+  `get`/`get_mut`/`contains_key`/`remove`/`len`/`is_empty`/`clear`/
+  `clone`, plus STL-style begin/end for `for (auto& [k, v] : m)`.
+- Position queries (step 14): `first_key_value`, `last_key_value`,
+  `range`, `size`, `empty`.
+- Mutation (step 22): `pop_first`, `pop_last`, `retain(f)`.
+- Entry API (step 22): `entry(k).or_insert(v)`,
+  `.or_insert_with(f)`, `.and_modify(f)` — the idiomatic Rust
+  counter / upsert pattern, one statement, one lookup.
+
+14-test smoke suite in `tests/btree_port_facade_test.cpp` covers
 insert/displace, remove, ordered iteration, clone independence,
-clear, initializer-list construction, and the set surface. All
-pass under `g++ -std=c++23`.
+clear, initializer-list construction, first/last, range, set
+surface, pop_first/pop_last, retain, and entry-API or_insert /
+or_insert_with / and_modify (including the canonical "word
+count" upsert pattern). All pass under `g++ -std=c++23`.
 
 The intent is **a stable public API while the transpiled
 internals are still being smoothed**. Each method body delegates
