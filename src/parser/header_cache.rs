@@ -288,15 +288,39 @@ impl HeaderCache {
             module_path.display()
         );
 
+        // Derive the namespace prefix from the module's `export module X.Y.Z;`
+        // declaration: by strong project convention (and what every rrr file
+        // actually does) the symbols a module exports live in `namespace X {
+        // ... }` where X is the module name's first segment. The text-pre-pass
+        // safety_annotations parser does its own brace-counting for namespace
+        // context, but that counter drifts on complex source (string-literal
+        // braces, macros, etc.) and frequently fails to qualify symbols. We
+        // patch that here: any unqualified name from the text parse gets the
+        // module's top-level namespace prepended so lookups like
+        // `rrr::Log_debug` resolve.
+        let module_namespace = fs::read_to_string(module_path).ok().and_then(|content| {
+            let re = Regex::new(r"(?m)^\s*export\s+module\s+([a-zA-Z_][a-zA-Z_0-9]*)\b").unwrap();
+            re.captures(&content)
+                .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+        });
+
         if let Ok(ctx) = super::safety_annotations::parse_safety_annotations(module_path) {
             for (func_sig, safety_mode) in &ctx.function_overrides {
+                let name = if !func_sig.name.contains("::") {
+                    if let Some(ns) = module_namespace.as_deref() {
+                        format!("{}::{}", ns, func_sig.name)
+                    } else {
+                        func_sig.name.clone()
+                    }
+                } else {
+                    func_sig.name.clone()
+                };
                 debug_println!(
                     "DEBUG HEADER: Module annotation '{}': {:?}",
-                    func_sig.name,
+                    name,
                     safety_mode
                 );
-                self.safety_annotations
-                    .insert(func_sig.name.clone(), *safety_mode);
+                self.safety_annotations.insert(name, *safety_mode);
             }
         }
 

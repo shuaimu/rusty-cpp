@@ -249,6 +249,15 @@ fn analyze_file(
     // Check for unsafe pointer operations and unsafe propagation in safe functions
     let mut violations = Vec::new();
     debug_println!("DEBUG: Found {} functions in AST", ast.functions.len());
+
+    // Canonical path of the file being checked. Used to filter out function
+    // bodies that libclang surfaced via imports/headers — those should be
+    // analyzed when THEIR own file is the check target, not re-analyzed
+    // from every consumer. Without this filter, large module-import graphs
+    // produce massive duplicate findings (e.g. each consumer of rrr.reactor
+    // re-flags every @safe→@unsafe call in Reactor's methods).
+    let main_file_canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+
     for function in &ast.functions {
         // Skip system header functions - they shouldn't be analyzed internally
         if is_system_header_or_std(&function.location.file, &function.name) {
@@ -256,6 +265,21 @@ fn analyze_file(
                 "DEBUG: Skipping system header function '{}' from {}",
                 function.name,
                 function.location.file
+            );
+            continue;
+        }
+
+        // Only analyze bodies whose source file matches the TU being checked.
+        // Functions from imported modules / other files have their own check
+        // pass; analyzing them here just produces duplicate findings.
+        let fn_file = std::fs::canonicalize(&function.location.file)
+            .unwrap_or_else(|_| PathBuf::from(&function.location.file));
+        if fn_file != main_file_canonical {
+            debug_println!(
+                "DEBUG: Skipping cross-file function '{}' from {} (current TU is {})",
+                function.name,
+                function.location.file,
+                main_file_canonical.display()
             );
             continue;
         }
