@@ -100,8 +100,41 @@ where each stands after step 21:
   GCC 14 internal compiler error (segfault) at the closing brace
   of `struct rusty::RcControlBlockBase`. Reproducer would be useful
   for the GCC bugzilla but it's outside the BTreeMap port scope.
-  Workaround: keep `map.entry` out of the build target until GCC
-  ICE is resolved, or test with clang's module support.
+  Worked around in step 25: CMakeLists conditionally adds map.entry
+  only under clang. Both compilers produce a usable libbtree_port.a:
+  gcc → btree_internal only; clang → btree_internal + map.entry.
+
+## Open blockers — map.cppm / set.cppm (added step 26)
+
+Step 26 explored adding `btree_port.btree.map.cppm` to the clang
+build. The patcher's reach was extended to handle two more modules
+(`map.cppm` and `set.cppm`), but map.cppm surfaces a new class of
+transpiler-side issues that exceeds the iteration's scope:
+
+- ✅ **MIN_LEN duplicate across modules** (post-strip fixed by
+  dropping the extern decl + const def in map.cppm; both live in
+  btree_internal and are imported).
+- ✅ **Invalid `using <module>::Symbol` after prefix strip** —
+  patcher now drops these lines (and the
+  `using namespace ::<module>;` /
+  `namespace <module> {}` siblings).
+- ⏳ **`Iter<K, V>::iter()` not a member** — the transpiler is
+  conflating the `Iter` struct (a type) with `.iter()` (a method
+  to produce it). 6+ occurrences in map.cppm.
+- ⏳ **`Range<K, V>::iter()` same shape**, ~5 occurrences.
+- ⏳ **More `height` method-vs-field clang-strictness errors**
+  inside map.cppm — same pattern as the one fixed in
+  btree_internal, but at different call sites.
+- ⏳ **`Handle` used without template args** at line 4413, similar
+  to the `NodeRef::new_leaf` template-args recovery gap.
+- ⏳ **`DormantMutRef` unknown type** — the cross-module type alias
+  for `marker::DormantMut` didn't propagate.
+
+These each look like ~one-line fixes per occurrence, but the count
+(~20-30 errors clustered in map.cppm's iterator/cursor types)
+exceeded what one iteration could land cleanly. Reverted map.cppm
+from the build target; the patcher extensions stay (they fix what
+they can; the broader transpiler-side issues remain).
 
 ## Working version delivered (step 13, expanded through step 22)
 

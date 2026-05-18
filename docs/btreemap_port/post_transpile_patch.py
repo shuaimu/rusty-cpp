@@ -412,27 +412,70 @@ def strip_module_namespace_prefixes(path: Path, prefixes: list[str]) -> None:
     the qualifier is wrong — it should be plain `Handle<…>`. Strip the
     prefix to make qualified references resolve via the import.
 
+    Also drops several constructs the transpiler emits that the
+    prefix-strip turns invalid:
+      - `using <module>::Symbol;` and `export using <module>::Symbol;`
+        (Symbol is already at file scope after the import).
+      - `using namespace ::<module>;`
+      - `namespace <module> {}` (and `namespace <module> = …;` aliases).
+
     Idempotent: skipped if the sentinel is already present."""
+    import re
+
     src = path.read_text()
     sentinel = "// btree_port port: module prefixes stripped by post_transpile_patch.py"
     if sentinel in src:
         print(f"  no changes to: {path.name} (prefixes already stripped)")
         return
     changed = 0
+    dropped_lines = 0
     for prefix in prefixes:
-        # Strip `prefix::` (with two colons), being careful to only match
-        # at identifier boundaries.
+        # 1. Drop `using namespace ::<prefix>;` and
+        #    `using namespace <prefix>;` lines.
+        pattern_ns = re.compile(
+            rf"^[ \t]*using namespace (?:::)?{re.escape(prefix)};\s*\n",
+            re.MULTILINE,
+        )
+        m = pattern_ns.subn("", src)
+        if m[1]:
+            src, n = m
+            dropped_lines += n
+        # 2. Drop `[export ]using <prefix>::Symbol;` lines (Symbol now at
+        #    file scope post-import).
+        pattern_using = re.compile(
+            rf"^[ \t]*(?:export\s+)?using {re.escape(prefix)}::[A-Za-z_][A-Za-z0-9_]*;\s*\n",
+            re.MULTILINE,
+        )
+        m = pattern_using.subn("", src)
+        if m[1]:
+            src, n = m
+            dropped_lines += n
+        # 3. Drop empty namespace declarations like `namespace <prefix> {}`
+        #    or `namespace <prefix> {\n}` that the transpiler sometimes
+        #    emits as placeholders.
+        pattern_empty_ns = re.compile(
+            rf"^[ \t]*namespace {re.escape(prefix)} \{{\s*}}\s*\n",
+            re.MULTILINE,
+        )
+        m = pattern_empty_ns.subn("", src)
+        if m[1]:
+            src, n = m
+            dropped_lines += n
+        # 4. Strip remaining `<prefix>::` qualifiers (now safe — the
+        #    using/namespace artifacts that depended on them are gone).
         needle = prefix + "::"
         before = src.count(needle)
         src = src.replace(needle, "")
         changed += before
-    if changed:
-        # Drop the sentinel at the very top to mark idempotency.
-        src = (
-            sentinel + "\n" + src
-        )
+    if changed or dropped_lines:
+        # Sentinel at the very top to mark idempotency.
+        src = sentinel + "\n" + src
         path.write_text(src)
-        print(f"  stripped {changed} prefix occurrence(s) in: {path.name}")
+        print(
+            f"  stripped {changed} prefix occurrence(s)"
+            f" and dropped {dropped_lines} using/namespace line(s)"
+            f" in: {path.name}"
+        )
     else:
         print(f"  no prefix occurrences found in: {path.name}")
 
@@ -556,13 +599,15 @@ def main() -> int:
     cmake = cpp_out_dir / "CMakeLists.txt"
     set_entry = cpp_out_dir / "btree_port.btree.set.entry.cppm"
     map_entry = cpp_out_dir / "btree_port.btree.map.entry.cppm"
+    map_mod = cpp_out_dir / "btree_port.btree.map.cppm"
+    set_mod = cpp_out_dir / "btree_port.btree.set.cppm"
     rusty_include_dir = Path(__file__).resolve().parent.parent.parent / "include"
 
-    print(f"[1/4] patching {internal.name}")
+    print(f"[1/6] patching {internal.name}")
     patch_internal(internal)
-    print(f"[2/4] patching {cmake.name}")
+    print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
-    print(f"[3/4] patching {set_entry.name}")
+    print(f"[3/6] patching {set_entry.name}")
     if set_entry.exists():
         # NOTE: set.entry isn't currently in the build target (it depends
         # on `import btree_port.btree.map`, which has its own transpiler
@@ -574,7 +619,7 @@ def main() -> int:
         align_requires_clauses(set_entry)
     else:
         print(f"  [skip] {set_entry.name} not present")
-    print(f"[4/4] patching {map_entry.name}")
+    print(f"[4/6] patching {map_entry.name}")
     if map_entry.exists():
         patch_entry_imports(map_entry, extra_imports=[])
         strip_module_namespace_prefixes(map_entry, ["btree_internal"])
@@ -583,6 +628,23 @@ def main() -> int:
         stub_nodref_insert_entry(map_entry)
     else:
         print(f"  [skip] {map_entry.name} not present")
+    print(f"[5/6] patching {map_mod.name}")
+    if map_mod.exists():
+        # map.cppm has the same import-ordering bug as map.entry and
+        # additionally references `entry::*` and `node::*` qualifier
+        # prefixes that don't survive the import (C++20 modules
+        # don't expose imported symbols under a module-named
+        # namespace). Strip both prefixes.
+        patch_entry_imports(map_mod, extra_imports=[])
+        strip_module_namespace_prefixes(map_mod, ["btree_internal", "entry", "node"])
+    else:
+        print(f"  [skip] {map_mod.name} not present")
+    print(f"[6/6] patching {set_mod.name}")
+    if set_mod.exists():
+        patch_entry_imports(set_mod, extra_imports=[])
+        strip_module_namespace_prefixes(set_mod, ["btree_internal", "entry", "node"])
+    else:
+        print(f"  [skip] {set_mod.name} not present")
     return 0
 
 
