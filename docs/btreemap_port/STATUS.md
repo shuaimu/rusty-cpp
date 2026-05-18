@@ -49,7 +49,29 @@ cmake -B build -S . -G Ninja \
 cmake --build build
 ```
 
-## Architectural limit — circular C++20 module dependencies
+## Architectural limit — resolved (step 8)
+
+Resolved via option 1 from the original analysis: the cyclic
+btree submodules (node, search, navigate, merge_iter, fix,
+remove, split, append, plus the supporting leaf files mem, borrow,
+set_val, dedup_sorted_iter) are now concatenated into a single
+`btree_internal.rs` by prep.sh before transpilation. The merged
+file produces `btree_port.btree.btree_internal.cppm` — one TU
+containing all interdependent types and impls, no cycle in the
+module import graph.
+
+The merged file's name is `btree_internal`, not `core`, because
+`core` collides with Rust's stdlib `core::*` crate path and the
+transpiler's path-mapping table misnormalizes it to `std::*`.
+
+Before this step the build failed at the dyndep stage with
+"CMake Error: Circular dependency detected in the C++ module
+import graph"; after it the build proceeds to actual compilation
+with ~55 ordinary errors (template instantiations, missing
+declarations) which are individual blockers to chip away at
+rather than an architectural wall.
+
+## Architectural limit — earlier analysis (kept for reference)
 
 This is the dominant remaining blocker and it isn't a transpiler bug —
 it's a structural mismatch between Rust's module system and C++20
