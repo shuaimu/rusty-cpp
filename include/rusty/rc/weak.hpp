@@ -85,12 +85,17 @@ public:
         }
     }
 
+    // @safe - Single-threaded Weak→Rc transition; raw-ptr deref + cast
+    // encapsulated in the inner @unsafe block.
     Option<rusty::Rc<T>> upgrade() const {
-        if (!ptr || ptr->strong_count == 0) {
-            return ::rusty::None;
+        // @unsafe { raw ControlBlock* deref, static_cast on raw ptr }
+        {
+            if (!ptr || ptr->strong_count == 0) {
+                return ::rusty::None;
+            }
+            T* value_ptr = static_cast<T*>(ptr->get_value_ptr());
+            return ::rusty::Some(rusty::Rc<T>(value_ptr, ptr, true));
         }
-        T* value_ptr = static_cast<T*>(ptr->get_value_ptr());
-        return ::rusty::Some(rusty::Rc<T>(value_ptr, ptr, true));
     }
 
     bool expired() const {

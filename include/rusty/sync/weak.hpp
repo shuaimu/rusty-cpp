@@ -85,22 +85,26 @@ public:
         }
     }
 
+    // @safe - Atomic Weak→Arc transition; atomic ops + raw-ptr deref
+    // encapsulated in the inner @unsafe block.
     Option<rusty::Arc<T>> upgrade() const {
         if (!ptr) {
             return ::rusty::None;
         }
-
-        size_t count = ptr->strong_count.load(std::memory_order_acquire);
-        while (count != 0) {
-            if (ptr->strong_count.compare_exchange_weak(
-                    count,
-                    count + 1,
-                    std::memory_order_acquire,
-                    std::memory_order_relaxed)) {
-                return ::rusty::Some(rusty::Arc<T>(ptr, false));
+        // @unsafe { std::atomic load + CAS, raw ControlBlock* deref }
+        {
+            size_t count = ptr->strong_count.load(std::memory_order_acquire);
+            while (count != 0) {
+                if (ptr->strong_count.compare_exchange_weak(
+                        count,
+                        count + 1,
+                        std::memory_order_acquire,
+                        std::memory_order_relaxed)) {
+                    return ::rusty::Some(rusty::Arc<T>(ptr, false));
+                }
             }
+            return ::rusty::None;
         }
-        return ::rusty::None;
     }
 
     bool expired() const {
