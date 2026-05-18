@@ -102,6 +102,16 @@ pub struct TranspileOptions {
     /// so the methods are absorbed into the struct's body and the
     /// orphan emission is suppressed. Empty for single-file mode.
     pub cross_file_type_aliases: Vec<syn::ItemType>,
+    /// Every C++ module name produced by the current crate-mode run
+    /// (e.g. `["btree_port.btree.node", "btree_port.btree.map", …]`).
+    /// Used by `emit_use` to detect when a Rust `use super::sibling::*`
+    /// path is referring to a sibling module that we ourselves are
+    /// generating, in which case we must emit `import …;` instead of
+    /// a global-namespace `using ::sibling::*;` (which fails name
+    /// lookup because `::sibling` doesn't exist outside Rust's
+    /// module tree). Empty in single-file mode; populated by main.rs
+    /// before per-file transpilation begins.
+    pub crate_module_names: Vec<String>,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -454,6 +464,7 @@ pub fn transpile_full_with_options(
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());
     codegen.set_cross_file_type_aliases(options.cross_file_type_aliases.clone());
+    codegen.set_crate_module_names(options.crate_module_names.clone());
     if let Some(index) = options.cpp_module_symbol_index.as_ref() {
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);

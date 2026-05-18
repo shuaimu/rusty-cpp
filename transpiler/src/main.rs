@@ -354,12 +354,23 @@ fn transpile_crate(
     // resolve when `Foo` is declared in another file) and detect orphan-impl
     // blocks (so out-of-line member definitions can be emitted and matching
     // forward declarations injected into the host struct's body).
+    // Collect every C++ module name we'll produce for this crate so
+    // the codegen can convert `use super::sibling::Item;` into a
+    // proper `import sibling_module;` instead of the broken
+    // `using ::sibling::Item;`. We compute the same module name the
+    // per-file loop will use below (via `cmake::map_rs_to_cppm`) so
+    // the names match exactly.
+    let crate_module_names: Vec<String> = sources
+        .iter()
+        .map(|rs_path| cmake::map_rs_to_cppm(rs_path, crate_name).1)
+        .collect();
     let crate_transpile_options = {
         let mut opts = transpile_options.clone();
         opts.cross_file_enums = cross_file_enums;
         opts.cross_file_impl_blocks = cross_file_impl_blocks;
         opts.cross_file_structs = cross_file_structs;
         opts.cross_file_type_aliases = cross_file_type_aliases;
+        opts.crate_module_names = crate_module_names;
         opts
     };
 
@@ -3407,6 +3418,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cross_file_impl_blocks: Vec::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
+        crate_module_names: Vec::new(),
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -3844,6 +3856,7 @@ fn main() {
         cross_file_impl_blocks: Vec::new(),
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
+        crate_module_names: Vec::new(),
     };
 
     // Handle --crate: transpile entire crate
