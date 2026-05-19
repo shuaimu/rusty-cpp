@@ -1206,6 +1206,110 @@ def implement_push_with_handle(path: Path) -> None:
     print(f"  hand-ported NodeRef::push_with_handle in: {path.name}")
 
 
+def _impl_deallocating_helper(direction: str) -> tuple[str, str]:
+    """Returns (stub-signature-substring, replacement-body) for the
+    deallocating_next / _back hand-ports. `direction` is "next" or
+    "next_back" — they're mirror images, differing only in
+    right_kv/left_kv and next_leaf_edge/next_back_leaf_edge."""
+    if direction == "next":
+        kv_method = "right_kv"
+        leaf_edge_method = "next_leaf_edge"
+    else:
+        kv_method = "left_kv"
+        leaf_edge_method = "next_back_leaf_edge"
+    sig_tail = f"deallocating_{direction}(A alloc) {{"
+    body = (
+        "{\n"
+        f"        // btree_port port: B4/B5 deallocating_{direction} hand-ported "
+        "by post_transpile_patch.py\n"
+        "        // Rust source (library/alloc/src/collections/btree/navigate.rs):\n"
+        "        //   let mut edge = self.forget_node_type();\n"
+        "        //   loop {\n"
+        f"        //       edge = match edge.{kv_method}() {{\n"
+        f"        //           Ok(kv) => return Some((ptr::read(&kv).{leaf_edge_method}(), kv)),\n"
+        "        //           Err(last_edge) => match last_edge.into_node().deallocate_and_ascend(alloc.clone()) {\n"
+        "        //               Some(parent_edge) => parent_edge.forget_node_type(),\n"
+        "        //               None => return None,\n"
+        "        //           },\n"
+        "        //       }\n"
+        "        //   }\n"
+        "        using __Ret = rusty::Option<std::tuple<\n"
+        "            Handle<Node, Type>,\n"
+        "            Handle<NodeRef<::marker::Dying, K, V, ::marker::LeafOrInternal>, ::marker::KV>\n"
+        "        >>;\n"
+        "        auto __edge = std::move(*this).forget_node_type();\n"
+        "        while (true) {\n"
+        f"            auto __rkv = __edge.{kv_method}();\n"
+        "            if (__rkv.is_ok()) {\n"
+        "                auto __kv = std::move(__rkv).unwrap();\n"
+        "                // ptr::read = bitwise copy. Caller's safety contract\n"
+        "                // ensures the kv outlives the next-edge walk.\n"
+        "                auto __copy = rusty::ptr::read(&__kv);\n"
+        f"                auto __next = std::move(__copy).{leaf_edge_method}();\n"
+        "                return __Ret(std::make_tuple(\n"
+        "                    std::move(__next), std::move(__kv)));\n"
+        "            }\n"
+        "            auto __last = std::move(__rkv).unwrap_err();\n"
+        "            auto __dealloc = std::move(__last).into_node()\n"
+        "                .deallocate_and_ascend(rusty::clone(alloc));\n"
+        "            if (__dealloc.is_some()) {\n"
+        "                __edge = std::move(__dealloc).unwrap().forget_node_type();\n"
+        "                continue;\n"
+        "            }\n"
+        "            return __Ret(rusty::None);\n"
+        "        }\n"
+        "    }"
+    )
+    return sig_tail, body
+
+
+def implement_deallocating(path: Path) -> None:
+    """Replace stubs for both `deallocating_next` and
+    `deallocating_next_back`. These are the tree-eating walks
+    used by `BTreeMap::into_iter` / drop: they return the next
+    (key, value) pair while deallocating any node whose last edge
+    has been visited."""
+    src = path.read_text()
+    sentinel_marker = (
+        "// btree_port port: B4/B5 deallocating_next hand-ported "
+        "by post_transpile_patch.py"
+    )
+    if sentinel_marker in src:
+        print(f"  no changes to: {path.name} (B4/B5 already landed)")
+        return
+
+    landed = 0
+    for direction in ("next", "next_back"):
+        sig_tail, body = _impl_deallocating_helper(direction)
+        sig_pos = src.find(sig_tail)
+        if sig_pos == -1:
+            print(f"  no B4/B5 stub site for {direction} in: {path.name}")
+            continue
+        # Stub bodies are `{ throw ::std::runtime_error(…); }` (single
+        # statement). Find the `{` at the END of the sig (the open
+        # brace is at sig_tail's last char).
+        brace_open = src.find("{", sig_pos + len(sig_tail) - 1)
+        depth = 0
+        brace_close = -1
+        for k in range(brace_open, len(src)):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    brace_close = k
+                    break
+        if brace_close == -1:
+            print(f"  [warn] couldn't find {direction} body end", file=sys.stderr)
+            continue
+        src = src[:brace_open] + body + src[brace_close + 1 :]
+        landed += 1
+        print(f"  hand-ported Handle::deallocating_{direction} in: {path.name}")
+
+    if landed:
+        path.write_text(src)
+
+
 def stub_nodref_insert_entry(path: Path) -> None:
     """Stub `OccupiedEntry insert_entry(V value)` in VacantEntry — the
     transpiler emits `NodeRef::new_leaf(…)` without template args,
@@ -1553,6 +1657,7 @@ def main() -> int:
     implement_from_new_leaf(internal)
     implement_from_new_internal(internal)
     implement_push_with_handle(internal)
+    implement_deallocating(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
     print(f"[*] writing link_smoke.cpp")

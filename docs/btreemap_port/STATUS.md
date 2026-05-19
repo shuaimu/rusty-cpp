@@ -94,9 +94,19 @@ Each currently throws; needed for `insert` / `remove` to work.
       pair. The returned NodeRef has a fresh lifetime `'b` in Rust
       that's just an erased Mut in C++. Landed in
       `implement_push_with_handle()`.
-- [ ] **B4** `Handle::deallocating_next` — used by `BTreeMap::into_iter`
-      and removal. Walks the tree dropping nodes.
-- [ ] **B5** `Handle::deallocating_next_back` — reverse of B4.
+- [x] **B4** `Handle::deallocating_next` — hand-ported via the
+      shared `_impl_deallocating_helper` factory. The Rust source
+      is a `loop { match edge.right_kv() { Ok(kv) => return
+      Some((ptr::read(&kv).next_leaf_edge(), kv)), Err(last_edge)
+      => match last_edge.into_node().deallocate_and_ascend(...) {
+      Some(parent) => parent.forget_node_type(), None => return
+      None } } }`. C++ port uses `while (true)`, `is_ok` check,
+      explicit `unwrap` / `unwrap_err`, `rusty::ptr::read` for the
+      bitwise-copy step. Landed in `implement_deallocating()`.
+- [x] **B5** `Handle::deallocating_next_back` — mirror of B4,
+      differs only in `right_kv`→`left_kv` and `next_leaf_edge`→
+      `next_back_leaf_edge`. Same helper produces both implementations
+      from a single template, parameterized by direction.
 
 **Phase C — integration test infrastructure.**
 
