@@ -2199,6 +2199,279 @@ def implement_handle_into_kv(path: Path) -> None:
     print(f"  hand-ported Handle::into_kv (with __NodeRefArgs) in: {path.name}")
 
 
+def apply_step54_insert_path_fixes(path: Path) -> None:
+    """Step 55: codify the 7 step-54 fixes for the insert path. Each is
+    an idempotent text replacement that fixes a specific transpiler emit
+    bug surfaced when VacantEntry::insert_entry was un-stubbed.
+
+    Fixes:
+      1. key_area_mut / val_area_mut / edge_area_mut: drop undeducible
+         Output template param, use decltype(auto) + integer-vs-range
+         dispatch.
+      2. Handle::reborrow/reborrow_mut/dormant/awaken: __NodeRefArgs<Node>
+         pattern (same as descend/force/into_kv).
+      3. Handle::insert_fit (leaf 2-arg form): __NodeRefArgs<Node>.
+      4. Handle::split: __NodeRefArgs<Node> + fix bogus
+         NodeRef<A, K, V, Type> → NodeRef<Owned, K, V, Leaf>.
+      5. Handle::split_leaf_data: drop unused NodeType param.
+      6. LeafNode::new_: bypass Box::new_uninit_in via default-construct +
+         init pattern.
+      7. Handle::insert (Leaf body): fix rusty::str_runtime::split path,
+         drop const auto on insertion_edge.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port step 55: step-54 insert-path fixes codified by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (step-54 insert-path fixes already applied)")
+        return
+    landed = 0
+
+    # Fix 1: key_area_mut / val_area_mut / edge_area_mut signatures.
+    old_area_block = (
+        "    template<typename I, typename Output>\n"
+        "    Output& key_area_mut(I index) {\n"
+        "        // @unsafe\n"
+        "        {\n"
+        "            return rusty::as_mut_slice(this->as_leaf_mut().keys)[std::move(index)];\n"
+        "        }\n"
+        "    }\n"
+        "    template<typename I, typename Output>\n"
+        "    Output& val_area_mut(I index) {\n"
+        "        // @unsafe\n"
+        "        {\n"
+        "            return rusty::as_mut_slice(this->as_leaf_mut().vals)[std::move(index)];\n"
+        "        }\n"
+        "    }\n"
+        "    template<typename I, typename Output>\n"
+        "    Output& edge_area_mut(I index) {\n"
+        "        // @unsafe\n"
+        "        {\n"
+        "            return rusty::as_mut_slice(this->as_internal_mut().edges)[std::move(index)];\n"
+        "        }\n"
+        "    }\n"
+    )
+    new_area_block = (
+        "    // btree_port port step 54: dropped undeducible Output template\n"
+        "    // param. Use decltype(auto) + dispatch between integer indexing\n"
+        "    // and range indexing (index_with_range) so callers can pass\n"
+        "    // either a size_t or a rusty::range_to/range_from etc.\n"
+        "    template<typename I>\n"
+        "    decltype(auto) key_area_mut(I index) {\n"
+        "        // @unsafe\n"
+        "        auto&& slice = rusty::as_mut_slice(this->as_leaf_mut().keys);\n"
+        "        if constexpr (std::is_integral_v<std::remove_cvref_t<I>>) {\n"
+        "            return slice[std::move(index)];\n"
+        "        } else {\n"
+        "            return rusty::index_with_range(slice, std::move(index));\n"
+        "        }\n"
+        "    }\n"
+        "    template<typename I>\n"
+        "    decltype(auto) val_area_mut(I index) {\n"
+        "        // @unsafe\n"
+        "        auto&& slice = rusty::as_mut_slice(this->as_leaf_mut().vals);\n"
+        "        if constexpr (std::is_integral_v<std::remove_cvref_t<I>>) {\n"
+        "            return slice[std::move(index)];\n"
+        "        } else {\n"
+        "            return rusty::index_with_range(slice, std::move(index));\n"
+        "        }\n"
+        "    }\n"
+        "    template<typename I>\n"
+        "    decltype(auto) edge_area_mut(I index) {\n"
+        "        // @unsafe\n"
+        "        auto&& slice = rusty::as_mut_slice(this->as_internal_mut().edges);\n"
+        "        if constexpr (std::is_integral_v<std::remove_cvref_t<I>>) {\n"
+        "            return slice[std::move(index)];\n"
+        "        } else {\n"
+        "            return rusty::index_with_range(slice, std::move(index));\n"
+        "        }\n"
+        "    }\n"
+    )
+    if old_area_block in src:
+        src = src.replace(old_area_block, new_area_block, 1)
+        landed += 1
+
+    # Fix 2: Handle::reborrow / reborrow_mut / dormant / awaken.
+    old_handle_borrows = (
+        "    template<typename BorrowType, typename K, typename V, typename NodeType, typename HandleType>\n"
+        "    Handle<NodeRef<::marker::Immut, K, V, NodeType>, HandleType> reborrow() const {\n"
+        "        return Handle<NodeRef<::marker::Immut, K, V, NodeType>, HandleType>(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).reborrow(); }) { return std::forward<decltype(__recv)>(__recv).reborrow(); } else { return std::forward<decltype(__recv)>(__recv)->reborrow(); } }(this->node)), this->idx_field, rusty::PhantomData<HandleType>{});\n"
+        "    }\n"
+        "    template<typename K, typename V, typename NodeType, typename HandleType>\n"
+        "    Handle<NodeRef<::marker::Mut, K, V, NodeType>, HandleType> reborrow_mut() {\n"
+        "        return Handle<NodeRef<::marker::Mut, K, V, NodeType>, HandleType>(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).reborrow_mut(); }) { return std::forward<decltype(__recv)>(__recv).reborrow_mut(); } else { return std::forward<decltype(__recv)>(__recv)->reborrow_mut(); } }(this->node)), this->idx_field, rusty::PhantomData<HandleType>{});\n"
+        "    }\n"
+        "    template<typename K, typename V, typename NodeType, typename HandleType>\n"
+        "    Handle<NodeRef<::marker::DormantMut, K, V, NodeType>, HandleType> dormant() const {\n"
+        "        return Handle<NodeRef<::marker::DormantMut, K, V, NodeType>, HandleType>(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).dormant(); }) { return std::forward<decltype(__recv)>(__recv).dormant(); } else { return std::forward<decltype(__recv)>(__recv)->dormant(); } }(this->node)), this->idx_field, rusty::PhantomData<HandleType>{});\n"
+        "    }\n"
+        "    template<typename K, typename V, typename NodeType, typename HandleType>\n"
+        "    Handle<NodeRef<::marker::Mut, K, V, NodeType>, HandleType> awaken() {\n"
+        "        return Handle<NodeRef<::marker::Mut, K, V, NodeType>, HandleType>(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).awaken(); }) { return std::forward<decltype(__recv)>(__recv).awaken(); } else { return std::forward<decltype(__recv)>(__recv)->awaken(); } }(this->node)), std::move(this->idx_field), rusty::PhantomData<HandleType>{});\n"
+        "    }\n"
+    )
+    new_handle_borrows = (
+        "    // btree_port port step 54: dropped redundant method-template\n"
+        "    // params; recover via __NodeRefArgs<Node>.\n"
+        "    Handle<NodeRef<::marker::Immut,\n"
+        "                   typename __NodeRefArgs<Node>::Key,\n"
+        "                   typename __NodeRefArgs<Node>::Value,\n"
+        "                   typename __NodeRefArgs<Node>::Tag>, Type> reborrow() const {\n"
+        "        return Handle<NodeRef<::marker::Immut,\n"
+        "                              typename __NodeRefArgs<Node>::Key,\n"
+        "                              typename __NodeRefArgs<Node>::Value,\n"
+        "                              typename __NodeRefArgs<Node>::Tag>, Type>(\n"
+        "            this->node.reborrow(), this->idx_field, rusty::PhantomData<Type>{});\n"
+        "    }\n"
+        "    Handle<NodeRef<::marker::Mut,\n"
+        "                   typename __NodeRefArgs<Node>::Key,\n"
+        "                   typename __NodeRefArgs<Node>::Value,\n"
+        "                   typename __NodeRefArgs<Node>::Tag>, Type> reborrow_mut() {\n"
+        "        return Handle<NodeRef<::marker::Mut,\n"
+        "                              typename __NodeRefArgs<Node>::Key,\n"
+        "                              typename __NodeRefArgs<Node>::Value,\n"
+        "                              typename __NodeRefArgs<Node>::Tag>, Type>(\n"
+        "            this->node.reborrow_mut(), this->idx_field, rusty::PhantomData<Type>{});\n"
+        "    }\n"
+        "    Handle<NodeRef<::marker::DormantMut,\n"
+        "                   typename __NodeRefArgs<Node>::Key,\n"
+        "                   typename __NodeRefArgs<Node>::Value,\n"
+        "                   typename __NodeRefArgs<Node>::Tag>, Type> dormant() const {\n"
+        "        return Handle<NodeRef<::marker::DormantMut,\n"
+        "                              typename __NodeRefArgs<Node>::Key,\n"
+        "                              typename __NodeRefArgs<Node>::Value,\n"
+        "                              typename __NodeRefArgs<Node>::Tag>, Type>(\n"
+        "            this->node.dormant(), this->idx_field, rusty::PhantomData<Type>{});\n"
+        "    }\n"
+        "    Handle<NodeRef<::marker::Mut,\n"
+        "                   typename __NodeRefArgs<Node>::Key,\n"
+        "                   typename __NodeRefArgs<Node>::Value,\n"
+        "                   typename __NodeRefArgs<Node>::Tag>, Type> awaken() {\n"
+        "        return Handle<NodeRef<::marker::Mut,\n"
+        "                              typename __NodeRefArgs<Node>::Key,\n"
+        "                              typename __NodeRefArgs<Node>::Value,\n"
+        "                              typename __NodeRefArgs<Node>::Tag>, Type>(\n"
+        "            this->node.awaken(), std::move(this->idx_field), rusty::PhantomData<Type>{});\n"
+        "    }\n"
+    )
+    if old_handle_borrows in src:
+        src = src.replace(old_handle_borrows, new_handle_borrows, 1)
+        landed += 1
+
+    # Fix 3: Handle::insert_fit (Leaf 2-arg).
+    old_insert_fit = (
+        "    template<typename K, typename V>\n"
+        "    Handle<NodeRef<::marker::Mut, K, V, ::marker::Leaf>, ::marker::KV> insert_fit(K key, V val) {\n"
+    )
+    new_insert_fit = (
+        "    // btree_port port step 54: recover K/V via __NodeRefArgs<Node>.\n"
+        "    Handle<NodeRef<::marker::Mut,\n"
+        "                   typename __NodeRefArgs<Node>::Key,\n"
+        "                   typename __NodeRefArgs<Node>::Value,\n"
+        "                   ::marker::Leaf>, ::marker::KV>\n"
+        "    insert_fit(typename __NodeRefArgs<Node>::Key key,\n"
+        "               typename __NodeRefArgs<Node>::Value val) {\n"
+        "        using K = typename __NodeRefArgs<Node>::Key;\n"
+        "        using V = typename __NodeRefArgs<Node>::Value;\n"
+    )
+    if old_insert_fit in src:
+        src = src.replace(old_insert_fit, new_insert_fit, 1)
+        landed += 1
+
+    # Fix 4: Handle::split. Match the signature + first 2 lines of body.
+    old_split = (
+        "    template<typename A, typename K, typename V>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    SplitResult<K, V, ::marker::Leaf> split(A alloc) {\n"
+        "        auto new_node = LeafNode<K, V>::new_(std::move(alloc));\n"
+        "        auto kv = this->split_leaf_data(rusty::detail::deref_if_pointer_like(new_node));\n"
+        "        auto right = NodeRef<A, K, V, Type>::from_new_leaf(std::move(new_node));\n"
+    )
+    new_split = (
+        "    // btree_port port step 54: recover K/V via __NodeRefArgs<Node>,\n"
+        "    // correct NodeRef<A, K, V, Type> typo to NodeRef<Owned, K, V, Leaf>.\n"
+        "    template<typename A>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    SplitResult<typename __NodeRefArgs<Node>::Key,\n"
+        "                typename __NodeRefArgs<Node>::Value,\n"
+        "                ::marker::Leaf> split(A alloc) {\n"
+        "        using K = typename __NodeRefArgs<Node>::Key;\n"
+        "        using V = typename __NodeRefArgs<Node>::Value;\n"
+        "        auto new_node = LeafNode<K, V>::new_(std::move(alloc));\n"
+        "        auto kv = this->split_leaf_data(rusty::detail::deref_if_pointer_like(new_node));\n"
+        "        auto right = NodeRef<::marker::Owned, K, V, ::marker::Leaf>::from_new_leaf(std::move(new_node));\n"
+    )
+    if old_split in src:
+        src = src.replace(old_split, new_split, 1)
+        landed += 1
+
+    # Fix 5: Handle::split_leaf_data — drop NodeType.
+    old_sld = (
+        "    template<typename K, typename V, typename NodeType>\n"
+        "    std::tuple<K, V> split_leaf_data(LeafNode<K, V>& new_node) {\n"
+    )
+    new_sld = (
+        "    // btree_port port step 54: dropped unused NodeType template param.\n"
+        "    template<typename K, typename V>\n"
+        "    std::tuple<K, V> split_leaf_data(LeafNode<K, V>& new_node) {\n"
+    )
+    if old_sld in src:
+        src = src.replace(old_sld, new_sld, 1)
+        landed += 1
+
+    # Fix 6: LeafNode::new_ — bypass Box::new_uninit_in.
+    old_leafnode_new = (
+        "    template<typename A>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    static rusty::Box<LeafNode<K, V>, A> new_(A alloc) {\n"
+        "        auto leaf = rusty::Box<LeafNode<K, V>, A>::new_uninit_in(std::move(alloc));\n"
+        "        // @unsafe\n"
+        "        {\n"
+        "            LeafNode<K, V>::init(reinterpret_cast<LeafNode<K, V>*>(rusty::as_mut_ptr(leaf)));\n"
+        "            return leaf.assume_init();\n"
+        "        }\n"
+        "    }\n"
+    )
+    new_leafnode_new = (
+        "    template<typename A>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    static rusty::Box<LeafNode<K, V>, A> new_(A alloc) {\n"
+        "        // btree_port port step 54: rusty::Box has no new_uninit_in,\n"
+        "        // and we don't need uninit storage anyway — the MaybeUninit\n"
+        "        // fields in LeafNode handle uninit-ness internally.\n"
+        "        auto leaf = rusty::Box<LeafNode<K, V>, A>::new_in(\n"
+        "            LeafNode<K, V>{}, std::move(alloc));\n"
+        "        LeafNode<K, V>::init(leaf.operator->());\n"
+        "        return leaf;\n"
+        "    }\n"
+    )
+    if old_leafnode_new in src:
+        src = src.replace(old_leafnode_new, new_leafnode_new, 1)
+        landed += 1
+
+    # Fix 7: Handle::insert (Leaf body) — split path + const drop.
+    old_insert_body = (
+        "            const auto middle = Handle<Node, Type>::new_kv(std::move(this->node), std::move(middle_kv_idx));\n"
+        "            auto result = rusty::str_runtime::split(middle, std::move(alloc));\n"
+        "            const auto insertion_edge = "
+    )
+    new_insert_body = (
+        "            auto middle = Handle<Node, Type>::new_kv(std::move(this->node), std::move(middle_kv_idx));\n"
+        "            // btree_port port step 54: was `rusty::str_runtime::split` — wrong path.\n"
+        "            auto result = std::move(middle).split(std::move(alloc));\n"
+        "            auto insertion_edge = "
+    )
+    if old_insert_body in src:
+        src = src.replace(old_insert_body, new_insert_body, 1)
+        landed += 1
+
+    if landed > 0:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  applied {landed}/7 step-54 insert-path fixes in: {path.name}")
+    else:
+        print(f"  no step-54 fix sites matched in: {path.name}")
+
+
 def implement_handle_force(path: Path) -> None:
     """Hand-port `Handle::force` on `Handle<NodeRef<…, LeafOrInternal>, Type>`.
     The transpiled body has the same shape as `Handle::descend` — emitted
@@ -3121,6 +3394,11 @@ def main() -> int:
     implement_handle_into_kv(internal)
     # `k.borrow()` on primitive types — wrap with SFINAE fallback.
     fix_borrow_method_fallback(internal)
+    # Step 55: codify the 7 step-54 insert-path fixes (key/val/edge_area_mut
+    # signatures, Handle::reborrow/reborrow_mut/dormant/awaken via
+    # __NodeRefArgs, insert_fit/split/split_leaf_data simplifications,
+    # LeafNode::new_ via new_in, middle.split path correction).
+    apply_step54_insert_path_fixes(internal)
     # search_tree is hand-ported; the older stub_broken_search_tree
     # is left in the source for reference but not invoked.
     implement_search_tree(internal)
