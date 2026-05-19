@@ -311,6 +311,30 @@ Neither fix fits in a single iteration. The hybrid as-delivered:
 - Transpiled BTreeMap::insert / entry: blocked on the architectural
   barrier above.
 
+**Step 53 — attempted `VacantEntry::insert_entry` hand-port.** The
+shape compiles (no module-attachment issues anymore — step 52 fixed
+those) and matches the Rust source. Instantiating it pulls in a
+cascade of transpiler-side bugs in `btree_internal.cppm`'s insert
+path, including:
+- `rusty::Box<LeafNode>::new_uninit_in` not defined (Box facade
+  missing this Rust method)
+- `NodeRef::key_area_mut` / `val_area_mut` argument-shape mismatch
+- `Handle::insert_recursing` body emitted `std::visit` with a
+  signature that doesn't match its alternatives (the lambda's auto&&
+  parameters)
+- `dormant() / split() / insert_fit()` member calls on types that
+  don't yet have them defined (transpiler's orphan-impl injection
+  missed these)
+- `slice_insert(this->node.key_area_mut, ...)` — `this->node` is a
+  NodeRef value but slice_insert's emit shape uses `->key_area_mut`
+  (arrow op, treating NodeRef as a pointer)
+
+Each is its own fix layer. The insert path was never exercised
+before this iteration — the previous stubs blocked it — so the bugs
+went undiscovered. Reverted to a stub for now; the path to
+unblocking is "fix each transpiler bug per occurrence" or
+hand-port the whole insert path bypassing the buggy emit.
+
 **Step 52 — ARCHITECTURAL BARRIER CLEARED.** The fix landed: merge
 the entry struct definitions (OccupiedEntry / VacantEntry / Entry /
 OccupiedError) from `map.entry.cppm` into `map.cppm`, so they share
