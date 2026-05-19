@@ -1382,6 +1382,121 @@ def fix_force_match_arms(path: Path) -> None:
         print(f"  no force() arm sites in: {path.name}")
 
 
+def strip_redundant_method_template_params(path: Path) -> None:
+    """The transpiler sometimes emits redundant template params on
+    method declarations, shadowing the enclosing struct's params.
+    e.g. inside `struct Handle<Node, Type>`:
+
+        template<typename BorrowType, typename K, typename V>
+        NodeRef<BorrowType, K, V, …> descend() {
+            …
+        }
+
+    Here BorrowType/K/V are shadowed method-template params. The
+    method takes no args from which to deduce them, so the call
+    `handle.descend()` fails template argument deduction. The fix
+    is to remove the `template<…>` line so the names refer to
+    the enclosing class's template params instead."""
+    src = path.read_text()
+    sentinel = "// btree_port port: redundant method-template params stripped by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (redundant method-template params already stripped)")
+        return
+    # Match the exact shape that produces the deduction failure:
+    # `    template<typename BorrowType, typename K, typename V>\n` at
+    # struct-body indent (4 spaces). Only strip when the next line
+    # is a method declaration (starts with a type or `template` for
+    # nested templates).
+    import re
+    pattern = re.compile(
+        r"^    template<typename BorrowType, typename K, typename V>\s*\n",
+        re.MULTILINE,
+    )
+    matches = list(pattern.finditer(src))
+    if not matches:
+        print(f"  no redundant method-template sites in: {path.name}")
+        return
+    src = pattern.sub("", src)
+    src = sentinel + "\n" + src
+    path.write_text(src)
+    print(f"  stripped {len(matches)} redundant method-template line(s) in: {path.name}")
+
+
+def implement_leaf_edge_walkers(path: Path) -> None:
+    """Hand-port `NodeRef::first_leaf_edge` and `last_leaf_edge`.
+    The transpiled bodies have the unrecoverable force() arm
+    pattern (`/* TODO transpiler: unresolved bare-glob variant
+    `Leaf` … */ true`) that left the conditions broken AND used
+    `._0` directly on a `std::variant` (invalid).
+
+    Rust source (library/alloc/src/collections/btree/navigate.rs):
+        fn first_leaf_edge(self) -> Handle<NodeRef<…, Leaf>, Edge> {
+            let mut node = self;
+            loop {
+                match node.force() {
+                    ForceResult::Leaf(leaf) => return leaf.first_edge(),
+                    ForceResult::Internal(internal) => {
+                        node = internal.first_edge().descend();
+                    }
+                }
+            }
+        }
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: first/last_leaf_edge hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (first/last_leaf_edge already ported)")
+        return
+
+    landed = 0
+    for (which, edge_call) in [("first_leaf_edge", "first_edge"), ("last_leaf_edge", "last_edge")]:
+        sig = (
+            f"Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, "
+            f"::marker::Edge> {which}() const {{"
+        )
+        sig_pos = src.find(sig)
+        if sig_pos == -1:
+            print(f"  no {which} const site in: {path.name}")
+            continue
+        brace_open = src.find("{", sig_pos + len(sig) - 1)
+        depth = 0
+        brace_close = -1
+        for k in range(brace_open, len(src)):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    brace_close = k
+                    break
+        if brace_close == -1:
+            print(f"  [warn] couldn't find {which} end", file=sys.stderr)
+            continue
+        impl = (
+            "{\n"
+            f"        {sentinel}\n"
+            "        // Method is const but the Rust source consumes self;\n"
+            "        // copy `*this` into a mutable local for the walk. NodeRef\n"
+            "        // is cheap to copy (a pointer + a size_t + PhantomData).\n"
+            "        auto node = *this;\n"
+            "        while (true) {\n"
+            "            auto __m = node.force();  // std::variant<ForceResult_Leaf, ForceResult_Internal>\n"
+            "            if (__m.index() == 0) {\n"
+            f"                return std::get<0>(__m)._0.{edge_call}();\n"
+            "            } else {\n"
+            f"                node = std::get<1>(__m)._0.{edge_call}().descend();\n"
+            "            }\n"
+            "        }\n"
+            "    }"
+        )
+        src = src[:brace_open] + impl + src[brace_close + 1 :]
+        landed += 1
+        print(f"  hand-ported NodeRef::{which} in: {path.name}")
+
+    if landed:
+        path.write_text(src)
+
+
 def stub_broken_search_tree(path: Path) -> None:
     """`NodeRef::search_tree(key)` has two interleaved transpiler bugs:
 
@@ -1504,6 +1619,13 @@ def fix_const_correctness(path: Path) -> None:
          "Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, ::marker::Edge> first_leaf_edge() const {"),
         ("Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, ::marker::Edge> last_leaf_edge() {",
          "Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, ::marker::Edge> last_leaf_edge() const {"),
+        # Handle::left_kv / right_kv take self by value in Rust
+        # (consuming) so they don't mutate the receiver. They're
+        # called from const first_key_value/last_key_value paths.
+        ("rusty::Result<Handle<NodeRef<BorrowType, K, V, NodeType>, ::marker::KV>, Handle<Node, Type>> left_kv() {",
+         "rusty::Result<Handle<NodeRef<BorrowType, K, V, NodeType>, ::marker::KV>, Handle<Node, Type>> left_kv() const {"),
+        ("rusty::Result<Handle<NodeRef<BorrowType, K, V, NodeType>, ::marker::KV>, Handle<Node, Type>> right_kv() {",
+         "rusty::Result<Handle<NodeRef<BorrowType, K, V, NodeType>, ::marker::KV>, Handle<Node, Type>> right_kv() const {"),
     ]
     n_fixed = 0
     for old, new in targets:
@@ -1976,13 +2098,18 @@ def main() -> int:
     fix_as_leaf_ptr_self(internal)
     fix_const_correctness(internal)
     fix_assume_init_ref_on_span(internal)
-    # NOTE: fix_force_match_arms removed — the variable-tracking
-    # heuristic was unreliable across nested scopes (multiple
-    # `auto&& _m` / `_whilelet` / `_m1` shadowed each other in
-    # different match arms). Phase E continuation needs a smarter
-    # parser-aware approach. The TODO markers stay in the .cppm
-    # for the methods that hit them; those methods don't compile
-    # under template instantiation but the rest of the module does.
+    # NOTE: strip_redundant_method_template_params disabled — the
+    # method-level template params LOOK redundant but the enclosing
+    # struct is `Handle<Node, Type>` (different names), so removing
+    # them makes BorrowType/K/V undeclared. Fixing this properly
+    # requires either deducing them from Node's components (gnarly
+    # SFINAE) or moving the methods to a specialization of Handle.
+    #
+    # NOTE: fix_force_match_arms (whole-file scope tracking) removed —
+    # the variable-tracking heuristic was unreliable across nested
+    # scopes. Instead, hand-port the specific methods whose bodies
+    # hit the unrecoverable force()-arm pattern.
+    implement_leaf_edge_walkers(internal)
     stub_broken_search_tree(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
