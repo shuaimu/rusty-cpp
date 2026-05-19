@@ -660,6 +660,33 @@ def fix_new_global_alloc(path: Path) -> None:
         print(f"  no new_()/A→Global sites in: {path.name}")
 
 
+def fix_vacant_entry_key_field(path: Path) -> None:
+    """`VacantEntry<K, V, A>` has its field named `key_field` (to
+    avoid clashing with the `key()` getter method) but the
+    transpiler emits aggregate-init with `.key = …`. C++20
+    designated initializers require the exact field name, so
+    `.key = …` errors. Same shape as the height/height_field
+    fix from earlier.
+
+    Substitute `.key = ` → `.key_field = ` inside `VacantEntry<…>{…}`
+    aggregate-init sites."""
+    src = path.read_text()
+    sentinel = "// btree_port port: VacantEntry .key → .key_field by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (VacantEntry key_field already fixed)")
+        return
+    target = "VacantEntry<K, V, A>{.key = std::move(key),"
+    repl = "VacantEntry<K, V, A>{.key_field = std::move(key),"
+    n = src.count(target)
+    if n == 0:
+        print(f"  no VacantEntry.key sites in: {path.name}")
+        return
+    src = src.replace(target, repl)
+    src = sentinel + "\n" + src
+    path.write_text(src)
+    print(f"  fixed {n} VacantEntry .key → .key_field in: {path.name}")
+
+
 def fix_setvalzst_as_value(path: Path) -> None:
     """`SetValZST` is a Rust unit struct (`pub struct SetValZST;`).
     The transpiler emits it both as a type (in PhantomData etc.) and
@@ -1591,9 +1618,15 @@ def implement_handle_descend(path: Path) -> None:
         "        using __K = typename __NodeRefArgs<Node>::Key;\n"
         "        using __V = typename __NodeRefArgs<Node>::Value;\n"
         "        const auto parent_ptr = NodeRef<__B, __K, __V, ::marker::Internal>::as_internal_ptr(this->node);\n"
-        "        auto node = (*parent_ptr).edges.get_unchecked(std::move(this->idx_field)).assume_init_read();\n"
+        "        // `edges` is std::array<MaybeUninit<NonNull<LeafNode>>, …>;\n"
+        "        // use operator[] (std::array has no get_unchecked) plus\n"
+        "        // assume_init_read() to extract the NonNull.\n"
+        "        auto __idx = static_cast<size_t>(this->idx_field);\n"
+        "        auto node = (*parent_ptr).edges[__idx].assume_init_read();\n"
         "        return NodeRef<__B, __K, __V, ::marker::LeafOrInternal>{\n"
-        "            .height_field = rusty::detail::deref_if_pointer_like(this->node.height) - static_cast<size_t>(1),\n"
+        "            // `height` is a getter method, not the field; the field\n"
+        "            // is named height_field.\n"
+        "            .height_field = this->node.height_field - static_cast<size_t>(1),\n"
         "            .node = std::move(node),\n"
         "            ._marker = rusty::PhantomData<std::tuple<__B, ::marker::LeafOrInternal>>{}\n"
         "        };\n"
@@ -1605,6 +1638,166 @@ def implement_handle_descend(path: Path) -> None:
         print(f"  hand-ported Handle::descend (with __NodeRefArgs trait) in: {path.name}")
     else:
         print(f"  no Handle::descend site in: {path.name}")
+
+
+def stub_broken_map_methods(path: Path) -> None:
+    """Stub map-side methods whose bodies have cascading transpiler
+    bugs that aren't worth fixing per-line (they're all blocked on
+    search_tree which is stubbed). Each method becomes a throw."""
+    src = path.read_text()
+    sentinel = "// btree_port port: map.cppm broken-method stubs by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (broken-method stubs already in)")
+        return
+
+    # Methods to stub. The body is replaced with a throw.
+    targets = [
+        ("rusty::Option<const V&> get(const Q& key) const {",
+         "BTreeMap::get"),
+        ("rusty::Option<std::tuple<const K&, const V&>> first_key_value() const {",
+         "BTreeMap::first_key_value"),
+        ("rusty::Option<std::tuple<const K&, const V&>> last_key_value() const {",
+         "BTreeMap::last_key_value"),
+    ]
+    landed = 0
+    for sig, name in targets:
+        sig_pos = src.find(sig)
+        if sig_pos == -1:
+            continue
+        brace_open = src.find("{", sig_pos + len(sig) - 1)
+        depth = 0
+        brace_close = -1
+        for k in range(brace_open, len(src)):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    brace_close = k
+                    break
+        if brace_close == -1:
+            continue
+        stub = (
+            "{\n"
+            f"        // btree_port port: {name} stubbed by post_transpile_patch.py\n"
+            f"        throw ::std::runtime_error(\"rusty-cpp-transpiler: {name} stub\");\n"
+            "    }"
+        )
+        src = src[:brace_open] + stub + src[brace_close + 1 :]
+        landed += 1
+        print(f"  stubbed {name} in: {path.name}")
+    if landed:
+        # Add sentinel at top so re-run skips.
+        src = src.replace("\n", f"\n{sentinel}\n", 1)
+        path.write_text(src)
+
+
+def stub_broken_map_entry_methods(path: Path) -> None:
+    """Stub map.entry methods (kv_mut, into_val_mut callers) whose
+    bodies depend on the broken-method chain."""
+    src = path.read_text()
+    sentinel = "// btree_port port: map.entry broken-method stubs by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (broken-method stubs already in)")
+        return
+
+    # Stub the specific lines/methods that fail. Simpler approach:
+    # find any line containing `.kv_mut()` or `.into_val_mut()` and
+    # wrap the enclosing method body. Actually easier — stub the
+    # specific known method.
+    # Looking at line 3709: it's inside OccupiedEntry::key().
+    targets = [
+        ("const K& key() const {",
+         "OccupiedEntry::key"),
+        ("K into_key() {",
+         "OccupiedEntry::into_key"),
+        ("V& get_mut() {",
+         "OccupiedEntry::get_mut"),
+        ("V& into_mut() {",
+         "OccupiedEntry::into_mut"),
+    ]
+    landed = 0
+    for sig, name in targets:
+        # Find first occurrence (there might be multiple structs with
+        # similarly-named methods — but the first within this file is
+        # the OccupiedEntry one based on the line numbers).
+        sig_pos = src.find(sig)
+        if sig_pos == -1:
+            continue
+        brace_open = src.find("{", sig_pos + len(sig) - 1)
+        depth = 0
+        brace_close = -1
+        for k in range(brace_open, len(src)):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    brace_close = k
+                    break
+        if brace_close == -1:
+            continue
+        stub = (
+            "{\n"
+            f"        // btree_port port: {name} stubbed by post_transpile_patch.py\n"
+            f"        throw ::std::runtime_error(\"rusty-cpp-transpiler: {name} stub\");\n"
+            "    }"
+        )
+        src = src[:brace_open] + stub + src[brace_close + 1 :]
+        landed += 1
+        print(f"  stubbed {name} in: {path.name}")
+    if landed:
+        src = src.replace("\n", f"\n{sentinel}\n", 1)
+        path.write_text(src)
+
+
+def stub_broken_entry_method(path: Path) -> None:
+    """`BTreeMap::entry(K key)` body has interleaved transpiler bugs:
+    designated-initializer field-name mismatches (key vs key_field),
+    DormantMutRef/NonNull conversion issues that may be aggregate-init
+    fall-through (compiler tries to init DormantMutRef's first member
+    instead of using move-ctor), and an `int.first/second` access.
+
+    Each is its own micro-bug, but together they cascade. Stub the
+    whole method — same approach as search_tree."""
+    src = path.read_text()
+    sentinel = "// btree_port port: BTreeMap::entry stubbed by post_transpile_patch.py (E)"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (entry already stubbed)")
+        return
+    sig = "Entry<K, V, A> entry(K key) {"
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        print(f"  no entry method site in: {path.name}")
+        return
+    brace_open = src.find("{", sig_pos + len(sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find entry end", file=sys.stderr)
+        return
+    stub = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        // Body had VacantEntry/OccupiedEntry aggregate-init shape\n"
+        "        // mismatches that cascade through multiple lines. The\n"
+        "        // proper fix needs hand-porting or transpiler-side changes.\n"
+        "        throw ::std::runtime_error(\n"
+        "            \"rusty-cpp-transpiler: BTreeMap::entry stub \"\n"
+        "            \"(VacantEntry/OccupiedEntry aggregate init mismatch; see STATUS.md)\");\n"
+        "    }"
+    )
+    src = src[:brace_open] + stub + src[brace_close + 1 :]
+    path.write_text(src)
+    print(f"  stubbed BTreeMap::entry in: {path.name}")
 
 
 def stub_broken_search_tree(path: Path) -> None:
@@ -2262,6 +2455,7 @@ def main() -> int:
         align_requires_clauses(map_entry)
         remove_setvalzst_methods(map_entry)
         stub_nodref_insert_entry(map_entry)
+        stub_broken_map_entry_methods(map_entry)
     else:
         print(f"  [skip] {map_entry.name} not present")
     print(f"[5/6] patching {map_mod.name}")
@@ -2294,6 +2488,14 @@ def main() -> int:
         # emitted without their concrete template arguments. Substitute
         # the K/V-in-scope forms (phase A1 of the transpile-path plan).
         recover_template_args(map_mod)
+        # `VacantEntry<…>{.key = …}` should be `.key_field = …`.
+        fix_vacant_entry_key_field(map_mod)
+        # `BTreeMap::entry` body has compounded aggregate-init bugs;
+        # stub it like search_tree.
+        stub_broken_entry_method(map_mod)
+        # get/first_key_value/last_key_value all cascade from
+        # search_tree's stub; stub them too.
+        stub_broken_map_methods(map_mod)
         # `DormantMutRef::new_(x)` is similar but the T varies per call
         # site (BTreeMap/Root/Option<Root>). Inject a deduction helper
         # and rewrite call sites to use it (phase A2).

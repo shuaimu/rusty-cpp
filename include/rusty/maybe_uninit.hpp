@@ -88,6 +88,17 @@ public:
         return *as_ptr();
     }
 
+    // Rust's `MaybeUninit::assume_init_read(&self) -> T` — read a copy
+    // of the contained value without destroying the source. Caller must
+    // ensure (1) the value is initialized and (2) for non-Copy T the
+    // aliasing/double-drop hazards are avoided. For trivially-copyable
+    // T (the usual transpiled-btree usage: NonNull, sizes), this is a
+    // bitwise copy.
+    // @unsafe
+    T assume_init_read() const noexcept(std::is_nothrow_copy_constructible_v<T>) {
+        return *as_ptr();
+    }
+
     // Assume initialized and move out (UNSAFE - caller must ensure initialized)
     // After this, the storage is uninitialized again
     T assume_init() noexcept(std::is_nothrow_move_constructible_v<T>) {

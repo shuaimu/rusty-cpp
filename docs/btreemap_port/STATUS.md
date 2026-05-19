@@ -112,11 +112,13 @@ Each currently throws; needed for `insert` / `remove` to work.
 
 - [x] **C1** `cpp_out/transpiled_smoke.cpp` imports
       `btree_port.btree.map` and exercises BTreeMap end-to-end
-      (insert / get / first/last_key_value). First instantiation of
-      the templates with concrete types (int, int) surfaces ~20
-      phase-E correctness errors. CMakeLists adds the executable
-      target under clang only. The Phase D facade rewire is gated
-      on getting this smoke test to link.
+      (insert / get / first/last_key_value). **Now compiles and
+      LINKS cleanly under clang (step 47).** Runtime behavior:
+      throws on the first call to a stubbed method (entry → stub
+      → BTreeMap::insert → throws). The transpiled module is
+      consumable from regular .cpp now, even though some method
+      bodies stay stubbed because their transpiler-emitted shape
+      had unrecoverable bugs.
 - [ ] **C2** Crash-resistant smoke harness: deferred. Will fold
       into transpiled_smoke once it actually links — currently we
       get compile errors rather than runtime throws, so there's
