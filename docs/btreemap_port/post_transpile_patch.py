@@ -1651,9 +1651,10 @@ def stub_broken_map_methods(path: Path) -> None:
         return
 
     # Methods to stub. The body is replaced with a throw.
+    # NOTE: BTreeMap::get used to be stubbed but search_tree is now
+    # hand-ported (step 48), so get's body should work — leaving it
+    # un-stubbed and seeing what happens.
     targets = [
-        ("rusty::Option<const V&> get(const Q& key) const {",
-         "BTreeMap::get"),
         ("rusty::Option<std::tuple<const K&, const V&>> first_key_value() const {",
          "BTreeMap::first_key_value"),
         ("rusty::Option<std::tuple<const K&, const V&>> last_key_value() const {",
@@ -1798,6 +1799,376 @@ def stub_broken_entry_method(path: Path) -> None:
     src = src[:brace_open] + stub + src[brace_close + 1 :]
     path.write_text(src)
     print(f"  stubbed BTreeMap::entry in: {path.name}")
+
+
+def fix_tuple_dot_underscore_access(path: Path) -> None:
+    """Rust's `tuple.0` / `tuple.1` accesses on std::tuple values
+    occasionally get emitted as `tuple._0` / `tuple._1` instead of
+    `std::get<N>(tuple)`. Specifically the BTreeMap get/get_or_insert
+    paths emit `handle.into_kv()._1` (or `_0`, `into_kv_mut()._0`).
+    Patch the few known sites; idempotent via sentinel.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: tuple ._N access fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (tuple ._N access already fixed)")
+        return
+    import re
+    # Match `<expr>.into_kv()._N` and `<expr>.into_kv_mut()._N`. The
+    # <expr> is bounded by needing a balanced . chain to the left;
+    # for simplicity, match `<identifier>.into_kv[_mut]()._N` only
+    # (the known emitted shapes).
+    landed = 0
+    for method in ("into_kv", "into_kv_mut"):
+        pattern = re.compile(
+            r"(\w+)\." + method + r"\(\)\._([0-9]+)"
+        )
+        def repl(m):
+            ident = m.group(1)
+            idx = m.group(2)
+            return f"std::get<{idx}>({ident}.{method}())"
+        new_src, n = pattern.subn(repl, src)
+        if n > 0:
+            src = new_src
+            landed += n
+    if landed > 0:
+        # Inject sentinel at top so re-runs skip.
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  rewrote {landed} `.into_kv[_mut]()._N` → `std::get<N>(...)` in: {path.name}")
+    else:
+        print(f"  no `.into_kv[_mut]()._N` sites in: {path.name}")
+
+
+def fix_borrow_method_fallback(path: Path) -> None:
+    """The transpiled body of `NodeRef::find_key_index` does:
+        switch (rusty::cmp::cmp(key, k.borrow())) {
+    where `k` is `const int&` (for primitive K). Primitives don't have
+    a `.borrow()` method — in Rust, `Borrow<Q>` is a trait, with a
+    blanket impl that makes `i32::borrow() = &self`. The transpiler
+    should have emitted the SFINAE-fallback shape it uses elsewhere
+    (`([&](auto&& __recv) -> decltype(auto) { if constexpr (requires
+    { __recv.borrow(); }) return __recv.borrow(); else return __recv;
+    }(k))`) but here it didn't.
+    Patch the specific known site by wrapping `k.borrow()` in the
+    SFINAE fallback. Idempotent via sentinel.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: k.borrow() SFINAE fallback by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (k.borrow() fallback already wrapped)")
+        return
+    needle = "rusty::cmp::cmp(key, k.borrow())"
+    replacement = (
+        "rusty::cmp::cmp(key, "
+        "([&]() -> decltype(auto) { "
+        "if constexpr (requires { k.borrow(); }) return k.borrow(); "
+        "else return (k); "
+        "}()))"
+    )
+    if needle not in src:
+        print(f"  no k.borrow() site in: {path.name}")
+        return
+    new_src = src.replace(needle, replacement, 1)
+    # Inject the sentinel at top of file so re-runs skip.
+    new_src = sentinel + "\n" + new_src
+    path.write_text(new_src)
+    print(f"  wrapped k.borrow() with SFINAE fallback in: {path.name}")
+
+
+def implement_handle_into_kv(path: Path) -> None:
+    """Same fix pattern as Handle::descend / Handle::force —
+    `Handle::into_kv` is emitted with redundant `template<typename K,
+    typename V, typename NodeType>` method-template params that fail
+    deduction at call sites like `handle.into_kv()._1`. Recover K/V
+    from the enclosing class's Node via __NodeRefArgs<Node>.
+    Reuses the trait injected by `implement_handle_descend`.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: Handle::into_kv hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (Handle::into_kv already ported)")
+        return
+    sig = (
+        "    template<typename K, typename V, typename NodeType>\n"
+        "    std::tuple<const K&, const V&> into_kv() {\n"
+    )
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        print(f"  no Handle::into_kv site in: {path.name}")
+        return
+    brace_open = src.rfind("{", sig_pos, sig_pos + len(sig))
+    if brace_open == -1:
+        print(f"  [warn] no method-body `{{` in Handle::into_kv sig", file=sys.stderr)
+        return
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find Handle::into_kv end", file=sys.stderr)
+        return
+    end = brace_close + 1
+    if end < len(src) and src[end] == "\n":
+        end += 1
+    new_method = (
+        f"    {sentinel}\n"
+        "    // Rust impl: `impl<BorrowType, K, V, NodeType>\n"
+        "    //   Handle<NodeRef<BorrowType, K, V, NodeType>, marker::KV>\n"
+        "    //   { fn into_kv(self) -> (&K, &V) }`.\n"
+        "    // C++ can't constrain Node to NodeRef<…> at class level,\n"
+        "    // so recover BorrowType/K/V via __NodeRefArgs<Node>.\n"
+        "    std::tuple<const typename __NodeRefArgs<Node>::Key&,\n"
+        "               const typename __NodeRefArgs<Node>::Value&>\n"
+        "    into_kv() const {\n"
+        "        using __K = typename __NodeRefArgs<Node>::Key;\n"
+        "        using __V = typename __NodeRefArgs<Node>::Value;\n"
+        "        assert((this->idx_field < rusty::len(this->node)));\n"
+        "        // this->node : NodeRef<__B, __K, __V, Tag>;\n"
+        "        // into_leaf returns &LeafNode<__K, __V>.\n"
+        "        const auto leaf = ([&](auto&& __recv) -> decltype(auto) {\n"
+        "            if constexpr (requires { std::forward<decltype(__recv)>(__recv).into_leaf(); }) {\n"
+        "                return std::forward<decltype(__recv)>(__recv).into_leaf();\n"
+        "            } else {\n"
+        "                return std::forward<decltype(__recv)>(__recv)->into_leaf();\n"
+        "            }\n"
+        "        }(this->node));\n"
+        "        const __K& k = leaf.keys[this->idx_field].assume_init_ref();\n"
+        "        const __V& v = leaf.vals[this->idx_field].assume_init_ref();\n"
+        "        return std::tuple<const __K&, const __V&>{k, v};\n"
+        "    }\n"
+    )
+    src = src[:sig_pos] + new_method + src[end:]
+    path.write_text(src)
+    print(f"  hand-ported Handle::into_kv (with __NodeRefArgs) in: {path.name}")
+
+
+def implement_handle_force(path: Path) -> None:
+    """Hand-port `Handle::force` on `Handle<NodeRef<…, LeafOrInternal>, Type>`.
+    The transpiled body has the same shape as `Handle::descend` — emitted
+    with redundant `template<typename BorrowType, typename K, typename V>`
+    method-template params that can't be deduced from the (empty)
+    parameter list, so call sites like `handle.force()` fail.
+    Fix: use the `__NodeRefArgs<Node>` trait to recover BorrowType/K/V
+    from the enclosing class's `Node` template arg. Same pattern as
+    descend(). Reuses the trait injected by `implement_handle_descend`.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: Handle::force hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (Handle::force already ported)")
+        return
+    # Find the original force() method by its signature.
+    sig = (
+        "    template<typename BorrowType, typename K, typename V>\n"
+        "    ForceResult<Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, "
+        "Type>, Handle<NodeRef<BorrowType, K, V, ::marker::Internal>, Type>> "
+        "force() {\n"
+    )
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        print(f"  no Handle::force site in: {path.name}")
+        return
+    # The method body `{` is the LAST `{` inside the signature (the one
+    # right after `force() `). Anchoring brace-open BEFORE the next
+    # `{` finds the lambda's `{` instead of the method's, which would
+    # then match the lambda's close as the "method end" and leave
+    # `}();    }` orphaned. Use rfind within the sig's range.
+    brace_open = src.rfind("{", sig_pos, sig_pos + len(sig))
+    if brace_open == -1:
+        print(f"  [warn] no method-body `{{` in Handle::force sig", file=sys.stderr)
+        return
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find Handle::force end", file=sys.stderr)
+        return
+    # The whole method spans [sig_pos, brace_close]. We also need to
+    # consume the trailing newline after `}` so the file stays tidy.
+    end = brace_close + 1
+    if end < len(src) and src[end] == "\n":
+        end += 1
+    new_method = (
+        f"    {sentinel}\n"
+        "    // The Rust source is `impl<BorrowType, K, V, Type>\n"
+        "    //   Handle<NodeRef<BorrowType, K, V, LeafOrInternal>, Type>\n"
+        "    //   { fn force(self) -> ForceResult<…, …> }`.\n"
+        "    // C++ can't constrain Node to NodeRef<…,LeafOrInternal>\n"
+        "    // at the class level, so we destructure Node via\n"
+        "    // __NodeRefArgs and build the result Handles.\n"
+        "    ForceResult<\n"
+        "        Handle<NodeRef<typename __NodeRefArgs<Node>::BorrowType,\n"
+        "                       typename __NodeRefArgs<Node>::Key,\n"
+        "                       typename __NodeRefArgs<Node>::Value,\n"
+        "                       ::marker::Leaf>, Type>,\n"
+        "        Handle<NodeRef<typename __NodeRefArgs<Node>::BorrowType,\n"
+        "                       typename __NodeRefArgs<Node>::Key,\n"
+        "                       typename __NodeRefArgs<Node>::Value,\n"
+        "                       ::marker::Internal>, Type>>\n"
+        "    force() {\n"
+        "        using __B = typename __NodeRefArgs<Node>::BorrowType;\n"
+        "        using __K = typename __NodeRefArgs<Node>::Key;\n"
+        "        using __V = typename __NodeRefArgs<Node>::Value;\n"
+        "        using __LeafH = Handle<NodeRef<__B, __K, __V, ::marker::Leaf>, Type>;\n"
+        "        using __IntH  = Handle<NodeRef<__B, __K, __V, ::marker::Internal>, Type>;\n"
+        "        using __Ret   = ForceResult<__LeafH, __IntH>;\n"
+        "        // this->node : NodeRef<__B, __K, __V, LeafOrInternal>\n"
+        "        // .force() returns ForceResult<NodeRef<…,Leaf>, NodeRef<…,Internal>>\n"
+        "        auto __forced = this->node.force();\n"
+        "        if (__forced.index() == 0) {\n"
+        "            auto&& __leaf_node = std::get<0>(__forced)._0;\n"
+        "            return __Ret{\n"
+        "                ForceResult_Leaf<__LeafH, __IntH>{\n"
+        "                    __LeafH{std::move(__leaf_node),\n"
+        "                            std::move(this->idx_field),\n"
+        "                            rusty::PhantomData<Type>{}}\n"
+        "                }\n"
+        "            };\n"
+        "        }\n"
+        "        auto&& __int_node = std::get<1>(__forced)._0;\n"
+        "        return __Ret{\n"
+        "            ForceResult_Internal<__LeafH, __IntH>{\n"
+        "                __IntH{std::move(__int_node),\n"
+        "                       std::move(this->idx_field),\n"
+        "                       rusty::PhantomData<Type>{}}\n"
+        "            }\n"
+        "        };\n"
+        "    }\n"
+    )
+    src = src[:sig_pos] + new_method + src[end:]
+    path.write_text(src)
+    print(f"  hand-ported Handle::force (with __NodeRefArgs) in: {path.name}")
+
+
+def implement_search_tree(path: Path) -> None:
+    """Hand-port `NodeRef::search_tree`. The Rust source is:
+
+        fn search_tree<Q>(mut self, key: &Q) -> SearchResult<…> {
+            loop {
+                match self.search_node(key) {
+                    Found(handle) => return Found(handle),
+                    GoDown(handle) => match handle.force() {
+                        Leaf(leaf) => return GoDown(leaf),
+                        Internal(internal) => self = internal.descend(),
+                    },
+                }
+            }
+        }
+
+    Replaces the throw stub with a faithful C++ translation. The
+    method's class context is `NodeRef<BorrowType, K, V,
+    marker::LeafOrInternal>` (its Tag is LeafOrInternal).
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: NodeRef::search_tree hand-ported by post_transpile_patch.py (E7-const)"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (search_tree hand-ported)")
+        return
+    # Look for either the stub or the original buggy body shape. Match
+    # the WHOLE method declaration (including signature) so we can add
+    # `const` qualifier. The Rust source takes `mut self` (by value),
+    # which doesn't mutate the caller's NodeRef — so the C++ equivalent
+    # is `const`-qualified, using a copy of *this internally.
+    sig = ("SearchResult<BorrowType, K, V, ::marker::LeafOrInternal, "
+           "::marker::Leaf> search_tree(const Q& key) {")
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        print(f"  no search_tree site in: {path.name}")
+        return
+    brace_open = src.find("{", sig_pos + len(sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find search_tree end", file=sys.stderr)
+        return
+    # Rewrite the signature to add `const`. The original signature is
+    # `SearchResult<…> search_tree(const Q& key) {`; we want
+    # `SearchResult<…> search_tree(const Q& key) const {`.
+    new_sig = sig.replace(") {", ") const {")
+    src = src[:sig_pos] + new_sig + src[sig_pos + len(sig):]
+    # `brace_open` and `brace_close` were computed before signature
+    # rewrite; recompute since `const` insertion shifted bytes.
+    brace_open = src.find("{", sig_pos + len(new_sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find search_tree end after const insert", file=sys.stderr)
+        return
+    impl = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        using __Ret = SearchResult<BorrowType, K, V,\n"
+        "                                    ::marker::LeafOrInternal,\n"
+        "                                    ::marker::Leaf>;\n"
+        "        // The Rust source uses `mut self` (by-value receiver):\n"
+        "        // the original NodeRef isn't mutated, only the local\n"
+        "        // alias. C++ equivalent is to copy *this into a local\n"
+        "        // (NodeRef is a thin {height, NonNull, _marker} struct\n"
+        "        // and trivially copyable for the borrow types we use).\n"
+        "        NodeRef<BorrowType, K, V, ::marker::LeafOrInternal>\n"
+        "            self_ = *this;\n"
+        "        while (true) {\n"
+        "            auto __sr = self_.search_node(key);\n"
+        "            // __sr is variant<SearchResult_Found, SearchResult_GoDown>\n"
+        "            if (__sr.index() == 0) {\n"
+        "                auto&& __handle = std::get<0>(__sr)._0;\n"
+        "                return __Ret{\n"
+        "                    SearchResult_Found<BorrowType, K, V,\n"
+        "                                        ::marker::LeafOrInternal,\n"
+        "                                        ::marker::Leaf>{std::move(__handle)}\n"
+        "                };\n"
+        "            }\n"
+        "            // GoDown: __sr.index() == 1\n"
+        "            auto&& __handle = std::get<1>(__sr)._0;\n"
+        "            auto __forced = __handle.force();\n"
+        "            // __forced is variant<ForceResult_Leaf, ForceResult_Internal>\n"
+        "            if (__forced.index() == 0) {\n"
+        "                auto&& __leaf = std::get<0>(__forced)._0;\n"
+        "                return __Ret{\n"
+        "                    SearchResult_GoDown<BorrowType, K, V,\n"
+        "                                         ::marker::LeafOrInternal,\n"
+        "                                         ::marker::Leaf>{std::move(__leaf)}\n"
+        "                };\n"
+        "            }\n"
+        "            // Internal: descend and continue the loop\n"
+        "            auto&& __internal = std::get<1>(__forced)._0;\n"
+        "            self_ = __internal.descend();\n"
+        "        }\n"
+        "    }"
+    )
+    src = src[:brace_open] + impl + src[brace_close + 1 :]
+    path.write_text(src)
+    print(f"  hand-ported NodeRef::search_tree (const) in: {path.name}")
 
 
 def stub_broken_search_tree(path: Path) -> None:
@@ -2414,7 +2785,16 @@ def main() -> int:
     # hit the unrecoverable force()-arm pattern.
     implement_leaf_edge_walkers(internal)
     implement_handle_descend(internal)
-    stub_broken_search_tree(internal)
+    # Handle::force has the same method-template recovery shape as
+    # descend; route through __NodeRefArgs<Node> trait.
+    implement_handle_force(internal)
+    # Handle::into_kv — same shape, same fix.
+    implement_handle_into_kv(internal)
+    # `k.borrow()` on primitive types — wrap with SFINAE fallback.
+    fix_borrow_method_fallback(internal)
+    # search_tree is hand-ported; the older stub_broken_search_tree
+    # is left in the source for reference but not invoked.
+    implement_search_tree(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
     print(f"[*] writing link_smoke.cpp")
@@ -2526,6 +2906,8 @@ def main() -> int:
         # `return /* write!(...) */;` leftover from untranspiled
         # write! macro — needs a return value (A4).
         fix_empty_write_return(map_mod)
+        # `handle.into_kv()._1` etc. — rewrite to `std::get<1>(...)`.
+        fix_tuple_dot_underscore_access(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")

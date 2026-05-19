@@ -96,11 +96,17 @@ decltype(auto) convert_try_into_error(SrcErr&& err) {
     })
 
 // ? on Option<T> — unwrap Some(T) or return None
+//
+// Returns `rusty::None` (a None_t sentinel) rather than
+// `decltype(_rusty_try_result)(rusty::None)` so that the function's
+// return-type Option<U> drives the conversion. This mirrors Rust's
+// `?` semantics where `Option<X>::None` can short-circuit a function
+// returning `Option<Y>` because both share the unit None variant.
 #define RUSTY_TRY_OPT(expr) \
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_none()) { \
-            return decltype(_rusty_try_result)(rusty::None); \
+            return rusty::None; \
         } \
         _rusty_try_result.unwrap(); \
     })
@@ -110,7 +116,7 @@ decltype(auto) convert_try_into_error(SrcErr&& err) {
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_none()) { \
-            co_return decltype(_rusty_try_result)(rusty::None); \
+            co_return rusty::None; \
         } \
         _rusty_try_result.unwrap(); \
     })

@@ -114,11 +114,14 @@ Each currently throws; needed for `insert` / `remove` to work.
       `btree_port.btree.map` and exercises BTreeMap end-to-end
       (insert / get / first/last_key_value). **Now compiles and
       LINKS cleanly under clang (step 47).** Runtime behavior:
-      throws on the first call to a stubbed method (entry → stub
-      → BTreeMap::insert → throws). The transpiled module is
-      consumable from regular .cpp now, even though some method
-      bodies stay stubbed because their transpiler-emitted shape
-      had unrecoverable bugs.
+      throws on the first call to a stubbed method. At step 47
+      this was the get() stub; after step 48 search_tree/force/
+      into_kv are hand-ported and BTreeMap::get() is un-stubbed,
+      so the smoke now reaches the first insert() call which
+      goes through the still-stubbed BTreeMap::entry().
+      The transpiled module is consumable from regular .cpp now,
+      even though some method bodies stay stubbed because their
+      transpiler-emitted shape had unrecoverable bugs.
 - [ ] **C2** Crash-resistant smoke harness: deferred. Will fold
       into transpiled_smoke once it actually links — currently we
       get compile errors rather than runtime throws, so there's
@@ -175,6 +178,42 @@ Tracking individually:
 - [ ] **E_misc** `right_kv` no matching member at map.cppm:5252
       (`first_key_value` const path) and `get()` Option<NodeRef&>→
       Option<int&> at 5242. Cascading from E7 or const issues.
+
+**Step 48 — un-stub `BTreeMap::get` (search_tree/force/into_kv +
+RUSTY_TRY_OPT + tuple ._N).** After step 47 zero-error baseline,
+this iteration knocked out the cascade behind BTreeMap::get():
+
+1. **RUSTY_TRY_OPT macro** (rusty/try.hpp) used
+   `return decltype(_rusty_try_result)(rusty::None);` which is
+   too type-strict — fails when the wrapping function's return
+   Option<U> differs from the inner Option<X>. Rust's `?` on
+   Option does the X→U bridge implicitly. Fix: return
+   `rusty::None` (the None_t sentinel) and let the function's
+   return type drive the conversion. Mirrors Rust semantics.
+2. **search_tree** hand-ported, const-qualified, copy-init `self_`.
+   The Rust source takes `mut self` (by-value); the C++ equivalent
+   doesn't mutate the caller's NodeRef, so const is fine.
+3. **Handle::force** hand-ported via `__NodeRefArgs<Node>` trait —
+   same fix as Handle::descend (step 46). The transpiler emitted
+   redundant `template<typename BorrowType, K, V>` method-template
+   params on what should be class-level args.
+4. **Handle::into_kv** hand-ported via __NodeRefArgs<Node> too;
+   call sites like `handle.into_kv()._1` would have failed K/V
+   deduction.
+5. **k.borrow() SFINAE fallback** — primitive K (e.g. int) doesn't
+   have `.borrow()` method; wrap with `if constexpr (requires
+   { k.borrow(); }) return k.borrow(); else return k;`.
+6. **`.into_kv()._N` → `std::get<N>(.into_kv())`** rewrite in map.cppm.
+   Rust tuple field access (`tuple.1`) was emitted as `tuple._1`
+   for std::tuple, which doesn't have `_N` members.
+
+Plus a patcher brace-tracking bug fix (use `rfind` within the
+sig range to find the method body's `{` instead of the next `{`
+which can be a lambda's open).
+
+After step 48: 0 compile errors, transpiled_smoke now reaches the
+BTreeMap::entry stub (first call from insert path). BTreeMap::get
+is fully on the transpiled path.
 
 **Honest assessment** (added step 43): each E-error requires
 surgical investigation of the lambda/variant emission. The
