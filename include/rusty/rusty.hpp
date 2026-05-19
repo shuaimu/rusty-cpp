@@ -75,6 +75,9 @@
 // Synchronization primitives (std::sync equivalent)
 #include "rusty/sync/atomic.hpp"
 #include "rusty/sync/mpsc.hpp"
+
+// Filesystem helpers (std::fs equivalent)
+#include "rusty/sys/fs.hpp"
 #include "rusty/mutex.hpp"
 #include "rusty/rwlock.hpp"
 #include "rusty/condvar.hpp"
