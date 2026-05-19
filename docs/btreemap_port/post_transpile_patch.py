@@ -980,6 +980,73 @@ def fix_boxed_box_path(path: Path) -> None:
     print(f"  rewrote {n1 + n2} boxed::Box path(s) in: {path.name}")
 
 
+def implement_from_new_leaf(path: Path) -> None:
+    """Replace the `throw` stub for `NodeRef::from_new_leaf` with a
+    hand-port of the Rust source. This is phase B1 of the transpile
+    completion plan — `BTreeMap::insert` ultimately reaches this
+    method to construct a fresh leaf NodeRef from a Box-allocated
+    LeafNode.
+
+    Rust source (library/alloc/src/collections/btree/node.rs):
+        fn from_new_leaf<A: Allocator + Clone>(
+            leaf: Box<LeafNode<K, V>, A>,
+        ) -> Self {
+            let (node, _alloc) = Box::into_non_null_with_allocator(leaf);
+            NodeRef { height: 0, node, _marker: PhantomData }
+        }
+
+    C++ port: take the Box's raw pointer (the allocator drops with
+    the Box's destructor), wrap in NonNull, build the NodeRef.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: B1 from_new_leaf hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (B1 already landed)")
+        return
+
+    # The stub line we're replacing was emitted by stub() at step 19.
+    # Match the exact stub-body shape so we don't accidentally rewrite
+    # a real impl on a re-run after manual edits.
+    sig = "static NodeRef<BorrowType, K, V, Type> from_new_leaf(rusty::Box<LeafNode<K, V>, A> leaf) {"
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        print(f"  no B1 stub site in: {path.name}")
+        return
+    # Find the matching close brace (depth walk).
+    brace_open = src.find("{", sig_pos + len(sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find stub end in: {path.name}", file=sys.stderr)
+        return
+
+    impl = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        // Box::into_non_null_with_allocator(leaf) → (NonNull<T>, A).\n"
+        "        // The Box owns the allocator; its destructor drops it. We use\n"
+        "        // `into_raw()` to take ownership of the LeafNode pointer.\n"
+        "        ::LeafNode<K, V>* __raw = std::move(leaf).into_raw();\n"
+        "        return NodeRef<BorrowType, K, V, Type>{\n"
+        "            .height_field = static_cast<size_t>(0),\n"
+        "            .node = rusty::ptr::NonNull<::LeafNode<K, V>>::new_unchecked(__raw),\n"
+        "            ._marker = rusty::PhantomData<std::tuple<BorrowType, Type>>{}\n"
+        "        };\n"
+        "    }"
+    )
+    new_src = src[:brace_open] + impl + src[brace_close + 1 :]
+    path.write_text(new_src)
+    print(f"  hand-ported NodeRef::from_new_leaf in: {path.name}")
+
+
 def stub_nodref_insert_entry(path: Path) -> None:
     """Stub `OccupiedEntry insert_entry(V value)` in VacantEntry — the
     transpiler emits `NodeRef::new_leaf(…)` without template args,
@@ -1320,6 +1387,11 @@ def main() -> int:
 
     print(f"[1/6] patching {internal.name}")
     patch_internal(internal)
+    # Phase B: replace stubs with real impls. Runs AFTER patch_internal
+    # so that on fresh transpile output we first install the stub
+    # (which makes the templated method parse) and then immediately
+    # override with the real impl. On re-runs, both are idempotent.
+    implement_from_new_leaf(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
     print(f"[*] writing link_smoke.cpp")

@@ -70,9 +70,15 @@ picks the first `[ ]` and goes.
 
 Each currently throws; needed for `insert` / `remove` to work.
 
-- [ ] **B1** `NodeRef::from_new_leaf` — hand-port from
-      `library/alloc/src/collections/btree/node.rs`. Constructs a
-      leaf NodeRef from a Box-allocated LeafNode.
+- [x] **B1** `NodeRef::from_new_leaf` — hand-ported. The Rust source
+      does `let (node, _alloc) = Box::into_non_null_with_allocator(leaf);
+      NodeRef { height: 0, node, _marker: PhantomData }`. The C++
+      port uses `std::move(leaf).into_raw()` (the Box's allocator
+      drops with the Box's destructor; we just take ownership of
+      the raw LeafNode pointer), wraps in `NonNull::new_unchecked`,
+      and builds the NodeRef aggregate. Landed in
+      `implement_from_new_leaf()`. Module rebuilds; smoke + facade
+      still green.
 - [ ] **B2** `NodeRef::from_new_internal` — same shape for internal
       nodes.
 - [ ] **B3** `NodeRef::push_with_handle` — pushes a K/V into a leaf;
