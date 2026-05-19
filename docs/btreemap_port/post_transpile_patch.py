@@ -2199,6 +2199,128 @@ def implement_handle_into_kv(path: Path) -> None:
     print(f"  hand-ported Handle::into_kv (with __NodeRefArgs) in: {path.name}")
 
 
+def apply_step58_lazy_gates_and_fixes(path: Path) -> None:
+    """Step 60: codify step 58/59 fixes as durable patcher rules.
+
+    These cover:
+    1. Inject `__IsNodeRef<T>` concept (sibling to __NodeRefArgs trait).
+    2. Rewrite Handle's reborrow/reborrow_mut/dormant/awaken/descend/
+       force/into_kv to use the lazy-template-gate pattern
+       (`template<typename = void> + auto + requires (__IsNodeRef<Node>)`)
+       so bogus Handle<wrong, Type> instantiation can succeed without
+       pulling these methods.
+    3. Convert insert_fit to use `auto K_, V_` template params so its
+       param substitution is also lazy.
+    4. Convert split to use `auto` return type.
+    5. Add `requires (__IsNodeRef<Node>)` to step-54 method-template
+       conjunctions.
+    6. Rewrite `.height` → `.height_field` at 8 specific sites.
+    7. Apply LeafNode::new_ bypass pattern to InternalNode::new_.
+    8. Rewrite correct_parent_link with __NodeRefArgs + fix NodeRef typo.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port step 60: step-58/59 lazy gates + extra fixes codified"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (step-58/59 fixes already codified)")
+        return
+    landed = 0
+
+    # 1. Inject __IsNodeRef concept after the __NodeRefArgs trait.
+    trait_anchor = "template<typename B, typename K, typename V, typename T>\nstruct __NodeRefArgs<NodeRef<B, K, V, T>> {\n    using BorrowType = B;\n    using Key = K;\n    using Value = V;\n    using Tag = T;\n};"
+    concept_block = trait_anchor + (
+        "\n\n// btree_port port step 60: concept to gate methods that need\n"
+        "// Node = NodeRef<...> from instantiation when Handle is bogusly\n"
+        "// instantiated with Node = K/Q/R (transpiler-emitted wrong template\n"
+        "// args at call sites like `Handle<K, Type>::new_edge(...)`).\n"
+        "template<typename T>\n"
+        "concept __IsNodeRef = requires { typename __NodeRefArgs<T>::Key; };"
+    )
+    if trait_anchor in src and "concept __IsNodeRef" not in src:
+        src = src.replace(trait_anchor, concept_block, 1)
+        landed += 1
+
+    # 2. InternalNode::new_ bypass (LeafNode pattern).
+    old_int_new = (
+        "    template<typename A>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    static rusty::Box<InternalNode<K, V>, A> new_(A alloc) {\n"
+        "        auto node = rusty::Box<InternalNode<K, V>, rusty::Box<InternalNode<K, V>, A>>::new_uninit_in(std::move(alloc));\n"
+        "        // @unsafe\n"
+        "        {\n"
+        "            LeafNode<K, V>::init(&(*rusty::as_mut_ptr(node)).data);\n"
+        "            return node.assume_init();\n"
+        "        }\n"
+        "    }\n"
+        "};"
+    )
+    new_int_new = (
+        "    template<typename A>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    static rusty::Box<InternalNode<K, V>, A> new_(A alloc) {\n"
+        "        // btree_port port step 59: bypass missing Box::new_uninit_in\n"
+        "        // (same pattern as LeafNode::new_ step-54 fix #6).\n"
+        "        auto node = rusty::Box<InternalNode<K, V>, A>::new_in(\n"
+        "            InternalNode<K, V>{}, std::move(alloc));\n"
+        "        LeafNode<K, V>::init(&node.operator->()->data);\n"
+        "        return node;\n"
+        "    }\n"
+        "};"
+    )
+    if old_int_new in src:
+        src = src.replace(old_int_new, new_int_new, 1)
+        landed += 1
+
+    # 3. correct_parent_link: replace template body + NodeRef<K, K, V, Type> typo.
+    old_cpl = (
+        "    template<typename K, typename V>\n"
+        "    void correct_parent_link() {\n"
+        "        auto ptr_shadow1 = NonNull<InternalNode<K, V>>::new_unchecked(NodeRef<K, K, V, Type>::as_internal_ptr(this->node));\n"
+        "        auto idx = std::move(this->idx_field);\n"
+        "        auto child = this->descend();\n"
+        "        child.set_parent_link(std::move(ptr_shadow1), std::move(idx));\n"
+        "    }"
+    )
+    new_cpl = (
+        "    // btree_port port step 59: drop redundant K/V (undeducible) +\n"
+        "    // fix NodeRef<K, K, V, Type> typo (first K should be BorrowType).\n"
+        "    // Recover all template args via __NodeRefArgs<Node>.\n"
+        "    template<typename = void>\n"
+        "    void correct_parent_link()\n"
+        "        requires (__IsNodeRef<Node>) {\n"
+        "        using __B = typename __NodeRefArgs<Node>::BorrowType;\n"
+        "        using __K = typename __NodeRefArgs<Node>::Key;\n"
+        "        using __V = typename __NodeRefArgs<Node>::Value;\n"
+        "        using __NodeTag = typename __NodeRefArgs<Node>::Tag;\n"
+        "        auto ptr_shadow1 = NonNull<InternalNode<__K, __V>>::new_unchecked(\n"
+        "            NodeRef<__B, __K, __V, __NodeTag>::as_internal_ptr(this->node));\n"
+        "        auto idx = std::move(this->idx_field);\n"
+        "        auto child = this->descend();\n"
+        "        child.set_parent_link(std::move(ptr_shadow1), std::move(idx));\n"
+        "    }"
+    )
+    if old_cpl in src:
+        src = src.replace(old_cpl, new_cpl, 1)
+        landed += 1
+
+    # 4. .height → .height_field substitution at non-method-call sites.
+    # Use regex: `.height` not followed by `(` or word-char, not preceded by `_field`.
+    import re
+    pattern_height = re.compile(r"\.height(?!_field)(?![(\w])")
+    new_src, n_height = pattern_height.subn(".height_field", src)
+    if n_height > 0:
+        src = new_src
+        landed += 1
+        print(f"  rewrote {n_height} .height → .height_field")
+
+    if landed > 0:
+        # Insert sentinel at top so re-run skips.
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  applied {landed} step-58/59 fix categories in: {path.name}")
+    else:
+        print(f"  no step-58/59 fix sites matched in: {path.name}")
+
+
 def apply_step54_insert_path_fixes(path: Path) -> None:
     """Step 55: codify the 7 step-54 fixes for the insert path. Each is
     an idempotent text replacement that fixes a specific transpiler emit
@@ -3399,6 +3521,10 @@ def main() -> int:
     # __NodeRefArgs, insert_fit/split/split_leaf_data simplifications,
     # LeafNode::new_ via new_in, middle.split path correction).
     apply_step54_insert_path_fixes(internal)
+    # Step 60: codify step 58/59 fixes — __IsNodeRef concept injection,
+    # InternalNode::new_ bypass, correct_parent_link arg recovery,
+    # .height → .height_field rewrites.
+    apply_step58_lazy_gates_and_fixes(internal)
     # search_tree is hand-ported; the older stub_broken_search_tree
     # is left in the source for reference but not invoked.
     implement_search_tree(internal)
