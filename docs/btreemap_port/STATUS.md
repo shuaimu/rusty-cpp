@@ -271,6 +271,75 @@ hand-port attempt and keeps the entry() stub. Status: 0 compile
 errors maintained, get() on transpiled tree, insert() throws on
 entry stub. 24/24 facade tests still green.
 
+**Architectural barrier — explained.** C++20 named modules attach
+entity declarations to the module they appear in. The OccupiedEntry/
+VacantEntry structs live in `btree_port.btree.map.entry`, and their
+`dormant_map` field has type `DormantMutRef<X>` where X is supposed
+to be the BTreeMap container being referenced. In the Rust source X
+is `super::map::BTreeMap`. The transpiler emits this as
+`rusty::BTreeMap<K,V,A>` — but `rusty::BTreeMap` is rusty/btreemap.hpp's
+std::map-backed facade, NOT the transpiled type defined in map.cppm.
+
+To make `BTreeMap::entry()` work, X needs to resolve to the transpiled
+BTreeMap. But:
+- A forward decl in `map.entry.cppm` would attach BTreeMap to that
+  module, conflicting with `map.cppm`'s actual definition.
+- A forward decl in `btree_internal.cppm` (which both map.entry and
+  map.cppm import) faces the same problem — module attachment doesn't
+  let map.cppm define a type "owned" by btree_internal.
+- A GMF (global module fragment) forward decl would be unattached,
+  but map.cppm's `export struct BTreeMap` then attaches to map's
+  module — a different entity than the GMF forward decl.
+
+The cleanest fix is to move BTreeMap's full definition (~1KLoC) into
+btree_internal.cppm so map.entry can see it through a simple import.
+This is mechanical but extensive — analogous to how prep.sh already
+consolidates the internal-only submodules (mem, borrow, node, search,
+navigate, etc.) into btree_internal. Map-specific entry struct types
+would also need to move alongside BTreeMap to keep the dependency
+graph acyclic.
+
+The alternative is a transpiler-side fix: don't emit `rusty::` as the
+namespace prefix when the Rust path is `super::map::BTreeMap`. The
+transpiler currently conflates the Rust crate root namespace with the
+runtime `rusty::` namespace.
+
+Neither fix fits in a single iteration. The hybrid as-delivered:
+- Facade (std::map): 24/24 tests, full feature parity.
+- Transpiled internals: built, link smoke + read smoke pass.
+- Transpiled BTreeMap::get / contains_key: work via search_tree.
+- Transpiled BTreeMap::insert / entry: blocked on the architectural
+  barrier above.
+
+**Step 51 — third architectural attempt (namespace-skip).** Tried
+to make the entry struct's `rusty::BTreeMap` field type resolve to
+the transpiled BTreeMap by:
+1. `#define RUSTY_BTREEMAP_HPP` / `RUSTY_BTREESET_HPP` in all three
+   transpiled modules' GMFs (so the facade in rusty/btreemap.hpp
+   isn't defined inside transpiled TUs).
+2. Wrap map.cppm's BTreeMap struct in `namespace rusty { ... }` so
+   it occupies the same name (`rusty::BTreeMap`) as the field
+   type expects.
+3. Add a top-level `using BTreeMap = rusty::BTreeMap` alias.
+
+Result: map.cppm built but map.entry.cppm failed — it imports
+btree_internal which still doesn't define `rusty::BTreeMap`, so
+the field type `DormantMutRef<rusty::BTreeMap<K,V,A>>` couldn't
+resolve. Adding a forward decl in btree_internal hits the same
+module-attachment conflict from step 49 (btree_internal-attached
+forward decl vs map-attached definition are distinct entities).
+
+Reverted. The real fix really does need either (a) moving BTreeMap
+out of map.cppm into btree_internal.cppm (so map.entry's import
+of btree_internal makes BTreeMap visible — large mechanical change
+through the patcher), or (b) a transpiler-side fix to stop emitting
+`rusty::` as the prefix for `crate::map::*` Rust paths.
+
+The 0-error baseline + 24/24 facade tests + working read-path
+transpiled BTreeMap (step 50) is the final delivered hybrid for
+this iteration cycle. Further work is appropriate for a dedicated
+restructure session, not self-paced iteration.
+
 **Honest assessment** (added step 43): each E-error requires
 surgical investigation of the lambda/variant emission. The
 transpiler's gaps are uneven — straightforward cases (E1-E4, E6,
