@@ -110,12 +110,17 @@ Each currently throws; needed for `insert` / `remove` to work.
 
 **Phase C — integration test infrastructure.**
 
-- [ ] **C1** Adapter header: point the 24-test facade suite at the
-      transpiled `BTreeMap` instead of `std::map`. Single
-      `#define BTREE_PORT_USE_TRANSPILED 1` toggle.
-- [ ] **C2** Crash-resistant smoke harness: catch throws from any
-      stub still in place so we can see WHICH method gets hit
-      before crashing.
+- [x] **C1** `cpp_out/transpiled_smoke.cpp` imports
+      `btree_port.btree.map` and exercises BTreeMap end-to-end
+      (insert / get / first/last_key_value). First instantiation of
+      the templates with concrete types (int, int) surfaces ~20
+      phase-E correctness errors. CMakeLists adds the executable
+      target under clang only. The Phase D facade rewire is gated
+      on getting this smoke test to link.
+- [ ] **C2** Crash-resistant smoke harness: deferred. Will fold
+      into transpiled_smoke once it actually links — currently we
+      get compile errors rather than runtime throws, so there's
+      nothing to catch at runtime yet.
 
 **Phase D — wire the facade.**
 
@@ -124,12 +129,41 @@ Each currently throws; needed for `insert` / `remove` to work.
       transpiled symbol. About 15 methods.
 - [ ] **D2** Run the 24-test suite. If green: WORKING TRANSPILED VERSION.
 
-**Phase E — fix correctness bugs surfaced by C/D** (unknown shape).
+**Phase E — fix correctness bugs surfaced by C/D** (in progress).
 
-- [ ] **E*** Per-bug. Most likely culprits per transpiler experience
-      so far: wrong move semantics on moved-in K/V; integer-cast
-      width loss on `usize`/`size_t` boundaries; closure capture
-      mode (`[&]` vs `[=]`) on a recursive callback.
+Instantiating the transpiled BTreeMap with `<int, int, Global>`
+surfaces 20 distinct errors. Each is a separate transpiler emit bug.
+Tracking individually:
+
+- [x] **E1** `DormantMutRef::new_(t)` called `NonNull::from(t)`
+      where `t: T&`. Our `NonNull::from(T*)` takes a pointer.
+      Fix: add `&` to get the address. `fix_dormant_mut_ref_from_t`.
+- [x] **E2** Const-correctness: `NodeRef::into_leaf`,
+      `first_leaf_edge`, `last_leaf_edge` were emitted non-const
+      despite being by-value `self` in Rust (which doesn't mutate
+      the receiver). Marked const. `fix_const_correctness`.
+- [ ] **E3** `DormantMutRef::new_` returns
+      `std::tuple<T&, DormantMutRef<T>>` but builds it with
+      `const T&` (transpiled `let new_ref = ... ` as `const T&`).
+      Tuple element-type mismatch on instantiation.
+- [ ] **E4** Several `as_leaf_ptr()` / similar static-via-free-fn
+      sites emit no `this_` argument; the free function expects
+      the receiver as first arg.
+- [ ] **E5** `force()` method missing for some `NodeRef` shape
+      where the transpile expected an enum-like variant return.
+- [ ] **E6** `assume_init_ref` not in `std::span<const MaybeUninit<int>>`
+      — needs adding to rusty's MaybeUninit-array helpers or
+      rewriting the call.
+- [ ] **E7** `SearchResult` returned where `NodeRef` expected —
+      semantic-mismatch in `search_tree` emit (an `if-else` chain
+      whose `else` returns a fresh `NodeRef` should have been a
+      `match` arm).
+- [ ] **E8** Several `_0` / `.first/.second` access on a
+      `std::variant<...>` (transpiled enum) — needs `std::get<>`
+      instead of dot-access.
+- [ ] **E9** `rusty::mem::ManuallyDrop<Global>` has deleted move
+      constructor when used in the BTreeMap aggregate-init path.
+      Needs investigation; possibly a rusty-side helper fix.
 
 **Risks the iteration loop should keep visible:**
 

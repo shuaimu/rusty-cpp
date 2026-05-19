@@ -1206,6 +1206,83 @@ def implement_push_with_handle(path: Path) -> None:
     print(f"  hand-ported NodeRef::push_with_handle in: {path.name}")
 
 
+def fix_dormant_mut_ref_from_t(path: Path) -> None:
+    """The Rust `DormantMutRef::new(t: &mut T)` body calls
+    `NonNull::from(t)` — taking the `&mut T` directly. The
+    transpiler emitted this as `NonNull<...>::from(t)` but our
+    `NonNull<T>::from(T*)` takes a POINTER, not a reference.
+    Patch: `NonNull<...>::from(t)` → `NonNull<...>::from(&t)`."""
+    src = path.read_text()
+    sentinel = (
+        "// btree_port port: DormantMutRef NonNull::from(t) → from(&t) "
+        "by post_transpile_patch.py"
+    )
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (DormantMutRef from(&t) already fixed)")
+        return
+    target = (
+        "auto ptr_shadow1 = NonNull<"
+        "std::remove_pointer_t<std::remove_reference_t<decltype((t))>>"
+        ">::from(t);"
+    )
+    repl = (
+        "auto ptr_shadow1 = NonNull<"
+        "std::remove_pointer_t<std::remove_reference_t<decltype((t))>>"
+        ">::from(&t);"
+    )
+    if target in src:
+        src = src.replace(target, repl, 1)
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  fixed DormantMutRef::new_ NonNull::from(t) → from(&t) in: {path.name}")
+    else:
+        print(f"  no DormantMutRef from(t) site in: {path.name}")
+
+
+def fix_const_correctness(path: Path) -> None:
+    """Rust methods that take `self` by value (consuming) or by
+    immutable reference are emitted in C++ as non-const member
+    functions in some cases, breaking the const-correctness chain
+    when called from const-qualified methods. Specifically known
+    problem methods (surfaced by transpiled_smoke):
+
+      - NodeRef::into_leaf
+      - NodeRef::first_leaf_edge
+      - NodeRef::last_leaf_edge
+
+    All three are `fn(self) -> …` in Rust (consuming) so they
+    don't mutate the receiver. Marking them `const` in C++ makes
+    them callable from `const NodeRef&` contexts (the
+    by-value-receiver semantic is otherwise preserved).
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: const-correctness on by-value methods by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (const-correctness already fixed)")
+        return
+    # Methods to mark const. Match the exact signature line we see in
+    # the transpiled output (avoiding shape-creep in other files).
+    targets = [
+        ("const LeafNode<K, V>& into_leaf() {",
+         "const LeafNode<K, V>& into_leaf() const {"),
+        ("Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, ::marker::Edge> first_leaf_edge() {",
+         "Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, ::marker::Edge> first_leaf_edge() const {"),
+        ("Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, ::marker::Edge> last_leaf_edge() {",
+         "Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, ::marker::Edge> last_leaf_edge() const {"),
+    ]
+    n_fixed = 0
+    for old, new in targets:
+        if old in src:
+            src = src.replace(old, new, 1)
+            n_fixed += 1
+    if n_fixed:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  marked {n_fixed} method(s) const in: {path.name}")
+    else:
+        print(f"  no const-correctness sites in: {path.name}")
+
+
 def _impl_deallocating_helper(direction: str) -> tuple[str, str]:
     """Returns (stub-signature-substring, replacement-body) for the
     deallocating_next / _back hand-ports. `direction` is "next" or
@@ -1658,6 +1735,9 @@ def main() -> int:
     implement_from_new_internal(internal)
     implement_push_with_handle(internal)
     implement_deallocating(internal)
+    # Phase E (correctness fixes surfaced at instantiation time):
+    fix_dormant_mut_ref_from_t(internal)
+    fix_const_correctness(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
     print(f"[*] writing link_smoke.cpp")
