@@ -311,6 +311,54 @@ Neither fix fits in a single iteration. The hybrid as-delivered:
 - Transpiled BTreeMap::insert / entry: blocked on the architectural
   barrier above.
 
+**Step 54 — peel insert-path transpiler bugs.** Made direct edits to
+`btree_internal.cppm` clearing several insert-path bugs that the
+step-53 attempt surfaced:
+
+1. **`key_area_mut` / `val_area_mut` / `edge_area_mut`**: dropped the
+   undeducible `<typename Output>` method-template param. Replaced
+   `Output&` return with `decltype(auto)`. Added an `if constexpr
+   (std::is_integral_v<I>)` dispatch so callers can pass either a
+   `size_t` index or a `rusty::range_to/range_from` etc.
+2. **`Handle::reborrow` / `reborrow_mut` / `dormant` / `awaken`**:
+   used `__NodeRefArgs<Node>` to recover Key/Value/Tag from the
+   enclosing class's Node template arg, dropping the redundant
+   method-template params that couldn't be deduced from empty call
+   args. Same pattern as Handle::descend/force/into_kv from step 48.
+3. **`Handle::insert_fit` (2-arg leaf form)**: same fix — recover
+   K/V from `__NodeRefArgs<Node>`.
+4. **`Handle::split`**: recover K/V from `__NodeRefArgs<Node>`,
+   correct `NodeRef<A, K, V, Type>` (where `A` was the allocator!)
+   to `NodeRef<Owned, K, V, Leaf>`.
+5. **`Handle::split_leaf_data`**: dropped unused/undeducible
+   `NodeType` template param.
+6. **`LeafNode::new_`**: bypassed missing `rusty::Box::new_uninit_in`
+   by allocating a default-constructed LeafNode via `new_in` then
+   calling `LeafNode::init` to write parent/len fields. The
+   MaybeUninit-typed arrays of keys/vals handle uninit-ness
+   internally.
+7. **`Handle::insert` (Leaf body)**: fixed `rusty::str_runtime::split`
+   → `middle.split(alloc)` (transpiler emitted a fake path).
+   Dropped `const auto insertion_edge` const-qualifier so
+   non-const `insert_fit` is callable.
+
+After these 7 fixes, the only remaining error was the malformed
+`std::visit(overloaded{...}, tuple)` in `Handle::insert_recursing` —
+tuples aren't variants. Attempted a clean hand-port of insert_recursing
+but it surfaced 6+ more transpiler bugs in adjacent code:
+`MaybeUninit<uint16_t>::assume_init` not const-qualified, `__NodeRefArgs`
+template-arg deduction failure for `rusty::range_inclusive`,
+`InternalNode::new_uninit_in` missing, etc. — each its own fix.
+
+The current iteration reverts the insert_entry / insert_recursing
+hand-ports to stubs (so the build stays green) but keeps the 7 working
+fixes above. Smoke tests + facade still green.
+
+The pattern is now clear: each layer of the insert path has its own
+transpiler emit bugs, each fixable in 5-20 lines, but the cumulative
+work is many iterations. The architectural fix in step 52 was the
+real unblock; the rest is mechanical sweep work.
+
 **Step 53 — attempted `VacantEntry::insert_entry` hand-port.** The
 shape compiles (no module-attachment issues anymore — step 52 fixed
 those) and matches the Rust source. Instantiating it pulls in a
