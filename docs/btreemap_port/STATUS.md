@@ -311,6 +311,37 @@ Neither fix fits in a single iteration. The hybrid as-delivered:
 - Transpiled BTreeMap::insert / entry: blocked on the architectural
   barrier above.
 
+**Step 61 — fixed `assume_init` const-qual, hit transpiler-level
+Rust-impl shape loss for `split`.** Two more chips at the insert path:
+
+1. `parent_idx.assume_init()` on a const MaybeUninit<u16> → use
+   `assume_init_read()` (const-callable, returns copy — safe for
+   trivial u16). Patched at line 4371.
+2. Internal `Handle::insert`'s split call needed `const auto middle`
+   → `auto middle` (split is non-const), plus the same
+   `rusty::str_runtime::split` → `middle.split(alloc)` path fix as
+   the Leaf body (step-54 fix #7 applied to a second site).
+3. Added `requires (std::same_as<Tag, ::marker::Internal>)` gate to
+   `descend` so it only instantiates when Node's Tag is Internal
+   (matches the Rust impl restriction).
+
+After step 61: 2 errors remain that need transpiler-side fixes:
+- `Handle::split` collapsed two Rust impl blocks (`<...,Leaf>` and
+  `<...,Internal>`) into one C++ method that always returns
+  `SplitResult<...,Leaf>`. The Internal::insert path needs the
+  Internal variant which doesn't exist in the emit.
+- `correct_parent_link` calls `descend()` — descend is now gated
+  to Tag=Internal, so the call only works when correct_parent_link's
+  enclosing Handle has Node = NodeRef<..., Internal>. The orphan-
+  impl injection placed correct_parent_link on too generic a Node
+  type, causing instantiation with Tag=Leaf to fail.
+
+Both need restructuring the transpiler's impl-block emission to
+preserve Rust's per-Tag restrictions. Out of scope for /loop
+iteration.
+
+Stubs stay in place; build green, all baselines hold.
+
 **Step 58 — Lazy template gates work; insert-path errors down to 4.**
 After step 57's failed concept-only gates, this iteration found the
 working shape: wrap each `__NodeRefArgs<Node>`-using method in
