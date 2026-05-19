@@ -215,6 +215,26 @@ After step 48: 0 compile errors, transpiled_smoke now reaches the
 BTreeMap::entry stub (first call from insert path). BTreeMap::get
 is fully on the transpiled path.
 
+**Step 50 — add `btree_port_transpiled_read_smoke` consumer test.**
+Now that BTreeMap::get works on the transpiled tree (step 48), add a
+small clang-only executable that exercises the read path end-to-end:
+constructs an empty `::BTreeMap<int,int,Global>` and calls `.get(1)`,
+`.get(42)`, `.contains_key(7)`. All three exercise the transpiled
+`search_tree` (which we hand-ported in step 48) and the new
+RUSTY_TRY_OPT macro that handles the None-root early-return. The
+test passes — proving the read path is wired end-to-end through the
+actual transpiled B-tree implementation, not a stub.
+
+Wired into both:
+- The patcher's CMake trim block (so future regens preserve the test)
+- A new `write_transpiled_read_smoke()` helper that emits the source
+- The active patch pipeline (called after `write_link_smoke`)
+
+Hybrid status delivered: facade with 24/24 std::map-backed tests +
+transpiled BTreeMap with working get() + working link smoke +
+working read smoke + libbtree_port.a builds clean on both g++
+(btree_internal only) and clang++ (btree_internal + map.entry + map).
+
 **Step 49 — attempted BTreeMap::entry hand-port; blocked on
 `rusty::BTreeMap` vs `::BTreeMap` namespace clash.** The transpiler
 emitted `DormantMutRef<rusty::BTreeMap<K,V,A>>` for the
