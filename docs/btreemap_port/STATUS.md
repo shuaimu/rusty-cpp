@@ -87,8 +87,13 @@ Each currently throws; needed for `insert` / `remove` to work.
       `borrow_mut().correct_all_childrens_parent_links()` to fix up
       the parent pointers in each child edge. Landed in
       `implement_from_new_internal()`.
-- [ ] **B3** `NodeRef::push_with_handle` — pushes a K/V into a leaf;
-      used by `BTreeMap::insert`. The most load-bearing of the five.
+- [x] **B3** `NodeRef::push_with_handle` — hand-ported. Same shape
+      as the already-transpiled `push()` method one block above
+      (line 4543): increment len, write into key/val areas at the
+      new idx, then build a Handle::new_kv pointing at the inserted
+      pair. The returned NodeRef has a fresh lifetime `'b` in Rust
+      that's just an erased Mut in C++. Landed in
+      `implement_push_with_handle()`.
 - [ ] **B4** `Handle::deallocating_next` — used by `BTreeMap::into_iter`
       and removal. Walks the tree dropping nodes.
 - [ ] **B5** `Handle::deallocating_next_back` — reverse of B4.

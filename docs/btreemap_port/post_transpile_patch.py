@@ -1120,6 +1120,92 @@ def implement_from_new_internal(path: Path) -> None:
     print(f"  hand-ported NodeRef::from_new_internal in: {path.name}")
 
 
+def implement_push_with_handle(path: Path) -> None:
+    """Replace the `throw` stub for `NodeRef::push_with_handle`.
+    This is the leaf-write workhorse: `BTreeMap::insert` ultimately
+    reaches here when adding to a non-full leaf.
+
+    Rust source (library/alloc/src/collections/btree/node.rs):
+        pub(super) unsafe fn push_with_handle<'b>(
+            &mut self, key: K, val: V,
+        ) -> Handle<NodeRef<marker::Mut<'b>, K, V, marker::Leaf>, marker::KV> {
+            let len = self.len_mut();
+            let idx = usize::from(*len);
+            assert!(idx < CAPACITY);
+            *len += 1;
+            unsafe {
+                self.key_area_mut(idx).write(key);
+                self.val_area_mut(idx).write(val);
+                Handle::new_kv(
+                    NodeRef {
+                        height: self.height,
+                        node: self.node,
+                        _marker: PhantomData,
+                    },
+                    idx,
+                )
+            }
+        }
+
+    The pattern is exactly the one already-transpiled `push()` at
+    line 4543 uses (same len/idx/CAPACITY check + key/val_area_mut
+    writes) — we just wrap a Handle::new_kv around the result.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: B3 push_with_handle hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (B3 already landed)")
+        return
+    sig = ("Handle<NodeRef<::marker::Mut, K, V, ::marker::Leaf>, ::marker::KV> "
+           "push_with_handle(K key, V val) {")
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        print(f"  no B3 stub site in: {path.name}")
+        return
+    brace_open = src.find("{", sig_pos + len(sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find B3 stub end in: {path.name}", file=sys.stderr)
+        return
+    impl = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        // Same pattern as the already-transpiled `push()`: increment\n"
+        "        // len, write into the key/val areas at idx, then return a\n"
+        "        // Handle pointing at the new (key, val) pair. The returned\n"
+        "        // NodeRef has a fresh lifetime 'b in Rust; in C++ lifetimes\n"
+        "        // are erased, so it's just a sibling NodeRef<Mut, K, V, Leaf>.\n"
+        "        uint16_t& __len = this->len_mut();\n"
+        "        auto __idx = static_cast<size_t>(__len);\n"
+        "        assert((__idx < CAPACITY));\n"
+        "        __len += 1;\n"
+        "        // @unsafe — caller has the only mutable borrow of this leaf.\n"
+        "        this->key_area_mut(__idx).write(std::move(key));\n"
+        "        this->val_area_mut(__idx).write(std::move(val));\n"
+        "        return Handle<NodeRef<::marker::Mut, K, V, ::marker::Leaf>, ::marker::KV>::new_kv(\n"
+        "            NodeRef<::marker::Mut, K, V, ::marker::Leaf>{\n"
+        "                .height_field = this->height_field,\n"
+        "                .node = this->node,\n"
+        "                ._marker = rusty::PhantomData<std::tuple<::marker::Mut, ::marker::Leaf>>{}\n"
+        "            },\n"
+        "            __idx\n"
+        "        );\n"
+        "    }"
+    )
+    new_src = src[:brace_open] + impl + src[brace_close + 1 :]
+    path.write_text(new_src)
+    print(f"  hand-ported NodeRef::push_with_handle in: {path.name}")
+
+
 def stub_nodref_insert_entry(path: Path) -> None:
     """Stub `OccupiedEntry insert_entry(V value)` in VacantEntry — the
     transpiler emits `NodeRef::new_leaf(…)` without template args,
@@ -1466,6 +1552,7 @@ def main() -> int:
     # override with the real impl. On re-runs, both are idempotent.
     implement_from_new_leaf(internal)
     implement_from_new_internal(internal)
+    implement_push_with_handle(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
     print(f"[*] writing link_smoke.cpp")
