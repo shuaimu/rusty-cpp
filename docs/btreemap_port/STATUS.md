@@ -35,14 +35,16 @@ picks the first `[ ]` and goes.
       external call at the caller site becomes
       `clone_subtree(clone_subtree, x)`. Landed in
       `fix_recursive_lambda_clone_subtree()`. Both errors cleared.
-- [~] **A4** Partial: MIN_LEN dup dropped (2), merge() `Q`→`K`
-      substitution (1), SearchBound (5) and DedupSortedIter (1)
-      added to template-arg recovery + DedupSortedIter deduction
-      helper. 9 sites cleared. Remaining: T→K in `entry()` body
-      (3 sites on one line), `new_()` method body mismatched A vs
-      Global (2 sites), `debug_map` not in rusty::fmt::Formatter (1),
-      empty `return /* write!… */` (1). Total 7 errors left
-      before A4 fully done.
+- [x] **A4** All map.cppm parse/compile errors cleared. Final tally
+      across 8 helpers added this phase: MIN_LEN dup (2), merge() Q→K
+      (1), SearchBound + DedupSortedIter template-args (6),
+      VacantEntry/OccupiedEntry T→K,V in entry() (3), new_()
+      A→Global with explicit return type (2), debug_map→debug_list
+      (1), empty `return /* write!… */;` → `Result::Ok` (1),
+      `rusty::alloc::Global` type→value at call-arg sites (3).
+      **map.cppm now compiles cleanly under clang.**
+      libbtree_port.a builds with `btree_internal + map.entry + map`.
+      Smoke test passes. Facade 24/24 still green.
 - [ ] **A5** Same pass over `set.cppm` / `set.entry.cppm` (currently
       blocked behind A1–A4 since they import map).
 - [ ] **A6** Add `btree_port.btree.map`, `set`, `set.entry` to the

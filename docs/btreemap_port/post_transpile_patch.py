@@ -570,6 +570,181 @@ def drop_duplicate_min_len(path: Path) -> None:
         print(f"  no MIN_LEN duplicates in: {path.name}")
 
 
+def fix_entry_T_to_KV(path: Path) -> None:
+    """In `BTreeMap::entry()`'s body, the transpiler emits
+    `VacantEntry<T, A>` / `OccupiedEntry<T, A>` instead of
+    `VacantEntry<K, V, A>` / `OccupiedEntry<K, V, A>`. The map-side
+    entry types take 3 type params; the transpiler accidentally
+    used the set-side spelling.
+
+    Substitute the wrong form to the right one. Idempotent."""
+    src = path.read_text()
+    sentinel = "// btree_port port: entry T→K,V fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (entry T→K,V already fixed)")
+        return
+    n_v = src.count("VacantEntry<T, A>")
+    n_o = src.count("OccupiedEntry<T, A>")
+    if n_v == 0 and n_o == 0:
+        print(f"  no entry T→K,V sites in: {path.name}")
+        return
+    src = src.replace("VacantEntry<T, A>", "VacantEntry<K, V, A>")
+    src = src.replace("OccupiedEntry<T, A>", "OccupiedEntry<K, V, A>")
+    src = sentinel + "\n" + src
+    path.write_text(src)
+    print(
+        f"  substituted {n_v} VacantEntry<T,A> + {n_o} OccupiedEntry<T,A> "
+        f"→ <K,V,A> in: {path.name}"
+    )
+
+
+def fix_new_global_alloc(path: Path) -> None:
+    """`BTreeMap<K, V>::new_()` is impl'd specifically for Global in
+    Rust (`impl<K, V> BTreeMap<K, V, Global>`). The transpiler emits
+    the body using `A` (the enclosing class's generic A) but the
+    return type is `BTreeMap<K, V>` which defaults A=Global. Mismatch
+    on the body's PhantomData.
+
+    Fix on two fronts:
+      1. Make `new_()`'s return type explicit:
+         `BTreeMap<K, V>` → `BTreeMap<K, V, rusty::alloc::Global>`
+      2. In the body, replace `A` → `rusty::alloc::Global` in
+         PhantomData (already aligning with the explicit return)."""
+    src = path.read_text()
+    sentinel = "// btree_port port: new_() A→Global fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (new_() A→Global already fixed)")
+        return
+
+    n_total = 0
+
+    # 1. `static BTreeMap<K, V> new_()` → explicit Global return.
+    decl_old = "static BTreeMap<K, V> new_()"
+    decl_new = "static BTreeMap<K, V, rusty::alloc::Global> new_()"
+    if decl_old in src:
+        src = src.replace(decl_old, decl_new, 1)
+        n_total += 1
+
+    # 2. Inside `BTreeMap<K, V>(...)` calls, swap `A` → `Global` in
+    # PhantomData. Also rewrite the constructor call itself to
+    # `BTreeMap<K, V, rusty::alloc::Global>(...)`.
+    pattern = "BTreeMap<K, V>("
+    target = "rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{}"
+    repl = "rusty::PhantomData<rusty::Box<std::tuple<K, V>, rusty::alloc::Global>>{}"
+    pos = 0
+    while True:
+        i = src.find(pattern, pos)
+        if i == -1:
+            break
+        j = src.find(";", i)
+        if j == -1:
+            break
+        stmt = src[i : j + 1]
+        if target in stmt:
+            new_stmt = stmt.replace(target, repl, 1)
+            new_stmt = new_stmt.replace(
+                "BTreeMap<K, V>(",
+                "BTreeMap<K, V, rusty::alloc::Global>(",
+                1,
+            )
+            src = src[:i] + new_stmt + src[j + 1 :]
+            n_total += 1
+            j = i + len(new_stmt) - 1
+        pos = j + 1
+
+    if n_total:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  applied {n_total} new_()/A→Global fix(es) in: {path.name}")
+    else:
+        print(f"  no new_()/A→Global sites in: {path.name}")
+
+
+def fix_global_as_value(path: Path) -> None:
+    """`rusty::alloc::Global` is an empty struct (Rust's `Global`
+    unit struct allocator). The transpiler emits it both as a TYPE
+    (`BTreeMap<K, V, rusty::alloc::Global>`) and as a VALUE
+    (`manually_drop_new(rusty::alloc::Global)`). The value form
+    needs `Global{}` for default construction.
+
+    Substitute only call-arg position contexts:
+      `, rusty::alloc::Global)`  →  `, rusty::alloc::Global{})`
+      `(rusty::alloc::Global)`   →  `(rusty::alloc::Global{})`
+    Type positions (`<…>`) are unaffected."""
+    src = path.read_text()
+    sentinel = (
+        "// btree_port port: rusty::alloc::Global type→value "
+        "by post_transpile_patch.py"
+    )
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (Global type→value already fixed)")
+        return
+    n1 = src.count(", rusty::alloc::Global)")
+    n2 = src.count("(rusty::alloc::Global)")
+    src = src.replace(", rusty::alloc::Global)", ", rusty::alloc::Global{})")
+    src = src.replace("(rusty::alloc::Global)", "(rusty::alloc::Global{})")
+    if n1 + n2 > 0:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  substituted Global → Global{{}} at {n1 + n2} call-arg site(s) in: {path.name}")
+    else:
+        print(f"  no Global type→value sites in: {path.name}")
+
+
+def fix_debug_map_call(path: Path) -> None:
+    """The transpiler emits `f.debug_map().entries(...)` but rusty's
+    Formatter has `debug_list`/`debug_struct`/`debug_tuple` only, not
+    `debug_map`. Substitute → `debug_list` (the print format won't
+    look like Rust's `{k: v, …}` but the type checks out).
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: debug_map→debug_list by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (debug_map already rewritten)")
+        return
+    target = "f.debug_map()"
+    if target not in src:
+        print(f"  no debug_map sites in: {path.name}")
+        return
+    n = src.count(target)
+    src = src.replace(target, "f.debug_list()")
+    src = sentinel + "\n" + src
+    path.write_text(src)
+    print(f"  rewrote {n} debug_map → debug_list in: {path.name}")
+
+
+def fix_empty_write_return(path: Path) -> None:
+    """Some `fmt(...)` bodies have a literal `return /* write!(…) */;`
+    where the `write!` macro got dropped (left as a comment) and the
+    return statement has no value. Inject `rusty::fmt::Result::Ok({})`
+    so the non-void function returns SOMETHING."""
+    src = path.read_text()
+    sentinel = "// btree_port port: empty-return fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (empty-return already fixed)")
+        return
+    import re
+    # Match `    return /* write!(...) */;` (any whitespace, any comment body)
+    pattern = re.compile(
+        r"return /\* write!\([^)]*\) \*/;",
+    )
+    matches = pattern.findall(src)
+    if not matches:
+        print(f"  no empty-return sites in: {path.name}")
+        return
+    # NB: don't use /* */ in the replacement — the matched original
+    # contains a /* */ already and nested block comments are invalid
+    # C++. Use a line-comment after the statement instead.
+    src = pattern.sub(
+        "return rusty::fmt::Result::Ok(std::make_tuple());  "
+        "// btree_port: was empty `return /* write! */;`",
+        src,
+    )
+    src = sentinel + "\n" + src
+    path.write_text(src)
+    print(f"  fixed {len(matches)} empty-return site(s) in: {path.name}")
+
+
 def fix_merge_unknown_Q(path: Path) -> None:
     """`BTreeMap::merge(other, conflict)` body references `Q` (a Rust
     generic that lets the lookup type be a borrowed view of K), but the
@@ -1044,7 +1219,10 @@ def patch_cmake(path: Path, rusty_include_dir: Path) -> None:
         "set(_BTREE_PORT_SOURCES btree_port.btree.btree_internal.cppm)\n"
         "if(CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\"\n"
         "   OR CMAKE_CXX_COMPILER_ID STREQUAL \"AppleClang\")\n"
-        "    list(APPEND _BTREE_PORT_SOURCES btree_port.btree.map.entry.cppm)\n"
+        "    list(APPEND _BTREE_PORT_SOURCES\n"
+        "        btree_port.btree.map.entry.cppm\n"
+        "        btree_port.btree.map.cppm\n"
+        "    )\n"
         "endif()\n"
         "\n"
         "add_library(btree_port ${_BTREE_PORT_SOURCES})\n"
@@ -1175,6 +1353,22 @@ def main() -> int:
         # `merge(other, conflict)` has an undeclared `Q` from a Rust
         # `Borrow<Q>` constraint; substitute Q→K (phase A4).
         fix_merge_unknown_Q(map_mod)
+        # `entry()` body uses VacantEntry<T,A>/OccupiedEntry<T,A>
+        # instead of <K,V,A> (set-side spelling leaked) (A4).
+        fix_entry_T_to_KV(map_mod)
+        # `new_()` body uses `A` (enclosing generic) but returns
+        # `BTreeMap<K, V>` (Global). Replace A→Global in those
+        # specific call sites (A4).
+        fix_new_global_alloc(map_mod)
+        # `rusty::alloc::Global` used in call-arg position needs to
+        # be `Global{}` (default construct the unit struct) (A4).
+        fix_global_as_value(map_mod)
+        # `f.debug_map()` is not a member of rusty::fmt::Formatter;
+        # use debug_list instead (A4).
+        fix_debug_map_call(map_mod)
+        # `return /* write!(...) */;` leftover from untranspiled
+        # write! macro — needs a return value (A4).
+        fix_empty_write_return(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")
