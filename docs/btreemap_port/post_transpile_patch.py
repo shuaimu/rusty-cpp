@@ -1047,6 +1047,79 @@ def implement_from_new_leaf(path: Path) -> None:
     print(f"  hand-ported NodeRef::from_new_leaf in: {path.name}")
 
 
+def implement_from_new_internal(path: Path) -> None:
+    """Replace the `throw` stub for `NodeRef::from_new_internal`. Same
+    shape as B1 but for internal nodes: takes a Box<InternalNode> + a
+    NonZero<size_t> height, casts the NonNull pointer to LeafNode (the
+    shared storage layout), and calls correct_all_childrens_parent_links
+    on the resulting borrow_mut.
+
+    Rust source (library/alloc/src/collections/btree/node.rs):
+        fn from_new_internal<A: Allocator + Clone>(
+            internal: Box<InternalNode<K, V>, A>,
+            height: NonZero<usize>,
+        ) -> Self {
+            let (node, _alloc) = Box::into_non_null_with_allocator(internal);
+            let mut this = NodeRef {
+                height: height.into(),
+                node: node.cast(),
+                _marker: PhantomData,
+            };
+            this.borrow_mut().correct_all_childrens_parent_links();
+            this
+        }
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: B2 from_new_internal hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (B2 already landed)")
+        return
+    sig = ("static NodeRef<BorrowType, K, V, Type> from_new_internal("
+           "rusty::Box<InternalNode<K, V>, A> internal, "
+           "rusty::num::NonZero<size_t> height) {")
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        print(f"  no B2 stub site in: {path.name}")
+        return
+    brace_open = src.find("{", sig_pos + len(sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find B2 stub end in: {path.name}", file=sys.stderr)
+        return
+    impl = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        // Box::into_non_null_with_allocator → (NonNull, A); the Box's\n"
+        "        // destructor drops the allocator. Take ownership of the\n"
+        "        // InternalNode pointer via `into_raw()`, then cast NonNull\n"
+        "        // to NonNull<LeafNode> (the storage layout has LeafNode at\n"
+        "        // the head of InternalNode, so the cast is reinterpret-safe).\n"
+        "        ::InternalNode<K, V>* __raw = std::move(internal).into_raw();\n"
+        "        rusty::ptr::NonNull<::LeafNode<K, V>> __node =\n"
+        "            rusty::ptr::NonNull<::InternalNode<K, V>>::new_unchecked(__raw).cast();\n"
+        "        NodeRef<BorrowType, K, V, Type> __this{\n"
+        "            .height_field = static_cast<size_t>(height.get()),\n"
+        "            .node = __node,\n"
+        "            ._marker = rusty::PhantomData<std::tuple<BorrowType, Type>>{}\n"
+        "        };\n"
+        "        __this.borrow_mut().correct_all_childrens_parent_links();\n"
+        "        return std::move(__this);\n"
+        "    }"
+    )
+    new_src = src[:brace_open] + impl + src[brace_close + 1 :]
+    path.write_text(new_src)
+    print(f"  hand-ported NodeRef::from_new_internal in: {path.name}")
+
+
 def stub_nodref_insert_entry(path: Path) -> None:
     """Stub `OccupiedEntry insert_entry(V value)` in VacantEntry — the
     transpiler emits `NodeRef::new_leaf(…)` without template args,
@@ -1392,6 +1465,7 @@ def main() -> int:
     # (which makes the templated method parse) and then immediately
     # override with the real impl. On re-runs, both are idempotent.
     implement_from_new_leaf(internal)
+    implement_from_new_internal(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
     print(f"[*] writing link_smoke.cpp")

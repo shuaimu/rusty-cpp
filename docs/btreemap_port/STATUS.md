@@ -79,8 +79,14 @@ Each currently throws; needed for `insert` / `remove` to work.
       and builds the NodeRef aggregate. Landed in
       `implement_from_new_leaf()`. Module rebuilds; smoke + facade
       still green.
-- [ ] **B2** `NodeRef::from_new_internal` — same shape for internal
-      nodes.
+- [x] **B2** `NodeRef::from_new_internal` — hand-ported. Same shape
+      as B1 but for InternalNode (takes height + NonZero<usize>),
+      with the `.cast()` to NonNull<LeafNode> exploiting that
+      InternalNode's storage starts with a LeafNode (so the cast is
+      reinterpret-safe). After the aggregate construction, calls
+      `borrow_mut().correct_all_childrens_parent_links()` to fix up
+      the parent pointers in each child edge. Landed in
+      `implement_from_new_internal()`.
 - [ ] **B3** `NodeRef::push_with_handle` — pushes a K/V into a leaf;
       used by `BTreeMap::insert`. The most load-bearing of the five.
 - [ ] **B4** `Handle::deallocating_next` — used by `BTreeMap::into_iter`
