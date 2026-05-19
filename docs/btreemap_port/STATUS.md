@@ -215,6 +215,42 @@ After step 48: 0 compile errors, transpiled_smoke now reaches the
 BTreeMap::entry stub (first call from insert path). BTreeMap::get
 is fully on the transpiled path.
 
+**Step 49 — attempted BTreeMap::entry hand-port; blocked on
+`rusty::BTreeMap` vs `::BTreeMap` namespace clash.** The transpiler
+emitted `DormantMutRef<rusty::BTreeMap<K,V,A>>` for the
+`OccupiedEntry`/`VacantEntry` `dormant_map` field. But
+`rusty::BTreeMap` (from rusty/btreemap.hpp) is an `std::map`-backed
+FACADE — a completely different type than the transpiled global
+`::BTreeMap` defined in map.cppm. When `BTreeMap::entry` is invoked
+from `BTreeMap<int,int,Global>`, `__btree_port_make_dormant(*this)`
+produces `DormantMutRef<::BTreeMap<int,int,Global>>` — but the
+struct field expects `DormantMutRef<rusty::BTreeMap<int,int,Global>>`,
+a different instantiation.
+
+Tried fixes:
+1. Substitute `rusty::BTreeMap` → `::BTreeMap` in map.entry.cppm
+   + forward-declare `BTreeMap` in map.entry's purview. Failed:
+   "declaration 'BTreeMap' attached to named module
+   'btree_port.btree.map.entry' can't be attached to other modules"
+   — map.cppm later defines BTreeMap, claiming module attachment.
+2. Forward-decl in the GMF of map.entry — would work for visibility
+   but then BTreeMap is unattached vs. map.cppm's attached version,
+   so they're still distinct types.
+
+Real fix paths:
+- (a) Move BTreeMap definition into btree_internal.cppm (large
+  restructure; the transpiler already merges other btree submodules
+  there, so this is consistent — but it'd require moving ~2KLoC of
+  emit and rewiring imports).
+- (b) Fix the transpiler so the `crate::map::BTreeMap` path in
+  Rust source emits as the transpiled type rather than confusing
+  with the rusty:: namespace member.
+
+Both are bigger than the current iteration. Step 49 reverts the
+hand-port attempt and keeps the entry() stub. Status: 0 compile
+errors maintained, get() on transpiled tree, insert() throws on
+entry stub. 24/24 facade tests still green.
+
 **Honest assessment** (added step 43): each E-error requires
 surgical investigation of the lambda/variant emission. The
 transpiler's gaps are uneven — straightforward cases (E1-E4, E6,

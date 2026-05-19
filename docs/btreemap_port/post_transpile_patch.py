@@ -1752,6 +1752,160 @@ def stub_broken_map_entry_methods(path: Path) -> None:
         path.write_text(src)
 
 
+def fix_rusty_btreemap_namespace_clash(path: Path) -> None:
+    """The transpiler emits `rusty::BTreeMap<K, V, A>` for the
+    `DormantMutRef<...>` field type inside OccupiedEntry / VacantEntry.
+    But `rusty::BTreeMap` from rusty/btreemap.hpp is an std::map-backed
+    FACADE — a totally different type than the transpiled global
+    `::BTreeMap<K, V, A>` defined in map.cppm. The transpiler's path
+    mangling confused the Rust crate's `crate::map::BTreeMap` with
+    the rusty:: namespace member.
+    Fix: strip the `rusty::` prefix from BTreeMap occurrences so it
+    resolves to the transpiled global type. The struct is in
+    map.entry.cppm but map.cppm (where BTreeMap is defined) imports
+    map.entry — so map.entry must forward-declare BTreeMap to
+    compile cleanly. Inject the forward decl right after the
+    `export module …;` block.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: rusty::BTreeMap → ::BTreeMap + fwd-decl by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (rusty::BTreeMap → ::BTreeMap already fixed)")
+        return
+    needle = "rusty::BTreeMap"
+    if needle not in src:
+        print(f"  no rusty::BTreeMap occurrences in: {path.name}")
+        return
+    n = src.count(needle)
+    src = src.replace(needle, "::BTreeMap")
+    # Inject the BTreeMap forward decl so the struct compiles. The
+    # entry module is compiled BEFORE map.cppm, so map.cppm's
+    # definition isn't yet visible — only a forward declaration works.
+    # Forward-decl is fine because DormantMutRef<T> only stores a
+    # NonNull<T> + PhantomData<T&>, neither of which needs T complete.
+    fwd_decl = (
+        "\n// btree_port port: forward-decl ::BTreeMap so DormantMutRef<BTreeMap<...>> compiles\n"
+        "// (the full definition is in map.cppm, imported by map.cppm AFTER this module).\n"
+        "// DormantMutRef stores only NonNull<T> + PhantomData<T&>, which work with incomplete T.\n"
+        "namespace rusty { namespace alloc { struct Global; } }\n"
+        "template<typename K, typename V, typename A = rusty::alloc::Global>\n"
+        "    requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "struct BTreeMap;\n"
+    )
+    # Insert AFTER the first `import btree_port.btree.btree_internal;`
+    # line (so Allocator is in scope), but BEFORE any struct definitions.
+    anchor = "import btree_port.btree.btree_internal;\n"
+    pos = src.find(anchor)
+    if pos != -1:
+        ins = pos + len(anchor)
+        src = src[:ins] + fwd_decl + src[ins:]
+    src = sentinel + "\n" + src
+    path.write_text(src)
+    print(f"  rewrote {n} rusty::BTreeMap → ::BTreeMap + fwd-decl in: {path.name}")
+
+
+def implement_btreemap_entry(path: Path) -> None:
+    """Hand-port `BTreeMap::entry`. Replaces the stub from
+    stub_broken_entry_method. The Rust source:
+        pub fn entry(&mut self, key: K) -> Entry<'_, K, V, A> {
+            let (map, dormant_map) = DormantMutRef::new(self);
+            match map.root {
+                None => Vacant(VacantEntry { key, handle: None, ... }),
+                Some(ref mut root) => match root.borrow_mut().search_tree(&key) {
+                    Found(handle) => Occupied(OccupiedEntry { handle, ... }),
+                    GoDown(handle) => Vacant(VacantEntry { key, handle: Some(handle), ... }),
+                }
+            }
+        }
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: BTreeMap::entry hand-ported by post_transpile_patch.py (v2-positional)"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (BTreeMap::entry hand-ported)")
+        return
+    sig = "Entry<K, V, A> entry(K key) {"
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        print(f"  no BTreeMap::entry site in: {path.name}")
+        return
+    # The method body `{` is the last char of the sig string.
+    brace_open = sig_pos + len(sig) - 1
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find BTreeMap::entry end", file=sys.stderr)
+        return
+    impl = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        using __VEHandle = Handle<NodeRef<::marker::Mut, K, V,\n"
+        "                                          ::marker::Leaf>, ::marker::Edge>;\n"
+        "        using __OEHandle = Handle<NodeRef<::marker::Mut, K, V,\n"
+        "                                          ::marker::LeafOrInternal>, ::marker::KV>;\n"
+        "        using __DMR = DormantMutRef<rusty::BTreeMap<K, V, A>>;\n"
+        "        auto [map, dormant_map] =\n"
+        "            __btree_port_make_dormant((*this));\n"
+        "        if (map.root.is_none()) {\n"
+        "            // Use member-by-member aggregate init in order, no\n"
+        "            // designators — the dormant_map field's nested\n"
+        "            // aggregate type triggers brace-elision when init'd\n"
+        "            // with a designator. Listing all 5 members positionally\n"
+        "            // bypasses that.\n"
+        "            VacantEntry<K, V, A> __ve{\n"
+        "                std::move(key),\n"
+        "                rusty::Option<__VEHandle>{rusty::None},\n"
+        "                __DMR{std::move(dormant_map).ptr,\n"
+        "                      std::move(dormant_map)._marker},\n"
+        "                rusty::clone(((rusty::detail::deref_if_pointer_like(map.alloc)))),\n"
+        "                rusty::PhantomData<std::tuple<K, V>&>{},\n"
+        "            };\n"
+        "            return Entry<K, V, A>::Vacant(std::move(__ve));\n"
+        "        }\n"
+        "        // The mutable borrow into root_node lives only long enough\n"
+        "        // for search_tree to consume it; the returned handles carry\n"
+        "        // their own NonNull pointers, so dormant_map's reborrow\n"
+        "        // remains valid (this matches the Rust source: dormant_map\n"
+        "        // is awakened from the OccupiedEntry/VacantEntry methods).\n"
+        "        auto root_borrow = map.root.as_mut().unwrap().borrow_mut();\n"
+        "        auto __sr = std::move(root_borrow).search_tree(key);\n"
+        "        if (__sr.index() == 0) {\n"
+        "            // Found: existing key, return OccupiedEntry\n"
+        "            auto __handle = std::move(std::get<0>(__sr)._0);\n"
+        "            OccupiedEntry<K, V, A> __oe{\n"
+        "                std::move(__handle),\n"
+        "                __DMR{std::move(dormant_map).ptr,\n"
+        "                      std::move(dormant_map)._marker},\n"
+        "                rusty::clone(((rusty::detail::deref_if_pointer_like(map.alloc)))),\n"
+        "                rusty::PhantomData<std::tuple<K, V>&>{},\n"
+        "            };\n"
+        "            return Entry<K, V, A>::Occupied(std::move(__oe));\n"
+        "        }\n"
+        "        // GoDown: new key, return VacantEntry with the leaf-edge\n"
+        "        auto __handle = std::move(std::get<1>(__sr)._0);\n"
+        "        VacantEntry<K, V, A> __ve{\n"
+        "            std::move(key),\n"
+        "            rusty::Option<__VEHandle>(std::move(__handle)),\n"
+        "            __DMR{std::move(dormant_map).ptr,\n"
+        "                  std::move(dormant_map)._marker},\n"
+        "            rusty::clone(((rusty::detail::deref_if_pointer_like(map.alloc)))),\n"
+        "            rusty::PhantomData<std::tuple<K, V>&>{},\n"
+        "        };\n"
+        "        return Entry<K, V, A>::Vacant(std::move(__ve));\n"
+        "    }"
+    )
+    src = src[:brace_open] + impl + src[brace_close + 1 :]
+    path.write_text(src)
+    print(f"  hand-ported BTreeMap::entry in: {path.name}")
+
+
 def stub_broken_entry_method(path: Path) -> None:
     """`BTreeMap::entry(K key)` body has interleaved transpiler bugs:
     designated-initializer field-name mismatches (key vs key_field),
@@ -2836,6 +2990,10 @@ def main() -> int:
         remove_setvalzst_methods(map_entry)
         stub_nodref_insert_entry(map_entry)
         stub_broken_map_entry_methods(map_entry)
+        # NOTE step 49: tried fix_rusty_btreemap_namespace_clash to
+        # rewrite `rusty::BTreeMap` → `::BTreeMap` in entry struct
+        # fields. Hit module-attachment issues (BTreeMap declared
+        # in two modules). Disabled pending architectural rework.
     else:
         print(f"  [skip] {map_entry.name} not present")
     print(f"[5/6] patching {map_mod.name}")
@@ -2870,8 +3028,13 @@ def main() -> int:
         recover_template_args(map_mod)
         # `VacantEntry<…>{.key = …}` should be `.key_field = …`.
         fix_vacant_entry_key_field(map_mod)
-        # `BTreeMap::entry` body has compounded aggregate-init bugs;
-        # stub it like search_tree.
+        # `BTreeMap::entry` body has compounded aggregate-init bugs.
+        # Step 49 attempted a hand-port but ran into a deeper namespace
+        # clash: the entry-struct fields use `rusty::BTreeMap<K,V,A>`
+        # (the std::map facade) instead of `::BTreeMap` (the transpiled
+        # global). Fixing that requires either (1) moving BTreeMap into
+        # btree_internal.cppm or (2) extensive cross-module forward-decl
+        # plumbing — both larger than this iteration. Keep the stub.
         stub_broken_entry_method(map_mod)
         # get/first_key_value/last_key_value all cascade from
         # search_tree's stub; stub them too.
