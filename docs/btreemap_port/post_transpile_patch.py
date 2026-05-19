@@ -1752,6 +1752,113 @@ def stub_broken_map_entry_methods(path: Path) -> None:
         path.write_text(src)
 
 
+def merge_map_entry_into_map(map_mod: Path, map_entry: Path) -> None:
+    """Step 52: merge OccupiedEntry / VacantEntry / Entry / OccupiedError
+    struct definitions from map.entry.cppm into map.cppm.
+
+    Why: in C++20 modules you can't express the cycle that the Rust
+    source has — `map/entry.rs` references `super::map::BTreeMap` in
+    its entry-struct `dormant_map` field, but `map.cppm` imports
+    `map.entry.cppm`. Forward decls can't bridge it because of module
+    attachment. The fix is to put the entry structs in the SAME module
+    as BTreeMap, so the field type resolves directly.
+
+    Side effects this transform makes:
+      1. Inject `#define RUSTY_BTREEMAP_HPP / RUSTY_BTREESET_HPP` in
+         map.cppm's GMF so the std::map facade (`rusty::BTreeMap`)
+         from rusty/btreemap.hpp doesn't define the same name.
+      2. Replace `import btree_port.btree.map.entry;` in map.cppm with
+         a comment explaining the merge.
+      3. Extract the post-`export module` content from map.entry.cppm
+         (the forward decls + struct defs) and inject it into map.cppm
+         right before the BTreeMap struct definition.
+      4. Substitute `rusty::BTreeMap` → `BTreeMap` throughout map.cppm
+         (both in the injected content and in the BTreeMap struct's
+         own body, which previously relied on the rusty:: facade).
+
+    The patcher's downstream rules then continue to operate on map.cppm
+    as if both halves were one file.
+    """
+    map_src = map_mod.read_text()
+    sentinel = "// btree_port port step 52: entry types (OccupiedEntry / VacantEntry / Entry / OccupiedError) inlined from map.entry.cppm"
+    if sentinel in map_src:
+        print(f"  no changes to: {map_mod.name} (map.entry already merged)")
+        return
+    if not map_entry.exists():
+        print(f"  [warn] {map_entry.name} not present; skip merge", file=sys.stderr)
+        return
+
+    # 1. Skip the rusty::BTreeMap / rusty::BTreeSet facade in map.cppm.
+    gmf_marker = "module;\n\n#include <cstdint>"
+    gmf_replace = (
+        "module;\n\n"
+        "// btree_port port step 52: skip rusty::BTreeMap / rusty::BTreeSet\n"
+        "// facade (rusty/btreemap.hpp + rusty/btreeset.hpp). The names\n"
+        "// rusty::BTreeMap / rusty::BTreeSet are no longer occupied by the\n"
+        "// std::map-backed facade inside this TU, so the transpiled BTreeMap\n"
+        "// can freely use the `BTreeMap` name in the global namespace.\n"
+        "#define RUSTY_BTREEMAP_HPP\n"
+        "#define RUSTY_BTREESET_HPP\n\n"
+        "#include <cstdint>"
+    )
+    if gmf_marker in map_src:
+        map_src = map_src.replace(gmf_marker, gmf_replace, 1)
+    else:
+        print(f"  [warn] couldn't find GMF anchor in {map_mod.name}", file=sys.stderr)
+
+    # 2. Replace `import map.entry;` with a comment.
+    import_marker = (
+        "import btree_port.btree.btree_internal;\n"
+        "import btree_port.btree.map.entry;"
+    )
+    import_replace = (
+        "import btree_port.btree.btree_internal;\n"
+        "// btree_port port step 52: map.entry merged into this module. The\n"
+        "// OccupiedEntry / VacantEntry / Entry / OccupiedError struct defs\n"
+        "// are now inlined below, ahead of the BTreeMap struct."
+    )
+    if import_marker in map_src:
+        map_src = map_src.replace(import_marker, import_replace, 1)
+
+    # 3. Extract entry content from map.entry.cppm. We take everything
+    #    after the `export module btree_port.btree.map.entry;` line
+    #    and its imports, up to EOF (which is the last `};`).
+    entry_src = map_entry.read_text()
+    # Find the first line AFTER the imports.
+    import_anchor = "import btree_port.btree.btree_internal;\n"
+    pos = entry_src.find(import_anchor)
+    if pos == -1:
+        print(f"  [warn] no import anchor in {map_entry.name}", file=sys.stderr)
+        return
+    content_start = pos + len(import_anchor)
+    # Skip any leading blank lines.
+    while content_start < len(entry_src) and entry_src[content_start] == "\n":
+        content_start += 1
+    entry_content = entry_src[content_start:]
+    # Substitute rusty::BTreeMap → BTreeMap so the merged content
+    # references the local transpiled BTreeMap.
+    entry_content = entry_content.replace("rusty::BTreeMap", "BTreeMap")
+
+    # 4. Inject entry content right before the BTreeMap struct
+    #    definition. Anchor on the comment line immediately above
+    #    `export template<typename K, typename V, typename A = …>`.
+    inject_anchor = "/// [`RefCell`]: core::cell::RefCell\n"
+    ix = map_src.find(inject_anchor)
+    if ix == -1:
+        print(f"  [warn] no inject anchor in {map_mod.name}", file=sys.stderr)
+        return
+    ix_end = ix + len(inject_anchor)
+    inject = f"{sentinel}. They were originally in a separate module but C++20 modules can't express the cycle that map.entry's `DormantMutRef<BTreeMap<K,V,A>>` field requires. Merging into this module gives the field type the same module attachment as BTreeMap's own definition.\n\n{entry_content}\n"
+    map_src = map_src[:ix_end] + inject + map_src[ix_end:]
+
+    # 5. Substitute rusty::BTreeMap → BTreeMap in the rest of map.cppm
+    #    too (a few internal uses inside BTreeMap's own body).
+    map_src = map_src.replace("rusty::BTreeMap", "BTreeMap")
+
+    map_mod.write_text(map_src)
+    print(f"  merged map.entry into map.cppm (entry content + facade skip)")
+
+
 def fix_rusty_btreemap_namespace_clash(path: Path) -> None:
     """The transpiler emits `rusty::BTreeMap<K, V, A>` for the
     `DormantMutRef<...>` field type inside OccupiedEntry / VacantEntry.
@@ -1819,7 +1926,7 @@ def implement_btreemap_entry(path: Path) -> None:
         }
     """
     src = path.read_text()
-    sentinel = "// btree_port port: BTreeMap::entry hand-ported by post_transpile_patch.py (v2-positional)"
+    sentinel = "// btree_port port step 52: BTreeMap::entry hand-ported (entry types merged in)"
     if sentinel in src:
         print(f"  no changes to: {path.name} (BTreeMap::entry hand-ported)")
         return
@@ -1846,59 +1953,48 @@ def implement_btreemap_entry(path: Path) -> None:
     impl = (
         "{\n"
         f"        {sentinel}\n"
+        "        // Now that OccupiedEntry/VacantEntry live in this same\n"
+        "        // module (their dormant_map field is\n"
+        "        // `DormantMutRef<BTreeMap<K,V,A>>`, unqualified — matches\n"
+        "        // this BTreeMap), the aggregate init works with designated\n"
+        "        // initializers (no DMR helper needed).\n"
         "        using __VEHandle = Handle<NodeRef<::marker::Mut, K, V,\n"
         "                                          ::marker::Leaf>, ::marker::Edge>;\n"
-        "        using __OEHandle = Handle<NodeRef<::marker::Mut, K, V,\n"
-        "                                          ::marker::LeafOrInternal>, ::marker::KV>;\n"
-        "        using __DMR = DormantMutRef<rusty::BTreeMap<K, V, A>>;\n"
         "        auto [map, dormant_map] =\n"
         "            __btree_port_make_dormant((*this));\n"
         "        if (map.root.is_none()) {\n"
-        "            // Use member-by-member aggregate init in order, no\n"
-        "            // designators — the dormant_map field's nested\n"
-        "            // aggregate type triggers brace-elision when init'd\n"
-        "            // with a designator. Listing all 5 members positionally\n"
-        "            // bypasses that.\n"
-        "            VacantEntry<K, V, A> __ve{\n"
-        "                std::move(key),\n"
-        "                rusty::Option<__VEHandle>{rusty::None},\n"
-        "                __DMR{std::move(dormant_map).ptr,\n"
-        "                      std::move(dormant_map)._marker},\n"
-        "                rusty::clone(((rusty::detail::deref_if_pointer_like(map.alloc)))),\n"
-        "                rusty::PhantomData<std::tuple<K, V>&>{},\n"
-        "            };\n"
-        "            return Entry<K, V, A>::Vacant(std::move(__ve));\n"
+        "            return Entry<K, V, A>::Vacant(VacantEntry<K, V, A>{\n"
+        "                .key_field = std::move(key),\n"
+        "                .handle = rusty::Option<__VEHandle>{rusty::None},\n"
+        "                .dormant_map = std::move(dormant_map),\n"
+        "                .alloc = rusty::clone(\n"
+        "                    ((rusty::detail::deref_if_pointer_like(map.alloc)))),\n"
+        "                ._marker = rusty::PhantomData<std::tuple<K, V>&>{},\n"
+        "            });\n"
         "        }\n"
-        "        // The mutable borrow into root_node lives only long enough\n"
-        "        // for search_tree to consume it; the returned handles carry\n"
-        "        // their own NonNull pointers, so dormant_map's reborrow\n"
-        "        // remains valid (this matches the Rust source: dormant_map\n"
-        "        // is awakened from the OccupiedEntry/VacantEntry methods).\n"
         "        auto root_borrow = map.root.as_mut().unwrap().borrow_mut();\n"
         "        auto __sr = std::move(root_borrow).search_tree(key);\n"
         "        if (__sr.index() == 0) {\n"
-        "            // Found: existing key, return OccupiedEntry\n"
+        "            // Found: existing key, return OccupiedEntry.\n"
         "            auto __handle = std::move(std::get<0>(__sr)._0);\n"
-        "            OccupiedEntry<K, V, A> __oe{\n"
-        "                std::move(__handle),\n"
-        "                __DMR{std::move(dormant_map).ptr,\n"
-        "                      std::move(dormant_map)._marker},\n"
-        "                rusty::clone(((rusty::detail::deref_if_pointer_like(map.alloc)))),\n"
-        "                rusty::PhantomData<std::tuple<K, V>&>{},\n"
-        "            };\n"
-        "            return Entry<K, V, A>::Occupied(std::move(__oe));\n"
+        "            return Entry<K, V, A>::Occupied(OccupiedEntry<K, V, A>{\n"
+        "                .handle = std::move(__handle),\n"
+        "                .dormant_map = std::move(dormant_map),\n"
+        "                .alloc = rusty::clone(\n"
+        "                    ((rusty::detail::deref_if_pointer_like(map.alloc)))),\n"
+        "                ._marker = rusty::PhantomData<std::tuple<K, V>&>{},\n"
+        "            });\n"
         "        }\n"
-        "        // GoDown: new key, return VacantEntry with the leaf-edge\n"
+        "        // GoDown: new key with insertion handle.\n"
         "        auto __handle = std::move(std::get<1>(__sr)._0);\n"
-        "        VacantEntry<K, V, A> __ve{\n"
-        "            std::move(key),\n"
-        "            rusty::Option<__VEHandle>(std::move(__handle)),\n"
-        "            __DMR{std::move(dormant_map).ptr,\n"
-        "                  std::move(dormant_map)._marker},\n"
-        "            rusty::clone(((rusty::detail::deref_if_pointer_like(map.alloc)))),\n"
-        "            rusty::PhantomData<std::tuple<K, V>&>{},\n"
-        "        };\n"
-        "        return Entry<K, V, A>::Vacant(std::move(__ve));\n"
+        "        return Entry<K, V, A>::Vacant(VacantEntry<K, V, A>{\n"
+        "            .key_field = std::move(key),\n"
+        "            .handle = rusty::Option<__VEHandle>(std::move(__handle)),\n"
+        "            .dormant_map = std::move(dormant_map),\n"
+        "            .alloc = rusty::clone(\n"
+        "                ((rusty::detail::deref_if_pointer_like(map.alloc)))),\n"
+        "            ._marker = rusty::PhantomData<std::tuple<K, V>&>{},\n"
+        "        });\n"
         "    }"
     )
     src = src[:brace_open] + impl + src[brace_close + 1 :]
@@ -2913,8 +3009,10 @@ def patch_cmake(path: Path, rusty_include_dir: Path) -> None:
         "set(_BTREE_PORT_SOURCES btree_port.btree.btree_internal.cppm)\n"
         "if(CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\"\n"
         "   OR CMAKE_CXX_COMPILER_ID STREQUAL \"AppleClang\")\n"
+        "    # btree_port port step 52: map.entry.cppm's content was merged\n"
+        "    # into map.cppm (see merge_map_entry_into_map in the patcher).\n"
+        "    # Only map.cppm is built now — map.entry's content lives there.\n"
         "    list(APPEND _BTREE_PORT_SOURCES\n"
-        "        btree_port.btree.map.entry.cppm\n"
         "        btree_port.btree.map.cppm\n"
         "    )\n"
         "endif()\n"
@@ -3069,14 +3167,19 @@ def main() -> int:
         remove_setvalzst_methods(map_entry)
         stub_nodref_insert_entry(map_entry)
         stub_broken_map_entry_methods(map_entry)
-        # NOTE step 49: tried fix_rusty_btreemap_namespace_clash to
-        # rewrite `rusty::BTreeMap` → `::BTreeMap` in entry struct
-        # fields. Hit module-attachment issues (BTreeMap declared
-        # in two modules). Disabled pending architectural rework.
+        # Step 52: merge map.entry's struct definitions into map.cppm
+        # (handled inside the map.cppm patching block below, since it
+        # operates on map.cppm as the destination).
     else:
         print(f"  [skip] {map_entry.name} not present")
     print(f"[5/6] patching {map_mod.name}")
     if map_mod.exists():
+        # Step 52: merge map.entry into map.cppm BEFORE any other
+        # map.cppm patches. This skips the rusty::BTreeMap facade
+        # in map.cppm's GMF, inlines the entry struct definitions,
+        # and substitutes `rusty::BTreeMap` → `BTreeMap` so the
+        # transpiled type owns the name within this TU.
+        merge_map_entry_into_map(map_mod, map_entry)
         # map.cppm has the same import-ordering bug as map.entry and
         # additionally references `entry::*` and `node::*` qualifier
         # prefixes that don't survive the import (C++20 modules
@@ -3109,12 +3212,11 @@ def main() -> int:
         fix_vacant_entry_key_field(map_mod)
         # `BTreeMap::entry` body has compounded aggregate-init bugs.
         # Step 49 attempted a hand-port but ran into a deeper namespace
-        # clash: the entry-struct fields use `rusty::BTreeMap<K,V,A>`
-        # (the std::map facade) instead of `::BTreeMap` (the transpiled
-        # global). Fixing that requires either (1) moving BTreeMap into
-        # btree_internal.cppm or (2) extensive cross-module forward-decl
-        # plumbing — both larger than this iteration. Keep the stub.
-        stub_broken_entry_method(map_mod)
+        # Step 52 unblocked the entry hand-port by merging the entry
+        # struct definitions into map.cppm. With OccupiedEntry /
+        # VacantEntry sharing BTreeMap's module attachment, the entry
+        # method body's aggregate-init compiles.
+        implement_btreemap_entry(map_mod)
         # get/first_key_value/last_key_value all cascade from
         # search_tree's stub; stub them too.
         stub_broken_map_methods(map_mod)

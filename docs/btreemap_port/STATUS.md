@@ -311,6 +311,46 @@ Neither fix fits in a single iteration. The hybrid as-delivered:
 - Transpiled BTreeMap::insert / entry: blocked on the architectural
   barrier above.
 
+**Step 52 — ARCHITECTURAL BARRIER CLEARED.** The fix landed: merge
+the entry struct definitions (OccupiedEntry / VacantEntry / Entry /
+OccupiedError) from `map.entry.cppm` into `map.cppm`, so they share
+BTreeMap's module attachment. Combined with skipping the
+`rusty/btreemap.hpp` facade (`#define RUSTY_BTREEMAP_HPP`) inside
+the transpiled module's GMF, this frees the unqualified `BTreeMap`
+name to mean exactly the transpiled type within the TU.
+
+Concrete steps the patcher now performs (in `merge_map_entry_into_map`):
+1. Inject `#define RUSTY_BTREEMAP_HPP` / `RUSTY_BTREESET_HPP` into
+   map.cppm's GMF.
+2. Replace `import btree_port.btree.map.entry;` with an explanatory
+   comment.
+3. Extract everything after the `export module …; import …;` block
+   in `map.entry.cppm` (the entry forward decls + struct definitions)
+   and inject it into `map.cppm` immediately before the BTreeMap
+   struct definition.
+4. Substitute `rusty::BTreeMap` → `BTreeMap` everywhere in `map.cppm`
+   (both in the injected entry content and in BTreeMap's own body).
+5. Drop `btree_port.btree.map.entry.cppm` from the CMakeLists target.
+
+After step 52:
+- libbtree_port.a builds clean (clang) — only `btree_internal` +
+  `map.cppm` now.
+- The entry hand-port (formerly blocked by the namespace clash)
+  compiles: aggregate-init with designated initializers works
+  cleanly because the field type `DormantMutRef<BTreeMap<K,V,A>>`
+  is now the exact same type as what `__btree_port_make_dormant
+  (*this)` returns.
+- transpiled_smoke advances from the BTreeMap::entry stub through
+  entry() and reaches the next stub: `VacantEntry::insert_entry`
+  (which the patcher had stubbed during phase A for separate
+  reasons). The next iteration will hand-port that.
+- Facade still 24/24, link_smoke + read_smoke still pass.
+
+The merge approach is the right fix that previous attempts circled
+without landing. The lesson: C++20 modules can't express the Rust
+cycle directly, but the cycle was always cosmetic — both halves of
+the public API naturally belong in one TU.
+
 **Step 51 — third architectural attempt (namespace-skip).** Tried
 to make the entry struct's `rusty::BTreeMap` field type resolve to
 the transpiled BTreeMap by:
