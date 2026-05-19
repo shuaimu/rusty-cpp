@@ -256,6 +256,11 @@ private:
 // In-memory cursor over a byte buffer. Implements Read, Write, Seek.
 // T must be a contiguous byte container (vector<uint8_t>, span<uint8_t>, etc.)
 
+// @safe - position math + std::span<uint8_t> arguments only at the
+// public API; the private get_data / get_mut_data helpers do the
+// raw `uint8_t*` extraction and are `// @unsafe`. read / write
+// carry inline `// @unsafe { }` blocks for the memcpy + raw-pointer
+// arithmetic on the data pointer.
 template<typename T>
 class Cursor {
 public:
@@ -265,28 +270,34 @@ public:
 
     // Read: copy bytes from cursor position into buf
     Result<size_t> read(std::span<uint8_t> buf) {
-        const uint8_t* data = get_data();
         size_t len = get_len();
-
         if (pos_ >= len) return Result<size_t>::ok(0);
 
         size_t available = len - pos_;
         size_t to_read = std::min(buf.size(), available);
-        std::memcpy(buf.data(), data + pos_, to_read);
+        // @unsafe { get_data() returns a raw `const uint8_t*`; memcpy
+        //           is libc; pointer arithmetic on data + pos_. }
+        {
+            const uint8_t* data = get_data();
+            std::memcpy(buf.data(), data + pos_, to_read);
+        }
         pos_ += to_read;
         return Result<size_t>::ok(to_read);
     }
 
     // Write: copy bytes from buf into cursor (for mutable buffers)
     Result<size_t> write(std::span<const uint8_t> buf) {
-        uint8_t* data = get_mut_data();
         size_t len = get_len();
-
         if (pos_ >= len) return Result<size_t>::ok(0);
 
         size_t available = len - pos_;
         size_t to_write = std::min(buf.size(), available);
-        std::memcpy(data + pos_, buf.data(), to_write);
+        // @unsafe { get_mut_data() returns a raw `uint8_t*`; memcpy is
+        //           libc; pointer arithmetic on data + pos_. }
+        {
+            uint8_t* data = get_mut_data();
+            std::memcpy(data + pos_, buf.data(), to_write);
+        }
         pos_ += to_write;
         return Result<size_t>::ok(to_write);
     }
@@ -320,7 +331,8 @@ public:
     T into_inner() { return std::move(inner_); }
 
 private:
-    // Helper to get raw data pointer (works with vector, span, array)
+    // Helper to get raw data pointer (works with vector, span, array).
+    // @unsafe - returns raw `const uint8_t*` into the inner buffer.
     const uint8_t* get_data() const {
         if constexpr (std::is_same_v<T, std::vector<uint8_t>>) {
             return inner_.data();
@@ -333,6 +345,7 @@ private:
         }
     }
 
+    // @unsafe - returns mutable raw `uint8_t*` into the inner buffer.
     uint8_t* get_mut_data() {
         if constexpr (std::is_same_v<T, std::vector<uint8_t>>) {
             return inner_.data();
