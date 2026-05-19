@@ -1497,6 +1497,116 @@ def implement_leaf_edge_walkers(path: Path) -> None:
         path.write_text(src)
 
 
+def implement_handle_descend(path: Path) -> None:
+    """Hand-port `Handle::descend`. The transpiled body:
+
+      template<typename BorrowType, typename K, typename V>
+      NodeRef<BorrowType, K, V, ::marker::LeafOrInternal> descend() {
+          rusty::intrinsics::unreachable();   // ← stub marker
+          const auto parent_ptr = …as_internal_ptr(this->node);
+          auto node = (*parent_ptr).edges.get_unchecked(…).assume_init_read();
+          return NodeRef<BorrowType, K, V, …>{…};
+      }
+
+    has two bugs:
+      1. The unreachable() at the top makes the body dead.
+      2. BorrowType/K/V are method-template params that can't be
+         deduced from the (empty) parameter list, so call sites
+         like `handle.descend()` fail template-arg deduction.
+
+    Fix: rewrite to use a `__NodeRefArgs<Node>` type-trait that
+    destructures the enclosing class's `Node` template arg
+    (which is `NodeRef<BorrowType, K, V, marker::Internal>` for
+    descend's specific impl), giving us BorrowType/K/V at the
+    method-body level without needing method-template params.
+
+    Also adds the `__NodeRefArgs` trait at the top of the module
+    (right after the rusty includes) so it's visible everywhere.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: Handle::descend hand-ported by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (Handle::descend already ported)")
+        return
+
+    # 1. Inject the __NodeRefArgs trait at module scope. Place it
+    #    right after the global-module-fragment block (before
+    #    `export module …;`) so it's visible everywhere in the
+    #    module purview. Actually easier: place it just before the
+    #    first NodeRef forward decl, which sits in the module
+    #    purview already.
+    trait_marker = "// btree_port port: __NodeRefArgs trait injected"
+    if trait_marker not in src:
+        trait_block = (
+            f"\n{trait_marker}\n"
+            "// Type-trait to destructure `NodeRef<B, K, V, T>` template\n"
+            "// arguments so methods of `Handle<NodeRef<...>, Edge>` can\n"
+            "// derive BorrowType/Key/Value at the class-template level\n"
+            "// rather than redundant method-template level (which fails\n"
+            "// deduction when the method has no arguments).\n"
+            "template<typename T> struct __NodeRefArgs;\n"
+            "template<typename B, typename K, typename V, typename T>\n"
+            "struct __NodeRefArgs<NodeRef<B, K, V, T>> {\n"
+            "    using BorrowType = B;\n"
+            "    using Key = K;\n"
+            "    using Value = V;\n"
+            "    using Tag = T;\n"
+            "};\n"
+        )
+        # Insert AFTER the first NodeRef forward declaration so the
+        # trait specialization can name `NodeRef<…>`. The forward
+        # decl looks like:
+        #   export template<typename BorrowType, typename K, typename V, typename Type>
+        #       requires (...)
+        #   struct NodeRef;
+        # We anchor on the `struct NodeRef;` line.
+        anchor = "struct NodeRef;\n"
+        pos = src.find(anchor)
+        if pos == -1:
+            print(f"  [warn] couldn't find NodeRef forward decl in: {path.name}", file=sys.stderr)
+            return
+        ins = pos + len(anchor)
+        src = src[:ins] + trait_block + src[ins:]
+
+    # 2. Replace the descend method's signature + body.
+    old_method = (
+        "    template<typename BorrowType, typename K, typename V>\n"
+        "    NodeRef<BorrowType, K, V, ::marker::LeafOrInternal> descend() {\n"
+        "        rusty::intrinsics::unreachable();\n"
+        "        const auto parent_ptr = NodeRef<BorrowType, K, V, ::marker::LeafOrInternal>::as_internal_ptr(this->node);\n"
+        "        auto node = (*parent_ptr).edges.get_unchecked(std::move(this->idx_field)).assume_init_read();\n"
+        "        return NodeRef<BorrowType, K, V, ::marker::LeafOrInternal>{"
+        ".height_field = rusty::detail::deref_if_pointer_like(this->node.height) - static_cast<size_t>(1), "
+        ".node = std::move(node), "
+        "._marker = rusty::PhantomData<std::tuple<BorrowType, ::marker::LeafOrInternal>>{}};\n"
+        "    }\n"
+    )
+    new_method = (
+        f"    {sentinel}\n"
+        "    NodeRef<typename __NodeRefArgs<Node>::BorrowType,\n"
+        "            typename __NodeRefArgs<Node>::Key,\n"
+        "            typename __NodeRefArgs<Node>::Value,\n"
+        "            ::marker::LeafOrInternal> descend() {\n"
+        "        using __B = typename __NodeRefArgs<Node>::BorrowType;\n"
+        "        using __K = typename __NodeRefArgs<Node>::Key;\n"
+        "        using __V = typename __NodeRefArgs<Node>::Value;\n"
+        "        const auto parent_ptr = NodeRef<__B, __K, __V, ::marker::Internal>::as_internal_ptr(this->node);\n"
+        "        auto node = (*parent_ptr).edges.get_unchecked(std::move(this->idx_field)).assume_init_read();\n"
+        "        return NodeRef<__B, __K, __V, ::marker::LeafOrInternal>{\n"
+        "            .height_field = rusty::detail::deref_if_pointer_like(this->node.height) - static_cast<size_t>(1),\n"
+        "            .node = std::move(node),\n"
+        "            ._marker = rusty::PhantomData<std::tuple<__B, ::marker::LeafOrInternal>>{}\n"
+        "        };\n"
+        "    }\n"
+    )
+    if old_method in src:
+        src = src.replace(old_method, new_method, 1)
+        path.write_text(src)
+        print(f"  hand-ported Handle::descend (with __NodeRefArgs trait) in: {path.name}")
+    else:
+        print(f"  no Handle::descend site in: {path.name}")
+
+
 def stub_broken_search_tree(path: Path) -> None:
     """`NodeRef::search_tree(key)` has two interleaved transpiler bugs:
 
@@ -2110,6 +2220,7 @@ def main() -> int:
     # scopes. Instead, hand-port the specific methods whose bodies
     # hit the unrecoverable force()-arm pattern.
     implement_leaf_edge_walkers(internal)
+    implement_handle_descend(internal)
     stub_broken_search_tree(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
