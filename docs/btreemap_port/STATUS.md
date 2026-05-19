@@ -311,6 +311,38 @@ Neither fix fits in a single iteration. The hybrid as-delivered:
 - Transpiled BTreeMap::insert / entry: blocked on the architectural
   barrier above.
 
+**Step 58 — Lazy template gates work; insert-path errors down to 4.**
+After step 57's failed concept-only gates, this iteration found the
+working shape: wrap each `__NodeRefArgs<Node>`-using method in
+`template<typename = void>` AND use `auto`-deduced return type so
+substitution is delayed until call. Together with the `requires
+(__IsNodeRef<Node>)` clause, Handle<wrong, Type> can now instantiate
+cleanly — the methods that need NodeRef args just aren't in the
+overload set.
+
+Methods converted to the lazy pattern:
+- `reborrow` / `reborrow_mut` / `dormant` / `awaken`
+- `insert_fit` (params now `auto K_`, `auto V_` for lazy param substitution)
+- `split` (return `auto`)
+- `descend` (return `auto`)
+- `force` (return `auto`)
+- `into_kv` (return `auto`)
+
+Also fixed `.height` → `.height_field` at 8 sites (transpiler emitted
+field access via the getter method without invocation).
+
+After step 58 the remaining build errors when insert_entry +
+insert_recursing are un-stubbed:
+1. `MaybeUninit<uint16_t>::assume_init` const-qualification
+2. `Box<InternalNode>::new_uninit_in` missing (same Box facade gap as
+   LeafNode::new_, but for InternalNode — apply step-54 fix #6 pattern)
+3. `correct_parent_link` template-arg recovery (similar to dormant)
+4. `Handle::split` no matching after my lazy-gate change
+
+These are tractable but stubbed for now to keep the build green
+while step 58's gating fixes are committed. Hybrid still
+delivered, smoke + facade tests still pass.
+
 **Step 57 — Handle::new_edge / new_kv deduce-Node-from-arg fix +
 `__IsNodeRef` concept gate.** Two targeted improvements that reduce
 the insert-path bug surface:
