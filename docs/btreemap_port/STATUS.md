@@ -311,6 +311,54 @@ Neither fix fits in a single iteration. The hybrid as-delivered:
 - Transpiled BTreeMap::insert / entry: blocked on the architectural
   barrier above.
 
+**Step 57 — Handle::new_edge / new_kv deduce-Node-from-arg fix +
+`__IsNodeRef` concept gate.** Two targeted improvements that reduce
+the insert-path bug surface:
+
+1. **`Handle::new_edge` and `Handle::new_kv` rewrite.** The transpiler
+   emits the factory methods as `template<typename BorrowType, K, V,
+   NodeType> static Handle<Node, Type> new_edge(NodeRef<…> node, …)`
+   where `Node`/`Type` come from the enclosing Handle class. But many
+   call sites pass wrong values for the enclosing Handle's Node
+   (`Handle<K, Type>::new_edge(...)`, `Handle<Q, Type>::new_edge(...)`,
+   `Handle<R, Type>::new_edge(...)`). The fix: change the return type
+   to `Handle<NodeRef<BorrowType, K, V, NodeType>, Type>` so it
+   *deduces* the result Node from the argument. The Type stays from
+   the enclosing Handle, which is correct for the call sites. This
+   single change should fix all ~6 broken call sites at once.
+
+2. **`__IsNodeRef<T>` concept + method-level gates.** Even with (1),
+   bogus `Handle<K, Type>` instantiation still pulls in my step-54
+   methods (reborrow/dormant/etc) which use `__NodeRefArgs<Node>`.
+   Added a concept `template<typename T> concept __IsNodeRef =
+   requires { typename __NodeRefArgs<T>::Key; };` and gate each of
+   `reborrow`/`reborrow_mut`/`dormant`/`awaken`/`insert_fit`/`split`
+   with `requires (__IsNodeRef<Node>)`.
+
+These changes apply correctly. However, the C++20 requires-clause on
+a non-template method is evaluated AFTER the return type is
+substituted — so the eager substitution of `__NodeRefArgs<int>` in
+the return type still fails before the constraint can short-circuit
+it. To properly gate, each method needs to be a template (`template
+<typename = void>`) so the return-type substitution is delayed until
+call. That's a larger restructure than this iteration can land
+without breaking other parts.
+
+Status after step 57: the deduce-Node-from-arg fix is in place
+(durable improvement to factory-method ergonomics) but the
+`__IsNodeRef` gates don't quite work in C++20 without method-template
+wrapping. Insert-path stubs stay in place. Build green, all
+baselines hold.
+
+The remaining work to make insert work end-to-end:
+- Convert the gated methods to `template<typename = void>` so
+  return-type substitution is lazy. ~10 line change per method.
+- Or restructure `__NodeRefArgs` into a SFINAE-friendly helper that
+  defaults to identity types for non-NodeRef inputs (tried in step
+  56, causes downstream void-arg errors).
+- Or fix the transpiler so it doesn't emit `Handle<wrong, Type>` in
+  the first place.
+
 **Step 56 — insert path is too deep for /loop iteration.** After
 landing the 7 step-54 fixes (codified in step 55), un-stubbing
 `VacantEntry::insert_entry` and hand-porting `Handle::insert_recursing`
