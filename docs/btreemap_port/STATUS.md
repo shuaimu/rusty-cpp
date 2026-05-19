@@ -311,6 +311,52 @@ Neither fix fits in a single iteration. The hybrid as-delivered:
 - Transpiled BTreeMap::insert / entry: blocked on the architectural
   barrier above.
 
+**Step 56 — insert path is too deep for /loop iteration.** After
+landing the 7 step-54 fixes (codified in step 55), un-stubbing
+`VacantEntry::insert_entry` and hand-porting `Handle::insert_recursing`
+surfaced a NEW class of transpiler bug: many `Handle<X, Type>::new_edge`
+call sites in `btree_internal.cppm` where X is the wrong template
+parameter (a range type `R`, a query type `Q`, a key type `K` — never
+a `NodeRef`). The Rust source has these as `Handle::new_edge(node,
+idx)` with Node deduced from the node argument; the transpiler
+emitted explicit (and wrong) template arguments at call sites.
+
+Counted occurrences with this bug in `btree_internal.cppm` alone:
+- Line 4620: `Handle<K, Type>::new_edge(...)` (K is the key type)
+- Lines 4709, 4730, 4736, 4797, 4799: `Handle<Q, Type>::new_edge(...)`
+  (Q is a borrow query type)
+- Plus line 4513 (already fixed in step 56's first try, but that
+  surfaced the broader pattern)
+
+Beyond that, the insert path needs:
+- `MaybeUninit<uint16_t>::assume_init` const-qualification fix
+- `Box<InternalNode>::new_uninit_in` (same as LeafNode fix, but for
+  InternalNode)
+- `correct_parent_link` template-arg recovery (similar to dormant)
+- Various "reference to non-static member function must be called"
+  errors
+
+Tried giving `__NodeRefArgs` a default specialization that maps
+non-NodeRef types to `void` — compiled away the trait errors but
+surfaced `void` argument type errors downstream where methods take
+`__NodeRefArgs<Node>::Key` as a parameter (you can't pass a `void`
+arg).
+
+The transpiler's bugs in the insert path are structural rather than
+sweep-fixable. The clean path forward is either:
+(a) Fix the transpiler so `Handle::new_edge(node, idx)` emits without
+    explicit (wrong) template args — this is a transpiler-side change.
+(b) Pattern-match and rewrite all the wrong call sites in the patcher
+    — feasible but ~10+ similar fixes, plus the const-qual and
+    new_uninit_in issues.
+
+This iteration: reverted insert_entry / insert_recursing to stubs
+(the step-56 draft hand-port is kept as a `#if 0` block in the file
+for reference). The 7 step-54/55 fixes stay landed and the build is
+clean. Hybrid status: facade 24/24, libbtree_port.a builds, read smoke
+works on the transpiled tree, insert smoke throws at the documented
+step-56 stub.
+
 **Step 54 — peel insert-path transpiler bugs.** Made direct edits to
 `btree_internal.cppm` clearing several insert-path bugs that the
 step-53 attempt surfaced:
