@@ -152,6 +152,24 @@ public:
     }
 };
 
+// Free-function alias used by the transpiled btree_internal where the
+// emit shape is `slice.assume_init_ref()` (method-style on a span) but
+// the corresponding member doesn't exist on std::span. Routing this
+// through rusty namespace gives the patcher a single substitution
+// target: `.assume_init_ref()` → `, rusty::assume_init_ref` shape.
+template<typename T>
+inline std::span<const T> assume_init_ref(
+    std::span<const MaybeUninit<T>> slice) noexcept {
+    return std::span<const T>(
+        reinterpret_cast<const T*>(slice.data()), slice.size());
+}
+template<typename T>
+inline std::span<T> assume_init_ref(
+    std::span<MaybeUninit<T>> slice) noexcept {
+    return std::span<T>(
+        reinterpret_cast<T*>(slice.data()), slice.size());
+}
+
 // UninitArray<T, N> - Fixed-size array of uninitialized storage
 // Similar to [MaybeUninit<T>; N] in Rust
 //

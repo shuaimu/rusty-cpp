@@ -140,30 +140,47 @@ Tracking individually:
       Fix: add `&` to get the address. `fix_dormant_mut_ref_from_t`.
 - [x] **E2** Const-correctness: `NodeRef::into_leaf`,
       `first_leaf_edge`, `last_leaf_edge` were emitted non-const
-      despite being by-value `self` in Rust (which doesn't mutate
-      the receiver). Marked const. `fix_const_correctness`.
-- [ ] **E3** `DormantMutRef::new_` returns
-      `std::tuple<T&, DormantMutRef<T>>` but builds it with
-      `const T&` (transpiled `let new_ref = ... ` as `const T&`).
-      Tuple element-type mismatch on instantiation.
-- [ ] **E4** Several `as_leaf_ptr()` / similar static-via-free-fn
-      sites emit no `this_` argument; the free function expects
-      the receiver as first arg.
+      despite being by-value `self` in Rust. Marked const.
+      `fix_const_correctness`.
+- [x] **E3** `DormantMutRef::new_` body had `const T& new_ref = …`
+      where the tuple element type wants `T&`. Stripped const.
+      `fix_dormant_mut_ref_const_ref`.
+- [x] **E4** `as_leaf_ptr()` (static method expecting `this_` as
+      first param) was called with no args at 4 sites. Pass
+      `(*this)` explicitly. `fix_as_leaf_ptr_self`.
+- [x] **E6** `slice_to(arr, n).assume_init_ref()` calls a method
+      on std::span that doesn't exist. Added free function
+      `rusty::assume_init_ref(span)` in rusty/maybe_uninit.hpp;
+      rewrote the call site. `fix_assume_init_ref_on_span`.
+- [x] **E9** `ManuallyDrop<T>` had implicitly-deleted move ctor
+      (copy was explicitly deleted, no move defined). Added
+      explicit move ctor + move assignment to rusty/mem.hpp that
+      transfer the contained T from one ManuallyDrop to another.
 - [ ] **E5** `force()` method missing for some `NodeRef` shape
       where the transpile expected an enum-like variant return.
-- [ ] **E6** `assume_init_ref` not in `std::span<const MaybeUninit<int>>`
-      — needs adding to rusty's MaybeUninit-array helpers or
-      rewriting the call.
-- [ ] **E7** `SearchResult` returned where `NodeRef` expected —
-      semantic-mismatch in `search_tree` emit (an `if-else` chain
-      whose `else` returns a fresh `NodeRef` should have been a
-      `match` arm).
-- [ ] **E8** Several `_0` / `.first/.second` access on a
-      `std::variant<...>` (transpiled enum) — needs `std::get<>`
-      instead of dot-access.
-- [ ] **E9** `rusty::mem::ManuallyDrop<Global>` has deleted move
-      constructor when used in the BTreeMap aggregate-init path.
-      Needs investigation; possibly a rusty-side helper fix.
+- [ ] **E7** `SearchResult` returned where `NodeRef` expected at
+      btree_internal.cppm:4608. The lambda body has
+      `[&]() -> NodeRef<…> { … return SearchResult<…>{…}; }` —
+      the lambda's return type annotation was emitted as the
+      enclosing struct's NodeRef but the actual returns are
+      SearchResult variants. Fix needs to change the lambda's
+      `-> NodeRef<…>` annotation to `-> SearchResult<…>`.
+- [ ] **E8a** `_0` member access on `std::variant<ForceResult_Leaf,
+      ForceResult_Internal>` — needs `std::get<…>(v)._0` instead
+      of `v._0`. Multiple sites at 4770, 4776 (force() output).
+- [ ] **E8b** `const int` not a structure — `.first/.second`
+      access on integer at 4677. Likely a wrong-type dispatch.
+- [ ] **E_misc** `right_kv` no matching member at map.cppm:5252
+      (`first_key_value` const path) and `get()` Option<NodeRef&>→
+      Option<int&> at 5242. Cascading from E7 or const issues.
+
+**Honest assessment** (added step 43): each E-error requires
+surgical investigation of the lambda/variant emission. The
+transpiler's gaps are uneven — straightforward cases (E1-E4, E6,
+E9) patch in 5-15 lines, but the lambda-return-type and variant-
+access cases (E5, E7, E8) are deep enough that a one-shot patcher
+rule may not catch all variants. Phase E completion is an
+indeterminate number of additional iterations.
 
 **Risks the iteration loop should keep visible:**
 

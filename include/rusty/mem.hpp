@@ -214,6 +214,30 @@ public:
     ManuallyDrop(const ManuallyDrop&) = delete;
     ManuallyDrop& operator=(const ManuallyDrop&) = delete;
 
+    // Move ctor: transfer the contained value. Mirrors Rust's
+    // implicit move semantics for ManuallyDrop<T> (T is moved, the
+    // source ManuallyDrop becomes uninitialized).
+    ManuallyDrop(ManuallyDrop&& other) noexcept(std::is_nothrow_move_constructible_v<T>)
+        : initialized_(other.initialized_) {
+        if (other.initialized_) {
+            new (storage_) T(std::move(*other.ptr()));
+            other.initialized_ = false;
+        }
+    }
+    ManuallyDrop& operator=(ManuallyDrop&& other) noexcept(std::is_nothrow_move_constructible_v<T>) {
+        if (this != &other) {
+            if (initialized_) {
+                ptr()->~T();
+            }
+            initialized_ = other.initialized_;
+            if (other.initialized_) {
+                new (storage_) T(std::move(*other.ptr()));
+                other.initialized_ = false;
+            }
+        }
+        return *this;
+    }
+
     // Intentional no-op destructor: mirrors Rust ManuallyDrop semantics.
     ~ManuallyDrop() = default;
 

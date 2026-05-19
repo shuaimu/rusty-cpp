@@ -1239,6 +1239,90 @@ def fix_dormant_mut_ref_from_t(path: Path) -> None:
         print(f"  no DormantMutRef from(t) site in: {path.name}")
 
 
+def fix_dormant_mut_ref_const_ref(path: Path) -> None:
+    """In `DormantMutRef::new_(T& t)` the body says
+    `const T& new_ref = …` but then constructs
+    `std::tuple<T&, DormantMutRef<T>>{new_ref, …}`. The Rust source
+    has `&mut *ptr.as_ptr()` (mutable). Strip the `const` so the
+    tuple init's `T&` element can bind to `new_ref`."""
+    src = path.read_text()
+    sentinel = (
+        "// btree_port port: DormantMutRef new_ref const→mut "
+        "by post_transpile_patch.py"
+    )
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (DormantMutRef const→mut already fixed)")
+        return
+    target = "const T& new_ref = *rusty::as_ptr(ptr_shadow1);"
+    repl = "T& new_ref = *rusty::as_ptr(ptr_shadow1);"
+    if target in src:
+        src = src.replace(target, repl, 1)
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  fixed DormantMutRef::new_ const T& → T& in: {path.name}")
+    else:
+        print(f"  no DormantMutRef const→mut site in: {path.name}")
+
+
+def fix_as_leaf_ptr_self(path: Path) -> None:
+    """`as_leaf_ptr` is declared `static auto as_leaf_ptr(const NodeRef& this_)`
+    (taking the receiver as an explicit parameter, mirroring Rust's
+    static-method convention). Several call sites inside NodeRef
+    methods call it as `as_leaf_ptr()` (no args), expecting the
+    self parameter to be implicit. Pass `(*this)` explicitly."""
+    src = path.read_text()
+    sentinel = "// btree_port port: as_leaf_ptr() → as_leaf_ptr((*this)) by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (as_leaf_ptr self-arg already fixed)")
+        return
+    # Match `as_leaf_ptr()` only when NOT preceded by a qualifier
+    # (those are the explicit static form like `NodeRef<…>::as_leaf_ptr(...)`
+    # which already passes (*this)). Use a simple word-boundary check.
+    import re
+    pattern = re.compile(r"(?<![\w:])as_leaf_ptr\(\)")
+    matches = list(pattern.finditer(src))
+    if not matches:
+        print(f"  no bare as_leaf_ptr() sites in: {path.name}")
+        return
+    src = pattern.sub("as_leaf_ptr((*this))", src)
+    src = sentinel + "\n" + src
+    path.write_text(src)
+    print(f"  fixed {len(matches)} bare as_leaf_ptr() call(s) in: {path.name}")
+
+
+def fix_assume_init_ref_on_span(path: Path) -> None:
+    """`rusty::slice_to(arr, n).assume_init_ref()` calls a method
+    on std::span. std::span doesn't have that method. The rusty
+    side has `MaybeUninit<T>::slice_assume_init_ref(span)` static
+    and a `rusty::assume_init_ref(span)` free function (added in
+    step 43). Rewrite the method call to use the free function."""
+    src = path.read_text()
+    sentinel = (
+        "// btree_port port: assume_init_ref method→free-fn "
+        "by post_transpile_patch.py"
+    )
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (assume_init_ref on span already fixed)")
+        return
+    # The exact site in btree_internal:
+    #   rusty::slice_to(leaf.keys, …).assume_init_ref()
+    # is a method call on the span result of slice_to. Use a regex
+    # that captures the slice_to(...) expression (with balanced parens
+    # up to the closing one) then wraps it.
+    import re
+    pattern = re.compile(
+        r"(rusty::slice_to\([^)]*\([^)]*\)[^)]*\))\.assume_init_ref\(\)"
+    )
+    matches = list(pattern.finditer(src))
+    if not matches:
+        print(f"  no slice_to(…).assume_init_ref() sites in: {path.name}")
+        return
+    src = pattern.sub(r"rusty::assume_init_ref(\1)", src)
+    src = sentinel + "\n" + src
+    path.write_text(src)
+    print(f"  rewrote {len(matches)} slice_to(…).assume_init_ref() in: {path.name}")
+
+
 def fix_const_correctness(path: Path) -> None:
     """Rust methods that take `self` by value (consuming) or by
     immutable reference are emitted in C++ as non-const member
@@ -1737,7 +1821,10 @@ def main() -> int:
     implement_deallocating(internal)
     # Phase E (correctness fixes surfaced at instantiation time):
     fix_dormant_mut_ref_from_t(internal)
+    fix_dormant_mut_ref_const_ref(internal)
+    fix_as_leaf_ptr_self(internal)
     fix_const_correctness(internal)
+    fix_assume_init_ref_on_span(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
     print(f"[*] writing link_smoke.cpp")
