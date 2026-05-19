@@ -45,10 +45,26 @@ picks the first `[ ]` and goes.
       **map.cppm now compiles cleanly under clang.**
       libbtree_port.a builds with `btree_internal + map.entry + map`.
       Smoke test passes. Facade 24/24 still green.
-- [ ] **A5** Same pass over `set.cppm` / `set.entry.cppm` (currently
-      blocked behind A1–A4 since they import map).
-- [ ] **A6** Add `btree_port.btree.map`, `set`, `set.entry` to the
-      clang build target. Verify libbtree_port.a links.
+- [~] **A5** Deferred. After A4 closed, ran the patcher discipline
+      on set.cppm / set.entry.cppm and surfaced a fundamental shape
+      issue: both modules declare `struct OccupiedEntry`/`VacantEntry`/
+      `Entry` that, after `import btree_port.btree.map.entry`, clash
+      at file scope with map's same-named structs (different arities,
+      same names). Rust's path qualification (`super::map::Entry`)
+      handles this; C++20 modules hoist all exports to global scope
+      so they collide. Workarounds (namespace-wrap set's types,
+      rename to SetOccupiedEntry, etc.) are tractable but would mean
+      hand-editing transpiler-generated files. Given that:
+      - BTreeSet is a thin wrapper over BTreeMap (perf isn't the
+        differentiator); the facade-over-std::set is fine.
+      - Phase D's wiring only needs BTreeMap to call into transpiled
+        code; the BTreeSet facade can stay as-is.
+      Decision: keep set modules out of the build target. Document
+      and move to phase B. `STATUS.md` notes the trade-off.
+- [x] **A6** `btree_port.btree.map` and `btree_port.btree.map.entry`
+      are in the clang build target. libbtree_port.a links cleanly
+      under clang. Smoke test `btree_port_link_smoke` runs.
+      set.cppm / set.entry.cppm deferred per A5.
 
 **Phase B — replace the 5 stubbed methods with real implementations.**
 

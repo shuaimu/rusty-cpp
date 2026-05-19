@@ -660,6 +660,42 @@ def fix_new_global_alloc(path: Path) -> None:
         print(f"  no new_()/A→Global sites in: {path.name}")
 
 
+def fix_setvalzst_as_value(path: Path) -> None:
+    """`SetValZST` is a Rust unit struct (`pub struct SetValZST;`).
+    The transpiler emits it both as a type (in PhantomData etc.) and
+    as a value (`.insert(SetValZST)`). The value form needs `{}` for
+    default construction.
+
+    Substitute only the value-position contexts:
+      `, SetValZST)`  →  `, SetValZST{})`
+      `(SetValZST)`   →  `(SetValZST{})`
+      ` SetValZST)`   →  ` SetValZST{})`  (e.g. `return SetValZST;`)
+    Type positions inside `<...>` are unaffected."""
+    src = path.read_text()
+    sentinel = "// btree_port port: SetValZST type→value by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (SetValZST type→value already fixed)")
+        return
+    replacements = [
+        (", SetValZST)", ", SetValZST{})"),
+        ("(SetValZST)", "(SetValZST{})"),
+        (", SetValZST,", ", SetValZST{},"),
+        (", SetValZST;", ", SetValZST{};"),
+    ]
+    n_total = 0
+    for old, new in replacements:
+        n = src.count(old)
+        if n:
+            src = src.replace(old, new)
+            n_total += n
+    if n_total:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  substituted SetValZST → SetValZST{{}} at {n_total} site(s) in: {path.name}")
+    else:
+        print(f"  no SetValZST type→value sites in: {path.name}")
+
+
 def fix_global_as_value(path: Path) -> None:
     """`rusty::alloc::Global` is an empty struct (Rust's `Global`
     unit struct allocator). The transpiler emits it both as a TYPE
@@ -1290,14 +1326,31 @@ def main() -> int:
     write_link_smoke(cpp_out_dir)
     print(f"[3/6] patching {set_entry.name}")
     if set_entry.exists():
-        # NOTE: set.entry isn't currently in the build target (it depends
-        # on `import btree_port.btree.map`, which has its own transpiler
-        # bugs). The patch logic is left in place so a future iteration
-        # can flip it on by adding set.entry + map.entry to CMakeLists.
-        patch_entry_imports(set_entry, extra_imports=["btree_port.btree.map"])
+        # set.entry imports map.entry (and indirectly map). Strip the
+        # `map::` and `btree_internal::` qualifier prefixes too — after
+        # the import, those symbols live at file scope and the prefix
+        # references are stale. Same shape as map.cppm patches.
+        patch_entry_imports(
+            set_entry,
+            extra_imports=[
+                "btree_port.btree.map",
+                "btree_port.btree.map.entry",
+            ],
+        )
         patch_entry_arities(set_entry)
-        strip_module_namespace_prefixes(set_entry, ["btree_internal"])
+        strip_module_namespace_prefixes(
+            set_entry, ["btree_internal", "map", "node"]
+        )
         align_requires_clauses(set_entry)
+        # Same `template<typename T>` misroute pattern as map.entry
+        # but now on the set side (methods absorbed from sister types).
+        remove_setvalzst_methods(set_entry)
+        # `SetValZST` referenced as a value (not a type) — same as
+        # map.cppm. Wrap as default-constructed (`SetValZST{}`).
+        # Since this is the actual definition's home, it's likely
+        # less misroute-shaped than in map.cppm — we just need value
+        # construction.
+        fix_setvalzst_as_value(set_entry)
     else:
         print(f"  [skip] {set_entry.name} not present")
     print(f"[4/6] patching {map_entry.name}")
