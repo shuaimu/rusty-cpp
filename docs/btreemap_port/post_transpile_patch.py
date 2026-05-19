@@ -1290,6 +1290,157 @@ def fix_as_leaf_ptr_self(path: Path) -> None:
     print(f"  fixed {len(matches)} bare as_leaf_ptr() call(s) in: {path.name}")
 
 
+def fix_force_match_arms(path: Path) -> None:
+    """The transpiler punts on `match expr.force() { Leaf(x) => …,
+    Internal(y) => … }` arms, emitting:
+
+      if (/* TODO transpiler: unresolved bare-glob variant `Leaf`
+            (no enum decl visible in this TU; patch arm manually) */ true) {
+          auto&& leaf = rusty::detail::deref_if_pointer(
+              rusty::detail::deref_if_pointer(_m)._0);
+          …
+      }
+      if (/* TODO ... `Internal` ... */ true) {
+          auto&& internal = …deref_if_pointer(_m)._0…;
+          …
+      }
+
+    Two bugs: (1) the condition is hard-coded `true` so both arms
+    enter, (2) `_m._0` doesn't compile because `_m` is a
+    std::variant<…> not a struct.
+
+    Fix: change `true` → `…(_m).index() == {0,1}`, and add
+    `std::get<{0,1}>` around `…(_m)` so the variant alternative
+    extraction works."""
+    src = path.read_text()
+    sentinel = "// btree_port port: force() arm conditions + variant access fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (force() arms already fixed)")
+        return
+
+    # The condition variable in scope varies: `_m` in nested-lambda
+    # match contexts, `_whilelet` in while-let contexts. Scan the
+    # whole file linearly so we can detect which variable was
+    # declared right before each TODO arm.
+    import re
+    n_fixed = 0
+    lines = src.split("\n")
+    var_in_scope = None  # most recent `auto&& X = ….force();` binding
+    out = []
+    for line in lines:
+        # Track .force() bindings.
+        m = re.search(r"auto&&\s+(_\w+)\s*=\s*[^;]*\.force\(\)", line)
+        if m:
+            var_in_scope = m.group(1)
+        # Substitute TODO patterns using the in-scope variable.
+        for idx, name in [(0, "Leaf"), (1, "Internal")]:
+            comment = (
+                f"/* TODO transpiler: unresolved bare-glob variant "
+                f"`{name}` (no enum decl visible in this TU; patch arm manually) */ true"
+            )
+            if comment in line and var_in_scope is not None:
+                replacement_cond = (
+                    f"rusty::detail::deref_if_pointer({var_in_scope}).index() == {idx}"
+                )
+                line = line.replace(comment, replacement_cond)
+                n_fixed += 1
+        out.append(line)
+    src = "\n".join(out)
+
+    # Now also fix the variant-element access. Inside each arm, the
+    # `_0` is accessed via:
+    #   rusty::detail::deref_if_pointer(_m)._0
+    # which fails because _m is a variant. Wrap in std::get.
+    # Heuristic: the arm body uses an enum-distinct name `leaf` or
+    # `internal` to bind. Find the binding pattern:
+    #   auto&& leaf = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m)._0);
+    #   →
+    #   auto&& leaf = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0);
+    # Same for `internal` with std::get<1>.
+    pairs = [
+        (
+            "auto&& leaf = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m)._0);",
+            "auto&& leaf = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0);",
+        ),
+        (
+            "auto&& internal = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m)._0);",
+            "auto&& internal = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0);",
+        ),
+    ]
+    for old, new in pairs:
+        n = src.count(old)
+        if n == 0:
+            continue
+        src = src.replace(old, new)
+        n_fixed += n
+
+    if n_fixed:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  fixed {n_fixed} force() arm site(s) in: {path.name}")
+    else:
+        print(f"  no force() arm sites in: {path.name}")
+
+
+def stub_broken_search_tree(path: Path) -> None:
+    """`NodeRef::search_tree(key)` has two interleaved transpiler bugs:
+
+    1. The outer lambda's return type was emitted as `-> NodeRef<…>`
+       but the body returns `SearchResult<…>` (the actual method
+       return type). This is a transpiler annotation mismatch.
+    2. The inner `handle.force()` match emits the unresolved-bare-glob
+       slot markers (`/* TODO transpiler: unresolved bare-glob variant
+       `Leaf` … */`) — the transpiler couldn't see the Leaf/Internal
+       enum decl in this TU.
+
+    Both are structural transpiler gaps that fixing in-place requires
+    rewriting the whole method body (a non-trivial Rust loop+match
+    construct). Stub it with `throw` for now — this lets the rest of
+    the transpiled BTreeMap link, but `search_tree` itself can't be
+    called (and `BTreeMap::get`/`insert` ultimately reach it, so they
+    won't work at runtime until this is hand-ported).
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: search_tree stubbed by post_transpile_patch.py (E7)"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (search_tree already stubbed)")
+        return
+    sig = ("SearchResult<BorrowType, K, V, ::marker::LeafOrInternal, "
+           "::marker::Leaf> search_tree(const Q& key) {")
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        print(f"  no search_tree stub site in: {path.name}")
+        return
+    brace_open = src.find("{", sig_pos + len(sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        print(f"  [warn] couldn't find search_tree end", file=sys.stderr)
+        return
+    stub = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        // The transpiled body had a lambda return-type/body\n"
+        "        // mismatch + unresolved Leaf/Internal force() arms.\n"
+        "        // Stubbed until the method is hand-ported.\n"
+        "        throw ::std::runtime_error(\n"
+        "            \"rusty-cpp-transpiler: search_tree stub \"\n"
+        "            \"(lambda return-type + force() arms mismatch; see STATUS.md E7)\");\n"
+        "    }"
+    )
+    src = src[:brace_open] + stub + src[brace_close + 1 :]
+    path.write_text(src)
+    print(f"  stubbed NodeRef::search_tree in: {path.name}")
+
+
 def fix_assume_init_ref_on_span(path: Path) -> None:
     """`rusty::slice_to(arr, n).assume_init_ref()` calls a method
     on std::span. std::span doesn't have that method. The rusty
@@ -1825,6 +1976,14 @@ def main() -> int:
     fix_as_leaf_ptr_self(internal)
     fix_const_correctness(internal)
     fix_assume_init_ref_on_span(internal)
+    # NOTE: fix_force_match_arms removed — the variable-tracking
+    # heuristic was unreliable across nested scopes (multiple
+    # `auto&& _m` / `_whilelet` / `_m1` shadowed each other in
+    # different match arms). Phase E continuation needs a smarter
+    # parser-aware approach. The TODO markers stay in the .cppm
+    # for the methods that hit them; those methods don't compile
+    # under template instantiation but the rest of the module does.
+    stub_broken_search_tree(internal)
     print(f"[2/6] patching {cmake.name}")
     patch_cmake(cmake, rusty_include_dir)
     print(f"[*] writing link_smoke.cpp")
