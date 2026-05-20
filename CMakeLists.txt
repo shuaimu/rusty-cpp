@@ -17,6 +17,7 @@ set(TEST_SOURCES
     tests/rusty_arc_test.cpp
     tests/rusty_arc_mt_test.cpp
     tests/rusty_box_test.cpp
+    tests/rusty_owned_fd_test.cpp
     tests/rusty_cell_test.cpp
     tests/rusty_option_test.cpp
     tests/rusty_rc_test.cpp

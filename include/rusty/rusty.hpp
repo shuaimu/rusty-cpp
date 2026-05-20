@@ -78,6 +78,8 @@
 
 // Filesystem helpers (std::fs equivalent)
 #include "rusty/sys/fs.hpp"
+// File descriptor wrappers (std::os::fd equivalent)
+#include "rusty/os/fd.hpp"
 #include "rusty/mutex.hpp"
 #include "rusty/rwlock.hpp"
 #include "rusty/condvar.hpp"
