@@ -92,6 +92,7 @@ export {
 #include <rusty/sync/mpsc.hpp>
 #include <rusty/sys/fs.hpp>
 #include <rusty/os/fd.hpp>
+#include <rusty/net/tcp.hpp>
 #include <rusty/mutex.hpp>
 #include <rusty/rwlock.hpp>
 #include <rusty/condvar.hpp>

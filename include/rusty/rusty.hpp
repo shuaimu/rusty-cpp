@@ -80,6 +80,8 @@
 #include "rusty/sys/fs.hpp"
 // File descriptor wrappers (std::os::fd equivalent)
 #include "rusty/os/fd.hpp"
+// TCP networking (std::net equivalent — bind/connect/accept/read/write).
+#include "rusty/net/tcp.hpp"
 #include "rusty/mutex.hpp"
 #include "rusty/rwlock.hpp"
 #include "rusty/condvar.hpp"

@@ -8,16 +8,19 @@
 
 namespace rusty::net {
 
-// Minimal std::net compatibility surface for transpiled type paths.
-// This can be expanded incrementally as parity work requires behavior.
-struct TcpStream {
-    TcpStream() = default;
-    TcpStream(const TcpStream&) = default;
-    TcpStream(TcpStream&&) noexcept = default;
-    TcpStream& operator=(const TcpStream&) = default;
-    TcpStream& operator=(TcpStream&&) noexcept = default;
-    ~TcpStream() = default;
-};
+// std::net compatibility surface — address types only.
+//
+// The address types (Ipv4Addr / Ipv6Addr / SocketAddrV4 / SocketAddrV6
+// / IpAddr / SocketAddr) live in this header as pure value types — no
+// kernel resources, default-constructible, copyable.
+//
+// The operational `TcpListener` / `TcpStream` types — which own
+// `os::fd::OwnedFd` and call socket / bind / connect / accept / read /
+// write / shutdown / set_nonblocking — live in `rusty/net/tcp.hpp`
+// (included via `rusty/rusty.hpp` and `rusty/rusty.cppm`). Keeping the
+// operational class out of this header avoids cyclic includes with
+// `rusty/os/fd.hpp` and keeps this header lightweight for transpiler
+// emission paths that only need the value types.
 
 struct Ipv4Addr {
     std::array<std::uint8_t, 4> bytes_{};
