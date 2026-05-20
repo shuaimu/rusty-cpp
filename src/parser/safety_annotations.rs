@@ -502,12 +502,14 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                     } else if is_class_declaration(&accumulated_line) {
                         // Class/struct declaration - extract class name and store annotation
                         if let Some(class_name) = extract_class_name(&accumulated_line) {
-                            // Bug #8 fix: Build qualified class name using context
-                            let qualified_name = if class_context_stack.is_empty() {
-                                class_name.clone()
-                            } else {
-                                format!("{}::{}", class_context_stack.join("::"), class_name)
-                            };
+                            // Bug #8 fix: Build qualified class name using context.
+                            // Anonymous-namespace markers are filtered out so
+                            // the qualified name matches libclang's shape.
+                            let qualified_name =
+                                match qualified_name_from_stack(&class_context_stack) {
+                                    Some(prefix) => format!("{}::{}", prefix, class_name),
+                                    None => class_name.clone(),
+                                };
                             let signature =
                                 FunctionSignature::from_name_only(qualified_name.clone());
                             context.function_overrides.push((signature, annotation));
@@ -529,12 +531,14 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                     } else if is_function_declaration(&accumulated_line) {
                         // Function declaration - extract function signature (name + params) and apply ONLY to this function
                         if let Some(func_name) = extract_function_name(&accumulated_line) {
-                            // Bug #8 fix: Build qualified function name using class context
-                            let qualified_name = if class_context_stack.is_empty() {
-                                func_name.clone()
-                            } else {
-                                format!("{}::{}", class_context_stack.join("::"), func_name)
-                            };
+                            // Bug #8 fix: Build qualified function name using class context.
+                            // Anonymous-namespace markers are filtered out so
+                            // the qualified name matches libclang's shape.
+                            let qualified_name =
+                                match qualified_name_from_stack(&class_context_stack) {
+                                    Some(prefix) => format!("{}::{}", prefix, func_name),
+                                    None => func_name.clone(),
+                                };
                             let param_types = extract_parameter_types(&accumulated_line);
                             let signature =
                                 FunctionSignature::new(qualified_name.clone(), param_types.clone());
@@ -635,7 +639,37 @@ fn extract_class_name(line: &str) -> Option<String> {
     None
 }
 
-/// Extract namespace name from a namespace declaration
+/// Sentinel pushed to `class_context_stack` when an anonymous namespace
+/// opens. It keeps the brace-tracking pop logic in sync with the source
+/// structure but is filtered out when building qualified names — see
+/// `qualified_name_from_stack` — so qualified names match libclang's
+/// behavior of skipping anonymous namespaces (e.g.
+/// `outer::funcname` rather than `outer::(anonymous)::funcname`).
+const ANON_NAMESPACE_MARKER: &str = "(anonymous)";
+
+/// Join a class/namespace context stack into a `::`-qualified name,
+/// skipping anonymous-namespace markers. Returns None when the stack
+/// is empty (or contains only markers).
+fn qualified_name_from_stack(stack: &[String]) -> Option<String> {
+    let joined: Vec<&str> = stack
+        .iter()
+        .filter(|s| s.as_str() != ANON_NAMESPACE_MARKER)
+        .map(|s| s.as_str())
+        .collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.join("::"))
+    }
+}
+
+/// Extract namespace name from a namespace declaration.
+///
+/// Returns `Some("(anonymous)")` for anonymous namespaces — callers use
+/// `qualified_name_from_stack` to filter the marker out when building
+/// `::`-qualified names. This keeps brace-tracking in sync (we push/pop
+/// the marker like any other namespace name) without leaking the
+/// synthetic name into recorded annotations.
 fn extract_namespace_name(line: &str) -> Option<String> {
     // Look for "namespace Name {"
     // Handle multi-line declarations by replacing newlines with spaces
@@ -652,6 +686,21 @@ fn extract_namespace_name(line: &str) -> Option<String> {
             if !name.is_empty() {
                 return Some(name.to_string());
             }
+            // First non-whitespace token after "namespace " is `{` (or attached
+            // to `{`) — this is an anonymous namespace `namespace { ... }`.
+            return Some(ANON_NAMESPACE_MARKER.to_string());
+        }
+    }
+    // No name token at all — the `{` may be on the next line. Still treat
+    // this as an anonymous namespace declaration so brace tracking stays
+    // coherent.
+    if normalized.trim_start().starts_with("namespace") {
+        let after = normalized
+            .trim_start()
+            .trim_start_matches("namespace")
+            .trim_start();
+        if after.starts_with('{') || after.is_empty() {
+            return Some(ANON_NAMESPACE_MARKER.to_string());
         }
     }
     None
@@ -1165,5 +1214,143 @@ void func() {}
         let context = parse_safety_annotations(file.path()).unwrap();
         // @safe only applies to the next element (global_var), not the whole file
         assert_eq!(context.file_default, SafetyMode::Unsafe);
+    }
+
+    #[test]
+    fn test_extract_namespace_name_anonymous() {
+        // Anonymous namespace declarations must produce a synthetic name so
+        // brace tracking and qualified-name building stay coherent. libclang
+        // skips anonymous namespaces when forming qualified names, so the
+        // marker we use here must be filtered out when building qualified
+        // names elsewhere — see test_annotation_inside_anonymous_namespace
+        // for the end-to-end behavior.
+        assert_eq!(
+            extract_namespace_name("namespace {"),
+            Some("(anonymous)".to_string())
+        );
+        assert_eq!(
+            extract_namespace_name("namespace { // some comment"),
+            Some("(anonymous)".to_string())
+        );
+        // Named namespaces still work.
+        assert_eq!(
+            extract_namespace_name("namespace rrr {"),
+            Some("rrr".to_string())
+        );
+    }
+
+    #[test]
+    fn test_annotation_inside_anonymous_namespace() {
+        // Reproduces the reactor.cpp tarpit: `// @unsafe` on a free
+        // inline function inside an anonymous namespace nested in a named
+        // namespace. The qualified name observed by libclang is
+        // `outer::funcname` (anonymous namespace is skipped), so the
+        // recorded annotation must match the same shape.
+        let code = r#"
+namespace outer {
+namespace {
+
+// @unsafe
+inline void inner_func() {
+    int x = 0;
+}
+
+}  // anonymous
+}  // namespace outer
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        // The annotation must reach the function. Querying by the libclang-
+        // style qualified name `outer::inner_func` should resolve to Unsafe.
+        assert_eq!(
+            context.get_function_safety("outer::inner_func"),
+            SafetyMode::Unsafe,
+            "annotation on a function inside an anonymous namespace must be honored"
+        );
+    }
+
+    #[test]
+    fn test_anonymous_namespace_after_nested_class_in_named_namespace() {
+        // Mirrors reactor.cpp's shape: a named namespace contains a class
+        // declaration (which the parser tracks on the context stack), then
+        // an anonymous namespace, then a function inside it with @unsafe.
+        // The class declaration's brace-depth reset stresses the tracking.
+        let code = r#"
+namespace rrr {
+
+class SomeClass {
+  int x;
+};
+
+namespace {
+
+// @unsafe
+inline void inner_func() {
+    int v = 0;
+}
+
+}  // anonymous
+
+void other_func() {}
+
+}  // namespace rrr
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        // libclang qualifies this as `rrr::inner_func` (anon ns skipped).
+        // The annotation must reach it.
+        assert_eq!(
+            context.get_function_safety("rrr::inner_func"),
+            SafetyMode::Unsafe,
+            "annotation on function inside anonymous namespace after a class declaration must be honored"
+        );
+    }
+
+    #[test]
+    fn test_safe_namespace_with_unsafe_func_in_anonymous_nested() {
+        // @safe on the outer namespace + @unsafe override on a function
+        // inside an anonymous namespace. The override must win.
+        let code = r#"
+// @safe
+namespace outer {
+
+void safe_func() {}
+
+namespace {
+
+// @unsafe
+inline void unsafe_helper() {
+    int* p = nullptr;
+    *p = 1;
+}
+
+}  // anonymous
+
+}  // namespace outer
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        assert_eq!(context.file_default, SafetyMode::Safe);
+        assert_eq!(
+            context.get_function_safety("outer::safe_func"),
+            SafetyMode::Safe
+        );
+        assert_eq!(
+            context.get_function_safety("outer::unsafe_helper"),
+            SafetyMode::Unsafe,
+            "@unsafe on a function inside an anonymous namespace must override the outer @safe namespace"
+        );
     }
 }
