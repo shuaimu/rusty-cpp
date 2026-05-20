@@ -753,18 +753,35 @@ fn extract_return_source(
         }
 
         Expression::Move { inner, .. } => {
-            // Move: return std::move(x);
+            // `return std::move(x);` (and similarly for `return Wrapper(
+            // std::move(x))` once the wrapper is unwrapped to its Move
+            // argument by extract_expression).
+            //
+            // Two things need to happen:
+            //
+            // 1. Record the Move so subsequent uses of `x` are flagged.
+            //    This is the responsibility of the IR move-tracking
+            //    machinery — the Move / MoveField statement we push.
+            //
+            // 2. Do NOT return `x` as the Return's source string. The
+            //    Return-statement check uses the source string to look
+            //    up ownership state and error if it's `Moved` — but
+            //    the move we just pushed marks `x` as Moved, so the
+            //    check would always fire on the canonical
+            //    `return std::move(x);` pattern. Returning None makes
+            //    the Return-statement check skip ownership lookup; the
+            //    value has already been consumed by the move and the
+            //    callee receives ownership.
             debug_println!("DEBUG IR: Processing Move in return statement");
             match inner.as_ref() {
                 Expression::Variable(var) => {
                     debug_println!("DEBUG IR: Return Move(Variable): {}", var);
-                    // Generate Move statement
                     statements.push(IrStatement::Move {
                         from: var.clone(),
                         to: format!("_returned_{}", var),
-                        line: 0, // Line not available in this context
+                        line: 0,
                     });
-                    Some(var.clone())
+                    None
                 }
                 Expression::MemberAccess { object, field } => {
                     debug_println!(
@@ -777,21 +794,20 @@ fn extract_return_source(
                         field
                     );
                     if let Expression::Variable(obj_name) = object.as_ref() {
-                        // Generate MoveField statement
                         statements.push(IrStatement::MoveField {
                             object: obj_name.clone(),
                             field: field.clone(),
                             to: format!("_returned_{}", field),
                             line: 0,
                         });
-                        Some(format!("{}.{}", obj_name, field))
-                    } else {
-                        None
                     }
+                    None
                 }
                 _ => {
-                    // Move of complex expression - try to extract source
-                    extract_return_source(inner, statements)
+                    // Move of complex expression - process inner for its
+                    // side-effects but do not surface a source string.
+                    let _ = extract_return_source(inner, statements);
+                    None
                 }
             }
         }
@@ -824,9 +840,21 @@ fn extract_return_source(
             if is_method_call {
                 // Method call - receiver is consumed/transformed, result is new value
                 None
-            } else if let Some(Expression::Variable(var)) = args.first() {
-                // Constructor or free function - first arg might be referenced by return value
-                Some(var.clone())
+            } else if let Some(first_arg) = args.first() {
+                match first_arg {
+                    // Explicit `std::move(x)` as the first argument of a
+                    // constructor / free function — the move is what
+                    // produces the return value; tracking x as the source
+                    // would fire a false "Cannot return x because moved"
+                    // error on the canonical `return Wrapper(std::move(x))`
+                    // pattern. The move itself is tracked when processing
+                    // the call's args, so we just return None here.
+                    Expression::Move { .. } => None,
+                    // Plain variable as first arg — `return Holder{x}` —
+                    // may hold a reference to x.
+                    Expression::Variable(var) => Some(var.clone()),
+                    _ => None,
+                }
             } else {
                 None
             }
