@@ -827,6 +827,7 @@ mod tests {
                 location: make_location(),
                 is_pack: false,
                 pack_element_type: None,
+                has_initializer: false,
             });
 
         let errors = validate_interface(&interface);

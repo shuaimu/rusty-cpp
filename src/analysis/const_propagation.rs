@@ -452,6 +452,7 @@ mod tests {
             },
             is_pack: false,
             pack_element_type: None,
+            has_initializer: false,
         };
         assert!(is_const_pointer_or_ref(&const_ptr));
 
@@ -472,6 +473,7 @@ mod tests {
             },
             is_pack: false,
             pack_element_type: None,
+            has_initializer: false,
         };
         assert!(!is_const_pointer_or_ref(&non_const_ptr));
     }

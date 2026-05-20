@@ -2477,6 +2477,7 @@ mod tests {
             },
             is_pack: false,
             pack_element_type: None,
+            has_initializer: false,
         }
     }
 
