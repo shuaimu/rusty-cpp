@@ -296,21 +296,59 @@ fn check_for_mutable_keyword(entity: &Entity) -> bool {
     false
 }
 
-/// Get the qualified name of an entity (including namespace/class context)
+/// Get the qualified name of an entity (including namespace/class context).
+///
+/// Walks semantic parents and accumulates Namespace / ClassDecl /
+/// StructDecl / ClassTemplate names.
+///
+/// Special handling for local-method-body types: when the walker
+/// encounters a `FunctionDecl` / `Method` / `Constructor` / `Destructor`
+/// ancestor BEFORE any class/struct ancestor, the type is a local
+/// declaration inside a function body, not a nested member of the
+/// enclosing class. From that point on we only accumulate Namespace
+/// ancestors and skip ClassDecl ancestors — that prevents
+/// `struct EarlyWakeState { ... };` declared inside
+/// `Reactor::spawn_stackless_task` from being qualified as
+/// `rrr::Reactor::EarlyWakeState` (which would falsely inherit
+/// Reactor's class-level `// @safe` annotation through file-default
+/// fallback). It correctly becomes `rrr::EarlyWakeState`, matching
+/// the qualification recorded by the text-based safety_annotations
+/// parser which can't track function-body scopes on its
+/// `class_context_stack`.
 pub fn get_qualified_name(entity: &Entity) -> String {
     let simple_name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
 
     // Try to build qualified name by walking up the semantic parents
     let mut parts = vec![simple_name.clone()];
     let mut current = entity.get_semantic_parent();
+    // Once we cross a function-body scope, ClassDecl ancestors above
+    // it are the function's enclosing class — not a nested-type
+    // parent. Skip them.
+    let mut crossed_function_body = false;
 
     while let Some(parent) = current {
         match parent.get_kind() {
-            EntityKind::Namespace
-            | EntityKind::ClassDecl
+            EntityKind::FunctionDecl
+            | EntityKind::Method
+            | EntityKind::Constructor
+            | EntityKind::Destructor
+            | EntityKind::ConversionFunction
+            | EntityKind::FunctionTemplate => {
+                crossed_function_body = true;
+            }
+            EntityKind::Namespace => {
+                if let Some(parent_name) = parent.get_name() {
+                    if !parent_name.is_empty() {
+                        parts.push(parent_name);
+                    }
+                }
+            }
+            EntityKind::ClassDecl
             | EntityKind::StructDecl
             | EntityKind::ClassTemplate => {
-                if let Some(parent_name) = parent.get_name() {
+                if crossed_function_body {
+                    // Local-method-body type — skip the enclosing class.
+                } else if let Some(parent_name) = parent.get_name() {
                     if !parent_name.is_empty() {
                         parts.push(parent_name);
                     }
