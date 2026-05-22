@@ -1617,11 +1617,30 @@ def implement_handle_descend(path: Path) -> None:
         "    template<typename BorrowType, typename K, typename V>\n"
         "    NodeRef<BorrowType, K, V, ::marker::LeafOrInternal> descend() {\n"
     )
+    # Post-Cluster-A-completion shape: the method-template params are
+    # dropped and impl-generic refs are replaced with
+    # `typename __TemplateArgs<Node>::arg_<N>`. The body keeps
+    # `.edges.get_unchecked(...)` (still wrong — std::array has no
+    # get_unchecked) and references `this->node.height_field`.
+    ta = "typename __TemplateArgs<Node>::arg_"
+    ta_ref = f"NodeRef<{ta}0, {ta}1, {ta}2"
+    cluster_a_method = (
+        f"    {ta_ref}, ::marker::LeafOrInternal> descend() {{\n"
+        "        // const-block elided (Rust 2024 compile-time fence)\n"
+        f"        const auto parent_ptr = {ta_ref}, ::marker::Internal>::as_internal_ptr(this->node);\n"
+        "        auto node = (*parent_ptr).edges.get_unchecked(std::move(this->idx_field)).assume_init_read();\n"
+        f"        return {ta_ref}, ::marker::LeafOrInternal>"
+        "{.height_field = rusty::detail::deref_if_pointer_like(this->node.height_field) - static_cast<size_t>(1), "
+        ".node = std::move(node), "
+        f"._marker = rusty::PhantomData<std::tuple<{ta}0, ::marker::LeafOrInternal>>{{}}}};\n"
+        "    }\n"
+    )
     old_method_variants = [
         sig_head + "        rusty::intrinsics::unreachable();\n" + body_tail,
         sig_head
         + "        // const-block elided (Rust 2024 compile-time fence)\n"
         + body_tail,
+        cluster_a_method,
     ]
     old_method = next((v for v in old_method_variants if v in src), None)
     new_method = (
@@ -2896,14 +2915,26 @@ def implement_handle_force(path: Path) -> None:
     if sentinel in src:
         print(f"  no changes to: {path.name} (Handle::force already ported)")
         return
-    # Find the original force() method by its signature.
-    sig = (
+    # Find the original force() method by its signature. Try both the
+    # pre-Cluster-A shape (method-template params) and the post-Cluster-A
+    # shape (typename __TemplateArgs<Node>::arg_N references).
+    sig_pre = (
         "    template<typename BorrowType, typename K, typename V>\n"
         "    ForceResult<Handle<NodeRef<BorrowType, K, V, ::marker::Leaf>, "
         "Type>, Handle<NodeRef<BorrowType, K, V, ::marker::Internal>, Type>> "
         "force() {\n"
     )
-    sig_pos = src.find(sig)
+    ta = "typename __TemplateArgs<Node>::arg_"
+    sig_post = (
+        f"    ForceResult<Handle<NodeRef<{ta}0, {ta}1, {ta}2, ::marker::Leaf>, "
+        f"Type>, Handle<NodeRef<{ta}0, {ta}1, {ta}2, ::marker::Internal>, Type>> "
+        "force() {\n"
+    )
+    sig_pos = src.find(sig_pre)
+    sig = sig_pre
+    if sig_pos == -1:
+        sig_pos = src.find(sig_post)
+        sig = sig_post
     if sig_pos == -1:
         print(f"  no Handle::force site in: {path.name}")
         return
@@ -2934,6 +2965,17 @@ def implement_handle_force(path: Path) -> None:
     end = brace_close + 1
     if end < len(src) and src[end] == "\n":
         end += 1
+    # Pick the per-shape typedef source for BorrowType/K/V. Cluster A
+    # completion already exposes them via __TemplateArgs<Node>::arg_N;
+    # the older descend hand-port path uses __NodeRefArgs<Node>.
+    if sig is sig_post:
+        b_alias = "typename __TemplateArgs<Node>::arg_0"
+        k_alias = "typename __TemplateArgs<Node>::arg_1"
+        v_alias = "typename __TemplateArgs<Node>::arg_2"
+    else:
+        b_alias = "typename __NodeRefArgs<Node>::BorrowType"
+        k_alias = "typename __NodeRefArgs<Node>::Key"
+        v_alias = "typename __NodeRefArgs<Node>::Value"
     new_method = (
         f"    {sentinel}\n"
         "    // The Rust source is `impl<BorrowType, K, V, Type>\n"
@@ -2941,20 +2983,20 @@ def implement_handle_force(path: Path) -> None:
         "    //   { fn force(self) -> ForceResult<…, …> }`.\n"
         "    // C++ can't constrain Node to NodeRef<…,LeafOrInternal>\n"
         "    // at the class level, so we destructure Node via\n"
-        "    // __NodeRefArgs and build the result Handles.\n"
+        "    // __TemplateArgs/__NodeRefArgs and build the result Handles.\n"
         "    ForceResult<\n"
-        "        Handle<NodeRef<typename __NodeRefArgs<Node>::BorrowType,\n"
-        "                       typename __NodeRefArgs<Node>::Key,\n"
-        "                       typename __NodeRefArgs<Node>::Value,\n"
+        f"        Handle<NodeRef<{b_alias},\n"
+        f"                       {k_alias},\n"
+        f"                       {v_alias},\n"
         "                       ::marker::Leaf>, Type>,\n"
-        "        Handle<NodeRef<typename __NodeRefArgs<Node>::BorrowType,\n"
-        "                       typename __NodeRefArgs<Node>::Key,\n"
-        "                       typename __NodeRefArgs<Node>::Value,\n"
+        f"        Handle<NodeRef<{b_alias},\n"
+        f"                       {k_alias},\n"
+        f"                       {v_alias},\n"
         "                       ::marker::Internal>, Type>>\n"
         "    force() {\n"
-        "        using __B = typename __NodeRefArgs<Node>::BorrowType;\n"
-        "        using __K = typename __NodeRefArgs<Node>::Key;\n"
-        "        using __V = typename __NodeRefArgs<Node>::Value;\n"
+        f"        using __B = {b_alias};\n"
+        f"        using __K = {k_alias};\n"
+        f"        using __V = {v_alias};\n"
         "        using __LeafH = Handle<NodeRef<__B, __K, __V, ::marker::Leaf>, Type>;\n"
         "        using __IntH  = Handle<NodeRef<__B, __K, __V, ::marker::Internal>, Type>;\n"
         "        using __Ret   = ForceResult<__LeafH, __IntH>;\n"
@@ -3273,9 +3315,15 @@ def _impl_deallocating_helper(direction: str) -> tuple[str, str]:
         "        //           },\n"
         "        //       }\n"
         "        //   }\n"
+        # K/V dropped from impl-block generics by Cluster A absorption;
+        # recover positionally from the host class param via the
+        # __TemplateArgs<Node>::arg_<N> partial-specialization helper.
         "        using __Ret = rusty::Option<std::tuple<\n"
         "            Handle<Node, Type>,\n"
-        "            Handle<NodeRef<::marker::Dying, K, V, ::marker::LeafOrInternal>, ::marker::KV>\n"
+        "            Handle<NodeRef<::marker::Dying,"
+        " typename __TemplateArgs<Node>::arg_1,"
+        " typename __TemplateArgs<Node>::arg_2,"
+        " ::marker::LeafOrInternal>, ::marker::KV>\n"
         "        >>;\n"
         "        auto __edge = std::move(*this).forget_node_type();\n"
         "        while (true) {\n"
@@ -3301,6 +3349,58 @@ def _impl_deallocating_helper(direction: str) -> tuple[str, str]:
         "    }"
     )
     return sig_tail, body
+
+
+def fix_std_array_get_unchecked(path: Path) -> None:
+    """Rewrite `.{keys,vals,edges}.get_unchecked[_mut](EXPR)` to
+    `.{keys,vals,edges}[(EXPR)]`. The btree leaf's keys/vals/edges
+    are `std::array<MaybeUninit<…>, N>` which has no `get_unchecked`
+    method; Rust's slice deref + UnsafeIndex shape doesn't survive
+    transpilation. Use plain operator[] (still UB on out-of-range,
+    matching Rust's `unsafe` contract on the original call)."""
+    import re
+    src = path.read_text()
+    # Match `.keys.get_unchecked(`, `.vals.get_unchecked_mut(`, etc.
+    # Capture the field name and the expression between `(` and the
+    # matching `)`. Use a parenthesis-balanced walk because the EXPR
+    # often contains `std::move(...)` calls.
+    pattern = re.compile(
+        r"\.(keys|vals|edges)\.get_unchecked(?:_mut)?\("
+    )
+    total = 0
+    new_src_parts: list[str] = []
+    cursor = 0
+    for m in pattern.finditer(src):
+        new_src_parts.append(src[cursor:m.start()])
+        field = m.group(1)
+        # Walk from the `(` to the matching `)`.
+        depth = 1
+        i = m.end()
+        while i < len(src) and depth > 0:
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            # Couldn't find balanced close — bail without rewriting
+            # this occurrence.
+            new_src_parts.append(src[m.start():i])
+            cursor = i
+            continue
+        # `src[m.end():i-1]` is the EXPR between parens; `src[i-1]` is `)`.
+        expr = src[m.end():i - 1]
+        new_src_parts.append(f".{field}[({expr})]")
+        cursor = i
+        total += 1
+    new_src_parts.append(src[cursor:])
+    if total > 0:
+        path.write_text("".join(new_src_parts))
+        print(
+            f"  rewrote {total} keys/vals/edges.get_unchecked → operator[] in: {path.name}"
+        )
+    else:
+        print(f"  no get_unchecked sites in: {path.name}")
 
 
 def implement_deallocating(path: Path) -> None:
@@ -3824,6 +3924,11 @@ def main() -> int:
     implement_handle_force(internal)
     # Handle::into_kv — same shape, same fix.
     implement_handle_into_kv(internal)
+    # Generic: any remaining `.{keys,vals,edges}.get_unchecked[_mut](EXPR)`
+    # the hand-ports didn't touch — rewrite to `[EXPR]`. std::array has
+    # no get_unchecked; the Rust source's unsafe contract maps cleanly
+    # to operator[]'s no-bounds-check behavior.
+    fix_std_array_get_unchecked(internal)
     # `k.borrow()` on primitive types — wrap with SFINAE fallback.
     fix_borrow_method_fallback(internal)
     # Step 55: codify the 7 step-54 insert-path fixes (key/val/edge_area_mut
