@@ -119,6 +119,13 @@ private:
     }
     
 public:
+    // STL-style typedef. Rust iterators express the element type via
+    // `type Item = T`, but several C++ APIs (gtest's ValuesIn,
+    // generic algorithms that probe for value_type) require the
+    // STL-conventional `typename C::value_type`. Exposing it here
+    // costs nothing and lets Vec<T> drop into those APIs unchanged.
+    using value_type = T;
+
     // Default constructor - empty vec
     Vec() : data_(nullptr), size_(0), capacity_(0) {}
     
@@ -354,8 +361,19 @@ public:
     }
     #endif
     
-    // Destructor
-    ~Vec() noexcept(false) {
+    // Destructor.
+    //
+    // The only operation in the body that can possibly throw is
+    // clear(), which invokes ~T() for each element. The other two
+    // calls are noexcept (operator delete and pure bookkeeping).
+    // Mirror std::vector's design: propagate T's destructor's
+    // exception specification. That way Vec<T> for T with a
+    // noexcept destructor (uint64_t, std::string, ...) is itself
+    // noexcept-destructible, which is required for any class that
+    // holds a Vec<T> member and overrides a virtual destructor of
+    // a noexcept base — the situation that arises in gtest fixture
+    // hierarchies and Masstree's search_range_callback.
+    ~Vec() noexcept(std::is_nothrow_destructible_v<T>) {
         clear();
         clear_forgotten_storage_marks();
         deallocate_storage(data_, capacity_);
