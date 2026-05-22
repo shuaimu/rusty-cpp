@@ -266,6 +266,16 @@ public:
     const T& operator*() const noexcept {
         return *ptr();
     }
+
+    // Rust's `ManuallyDrop::take(&mut slot) -> T` is a static fn that moves
+    // the inner value out, leaving the wrapper logically uninitialized.
+    // Transpiler emits it as an instance call `slot.take()` rather than the
+    // free-fn form, so expose it as a method here.
+    T take() noexcept(std::is_nothrow_move_constructible_v<T>) {
+        T result = std::move(*ptr());
+        initialized_ = false;
+        return result;
+    }
 };
 
 template<typename T>

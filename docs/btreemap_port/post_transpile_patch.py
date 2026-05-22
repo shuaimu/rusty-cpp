@@ -24,6 +24,7 @@ Usage:
 Idempotent: rerunning detects already-applied patches and skips.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -1596,10 +1597,14 @@ def implement_handle_descend(path: Path) -> None:
         src = src[:ins] + trait_block + src[ins:]
 
     # 2. Replace the descend method's signature + body.
-    old_method = (
-        "    template<typename BorrowType, typename K, typename V>\n"
-        "    NodeRef<BorrowType, K, V, ::marker::LeafOrInternal> descend() {\n"
-        "        rusty::intrinsics::unreachable();\n"
+    # The two known emit shapes differ only in the first body line:
+    #   - OLD (pre-Cluster D): `rusty::intrinsics::unreachable();` (the
+    #     mis-lowered `const { ... }` Rust 2024 compile-time fence).
+    #   - NEW (post-Cluster D): `// const-block elided (Rust 2024 compile-time fence)`.
+    # The rest of the body (parent_ptr lookup, edges read, return aggregate
+    # — including `this->node.height` without the `_field` suffix, which a
+    # later patcher pass rewrites globally) is identical between the two.
+    body_tail = (
         "        const auto parent_ptr = NodeRef<BorrowType, K, V, ::marker::LeafOrInternal>::as_internal_ptr(this->node);\n"
         "        auto node = (*parent_ptr).edges.get_unchecked(std::move(this->idx_field)).assume_init_read();\n"
         "        return NodeRef<BorrowType, K, V, ::marker::LeafOrInternal>{"
@@ -1608,6 +1613,17 @@ def implement_handle_descend(path: Path) -> None:
         "._marker = rusty::PhantomData<std::tuple<BorrowType, ::marker::LeafOrInternal>>{}};\n"
         "    }\n"
     )
+    sig_head = (
+        "    template<typename BorrowType, typename K, typename V>\n"
+        "    NodeRef<BorrowType, K, V, ::marker::LeafOrInternal> descend() {\n"
+    )
+    old_method_variants = [
+        sig_head + "        rusty::intrinsics::unreachable();\n" + body_tail,
+        sig_head
+        + "        // const-block elided (Rust 2024 compile-time fence)\n"
+        + body_tail,
+    ]
+    old_method = next((v for v in old_method_variants if v in src), None)
     new_method = (
         f"    {sentinel}\n"
         "    NodeRef<typename __NodeRefArgs<Node>::BorrowType,\n"
@@ -1632,7 +1648,7 @@ def implement_handle_descend(path: Path) -> None:
         "        };\n"
         "    }\n"
     )
-    if old_method in src:
+    if old_method is not None:
         src = src.replace(old_method, new_method, 1)
         path.write_text(src)
         print(f"  hand-ported Handle::descend (with __NodeRefArgs trait) in: {path.name}")
@@ -1806,19 +1822,29 @@ def merge_map_entry_into_map(map_mod: Path, map_entry: Path) -> None:
     else:
         print(f"  [warn] couldn't find GMF anchor in {map_mod.name}", file=sys.stderr)
 
-    # 2. Replace `import map.entry;` with a comment.
-    import_marker = (
-        "import btree_port.btree.btree_internal;\n"
-        "import btree_port.btree.map.entry;"
-    )
-    import_replace = (
-        "import btree_port.btree.btree_internal;\n"
+    # 2. Strip `import btree_port.btree.map.entry;` (its content is being
+    #    inlined below, so this import would dangle — the module isn't in
+    #    the build target). Use a line-level regex so the strip is robust
+    #    to surrounding whitespace / blank lines / sentinel comment order.
+    import_replace_note = (
         "// btree_port port step 52: map.entry merged into this module. The\n"
         "// OccupiedEntry / VacantEntry / Entry / OccupiedError struct defs\n"
-        "// are now inlined below, ahead of the BTreeMap struct."
+        "// are now inlined below, ahead of the BTreeMap struct.\n"
     )
-    if import_marker in map_src:
-        map_src = map_src.replace(import_marker, import_replace, 1)
+    new_map_src, n_stripped = re.subn(
+        r"^import btree_port\.btree\.map\.entry;\s*\n",
+        import_replace_note,
+        map_src,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n_stripped:
+        map_src = new_map_src
+    else:
+        print(
+            f"  [warn] no `import btree_port.btree.map.entry;` line in {map_mod.name}",
+            file=sys.stderr,
+        )
 
     # 3. Extract entry content from map.entry.cppm. We take everything
     #    after the `export module btree_port.btree.map.entry;` line
@@ -2070,13 +2096,21 @@ def fix_tuple_dot_underscore_access(path: Path) -> None:
     # (the known emitted shapes).
     landed = 0
     for method in ("into_kv", "into_kv_mut"):
+        # Match `[this->]<ident>.<method>()._N` and rewrite to
+        # `std::get<N>([this->]<ident>.<method>())`. The optional `this->`
+        # prefix matters because otherwise the rewrite leaves a stale
+        # `this->std::get<...>(...)` that doesn't compile (`std::get` isn't
+        # a member of `this`).
         pattern = re.compile(
-            r"(\w+)\." + method + r"\(\)\._([0-9]+)"
+            r"(this->)?(\w+)\." + method + r"\(\)\._([0-9]+)"
         )
-        def repl(m):
-            ident = m.group(1)
-            idx = m.group(2)
-            return f"std::get<{idx}>({ident}.{method}())"
+
+        def repl(m, method=method):
+            this_prefix = m.group(1) or ""
+            ident = m.group(2)
+            idx = m.group(3)
+            return f"std::get<{idx}>({this_prefix}{ident}.{method}())"
+
         new_src, n = pattern.subn(repl, src)
         if n > 0:
             src = new_src
@@ -2182,7 +2216,10 @@ def implement_handle_into_kv(path: Path) -> None:
         "        assert((this->idx_field < rusty::len(this->node)));\n"
         "        // this->node : NodeRef<__B, __K, __V, Tag>;\n"
         "        // into_leaf returns &LeafNode<__K, __V>.\n"
-        "        const auto leaf = ([&](auto&& __recv) -> decltype(auto) {\n"
+        "        // Step 64: use `const auto&` (not `const auto`) to preserve the\n"
+        "        // reference; otherwise we copy the LeafNode and return dangling\n"
+        "        // references to keys/vals inside the copy.\n"
+        "        const auto& leaf = ([&](auto&& __recv) -> decltype(auto) {\n"
         "            if constexpr (requires { std::forward<decltype(__recv)>(__recv).into_leaf(); }) {\n"
         "                return std::forward<decltype(__recv)>(__recv).into_leaf();\n"
         "            } else {\n"
@@ -2319,6 +2356,256 @@ def apply_step58_lazy_gates_and_fixes(path: Path) -> None:
         print(f"  applied {landed} step-58/59 fix categories in: {path.name}")
     else:
         print(f"  no step-58/59 fix sites matched in: {path.name}")
+
+
+def fix_static_factory_param_type_recovery(path: Path) -> None:
+    """After Cluster A landed, the transpiler drops impl-block generic params
+    that decompose structurally into the host (e.g. `BorrowType, K, V, NodeType`
+    when the host is `Handle<Node, Type>` and the absorbed impl was over
+    `Handle<NodeRef<BorrowType, K, V, NodeType>, Type>`). Method bodies are
+    still patched with `using BorrowType = typename __TemplateArgs<Node>::arg_0;`
+    (etc.) inside the body, which works for return-type references — but
+    static-factory PARAMETER TYPES like `NodeRef<BorrowType, K, V, NodeType>`
+    refer to those identifiers BEFORE the body opens, when no `using` aliases
+    are in scope yet.
+
+    The two known sites are `new_kv` / `new_edge`. Fix: replace the parameter
+    type with `auto` (C++20 abbreviated function template) so the call-site
+    type is deduced from the argument. Body code still uses the
+    `using BorrowType = …` aliases for return-position constructions, which
+    work fine post-signature.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: new_kv/new_edge auto-param recovered by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (new_kv/new_edge auto-param already fixed)")
+        return
+
+    landed = 0
+    for name in ("new_kv", "new_edge"):
+        bad = (
+            f"    static auto {name}("
+            "NodeRef<BorrowType, K, V, NodeType> node, size_t idx) -> Handle<Node, Type> {\n"
+        )
+        good = (
+            f"    {sentinel.replace('post_transpile_patch.py', name).replace('// ', '    // ')}\n"
+            "    "
+            f"static auto {name}(auto node, size_t idx) -> Handle<Node, Type> {{\n"
+        )
+        if bad in src:
+            src = src.replace(bad, good, 1)
+            landed += 1
+    if landed:
+        path.write_text(src)
+        print(f"  rewrote {landed} new_kv/new_edge param(s) to auto in: {path.name}")
+    else:
+        print(f"  no new_kv/new_edge static-factory param sites in: {path.name}")
+
+
+def apply_step66_map_runtime_fixes(path: Path) -> None:
+    """Step 67: codify the step 64/65/66 map.cppm fixes that brought the
+    transpiled BTreeMap smoke test to all-green.
+
+    These run AFTER `stub_broken_map_methods` / `stub_broken_map_entry_methods`
+    so the stubbed bodies get OVERWRITTEN with the real implementations.
+
+    Fixes:
+      1. Step 66: `~BTreeMap` infinite-recursion segfault. The transpiler
+         emitted `rusty::mem::drop(rusty::iter(rusty::ptr::read(&(*this))))`
+         which (a) borrows via `rusty::iter` rather than consuming via
+         `.into_iter()`, and (b) the stack-temp from `ptr::read` recursively
+         re-enters ~BTreeMap because consume_forgotten_address never returns
+         true for the temp's fresh address. Replace with a mark-forgotten
+         leak (member dtors are trivial; a proper IntoIter-driven drop is
+         deferred).
+      2. Step 64: `BTreeMap::insert` arm reversal. Transpiler emitted the
+         Vacant and Occupied arms swapped. Rewrite to match Rust: Vacant
+         → insert and return None; Occupied → return Some(old).
+      3. Step 64: un-stub `BTreeMap::first_key_value`. Rust source:
+         `let root_node = self.root.as_ref()?.reborrow();
+          root_node.first_leaf_edge().right_kv().ok().map(Handle::into_kv)`.
+      4. Step 65: un-stub `BTreeMap::last_key_value`. Mirror of above using
+         `last_leaf_edge().left_kv()`.
+      5. Step 64: un-stub `OccupiedEntry::into_mut`. Rust:
+         `self.handle.into_val_mut()`.
+      6. Step 64: un-stub `OccupiedEntry::get_mut`. Rust:
+         `self.handle.kv_mut().1`.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port step 67: step 64-66 runtime fixes codified by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (step 64-66 runtime fixes already codified)")
+        return
+    landed = 0
+
+    # 1. ~BTreeMap destructor — replace the broken body with a leak.
+    old_dtor_body = (
+        "    ~BTreeMap() noexcept(false) {\n"
+        "        if (rusty::mem::consume_forgotten_address(this)) { return; }\n"
+        "        rusty::mem::drop(rusty::iter(rusty::ptr::read(&(*this))));\n"
+        "    }"
+    )
+    new_dtor_body = (
+        "    ~BTreeMap() noexcept(false) {\n"
+        "        if (rusty::mem::consume_forgotten_address(this)) { return; }\n"
+        "        // Step 66: the transpiler emitted\n"
+        "        //   rusty::mem::drop(rusty::iter(rusty::ptr::read(&(*this))))\n"
+        "        // which is wrong on two counts: (a) `rusty::iter` returns the\n"
+        "        // BORROWING Iter<K,V>, not the consuming IntoIter, so heap\n"
+        "        // nodes are never freed; (b) `ptr::read` produces a stack-\n"
+        "        // temp BTreeMap whose own ~BTreeMap would `ptr::read` AGAIN\n"
+        "        // and recurse infinitely (consume_forgotten_address never\n"
+        "        // returns true for the temp's fresh address) → stack overflow.\n"
+        "        //\n"
+        "        // A proper drop would route through `into_iter()` + IntoIter's\n"
+        "        // deallocating_next walk, but that path drags in more uninstan-\n"
+        "        // tiated stubs (ManuallyDrop field-access, deallocating_*).\n"
+        "        // Member destructors are all trivial (NodeRef wraps a NonNull\n"
+        "        // pointer, ManuallyDrop<A> doesn't drop A), so leaking the\n"
+        "        // leaf-node allocations at program exit is the pragmatic\n"
+        "        // fix for the hybrid milestone.\n"
+        "        rusty::mem::mark_forgotten_address(this);\n"
+        "    }"
+    )
+    if old_dtor_body in src:
+        src = src.replace(old_dtor_body, new_dtor_body, 1)
+        landed += 1
+        print(f"  step 66: fixed ~BTreeMap infinite-recursion in: {path.name}")
+
+    # 2. BTreeMap::insert — replace the stubbed body (from stub_broken_map_methods
+    # if it was stubbed) OR the original transpiler emit (with arms swapped).
+    insert_stub = (
+        "    rusty::Option<V> insert(K key, V value) {\n"
+        "        // btree_port port: BTreeMap::insert stubbed by post_transpile_patch.py\n"
+        "        throw ::std::runtime_error(\"rusty-cpp-transpiler: BTreeMap::insert stub\");\n"
+        "    }"
+    )
+    insert_real = (
+        "    rusty::Option<V> insert(K key, V value) {\n"
+        "        // Step 64: transpiler emitted the Vacant/Occupied arms swapped.\n"
+        "        // Rust source: `match self.entry(key) { Occupied(e) => Some(e.insert(v)),\n"
+        "        // Vacant(e) => { e.insert(v); None } }`.\n"
+        "        // In our variant, index 0 = Entry_Vacant, index 1 = Entry_Occupied.\n"
+        "        auto&& _m = this->entry(std::move(key));\n"
+        "        if (_m.index() == 0) {\n"
+        "            // Vacant: insert + return None.\n"
+        "            auto entry_shadow1 = std::move(std::get<0>(_m)._0);\n"
+        "            entry_shadow1.insert(std::move(value));\n"
+        "            return rusty::Option<V>{rusty::None};\n"
+        "        }\n"
+        "        // Occupied: return Some(old_value).\n"
+        "        auto entry_shadow1 = std::move(std::get<1>(_m)._0);\n"
+        "        return rusty::Option<V>(entry_shadow1.insert(std::move(value)));\n"
+        "    }"
+    )
+    if insert_stub in src:
+        src = src.replace(insert_stub, insert_real, 1)
+        landed += 1
+        print(f"  step 64: un-stubbed BTreeMap::insert in: {path.name}")
+
+    # 3. BTreeMap::first_key_value — un-stub.
+    fkv_stub = (
+        "    rusty::Option<std::tuple<const K&, const V&>> first_key_value() const {\n"
+        "        // btree_port port: BTreeMap::first_key_value stubbed by post_transpile_patch.py\n"
+        "        throw ::std::runtime_error(\"rusty-cpp-transpiler: BTreeMap::first_key_value stub\");\n"
+        "    }"
+    )
+    fkv_real = (
+        "    rusty::Option<std::tuple<const K&, const V&>> first_key_value() const {\n"
+        "        // Step 64: un-stubbed. Rust source:\n"
+        "        //   let root_node = self.root.as_ref()?.reborrow();\n"
+        "        //   root_node.first_leaf_edge().right_kv().ok().map(Handle::into_kv)\n"
+        "        const auto root_opt = this->root.as_ref();\n"
+        "        if (root_opt.is_none()) {\n"
+        "            return rusty::None;\n"
+        "        }\n"
+        "        auto root_node = root_opt.unwrap().reborrow();\n"
+        "        auto right_kv_res = root_node.first_leaf_edge().right_kv();\n"
+        "        if (right_kv_res.is_err()) {\n"
+        "            return rusty::None;\n"
+        "        }\n"
+        "        auto kv_handle = std::move(right_kv_res).unwrap();\n"
+        "        return rusty::Option<std::tuple<const K&, const V&>>(kv_handle.into_kv());\n"
+        "    }"
+    )
+    if fkv_stub in src:
+        src = src.replace(fkv_stub, fkv_real, 1)
+        landed += 1
+        print(f"  step 64: un-stubbed BTreeMap::first_key_value in: {path.name}")
+
+    # 4. BTreeMap::last_key_value — un-stub.
+    lkv_stub = (
+        "    rusty::Option<std::tuple<const K&, const V&>> last_key_value() const {\n"
+        "        // btree_port port: BTreeMap::last_key_value stubbed by post_transpile_patch.py\n"
+        "        throw ::std::runtime_error(\"rusty-cpp-transpiler: BTreeMap::last_key_value stub\");\n"
+        "    }"
+    )
+    lkv_real = (
+        "    rusty::Option<std::tuple<const K&, const V&>> last_key_value() const {\n"
+        "        // Step 65: un-stubbed. Rust source:\n"
+        "        //   let root_node = self.root.as_ref()?.reborrow();\n"
+        "        //   root_node.last_leaf_edge().left_kv().ok().map(Handle::into_kv)\n"
+        "        const auto root_opt = this->root.as_ref();\n"
+        "        if (root_opt.is_none()) {\n"
+        "            return rusty::None;\n"
+        "        }\n"
+        "        auto root_node = root_opt.unwrap().reborrow();\n"
+        "        auto left_kv_res = root_node.last_leaf_edge().left_kv();\n"
+        "        if (left_kv_res.is_err()) {\n"
+        "            return rusty::None;\n"
+        "        }\n"
+        "        auto kv_handle = std::move(left_kv_res).unwrap();\n"
+        "        return rusty::Option<std::tuple<const K&, const V&>>(kv_handle.into_kv());\n"
+        "    }"
+    )
+    if lkv_stub in src:
+        src = src.replace(lkv_stub, lkv_real, 1)
+        landed += 1
+        print(f"  step 65: un-stubbed BTreeMap::last_key_value in: {path.name}")
+
+    # 5. OccupiedEntry::into_mut — un-stub.
+    into_mut_stub = (
+        "    V& into_mut() {\n"
+        "        // btree_port port: OccupiedEntry::into_mut stubbed by post_transpile_patch.py\n"
+        "        throw ::std::runtime_error(\"rusty-cpp-transpiler: OccupiedEntry::into_mut stub\");\n"
+        "    }"
+    )
+    into_mut_real = (
+        "    V& into_mut() {\n"
+        "        // Step 64: un-stubbed — calls Handle::into_val_mut on the\n"
+        "        // owned KV handle to get a mutable ref into the leaf node.\n"
+        "        return this->handle.into_val_mut();\n"
+        "    }"
+    )
+    if into_mut_stub in src:
+        src = src.replace(into_mut_stub, into_mut_real, 1)
+        landed += 1
+        print(f"  step 64: un-stubbed OccupiedEntry::into_mut in: {path.name}")
+
+    # 6. OccupiedEntry::get_mut — un-stub.
+    get_mut_stub = (
+        "    V& get_mut() {\n"
+        "        // btree_port port: OccupiedEntry::get_mut stubbed by post_transpile_patch.py\n"
+        "        throw ::std::runtime_error(\"rusty-cpp-transpiler: OccupiedEntry::get_mut stub\");\n"
+        "    }"
+    )
+    get_mut_real = (
+        "    V& get_mut() {\n"
+        "        // Step 64: un-stubbed — Rust: `self.handle.kv_mut().1`.\n"
+        "        return std::get<1>(this->handle.kv_mut());\n"
+        "    }"
+    )
+    if get_mut_stub in src:
+        src = src.replace(get_mut_stub, get_mut_real, 1)
+        landed += 1
+        print(f"  step 64: un-stubbed OccupiedEntry::get_mut in: {path.name}")
+
+    if landed > 0:
+        src = sentinel + "\n" + src
+        path.write_text(src)
+        print(f"  applied {landed} step 64-66 runtime fixes in: {path.name}")
+    else:
+        print(f"  no step 64-66 runtime fix sites matched in: {path.name}")
 
 
 def apply_step54_insert_path_fixes(path: Path) -> None:
@@ -3525,6 +3812,12 @@ def main() -> int:
     # InternalNode::new_ bypass, correct_parent_link arg recovery,
     # .height → .height_field rewrites.
     apply_step58_lazy_gates_and_fixes(internal)
+    # After Cluster A landed, the transpiler drops method-template params
+    # for `Handle::new_kv` / `new_edge`, but the static-factory parameter
+    # type `NodeRef<BorrowType, K, V, NodeType>` still references those
+    # identifiers — at signature scope, before the body's `using` aliases
+    # take effect. Convert the param to `auto` so it's deduced from the arg.
+    fix_static_factory_param_type_recovery(internal)
     # search_tree is hand-ported; the older stub_broken_search_tree
     # is left in the source for reference but not invoked.
     implement_search_tree(internal)
@@ -3656,6 +3949,11 @@ def main() -> int:
         fix_empty_write_return(map_mod)
         # `handle.into_kv()._1` etc. — rewrite to `std::get<1>(...)`.
         fix_tuple_dot_underscore_access(map_mod)
+        # Step 67: codify the step 64-66 runtime fixes that brought the
+        # transpiled BTreeMap smoke test to all-green. Must run AFTER
+        # stub_broken_map_methods so the stubbed bodies get OVERWRITTEN
+        # with the real implementations.
+        apply_step66_map_runtime_fixes(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")

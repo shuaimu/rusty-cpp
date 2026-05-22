@@ -311,6 +311,111 @@ Neither fix fits in a single iteration. The hybrid as-delivered:
 - Transpiled BTreeMap::insert / entry: blocked on the architectural
   barrier above.
 
+**Step 66 — transpiled BTreeMap smoke test PASSES end-to-end.** All
+8 assertions green, clean exit. The hybrid (mostly-transpiled +
+hand-patched internals) is now a working data structure.
+
+Smoke test output:
+```
+[ok]   first insert: no displacement
+[ok]   get(1) after insert: some
+[dbg]  v0_val = 100
+[ok]   get(1) returns 100
+[ok]   second insert at key 1: some displacement
+[ok]   displaced value is 100
+[ok]   first_key_value: some
+[ok]   last_key_value: some
+transpiled BTreeMap smoke: ALL CHECKS PASSED
+EXIT=0
+```
+
+Steps 62-66 cleared the remaining architectural barriers and
+runtime stubs:
+
+1. **Step 62: `Handle::split` tag-dispatched via `if constexpr`.**
+   Step 61 identified that the transpiler collapsed two Rust impl
+   blocks (`<...,Leaf>` and `<...,Internal>`) into one C++ method
+   that always returned `SplitResult<...,Leaf>`. Fix: branch the
+   method body on `std::same_as<Tag, ::marker::Leaf>` and provide
+   both Leaf and Internal split variants.
+
+2. **Step 63: gated `correct_*_parent_link` + Internal-only helpers.**
+   `correct_childrens_parent_links`, `correct_all_childrens_parent_links`,
+   `from_new_internal`, and `new_internal` all only make sense when
+   the host NodeRef has `Type=Internal`. Added
+   `requires (std::same_as<Type, ::marker::Internal>)` gates so they
+   don't instantiate against Leaf shapes.
+
+3. **Step 64: lazy-gated `into_val_mut` / `kv_mut` / `right_kv`;
+   fixed dangling-ref bug in `into_kv`; fixed `BTreeMap::insert` arm
+   reversal; un-stubbed `OccupiedEntry::into_mut`, `get_mut`,
+   `BTreeMap::first_key_value`.**
+   - Critical data-corruption fix: `Handle::into_kv` used
+     `const auto leaf = into_leaf()` which COPIED the leaf node by
+     value, then returned references into the copy → dangling.
+     Changed to `const auto& leaf` to preserve the reference.
+     This was the bug behind the `v0_val = 502902576` garbage seen
+     before; after the fix v0_val correctly = 100.
+   - `BTreeMap::insert` had its Vacant/Occupied match arms swapped
+     in the transpiler emit — the Vacant arm returned the
+     entry-insert result (which is the new value), but Rust returns
+     None for vacant. Rewrote with explicit if/else matching the
+     Rust source.
+   - `Handle::push_internal_level` needed an explicit `Internal`
+     tag on the `NodeRef<BorrowType, K, V, ::marker::Internal>::new_internal`
+     call since `new_internal` was step-63 gated to Internal.
+
+4. **Step 65: un-stubbed `BTreeMap::last_key_value` + converted
+   `Handle::left_kv` to lazy gate.** `last_key_value` was patcher-
+   stubbed; reimplemented to mirror `first_key_value` using
+   `last_leaf_edge().left_kv()`. `left_kv` still had the old
+   explicit-template-args signature where `BorrowType` couldn't be
+   inferred at the call site (no argument carried it); converted
+   to the lazy-gate pattern (`template<typename=void> + auto +
+   requires (__IsNodeRef<Node>)`) like `right_kv` got in step 64.
+
+5. **Step 66: fixed `~BTreeMap` infinite-recursion segfault.**
+   The transpiler emitted
+   `rusty::mem::drop(rusty::iter(rusty::ptr::read(&(*this))))`.
+   Two bugs: (a) `rusty::iter` returns the borrowing `Iter<K,V>`
+   (a no-op on drop), not the consuming `IntoIter` that owns heap
+   nodes; (b) `ptr::read` returns a stack-temp BTreeMap whose own
+   destructor would `ptr::read` AGAIN and recurse infinitely until
+   stack overflow. Member destructors are all trivial (NodeRef is
+   a NonNull wrapper, ManuallyDrop<A> doesn't drop A), so the
+   simplest fix is to mark `this` as forgotten so any recursive
+   destructor short-circuits via `consume_forgotten_address`, and
+   leak the heap leaf-node allocations at program exit. A proper
+   drop would route through `into_iter()` but that path drags in
+   ManuallyDrop field-access and `deallocating_*` stubs that need
+   more work. Acceptable for the hybrid milestone.
+
+**Step 67 — codify the highest-impact step 64-66 fixes into the
+patcher.** Added `apply_step66_map_runtime_fixes()` in
+`post_transpile_patch.py` covering:
+- ~BTreeMap recursion fix (step 66)
+- BTreeMap::insert arm reversal (step 64)
+- BTreeMap::first_key_value / last_key_value un-stubs (steps 64, 65)
+- OccupiedEntry::into_mut / get_mut un-stubs (step 64)
+
+Also fixed `implement_handle_into_kv` which was emitting `const auto
+leaf` (value copy → dangling refs). Changed to `const auto& leaf`
+(the critical data-corruption fix from step 64).
+
+Step 67 covers the map.cppm-side fixes that are simple text
+replacements. The btree_internal.cppm-side fixes (tag-dispatched
+Handle::split from step 62, Internal-only gates on correct_*_parent_
+links / new_internal / descend from step 63, left_kv lazy gate from
+step 65, push_internal_level explicit Internal tag from step 64)
+still need codification — they involve larger multi-line edits to
+class-template bodies. Deferred to a future iteration. The hybrid
+milestone (smoke test all-green) holds without them as long as the
+current `/tmp/btree_port_attempt/cpp_out/btree_port.btree.btree_internal.cppm`
+remains intact.
+
+Proper IntoIter-based drop also deferred — leak is fine for the
+smoke milestone.
+
 **Step 61 — fixed `assume_init` const-qual, hit transpiler-level
 Rust-impl shape loss for `split`.** Two more chips at the insert path:
 

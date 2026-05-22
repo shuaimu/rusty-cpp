@@ -116,6 +116,13 @@ public:
         }
     }
 
+    // Rust's `MaybeUninit::assume_init_drop(&mut self)` — drop the inner
+    // value in place. Same semantics as `destroy()`; aliased here so the
+    // transpiler can emit the Rust-side spelling without rewriting.
+    void assume_init_drop() noexcept(std::is_nothrow_destructible_v<T>) {
+        destroy();
+    }
+
     // Create with an initial value.
     // `new_` is the primary Rust-surface entrypoint (`MaybeUninit::new` in Rust),
     // while `new_with` is kept as a compatibility alias.
