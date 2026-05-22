@@ -395,6 +395,20 @@ public:
         return value;
     }
 
+    // Rust parity: Option::insert(&mut self, value: T) -> &mut T
+    // (Rust 1.53+) Insert `value` into the Option, dropping the prior
+    // value if any, and return a mutable reference to the new one.
+    // Unlike `get_or_insert`, this OVERWRITES — so it always returns a
+    // ref to the just-inserted value.
+    T& insert(T new_value) {
+        if (has_value) {
+            value.~T();
+        }
+        new (&value) T(std::move(new_value));
+        has_value = true;
+        return value;
+    }
+
     // Rust parity: Option::get_or_insert_with(self, f) -> &mut T
     template<typename F>
     T& get_or_insert_with(F&& f) {
