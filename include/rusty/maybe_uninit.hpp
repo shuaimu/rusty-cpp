@@ -88,6 +88,15 @@ public:
         return *as_ptr();
     }
 
+    // Rust's `MaybeUninit::assume_init_mut(&mut self) -> &mut T`. Same
+    // contract as the non-const `assume_init_ref` overload above, but
+    // exposed under the spelling that the transpiler emits for the
+    // `_mut` variant. (Rust has both methods; C++ would collapse them
+    // via overloading, but the transpiler doesn't reshape callsites.)
+    T& assume_init_mut() noexcept {
+        return *as_mut_ptr();
+    }
+
     // Rust's `MaybeUninit::assume_init_read(&self) -> T` — read a copy
     // of the contained value without destroying the source. Caller must
     // ensure (1) the value is initialized and (2) for non-Copy T the
