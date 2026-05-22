@@ -3650,6 +3650,19 @@ def patch_cmake(path: Path, rusty_include_dir: Path) -> None:
     """Trim CMakeLists.txt to btree_internal-only and wire the rusty
     include path so reconfigure doesn't drop -I."""
     src = path.read_text()
+    # The transpiler emits `set(CMAKE_CXX_STANDARD 20)` but the runtime
+    # headers (rusty/*.hpp) use C++23 features (std::println, deduced
+    # this, etc.) so bump to 23. Idempotent — looks for the exact 20
+    # setter; once swapped the substitution is a no-op.
+    cxx_std_orig = "set(CMAKE_CXX_STANDARD 20)"
+    cxx_std_new = (
+        "set(CMAKE_CXX_STANDARD 23)  "
+        "# btree_port port: bumped to 23 for std::println in transpiled internals"
+    )
+    if cxx_std_orig in src:
+        src = src.replace(cxx_std_orig, cxx_std_new, 1)
+        path.write_text(src)
+        print(f"  bumped CMAKE_CXX_STANDARD 20 → 23 in: {path.name}")
     sentinel = "# btree_port port: trimmed by post_transpile_patch.py"
     if sentinel in src:
         print(f"  no changes to: {path.name} (already trimmed)")
@@ -3726,6 +3739,16 @@ def patch_cmake(path: Path, rusty_include_dir: Path) -> None:
         "        OR CMAKE_CXX_COMPILER_ID STREQUAL \"AppleClang\"))\n"
         "    add_executable(btree_port_transpiled_read_smoke transpiled_read_smoke.cpp)\n"
         "    target_link_libraries(btree_port_transpiled_read_smoke PRIVATE btree_port)\n"
+        "endif()\n"
+        "\n"
+        "# Write-path smoke test — exercises insert / get / first_key_value /\n"
+        "# last_key_value end-to-end on the transpiled tree. Only built when\n"
+        "# the transpiled_smoke.cpp source is present.\n"
+        "if(EXISTS \"${CMAKE_CURRENT_SOURCE_DIR}/transpiled_smoke.cpp\"\n"
+        "   AND (CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\"\n"
+        "        OR CMAKE_CXX_COMPILER_ID STREQUAL \"AppleClang\"))\n"
+        "    add_executable(btree_port_transpiled_smoke transpiled_smoke.cpp)\n"
+        "    target_link_libraries(btree_port_transpiled_smoke PRIVATE btree_port)\n"
         "endif()\n"
     )
     # Match from 'add_library(btree_port' through the FIRST ')' that
