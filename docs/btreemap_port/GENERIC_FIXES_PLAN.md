@@ -153,7 +153,7 @@ with `.emplace`/`.value()`). But the BTreeMap merge_iter case:
     let mut a_next;
     let mut b_next;
     match self.peeked.take() {
-        Some(Peeked::Left(next)) => { a_next = Some(next); … }
+        Some(Peeked::Leftaedd910) => { a_next = Some(next); … }
         …
     }
 
@@ -320,7 +320,7 @@ only larger inserts would.
 | 3  | By-value self → C++ `const`                  | deferred*   | —      |
 | 4  | Const-value match patterns                   | partial*    | 0fc730f |
 | 5  | Uninitialized `let` bindings                 | deferred*   | —      |
-| 6  | Ref-returning `let` bindings                 | partial*    | (next) |
+| 6  | Ref-returning `let` bindings                 | partial*    | aedd910 |
 | 7  | Wrong template-arg recovery                  | pending     | —      |
 | 8  | Recursive lambda → Y-combinator              | pending     | —      |
 | 9  | Module-namespace prefix stripping (borderline) | pending   | —      |
