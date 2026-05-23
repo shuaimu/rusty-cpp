@@ -3351,6 +3351,102 @@ def _impl_deallocating_helper(direction: str) -> tuple[str, str]:
     return sig_tail, body
 
 
+def stub_insert_recursing(path: Path) -> None:
+    """Stub `Handle::insert_recursing(key, value, alloc, split_root)`.
+    The transpiled body uses a `std::visit(overloaded{[&](auto&&) {
+    unreachable(); }, [&](auto&&) { unreachable(); }}, ...)` — the
+    transpiler couldn't lower the complex tuple-pattern match
+    `(None, handle)|(Some(_),_)` in the Rust source's match arm.
+    Both lambdas return void, but the result is destructured as a
+    pair `auto [split, handle] = visit(...)` — which can't compile.
+
+    For the empty-map insert path (`VacantEntry::insert_entry` with
+    `self.handle == None`), insert_recursing is NOT called. But C++
+    template instantiation forces the body to compile anyway. Stub
+    with a throw so the instantiation succeeds; calls at runtime
+    will abort (which the empty-map path never reaches).
+    """
+    import re
+    src = path.read_text()
+    sentinel = "// btree_port port: insert_recursing stubbed by post_transpile_patch.py"
+    if sentinel in src:
+        return
+    sig_anchor = "insert_recursing(typename __TemplateArgs<Node>::arg_1 key,"
+    pos = src.find(sig_anchor)
+    if pos == -1:
+        print(f"  no insert_recursing site in: {path.name}")
+        return
+    brace_open = src.find("{", pos)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        return
+    stub_body = (
+        f"{{ /* {sentinel} */ "
+        "throw ::std::runtime_error(\"rusty-cpp-transpiler: insert_recursing "
+        "stub (complex tuple match unreachable in transpiler)\"); }"
+    )
+    src = src[:brace_open] + stub_body + src[brace_close + 1 :]
+    path.write_text(src)
+    print(f"  stubbed Handle::insert_recursing in: {path.name}")
+
+
+def fix_from_new_leaf_markers(path: Path) -> None:
+    """Rewrite `NodeRef<::marker::Mut, …, ::marker::Internal>::from_new_leaf(…)`
+    to `NodeRef<::marker::Owned, …, ::marker::Leaf>::from_new_leaf(…)`.
+    `from_new_leaf` constructs an owned leaf node — the Rust source omits
+    explicit template args and lets type inference pick Owned+Leaf. The
+    transpiler's recovery picked Mut+Internal (from the impl's
+    NodeRef<Mut, K, V, Leaf> shape, mis-applying the Internal marker).
+    """
+    src = path.read_text()
+    ta = "typename __TemplateArgs<Node>::arg_"
+    pattern_old = (
+        f"NodeRef<::marker::Mut, {ta}1, {ta}2, ::marker::Internal>::from_new_leaf("
+    )
+    pattern_new = (
+        f"NodeRef<::marker::Owned, {ta}1, {ta}2, ::marker::Leaf>::from_new_leaf("
+    )
+    n = src.count(pattern_old)
+    if n == 0:
+        print(f"  no NodeRef<Mut,…,Internal>::from_new_leaf sites in: {path.name}")
+        return
+    src = src.replace(pattern_old, pattern_new)
+    path.write_text(src)
+    print(f"  rewrote {n} NodeRef<Mut,…,Internal>::from_new_leaf → <Owned,…,Leaf> in: {path.name}")
+
+
+def fix_leafnode_new_template_args(path: Path) -> None:
+    """Rewrite the emit-side mis-recovery `LeafNode<A, Node>::new_(...)` to
+    `LeafNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>::new_(...)`
+    in absorbed Handle methods. The Rust source is `LeafNode::new(alloc)`
+    (no explicit args); the transpiler's recovery picked `A` (method's
+    allocator template) and `Node` (host class param) instead of K, V.
+    Inside the absorbed method, K and V are no longer in scope as type
+    params — they're only reachable via `__TemplateArgs<Node>::arg_1/2`."""
+    src = path.read_text()
+    pattern_old = "LeafNode<A, Node>::new_("
+    pattern_new = (
+        "LeafNode<typename __TemplateArgs<Node>::arg_1, "
+        "typename __TemplateArgs<Node>::arg_2>::new_("
+    )
+    n = src.count(pattern_old)
+    if n == 0:
+        print(f"  no LeafNode<A, Node>::new_ sites in: {path.name}")
+        return
+    src = src.replace(pattern_old, pattern_new)
+    path.write_text(src)
+    print(f"  rewrote {n} LeafNode<A, Node>::new_ → <__TA::arg_1, __TA::arg_2>::new_ in: {path.name}")
+
+
 def fix_dormant_map_reborrow_binding(path: Path) -> None:
     """Rewrite `const auto map = this->dormant_map.reborrow();` to
     `auto& map = this->dormant_map.reborrow();` so subsequent calls like
@@ -3362,6 +3458,10 @@ def fix_dormant_map_reborrow_binding(path: Path) -> None:
     disables the non-const Option methods. Same issue with the
     `const auto root = map.root.insert(...)` line — `Option::insert`
     returns &mut T.
+
+    Also rewrite `const auto handle = [&](){…}();` IIFE-result bindings
+    in insert_entry to `auto handle = ...` so `handle.forget_node_type()`
+    (non-const member call) resolves.
     """
     src = path.read_text()
     pairs = [
@@ -3369,6 +3469,8 @@ def fix_dormant_map_reborrow_binding(path: Path) -> None:
          "auto& map = this->dormant_map.reborrow()"),
         ("const auto root = map.root.insert(",
          "auto& root = map.root.insert("),
+        ("const auto handle = [&]() { auto&& _m = this->handle;",
+         "auto handle = [&]() { auto&& _m = this->handle;"),
     ]
     n_fixed = 0
     for old, new in pairs:
@@ -3963,6 +4065,17 @@ def main() -> int:
     # no get_unchecked; the Rust source's unsafe contract maps cleanly
     # to operator[]'s no-bounds-check behavior.
     fix_std_array_get_unchecked(internal)
+    # Issue D from write-path investigation: absorbed Handle::split emits
+    # `LeafNode<A, Node>::new_(...)` (wrong recovery — A is method's
+    # allocator, Node is host class). Rewrite to use __TemplateArgs<Node>.
+    fix_leafnode_new_template_args(internal)
+    # Issue D follow-on: `NodeRef<Mut,…,Internal>::from_new_leaf(…)` should
+    # be `<Owned,…,Leaf>` (Rust source has no explicit args).
+    fix_from_new_leaf_markers(internal)
+    # Issue B: insert_recursing has unrecoverable std::visit body. Stub
+    # it so write-path instantiation succeeds; empty-map insert never
+    # reaches it.
+    stub_insert_recursing(internal)
     # Issue A from write-path investigation: `const auto map = this->dormant_map.reborrow();`
     # decays the &mut T return to a value copy. Rewrite to `auto&`.
     fix_dormant_map_reborrow_binding(internal)
@@ -4027,7 +4140,8 @@ def main() -> int:
         strip_module_namespace_prefixes(map_entry, ["btree_internal"])
         align_requires_clauses(map_entry)
         remove_setvalzst_methods(map_entry)
-        stub_nodref_insert_entry(map_entry)
+        # Temporarily disabled to chase remaining write-path errors.
+        # stub_nodref_insert_entry(map_entry)
         stub_broken_map_entry_methods(map_entry)
         # Step 52: merge map.entry's struct definitions into map.cppm
         # (handled inside the map.cppm patching block below, since it
