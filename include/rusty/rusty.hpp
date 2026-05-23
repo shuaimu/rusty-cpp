@@ -85,6 +85,9 @@
 #include "rusty/sys/process.hpp"
 // Environment / host helpers (std::env equivalent — gethostname wrapper).
 #include "rusty/sys/env.hpp"
+// Thread-identity helper (pthread_self hash; rusty::sync::* wraps the
+// mutex / condvar / thread-create surface).
+#include "rusty/sys/pthread.hpp"
 // File descriptor wrappers (std::os::fd equivalent)
 #include "rusty/os/fd.hpp"
 // TCP networking (std::net equivalent — bind/connect/accept/read/write).

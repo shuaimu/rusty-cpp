@@ -94,6 +94,7 @@ export {
 #include <rusty/sys/time.hpp>
 #include <rusty/sys/process.hpp>
 #include <rusty/sys/env.hpp>
+#include <rusty/sys/pthread.hpp>
 #include <rusty/os/fd.hpp>
 #include <rusty/net/tcp.hpp>
 #include <rusty/mutex.hpp>
