@@ -153,7 +153,7 @@ with `.emplace`/`.value()`). But the BTreeMap merge_iter case:
     let mut a_next;
     let mut b_next;
     match self.peeked.take() {
-        Some(Peeked::Leftaedd910) => { a_next = Some(next); … }
+        Some(Peeked::Left(next)) => { a_next = Some(next); … }
         …
     }
 
