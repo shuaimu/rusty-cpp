@@ -2062,51 +2062,14 @@ def stub_broken_entry_method(path: Path) -> None:
     print(f"  stubbed BTreeMap::entry in: {path.name}")
 
 
-def fix_tuple_dot_underscore_access(path: Path) -> None:
-    """Rust's `tuple.0` / `tuple.1` accesses on std::tuple values
-    occasionally get emitted as `tuple._0` / `tuple._1` instead of
-    `std::get<N>(tuple)`. Specifically the BTreeMap get/get_or_insert
-    paths emit `handle.into_kv()._1` (or `_0`, `into_kv_mut()._0`).
-    Patch the few known sites; idempotent via sentinel.
-    """
-    src = path.read_text()
-    sentinel = "// btree_port port: tuple ._N access fixed by post_transpile_patch.py"
-    if sentinel in src:
-        print(f"  no changes to: {path.name} (tuple ._N access already fixed)")
-        return
-    import re
-    # Match `<expr>.into_kv()._N` and `<expr>.into_kv_mut()._N`. The
-    # <expr> is bounded by needing a balanced . chain to the left;
-    # for simplicity, match `<identifier>.into_kv[_mut]()._N` only
-    # (the known emitted shapes).
-    landed = 0
-    for method in ("into_kv", "into_kv_mut"):
-        # Match `[this->]<ident>.<method>()._N` and rewrite to
-        # `std::get<N>([this->]<ident>.<method>())`. The optional `this->`
-        # prefix matters because otherwise the rewrite leaves a stale
-        # `this->std::get<...>(...)` that doesn't compile (`std::get` isn't
-        # a member of `this`).
-        pattern = re.compile(
-            r"(this->)?(\w+)\." + method + r"\(\)\._([0-9]+)"
-        )
-
-        def repl(m, method=method):
-            this_prefix = m.group(1) or ""
-            ident = m.group(2)
-            idx = m.group(3)
-            return f"std::get<{idx}>({this_prefix}{ident}.{method}())"
-
-        new_src, n = pattern.subn(repl, src)
-        if n > 0:
-            src = new_src
-            landed += n
-    if landed > 0:
-        # Inject sentinel at top so re-runs skip.
-        src = sentinel + "\n" + src
-        path.write_text(src)
-        print(f"  rewrote {landed} `.into_kv[_mut]()._N` → `std::get<N>(...)` in: {path.name}")
-    else:
-        print(f"  no `.into_kv[_mut]()._N` sites in: {path.name}")
+# `fix_tuple_dot_underscore_access` removed — Item 1 of
+# GENERIC_FIXES_PLAN.md is now lifted into the transpiler. When the
+# receiver type of an `expr.N` access is genuinely unknown (e.g.
+# `auto&&`-bound through a deref chain), the emit path now wraps the
+# access in a `requires { __t._N; }` SFINAE dispatch that picks
+# `__t._N` for transpiler-synthesized tuple-structs or
+# `std::get<N>(__t)` for std::tuple/pair/array at C++ compile time.
+# See transpiler/src/codegen.rs `Expr::Field` → `Member::Unnamed`.
 
 
 def fix_borrow_method_fallback(path: Path) -> None:
@@ -3317,75 +3280,18 @@ def _impl_deallocating_helper(direction: str) -> tuple[str, str]:
     return sig_tail, body
 
 
-def stub_insert_recursing(path: Path) -> None:
-    """Stub `Handle::insert_recursing(key, value, alloc, split_root)`.
-    The transpiled body uses a `std::visit(overloaded{[&](auto&&) {
-    unreachable(); }, [&](auto&&) { unreachable(); }}, ...)` — the
-    transpiler couldn't lower the complex tuple-pattern match
-    `(None, handle)|(Some(_),_)` in the Rust source's match arm.
-    Both lambdas return void, but the result is destructured as a
-    pair `auto [split, handle] = visit(...)` — which can't compile.
-
-    For the empty-map insert path (`VacantEntry::insert_entry` with
-    `self.handle == None`), insert_recursing is NOT called. But C++
-    template instantiation forces the body to compile anyway. Stub
-    with a throw so the instantiation succeeds; calls at runtime
-    will abort (which the empty-map path never reaches).
-    """
-    import re
-    src = path.read_text()
-    sentinel = "// btree_port port: insert_recursing stubbed by post_transpile_patch.py"
-    if sentinel in src:
-        return
-    # Two known sigs depending on whether Cluster A absorbed the impl:
-    #   - Pre-Item-7: `insert_recursing(typename __TemplateArgs<Node>::arg_1 key,`
-    #   - Post-Item-7/11: `insert_recursing(K key,` (params surface as plain K/V).
-    sig_anchor_candidates = [
-        "insert_recursing(K key,",
-        "insert_recursing(typename __TemplateArgs<Node>::arg_1 key,",
-    ]
-    pos = -1
-    for cand in sig_anchor_candidates:
-        pos = src.find(cand)
-        if pos != -1:
-            break
-    if pos == -1:
-        print(f"  no insert_recursing site in: {path.name}")
-        return
-    # Item 11 completion lifted the outer `let pat = match { … }`
-    # lowering into the transpiler — the body now produces compilable
-    # statement-level `auto&& _let_match_tuple = …; if (…) { return …; };
-    # auto _let_match_result = [&](){ … }(); auto [pat] = …;` shape.
-    # However the body's INNER loop (the `while (true)` walking up the
-    # tree) still trips on three independent transpiler gaps that were
-    # previously hidden behind this stub:
-    #   1. `split.kv._0` (tuple `.N` field access on std::tuple) —
-    #      GENERIC_FIXES_PLAN Item #1.
-    #   2. `NonNull<LeafNode<int,int>>` constructor mismatch when
-    #      reusing the result of `from_new_leaf`.
-    #   3. `assume_init()` called on a `const MaybeUninit`.
-    # Until those are fixed, keep the stub so the build stays green.
-    brace_open = src.find("{", pos)
-    depth = 0
-    brace_close = -1
-    for k in range(brace_open, len(src)):
-        if src[k] == "{":
-            depth += 1
-        elif src[k] == "}":
-            depth -= 1
-            if depth == 0:
-                brace_close = k
-                break
-    if brace_close == -1:
-        return
-    stub_body = (
-        f"{{ /* {sentinel} */ "
-        "throw ::std::runtime_error(\"rusty-cpp-transpiler: insert_recursing "
-        "stub (complex tuple match unreachable in transpiler)\"); }"
-    )
-    src = src[:brace_open] + stub_body + src[brace_close + 1 :]
-    path.write_text(src)
-    print(f"  stubbed Handle::insert_recursing in: {path.name}")
+# `stub_insert_recursing` removed.
+#
+# Background: `Handle::insert_recursing` used to require a stub because
+# (a) the outer `let pat = match { (None,h) => return …, (Some(_),_) => … }`
+# couldn't lower out of an IIFE — Item 11 in GENERIC_FIXES_PLAN.md — and
+# (b) the inner `while (true)` body's `split.kv._0` tuple-field access
+# emitted `._0` on a `std::tuple<K,V>` field — Item 1 in the same plan.
+#
+# Both lifts have landed in the transpiler. The full `insert_recursing`
+# body now compiles directly: clean transpile + `libbtree_port.a` builds
+# under clang, link smoke + transpiled-read smoke both pass with this
+# rule disabled. See the GENERIC_FIXES_PLAN entries for Items 1 and 11.
 
 
 def fix_from_new_leaf_markers(path: Path) -> None:
@@ -4007,10 +3913,10 @@ def main() -> int:
     # Issue D follow-on: `NodeRef<…>::from_new_leaf(…)` should
     # be `<Owned,…,Leaf>` (Rust source has no explicit args).
     fix_from_new_leaf_markers(internal)
-    # Issue B: insert_recursing has unrecoverable std::visit body. Stub
-    # it so write-path instantiation succeeds; empty-map insert never
-    # reaches it.
-    stub_insert_recursing(internal)
+    # `stub_insert_recursing` was needed before Items 1 + 11 of the
+    # GENERIC_FIXES_PLAN landed; the transpiler now lowers
+    # insert_recursing's body directly. Call removed; the function
+    # itself is also gone (replaced with a comment block).
     # Issue A from write-path investigation: `const auto map = this->dormant_map.reborrow();`
     # decays the &mut T return to a value copy. Rewrite to `auto&`.
     fix_dormant_map_reborrow_binding(internal)
@@ -4162,8 +4068,12 @@ def main() -> int:
         # `return /* write!(...) */;` leftover from untranspiled
         # write! macro — needs a return value (A4).
         fix_empty_write_return(map_mod)
-        # `handle.into_kv()._1` etc. — rewrite to `std::get<1>(...)`.
-        fix_tuple_dot_underscore_access(map_mod)
+        # `fix_tuple_dot_underscore_access` removed — Item 1 of the
+        # GENERIC_FIXES_PLAN landed in the transpiler: when the
+        # receiver type is unknown, the emit now wraps `expr.N` in a
+        # `requires { __t._N; }` SFINAE dispatch that picks `_N` for
+        # tuple-structs or `std::get<N>` for std::tuple at C++ compile
+        # time.
         # Item 6 partial lift: `reborrow` is now in the transpiler's
         # method-name heuristic so `let map = …reborrow()` emits
         # `auto& map = …` directly. The follow-on `Option::insert`

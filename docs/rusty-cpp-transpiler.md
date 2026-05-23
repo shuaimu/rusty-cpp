@@ -422,7 +422,42 @@ Gates:
 
 Why the success arm sits inside an IIFE: inner pattern bindings (`Some(s), b`) can collide with the outer let-pat bindings (`a, b`). Wrapping the success arm in `[&]() { … }()` opens a fresh C++ scope so the inner `b` shadows safely; the IIFE's return value is then destructured into the outer let-pat via `auto [a, b] = _let_match_result;`. The IIFE's `auto` deduction also succeeds because only the single success arm contributes a value type — no divergent arms to deduce against.
 
-This completes Item #11 of the BTreeMap port's `GENERIC_FIXES_PLAN.md`. The recursive `insert_recursing` in `library/alloc/src/collections/btree/btree_internal.rs` is the canonical instance; the transpiler now emits its outer `let-match-return` shape directly without patcher intervention. (The patcher's `stub_insert_recursing` stays for now because the function body's *inner* `while (true)` loop still trips on three unrelated transpiler gaps documented alongside the patcher rule.)
+This completes Item #11 of the BTreeMap port's `GENERIC_FIXES_PLAN.md`. The recursive `insert_recursing` in `library/alloc/src/collections/btree/btree_internal.rs` is the canonical instance; the transpiler now emits its outer `let-match-return` shape directly. Together with §2.2.0.5 (tuple `.N` SFINAE dispatch) the function body's inner `while (true)` loop also compiles without patcher intervention — `stub_insert_recursing` has been removed from the BTreeMap port's `post_transpile_patch.py`.
+
+### 2.2.0.5 Tuple `.N` field access with unknown receiver type
+
+In Rust, `t.0` / `t.1` reads the Nth tuple field. The C++ form depends on what `t` is:
+
+- A transpiler-synthesized tuple-struct has named members `_0`, `_1`, … so the right lowering is `t._N`.
+- A `std::tuple<…>` (which is what the transpiler maps real Rust tuples to) requires `std::get<N>(t)`.
+
+When the transpiler can infer the receiver's type (either directly via `infer_simple_expr_type` or, for `self.foo()` shapes, via the current struct's method-return table), it picks the right form: `std::get<N>` for tuple-typed receivers, `_N` otherwise. The hard case is when the receiver is `auto&&`-bound through a deref chain that the type-inference pass can't trace — e.g. in the BTreeMap port:
+
+```cpp
+auto&& handle = rusty::detail::deref_if_pointer(std::get<0>(...)._0);
+auto kv      = handle.into_kv();   // kv: std::tuple<const K&, const V&>
+return kv.1;                       // ← can't see kv as std::tuple
+```
+
+For this case, the emit path at `Expr::Field` → `Member::Unnamed` falls back to a SFINAE-discriminated IIFE that picks the right form at C++ compile time:
+
+```cpp
+([&](auto&& __t) -> decltype(auto) {
+    if constexpr (requires { __t._N; })
+        return (std::forward<decltype(__t)>(__t)._N);
+    else
+        return std::get<N>(std::forward<decltype(__t)>(__t));
+})(kv)
+```
+
+Notes:
+
+- The IIFE evaluates the receiver exactly once (avoiding double-evaluation of side-effecting expressions).
+- `std::forward<decltype(__t)>` preserves the receiver's reference category — important for callers that mutate or move the field through the access.
+- `decltype(auto)` plus the parens around `__t._N` lets the return propagate as a reference when the underlying field is a reference, matching Rust's semantics for `tuple.N`.
+- The verbose form fires only in the third branch (type genuinely unknown). When `infer_simple_expr_type` returns `Some(_)` the simpler `_N` / `std::get<N>` shape stays.
+
+This completes Item #1 of `GENERIC_FIXES_PLAN.md`; the patcher rule `fix_tuple_dot_underscore_access` is removed.
 
 ### 2.2.1 Match arms: const-value patterns
 

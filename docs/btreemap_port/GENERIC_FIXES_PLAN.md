@@ -39,20 +39,45 @@ receiver's known type. If it's `std::tuple<…>` (or anything mapped to
 it), emit `std::get<N>(receiver)`; otherwise keep the `_N` field-access
 form for tuple-structs.
 
-**Cleanup**: Remove `fix_tuple_dot_underscore_access` and its call site
-in `main()`.
+**Cleanup**: `fix_tuple_dot_underscore_access` removed from the
+patcher; both the function and its call site at `apply_map_path_fixes`
+are gone, replaced with explanatory comment blocks.
 
-**Deferred**: Minimal repros of `h.into_kv().1` (with known receiver
-type) emit `std::get<1>` correctly. The actual btree case fails
-because the receiver is `auto&&`-bound (via `auto&& handle =
-rusty::detail::deref_if_pointer(std::get<0>(...).....0)`) so the
-transpiler can't look up the return-type of `into_kv` from the
-receiver's impl. Fix would either (a) trace through auto-bindings to
-recover the method receiver's struct, or (b) wrap every `expr.N`
-access in a `requires {std::get<N>(...)}` SFINAE that picks
-`std::get<N>` vs `._N` at C++ compile time. Both have non-trivial
-emit-shape impact. Defer until we have a clean repro that doesn't
-require BTreeMap context.
+**Status (done)**: Option (b) from the original deferred analysis
+landed. In `Expr::Field` → `Member::Unnamed`, the emit now branches
+on whether the receiver's type is known:
+
+1. **Known to be tuple-like** (`infer_simple_expr_type` returns a
+   tuple, or scrutinee is a method-call on `self` returning a tuple):
+   emit `std::get<N>(receiver)` — the existing path.
+2. **Known to be non-tuple-like** (`infer_simple_expr_type` returns
+   some other concrete type): emit `receiver._N` — the type must be a
+   transpiler-synthesized tuple-struct with `_0`, `_1`, … members.
+3. **Genuinely unknown** (`infer_simple_expr_type` returns `None`,
+   e.g. for an `auto&&`-bound binding whose RHS the transpiler can't
+   trace): emit a SFINAE-discriminated form
+
+   ```cpp
+   ([&](auto&& __t) -> decltype(auto) {
+       if constexpr (requires { __t._N; })
+           return (std::forward<decltype(__t)>(__t)._N);
+       else
+           return std::get<N>(std::forward<decltype(__t)>(__t));
+   })(receiver)
+   ```
+
+   that picks the right form at C++ compile time. The IIFE evaluates
+   the receiver exactly once and preserves reference category via
+   `std::forward<decltype(__t)>`. The verbose shape only fires when
+   inference fails, so the vast majority of tuple-field accesses keep
+   the simple `_N`/`std::get<N>` shape.
+
+Combined with Item 11 (statement-level let+match+return lowering),
+`Handle::insert_recursing` in the BTreeMap port now compiles without
+patcher intervention — the previous `stub_insert_recursing` rule is
+also removed. Pipeline verified clean (transpile → patch → cmake →
+ninja → smoke tests) under clang++ after both patcher rules are
+disabled.
 
 ---
 
@@ -321,11 +346,16 @@ only larger inserts would.
 
 **Outcome**: The transpiler-side lowering is complete. All tuple-pattern matches in this shape lower without manual intervention.
 
-**Cleanup**: `stub_insert_recursing` is *kept for now* — the transpiler now emits a compilable outer `let-match-return` shape, but un-stubbing `insert_recursing` exposes three independent pre-existing transpiler gaps in the body's `while (true)` loop walking up the tree:
-- `split.kv._0` — tuple `.N` field access on `std::tuple` (Item #1).
-- `NonNull<LeafNode<int,int>>` constructor mismatch when reusing the result of `from_new_leaf`.
-- `assume_init()` called on a `const MaybeUninit<…>` (const-correctness).
-Until those three are fixed, the stub stays so the BTreeMap pipeline builds.
+**Cleanup**: `stub_insert_recursing` *removed*. After Item 1 also
+landed (`expr.N` SFINAE dispatch for unknown receiver types), the
+three downstream gaps that had been hidden behind the stub all
+disappeared too — the suspected `NonNull` constructor mismatch and
+`assume_init`-on-const-MaybeUninit were actually shapes of the same
+underlying tuple-field issue, not independent bugs. Verified by
+running the BTreeMap pipeline (transpile → patch → cmake → ninja →
+link smoke → transpiled-read smoke) clean under clang++ with both
+`stub_insert_recursing` and `fix_tuple_dot_underscore_access`
+disabled.
 
 ---
 
@@ -333,7 +363,7 @@ Until those three are fixed, the stub stays so the BTreeMap pipeline builds.
 
 | #  | Item                                         | Status      | Commit |
 |----|----------------------------------------------|-------------|--------|
-| 1  | Tuple `.N` → `std::get<N>`                   | deferred*   | —      |
+| 1  | Tuple `.N` → `std::get<N>`                   | done        | *pending* |
 | 2  | `slice.get_unchecked` → `slice[i]`           | done        | 0dc9512|
 | 3  | By-value self → C++ `const`                  | deferred*   | —      |
 | 4  | Const-value match patterns                   | partial*    | 0fc730f |
@@ -343,12 +373,12 @@ Until those three are fixed, the stub stays so the BTreeMap pipeline builds.
 | 8  | Recursive lambda → Y-combinator              | done        | 9073eaa |
 | 9  | Module-namespace prefix stripping (borderline) | pending   | —      |
 | 10 | Cluster A direct positional matches          | done        | cae6682|
-| 11 | Tuple-pattern match lowering (borderline)    | done†       | 54cbe73, *pending* |
+| 11 | Tuple-pattern match lowering (borderline)    | done        | 54cbe73, 93b6ccf |
 
 \* Items marked deferred/partial mean the *transpiler-side* fix is the
 right place but is non-trivial to lift right now; the patcher rules
 remain as the documented workaround until then.
 
-† Item 11's transpiler-side lowering is complete. The
-`stub_insert_recursing` patcher rule is kept only because un-stubbing
-exposes three unrelated downstream transpiler gaps (see Item 11 above).
+Both `stub_insert_recursing` and `fix_tuple_dot_underscore_access` are
+now removed from the patcher; the BTreeMap pipeline builds clean
+without them under clang++.
