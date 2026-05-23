@@ -831,88 +831,9 @@ def fix_merge_unknown_Q(path: Path) -> None:
         print(f"  no merge Q→K site in: {path.name}")
 
 
-def fix_recursive_lambda_clone_subtree(path: Path) -> None:
-    """Rewrite `BTreeMap::clone()`'s `clone_subtree` recursive lambda
-    into Y-combinator form so the lambda body can call itself without
-    referencing its own `auto`-deduced name.
-
-    Transformation (lambda signature):
-        const auto clone_subtree = [](auto node, auto alloc) -> Ret { … }
-      → const auto clone_subtree = [](auto&& __self, auto node, auto alloc) -> Ret { … }
-
-    And inside the lambda body, recursive calls become:
-        clone_subtree(args)  →  __self(__self, args)
-
-    And the external call (in the enclosing `clone()` method body):
-        clone_subtree(args)  →  clone_subtree(clone_subtree, args)
-
-    Idempotent — guarded by a sentinel."""
-    src = path.read_text()
-    sentinel = (
-        "// btree_port port: clone_subtree rewritten to Y-combinator "
-        "by post_transpile_patch.py"
-    )
-    if sentinel in src:
-        print(f"  no changes to: {path.name} (clone_subtree already Y-combined)")
-        return
-
-    # Locate the lambda declaration line: const auto clone_subtree = [...]...
-    decl_marker = "const auto clone_subtree = [](auto node, auto alloc)"
-    pos = src.find(decl_marker)
-    if pos == -1:
-        print(f"  no clone_subtree decl in: {path.name}")
-        return
-    # Rewrite the signature to take __self first.
-    new_decl = (
-        "const auto clone_subtree = "
-        "[](auto&& __self, auto node, auto alloc)"
-    )
-    src = src.replace(decl_marker, new_decl, 1)
-
-    # Find the matching `};` that closes the lambda. Walk brace depth
-    # starting from the `{` of the lambda body.
-    body_open = src.find("{", pos + len(new_decl))
-    depth = 0
-    body_close = -1
-    for i in range(body_open, len(src)):
-        ch = src[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                body_close = i
-                break
-    if body_close == -1:
-        print(f"  [warn] couldn't find lambda end in: {path.name}", file=sys.stderr)
-        return
-
-    # Body is src[body_open : body_close + 1]. Rewrite recursive
-    # `clone_subtree(` → `__self(__self, ` inside.
-    body = src[body_open : body_close + 1]
-    body_n_recursive = body.count("clone_subtree(")
-    new_body = body.replace("clone_subtree(", "__self(__self, ")
-    src = src[:body_open] + new_body + src[body_close + 1 :]
-
-    # After the body, the external call: `clone_subtree(…)` → seed
-    # the Y-combinator. Just one external call in the enclosing
-    # method body for this case.
-    after = src[body_close + 1 :]
-    n_external = after.count("clone_subtree(")
-    if n_external > 0:
-        new_after = after.replace(
-            "clone_subtree(",
-            "clone_subtree(clone_subtree, ",
-            n_external,
-        )
-        src = src[: body_close + 1] + new_after
-
-    src = sentinel + "\n" + src
-    path.write_text(src)
-    print(
-        f"  rewrote clone_subtree: {body_n_recursive} recursive + "
-        f"{n_external} external call(s) in: {path.name}"
-    )
+# `fix_recursive_lambda_clone_subtree` removed (Item 8): the transpiler
+# now lowers self-recursive nested fns to Y-combinator-shaped lambdas
+# directly. See `emit_nested_function` + `try_emit_y_combinator_call`.
 
 
 def fix_dormant_mut_ref_calls(path: Path) -> None:
@@ -4191,10 +4112,11 @@ def main() -> int:
         # site (BTreeMap/Root/Option<Root>). Inject a deduction helper
         # and rewrite call sites to use it (phase A2).
         fix_dormant_mut_ref_calls(map_mod)
-        # `BTreeMap::clone()` uses a recursive lambda `clone_subtree`;
-        # rewrite to Y-combinator form so the lambda's `auto`-deduced
-        # name doesn't appear in its own initializer (phase A3).
-        fix_recursive_lambda_clone_subtree(map_mod)
+        # `fix_recursive_lambda_clone_subtree` was lifted into the
+        # transpiler as Item 8 — `emit_nested_function` now detects
+        # self-recursive nested fns and emits Y-combinator-shaped lambdas
+        # (extra `auto&& __self` param, `__self(__self, …)` inside body,
+        # `NAME(NAME, …)` at external call sites).
         # MIN_LEN is duplicated between btree_internal and map; drop
         # the map-side decls (phase A4).
         drop_duplicate_min_len(map_mod)

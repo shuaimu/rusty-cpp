@@ -331,6 +331,35 @@ The recovery in `recover_omitted_owner_generic_args_from_scope` walks the called
 
 The decomposition is keyed to the specific method being emitted (not iterated across all methods on the host), so different methods on the same host with different impl-block specializations don't cross-contaminate.
 
+### 2.2.0.2 Self-recursive nested fns → Y-combinator lambda
+
+A Rust `fn` declared inside a function body can recurse — name resolution treats it like a free function:
+
+```rust
+fn outer(n: u32) -> u32 {
+    fn rec(x: u32) -> u32 {
+        if x == 0 { 0 } else { rec(x - 1) + 1 }
+    }
+    rec(n)
+}
+```
+
+The transpiler lowers nested fns to `const auto` lambdas. But a C++ `auto`-deduced lambda can't reference its own name in its body — the lambda's type isn't known until the initializer completes.
+
+When `emit_nested_function` detects self-recursion (any token-stream mention of the fn's own name in its body), it emits a Y-combinator-shaped lambda:
+
+```cpp
+const auto rec = [](auto&& __self, uint32_t x) -> uint32_t {
+    if (... x == 0) { return 0; }
+    else { return __self(__self, x - 1) + 1; }
+};
+return rec(rec, n);
+```
+
+`__self` is prepended as the first parameter; inside the body, recursive calls become `__self(__self, args)`; at external call sites (subsequent statements in the same scope), `rec(args)` becomes `rec(rec, args)` to seed the combinator.
+
+Scope tracking is per-block: when leaving the enclosing block, the recursive name is removed from the in-scope set so unrelated calls outside the block aren't rewritten.
+
 ### 2.2.1 Match arms: const-value patterns
 
 A Rust match arm of the form `CONST_NAME => …`, where `CONST_NAME` is a const item in scope, compares the scrutinee to the const's value (NOT a fresh variable binding):

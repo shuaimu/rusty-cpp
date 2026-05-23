@@ -261,8 +261,9 @@ auto f_wrapped = [&](args) { return f(f, args); };
 
 Trickier emit-wise but Y-combinator is the well-known C++ workaround.
 
-**Cleanup**: Remove `fix_recursive_lambda_clone_subtree` and its call
-site.
+**Status (done)**: `emit_nested_function` now detects self-recursion by token-stream-scanning the body for the fn's own name, and lowers the lambda with `auto&& __self` prepended. `try_emit_y_combinator_call` (hook at the top of `emit_call_expr_to_string`) rewrites internal `NAME(args)` calls to `__self(__self, args)` and external callers (later statements in the same scope) to `NAME(NAME, args)`. Scope tracking is block-scoped via `recursive_nested_fns_in_scope`. `fix_recursive_lambda_clone_subtree` is removed from the patcher.
+
+**Cleanup**: `fix_recursive_lambda_clone_subtree` removed.
 
 ---
 
@@ -325,7 +326,7 @@ only larger inserts would.
 | 5  | Uninitialized `let` bindings                 | deferred*   | —      |
 | 6  | Ref-returning `let` bindings                 | partial*    | aedd910 |
 | 7  | Wrong template-arg recovery                  | partial*    | 1e6b8c6 |
-| 8  | Recursive lambda → Y-combinator              | pending     | —      |
+| 8  | Recursive lambda → Y-combinator              | done        | TBD    |
 | 9  | Module-namespace prefix stripping (borderline) | pending   | —      |
 | 10 | Cluster A direct positional matches          | done        | cae6682|
 | 11 | Tuple-pattern match lowering (borderline)    | pending     | —      |
