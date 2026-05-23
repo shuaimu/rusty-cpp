@@ -3448,27 +3448,22 @@ def fix_leafnode_new_template_args(path: Path) -> None:
 
 
 def fix_dormant_map_reborrow_binding(path: Path) -> None:
-    """Rewrite `const auto map = this->dormant_map.reborrow();` to
-    `auto& map = this->dormant_map.reborrow();` so subsequent calls like
-    `map.root.insert(...)` and `map.root.as_mut().unwrap()` resolve
-    against a non-const reference. DormantMutRef::reborrow returns
-    &mut T, but the transpiler's let-binding emit for THIS specific
-    site (cross-module ref-return through DormantMutRef<BTreeMap<…>>)
-    picks `const auto`, which copies a non-copyable BTreeMap and also
-    disables the non-const Option methods. Same issue with the
-    `const auto root = map.root.insert(...)` line — `Option::insert`
-    returns &mut T.
-
-    Also rewrite `const auto handle = [&](){…}();` IIFE-result bindings
-    in insert_entry to `auto handle = ...` so `handle.forget_node_type()`
-    (non-const member call) resolves.
+    """Item 6 follow-on: rewrite the `Option::insert` + outer `handle`
+    let-bindings that surround the reborrow site. The `reborrow` itself
+    now emits `auto&` directly from the transpiler (Item 6 lift); but
+    `Option::insert(value) -> &mut T` isn't part of the generic
+    method-name heuristic (the name `insert` is too common to blanket-
+    treat as ref-returning). And the outer `const auto handle = …IIFE…;`
+    blocks calls like `handle.forget_node_type()` which requires
+    non-const.
     """
     src = path.read_text()
     pairs = [
-        ("const auto map = this->dormant_map.reborrow()",
-         "auto& map = this->dormant_map.reborrow()"),
+        # `map.root.insert(...)` — Option::insert returns &mut T.
         ("const auto root = map.root.insert(",
          "auto& root = map.root.insert("),
+        # `const auto handle = [&]() {...}()` — IIFE result is moved into
+        # an OccupiedEntry; needs non-const so `.forget_node_type()` works.
         ("const auto handle = [&]() { auto&& _m = this->handle;",
          "auto handle = [&]() { auto&& _m = this->handle;"),
     ]
@@ -4176,9 +4171,11 @@ def main() -> int:
         fix_empty_write_return(map_mod)
         # `handle.into_kv()._1` etc. — rewrite to `std::get<1>(...)`.
         fix_tuple_dot_underscore_access(map_mod)
-        # Issue A from write-path investigation:
-        # `const auto map = this->dormant_map.reborrow();` decays the
-        # &mut T return to a value copy. Rewrite to `auto&`.
+        # Item 6 partial lift: `reborrow` is now in the transpiler's
+        # method-name heuristic so `let map = …reborrow()` emits
+        # `auto& map = …` directly. The follow-on `Option::insert`
+        # site and outer IIFE-result handle binding still need the
+        # patcher (typed-receiver awareness for `Option::insert`).
         fix_dormant_map_reborrow_binding(map_mod)
         # Step 67: codify the step 64-66 runtime fixes that brought the
         # transpiled BTreeMap smoke test to all-green. Must run AFTER

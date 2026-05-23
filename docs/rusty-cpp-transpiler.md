@@ -312,6 +312,17 @@ auto pair = std::tuple<int32_t, std::string>(42, std::string("hello"));
 auto [a, b] = std::move(pair);  // structured bindings (C++17)
 ```
 
+### 2.2.0 Let bindings of reference-returning calls
+
+When `let x = recv.method()` calls a method whose return type is `&T` or `&mut T`, the C++ emit needs `auto&` (or `const auto&`) — not plain `auto`, which would decay the reference to a value copy.
+
+The transpiler recognizes reference-returning methods by:
+- Direct return-type inference (when the method's signature is reachable through impl-block lookup).
+- A method-name heuristic for the cases where lookup fails (e.g. cross-module calls through generic-T receivers). The heuristic matches names ending in `_mut` or `_ref`, plus a specific list (`get_mut`, `force_mut`, `as_mut`, `deref_mut`, `into_mut`, `borrow_mut`, `reborrow`, `unwrap`-after-ref-chain, etc.).
+- Peeling through `unsafe { ... }`, `{ ... }`, parens, and groups so `let x = unsafe { recv.reborrow() }` is recognized the same as the bare call.
+
+When the heuristic fires, the binding is emitted as `auto& x = …` (mutable) or `const auto& x = …` (immutable), preserving the reference through the C++ binding.
+
 ### 2.2.1 Match arms: const-value patterns
 
 A Rust match arm of the form `CONST_NAME => …`, where `CONST_NAME` is a const item in scope, compares the scrutinee to the const's value (NOT a fresh variable binding):
