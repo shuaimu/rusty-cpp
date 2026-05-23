@@ -3352,16 +3352,19 @@ def stub_insert_recursing(path: Path) -> None:
     if pos == -1:
         print(f"  no insert_recursing site in: {path.name}")
         return
-    # Item 11 (partial): the tuple-pattern lowering and as_const-stripping
-    # parts of Item 11 landed in the transpiler, so the body no longer
-    # contains the `std::visit(overloaded { [&](auto&&) { unreachable(); }, … })`
-    # shape. But it now has the early-return-arm shape — an IIFE whose
-    # two arms diverge on return type because Rust's arm-1 `return X`
-    # (which exits the outer function) became a lambda-local return in
-    # the C++ emit, leaving the lambda with unresolvable return type
-    # deduction. Lifting the diverging arm out of the IIFE requires
-    # statement-level match lowering, which is a follow-on. For now,
-    # keep the stub so the build stays green.
+    # Item 11 completion lifted the outer `let pat = match { … }`
+    # lowering into the transpiler — the body now produces compilable
+    # statement-level `auto&& _let_match_tuple = …; if (…) { return …; };
+    # auto _let_match_result = [&](){ … }(); auto [pat] = …;` shape.
+    # However the body's INNER loop (the `while (true)` walking up the
+    # tree) still trips on three independent transpiler gaps that were
+    # previously hidden behind this stub:
+    #   1. `split.kv._0` (tuple `.N` field access on std::tuple) —
+    #      GENERIC_FIXES_PLAN Item #1.
+    #   2. `NonNull<LeafNode<int,int>>` constructor mismatch when
+    #      reusing the result of `from_new_leaf`.
+    #   3. `assume_init()` called on a `const MaybeUninit`.
+    # Until those are fixed, keep the stub so the build stays green.
     brace_open = src.find("{", pos)
     depth = 0
     brace_close = -1

@@ -379,7 +379,50 @@ The fix infers the scrutinee's tuple arity from the arm patterns themselves: if 
 
 For pattern bindings inside the arm (e.g. `Some(x)`), the value-conditions path now also runs `allow_runtime_match_binding_payload_moves`, which strips `std::as_const(_).unwrap()` wraps so the bound payload is movable and the arm body can call non-const member functions on it.
 
-Open limitation: if an arm's body is `return X` (non-local return), the C++ lambda's `return` is lambda-local, not function-local. When the arm types diverge (one arm `return T1`, another arm yields `T2`), the lambda's `auto` return can't be deduced. Lifting the diverging arm out of the IIFE requires statement-level match lowering, which is a separate effort.
+Resolved as of `try_emit_let_match_return_statement_level`: see §2.2.0.4 for the let-pattern + match + early-return-arm case.
+
+### 2.2.0.4 Statement-level `let pat = match { ⇒ return …, ⇒ (…) }`
+
+A Rust statement of the form
+
+```rust
+let (a, b) = match make_pair() {
+    (None, b) => return b,
+    (Some(s), b) => (s + 1, b),
+};
+```
+
+cannot lower as an IIFE: the arm's `return X` is a *non-local* return that exits the surrounding Rust function, but in C++ it would become lambda-local. With diverging arm types (one arm returns from the outer fn; the other arm yields a tuple), the IIFE's `auto` deduction also fails.
+
+The transpiler recognises this shape at `Stmt::Local` emit time (`try_emit_let_match_return_statement_level`, hooked into `emit_stmt` before the default `emit_local` path) and lifts it to a statement-level sequence:
+
+```cpp
+auto&& _let_match_tuple = make_pair();
+auto&& _let_match_m0    = std::get<0>(rusty::detail::deref_if_pointer(_let_match_tuple));
+auto&& _let_match_m1    = std::get<1>(rusty::detail::deref_if_pointer(_let_match_tuple));
+if (_let_match_m0.is_none()) {
+    auto&& b = rusty::detail::deref_if_pointer(_let_match_m1);
+    return std::move(b);
+}
+auto _let_match_result = [&]() {
+    auto&& s = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_match_m0).unwrap());
+    auto&& b = rusty::detail::deref_if_pointer(_let_match_m1);
+    return std::make_tuple((static_cast<size_t>(s) + static_cast<size_t>(1)), b);
+}();
+auto [a, b] = _let_match_result;
+```
+
+Gates:
+- The `let` pattern is `Pat::Tuple`.
+- The init is a `match` (after peeling parens/groups).
+- Exactly one arm is non-diverging (the success arm); at least one arm has a body that is a non-local `return X` (`expr_is_try_style_return_flow`).
+- No arm has a `guard` (we can't easily split the guard test from the arm condition).
+- Every arm pattern is `Pat::Tuple` of the same arity, matching the outer let-pat arity.
+- `tuple_match_can_lower_as_value_conditions` accepts the arm shape.
+
+Why the success arm sits inside an IIFE: inner pattern bindings (`Some(s), b`) can collide with the outer let-pat bindings (`a, b`). Wrapping the success arm in `[&]() { … }()` opens a fresh C++ scope so the inner `b` shadows safely; the IIFE's return value is then destructured into the outer let-pat via `auto [a, b] = _let_match_result;`. The IIFE's `auto` deduction also succeeds because only the single success arm contributes a value type — no divergent arms to deduce against.
+
+This completes Item #11 of the BTreeMap port's `GENERIC_FIXES_PLAN.md`. The recursive `insert_recursing` in `library/alloc/src/collections/btree/btree_internal.rs` is the canonical instance; the transpiler now emits its outer `let-match-return` shape directly without patcher intervention. (The patcher's `stub_insert_recursing` stays for now because the function body's *inner* `while (true)` loop still trips on three unrelated transpiler gaps documented alongside the patcher rule.)
 
 ### 2.2.1 Match arms: const-value patterns
 
