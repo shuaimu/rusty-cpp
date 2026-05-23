@@ -91,6 +91,7 @@ export {
 #include <rusty/sync/atomic.hpp>
 #include <rusty/sync/mpsc.hpp>
 #include <rusty/sys/fs.hpp>
+#include <rusty/sys/time.hpp>
 #include <rusty/os/fd.hpp>
 #include <rusty/net/tcp.hpp>
 #include <rusty/mutex.hpp>
