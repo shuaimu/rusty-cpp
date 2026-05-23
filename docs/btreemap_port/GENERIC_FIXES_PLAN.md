@@ -324,7 +324,7 @@ only larger inserts would.
 | 4  | Const-value match patterns                   | partial*    | 0fc730f |
 | 5  | Uninitialized `let` bindings                 | deferred*   | —      |
 | 6  | Ref-returning `let` bindings                 | partial*    | aedd910 |
-| 7  | Wrong template-arg recovery                  | partial*    | TBD    |
+| 7  | Wrong template-arg recovery                  | partial*    | 1e6b8c6 |
 | 8  | Recursive lambda → Y-combinator              | pending     | —      |
 | 9  | Module-namespace prefix stripping (borderline) | pending   | —      |
 | 10 | Cluster A direct positional matches          | done        | cae6682|
