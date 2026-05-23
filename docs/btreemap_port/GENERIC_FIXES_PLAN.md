@@ -339,4 +339,4 @@ The two parts that did land unblock all other tuple-pattern matches in this shap
 | 8  | Recursive lambda → Y-combinator              | done        | 9073eaa |
 | 9  | Module-namespace prefix stripping (borderline) | pending   | —      |
 | 10 | Cluster A direct positional matches          | done        | cae6682|
-| 11 | Tuple-pattern match lowering (borderline)    | partial*    | TBD    |
+| 11 | Tuple-pattern match lowering (borderline)    | partial*    | 54cbe73 |
