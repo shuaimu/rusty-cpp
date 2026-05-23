@@ -326,7 +326,7 @@ only larger inserts would.
 | 5  | Uninitialized `let` bindings                 | deferred*   | —      |
 | 6  | Ref-returning `let` bindings                 | partial*    | aedd910 |
 | 7  | Wrong template-arg recovery                  | partial*    | 1e6b8c6 |
-| 8  | Recursive lambda → Y-combinator              | done        | TBD    |
+| 8  | Recursive lambda → Y-combinator              | done        | 9073eaa |
 | 9  | Module-namespace prefix stripping (borderline) | pending   | —      |
 | 10 | Cluster A direct positional matches          | done        | cae6682|
 | 11 | Tuple-pattern match lowering (borderline)    | pending     | —      |
