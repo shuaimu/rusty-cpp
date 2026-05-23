@@ -3351,6 +3351,40 @@ def _impl_deallocating_helper(direction: str) -> tuple[str, str]:
     return sig_tail, body
 
 
+def fix_dormant_map_reborrow_binding(path: Path) -> None:
+    """Rewrite `const auto map = this->dormant_map.reborrow();` to
+    `auto& map = this->dormant_map.reborrow();` so subsequent calls like
+    `map.root.insert(...)` and `map.root.as_mut().unwrap()` resolve
+    against a non-const reference. DormantMutRef::reborrow returns
+    &mut T, but the transpiler's let-binding emit for THIS specific
+    site (cross-module ref-return through DormantMutRef<BTreeMap<…>>)
+    picks `const auto`, which copies a non-copyable BTreeMap and also
+    disables the non-const Option methods. Same issue with the
+    `const auto root = map.root.insert(...)` line — `Option::insert`
+    returns &mut T.
+    """
+    src = path.read_text()
+    pairs = [
+        ("const auto map = this->dormant_map.reborrow()",
+         "auto& map = this->dormant_map.reborrow()"),
+        ("const auto root = map.root.insert(",
+         "auto& root = map.root.insert("),
+    ]
+    n_fixed = 0
+    for old, new in pairs:
+        cnt = src.count(old)
+        if cnt > 0:
+            src = src.replace(old, new)
+            n_fixed += cnt
+    if n_fixed:
+        path.write_text(src)
+        print(
+            f"  rewrote {n_fixed} dormant_map.reborrow/root.insert ref-binding(s) in: {path.name}"
+        )
+    else:
+        print(f"  no dormant_map.reborrow const-auto sites in: {path.name}")
+
+
 def fix_std_array_get_unchecked(path: Path) -> None:
     """Rewrite `.{keys,vals,edges}.get_unchecked[_mut](EXPR)` to
     `.{keys,vals,edges}[(EXPR)]`. The btree leaf's keys/vals/edges
@@ -3929,6 +3963,9 @@ def main() -> int:
     # no get_unchecked; the Rust source's unsafe contract maps cleanly
     # to operator[]'s no-bounds-check behavior.
     fix_std_array_get_unchecked(internal)
+    # Issue A from write-path investigation: `const auto map = this->dormant_map.reborrow();`
+    # decays the &mut T return to a value copy. Rewrite to `auto&`.
+    fix_dormant_map_reborrow_binding(internal)
     # `k.borrow()` on primitive types — wrap with SFINAE fallback.
     fix_borrow_method_fallback(internal)
     # Step 55: codify the 7 step-54 insert-path fixes (key/val/edge_area_mut
@@ -4077,6 +4114,10 @@ def main() -> int:
         fix_empty_write_return(map_mod)
         # `handle.into_kv()._1` etc. — rewrite to `std::get<1>(...)`.
         fix_tuple_dot_underscore_access(map_mod)
+        # Issue A from write-path investigation:
+        # `const auto map = this->dormant_map.reborrow();` decays the
+        # &mut T return to a value copy. Rewrite to `auto&`.
+        fix_dormant_map_reborrow_binding(map_mod)
         # Step 67: codify the step 64-66 runtime fixes that brought the
         # transpiled BTreeMap smoke test to all-green. Must run AFTER
         # stub_broken_map_methods so the stubbed bodies get OVERWRITTEN
