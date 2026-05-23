@@ -229,8 +229,11 @@ construction site needs `Owned`, `Leaf`.
 Both are recovery-site improvements: the existing code does string-level
 guessing where AST-level reasoning is available.
 
-**Cleanup**: Remove both `fix_leafnode_new_template_args` and
-`fix_from_new_leaf_markers`.
+**Status (partial)**: The LeafNode case is done — `recover_omitted_owner_generic_args_from_scope` now consults the current emitting method's structural decomposition (`current_emit_structural_decomp`) and returns `typename __TemplateArgs<HostParam>::arg_<pos>` for dropped owner-declared params before falling back to ordered-scope. `LeafNode<A, Node>::new_(alloc)` now emits directly as `LeafNode<arg_1, arg_2>::new_(alloc)`. `fix_leafnode_new_template_args` is removed from the patcher.
+
+The `NodeRef::from_new_leaf` case is **not** generically fixed yet — it needs lookup of the *called method's* defining impl block (which has the concrete `Owned`/`Leaf` markers), separate from the *current method's* impl block. Cluster A only tracks the latter. The patcher's `fix_from_new_leaf_markers` is kept, now matching both pre- and post-Item-7 emit shapes.
+
+**Cleanup**: `fix_leafnode_new_template_args` removed. `fix_from_new_leaf_markers` kept.
 
 ---
 
@@ -321,7 +324,7 @@ only larger inserts would.
 | 4  | Const-value match patterns                   | partial*    | 0fc730f |
 | 5  | Uninitialized `let` bindings                 | deferred*   | —      |
 | 6  | Ref-returning `let` bindings                 | partial*    | aedd910 |
-| 7  | Wrong template-arg recovery                  | pending     | —      |
+| 7  | Wrong template-arg recovery                  | partial*    | TBD    |
 | 8  | Recursive lambda → Y-combinator              | pending     | —      |
 | 9  | Module-namespace prefix stripping (borderline) | pending   | —      |
 | 10 | Cluster A direct positional matches          | done        | cae6682|

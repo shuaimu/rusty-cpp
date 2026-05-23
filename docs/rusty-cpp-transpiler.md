@@ -323,6 +323,14 @@ The transpiler recognizes reference-returning methods by:
 
 When the heuristic fires, the binding is emitted as `auto& x = …` (mutable) or `const auto& x = …` (immutable), preserving the reference through the C++ binding.
 
+### 2.2.0.1 Owner template-arg recovery for absorbed methods (Cluster A)
+
+When an impl-block's generics structurally decompose into a host-class template arg (the "Cluster A" pattern from the BTreeMap port), method bodies absorbed into the host class lose those impl-block generics from scope. Direct references are already substituted with `typename __TemplateArgs<HostParam>::arg_<N>` (§Cluster A completion), but path-level recovery — picking the right template args for a call like `LeafNode::new(alloc)` — needed a separate fix.
+
+The recovery in `recover_omitted_owner_generic_args_from_scope` walks the called owner's declared params (e.g. `K, V` on `LeafNode`). When a declared param is not in lexical scope as a plain ident, the recovery now consults the current method's structural decomposition: if the same name appears as an impl-block generic at a tracked inner-struct position, the recovery returns `typename __TemplateArgs<HostParam>::arg_<pos>` instead of falling back to the loose ordered-scope fallback (which would otherwise grab whatever else is in scope — `A` from a method's allocator template, `Node` from the host class — and emit nonsense like `LeafNode<A, Node>::new_(alloc)`).
+
+The decomposition is keyed to the specific method being emitted (not iterated across all methods on the host), so different methods on the same host with different impl-block specializations don't cross-contaminate.
+
 ### 2.2.1 Match arms: const-value patterns
 
 A Rust match arm of the form `CONST_NAME => …`, where `CONST_NAME` is a const item in scope, compares the scrutinee to the const's value (NOT a fresh variable binding):

@@ -1635,12 +1635,57 @@ def implement_handle_descend(path: Path) -> None:
         f"._marker = rusty::PhantomData<std::tuple<{ta}0, ::marker::LeafOrInternal>>{{}}}};\n"
         "    }\n"
     )
+    # Post-(Item 2 + Item 7 transient) shape: get_unchecked is now wrapped
+    # in a SFINAE shim, and at one point the as_internal_ptr recovery
+    # picked LeafOrInternal (from the descend method's return type) instead
+    # of Internal (from the receiver's struct field). Kept for back-compat
+    # with intermediate transpiler versions.
+    cluster_a_v2_method = (
+        f"    {ta_ref}, ::marker::LeafOrInternal> descend() {{\n"
+        "        // const-block elided (Rust 2024 compile-time fence)\n"
+        f"        const auto parent_ptr = {ta_ref}, ::marker::LeafOrInternal>::as_internal_ptr(this->node);\n"
+        "        auto node = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { "
+        "if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } "
+        "else { return __recv.get_unchecked(__idx); } })"
+        "((*parent_ptr).edges, std::move(this->idx_field)).assume_init_read();\n"
+        f"        return {ta_ref}, ::marker::LeafOrInternal>"
+        "{.height_field = rusty::detail::deref_if_pointer_like(this->node.height_field) - static_cast<size_t>(1), "
+        ".node = std::move(node), "
+        f"._marker = rusty::PhantomData<std::tuple<{ta}0, ::marker::LeafOrInternal>>{{}}}};\n"
+        "    }\n"
+    )
+    # Post-Item-7 (LeafOrInternal) shape: cluster_a recovery resolves
+    # arg_0/1/2 correctly, but the trailing marker still comes from the
+    # enclosing function's return type hint (LeafOrInternal), not the
+    # impl block's concrete `Internal`. The `as_internal_ptr` call
+    # therefore has the WRONG marker — Owned/Leaf method resolution
+    # still works at runtime because the helper just looks up a static
+    # method on NodeRef regardless of marker — but the hand-port
+    # replaces the whole body anyway, so we only need to match the
+    # emit shape. `this->node.height` (no _field suffix) is the raw
+    # Rust field name; the renamed C++ field is `height_field`.
+    cluster_a_item7_method = (
+        f"    {ta_ref}, ::marker::LeafOrInternal> descend() {{\n"
+        "        // const-block elided (Rust 2024 compile-time fence)\n"
+        f"        const auto parent_ptr = {ta_ref}, ::marker::LeafOrInternal>::as_internal_ptr(this->node);\n"
+        "        auto node = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { "
+        "if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } "
+        "else { return __recv.get_unchecked(__idx); } })"
+        "((*parent_ptr).edges, std::move(this->idx_field)).assume_init_read();\n"
+        f"        return {ta_ref}, ::marker::LeafOrInternal>"
+        "{.height_field = rusty::detail::deref_if_pointer_like(this->node.height) - static_cast<size_t>(1), "
+        ".node = std::move(node), "
+        f"._marker = rusty::PhantomData<std::tuple<{ta}0, ::marker::LeafOrInternal>>{{}}}};\n"
+        "    }\n"
+    )
     old_method_variants = [
         sig_head + "        rusty::intrinsics::unreachable();\n" + body_tail,
         sig_head
         + "        // const-block elided (Rust 2024 compile-time fence)\n"
         + body_tail,
         cluster_a_method,
+        cluster_a_v2_method,
+        cluster_a_item7_method,
     ]
     old_method = next((v for v in old_method_variants if v in src), None)
     new_method = (
@@ -3400,51 +3445,53 @@ def stub_insert_recursing(path: Path) -> None:
 
 
 def fix_from_new_leaf_markers(path: Path) -> None:
-    """Rewrite `NodeRef<::marker::Mut, …, ::marker::Internal>::from_new_leaf(…)`
-    to `NodeRef<::marker::Owned, …, ::marker::Leaf>::from_new_leaf(…)`.
-    `from_new_leaf` constructs an owned leaf node — the Rust source omits
-    explicit template args and lets type inference pick Owned+Leaf. The
-    transpiler's recovery picked Mut+Internal (from the impl's
-    NodeRef<Mut, K, V, Leaf> shape, mis-applying the Internal marker).
+    """Rewrite `NodeRef<…>::from_new_leaf(…)` so its owner args are
+    `<Owned, K, V, Leaf>` regardless of which mis-recovery shape the
+    transpiler emitted. `from_new_leaf` is defined on
+    `impl<K,V> NodeRef<marker::Owned, K, V, marker::Leaf>` — the Rust call
+    site omits explicit template args and lets type inference pick
+    Owned/Leaf, but the transpiler can't see the called method's
+    defining impl block, so its recovery pulls from elsewhere.
+
+    Two emit shapes seen:
+      OLD (pre-Item 7): `NodeRef<::marker::Mut, arg_1, arg_2, ::marker::Internal>::from_new_leaf(…)`
+        — recovery used inner_full_args from the absorbing method's impl
+        block (`Mut, Internal`).
+      NEW (post-Item 7): `NodeRef<arg_0, arg_1, arg_2, Type>::from_new_leaf(…)`
+        — Cluster A recovery resolved the impl-generics correctly, then
+        the trailing `Type` is the in-scope host class param.
     """
     src = path.read_text()
     ta = "typename __TemplateArgs<Node>::arg_"
-    pattern_old = (
-        f"NodeRef<::marker::Mut, {ta}1, {ta}2, ::marker::Internal>::from_new_leaf("
-    )
     pattern_new = (
         f"NodeRef<::marker::Owned, {ta}1, {ta}2, ::marker::Leaf>::from_new_leaf("
     )
-    n = src.count(pattern_old)
-    if n == 0:
-        print(f"  no NodeRef<Mut,…,Internal>::from_new_leaf sites in: {path.name}")
+    patterns_old = [
+        # OLD shape (pre-Item 7)
+        f"NodeRef<::marker::Mut, {ta}1, {ta}2, ::marker::Internal>::from_new_leaf(",
+        # NEW shape (post-Item 7 cluster_a recovery): arg_0 / Type at the
+        # marker position.
+        f"NodeRef<{ta}0, {ta}1, {ta}2, Type>::from_new_leaf(",
+    ]
+    total = 0
+    for pattern_old in patterns_old:
+        n = src.count(pattern_old)
+        if n:
+            src = src.replace(pattern_old, pattern_new)
+            total += n
+    if total == 0:
+        print(f"  no NodeRef<…>::from_new_leaf mis-recovery sites in: {path.name}")
         return
-    src = src.replace(pattern_old, pattern_new)
     path.write_text(src)
-    print(f"  rewrote {n} NodeRef<Mut,…,Internal>::from_new_leaf → <Owned,…,Leaf> in: {path.name}")
+    print(f"  rewrote {total} NodeRef<…>::from_new_leaf → <Owned,…,Leaf> in: {path.name}")
 
 
-def fix_leafnode_new_template_args(path: Path) -> None:
-    """Rewrite the emit-side mis-recovery `LeafNode<A, Node>::new_(...)` to
-    `LeafNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>::new_(...)`
-    in absorbed Handle methods. The Rust source is `LeafNode::new(alloc)`
-    (no explicit args); the transpiler's recovery picked `A` (method's
-    allocator template) and `Node` (host class param) instead of K, V.
-    Inside the absorbed method, K and V are no longer in scope as type
-    params — they're only reachable via `__TemplateArgs<Node>::arg_1/2`."""
-    src = path.read_text()
-    pattern_old = "LeafNode<A, Node>::new_("
-    pattern_new = (
-        "LeafNode<typename __TemplateArgs<Node>::arg_1, "
-        "typename __TemplateArgs<Node>::arg_2>::new_("
-    )
-    n = src.count(pattern_old)
-    if n == 0:
-        print(f"  no LeafNode<A, Node>::new_ sites in: {path.name}")
-        return
-    src = src.replace(pattern_old, pattern_new)
-    path.write_text(src)
-    print(f"  rewrote {n} LeafNode<A, Node>::new_ → <__TA::arg_1, __TA::arg_2>::new_ in: {path.name}")
+# `fix_leafnode_new_template_args` removed (Item 7): the transpiler's
+# Cluster A recovery now resolves dropped owner-declared params (K, V on
+# LeafNode) through the absorbing method's structural decomposition, so
+# `LeafNode::new(alloc)` directly emits as
+# `LeafNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>::new_(...)`
+# with no post-transpile patch needed.
 
 
 def fix_dormant_map_reborrow_binding(path: Path) -> None:
@@ -4010,9 +4057,10 @@ def main() -> int:
     # (Rusty slice helpers) untouched.
     # Issue D from write-path investigation: absorbed Handle::split emits
     # `LeafNode<A, Node>::new_(...)` (wrong recovery — A is method's
-    # allocator, Node is host class). Rewrite to use __TemplateArgs<Node>.
-    fix_leafnode_new_template_args(internal)
-    # Issue D follow-on: `NodeRef<Mut,…,Internal>::from_new_leaf(…)` should
+    # `fix_leafnode_new_template_args` was lifted into the transpiler as
+    # Item 7 — Cluster A recovery now resolves K/V via
+    # `__TemplateArgs<Node>::arg_<N>` directly at emit time.
+    # Issue D follow-on: `NodeRef<…>::from_new_leaf(…)` should
     # be `<Owned,…,Leaf>` (Rust source has no explicit args).
     fix_from_new_leaf_markers(internal)
     # Issue B: insert_recursing has unrecoverable std::visit body. Stub
