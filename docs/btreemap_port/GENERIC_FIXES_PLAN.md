@@ -42,6 +42,18 @@ form for tuple-structs.
 **Cleanup**: Remove `fix_tuple_dot_underscore_access` and its call site
 in `main()`.
 
+**Deferred**: Minimal repros of `h.into_kv().1` (with known receiver
+type) emit `std::get<1>` correctly. The actual btree case fails
+because the receiver is `auto&&`-bound (via `auto&& handle =
+rusty::detail::deref_if_pointer(std::get<0>(...).....0)`) so the
+transpiler can't look up the return-type of `into_kv` from the
+receiver's impl. Fix would either (a) trace through auto-bindings to
+recover the method receiver's struct, or (b) wrap every `expr.N`
+access in a `requires {std::get<N>(...)}` SFINAE that picks
+`std::get<N>` vs `._N` at C++ compile time. Both have non-trivial
+emit-shape impact. Defer until we have a clean repro that doesn't
+require BTreeMap context.
+
 ---
 
 ## 2. `slice.get_unchecked[_mut](i)` → `slice[i]`
@@ -281,8 +293,8 @@ only larger inserts would.
 
 | #  | Item                                         | Status      | Commit |
 |----|----------------------------------------------|-------------|--------|
-| 1  | Tuple `.N` → `std::get<N>`                   | pending     | —      |
-| 2  | `slice.get_unchecked` → `slice[i]`           | pending     | —      |
+| 1  | Tuple `.N` → `std::get<N>`                   | deferred*   | —      |
+| 2  | `slice.get_unchecked` → `slice[i]`           | done        | (next) |
 | 3  | By-value self → C++ `const`                  | pending     | —      |
 | 4  | Const-value match patterns                   | pending     | —      |
 | 5  | Uninitialized `let` bindings                 | pending     | —      |

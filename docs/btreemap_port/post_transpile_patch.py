@@ -3487,58 +3487,6 @@ def fix_dormant_map_reborrow_binding(path: Path) -> None:
         print(f"  no dormant_map.reborrow const-auto sites in: {path.name}")
 
 
-def fix_std_array_get_unchecked(path: Path) -> None:
-    """Rewrite `.{keys,vals,edges}.get_unchecked[_mut](EXPR)` to
-    `.{keys,vals,edges}[(EXPR)]`. The btree leaf's keys/vals/edges
-    are `std::array<MaybeUninit<…>, N>` which has no `get_unchecked`
-    method; Rust's slice deref + UnsafeIndex shape doesn't survive
-    transpilation. Use plain operator[] (still UB on out-of-range,
-    matching Rust's `unsafe` contract on the original call)."""
-    import re
-    src = path.read_text()
-    # Match `.keys.get_unchecked(`, `.vals.get_unchecked_mut(`, etc.
-    # Capture the field name and the expression between `(` and the
-    # matching `)`. Use a parenthesis-balanced walk because the EXPR
-    # often contains `std::move(...)` calls.
-    pattern = re.compile(
-        r"\.(keys|vals|edges)\.get_unchecked(?:_mut)?\("
-    )
-    total = 0
-    new_src_parts: list[str] = []
-    cursor = 0
-    for m in pattern.finditer(src):
-        new_src_parts.append(src[cursor:m.start()])
-        field = m.group(1)
-        # Walk from the `(` to the matching `)`.
-        depth = 1
-        i = m.end()
-        while i < len(src) and depth > 0:
-            if src[i] == "(":
-                depth += 1
-            elif src[i] == ")":
-                depth -= 1
-            i += 1
-        if depth != 0:
-            # Couldn't find balanced close — bail without rewriting
-            # this occurrence.
-            new_src_parts.append(src[m.start():i])
-            cursor = i
-            continue
-        # `src[m.end():i-1]` is the EXPR between parens; `src[i-1]` is `)`.
-        expr = src[m.end():i - 1]
-        new_src_parts.append(f".{field}[({expr})]")
-        cursor = i
-        total += 1
-    new_src_parts.append(src[cursor:])
-    if total > 0:
-        path.write_text("".join(new_src_parts))
-        print(
-            f"  rewrote {total} keys/vals/edges.get_unchecked → operator[] in: {path.name}"
-        )
-    else:
-        print(f"  no get_unchecked sites in: {path.name}")
-
-
 def implement_deallocating(path: Path) -> None:
     """Replace stubs for both `deallocating_next` and
     `deallocating_next_back`. These are the tree-eating walks
@@ -4060,11 +4008,11 @@ def main() -> int:
     implement_handle_force(internal)
     # Handle::into_kv — same shape, same fix.
     implement_handle_into_kv(internal)
-    # Generic: any remaining `.{keys,vals,edges}.get_unchecked[_mut](EXPR)`
-    # the hand-ports didn't touch — rewrite to `[EXPR]`. std::array has
-    # no get_unchecked; the Rust source's unsafe contract maps cleanly
-    # to operator[]'s no-bounds-check behavior.
-    fix_std_array_get_unchecked(internal)
+    # Moved into the transpiler: get_unchecked emit at codegen.rs now
+    # wraps unknown-receiver calls in a SFINAE `requires { recv[idx]; }`
+    # shim that routes std::array / std::vector / std::span through
+    # operator[] while leaving real `get_unchecked`-having types
+    # (Rusty slice helpers) untouched.
     # Issue D from write-path investigation: absorbed Handle::split emits
     # `LeafNode<A, Node>::new_(...)` (wrong recovery — A is method's
     # allocator, Node is host class). Rewrite to use __TemplateArgs<Node>.

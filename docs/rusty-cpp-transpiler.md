@@ -320,6 +320,8 @@ auto [a, b] = std::move(pair);  // structured bindings (C++17)
 | `&[T]` (slice) | `std::span<const T>` (C++20) |
 | `&mut [T]` | `std::span<T>` |
 
+**Indexing**: Rust's slice methods `get_unchecked(i)` / `get_unchecked_mut(i)` lower to C++ `[i]`. When the receiver type is statically known to be an array/slice, the transpiler emits `recv[i]` directly. When the receiver is `auto&&`-bound (a deduced type from a method-call chain), the transpiler emits a `requires { recv[idx] }` SFINAE wrapper that picks `recv[idx]` for std::array/std::vector/std::span receivers and `recv.get_unchecked(idx)` for receivers that genuinely expose the named method (e.g. Rusty slice helpers).
+
 ### 2.4 Type Aliases
 
 ```rust
