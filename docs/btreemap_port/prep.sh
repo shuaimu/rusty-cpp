@@ -122,18 +122,19 @@ if [[ -f "$BTREE_DIR/search.rs" ]] && grep -q "<V as super::set_val::IsSetVal>::
 fi
 
 # node.rs::splitpoint uses module-level consts (EDGE_IDX_LEFT_OF_CENTER,
-# EDGE_IDX_RIGHT_OF_CENTER, KV_IDX_CENTER) as match-arm patterns. Rust
-# resolves these as value patterns (matching against the const value);
-# the transpiler currently emits them as fresh variable bindings,
-# shadowing the consts and producing
-#   `const auto& EDGE_IDX_RIGHT_OF_CENTER = _m; return ...;`
-# which then makes the match-IIFE return inconsistent types across
-# arms (one arm returns Left, another Right; the binding capture
-# loses the unifying type info).
+# EDGE_IDX_RIGHT_OF_CENTER, KV_IDX_CENTER) as match-arm patterns.
 #
-# Rewrite the match to an if-chain so each comparison is explicit.
-# Both shapes have identical semantics in Rust; the if-chain form
-# transpiles cleanly because there are no pattern bindings to confuse.
+# Status: PARTIALLY fixed in the transpiler — GENERIC_FIXES_PLAN
+# item 4 made Pat::Ident in match arms lower SCREAMING_SNAKE_CASE
+# names as `if (_m == NAME)` instead of fresh variable bindings. But
+# the surrounding IIFE that wraps the match still infers the lambda
+# return type from the first arm, and the remaining arms return
+# different concrete variant types (LeftOrRight_Left vs
+# LeftOrRight_Right) that don't unify.
+#
+# Until the IIFE-return-type-unification gap closes, keep this
+# prep.sh rewrite: convert the match to an if-chain so the lowering
+# bypasses the lambda-IIFE shape entirely.
 if [[ -f "$BTREE_DIR/node.rs" ]] && grep -q "fn splitpoint(edge_idx: usize)" "$BTREE_DIR/node.rs"; then
   python3 - "$BTREE_DIR/node.rs" <<'PYEOF'
 import sys, pathlib
@@ -152,10 +153,12 @@ old = """fn splitpoint(edge_idx: usize) -> (usize, LeftOrRight<usize>) {
 new = """fn splitpoint(edge_idx: usize) -> (usize, LeftOrRight<usize>) {
     debug_assert!(edge_idx <= CAPACITY);
     // Rust issue #74834 tries to explain these symmetric rules.
-    // Rewritten from a `match` with const-value patterns to an
-    // if-chain by docs/btreemap_port/prep.sh — the transpiler binds
-    // const patterns as fresh variables, which breaks match-IIFE
-    // return-type unification. Semantics unchanged.
+    // Rewritten from a `match` to an if-chain by
+    // docs/btreemap_port/prep.sh — the transpiler now lowers the
+    // const-value match arms correctly, but the IIFE that wraps the
+    // match infers its return type from the first arm and the
+    // remaining arms don't unify (LeftOrRight_Left vs LeftOrRight_Right).
+    // Semantics unchanged.
     if edge_idx < EDGE_IDX_LEFT_OF_CENTER {
         (KV_IDX_CENTER - 1, LeftOrRight::Left(edge_idx))
     } else if edge_idx == EDGE_IDX_LEFT_OF_CENTER {

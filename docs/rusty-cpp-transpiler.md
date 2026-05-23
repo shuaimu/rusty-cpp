@@ -312,6 +312,22 @@ auto pair = std::tuple<int32_t, std::string>(42, std::string("hello"));
 auto [a, b] = std::move(pair);  // structured bindings (C++17)
 ```
 
+### 2.2.1 Match arms: const-value patterns
+
+A Rust match arm of the form `CONST_NAME => …`, where `CONST_NAME` is a const item in scope, compares the scrutinee to the const's value (NOT a fresh variable binding):
+
+```rust
+const LEFT: usize = 5;
+match idx {
+    LEFT => "hit left",
+    _    => "other",
+}
+```
+
+In syn's AST this looks identical to a binding pattern (`Pat::Ident`), and the transpiler doesn't run a full name-resolution pass. As a heuristic, when the ident is SCREAMING_SNAKE_CASE (all uppercase letters/digits/underscores, at least one letter) the transpiler treats it as a const-value pattern and emits `if (_m == LEFT) { … }` instead of `{ const auto& LEFT = _m; … }`. This matches Rust's naming convention for consts.
+
+A lowercase or mixed-case bare ident is still emitted as a fresh binding alias.
+
 ### 2.3 Arrays and Slices
 
 | Rust | C++ |

@@ -295,8 +295,8 @@ only larger inserts would.
 |----|----------------------------------------------|-------------|--------|
 | 1  | Tuple `.N` → `std::get<N>`                   | deferred*   | —      |
 | 2  | `slice.get_unchecked` → `slice[i]`           | done        | 0dc9512|
-| 3  | By-value self → C++ `const`                  | pending     | —      |
-| 4  | Const-value match patterns                   | pending     | —      |
+| 3  | By-value self → C++ `const`                  | deferred*   | —      |
+| 4  | Const-value match patterns                   | partial*    | (next) |
 | 5  | Uninitialized `let` bindings                 | pending     | —      |
 | 6  | Ref-returning `let` bindings                 | pending     | —      |
 | 7  | Wrong template-arg recovery                  | pending     | —      |
