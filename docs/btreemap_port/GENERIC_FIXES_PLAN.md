@@ -137,8 +137,13 @@ that resolves to a `const` item in scope, lower to
 `if (scrutinee == CONST_NAME) { return arm_body; }` instead of a
 binding-with-rename.
 
-**Cleanup**: Remove the `splitpoint` if-chain rewrite from `prep.sh`
-and confirm the original `match` form survives a re-transpile.
+**Status (partial)**: Two of the three pieces are landed:
+
+1. *Const-name pattern detection*: `pattern_ident_is_const_value` and `runtime_ident_match_condition_method` heuristic-detect SCREAMING_SNAKE_CASE arm patterns and lower them as `_m == NAME` comparisons rather than fresh-variable bindings (commit `0fc730f`).
+2. *Explicit IIFE return type for value-lowering matches*: when the match is in tail position with a known expected type, the IIFE wrapper now emits `[&]() -> ExpectedType { … }()` instead of `[&]() { … }()`, so diverging arm body types that converge to the function's return type are accepted via implicit conversion. Helps any match whose arms return variant-constructor sub-types that flatten into a common enum.
+3. *NOT done — literal-type from variant-payload-expected-type*: for the splitpoint case specifically, `LeftOrRight::Right(0)` emits as `LeftOrRight_Right{0}` where the `0` deduces `T = int`, not `T = size_t`. Even with the explicit lambda return `-> std::tuple<size_t, LeftOrRight<size_t>>`, `std::tuple<size_t, LeftOrRight_Right<int>>` can't be implicitly converted to `std::tuple<size_t, LeftOrRight<size_t>>` (different `T`). Fix would teach `maybe_wrap_variant_constructor_with_expected_enum` (or a sibling helper for the *inner* literal cast) to deduce the variant's payload type from the expected enum's type args and cast literals into it. Defer until a clean minimal repro is in place; for now the prep.sh `splitpoint` if-chain rewrite stays.
+
+**Cleanup**: prep.sh `splitpoint` rewrite *kept* — see piece 3 above. Will remove once the literal-type lift lands.
 
 ---
 
@@ -366,7 +371,7 @@ disabled.
 | 1  | Tuple `.N` → `std::get<N>`                   | done        | *pending* |
 | 2  | `slice.get_unchecked` → `slice[i]`           | done        | 0dc9512|
 | 3  | By-value self → C++ `const`                  | deferred*   | —      |
-| 4  | Const-value match patterns                   | partial*    | 0fc730f |
+| 4  | Const-value match patterns                   | partial*    | 0fc730f, *pending* |
 | 5  | Uninitialized `let` bindings                 | deferred*   | —      |
 | 6  | Ref-returning `let` bindings                 | partial*    | aedd910 |
 | 7  | Wrong template-arg recovery                  | partial*    | 1e6b8c6 |
