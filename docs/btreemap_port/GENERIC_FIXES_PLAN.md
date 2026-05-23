@@ -313,6 +313,16 @@ Real match-lowering work, not a one-line emit redirect. Lower priority
 because the empty-map insert path doesn't trigger this at runtime —
 only larger inserts would.
 
+**Status (partial)**: Two of the three pieces have landed in the transpiler:
+
+1. *Tuple-arity from arm patterns*: `match_expr_to_string` now also derives the scrutinee's tuple arity from the arms when `infer_simple_expr_type` returns nothing for the scrutinee. If every arm is a `Pat::Tuple` of the same arity (or `_` wildcard fallback), it routes to the value-conditions emit instead of the broken `std::visit(overloaded { … })` shape. Method-call scrutinees like `self.foo()` returning a tuple no longer degrade to two-unreachable lambdas.
+2. *Movable payload bindings*: `emit_match_expr_tuple_value_conditions_for_scrutinee_expr` now applies `allow_runtime_match_binding_payload_moves` for unguarded arms, so `Some(x)` pattern extraction strips the `std::as_const(_).unwrap()` wrap when the same source isn't reused — keeping the payload movable for the arm body (necessary when the bound value calls non-const member functions like `SplitResult::forget_node_type`).
+3. *NOT done — early-return-arm in let-binding*: when one match arm has a non-local `return X` and the whole match is bound to a `let`, the C++ lowering still wraps the arms in a lambda whose `return` becomes lambda-local rather than function-local — and the arm types diverge so the lambda's `auto` return deduction fails. Lifting the diverging arm OUT of the IIFE requires statement-level match lowering (emit if-return before the let-binding, keep only the success arm value as the let-binding's RHS). That's a larger refactor that touches `Stmt::Local` emission; left as follow-on work. For now the patcher's `stub_insert_recursing` remains in place to keep the BTreeMap pipeline green.
+
+The two parts that did land unblock all other tuple-pattern matches in this shape that *don't* use `return` in an arm.
+
+**Cleanup**: `stub_insert_recursing` kept (still needed for the let+match+return case).
+
 ---
 
 ## Status tracking (update as we go)
@@ -329,4 +339,4 @@ only larger inserts would.
 | 8  | Recursive lambda → Y-combinator              | done        | 9073eaa |
 | 9  | Module-namespace prefix stripping (borderline) | pending   | —      |
 | 10 | Cluster A direct positional matches          | done        | cae6682|
-| 11 | Tuple-pattern match lowering (borderline)    | pending     | —      |
+| 11 | Tuple-pattern match lowering (borderline)    | partial*    | TBD    |

@@ -360,6 +360,27 @@ return rec(rec, n);
 
 Scope tracking is per-block: when leaving the enclosing block, the recursive name is removed from the in-scope set so unrelated calls outside the block aren't rewritten.
 
+### 2.2.0.3 Tuple-pattern match without scrutinee type info
+
+A Rust `match scrutinee { (Pat0, Pat1) => …, … }` where `scrutinee` is a tuple-typed expression but the transpiler's value-level type inference can't see the tuple shape (most often: scrutinee is a method-call return whose owner-impl is resolved through deep generics) previously fell through to a `std::visit(overloaded { [&](auto&&) { unreachable(); }, … }, _m)` emit — `_m` is a `std::tuple`, `std::visit` is for `std::variant`, and both arms degraded to `unreachable()` because the catch-all in `emit_match_expr_visit` had no clause for `Pat::Tuple`.
+
+The fix infers the scrutinee's tuple arity from the arm patterns themselves: if every arm is a `Pat::Tuple` of the same arity (plus optional `_` wildcards), the match routes to the value-conditions emit, which expands as:
+
+```cpp
+[&]() -> ReturnT {
+    auto&& _m_tuple = scrutinee;
+    auto&& _m0 = std::get<0>(_m_tuple);
+    auto&& _m1 = std::get<1>(_m_tuple);
+    if (_m0.is_none()) { auto&& y = _m1; return /* arm body */; }
+    if (_m0.is_some()) { auto&& x = _m0.unwrap(); auto&& y = _m1; return /* arm body */; }
+    rusty::intrinsics::unreachable();
+}()
+```
+
+For pattern bindings inside the arm (e.g. `Some(x)`), the value-conditions path now also runs `allow_runtime_match_binding_payload_moves`, which strips `std::as_const(_).unwrap()` wraps so the bound payload is movable and the arm body can call non-const member functions on it.
+
+Open limitation: if an arm's body is `return X` (non-local return), the C++ lambda's `return` is lambda-local, not function-local. When the arm types diverge (one arm `return T1`, another arm yields `T2`), the lambda's `auto` return can't be deduced. Lifting the diverging arm out of the IIFE requires statement-level match lowering, which is a separate effort.
+
 ### 2.2.1 Match arms: const-value patterns
 
 A Rust match arm of the form `CONST_NAME => …`, where `CONST_NAME` is a const item in scope, compares the scrutinee to the const's value (NOT a fresh variable binding):

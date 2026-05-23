@@ -3337,11 +3337,31 @@ def stub_insert_recursing(path: Path) -> None:
     sentinel = "// btree_port port: insert_recursing stubbed by post_transpile_patch.py"
     if sentinel in src:
         return
-    sig_anchor = "insert_recursing(typename __TemplateArgs<Node>::arg_1 key,"
-    pos = src.find(sig_anchor)
+    # Two known sigs depending on whether Cluster A absorbed the impl:
+    #   - Pre-Item-7: `insert_recursing(typename __TemplateArgs<Node>::arg_1 key,`
+    #   - Post-Item-7/11: `insert_recursing(K key,` (params surface as plain K/V).
+    sig_anchor_candidates = [
+        "insert_recursing(K key,",
+        "insert_recursing(typename __TemplateArgs<Node>::arg_1 key,",
+    ]
+    pos = -1
+    for cand in sig_anchor_candidates:
+        pos = src.find(cand)
+        if pos != -1:
+            break
     if pos == -1:
         print(f"  no insert_recursing site in: {path.name}")
         return
+    # Item 11 (partial): the tuple-pattern lowering and as_const-stripping
+    # parts of Item 11 landed in the transpiler, so the body no longer
+    # contains the `std::visit(overloaded { [&](auto&&) { unreachable(); }, … })`
+    # shape. But it now has the early-return-arm shape — an IIFE whose
+    # two arms diverge on return type because Rust's arm-1 `return X`
+    # (which exits the outer function) became a lambda-local return in
+    # the C++ emit, leaving the lambda with unresolvable return type
+    # deduction. Lifting the diverging arm out of the IIFE requires
+    # statement-level match lowering, which is a follow-on. For now,
+    # keep the stub so the build stays green.
     brace_open = src.find("{", pos)
     depth = 0
     brace_close = -1
