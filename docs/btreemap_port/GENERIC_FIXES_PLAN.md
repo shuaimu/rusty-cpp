@@ -146,6 +146,28 @@ truly opaque cases.
 **Cleanup**: Remove all three prep.sh patches and confirm the original
 Rust source survives a re-transpile.
 
+**Deferred status**: The transpiler already handles the simplest case
+(`let mut x; if cond { x = 1; } else { x = 2; } x` → `std::optional<int>`
+with `.emplace`/`.value()`). But the BTreeMap merge_iter case:
+
+    let mut a_next;
+    let mut b_next;
+    match self.peeked.take() {
+        Some(Peeked::Left(next)) => { a_next = Some(next); … }
+        …
+    }
+
+emits `auto a_next; auto b_next;` (no type), because the
+`inferred_binding_ty` for the let is None (no initializer) and the
+existing `augment_uninitialized_local_type_hints_from_usage`
+pre-pass doesn't pick up assignments-from-method-call-return as
+type hints. Fix would extend the pre-pass to:
+- Look at the RHS expression type of later assignments.
+- Apply the inferred type to the let binding.
+
+The shape of the work is in `collect_local_generic_placeholder_hints`
+and friends — a separate-enough investigation to defer.
+
 ---
 
 ## 6. Reference-returning `let` bindings: `const auto x = ref_call()` → `auto& x = …`
@@ -297,7 +319,7 @@ only larger inserts would.
 | 2  | `slice.get_unchecked` → `slice[i]`           | done        | 0dc9512|
 | 3  | By-value self → C++ `const`                  | deferred*   | —      |
 | 4  | Const-value match patterns                   | partial*    | 0fc730f |
-| 5  | Uninitialized `let` bindings                 | pending     | —      |
+| 5  | Uninitialized `let` bindings                 | deferred*   | —      |
 | 6  | Ref-returning `let` bindings                 | pending     | —      |
 | 7  | Wrong template-arg recovery                  | pending     | —      |
 | 8  | Recursive lambda → Y-combinator              | pending     | —      |
