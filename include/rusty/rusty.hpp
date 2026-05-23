@@ -83,6 +83,8 @@
 // Process / system-info helpers (std::process equivalent — sysconf /
 // getpid / times / sysinfo wrappers).
 #include "rusty/sys/process.hpp"
+// Environment / host helpers (std::env equivalent — gethostname wrapper).
+#include "rusty/sys/env.hpp"
 // File descriptor wrappers (std::os::fd equivalent)
 #include "rusty/os/fd.hpp"
 // TCP networking (std::net equivalent — bind/connect/accept/read/write).
