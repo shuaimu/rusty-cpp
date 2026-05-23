@@ -294,7 +294,7 @@ only larger inserts would.
 | #  | Item                                         | Status      | Commit |
 |----|----------------------------------------------|-------------|--------|
 | 1  | Tuple `.N` → `std::get<N>`                   | deferred*   | —      |
-| 2  | `slice.get_unchecked` → `slice[i]`           | done        | (next) |
+| 2  | `slice.get_unchecked` → `slice[i]`           | done        | 0dc9512|
 | 3  | By-value self → C++ `const`                  | pending     | —      |
 | 4  | Const-value match patterns                   | pending     | —      |
 | 5  | Uninitialized `let` bindings                 | pending     | —      |
