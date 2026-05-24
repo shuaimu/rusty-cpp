@@ -1,29 +1,67 @@
-# BTreeMap port — hand-ported function bodies
+# Rusty Std Book — porting the Rust standard library to C++
 
-This doc tracks the **function bodies** in the transpiled BTreeMap output
-that are *not* produced by the transpiler itself. They live in
+A living document tracking the work of translating the Rust standard
+library (the `library/alloc`, `library/core`, `library/std` source
+trees from rustc) into C++ modules via the `rusty-cpp-transpiler`.
+
+Each major chapter below corresponds to one standard-library type or
+collection we've attempted to port. For each port we record:
+
+- what the transpiler can handle on its own,
+- what function bodies are still hand-written (in
+  `docs/<port>_port/post_transpile_patch.py`),
+- which of those hand-ports could be retired by a generic transpiler
+  fix, and which need human porting effort.
+
+Sibling docs:
+
+- `rusty-cpp-book.md` — the borrow-checker / analyser side of RustyCpp.
+- `rusty-cpp-transpiler.md` — transpiler design notes.
+- `btreemap_port/STATUS.md`, `btreemap_port/GENERIC_FIXES_PLAN.md` —
+  the day-by-day driver for the BTreeMap port and the patcher
+  *text-fix* rule list, respectively. This book is the higher-level
+  catalogue of *function-body* hand-ports across all ports.
+
+---
+
+## Table of Contents
+
+- [Chapter 1 — `collections::BTreeMap`](#chapter-1--collectionsbtreemap)
+  - [1.1 Hand-ports (full function bodies)](#11-hand-ports-full-function-bodies)
+  - [1.2 Stubs that throw `runtime_error`](#12-stubs-that-throw-runtime_error-not-implemented)
+  - [1.3 Root-cause categories](#13-root-cause-categories)
+  - [1.4 Summary: retire-by-transpiler-fix triage](#14-summary-which-hand-ports-could-be-retired-by-transpiler-fixes)
+
+Future chapters: `Vec`, `HashMap`, `String`, `Arc`/`Rc`, `Mutex`, …
+
+---
+
+## Chapter 1 — `collections::BTreeMap`
+
+This chapter tracks the **function bodies** in the transpiled BTreeMap
+output that are *not* produced by the transpiler itself. They live in
 `docs/btreemap_port/post_transpile_patch.py`, which runs after the
 transpiler emits the `.cppm` modules and rewrites specific function
 bodies via text-level patches.
 
-Separate from this file:
+Separate from this chapter:
 
-- `STATUS.md` — overall port progress, phase-by-phase.
-- `GENERIC_FIXES_PLAN.md` — patcher *text-fix* rules (regex/string
-  rewrites) that should be lifted into the transpiler. Items 1–8.
+- `btreemap_port/STATUS.md` — overall port progress, phase-by-phase.
+- `btreemap_port/GENERIC_FIXES_PLAN.md` — patcher *text-fix* rules
+  (regex/string rewrites) that should be lifted into the transpiler.
+  Items 1–8.
 
-This file covers a different class of patch: **entire function bodies
-replaced with manually-written C++**, plus methods left as **stubs that
-throw `runtime_error`** because nobody has implemented them yet.
+This chapter covers a different class of patch: **entire function
+bodies replaced with manually-written C++**, plus methods left as
+**stubs that throw `runtime_error`** because nobody has implemented
+them yet.
 
-The goal of this doc is to (a) catalogue what's hand-written so the
-"is this transpiled?" question has a single source of truth, and (b)
-analyse which hand-ports could be retired by a generic transpiler fix
-vs. which need real human porting effort.
+The goal of this chapter is to (a) catalogue what's hand-written so
+the "is this transpiled?" question has a single source of truth, and
+(b) analyse which hand-ports could be retired by a generic transpiler
+fix vs. which need real human porting effort.
 
----
-
-## Hand-ports (full function bodies)
+### 1.1 Hand-ports (full function bodies)
 
 Listed in roughly the order they appear in the patcher.
 
@@ -42,7 +80,7 @@ Listed in roughly the order they appear in the patcher.
 | H11 | `deallocating_next_back` | btree_internal.cppm:5698 | `implement_deallocating` | `into_iter` / drop |
 | H12 | `BTreeMap::entry` | map.cppm:5757 | `implement_btreemap_entry` | `BTreeMap::insert`, user entry API |
 
-## Stubs that throw `runtime_error` (NOT implemented)
+### 1.2 Stubs that throw `runtime_error` (NOT implemented)
 
 If these are called at runtime, they throw `rusty-cpp-transpiler: …`.
 
@@ -56,15 +94,13 @@ If these are called at runtime, they throw `rusty-cpp-transpiler: …`.
 The benchmark exercises only `insert` + `get`; these paths don't hit
 the OccupiedEntry stubs. Anything that walks an Entry would.
 
----
-
-## Root-cause categories
+### 1.3 Root-cause categories
 
 Group the hand-ports by *why* the transpiler couldn't handle them.
-This is the lens for deciding "could a generic transpiler fix
-retire this hand-port?"
+This is the lens for deciding "could a generic transpiler fix retire
+this hand-port?"
 
-### Category A — `Box::into_non_null_with_allocator` destructure
+#### Category A — `Box::into_non_null_with_allocator` destructure
 
 **Members**: H1 (`from_new_leaf`), H2 (`from_new_internal`).
 
@@ -90,7 +126,7 @@ small lookup-table entry.
 **Note**: The hand-port itself is ~6 lines per method — not where the
 perf gap lives. Pure correctness completion.
 
-### Category B — `MaybeUninit` slot writes through generic-parameterized arrays
+#### Category B — `MaybeUninit` slot writes through generic-parameterized arrays
 
 **Members**: H3 (`push_with_handle`).
 
@@ -112,14 +148,14 @@ The hand-port directly does the same calls but with explicit types,
 avoiding the auto-deduction problem.
 
 **Generic-fix viability: MEDIUM.** This is the same family of issue as
-Item 2 in `GENERIC_FIXES_PLAN.md` (`slice.get_unchecked[_mut](i) →
-slice[i]`). A proper fix is to thread element types through generic
-array accesses so the `MaybeUninit<K>` slot type can be deduced at the
-call site. Doable but not trivial — touches the type-inference paths
-that already failed once on this code (see Iter 72–79 in the task
-history).
+Item 2 in `btreemap_port/GENERIC_FIXES_PLAN.md`
+(`slice.get_unchecked[_mut](i) → slice[i]`). A proper fix is to thread
+element types through generic array accesses so the `MaybeUninit<K>`
+slot type can be deduced at the call site. Doable but not trivial —
+touches the type-inference paths that already failed once on this code
+(see Iter 72–79 in the task history).
 
-### Category C — `loop { match self.force() { Leaf(x) => …, Internal(y) => … } }`
+#### Category C — `loop { match self.force() { Leaf(x) => …, Internal(y) => … } }`
 
 **Members**: H4 (`search_tree`), H5/H6 (`first_leaf_edge`, `last_leaf_edge`),
 H10/H11 (`deallocating_next`, `deallocating_next_back`).
@@ -160,7 +196,7 @@ If fixed, this single change retires **at least 5 of the 12
 hand-ports** (H4, H5, H6, H10, H11) plus ~13 manual-patch slots.
 This is the highest-impact transpiler fix on the table.
 
-### Category D — Method-template params that fail deduction
+#### Category D — Method-template params that fail deduction
 
 **Members**: H7 (`Handle::descend`), H8 (`Handle::force`),
 H9 (`Handle::into_kv`).
@@ -187,9 +223,10 @@ recover `BorrowType`/`K`/`V` from it without method-template params.
 pattern. It just didn't catch every method. Extending Cluster A's
 detection to cover these three methods (or generalising the pattern
 match it uses) would retire H7/H8/H9. Same family as completed
-GENERIC_FIXES_PLAN item 7 ("Wrong template-arg recovery").
+`btreemap_port/GENERIC_FIXES_PLAN.md` item 7 ("Wrong template-arg
+recovery").
 
-### Category E — Composite: `BTreeMap::entry`
+#### Category E — Composite: `BTreeMap::entry`
 
 **Member**: H12 (`BTreeMap::entry`).
 
@@ -219,7 +256,7 @@ elsewhere. Roughly 90% of this hand-port disappears for free if C
 and D are fixed; the last 10% is `DormantMutRef::new` destructuring
 which already has a partial helper.
 
-### Category F — Genuine unimplemented surface (stubs)
+#### Category F — Genuine unimplemented surface (stubs)
 
 **Members**: `OccupiedEntry::{key, get_mut, into_mut, into_key}`.
 
@@ -233,9 +270,7 @@ emit working versions today now that H9 (`Handle::into_kv`) and the
 H11/H12 fixes from Category D are in; the stubs date from earlier
 phases when those weren't yet available.
 
----
-
-## Summary: which hand-ports could be retired by transpiler fixes
+### 1.4 Summary: which hand-ports could be retired by transpiler fixes
 
 | Category | Hand-ports | Generic fix? | Effort | Impact |
 |---|---|---|---|---|
