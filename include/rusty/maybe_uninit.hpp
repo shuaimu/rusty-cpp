@@ -118,6 +118,18 @@ public:
         return value;
     }
 
+    // Const overload: for trivially-copyable T, dereferencing `*const T`
+    // and calling `.assume_init()` is legal in Rust (the field is copied
+    // out by value, then `assume_init()` consumes the copy). C++ needs
+    // the receiver to be non-const for the move-out variant — provide
+    // a const path that just copies, matching Rust's effective behavior
+    // for Copy types.
+    T assume_init() const noexcept(std::is_nothrow_copy_constructible_v<T>)
+        requires (std::is_copy_constructible_v<T>)
+    {
+        return *as_ptr();
+    }
+
     // Destroy the value (UNSAFE - caller must ensure initialized)
     void destroy() noexcept(std::is_nothrow_destructible_v<T>) {
         if constexpr (!std::is_reference_v<T>) {
