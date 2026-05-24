@@ -472,7 +472,37 @@ pub fn transpile_full_with_options(
     log_profile("codegen_setup");
     codegen.emit_file(&file, module_name);
     log_profile("codegen_emit_file");
-    Ok(codegen.into_output())
+    let mut output_str = codegen.into_output();
+    println!("RUSTY_DEDUP_TRACE_X9Z called len={}", output_str.len());
+    // Generic dedup of consecutive identical `= default;` operator lines.
+    // `#[derive(Eq, PartialEq, Ord, PartialOrd)]` lowers each pair (Eq +
+    // PartialEq → operator==, Ord + PartialOrd → operator<=>) to the same
+    // defaulted overload — C++ rejects two defaulted overloads with the
+    // same signature. The per-struct dedup in `emit_struct` catches most
+    // cases, but some emit paths leave duplicates. A textual dedup of
+    // adjacent identical operator-default lines is always safe.
+    output_str = {
+        let mut out = String::with_capacity(output_str.len());
+        let mut prev_trimmed: Option<String> = None;
+        for line in output_str.split_inclusive('\n') {
+            let trimmed = line.trim().to_string();
+            let is_defaulted_declarator = trimmed.ends_with("= default;")
+                && (trimmed.contains("operator==")
+                    || trimmed.contains("operator<=>")
+                    || trimmed.contains("operator<")
+                    || trimmed.contains("operator>")
+                    || trimmed.contains("operator!="));
+            if is_defaulted_declarator
+                && prev_trimmed.as_ref().is_some_and(|prev| prev == &trimmed)
+            {
+                continue;
+            }
+            out.push_str(line);
+            prev_trimmed = Some(trimmed);
+        }
+        out
+    };
+    Ok(output_str)
 }
 
 fn parse_with_expand_hygiene_fallback(rust_source: &str) -> Result<syn::File, syn::Error> {
