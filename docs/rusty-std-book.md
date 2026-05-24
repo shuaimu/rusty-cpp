@@ -41,6 +41,7 @@ Sibling docs:
   - [1.2 Stubs that throw `runtime_error`](#12-stubs-that-throw-runtime_error-not-implemented)
   - [1.3 Root-cause categories](#13-root-cause-categories)
   - [1.4 Summary: retire-by-transpiler-fix triage](#14-summary-which-hand-ports-could-be-retired-by-transpiler-fixes)
+  - [1.5 Perf profiling: the `clear_forgotten_address_range` cliff](#15-perf-profiling-the-rustymemclear_forgotten_address_range-cliff)
 
 Future chapters: `Vec`, `HashMap`, `String`, `Arc`/`Rc`, `Mutex`, …
 
@@ -560,16 +561,132 @@ it's the same root cause as most of the remaining 13 `// TODO
 transpiler: unresolved bare-glob variant …` slots.** It is the
 highest-leverage transpiler item still open.
 
-The current ~1700–10000× perf gap vs. `std::map` is largely *not*
-caused by hand-port shortfalls — the hot path (`insert` → `entry` →
-`search_tree` → `force()` → `push_with_handle`) is mostly hand-ported
-and should be roughly hand-quality C++. The gap is from:
+The current ~1700–10000× perf gap vs. `std::map` is *almost entirely*
+caused by a single runtime-bookkeeping routine in the `rusty/mem.hpp`
+header — see Section 1.5.
 
-- SFINAE dispatcher lambdas around every method call (`[&](auto&&
-  __recv) -> decltype(auto) { if constexpr (requires {…}) … }
-  (receiver)`) defeating the inliner.
-- `std::variant<...>` + `.index()` dispatch instead of direct branches.
-- Generic `rusty::alloc::Global` allocator wrapper overhead.
+### 1.5 Perf profiling: the `rusty::mem::clear_forgotten_address_range` cliff
 
-Those are emit-shape issues, separate from the hand-port catalog
-above. They'd need their own plan to address.
+Profiled the bench with gperftools (`-lprofiler` + `CPUPROFILE=…`,
+analysed with `pprof`) at N=10, REPS=8000 (26s wall, 2611 samples).
+The flat profile:
+
+```
+flat   flat%   cum     cum%    function
+25.99s  99.54%  26.03s  99.69%  rusty::mem::clear_forgotten_address_range
+0       0%      23.08s  88.40%  slice_insert (via insert_recursing, insert_fit, …)
+0       0%       3.02s  11.57%  rusty::ptr::write (via LeafNode::init, new_leaf, …)
+```
+
+**One function — `rusty::mem::clear_forgotten_address_range` — holds
+99.5% of self time.** Inside it, the hot line is the comparison inside
+a `for it = addresses.begin(); it != addresses.end(); …` loop
+(25.70s / 98.4%).
+
+#### What the function does
+
+`include/rusty/mem.hpp:343`. It walks a **global mutex-guarded
+`std::unordered_map`** ("forgotten-address" markers — addresses of
+values the runtime has flagged as moved-from for double-drop
+detection) and erases any keys whose `address` falls in
+`[base, base + bytes)`:
+
+```cpp
+inline void clear_forgotten_address_range(const void* base, std::size_t bytes) noexcept {
+    …
+    platform::threading::lock_guard<platform::threading::mutex> lock(detail::forgotten_addresses_mutex());
+    auto& addresses = detail::forgotten_addresses();
+    for (auto it = addresses.begin(); it != addresses.end();) {
+        const auto current = reinterpret_cast<std::uintptr_t>(it->first.address);
+        if (current >= start && current < end) {       // ← 98.4% of total CPU here
+            it = addresses.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+```
+
+#### Why it's catastrophic
+
+It is called **on every element write inside `ptr::write` / `ptr::copy`**:
+
+```cpp
+template<typename T, typename U>
+inline void write(T* dst, U&& value) {
+    rusty::mem::clear_forgotten_address_range(static_cast<const void*>(dst), sizeof(T));
+    std::construct_at(dst, std::forward<U>(value));
+}
+```
+
+And every B-tree insert ultimately calls `slice_insert`, which shifts
+K elements via `ptr::copy`, which calls
+`clear_forgotten_address_range` K times. Each call:
+
+1. Takes a process-wide mutex.
+2. Scans the **entire** global forgotten-addresses map (linearly,
+   regardless of `base`).
+3. Erases any entries whose key falls inside the range.
+
+The set grows monotonically as moves accumulate across all
+`BTreeMap`s in the process, so each call gets slower. The cost is
+O(global_set_size × elements_shifted × inserts).
+
+#### Quick verification
+
+Replacing the body of `clear_forgotten_address_range` with a no-op
+(temporary perf experiment, not a real fix — it disables moved-from
+tracking) and re-running the bench:
+
+| N  | REPS | Before (with bookkeeping) | After (no-op)  | Gap shrinks by |
+|----|------|---------------------------|----------------|----------------|
+| 5  | 2000 | 1770× slower than std::map | **12.1×**     | ~146×          |
+| 10 | 1000 | 4821×                      | **18.7×**     | ~258×          |
+| 15 | 500  | 10265×                     | **17.5×**     | ~587×          |
+| 20 | 200  | 10971×                     | **18.3×**     | ~600×          |
+
+Removing this single function brought the perf gap from **~1700–11000×**
+down to **~12–19×**. That's a **600–1000× speedup** from one change.
+
+After the no-op, the ~12–19× residual gap is the "real" emit-shape
+overhead I'd guessed at earlier (SFINAE dispatchers, std::variant
+dispatch, allocator wrapper). The hot-path symbols disappeared from
+the profile entirely.
+
+#### Fix options
+
+1. **Conditional compilation**: gate the bookkeeping behind a
+   `#ifndef RUSTY_DISABLE_FORGOTTEN_TRACKING` define. Default-on for
+   debug, default-off for `-DNDEBUG` / release builds. Trivial; ships
+   immediately. Doesn't address the underlying inefficiency.
+
+2. **Drop the linear scan**: the function takes an address range and
+   removes entries falling inside it. Replace the `unordered_map`
+   linear scan with an interval tree / sorted-by-address structure
+   so the range-erase is O(log N + matches) instead of O(N). Then it
+   could stay enabled by default.
+
+3. **Reduce call rate**: the bookkeeping is a *correctness* aid for
+   moved-from detection, but `ptr::write` already runs
+   `std::construct_at` immediately after the clear — i.e. the write
+   itself is the source of truth, and the prior forgotten marker is
+   stale by definition. The clear could be elided when the caller
+   already proved the slot is uninitialized (which is exactly when
+   `ptr::write` is supposed to be used). That requires reworking the
+   `ptr::write` contract.
+
+4. **Per-allocation tracking**: keep markers in metadata adjacent to
+   the allocation instead of a global map. O(1) per write. Larger
+   refactor.
+
+Option 1 is the obvious immediate win. Option 4 would be the right
+long-term fix.
+
+#### Where this should live in the book
+
+Even though the cliff is in `rusty/mem.hpp` (the C++ runtime support
+library, not the transpiler or the patcher), the impact is so
+disproportionate that it dwarfs every other category in Sections
+1.1–1.4. Any future std-library port using `ptr::write` or
+`ptr::copy` on hot paths will hit the same wall. Worth fixing
+*before* attempting the next port.
