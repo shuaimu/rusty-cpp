@@ -44,6 +44,16 @@ Sibling docs:
   - [1.5 Perf profiling: the `clear_forgotten_address_range` cliff](#15-perf-profiling-the-rustymemclear_forgotten_address_range-cliff)
   - [1.6 Component-level comparison vs native Rust BTreeMap](#16-component-level-comparison-vs-native-rust-btreemap)
   - [1.7 IIFE-lambda overhead: focused micro-bench](#17-iife-lambda-overhead-focused-micro-bench)
+  - [1.8 Retrospective: timeline, effort, milestones](#18-retrospective-timeline-effort-milestones)
+- [Chapter 2 — Playbook for future std-library ports](#chapter-2--playbook-for-future-std-library-ports)
+  - [2.1 Picking a target](#21-picking-a-target)
+  - [2.2 The three-axis problem](#22-the-three-axis-problem-parser-codegen-runtime)
+  - [2.3 Phase template (A → E)](#23-phase-template-a--e)
+  - [2.4 Recurring transpiler-emit clusters to anticipate](#24-recurring-transpiler-emit-clusters-to-anticipate)
+  - [2.5 Runtime gotchas](#25-runtime-gotchas)
+  - [2.6 Bench discipline](#26-bench-discipline)
+  - [2.7 When to stop](#27-when-to-stop)
+  - [2.8 Estimating effort for the next port](#28-estimating-effort-for-the-next-port)
 
 Future chapters: `Vec`, `HashMap`, `String`, `Arc`/`Rc`, `Mutex`, …
 
@@ -1150,3 +1160,412 @@ diff <(awk '/_Z11plain_match/,/Lfunc_end/' iife.s) \
 
 Empty diff = elided cleanly. Non-empty diff = real codegen
 difference worth investigating.
+
+### 1.8 Retrospective: timeline, effort, milestones
+
+This section captures the wall-clock and effort numbers behind the
+BTreeMap port, both as a record of what actually happened and as a
+calibration point for estimating future ports.
+
+#### Wall-clock timeline
+
+| Date / time (ET) | Milestone | Cumulative |
+|---|---|---|
+| 2025-08-24 | First abandoned attempt (`new btreemap`) — punted | — |
+| **2026-05-18 00:17** | Restart: prep.sh + `transpiler:` step 1 (assert! macro lowering) | **0 h** |
+| 2026-05-18 08:57 | Transpiled `btree_internal.cppm` compiles cleanly under clang (step 19) | +8.7 h |
+| 2026-05-18 09:37 | Facade API surface complete: entry(), pop_first/last, retain (step 22) | +9.3 h |
+| 2026-05-18 10:06 | BTreeSet set-theoretic ops + range/pop (step 24) | +9.8 h |
+| **2026-05-19 00:34** | **ZERO compile errors; transpiled_smoke LINKS and RUNS** (step 47) | **+24.3 h** |
+| 2026-05-19 21:30 | Phase E insert path partially working (step 61); transpiler-level limits identified | +45 h |
+| 2026-05-22 01:19 | Cluster A–E transpiler-fix batch lands | ~4 days |
+| 2026-05-23 ~ 2026-05-24 | Item 1–11 redoes (parser-side & emit-side fixes) | ~5–6 days |
+| 2026-05-24 17:10 | **Perf cliff found and fixed** (§1.5: `clear_forgotten_address_range` linear-scan) | ~6.5 days |
+| 2026-05-25 01:30 | Strict null-state achieved (global table deleted, §1.5 epilogue) | ~7 days |
+| 2026-05-25 09:39 | Component comparison vs Rust + IIFE micro-bench (§§1.6–1.7) | ~7.4 days |
+
+**~1 week of focused effort** from "no port" to "matches `std::map`,
+1.59× steady-state vs native Rust BTreeMap, with retrospective and
+playbook documented." The August 2025 attempt was abandoned because
+the transpiler wasn't ready — by May 2026 it was.
+
+#### Effort numbers
+
+Since the restart on 2026-05-18 through 2026-05-25:
+
+| Metric | Value |
+|---|---|
+| Commits with `btree_port:` / `BTreeMap port step` | 33 |
+| Commits with `transpiler:` / `codegen:` (driven by port) | ~80 |
+| Total commits in the week | ~200 |
+| `docs/btreemap_port/prep.sh` | 421 lines |
+| `docs/btreemap_port/post_transpile_patch.py` | 4,105 lines, 57 functions |
+| Hand-port function bodies (in patcher) | ~30 |
+| Stubs that throw `runtime_error` (still unimplemented) | ~13 |
+| Total LOC churned in btree-related commits | ~10,500 insertions / ~1,200 deletions |
+
+The patcher (4.1K lines) and prep.sh (421 lines) together represent
+~4.5K lines of "stuff the transpiler can't yet do." Of that, the
+patcher is the larger structural debt — most of its hand-ports could
+be retired by transpiler fixes (see §1.4's triage).
+
+#### Phase shape that emerged
+
+The port naturally clustered into five phases. Roughly:
+
+| Phase | Goal | What it looked like | Effort |
+|---|---|---|---|
+| **A** — *Types compile* | Get the module to parse + compile (no link, no run) | A1: template-arg recovery for `Handle`/`NodeRef`/`Root`. A2–A5: fix unknown-type errors one cluster at a time. | ~8 h |
+| **B** — *Hand-port unknowns* | Stub out / hand-port what the transpiler emitted as broken or missing | B1–B5: `from_new_leaf`, `from_new_internal`, `push_with_handle`, `deallocating_next/_back`. | ~2 h |
+| **C** — *Link + smoke-test* | Get a consumer test to link and run *anything* through the API | C1: read-path smoke test (insert + iterate) | ~1 h |
+| **D** (skipped) | (Would have been: full Rust unit-test parity, like the `either` parity harness — punted; not necessary for BTreeMap goal) | — | — |
+| **E** — *Tighten transpiler & full API* | Codify hand-ports back into transpiler when possible; chase down insert-path, then perf | Cluster A–E transpiler fixes; Item 1–11 redoes; eventually perf cliff + null-state | ~5 days |
+
+**The first 24 hours took the port from nothing → linking & running
+a smoke test.** Everything after that was tightening the long tail.
+
+#### Distribution of effort
+
+Roughly, where the week went:
+
+```
+Pipeline + initial transpile  ████████░░░░░░░░░░░░ ~20%  (steps 1-30, May 18 single-day blitz)
+Hand-port phases A-C          ████░░░░░░░░░░░░░░░░ ~10%  (steps 31-47)
+Insert-path long tail (E)     ████████████░░░░░░░░ ~30%  (steps 48-80, Cluster A-E, Items 1-11)
+Perf cliff fix (§1.5)         ████░░░░░░░░░░░░░░░░ ~10%
+Strict null-state refactor    ████░░░░░░░░░░░░░░░░ ~10%
+Bench + retrospective (§§1.6-1.8)  ████████░░░░░░░░ ~20%
+```
+
+The insert path was the single biggest tar-pit — `Handle::insert_fit`
+/ `insert_recursing` / `VacantEntry::insert_entry` chained ~15
+distinct transpiler-emit bugs that had to be peeled one at a time.
+
+#### What worked
+
+1. **Numbered steps with one-line commit summaries** — Made it
+   trivial to reconstruct what was tried. Every commit is searchable
+   as `port step N`. Without this we'd have lost the thread.
+
+2. **The patcher as a "transpiler IOU ledger"** — Every hand-fix
+   went into `post_transpile_patch.py` with a `# transpiler should
+   do X` comment. §1.4 then triaged them back into transpiler fixes.
+   This kept the patcher from rotting into permanent technical debt.
+
+3. **Compile-then-link-then-run** — Phase A got the module to
+   *compile*. Phase B hand-stubbed the broken bodies. Phase C got
+   *one* consumer test to *link and run*. Only after that did Phase
+   E start chasing per-method correctness. Each phase had a binary
+   exit criterion.
+
+4. **Bench discipline** — Once the port was running, the first
+   bench result (1700–10000× slower than `std::map`) immediately
+   surfaced the perf cliff in §1.5. Without that bench we'd have
+   shipped a structurally-correct but practically-unusable port.
+
+5. **Comparing against Rust, not just `std::map`** — §1.6 reframed
+   the goal: "are we close to *native Rust*?" not "are we close to
+   *libstdc++*?". Different conclusion (1.59× vs 1.05×) and
+   different optimization priorities.
+
+#### What was hard
+
+1. **The cyclic-module problem.** rustc's btree submodule has
+   `node ↔ navigate ↔ search ↔ merge_iter ↔ fix ↔ remove ↔ split ↔ append`
+   forming a tight cycle. C++20 modules require a DAG. We
+   concatenated the cyclic group into a single `btree_internal.rs`
+   in prep.sh — ugly, but the only realistic option short of a
+   transpiler-level cycle breaker. **This will recur for any
+   multi-file Rust module with sibling impl blocks.**
+
+2. **Template-argument recovery from absorbed methods.** Cluster A
+   alone took multiple rounds (initial fix, then redo, then
+   "Cluster A completion" with `__TemplateArgs<...>` partial
+   specialization). The transpiler can't recover from the
+   structural-decomposition mismatch when the host class's
+   generics don't textually appear in the absorbed method
+   signature. The current fix is robust but the design space wasn't
+   obvious upfront.
+
+3. **The perf cliff.** A 1700× cliff sitting in a `for it = …;
+   addresses.begin() != end(); …` loop in `rusty::mem.hpp` was
+   invisible from the C++ source review — only visible via
+   `gperftools`. **Lesson: profile early, not after correctness
+   work.** A profile after step 47 (when smoke test first ran)
+   would have surfaced this within minutes.
+
+4. **The "deletes after a move" problem.** The original moved-from
+   tracking used a global mutex-guarded `unordered_map`. Solving it
+   correctly took multiple iterations: address-range no-op fast
+   path → if-constexpr guard → per-type `_rusty_forgotten` bool →
+   delete the global table entirely. Each iteration was driven by
+   a new bench scenario that broke the previous fix.
+
+#### Hand-port → transpiler-fix conversion rate
+
+§1.4 triage:
+- **Retire-by-transpiler-fix** (high leverage): 8 of 30 hand-ports
+- **Retire-by-prep.sh** (medium leverage, port-specific): 6
+- **Genuine human porting** (low leverage, won't generalize): 16
+
+So roughly **half** the hand-ports represent transpiler debt that
+would help future ports too. The other half are BTreeMap-specific
+oddities (e.g. `IsSetVal::is_set_val()` unstable specialization).
+
+---
+
+## Chapter 2 — Playbook for future std-library ports
+
+§1 is the BTreeMap-specific record. This chapter distills it into
+patterns that should apply to the next port (`Vec`, `HashMap`, etc).
+
+### 2.1 Picking a target
+
+Order targets by:
+
+1. **Cyclic-module score** — Does the rustc source have sibling
+   files with cyclic `use super::` imports? (See §1.3 / Chapter 0
+   for why this matters.) Single-file modules are easiest; tight
+   cycles are hardest. Check with `grep -r "use super::" library/<…>`.
+2. **Generic-arity score** — How many type parameters? `Vec<T>` is
+   1, `HashMap<K, V, S>` is 3, `BTreeMap<K, V, A>` is 3 with deeply
+   nested handles. Higher = more chance of running into
+   Cluster-A-style template-arg recovery issues.
+3. **Internal unsafe density** — `Vec::push` is ~10 LOC of unsafe;
+   `BTreeMap::insert` is hundreds of LOC across multiple files.
+   Higher = more bodies the transpiler has to get exactly right.
+4. **External surface** — Public API methods × callable-from-stable
+   variants. Each method needs a working hand-port or transpiler
+   emit. Bigger surface = longer Phase E tail.
+
+**Easy wins** (low on all axes): `Range`, `RangeInclusive`,
+`Option`/`Result` helpers, `Cell`, `RefCell`.
+**Medium**: `Vec`, `VecDeque`, `String`.
+**Hard**: `HashMap`, `BTreeMap`, `BTreeSet`, `BinaryHeap`.
+**Very hard**: `Arc`/`Rc` (weak refs, atomics), `Mutex` (platform
+threading), async primitives.
+
+### 2.2 The three-axis problem (parser, codegen, runtime)
+
+Every port failure falls into one of three buckets:
+
+| Axis | What it looks like | Where the fix lives |
+|---|---|---|
+| **Parser** (transpiler input) | Rust feature the syn-AST visitor doesn't understand (e.g. `default fn`, `const { ... }`, parameterized macros) | `transpiler/src/*` Rust-side AST handling, OR prep.sh rewrite |
+| **Codegen** (transpiler emit) | C++ output that doesn't compile or has wrong semantics (e.g. `auto` decays a ref, IIFE return type mismatch, `__TemplateArgs<>` missing) | `transpiler/src/codegen.rs` emit logic |
+| **Runtime** (rusty/* headers) | C++ compiles + runs, but is slow, leaks, or aborts (e.g. perf cliff, moved-from semantics) | `include/rusty/*.hpp` or new helper headers |
+
+A useful diagnostic question when stuck: *if I look at the C++
+output, what would have to be true at the source-Rust level to make
+this output correct?* That tells you whether the fix is in the
+transpiler (axis 2) or upstream in prep.sh (axis 1).
+
+### 2.3 Phase template (A → E)
+
+For each new port, follow this phase structure. Each phase has a
+binary exit criterion.
+
+#### Phase A — Types compile
+
+**Goal**: the transpiled `.cppm` module produces zero compile errors.
+
+**Exit**: `clang++ -fmodule-output ... <module>.cppm` produces a `.pcm`.
+
+**Methods used in BTreeMap**:
+- A1: Template-arg recovery for compound types (`Handle<NodeRef<…>>`).
+- A2: Add transpiler helpers for unknown types (`DormantMutRef`).
+- A3: Recursive-lambda → Y-combinator lowering for nested fns.
+- A4: Constant deduplication (`MIN_LEN`), associated-type
+  projections (`SearchBound`).
+- A5: Set module after map (sibling-module ordering).
+
+**Watch for**: undefined identifiers in template parameters; this
+almost always means template-arg recovery missed a layer.
+
+#### Phase B — Hand-port unknowns
+
+**Goal**: stub or hand-port the function bodies the transpiler
+couldn't emit correctly.
+
+**Exit**: the module *would* link if you ran the linker, modulo
+unimplemented features that throw `runtime_error`.
+
+**Pattern**: every hand-port goes in `post_transpile_patch.py` with
+a `# transpiler should do X` comment so §1.4-style triage can
+retire them later.
+
+**Watch for**: hand-ports that are really fixes for *transpiler
+bugs* (axis 2). These should be promoted to transpiler fixes ASAP,
+before the patcher accumulates redundant cases.
+
+#### Phase C — Link and run a smoke test
+
+**Goal**: produce one consumer test that exercises the API
+end-to-end and runs to completion.
+
+**Exit**: `./smoke_test` exits 0.
+
+**Why this matters**: this is the first time you know the port
+actually *works*, not just compiles. The smoke test should exercise
+the construction + a couple of typical operations.
+
+**Recommended**: keep the smoke test tiny (5–10 lines of usage).
+Bigger tests come later (Phase D).
+
+#### Phase D — Full parity (optional, often skipped)
+
+**Goal**: run Rust's own unit tests against the C++ port.
+
+**Mechanism**: the `parity-test` harness in
+`tests/transpile_tests/<crate>/run_parity_harness.sh` (see the
+either-crate worked example).
+
+**When to do this**: only if you need *behavioral parity assurance*
+beyond your own smoke tests. For BTreeMap we skipped it — the
+bench-style integration test was enough to validate correctness on
+the hot path.
+
+#### Phase E — Tighten transpiler & full API
+
+**Goal**: peel transpiler emit bugs one at a time until the patcher
+shrinks and the full public API surface works.
+
+**Exit**: depends on goals — for BTreeMap we exited at "perf within
+1.7× of native Rust and the bench validates correctness."
+
+**Pattern**:
+1. Pick a not-yet-working API method.
+2. Look at what the transpiler emits.
+3. Fix the emit in transpiler if reasonable; otherwise add a
+   patcher entry with a `# transpiler should do X` comment.
+4. Re-transpile, see what new error surfaces, repeat.
+
+This is the **longest phase by far** (~60% of the BTreeMap week).
+
+### 2.4 Recurring transpiler-emit clusters to anticipate
+
+These showed up in BTreeMap and will likely recur. Recognising the
+pattern lets you skip the diagnostic time.
+
+| Cluster | Symptom | Reference fix |
+|---|---|---|
+| **A** — Structural-decomposition methods | Method emit uses `auto` placeholders or unresolved template-args because the host class's generics don't textually appear in the absorbed method signature | `__TemplateArgs<HostParam>::arg_<N>` partial specialization (see `transpiler: Cluster A completion` commits) |
+| **B** — `ptr::read` const-qualifier drop | `let x = ptr::read(&y)` emits `auto x = …` but should emit `const auto x = …` for non-trivially-copyable T | `codegen.rs` let-binding const propagation |
+| **C** — Parallel impl blocks with hardcoded markers | `impl Handle<NodeRef<…,Leaf>, …>` and `impl Handle<NodeRef<…,Internal>, …>` should both produce one absorbed method with the marker generalized | Parallel-impl detector + nested-marker text substitution |
+| **D** — `const { … }` block lowering | Rust's `const { assert!(…) }` should lower to `static_assert(...)` or to `unreachable!()` for elided const-blocks | Const-block detection in codegen |
+| **E** — Nested variant patterns + borrow scrutinee in `if let` | `if let Some(Pat::Tuple(…)) = &expr` needs both nested variant lowering AND borrow-vs-move semantics on the scrutinee | Nested pattern handling + scrutinee borrow detection |
+
+Plus several "Item N" smaller clusters: tuple `.N` field access,
+const-value match arm patterns, recursive nested fns, ref-returning
+let bindings, statement-level `lhs = match { ... }` lowering.
+
+### 2.5 Runtime gotchas
+
+Lessons from `include/rusty/*.hpp`:
+
+1. **Anything that runs per-element on a hot path needs `if
+   constexpr` gating by `is_trivially_destructible_v<T>`.** The
+   §1.5 cliff was a `clear_forgotten_address_range` call on every
+   `ptr::write`. For `int`-sized elements in a B-tree leaf shift,
+   that's millions of ops per insert.
+
+2. **`MaybeUninit<T>` is always trivially destructible** regardless
+   of `T`'s destructor, because it stores `unsigned char
+   storage_[sizeof(T)]`. This makes it a great fast-path detector
+   in `if constexpr` chains.
+
+3. **The moved-from protocol must be local, not global.** Our first
+   implementation used a global mutex-guarded `unordered_map` — it
+   was correct but catastrophically slow (1700–10000×). The current
+   strict-null-state design uses a per-instance `bool
+   _rusty_forgotten` field on every Drop-impl type. No global
+   state, no mutex, ~5 ns/op overhead per move-ctor / destructor.
+
+4. **Allocator wrappers cost more than direct `__rdl_alloc`.**
+   §1.6's component breakdown shows `rusty::alloc::Global` is ~1.8×
+   the malloc cost of Rust's direct allocator. For high-allocation
+   ports (Vec growth, HashMap rehash), this matters.
+
+5. **Reference-vs-pointer aliasing.** Rust's `&T` is a reference;
+   our `Box<T>` / `Vec<T>` / `Option<T&>` need to model both move
+   and copy semantics. Get the move-ctor right *first* (sets
+   source to null/forgotten), then worry about the destructor.
+
+### 2.6 Bench discipline
+
+1. **Bench before declaring "done."** Phase C is "it links and
+   runs," not "it's done." Benching against the C++ STL
+   equivalent (and ideally against native Rust too) is what closes
+   the loop.
+
+2. **Two reference points: STL and native Rust.** §1.6's mistake
+   was originally calibrating only against `std::map` and declaring
+   victory. Comparing against *native Rust* showed there was still
+   real distance to close — and reframed what "good" means.
+
+3. **`callgrind` beats `perf` for deterministic profiles.**
+   Instruction counts are reproducible run-to-run; `perf record`
+   sampling isn't, and often needs sudo / kernel-config changes
+   (`perf_event_paranoid=4` blocks unprivileged use). `callgrind`
+   just works.
+
+4. **Profile after Phase C, not after Phase E.** A perf profile
+   would have surfaced the §1.5 cliff within minutes of the smoke
+   test running. We didn't profile until day 6 — that was a
+   process miss.
+
+5. **Disassembly comparison rules.** When a micro-bench shows a
+   measurable per-op overhead, the question is *"is the function
+   body actually different?"* Diff the asm. If empty, the
+   measurement is harness noise. §1.7's IIFE bench made this
+   mistake → asm correction.
+
+### 2.7 When to stop
+
+The BTreeMap port arrived at 1.05× `std::map` / 1.59× native Rust.
+We chose to stop optimizing because:
+
+- **Catastrophic regression closed** (1700× → ~1×): ✅
+- **At parity with the natural C++ baseline (`std::map`)**: ✅
+- **Remaining gap to Rust is structural (template-instantiation
+  bloat, allocator layering), not algorithmic**: would need codegen
+  surgery, not just emit fixes.
+
+**Recommended stop conditions for future ports**:
+
+1. The catastrophic-regression cliff (if any) is fixed.
+2. The port is within 2× of the closest STL analogue on a
+   representative workload.
+3. The remaining gap is documented (so the next person knows what
+   not to chase).
+
+**Don't stop before** smoke tests pass and at least one
+representative bench has been run with callgrind.
+
+### 2.8 Estimating effort for the next port
+
+Using BTreeMap as one calibration point:
+
+- **Single-file simple type** (e.g. `Range`, `Cell`): a few hours,
+  mostly hand-port of a few methods.
+- **Medium type, single module** (e.g. `Vec`): 1–2 days. Most of
+  the time is in iterator + reserve/grow paths.
+- **Cyclic multi-module structure** (e.g. another B-tree-style
+  collection, `LinkedList`'s rustc impl): ~1 week, like BTreeMap.
+- **Concurrency / atomics** (`Arc`, `Mutex`): potentially weeks,
+  because correctness verification is much harder than for
+  collections.
+
+Rough proportion of effort that goes into each axis:
+- Parser fixes (prep.sh + syn-AST handling): ~10%
+- Codegen fixes (transpiler emit): ~50%
+- Runtime fixes (`rusty/*.hpp` headers): ~10%
+- Bench + perf-tuning + correctness verification: ~30%
+
+The week-long BTreeMap effort split as roughly **1 day Phase A–C,
+4 days Phase E, 2 days perf + bench**. If a future port skips
+Phase D (parity testing) like BTreeMap did, similar shape.
+
+The patcher is the artifact that lives on: ~50% of its hand-ports
+were transpiler debt at the time of writing — and every transpiler
+fix reduces the patcher size and helps the *next* port.
