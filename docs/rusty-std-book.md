@@ -43,6 +43,7 @@ Sibling docs:
   - [1.4 Summary: retire-by-transpiler-fix triage](#14-summary-which-hand-ports-could-be-retired-by-transpiler-fixes)
   - [1.5 Perf profiling: the `clear_forgotten_address_range` cliff](#15-perf-profiling-the-rustymemclear_forgotten_address_range-cliff)
   - [1.6 Component-level comparison vs native Rust BTreeMap](#16-component-level-comparison-vs-native-rust-btreemap)
+  - [1.7 IIFE-lambda overhead: focused micro-bench](#17-iife-lambda-overhead-focused-micro-bench)
 
 Future chapters: `Vec`, `HashMap`, `String`, `Arc`/`Rc`, `Mutex`, …
 
@@ -905,15 +906,16 @@ per-op ratio:
 
 #### Where the gap actually is
 
-1. **IIFE / lambda overhead — 3.6 M instructions (17 % of total)** is
-   the single biggest item with **no counterpart in Rust**. The
-   transpiler lowers `?`, `if let Some(...) = ...`, and `match` arms
-   with early returns into immediately-invoked-function-expression
-   (IIFE) lambdas to preserve control flow. The compiler does *not*
-   fully elide them — they show up as
-   `BTreeMap::insert::{lambda#1}::operator()`,
-   `VacantEntry::insert_entry::{lambda#1}`, etc., across multiple
-   files. This work is structurally absent in Rust.
+1. **IIFE lambda symbols — 3.6 M instructions attributed (17 % of
+   total), but ~zero is overhead.** This was originally read as "pure
+   IIFE setup cost," but a focused micro-bench (see §1.7) shows that
+   at `-O3` both clang and g++ fully elide the IIFE wrapping — the
+   function body is byte-identical to the equivalent plain-branch
+   version. The 3.6 M Ir is the *work happening inside* the lambda
+   bodies (variant dispatch, value extraction, `insert_entry`), which
+   has a direct counterpart in Rust attributed to the enclosing
+   function instead of to a lambda symbol. This is a callgrind
+   attribution difference, **not** real overhead.
 
 2. **Insert-path inflation: 2.47×**. `insert_fit` shows up in *two*
    files (`ptr.hpp` 1.60 M + `btree_internal.cppm` 1.59 M) for a
@@ -949,15 +951,17 @@ per-op ratio:
 
 | Optimization | Est. savings | Difficulty |
 |---|---|---|
-| Eliminate IIFE codegen for simple `?` / `if let` chains | ~2–3 M Ir (10–15 % total) | High — transpiler change to lower these to plain branches when control flow permits |
+| ~~Eliminate IIFE codegen for `?`/`if let`~~ | **~0 Ir** | **Skip — clang elides IIFE at `-O3`, see §1.7** |
 | Drop slice-bounds checks in `find_key_index` (UB-safe in B-tree internal code) | ~0.6 M Ir (3 %) | Low — add `Slice::get_unchecked` variant in `include/rusty/slice.hpp` |
 | Coalesce duplicate `insert_fit` symbol attribution | ~1.5 M Ir (7 %) | Medium — likely an `__always_inline` / module-linkage issue |
 | Switch to `mimalloc` / pool allocator | ~0.3–0.5 M Ir (2 %) | Low — orthogonal to the port |
 
-Realistic ceiling if all four were done: ~16 M Ir C++ vs 12.4 M
-Rust → **1.29× ratio**. We'd close roughly half the remaining gap,
-but matching Rust would require codegen surgery, not algorithmic
-changes — the algorithm is already isomorphic line-for-line.
+Realistic ceiling if the remaining items were done: ~19 M Ir C++ vs
+12.4 M Rust → **1.53× ratio**. We'd close only a modest fraction of
+the gap. The bulk of the remaining cost is in the actual insert-path
+work (compounded template instantiations, allocator layering), not in
+codegen wrappers — and matching Rust would mean redoing the data
+layout / handle abstraction, not just transpiler patches.
 
 #### Recommendation
 
@@ -968,17 +972,181 @@ changes — the algorithm is already isomorphic line-for-line.
 - Versus native Rust BTreeMap: **1.59× slower steady-state** /
   **1.70× including startup**.
 
-The remaining gap is in **codegen artifacts**, not algorithm or data
-structure. The biggest single item (IIFE lambdas) accounts for ~17 %
-of total instructions and is a transpiler-emit-shape problem with no
-algorithmic counterpart in Rust.
+The remaining gap is **not** in IIFE wrappers (§1.7 confirms those
+elide cleanly at `-O3`). It's spread across compounded template
+instantiations on the insert path, slice-bounds checks in the search
+hot loop, and an allocator layer with one more level of indirection
+than Rust's direct `__rdl_alloc`. Closing it would require redoing
+those structural decisions, not adding a transpiler patch.
 
 Better ROI is on:
 - broader port coverage (`Vec`, `HashMap`, `Arc`/`Rc`, …) — the
   workflow in Chapter 0 is now well-trodden,
-- **or**, if perf parity becomes important later, a focused
-  IIFE-elimination pass in the transpiler. Single biggest win at
-  ~15 % of total cost.
+- **or**, if perf parity becomes important later, work on the
+  insert-path bloat (coalesce `insert_fit` duplicates, add
+  `get_unchecked` for internal-use slice access). Each one is worth
+  3–7 % at most; combined ~10–15 %.
 
 The full callgrind dumps are at `/tmp/callgrind.rust.out` and
 `/tmp/callgrind.cpp.out` for re-analysis if priorities change.
+
+### 1.7 IIFE-lambda overhead: focused micro-bench
+
+A natural follow-up to §1.6 is: how much of the 21 M Ir attributed to
+`{lambda#1}::operator()` symbols is *actually* IIFE overhead vs the
+work happening inside the lambda body? This section answers that.
+
+#### Setup
+
+Four versions of the same `match` over a `std::variant<KV, int>`,
+hand-written to match shapes the transpiler emits. All four return
+the same value; all four are marked `__attribute__((noinline))` so
+the compiler can't fold the boundary away:
+
+1. **plain match** — direct `if (m.index() == 0) ... else ...` with
+   no closures. Baseline.
+2. **outer IIFE only** — `[&](){ if/else }()` wrapping the match.
+3. **plain + inner if-constexpr lambda** — no outer wrapper, but
+   uses the transpiler's generic `[&](auto&& __t){ if constexpr
+   (requires{__t._1;}) ... else std::get<1>(__t) }` field extractor.
+4. **full transpiler shape** — outer IIFE + inner generic lambda.
+
+Driver runs 200 M reps; per-call cost is measured with a `volatile`
+memory barrier preventing CSE across iterations.
+
+Source: `/tmp/iife_bench/iife_bench.cpp` (simple body),
+`/tmp/iife_bench/iife_heavy.cpp` (heavier per-arm body).
+
+#### Headline result: clang elides the IIFE completely
+
+Disassembling all four functions with clang 19 at `-O3` shows
+**byte-identical 4-instruction bodies**:
+
+```asm
+xorl    %eax, %eax
+cmpb    8(%rdi), %al        # compare variant index byte
+sbbl    %eax, %eax
+orl     4(%rdi), %eax       # OR with the _1 field; sets to -1 on Vacant
+retq
+```
+
+g++ 14 at `-O3` produces a slightly different (branchy) 4-instruction
+body, also byte-identical across all four variants:
+
+```asm
+cmpb    $0, 8(%rdi)
+jne     .L_vacant
+movl    4(%rdi), %eax
+ret
+.L_vacant:
+movl    $-1, %eax
+ret
+```
+
+**Conclusion at the function-body level: zero overhead.** The
+IIFE-wrapped form compiles to the same instructions as the plain
+form in both compilers.
+
+#### What the bench measures
+
+Despite identical asm, the bench reported measurable differences:
+
+| Variant | clang `-O3` | g++ `-O3` |
+|---|---|---|
+| 1. plain match | 1.51 ns/op | 1.79 ns/op |
+| 2. outer IIFE only | 1.94 ns/op (1.29×) | 2.10 ns/op (1.17×) |
+| 3. plain + inner constexpr | 1.79 ns/op (1.19×) | 1.79 ns/op (1.00×) |
+| 4. full transpiler shape | 1.50 ns/op (0.99×) | 2.23 ns/op (1.24×) |
+
+These differences are **harness artifacts**, not function-body cost.
+The harness's `measure()` template inlines the wrapping lambda (one
+per variant) into the inner loop; the loop's codegen differs by
+function-pointer / lambda-shape even when the called function's body
+is the same. Notice that variant 4 is *faster* than variant 1 in
+clang, which is impossible if the IIFE had real cost.
+
+#### Heavier-body test
+
+To rule out "maybe the simple case is too trivial," a second bench
+puts a 5-iteration LCG loop in each arm — closer to the real per-arm
+work in BTreeMap's insert path:
+
+| Variant | clang `-O3` | g++ `-O3` |
+|---|---|---|
+| plain | 4.25 ns/op | 3.98 ns/op |
+| full transpiler shape | 4.47 ns/op (1.05×) | 4.04 ns/op (1.02×) |
+
+The 1–5 % overhead is at the noise floor; inspection of the asm
+shows it's from clang missing one constant-fold across the IIFE
+boundary (one extra `addl $12345, %ecx` per loop iteration), not
+from the IIFE itself.
+
+#### Does it hold at `-O2`?
+
+Yes. `-O2` is the more common production setting (CMake's `Release`
+type uses `-O3`, but many distros and most CI builds use `-O2`). Re-
+running the simple-body bench at `-O2`:
+
+| Variant | clang `-O2` | g++ `-O2` |
+|---|---|---|
+| 1. plain | 1.49 ns/op | 1.79 ns/op |
+| 2. outer IIFE only | 1.94 ns/op (1.30×) | 2.09 ns/op (1.17×) |
+| 3. plain + inner constexpr | 1.80 ns/op (1.21×) | 1.79 ns/op (1.00×) |
+| 4. full transpiler shape | 1.50 ns/op (1.00×) | 2.24 ns/op (1.25×) |
+
+Numbers within noise of the `-O3` measurements. Crucially, the
+*disassembly* of `plain_match` and `iife_full` is byte-identical at
+`-O2` in both compilers — same 4-instruction body. **The IIFE
+wrapping is fully elided at `-O2` too.**
+
+Heavier-body at `-O2`: clang 1.05×, g++ 1.12× (g++ misses slightly
+more constant folds at `-O2` than `-O3`, but still well under the
+overall BTreeMap ratio).
+
+#### What about `-O1`?
+
+For completeness — `-O1` is rarely used in production:
+
+| Variant | clang `-O1` | g++ `-O1` |
+|---|---|---|
+| 1. plain | 1.51 ns/op | 2.22 ns/op |
+| 4. full transpiler shape | 1.49 ns/op (0.99×) | 2.08 ns/op (0.94×) |
+
+Clang still elides the IIFE completely at `-O1` (5 asm instructions,
+identical to plain). g++ does *not* elide at `-O1` — the iife_full
+function body is 288 lines of asm vs 315 for plain, both far larger
+than the optimized 4-instruction form. Yet the bench shows iife_full
+is *slightly faster* (0.94×) — g++ at `-O1` happens to produce more
+compact code for the wrapped form. Not worth investigating; nobody
+ships `-O1` builds.
+
+#### Implication for §1.6
+
+The 3.6 M Ir originally attributed to "IIFE overhead" in §1.6 is
+**not** lambda-mechanism cost. It's the actual variant-dispatch,
+field-extraction, and `insert_entry` work happening inside the
+lambda body — which has direct counterparts in Rust attributed to
+the enclosing function instead of to a lambda symbol. The IIFE
+boundary in the BTreeMap port is *free* under both `-O2` and `-O3`
+in clang and g++ (the BTreeMap port itself ships with `-O3 -g
+-DNDEBUG`, the `RelWithDebInfo` defaults).
+
+This rules out the largest "potential optimization" from §1.6. The
+remaining optimization items (slice-bounds removal, `insert_fit`
+coalescing, allocator) account for at most ~10 % of total cost
+combined, reinforcing the §1.6 recommendation to stop optimizing.
+
+#### Where to look if performance regresses
+
+If a future change introduces real IIFE overhead, it would show up
+as differing assembly between the plain and IIFE-wrapped forms. Run
+the bench:
+
+```sh
+clang++ -O3 -std=c++23 -S -o iife.s /tmp/iife_bench/iife_bench.cpp
+diff <(awk '/_Z11plain_match/,/Lfunc_end/' iife.s) \
+     <(awk '/_Z9iife_full/,/Lfunc_end/'   iife.s)
+```
+
+Empty diff = elided cleanly. Non-empty diff = real codegen
+difference worth investigating.
