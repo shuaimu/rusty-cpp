@@ -54,8 +54,19 @@ Sibling docs:
   - [2.6 Bench discipline](#26-bench-discipline)
   - [2.7 When to stop](#27-when-to-stop)
   - [2.8 Estimating effort for the next port](#28-estimating-effort-for-the-next-port)
+- [Chapter 3 — Port priority queue](#chapter-3--port-priority-queue)
+  - [3.1 Ranking criteria](#31-ranking-criteria)
+  - [3.2 Tier 1 — High-value transpiles](#32-tier-1--high-value-transpiles)
+  - [3.3 Tier 2 — Net-new collections](#33-tier-2--net-new-collections)
+  - [3.4 Tier 3 — Worth porting opportunistically](#34-tier-3--worth-porting-opportunistically)
+  - [3.5 Tier 4 — Niche / narrow use case](#35-tier-4--niche--narrow-use-case)
+  - [3.6 Keep hand-written (don't transpile)](#36-keep-hand-written-dont-transpile)
+  - [3.7 Out of scope](#37-out-of-scope)
+  - [3.8 Recommended order for the first 3 ports](#38-recommended-order-for-the-first-3-ports)
 
-Future chapters: `Vec`, `HashMap`, `String`, `Arc`/`Rc`, `Mutex`, …
+Each completed port will graduate into its own chapter (parallel to
+Chapter 1 for BTreeMap). Chapter 3's tables stay as the live
+priority queue.
 
 ---
 
@@ -1569,3 +1580,185 @@ Phase D (parity testing) like BTreeMap did, similar shape.
 The patcher is the artifact that lives on: ~50% of its hand-ports
 were transpiler debt at the time of writing — and every transpiler
 fix reduces the patcher size and helps the *next* port.
+
+---
+
+## Chapter 3 — Port priority queue
+
+This is the **live queue** of std-library structures worth porting,
+ranked by value × tractability per Chapter 2's framework. Many of
+the entries already have hand-written headers in `include/rusty/*`
+— this chapter is specifically about which ones are worth porting
+**from rustc source** (vs keeping the hand-written form).
+
+### 3.1 Ranking criteria
+
+Each candidate is scored on four axes from §2.1, plus two
+port-decision axes:
+
+| Axis | Question |
+|---|---|
+| **Cyclic-module** | Does rustc's source have sibling files with `use super::` cycles? (BTreeMap = high; `Vec` = low) |
+| **Generic-arity** | How many type parameters? `Vec<T>` = 1, `BTreeMap<K,V,A>` = 3 |
+| **Unsafe density** | How much `unsafe` is in the impl? `Cell` = ~none; `Vec::push` = lots; `Arc` = atomics-everywhere |
+| **API surface** | Public methods × stable variants. `Box` is small; `Vec` is large |
+| **Has hand-written?** | Is there already a `include/rusty/X.hpp`? If yes, does transpiling add value beyond it? |
+| **Transpiler validation value** | Does porting exercise transpiler features that other ports will need? (e.g. porting `Vec` validates allocator-aware reserve/grow that `String`, `VecDeque`, `BinaryHeap` all share) |
+
+The list is ordered by **(user value + transpiler validation value)
+÷ (cyclic + generic + unsafe + surface effort)**. Tier 1 is "do
+next." Tier 4 is "if there's time."
+
+### 3.2 Tier 1 — High-value transpiles
+
+Foundational types. Doing these well unlocks downstream ports
+(`String` needs `Vec`, `HashSet` needs `HashMap`, etc.) and
+validates the transpiler against the most-used parts of stdlib.
+
+| Type | rustc source | Hand-written? | Difficulty | Why port |
+|---|---|---|---|---|
+| **`Vec<T, A>`** | `library/alloc/src/vec/` (multi-file) | ✅ `vec.hpp` (extensive) | Medium — multi-file but mostly acyclic; allocator-aware; lots of method overloads (`push`, `extend`, `drain`, `splice`, `truncate`, …) | Most-used type. Validates allocator-aware reserve/grow paths. `vec.hpp` is hand-written and already quite featureful, but transpiling locks in Rust's exact growth strategy + iterator invalidation semantics. Sets the pattern for all owning collections. |
+| **`String`** | `library/alloc/src/string.rs` (single file, ~3K LOC) | ✅ `string.hpp` | Low — single file, mostly delegates to `Vec<u8>` + UTF-8 invariants. Should follow naturally after `Vec` | Used everywhere. Falls out almost free once `Vec` is ported. Validates UTF-8 invariant maintenance through transpile. |
+| **`HashMap<K, V, S>`** | `library/std/src/collections/hash/map.rs` + hashbrown crate | ✅ `hashmap.hpp` | High — hashbrown's SwissTable internals are intricate (SIMD probing, control bytes); `S` hasher is a third generic; tombstones / resize logic | hashbrown is **way** faster than `std::unordered_map`. Transpiling the actual algorithm preserves the perf advantage. Largest "real value" port outside BTreeMap. |
+
+**Why these three first:** they cover the three big shapes (owning
+contiguous buffer; UTF-8 string built on Vec; open-addressed hash
+table). Together they exercise allocator wrappers, iterator
+invalidation, generic hashing, and large multi-impl-block
+structures. Every subsequent port reuses pieces of this work.
+
+### 3.3 Tier 2 — Net-new collections
+
+Useful collection types that **don't yet exist** in `include/rusty/`
+or where the existing hand-written version is a thin wrapper.
+
+| Type | rustc source | Hand-written? | Difficulty | Why port |
+|---|---|---|---|---|
+| **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
+| **`VecDeque<T, A>`** | `library/alloc/src/collections/vec_deque/` | ✅ `vecdeque.hpp` | Medium — ring buffer with separate head/tail; wraparound arithmetic; some unsafe but not exotic | Hand-written exists but transpiling locks in Rust's exact wraparound semantics + `drain` / `swap_remove_back`. Common in BFS / queue workloads. |
+| **`LinkedList<T>`** | `library/alloc/src/collections/linked_list.rs` | ❌ none | Medium — doubly-linked with raw-pointer plumbing; cursor API uses unsafe heavily | Net-new functionality. Rarely used compared to `Vec`/`VecDeque`, but completes the collections family. Tests the transpiler against intrusive-list shapes. |
+| **`HashSet<T, S>`** | `library/std/src/collections/hash/set.rs` | ✅ `hashset.hpp` | Low — ~free once `HashMap` is done (it's literally `HashMap<T, ()>` underneath) | Lands automatically with HashMap. |
+
+### 3.4 Tier 3 — Worth porting opportunistically
+
+Types where transpiling has value but the existing hand-written
+version is already pretty complete. Port these if a transpiler
+validation gap appears.
+
+| Type | rustc source | Hand-written? | Difficulty | Why port |
+|---|---|---|---|---|
+| **`Rc<T>` / `Weak<T>`** | `library/alloc/src/rc.rs` | ✅ `rc.hpp`, `rc/weak.hpp` | Medium — single file, but lots of unsafe pointer arithmetic + drop ordering | Single-thread refcount + cycle detection via `Weak`. Transpiling validates the unsafe drop sequence the hand-written version approximates. |
+| **`Arc<T>` / `Weak<T>`** | `library/alloc/src/sync.rs` | ✅ `arc.hpp`, `sync/weak.hpp`, `sync/atomic.hpp` | Hard — atomic operations everywhere; memory ordering matters; ABA-style concerns on `upgrade()` | Atomic refcount, fundamental to multi-threaded data. The hand-written version's atomics quarantine (see commit `ddee375`) suggests there are still rough edges. Transpiling could nail down the exact memory ordering rustc uses. |
+| **`Mutex<T>` / `RwLock<T>`** | `library/std/src/sync/{mutex,rwlock}.rs` | ✅ `mutex.hpp`, `rwlock.hpp` | Medium — but each platform-specific impl is its own subtree; pthread on Linux, SRWLock on Windows | Hand-written exists and works. Transpiling adds value mainly if poisoning semantics matter to a user. Likely skip unless a poisoning bug appears. |
+| **`BTreeSet<T>`** | `library/alloc/src/collections/btree/set.rs` | ✅ Already done as part of BTreeMap port | — | ✅ Done. Mentioned for completeness. |
+| **`Range`, `RangeInclusive`, `RangeFrom`, `RangeTo`, `RangeFull`** | `library/core/src/ops/range.rs` | ❌ partial (probably implicit in `slice.hpp`) | Low — trivial structs with iter impls | Foundational for slicing. Small surface. Falls out nearly free. |
+| **`RefCell<T>` / `Ref` / `RefMut`** | `library/core/src/cell.rs` | ✅ `refcell.hpp`, `cell.hpp`, `unsafe_cell.hpp` | Low — small file; mostly bookkeeping | Hand-written is fine for `Cell` / `RefCell`. Skip unless a Rust-specific borrow-runtime behavior is missing. |
+
+### 3.5 Tier 4 — Niche / narrow use case
+
+Types worth knowing about but probably not worth dedicated porting
+unless a specific user request comes in.
+
+| Type | rustc source | Hand-written? | Verdict |
+|---|---|---|---|
+| **`OnceCell<T>` / `LazyCell<T>` / `OnceLock<T>`** | `library/core/src/cell/once.rs`, `library/std/src/sync/once_lock.rs` | ✅ `once.hpp` (probably partial) | Hand-write or port small. Single-init types. |
+| **`CString` / `CStr`** | `library/std/src/ffi/c_str.rs` | ❌ none | FFI niche. Port only if needed for a C-interop target. |
+| **`Path` / `PathBuf`** | `library/std/src/path.rs` | ❌ none | Useful but platform-specific. Defer until file-path manipulation use cases emerge. |
+| **`Duration`, `Instant`, `SystemTime`** | `library/core/src/time.rs`, `library/std/src/time.rs` | ✅ partial in `sys/time.hpp` | Hand-written wrapper is fine for most uses. Port if precision arithmetic or `checked_add` semantics matter. |
+| **`mpsc::channel` / `mpsc::sync_channel`** | `library/std/src/sync/mpmc/` | ✅ `sync/mpsc.hpp`, `sync/mpsc_lockfree.hpp` | Hand-written is non-trivial; rustc's impl in `mpmc/` is also complex. Probably keep hand-written. |
+| **`Barrier`, `Condvar`** | `library/std/src/sync/{barrier,condvar}.rs` | ✅ `barrier.hpp`, `condvar.hpp` | Keep hand-written. Small types; transpiling adds little. |
+| **Iterator adapters** (`Map`, `Filter`, `Take`, `Skip`, `Peekable`, `Chain`, `Zip`, `Enumerate`, `Rev`, `StepBy`, `Fuse`, `Inspect`, `Cycle`, `Cloned`, `Copied`, `Flatten`, `FlatMap`, `Scan`, `TakeWhile`, `SkipWhile`, `Windows`, `Chunks`, …) | `library/core/src/iter/adapters/` | partial in `slice.hpp` etc. | Many small types, each ~50–100 LOC in rustc. Tedious to port individually. Better strategy: build a small generic-iterator-emit pass in the transpiler that handles them all. |
+
+### 3.6 Keep hand-written (don't transpile)
+
+These are small and stable enough that the hand-written version is
+the right choice; transpiling would add maintenance cost without
+proportional value.
+
+| Type | Reason |
+|---|---|
+| **`Box<T>`** | Tiny — single allocation + Drop. Hand-written is ~50 LOC and matches Rust semantics exactly. Transpiling would add ~500 LOC of rustc internals (e.g. `Box::leak`, `Box::pin`, allocator paths) for marginal benefit. |
+| **`Option<T>` / `Result<T, E>`** | Used by every other port. Need to be rock-solid and small. Hand-written matches `std::variant` shape + Rust ergonomics; transpiling from rustc would replace this with a `std::variant`-like emit that's already what we have. |
+| **`MaybeUninit<T>`** | Crucial primitive (see §1.5's fast-path observation). Hand-written = bytes + manual lifecycle. Transpiling adds nothing. |
+| **`PhantomData<T>`** | Empty struct. Trivial. |
+| **`marker::Send`, `marker::Sync`** | Trait declarations; no impl to transpile. |
+| **Trait families: `core::cmp::*`, `core::ops::*`, `core::convert::{From, Into, AsRef, AsMut}`** | Trait declarations + default methods. Better as hand-written headers with consistent C++ idioms (operator overloads). |
+| **`fmt::*` formatter machinery** | Macro-heavy; the rustc emit relies on compiler-internal `format_args!` lowering. The hand-written `fmt.hpp` does the right thing via C++23 `std::format`. |
+
+### 3.7 Out of scope
+
+These should not be ports at all in the current transpiler design:
+
+| Type | Reason |
+|---|---|
+| **`Future`, async/await machinery** | A completely different paradigm. C++ coroutines exist but have different shape than Rust's poll-based futures. If we need async, design it as a first-class C++23 coroutine system, not a port. |
+| **`Box<dyn Trait>`, `dyn Any`** | Runtime type identity in Rust is built around `TypeId`, which is opaque. Modeling it correctly in C++ would either require RTTI (often disabled) or a parallel TypeId infrastructure. Out of scope for the transpiler. |
+| **`Cell<dyn Trait>` and `Rc<dyn Trait>`** | Same `dyn` issue. |
+| **`std::backtrace::Backtrace`** | Platform + libunwind dependent; not really a port — would be a from-scratch C++ implementation. |
+| **`std::panic::*` machinery beyond what's in `panic.hpp`** | Panic propagation in C++ is exceptions; the model is fundamentally different. Hand-written `panic.hpp` already does the minimum. |
+| **`std::process::Command` / `std::env::*` beyond what's in `sys/*`** | Mostly shell-out wrappers. Better as hand-written wrappers per-platform. |
+| **`std::net::*` beyond `tcp.hpp`** | UDP / Unix sockets / etc. — these are platform-shape wrappers, better hand-written. |
+| **`std::fs::*`** | Filesystem operations. Platform-specific. Use hand-written `sys/fs.hpp`. |
+
+### 3.8 Recommended order for the first 3 ports
+
+If picking the next three after BTreeMap, do them in this order:
+
+#### 1. `Vec<T>` — start here
+
+**Why first**: Most-used type in real Rust code, validates
+allocator-aware patterns, every subsequent collection reuses Vec
+internals. Hand-written `vec.hpp` already exists, so we can A/B
+test the transpiled version against it.
+
+**Predicted effort**: 1–2 days. Lower than BTreeMap because:
+- Single source file (mostly): `library/alloc/src/vec/mod.rs` +
+  smaller adjacents. No cyclic modules.
+- Generic arity 1 (`T`) + allocator (`A`); not as deep as
+  BTreeMap's `<K, V, A>` + handle layers.
+- The hard parts (`reserve`, `extend_from_slice`, `drain`) are
+  the *kind* of unsafe we've already seen in BTreeMap.
+
+**Watch for**: `into_iter` produces a separate `IntoIter` struct
+with its own Drop. Iterator-invalidation rules. `extend` with
+specialization. `Vec::splice` and `Vec::drain` are gnarly.
+
+#### 2. `String` — second
+
+**Why second**: Lands almost free after `Vec`. `String` is
+`Vec<u8>` + UTF-8 invariants + a thin layer of char-boundary APIs.
+
+**Predicted effort**: half a day if Vec is already done.
+
+**Watch for**: `String::from_utf8` returns `Result<String,
+FromUtf8Error>`; the error type needs to round-trip the bytes.
+UTF-8 char-boundary checks must be inlined / fast.
+
+#### 3. `HashMap<K, V, S>` — third
+
+**Why third**: Highest value-per-effort *after* Vec/String are
+done (because they share allocator + iterator patterns).
+hashbrown's SwissTable is the most-impactful perf win available
+— `std::unordered_map` is multiple times slower on most workloads.
+
+**Predicted effort**: ~1 week, comparable to BTreeMap. The
+hashbrown internals (SIMD `match_byte` probe + control bytes +
+rehash logic) are non-trivial. Expect a §1.5-style perf
+discovery near the end.
+
+**Watch for**: The `S` hasher generic + `BuildHasher` trait. The
+default `RandomState` is keyed at runtime; port that or pin a
+deterministic seed for the C++ port. Rehash logic moves entries
+en-masse — equivalent to BTreeMap's `slice_insert` for our
+moved-from protocol; expect the same kind of fast-path gating.
+
+#### After these three
+
+Reassess. Likely candidates: `BinaryHeap` (cheap after Vec),
+`Rc`/`Arc` (validation that hand-written matches rustc), then
+specialized iterators or platform wrappers as use cases demand.
+
+The point of this queue is **not** to port everything. The point
+is to port the types that **actually unlock value** for users of
+the borrow checker, where "value" = "type you'd reach for in real
+Rust code, and where the rustc semantics matter."
