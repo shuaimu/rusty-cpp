@@ -90,6 +90,13 @@ export {
 #include <rusty/move.hpp>
 #include <rusty/sync/atomic.hpp>
 #include <rusty/sync/mpsc.hpp>
+#include <rusty/sys/fs.hpp>
+#include <rusty/sys/time.hpp>
+#include <rusty/sys/process.hpp>
+#include <rusty/sys/env.hpp>
+#include <rusty/sys/pthread.hpp>
+#include <rusty/os/fd.hpp>
+#include <rusty/net/tcp.hpp>
 #include <rusty/mutex.hpp>
 #include <rusty/rwlock.hpp>
 #include <rusty/condvar.hpp>

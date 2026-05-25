@@ -1036,6 +1036,7 @@ mod tests {
             },
             is_pack: false,
             pack_element_type: None,
+            has_initializer: false,
         });
 
         let error = check_parsed_statement_for_pointers(&stmt, false, &empty_safe_vars());
@@ -1066,6 +1067,7 @@ mod tests {
             },
             is_pack: false,
             pack_element_type: None,
+            has_initializer: false,
         });
 
         let error = check_parsed_statement_for_pointers(&stmt, true, &empty_safe_vars()); // in_unsafe_scope = true

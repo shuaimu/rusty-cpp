@@ -139,6 +139,12 @@ pub fn parse_cpp_file_with_includes_defines_and_args(
         "-Wno-everything".to_string(),
         // Don't fail on missing includes
         "-Wno-error".to_string(),
+        // Don't abort on "too many errors": large module-consuming TUs can
+        // accumulate hundreds of non-fatal libc++ vs. `import std;`
+        // duplicate-decl complaints. We still want a usable AST for borrow
+        // analysis, and the harness above (`is_module_resolution_fatal`)
+        // already filters truly fatal issues.
+        "-ferror-limit=0".to_string(),
     ];
 
     // Add extra compile flags (for example module flags extracted from compile_commands.json).
@@ -168,6 +174,10 @@ pub fn parse_cpp_file_with_includes_defines_and_args(
 
     // Parse the translation unit. If prebuilt module deserialization fails, retry with
     // progressively less module state so analysis can still proceed.
+    // Also retry on opaque `Crash` errors — clang-22's libclang crashes on certain
+    // module-purview parses that clang++ CLI handles fine (e.g. some fiber_channel
+    // / server-shaped TUs in rrr). Recovering with fewer module args usually lets
+    // analysis continue with a partial AST.
     let tu = match parse_with_args(&args) {
         Ok(tu) => tu,
         Err(first_error) => {
@@ -177,7 +187,9 @@ pub fn parse_cpp_file_with_includes_defines_and_args(
                     .windows(2)
                     .any(|pair| pair[0] == "-x" && pair[1] == "c++-module");
 
-            if !has_module_args || !first_error_text.contains("AstDeserialization") {
+            let recoverable =
+                first_error_text.contains("AstDeserialization") || first_error_text.contains("Crash");
+            if !has_module_args || !recoverable {
                 return Err(format!("Failed to parse file: {:?}", first_error));
             }
 

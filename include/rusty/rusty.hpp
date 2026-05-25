@@ -75,6 +75,23 @@
 // Synchronization primitives (std::sync equivalent)
 #include "rusty/sync/atomic.hpp"
 #include "rusty/sync/mpsc.hpp"
+
+// Filesystem helpers (std::fs equivalent)
+#include "rusty/sys/fs.hpp"
+// Time helpers (std::time equivalent — clock_gettime / nanosleep wrappers)
+#include "rusty/sys/time.hpp"
+// Process / system-info helpers (std::process equivalent — sysconf /
+// getpid / times / sysinfo wrappers).
+#include "rusty/sys/process.hpp"
+// Environment / host helpers (std::env equivalent — gethostname wrapper).
+#include "rusty/sys/env.hpp"
+// Thread-identity helper (pthread_self hash; rusty::sync::* wraps the
+// mutex / condvar / thread-create surface).
+#include "rusty/sys/pthread.hpp"
+// File descriptor wrappers (std::os::fd equivalent)
+#include "rusty/os/fd.hpp"
+// TCP networking (std::net equivalent — bind/connect/accept/read/write).
+#include "rusty/net/tcp.hpp"
 #include "rusty/mutex.hpp"
 #include "rusty/rwlock.hpp"
 #include "rusty/condvar.hpp"

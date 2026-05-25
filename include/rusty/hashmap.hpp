@@ -560,63 +560,66 @@ public:
         }
     }
     
-    // Get value by key
+    // Get value by key. Returns Option<V&> (matching Rust's
+    // HashMap::get which is `Option<&V>`). The reference is borrowed
+    // from the map for the lifetime of the map.
     // @lifetime: (&'a) -> &'a
-    Option<V*> get(const K& key) {
+    Option<V&> get(const K& key) {
         size_t index = find_key(key);
         if (index != NPOS) {
-            return Some(&values_[index]);
+            return Option<V&>(values_[index]);
         }
-        return None;
+        return Option<V&>(None);
     }
 
     template<typename Q>
-    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<V*>>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<V&>>
     get(const Q& key) {
         size_t index = find_key_heterogeneous(key);
         if (index != NPOS) {
-            return Some(&values_[index]);
+            return Option<V&>(values_[index]);
         }
-        return None;
+        return Option<V&>(None);
     }
-    
+
     // @lifetime: (&'a) -> &'a
-    Option<const V*> get(const K& key) const {
+    Option<const V&> get(const K& key) const {
         size_t index = find_key(key);
         if (index != NPOS) {
-            return Option<const V*>(Some(const_cast<const V*>(&values_[index])));
+            return Option<const V&>(values_[index]);
         }
-        return Option<const V*>(None);
+        return Option<const V&>(None);
     }
 
     template<typename Q>
-    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<const V*>>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<const V&>>
     get(const Q& key) const {
         size_t index = find_key_heterogeneous(key);
         if (index != NPOS) {
-            return Option<const V*>(Some(const_cast<const V*>(&values_[index])));
+            return Option<const V&>(values_[index]);
         }
-        return Option<const V*>(None);
+        return Option<const V&>(None);
     }
-    
-    // Get mutable reference
+
+    // Get mutable reference. Returns Option<V&> (matching Rust's
+    // HashMap::get_mut which is `Option<&mut V>`).
     // @lifetime: (&'a mut) -> &'a mut
-    Option<V*> get_mut(const K& key) {
+    Option<V&> get_mut(const K& key) {
         size_t index = find_key(key);
         if (index != NPOS) {
-            return Some(&values_[index]);
+            return Option<V&>(values_[index]);
         }
-        return None;
+        return Option<V&>(None);
     }
 
     template<typename Q>
-    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<V*>>
+    std::enable_if_t<!std::is_same_v<std::remove_cvref_t<Q>, K>, Option<V&>>
     get_mut(const Q& key) {
         size_t index = find_key_heterogeneous(key);
         if (index != NPOS) {
-            return Some(&values_[index]);
+            return Option<V&>(values_[index]);
         }
-        return None;
+        return Option<V&>(None);
     }
     
     // Remove by key
@@ -673,10 +676,11 @@ public:
 
     // Rust-style index operation: lookup-only (no implicit insertion).
     // Missing keys throw to match Rust's indexing panic semantics.
+    // get() now returns Option<V&>, so unwrap() is already a reference.
     V& operator[](const K& key) {
         auto value = get(key);
         if (value.is_some()) {
-            return *value.unwrap();
+            return value.unwrap();
         }
         throw std::out_of_range("rusty::HashMap index: key not found");
     }
@@ -684,7 +688,7 @@ public:
     const V& operator[](const K& key) const {
         auto value = get(key);
         if (value.is_some()) {
-            return *value.unwrap();
+            return value.unwrap();
         }
         throw std::out_of_range("rusty::HashMap index: key not found");
     }
@@ -694,7 +698,7 @@ public:
     operator[](const Q& key) {
         auto value = get(key);
         if (value.is_some()) {
-            return *value.unwrap();
+            return value.unwrap();
         }
         throw std::out_of_range("rusty::HashMap index: key not found");
     }

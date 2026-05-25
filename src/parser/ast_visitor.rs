@@ -189,39 +189,49 @@ fn check_for_unsafe_annotation(entity: &Entity) -> bool {
     };
 
     let reader = BufReader::new(file_handle);
-    let mut current_line = 0;
-    let mut prev_line = String::new();
+    // Collect all lines up to (but not including) the block's line. We need
+    // to scan upward through the contiguous comment block immediately above
+    // the `{`, because users commonly write multi-line annotations like:
+    //   // @unsafe - long description that
+    //   // continues across several lines
+    //   {
+    //     ...
+    //   }
+    // The old single-line check only saw `// continues across several lines`
+    // and missed the annotation.
+    let mut preceding: Vec<String> = Vec::with_capacity(block_line.saturating_sub(1));
+    for (idx, line_result) in reader.lines().enumerate() {
+        let current_line = idx + 1;
+        if current_line >= block_line {
+            break;
+        }
+        match line_result {
+            Ok(l) => preceding.push(l),
+            Err(_) => preceding.push(String::new()),
+        }
+    }
 
-    for line_result in reader.lines() {
-        current_line += 1;
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        // Check if we're at the block's line
-        if current_line == block_line {
-            // Check the previous line for @unsafe annotation
-            let trimmed = prev_line.trim();
-            if trimmed.starts_with("//") && trimmed.contains("@unsafe") {
-                debug_println!(
-                    "DEBUG UNSAFE: Found @unsafe annotation for block at line {}",
-                    block_line
-                );
-                return true;
-            }
-            // Also check for /* @unsafe */ style comments
-            if trimmed.contains("/*") && trimmed.contains("@unsafe") && trimmed.contains("*/") {
-                debug_println!(
-                    "DEBUG UNSAFE: Found @unsafe annotation for block at line {}",
-                    block_line
-                );
-                return true;
-            }
+    // Walk back through the contiguous comment block that precedes the
+    // brace. Stop at the first blank line OR the first non-comment line.
+    for line in preceding.iter().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             return false;
         }
-
-        prev_line = line;
+        let is_line_comment = trimmed.starts_with("//");
+        let is_block_comment_single_line =
+            trimmed.contains("/*") && trimmed.contains("*/");
+        let is_block_comment_open = trimmed.starts_with("/*") || trimmed.starts_with("*");
+        if !is_line_comment && !is_block_comment_single_line && !is_block_comment_open {
+            return false;
+        }
+        if trimmed.contains("@unsafe") {
+            debug_println!(
+                "DEBUG UNSAFE: Found @unsafe annotation for block at line {}",
+                block_line
+            );
+            return true;
+        }
     }
 
     false
@@ -286,21 +296,59 @@ fn check_for_mutable_keyword(entity: &Entity) -> bool {
     false
 }
 
-/// Get the qualified name of an entity (including namespace/class context)
+/// Get the qualified name of an entity (including namespace/class context).
+///
+/// Walks semantic parents and accumulates Namespace / ClassDecl /
+/// StructDecl / ClassTemplate names.
+///
+/// Special handling for local-method-body types: when the walker
+/// encounters a `FunctionDecl` / `Method` / `Constructor` / `Destructor`
+/// ancestor BEFORE any class/struct ancestor, the type is a local
+/// declaration inside a function body, not a nested member of the
+/// enclosing class. From that point on we only accumulate Namespace
+/// ancestors and skip ClassDecl ancestors — that prevents
+/// `struct EarlyWakeState { ... };` declared inside
+/// `Reactor::spawn_stackless_task` from being qualified as
+/// `rrr::Reactor::EarlyWakeState` (which would falsely inherit
+/// Reactor's class-level `// @safe` annotation through file-default
+/// fallback). It correctly becomes `rrr::EarlyWakeState`, matching
+/// the qualification recorded by the text-based safety_annotations
+/// parser which can't track function-body scopes on its
+/// `class_context_stack`.
 pub fn get_qualified_name(entity: &Entity) -> String {
     let simple_name = entity.get_name().unwrap_or_else(|| "anonymous".to_string());
 
     // Try to build qualified name by walking up the semantic parents
     let mut parts = vec![simple_name.clone()];
     let mut current = entity.get_semantic_parent();
+    // Once we cross a function-body scope, ClassDecl ancestors above
+    // it are the function's enclosing class — not a nested-type
+    // parent. Skip them.
+    let mut crossed_function_body = false;
 
     while let Some(parent) = current {
         match parent.get_kind() {
-            EntityKind::Namespace
-            | EntityKind::ClassDecl
+            EntityKind::FunctionDecl
+            | EntityKind::Method
+            | EntityKind::Constructor
+            | EntityKind::Destructor
+            | EntityKind::ConversionFunction
+            | EntityKind::FunctionTemplate => {
+                crossed_function_body = true;
+            }
+            EntityKind::Namespace => {
+                if let Some(parent_name) = parent.get_name() {
+                    if !parent_name.is_empty() {
+                        parts.push(parent_name);
+                    }
+                }
+            }
+            EntityKind::ClassDecl
             | EntityKind::StructDecl
             | EntityKind::ClassTemplate => {
-                if let Some(parent_name) = parent.get_name() {
+                if crossed_function_body {
+                    // Local-method-body type — skip the enclosing class.
+                } else if let Some(parent_name) = parent.get_name() {
                     if !parent_name.is_empty() {
                         parts.push(parent_name);
                     }
@@ -449,6 +497,13 @@ pub struct Variable {
     // Variadic template support (Phase 1)
     pub is_pack: bool, // Is this a parameter pack (e.g., Args... args)?
     pub pack_element_type: Option<String>, // Type of pack elements (e.g., "Args&&" from "Args&&...")
+    /// True when the declaration has an initializer expression
+    /// (`int x = 5;`, `int mode = PollMode::READ;`, `auto id = get_next_id();`,
+    /// `auto v = cond ? a : b;`, brace-init `Foo f{...}`).
+    /// Used by initialization_tracking to avoid false-positive uninit reports
+    /// when the analyzer can't parse the initializer into an `Expression` but
+    /// libclang still exposes the init children on the VarDecl entity.
+    pub has_initializer: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1274,7 +1329,253 @@ pub fn extract_variable(entity: &Entity) -> Variable {
         location,
         is_pack: false,          // Will be set properly for function parameters
         pack_element_type: None, // Will be set properly for function parameters
+        // Set conservatively to false here. Local-var sites in
+        // `extract_compound_statement` recompute this from the VarDecl
+        // entity's children before pushing the Statement::VariableDecl,
+        // so parameter / class-member uses (which don't feed the init
+        // tracker) are unaffected.
+        has_initializer: var_decl_has_initializer(entity),
     }
+}
+
+/// Returns true if a libclang VarDecl-like entity has an initializer
+/// expression. Detected by two complementary signals — either is sufficient:
+///
+/// 1. **AST children** — VarDecl exposes children for the initializer
+///    in the typical compilation path (IntegerLiteral, DeclRefExpr,
+///    CallExpr, CXXConstructExpr, InitListExpr, UnexposedExpr, etc.).
+///    Anything that isn't a pure type-decoration (TypeRef, NamespaceRef,
+///    …) is evidence of an initializer.
+///
+/// 2. **Token sweep over the source range** — fallback for cases where
+///    libclang exposes no initializer children (observed in the C++23
+///    named-module compilation path on this codebase: `int mode =
+///    PollMode::READ;` inside a member function of an `export module rrr.X`
+///    TU surfaces a VarDecl with zero children). We tokenize the source
+///    range and look for `=`, `{`, or `(` AFTER the variable name —
+///    those are the only ways C++ can introduce an initializer
+///    syntactically.
+fn var_decl_has_initializer(entity: &Entity) -> bool {
+    // Signal 1: AST children.
+    for child in entity.get_children() {
+        match child.get_kind() {
+            // Pure type decoration — not an initializer.
+            EntityKind::TypeRef
+            | EntityKind::NamespaceRef
+            | EntityKind::TemplateRef
+            | EntityKind::ParmDecl
+            | EntityKind::OverloadedDeclRef => continue,
+            // Anything else is treated as evidence of an initializer.
+            _ => return true,
+        }
+    }
+
+    // Signal 2: token-level fallback when libclang doesn't expose
+    // initializer children. We look at the VarDecl's source range and
+    // scan tokens after the variable name for `=`, `{`, or `(`. Any of
+    // those introduces an initializer in C++ (`= expr`, brace-init,
+    // direct-init). Note: the named-module compilation path on C++23
+    // can truncate the entity's range to just `<type> <name>` —
+    // signal 3 below recovers from that case via direct source-file
+    // reads.
+    if let Some(range) = entity.get_range() {
+        let tokens = safe_tokenize(&range);
+        let name = entity.get_name().unwrap_or_default();
+        if scan_tokens_for_initializer(&tokens, &name) {
+            return true;
+        }
+    }
+
+    // Signal 3: source-file fallback when even the tokenization is
+    // truncated (observed for some VarDecls in C++23 named-module
+    // compilation paths — the entity's get_range() ends at the
+    // declarator name without including `= …` / `{…}`). We read the
+    // line from the source file at the entity's location and scan it
+    // for an initializer-introducing token after the variable name.
+    //
+    // Two cases produce a true result:
+    //   (a) An explicit `=`, `{`, or `(` after the name (initializer).
+    //   (b) The type prefix before the name looks like a class type —
+    //       e.g. contains `::`, `<`, or starts with an uppercase
+    //       identifier (so default-construction runs even without an
+    //       explicit initializer). This works around libclang
+    //       collapsing complex types to bare `int` in the named-module
+    //       path, which otherwise breaks the `is_class_or_struct_type`
+    //       heuristic in the init tracker.
+    if let Some(loc) = entity.get_location() {
+        let file_loc = loc.get_file_location();
+        if let (Some(file), name) = (file_loc.file, entity.get_name().unwrap_or_default()) {
+            let path = file.get_path();
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                // Lines from libclang are 1-indexed; .lines() returns 0-indexed.
+                let line_idx = file_loc.line.saturating_sub(1) as usize;
+                if let Some(line) = contents.lines().nth(line_idx) {
+                    if source_line_has_initializer(line, &name) {
+                        return true;
+                    }
+                    if source_line_type_prefix_is_class(line, &name) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Walk a token list (from libclang's safe_tokenize) and return true
+/// if there is an initializer-introducing token (`=`, `{`, or `(`)
+/// after the variable name and before the next `;` or `,`.
+fn scan_tokens_for_initializer(tokens: &[clang::token::Token], name: &str) -> bool {
+    let mut seen_name = false;
+    for token in tokens {
+        let s = token.get_spelling();
+        if !seen_name {
+            if s == name {
+                seen_name = true;
+            }
+            continue;
+        }
+        match s.as_str() {
+            "=" | "{" | "(" => return true,
+            ";" | "," => return false,
+            _ => continue,
+        }
+    }
+    false
+}
+
+/// Scan a single source line for an initializer-introducing character
+/// (`=`, `{`, or `(`) after the variable name. Skips characters in
+/// string/char literals and line comments. This is the last-resort
+/// fallback used when both libclang's AST children and tokenization
+/// fail to expose the initializer (C++23 named-module path).
+fn source_line_has_initializer(line: &str, name: &str) -> bool {
+    // Find the variable name in the line — it must appear as a
+    // standalone identifier (not as a substring of another identifier).
+    let bytes = line.as_bytes();
+    let name_bytes = name.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = line[start..].find(name) {
+        let abs = start + pos;
+        let before_ok = abs == 0
+            || !is_ident_byte(bytes[abs - 1]);
+        let after = abs + name_bytes.len();
+        let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+        if before_ok && after_ok {
+            // Scan the rest of the line for `=`, `{`, `(`.
+            // Stop at line comment (`//`), `;`, or `,`.
+            let rest = &line[after..];
+            let mut chars = rest.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '=' => {
+                        // Skip `==` / `=>` / `>=` etc. — the simplest filter:
+                        // if the next character is `=` it's `==`, not init.
+                        if chars.peek() == Some(&'=') {
+                            return false;
+                        }
+                        return true;
+                    }
+                    '{' | '(' => return true,
+                    ';' | ',' => return false,
+                    '/' => {
+                        if chars.peek() == Some(&'/') {
+                            return false; // line comment — no init here
+                        }
+                    }
+                    '"' => {
+                        // skip string literal
+                        loop {
+                            match chars.next() {
+                                Some('"') => break,
+                                Some('\\') => {
+                                    let _ = chars.next();
+                                }
+                                Some(_) => continue,
+                                None => break,
+                            }
+                        }
+                    }
+                    '\'' => {
+                        // skip char literal
+                        loop {
+                            match chars.next() {
+                                Some('\'') => break,
+                                Some('\\') => {
+                                    let _ = chars.next();
+                                }
+                                Some(_) => continue,
+                                None => break,
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return false;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Returns true if the text before the variable name on the source line
+/// looks like a class type — i.e. contains `::` (namespace-qualified),
+/// `<` (template), or its first identifier token starts with an
+/// uppercase letter. Class types are default-constructed when declared
+/// without an explicit initializer, so for init-tracking purposes they
+/// should be considered initialized.
+///
+/// This is a defensive workaround for cases where libclang collapses
+/// the variable's type to a primitive like `int` in the C++23 named-
+/// module compilation path, breaking the type-name-based class
+/// detection in the init tracker.
+fn source_line_type_prefix_is_class(line: &str, name: &str) -> bool {
+    let bytes = line.as_bytes();
+    let name_bytes = name.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = line[start..].find(name) {
+        let abs = start + pos;
+        let before_ok = abs == 0 || !is_ident_byte(bytes[abs - 1]);
+        let after = abs + name_bytes.len();
+        let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
+        if before_ok && after_ok {
+            // The substring before this occurrence is the type prefix.
+            let prefix = line[..abs].trim_end();
+            // Skip storage-class / qualifier keywords that aren't part
+            // of the type identifier (e.g. `const`, `static`, `mutable`).
+            // We just need a quick test, not full parsing.
+            if prefix.contains("::") || prefix.contains('<') {
+                return true;
+            }
+            // First identifier-looking token starting uppercase?
+            // Walk backward to find the last identifier token.
+            let prefix_bytes = prefix.as_bytes();
+            let mut end = prefix_bytes.len();
+            while end > 0 && !is_ident_byte(prefix_bytes[end - 1]) {
+                end -= 1;
+            }
+            let mut tok_start = end;
+            while tok_start > 0 && is_ident_byte(prefix_bytes[tok_start - 1]) {
+                tok_start -= 1;
+            }
+            if tok_start < end {
+                let first_byte = prefix_bytes[tok_start];
+                if first_byte.is_ascii_uppercase() {
+                    return true;
+                }
+            }
+            return false;
+        }
+        start = abs + 1;
+    }
+    false
 }
 
 fn extract_function_body(entity: &Entity) -> Vec<Statement> {

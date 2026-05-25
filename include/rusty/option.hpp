@@ -16,11 +16,15 @@
 // - No null pointer dereferencing
 // - Explicit handling of absence
 //
-// Note: This header is marked @unsafe because it implements low-level
-// data structures using raw pointers internally. The external API is
-// designed to be safe, but the implementation requires unsafe operations.
+// Note: The external API is safe — Option mirrors Rust's `Option<T>`. The
+// `union { T value; char dummy; }` storage and placement-new manipulation
+// inside method bodies is encapsulated and not exposed to callers. The
+// namespace is therefore marked `@safe` (parity with `rusty/vec.hpp`,
+// `rusty/hashmap.hpp`, `rusty/btreemap.hpp`, `rusty/refcell.hpp`); methods
+// that internally do truly unsafe work wrap those operations in
+// `@unsafe { ... }` blocks.
 
-// @unsafe
+// @safe
 namespace rusty {
 
 // Forward declaration for Result (defined in result.hpp, included later)

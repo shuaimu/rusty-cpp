@@ -177,19 +177,23 @@ fn analyze_statement_init(
 ) {
     match stmt {
         Statement::VariableDecl(var) => {
-            // Variable declarations
-            // Check if there's an initializer by looking at the type context
-            // For now, assume variables with types that suggest initialization are initialized
-            // (e.g., "int x = 5" vs "int x;")
-
-            // Heuristic: if the variable is a reference or has a complex type, assume initialized
-            // Otherwise, mark as uninitialized
+            // A variable declaration with no initializer leaves the
+            // variable uninitialized for primitive types. Use the
+            // `has_initializer` flag set by `extract_variable` from the
+            // libclang VarDecl entity — this is authoritative regardless
+            // of whether `extract_expression` can parse the RHS into our
+            // `Expression` IR. This fixes false-positives for shapes
+            // like `int mode = EnumScope::VALUE;`, `auto id = call();`,
+            // `auto v = cond ? a : b;`, and brace-init `Foo f{...}`.
             //
-            // Class/struct types are considered initialized because their constructor is called
-            // even for `Container c;` declarations. Only primitive types without initializers
-            // are truly uninitialized in C++.
-            let is_initialized = var.is_reference
-                || var.type_name.contains('=')
+            // Other cases that imply initialization:
+            // - References (must bind at declaration in C++)
+            // - Const variables (must be initialized — language rule)
+            // - Class/struct types (default constructor runs even for
+            //   `Container c;` so the object is reachable, just default-
+            //   initialized; only primitive types are truly uninitialized)
+            let is_initialized = var.has_initializer
+                || var.is_reference
                 || (!var.type_name.is_empty() && var.is_const)
                 || is_class_or_struct_type(&var.type_name);
 
@@ -515,5 +519,115 @@ mod tests {
         tracker.exit_scope();
         // y should be gone after scope exit
         assert_eq!(tracker.get_state("y"), InitState::Initialized); // defaults to Initialized
+    }
+
+    use crate::parser::ast_visitor::Variable;
+    use crate::parser::{Function, SourceLocation, Statement};
+
+    fn loc() -> SourceLocation {
+        SourceLocation {
+            file: "test.cpp".to_string(),
+            line: 1,
+            column: 1,
+        }
+    }
+
+    /// Helper: build a Variable matching a primitive local declaration.
+    /// `has_initializer` is the only knob that varies across the tests.
+    fn primitive_var(name: &str, type_name: &str, has_initializer: bool) -> Variable {
+        Variable {
+            name: name.to_string(),
+            type_name: type_name.to_string(),
+            is_reference: false,
+            is_pointer: false,
+            is_const: false,
+            is_unique_ptr: false,
+            is_shared_ptr: false,
+            is_static: false,
+            is_mutable: false,
+            location: loc(),
+            is_pack: false,
+            pack_element_type: None,
+            has_initializer,
+        }
+    }
+
+    fn safe_fn(name: &str, body: Vec<Statement>) -> Function {
+        Function {
+            name: name.to_string(),
+            parameters: vec![],
+            return_type: "void".to_string(),
+            body,
+            location: loc(),
+            is_method: false,
+            method_qualifier: None,
+            template_parameters: vec![],
+            safety_annotation: Some(SafetyMode::Safe),
+            has_explicit_safety_annotation: true,
+            is_deleted: false,
+            member_initializers: vec![],
+        }
+    }
+
+    #[test]
+    fn test_primitive_without_initializer_used_in_return_is_flagged() {
+        // `int x; return x;` — genuinely uninitialized.
+        let body = vec![
+            Statement::VariableDecl(primitive_var("x", "int", false)),
+            Statement::Return(Some(crate::parser::Expression::Variable("x".to_string()))),
+        ];
+        let errors = check_initialization_safety(&safe_fn("f", body), SafetyMode::Safe);
+        assert_eq!(errors.len(), 1, "expected 1 error, got: {:?}", errors);
+        assert!(errors[0].contains("uninitialized variable 'x'"));
+    }
+
+    #[test]
+    fn test_primitive_with_initializer_used_in_return_is_ok() {
+        // `int x = 5; return x;` — has_initializer set by extract_variable.
+        // This covers the `int mode = PollMode::READ;` shape from the rrr
+        // tcp_channel.cpp false positive — the RHS may or may not be
+        // parseable as `Expression`, but `has_initializer=true` is enough.
+        let body = vec![
+            Statement::VariableDecl(primitive_var("x", "int", true)),
+            Statement::Return(Some(crate::parser::Expression::Variable("x".to_string()))),
+        ];
+        let errors = check_initialization_safety(&safe_fn("f", body), SafetyMode::Safe);
+        assert!(
+            errors.is_empty(),
+            "expected no errors, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_typedef_primitive_with_initializer_is_ok() {
+        // `uint64_t id = get_next_id(); return id;` — same shape as the
+        // alock.cpp WaitDieALock::vlock false positive. The function-call
+        // RHS may not parse into Expression, but has_initializer=true.
+        let body = vec![
+            Statement::VariableDecl(primitive_var("id", "uint64_t", true)),
+            Statement::Return(Some(crate::parser::Expression::Variable("id".to_string()))),
+        ];
+        let errors = check_initialization_safety(&safe_fn("f", body), SafetyMode::Safe);
+        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn test_double_with_ternary_initializer_is_ok() {
+        // `double avg = (n > 0) ? sum/n : 0.0; log(avg);` — the reactor.cpp
+        // stackless_profile_report_periodic shape that motivated the
+        // original Bug 3 investigation. Ternary expressions exposed via
+        // UnexposedExpr may not parse into Expression, but has_initializer
+        // is enough.
+        let body = vec![
+            Statement::VariableDecl(primitive_var("avg", "double", true)),
+            Statement::FunctionCall {
+                name: "log".to_string(),
+                args: vec![crate::parser::Expression::Variable("avg".to_string())],
+                location: loc(),
+            },
+        ];
+        let errors = check_initialization_safety(&safe_fn("f", body), SafetyMode::Safe);
+        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
     }
 }

@@ -58,6 +58,10 @@ struct Args {
 struct CompileCommandConfig {
     include_paths: Vec<PathBuf>,
     clang_args: Vec<String>,
+    /// Absolute path of the compiler that compile_commands.json says built
+    /// this TU. We use it to query `-print-resource-dir` so the resource
+    /// dir matches the toolchain that built the PCM/BMI files.
+    compiler_path: Option<PathBuf>,
 }
 
 fn main() {
@@ -113,6 +117,7 @@ fn analyze_file(
     all_include_paths.extend(extract_include_paths_from_env());
 
     // Extract additional include paths and compile flags from compile_commands.json if provided
+    let mut cc_compiler_path: Option<PathBuf> = None;
     if let Some(cc_path) = compile_commands {
         let extracted = extract_compile_config_from_compile_commands(cc_path, path)?;
         // For module/libc++ builds we should trust compile_commands include paths.
@@ -129,11 +134,33 @@ fn analyze_file(
         });
         all_include_paths.extend(extracted.include_paths);
         extra_clang_args.extend(extracted.clang_args);
+        cc_compiler_path = extracted.compiler_path;
     }
 
     // Auto-detect C++ standard library paths from clang installation when needed.
     if should_auto_detect_clang_includes {
         all_include_paths.extend(extract_include_paths_from_clang());
+    } else {
+        // Even when compile_commands.json owns the STL paths (libc++ / module
+        // builds), libclang needs to know where its builtin resource directory
+        // lives (for `stddef.h`, `stdarg.h`, intrinsics, etc.) so the
+        // wrapper-header dance with libc++ works. Use `-resource-dir=...`
+        // rather than `-I<resource-dir>/include` — passing the dir as a
+        // regular `-I` puts it ahead of libc++ on the search path and breaks
+        // `__has_include_next` patterns in libc++'s wrappers. With
+        // `-resource-dir=`, libclang slots the builtin headers into the
+        // canonical `-isystem` position and the libc++ wrappers resolve
+        // correctly.
+        //
+        // CRITICAL: the resource dir MUST come from the SAME toolchain that
+        // produced the PCM/BMI files in compile_commands.json. Mismatched
+        // resource dirs (e.g. clang-19 + libclang-22 + clang-22 BMIs) crash
+        // libclang during BMI deserialization. We pass the compile_commands
+        // compiler down so the resolver can query `-print-resource-dir`
+        // from that specific binary.
+        if let Some(dir) = find_libclang_resource_root_for(cc_compiler_path.as_deref()) {
+            extra_clang_args.push(format!("-resource-dir={}", dir.display()));
+        }
     }
 
     // Parse included headers for lifetime annotations
@@ -222,6 +249,15 @@ fn analyze_file(
     // Check for unsafe pointer operations and unsafe propagation in safe functions
     let mut violations = Vec::new();
     debug_println!("DEBUG: Found {} functions in AST", ast.functions.len());
+
+    // Canonical path of the file being checked. Used to filter out function
+    // bodies that libclang surfaced via imports/headers — those should be
+    // analyzed when THEIR own file is the check target, not re-analyzed
+    // from every consumer. Without this filter, large module-import graphs
+    // produce massive duplicate findings (e.g. each consumer of rrr.reactor
+    // re-flags every @safe→@unsafe call in Reactor's methods).
+    let main_file_canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+
     for function in &ast.functions {
         // Skip system header functions - they shouldn't be analyzed internally
         if is_system_header_or_std(&function.location.file, &function.name) {
@@ -229,6 +265,21 @@ fn analyze_file(
                 "DEBUG: Skipping system header function '{}' from {}",
                 function.name,
                 function.location.file
+            );
+            continue;
+        }
+
+        // Only analyze bodies whose source file matches the TU being checked.
+        // Functions from imported modules / other files have their own check
+        // pass; analyzing them here just produces duplicate findings.
+        let fn_file = std::fs::canonicalize(&function.location.file)
+            .unwrap_or_else(|_| PathBuf::from(&function.location.file));
+        if fn_file != main_file_canonical {
+            debug_println!(
+                "DEBUG: Skipping cross-file function '{}' from {} (current TU is {})",
+                function.name,
+                function.location.file,
+                main_file_canonical.display()
             );
             continue;
         }
@@ -467,6 +518,25 @@ fn extract_compile_config_from_tokens(
 ) -> Result<CompileCommandConfig, String> {
     let mut config = CompileCommandConfig::default();
 
+    // The first token of a compile_commands.json `command` (or first item of
+    // `arguments`) is the compiler binary. We capture it so the rest of
+    // rusty-cpp can ask THAT compiler for its resource directory, ensuring
+    // the resource dir matches the toolchain that produced the PCM/BMI
+    // files. (Falling back to `Clang::find` would pick whatever clang is on
+    // PATH, which may be a different version and crash on PCM load.)
+    if let Some(first) = tokens.first() {
+        let raw = strip_outer_quotes(first.as_str());
+        if !raw.is_empty() && !raw.starts_with('-') {
+            let candidate = if raw.contains('/') {
+                absolutize_if_needed(raw, directory)
+            } else {
+                // Not a path — leave it for PATH resolution downstream.
+                PathBuf::from(raw)
+            };
+            config.compiler_path = Some(candidate);
+        }
+    }
+
     let mut i = 0;
     while i < tokens.len() {
         let token = tokens[i].as_str();
@@ -590,6 +660,41 @@ fn extract_compile_config_from_tokens(
                 }
             }
             i += 1;
+        } else if token.starts_with("-D") || token.starts_with("-U") {
+            // Preprocessor define/undefine. Source code often guards on these
+            // (e.g. -DCONFIG_H="..."), so dropping them silently leads to
+            // hard-to-diagnose parse failures.
+            config.clang_args.push(token.to_string());
+            i += 1;
+        } else if token == "-D" || token == "-U" {
+            // Two-token form: -D NAME, -U NAME.
+            if i + 1 < tokens.len() {
+                config.clang_args.push(token.to_string());
+                config.clang_args.push(tokens[i + 1].clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if token.starts_with("-m") || token.starts_with("-march") {
+            // Target / codegen feature flags (-march=native, -mtune=skylake,
+            // -mmmx, -msse4.2, -mavx2, etc.). Without these, clang's bundled
+            // intrinsic headers (mmintrin.h, emmintrin.h, ...) fail to declare
+            // `__builtin_ia32_*` builtins, surfacing as a flood of
+            // "use of undeclared identifier" errors when libc++ headers pull
+            // them in.
+            config.clang_args.push(token.to_string());
+            i += 1;
+        } else if token.starts_with("-f") {
+            // Generic -f flags (e.g. -fno-omit-frame-pointer, -fexceptions).
+            // These rarely break parsing and often gate language behaviour.
+            config.clang_args.push(token.to_string());
+            i += 1;
+        } else if token.starts_with("-O") || token == "-g" || token.starts_with("-g") {
+            // Optimization / debug flags — harmless for parsing, occasionally
+            // affect preprocessor behaviour (NDEBUG via -O passes is rare but
+            // -DNDEBUG itself is in the -D list above).
+            config.clang_args.push(token.to_string());
+            i += 1;
         } else {
             i += 1;
         }
@@ -645,6 +750,68 @@ fn extract_include_paths_from_env() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+/// Return the **root** of the clang resource directory (e.g.
+/// `/path/to/lib/clang/22`) — NOT the `include` subdirectory inside it.
+/// Pass this to libclang via `-resource-dir=...` so it can locate builtin
+/// headers AND wire up the libc++ wrapper-header dance via `__has_include_next`.
+/// Passing the `include` subdir as a plain `-I` does not work for the latter.
+///
+/// Important: the resource dir MUST match the libclang ABI version. Mismatching
+/// (e.g. clang-19 resource dir with libclang-22) crashes on PCM/BMI load.
+/// Resolution order:
+///   1. If a `compiler_hint` is given (typically extracted from
+///      `compile_commands.json`'s `command[0]`), query THAT binary's
+///      `-print-resource-dir`. This is the strongest guarantee — the PCMs
+///      were produced by exactly this toolchain.
+///   2. Otherwise ask whatever `clang_sys::Clang::find` returns. Note that
+///      can pick a wrong-version clang on multi-LLVM systems.
+///   3. Finally fall back to the hardcoded `/usr/lib/llvm-N` scan.
+#[allow(dead_code)]
+fn find_libclang_resource_root() -> Option<PathBuf> {
+    find_libclang_resource_root_for(None)
+}
+
+fn find_libclang_resource_root_for(compiler_hint: Option<&Path>) -> Option<PathBuf> {
+    fn ask(bin: &Path) -> Option<PathBuf> {
+        let output = std::process::Command::new(bin)
+            .arg("-print-resource-dir")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let resource_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let root = PathBuf::from(&resource_dir);
+        if root.exists() { Some(root) } else { None }
+    }
+
+    // 1. Trust the compile_commands compiler if available.
+    if let Some(bin) = compiler_hint {
+        if let Some(root) = ask(bin) {
+            return Some(root);
+        }
+    }
+
+    // 2. Fall back to clang_sys's discovery.
+    if let Some(clang) = Clang::find(None, &[]) {
+        if let Some(root) = ask(&clang.path) {
+            return Some(root);
+        }
+    }
+
+    // 3. Hardcoded scan (LLVM 14..=22, Homebrew/Linuxbrew layouts).
+    if let Some(include_dir) = find_libclang_resource_include() {
+        if include_dir.ends_with("include") {
+            if let Some(parent) = include_dir.parent() {
+                return Some(parent.to_path_buf());
+            }
+        }
+        return Some(include_dir);
+    }
+
+    None
 }
 
 /// Extract C++ standard library include paths using clang_sys
@@ -731,7 +898,7 @@ fn extract_include_paths_from_clang() -> Vec<PathBuf> {
 fn find_libclang_resource_include() -> Option<PathBuf> {
     // Try to find libclang version by checking common LLVM installation paths
     // Search for the newest version first (higher versions are typically more compatible)
-    for version in (14..=20).rev() {
+    for version in (14..=22).rev() {
         // Try versioned path (e.g., /usr/lib/llvm-16/lib/clang/16/include)
         let versioned_path = PathBuf::from(format!(
             "/usr/lib/llvm-{}/lib/clang/{}/include",
@@ -769,7 +936,7 @@ fn find_libclang_resource_include() -> Option<PathBuf> {
     }
 
     // Fallback: Try to find any clang resource directory
-    for version in (14..=20).rev() {
+    for version in (14..=22).rev() {
         let versioned_path = PathBuf::from(format!(
             "/usr/lib/llvm-{}/lib/clang/{}/include",
             version, version

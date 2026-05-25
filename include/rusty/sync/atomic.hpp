@@ -7,6 +7,9 @@
 
 #include "../result.hpp"
 
+// @safe - thread-safe primitives that wrap std::atomic<T>. Each
+// method's body funnels into a `// @unsafe { ... }` block around the
+// underlying `std::atomic<T>::*` call (STL, not borrow-checked).
 namespace rusty::sync::atomic {
 
 enum class Ordering {
@@ -46,6 +49,7 @@ public:
     }
 
     Atomic(const Atomic& other) noexcept
+        // @unsafe { std::atomic<T>::load }
         : inner_(other.inner_.load(std::memory_order_relaxed)) {}
 
     Atomic& operator=(const Atomic& other) noexcept {
@@ -61,15 +65,18 @@ public:
     }
 
     T load(Ordering order = Ordering::SeqCst) const noexcept {
-        return inner_.load(to_std_memory_order(order));
+        // @unsafe { std::atomic<T>::load is STL, not borrow-checked }
+        { return inner_.load(to_std_memory_order(order)); }
     }
 
     void store(T value, Ordering order = Ordering::SeqCst) const noexcept {
-        inner_.store(value, to_std_memory_order(order));
+        // @unsafe { std::atomic<T>::store is STL, not borrow-checked }
+        { inner_.store(value, to_std_memory_order(order)); }
     }
 
     T swap(T value, Ordering order = Ordering::SeqCst) const noexcept {
-        return inner_.exchange(value, to_std_memory_order(order));
+        // @unsafe { std::atomic<T>::exchange is STL, not borrow-checked }
+        { return inner_.exchange(value, to_std_memory_order(order)); }
     }
 
     T* get_mut() noexcept {
@@ -86,11 +93,16 @@ public:
         Ordering success,
         Ordering failure) const noexcept {
         T expected = current;
-        if (inner_.compare_exchange_strong(
+        // @unsafe { std::atomic<T>::compare_exchange_strong is STL, not borrow-checked }
+        bool ok = false;
+        {
+            ok = inner_.compare_exchange_strong(
                 expected,
                 new_value,
                 to_std_memory_order(success),
-                to_std_memory_order(failure))) {
+                to_std_memory_order(failure));
+        }
+        if (ok) {
             return rusty::Result<T, T>::Ok(current);
         }
         return rusty::Result<T, T>::Err(expected);
@@ -102,11 +114,16 @@ public:
         Ordering success,
         Ordering failure) const noexcept {
         T expected = current;
-        if (inner_.compare_exchange_weak(
+        // @unsafe { std::atomic<T>::compare_exchange_weak is STL, not borrow-checked }
+        bool ok = false;
+        {
+            ok = inner_.compare_exchange_weak(
                 expected,
                 new_value,
                 to_std_memory_order(success),
-                to_std_memory_order(failure))) {
+                to_std_memory_order(failure));
+        }
+        if (ok) {
             return rusty::Result<T, T>::Ok(current);
         }
         return rusty::Result<T, T>::Err(expected);
@@ -115,37 +132,43 @@ public:
     template<typename U = T>
     requires (std::is_integral_v<U> && !std::is_same_v<U, bool>)
     U fetch_add(U value, Ordering order = Ordering::SeqCst) const noexcept {
-        return inner_.fetch_add(value, to_std_memory_order(order));
+        // @unsafe { std::atomic<T>::fetch_add is STL, not borrow-checked }
+        { return inner_.fetch_add(value, to_std_memory_order(order)); }
     }
 
     template<typename U = T>
     requires (std::is_integral_v<U> && !std::is_same_v<U, bool>)
     U fetch_sub(U value, Ordering order = Ordering::SeqCst) const noexcept {
-        return inner_.fetch_sub(value, to_std_memory_order(order));
+        // @unsafe { std::atomic<T>::fetch_sub is STL, not borrow-checked }
+        { return inner_.fetch_sub(value, to_std_memory_order(order)); }
     }
 
     template<typename U = T>
     requires std::is_pointer_v<U>
     U fetch_add(std::ptrdiff_t value, Ordering order = Ordering::SeqCst) const noexcept {
-        return inner_.fetch_add(value, to_std_memory_order(order));
+        // @unsafe { std::atomic<T*>::fetch_add is STL, not borrow-checked }
+        { return inner_.fetch_add(value, to_std_memory_order(order)); }
     }
 
     template<typename U = T>
     requires std::is_pointer_v<U>
     U fetch_sub(std::ptrdiff_t value, Ordering order = Ordering::SeqCst) const noexcept {
-        return inner_.fetch_sub(value, to_std_memory_order(order));
+        // @unsafe { std::atomic<T*>::fetch_sub is STL, not borrow-checked }
+        { return inner_.fetch_sub(value, to_std_memory_order(order)); }
     }
 
     template<typename U = T>
     requires (std::is_integral_v<U> && !std::is_same_v<U, bool>)
     U fetch_and(U value, Ordering order = Ordering::SeqCst) const noexcept {
-        return inner_.fetch_and(value, to_std_memory_order(order));
+        // @unsafe { std::atomic<T>::fetch_and is STL, not borrow-checked }
+        { return inner_.fetch_and(value, to_std_memory_order(order)); }
     }
 
     template<typename U = T>
     requires (std::is_integral_v<U> && !std::is_same_v<U, bool>)
     U fetch_or(U value, Ordering order = Ordering::SeqCst) const noexcept {
-        return inner_.fetch_or(value, to_std_memory_order(order));
+        // @unsafe { std::atomic<T>::fetch_or is STL, not borrow-checked }
+        { return inner_.fetch_or(value, to_std_memory_order(order)); }
     }
 
     operator const Atomic*() const noexcept {
@@ -176,7 +199,8 @@ template<typename T>
 using AtomicPtr = Atomic<T*>;
 
 inline void fence(Ordering order = Ordering::SeqCst) noexcept {
-    std::atomic_thread_fence(to_std_memory_order(order));
+    // @unsafe { std::atomic_thread_fence is STL, not borrow-checked }
+    { std::atomic_thread_fence(to_std_memory_order(order)); }
 }
 
 } // namespace rusty::sync::atomic

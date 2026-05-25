@@ -314,9 +314,20 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
     let mut accumulated_line = String::new();
     let mut accumulating_for_annotation = false;
 
-    // Bug #8 fix: Track class context for method annotations
-    let mut class_context_stack: Vec<String> = Vec::new();
-    let mut brace_depth = 0;
+    // Bug #8 fix: Track class context for method annotations.
+    //
+    // Each entry is `(name, push_depth)` — the brace depth at which the
+    // scope was opened. We pop while `stack.last().push_depth >
+    // current_depth`, which is robust to nested classes / namespaces /
+    // closures (the previous design reset `brace_depth` on each push
+    // and used `<= 0` as the pop trigger, which silently popped the
+    // wrong entry whenever multiple scopes nested inside a named
+    // namespace — surfaced as anonymous-namespace functions losing
+    // their outer-namespace qualification, e.g.
+    // `rrr::{ {anon}::parse_inet4_addr() }` being recorded as
+    // `parse_inet4_addr` instead of `rrr::parse_inet4_addr`).
+    let mut class_context_stack: Vec<(String, i32)> = Vec::new();
+    let mut current_depth: i32 = 0;
 
     for line_result in reader.lines() {
         _current_line += 1;
@@ -371,43 +382,48 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             continue;
         }
 
-        // Bug #8 fix: Track braces to know when we exit a class
-        // Note: This is a simplified tracking that doesn't handle strings/comments perfectly
-        // but works for typical C++ code with annotations
+        // Bug #8 fix: Track braces to know when we exit a class/namespace.
+        // Note: This is a simplified tracking that doesn't handle strings /
+        // comments perfectly but works for typical C++ code with annotations.
         let opens = trimmed.matches('{').count() as i32;
         let closes = trimmed.matches('}').count() as i32;
-        brace_depth += opens - closes;
-
-        // Pop class context when we exit its scope
-        if brace_depth <= 0 && !class_context_stack.is_empty() {
-            class_context_stack.pop();
-            brace_depth = 0; // Reset to handle nested classes properly
+        // Apply the line's net brace delta. Scopes that closed on this line
+        // (their `push_depth > current_depth` after the update) are popped.
+        current_depth += opens - closes;
+        if current_depth < 0 {
+            current_depth = 0;
+        }
+        while let Some(&(_, push_depth)) = class_context_stack.last() {
+            if push_depth > current_depth {
+                class_context_stack.pop();
+            } else {
+                break;
+            }
         }
 
-        // Bug #8 fix: Track class declarations even without annotations
-        // This ensures method annotations get qualified with class name
-        // NOTE: Only push non-annotated classes here; annotated classes are pushed
-        // in the annotation handling section below
+        // Bug #8 fix: Track class declarations even without annotations.
+        // This ensures method annotations get qualified with class name.
+        // NOTE: Only push non-annotated classes here; annotated classes are
+        // pushed in the annotation handling section below.
         let is_class_line = is_class_declaration(trimmed);
         let needs_class_tracking =
             is_class_line && pending_annotation.is_none() && !accumulating_for_annotation;
         if needs_class_tracking {
             if let Some(class_name) = extract_class_name(trimmed) {
-                // Calculate brace depth for this class declaration
-                let class_brace_depth =
-                    trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
-                // Only push class to context if it's NOT complete on the same line
-                // A class complete on one line (like `struct Foo { int x; };`) has brace_depth == 0
-                // and should not be pushed to context stack
-                if class_brace_depth > 0 {
-                    class_context_stack.push(class_name);
-                    brace_depth = class_brace_depth;
+                // Only push class to context if it's NOT complete on the
+                // same line. A class complete on one line
+                // (`struct Foo { int x; };`) has net brace delta == 0 and
+                // shouldn't be pushed: by the time we finish this line the
+                // scope has already closed.
+                let net = opens - closes;
+                if net > 0 {
+                    class_context_stack.push((class_name, current_depth));
                 }
             }
         }
 
-        // Track namespace declarations (even without annotations) for qualified name building
-        // This ensures function annotations inside namespaces get the proper qualified name
+        // Track namespace declarations (even without annotations) for
+        // qualified name building.
         let is_namespace_line = (trimmed.starts_with("namespace ")
             || trimmed.contains(" namespace "))
             && !trimmed.contains("using ")
@@ -416,11 +432,15 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             is_namespace_line && pending_annotation.is_none() && !accumulating_for_annotation;
         if needs_namespace_tracking {
             if let Some(ns_name) = extract_namespace_name(trimmed) {
-                debug_println!("DEBUG SAFETY: Entering namespace '{}' for context", ns_name);
-                class_context_stack.push(ns_name);
-                // Reset brace depth to track this namespace's scope
-                brace_depth =
-                    trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
+                let net = opens - closes;
+                if net > 0 {
+                    debug_println!(
+                        "DEBUG SAFETY: Entering namespace '{}' at depth {}",
+                        ns_name,
+                        current_depth
+                    );
+                    class_context_stack.push((ns_name, current_depth));
+                }
             }
         }
 
@@ -489,25 +509,30 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                             "DEBUG SAFETY: Set file default to {:?} (namespace)",
                             annotation
                         );
-                        // Also push namespace to context stack for qualifying nested function annotations
+                        // Also push namespace to context stack for qualifying nested function annotations.
                         if let Some(ns_name) = extract_namespace_name(&accumulated_line) {
-                            debug_println!(
-                                "DEBUG SAFETY: Entering annotated namespace '{}' for context",
-                                ns_name
-                            );
-                            class_context_stack.push(ns_name);
-                            brace_depth = accumulated_line.matches('{').count() as i32
+                            let net = accumulated_line.matches('{').count() as i32
                                 - accumulated_line.matches('}').count() as i32;
+                            if net > 0 {
+                                debug_println!(
+                                    "DEBUG SAFETY: Entering annotated namespace '{}' at depth {}",
+                                    ns_name,
+                                    current_depth
+                                );
+                                class_context_stack.push((ns_name, current_depth));
+                            }
                         }
                     } else if is_class_declaration(&accumulated_line) {
                         // Class/struct declaration - extract class name and store annotation
                         if let Some(class_name) = extract_class_name(&accumulated_line) {
-                            // Bug #8 fix: Build qualified class name using context
-                            let qualified_name = if class_context_stack.is_empty() {
-                                class_name.clone()
-                            } else {
-                                format!("{}::{}", class_context_stack.join("::"), class_name)
-                            };
+                            // Bug #8 fix: Build qualified class name using context.
+                            // Anonymous-namespace markers are filtered out so
+                            // the qualified name matches libclang's shape.
+                            let qualified_name =
+                                match qualified_name_from_stack(&class_context_stack) {
+                                    Some(prefix) => format!("{}::{}", prefix, class_name),
+                                    None => class_name.clone(),
+                                };
                             let signature =
                                 FunctionSignature::from_name_only(qualified_name.clone());
                             context.function_overrides.push((signature, annotation));
@@ -517,27 +542,41 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                                 annotation
                             );
 
-                            // Push class to context for nested methods
-                            // Only push if the class is NOT complete on the same line
-                            let class_brace_depth = accumulated_line.matches('{').count() as i32
+                            // Push class to context for nested methods.
+                            // Only push if the class is NOT complete on the same line.
+                            let net = accumulated_line.matches('{').count() as i32
                                 - accumulated_line.matches('}').count() as i32;
-                            if class_brace_depth > 0 {
-                                class_context_stack.push(class_name.clone());
-                                brace_depth = class_brace_depth;
+                            if net > 0 {
+                                class_context_stack
+                                    .push((class_name.clone(), current_depth));
                             }
                         }
                     } else if is_function_declaration(&accumulated_line) {
                         // Function declaration - extract function signature (name + params) and apply ONLY to this function
                         if let Some(func_name) = extract_function_name(&accumulated_line) {
-                            // Bug #8 fix: Build qualified function name using class context
-                            let qualified_name = if class_context_stack.is_empty() {
-                                func_name.clone()
-                            } else {
-                                format!("{}::{}", class_context_stack.join("::"), func_name)
-                            };
+                            // Bug #8 fix: Build qualified function name using class context.
+                            // Anonymous-namespace markers are filtered out so
+                            // the qualified name matches libclang's shape.
+                            let qualified_name =
+                                match qualified_name_from_stack(&class_context_stack) {
+                                    Some(prefix) => format!("{}::{}", prefix, func_name),
+                                    None => func_name.clone(),
+                                };
                             let param_types = extract_parameter_types(&accumulated_line);
                             let signature =
                                 FunctionSignature::new(qualified_name.clone(), param_types.clone());
+                            // Replace any prior entry with the same qualified
+                            // name (regardless of param-type detail). This
+                            // ensures the out-of-class definition's explicit
+                            // `// @unsafe` overrides the inherited class-level
+                            // `// @safe` annotation that gets recorded when
+                            // the in-class declaration is processed first.
+                            // Without this, `get_function_safety` returns the
+                            // first match (the inherited @safe) instead of
+                            // the explicit @unsafe.
+                            context
+                                .function_overrides
+                                .retain(|(sig, _)| sig.name != qualified_name);
                             context.function_overrides.push((signature, annotation));
 
                             if let Some(ref params) = param_types {
@@ -635,7 +674,37 @@ fn extract_class_name(line: &str) -> Option<String> {
     None
 }
 
-/// Extract namespace name from a namespace declaration
+/// Sentinel pushed to `class_context_stack` when an anonymous namespace
+/// opens. It keeps the brace-tracking pop logic in sync with the source
+/// structure but is filtered out when building qualified names — see
+/// `qualified_name_from_stack` — so qualified names match libclang's
+/// behavior of skipping anonymous namespaces (e.g.
+/// `outer::funcname` rather than `outer::(anonymous)::funcname`).
+const ANON_NAMESPACE_MARKER: &str = "(anonymous)";
+
+/// Join a class/namespace context stack into a `::`-qualified name,
+/// skipping anonymous-namespace markers. Returns None when the stack
+/// is empty (or contains only markers).
+fn qualified_name_from_stack(stack: &[(String, i32)]) -> Option<String> {
+    let joined: Vec<&str> = stack
+        .iter()
+        .filter(|(name, _)| name.as_str() != ANON_NAMESPACE_MARKER)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.join("::"))
+    }
+}
+
+/// Extract namespace name from a namespace declaration.
+///
+/// Returns `Some("(anonymous)")` for anonymous namespaces — callers use
+/// `qualified_name_from_stack` to filter the marker out when building
+/// `::`-qualified names. This keeps brace-tracking in sync (we push/pop
+/// the marker like any other namespace name) without leaking the
+/// synthetic name into recorded annotations.
 fn extract_namespace_name(line: &str) -> Option<String> {
     // Look for "namespace Name {"
     // Handle multi-line declarations by replacing newlines with spaces
@@ -652,6 +721,21 @@ fn extract_namespace_name(line: &str) -> Option<String> {
             if !name.is_empty() {
                 return Some(name.to_string());
             }
+            // First non-whitespace token after "namespace " is `{` (or attached
+            // to `{`) — this is an anonymous namespace `namespace { ... }`.
+            return Some(ANON_NAMESPACE_MARKER.to_string());
+        }
+    }
+    // No name token at all — the `{` may be on the next line. Still treat
+    // this as an anonymous namespace declaration so brace tracking stays
+    // coherent.
+    if normalized.trim_start().starts_with("namespace") {
+        let after = normalized
+            .trim_start()
+            .trim_start_matches("namespace")
+            .trim_start();
+        if after.starts_with('{') || after.is_empty() {
+            return Some(ANON_NAMESPACE_MARKER.to_string());
         }
     }
     None
@@ -1165,5 +1249,228 @@ void func() {}
         let context = parse_safety_annotations(file.path()).unwrap();
         // @safe only applies to the next element (global_var), not the whole file
         assert_eq!(context.file_default, SafetyMode::Unsafe);
+    }
+
+    #[test]
+    fn test_extract_namespace_name_anonymous() {
+        // Anonymous namespace declarations must produce a synthetic name so
+        // brace tracking and qualified-name building stay coherent. libclang
+        // skips anonymous namespaces when forming qualified names, so the
+        // marker we use here must be filtered out when building qualified
+        // names elsewhere — see test_annotation_inside_anonymous_namespace
+        // for the end-to-end behavior.
+        assert_eq!(
+            extract_namespace_name("namespace {"),
+            Some("(anonymous)".to_string())
+        );
+        assert_eq!(
+            extract_namespace_name("namespace { // some comment"),
+            Some("(anonymous)".to_string())
+        );
+        // Named namespaces still work.
+        assert_eq!(
+            extract_namespace_name("namespace rrr {"),
+            Some("rrr".to_string())
+        );
+    }
+
+    #[test]
+    fn test_annotation_inside_anonymous_namespace() {
+        // Reproduces the reactor.cpp tarpit: `// @unsafe` on a free
+        // inline function inside an anonymous namespace nested in a named
+        // namespace. The qualified name observed by libclang is
+        // `outer::funcname` (anonymous namespace is skipped), so the
+        // recorded annotation must match the same shape.
+        let code = r#"
+namespace outer {
+namespace {
+
+// @unsafe
+inline void inner_func() {
+    int x = 0;
+}
+
+}  // anonymous
+}  // namespace outer
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        // The annotation must reach the function. Querying by the libclang-
+        // style qualified name `outer::inner_func` should resolve to Unsafe.
+        assert_eq!(
+            context.get_function_safety("outer::inner_func"),
+            SafetyMode::Unsafe,
+            "annotation on a function inside an anonymous namespace must be honored"
+        );
+    }
+
+    #[test]
+    fn test_anonymous_namespace_after_nested_class_in_named_namespace() {
+        // Mirrors reactor.cpp's shape: a named namespace contains a class
+        // declaration (which the parser tracks on the context stack), then
+        // an anonymous namespace, then a function inside it with @unsafe.
+        // The class declaration's brace-depth reset stresses the tracking.
+        let code = r#"
+namespace rrr {
+
+class SomeClass {
+  int x;
+};
+
+namespace {
+
+// @unsafe
+inline void inner_func() {
+    int v = 0;
+}
+
+}  // anonymous
+
+void other_func() {}
+
+}  // namespace rrr
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        // libclang qualifies this as `rrr::inner_func` (anon ns skipped).
+        // The annotation must reach it.
+        assert_eq!(
+            context.get_function_safety("rrr::inner_func"),
+            SafetyMode::Unsafe,
+            "annotation on function inside anonymous namespace after a class declaration must be honored"
+        );
+    }
+
+    #[test]
+    fn test_out_of_class_definition_overrides_in_class_decl() {
+        // When a function has BOTH an in-class declaration that inherits
+        // class-level `// @safe` AND an out-of-class definition with an
+        // explicit `// @unsafe` annotation, the explicit @unsafe must
+        // win. Without this, the in-class @safe (recorded first by the
+        // text parser) ends up the first match in `function_overrides`
+        // and silently overrides the explicit @unsafe on the definition.
+        let code = r#"
+// @safe
+class Outer {
+public:
+    void m() const;
+};
+
+// @unsafe - explicit override on the definition
+void Outer::m() const {
+    int* p = nullptr;
+    *p = 1;
+}
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        assert_eq!(
+            context.get_function_safety("Outer::m"),
+            SafetyMode::Unsafe,
+            "out-of-class definition's explicit @unsafe must override the \
+             class-level @safe inherited via the in-class declaration"
+        );
+    }
+
+    #[test]
+    fn test_anon_ns_after_multiple_classes_preserves_outer_namespace() {
+        // Stress-test the brace tracker. Multiple classes inside a named
+        // namespace, then an anonymous namespace, then a function with
+        // `// @unsafe`. The named namespace MUST stay on the context
+        // stack throughout so the function gets the qualified name
+        // `rrr::parse_inet4_addr` — matching what libclang exposes via
+        // `get_qualified_name`. This mirrors the actual shape in
+        // `src/rrr/rpc/tcp_channel.cpp` where the bug surfaced.
+        let code = r#"
+namespace rrr {
+
+class A {
+  int x;
+};
+
+class B {
+  int y;
+};
+
+void some_func() {
+  int x = 1;
+}
+
+namespace {
+
+// @unsafe
+bool parse_inet4_addr() {
+  return false;
+}
+
+}  // anonymous
+
+}  // namespace rrr
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        assert_eq!(
+            context.get_function_safety("rrr::parse_inet4_addr"),
+            SafetyMode::Unsafe,
+            "annotation must be recorded under the outer named namespace's \
+             qualified name, even after multiple nested classes and an \
+             intervening anonymous namespace"
+        );
+    }
+
+    #[test]
+    fn test_safe_namespace_with_unsafe_func_in_anonymous_nested() {
+        // @safe on the outer namespace + @unsafe override on a function
+        // inside an anonymous namespace. The override must win.
+        let code = r#"
+// @safe
+namespace outer {
+
+void safe_func() {}
+
+namespace {
+
+// @unsafe
+inline void unsafe_helper() {
+    int* p = nullptr;
+    *p = 1;
+}
+
+}  // anonymous
+
+}  // namespace outer
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        assert_eq!(context.file_default, SafetyMode::Safe);
+        assert_eq!(
+            context.get_function_safety("outer::safe_func"),
+            SafetyMode::Safe
+        );
+        assert_eq!(
+            context.get_function_safety("outer::unsafe_helper"),
+            SafetyMode::Unsafe,
+            "@unsafe on a function inside an anonymous namespace must override the outer @safe namespace"
+        );
     }
 }
