@@ -42,6 +42,7 @@ Sibling docs:
   - [1.3 Root-cause categories](#13-root-cause-categories)
   - [1.4 Summary: retire-by-transpiler-fix triage](#14-summary-which-hand-ports-could-be-retired-by-transpiler-fixes)
   - [1.5 Perf profiling: the `clear_forgotten_address_range` cliff](#15-perf-profiling-the-rustymemclear_forgotten_address_range-cliff)
+  - [1.6 Component-level comparison vs native Rust BTreeMap](#16-component-level-comparison-vs-native-rust-btreemap)
 
 Future chapters: `Vec`, `HashMap`, `String`, `Arc`/`Rc`, `Mutex`, …
 
@@ -848,3 +849,136 @@ disproportionate that it dwarfed every other category in Sections
 1.1–1.4. Any future std-library port using `ptr::write` or
 `ptr::copy` on hot paths with trivially-destructible elements would
 have hit the same wall before this fix.
+
+### 1.6 Component-level comparison vs native Rust BTreeMap
+
+After §1.5 closed the catastrophic cliff and brought the transpiled
+port to within ~1.2× of `std::map`, the next natural question is: how
+does it compare to **native Rust BTreeMap** running the same
+workload? This section answers that with a head-to-head callgrind
+breakdown to decide whether further optimization is worth pursuing.
+
+#### Setup
+
+Two identical bench programs, one Rust and one C++, both running:
+- N = 10 keys (LCG-shuffled deterministically with the same seed)
+- 5,000 reps × (10 inserts + 10 gets) = 100,000 operations
+- Counted under `valgrind --tool=callgrind` (instruction count `Ir`)
+
+| | Total Ir | per op | wall ns/op |
+|---|---|---|---|
+| Rust `std::collections::BTreeMap` | 12,446,365 | 124 | 14.0 |
+| C++ transpiled `BTreeMap` | 21,167,039 | 212 | 23.6 |
+| Ratio | — | **1.70×** | **1.69×** |
+
+`perf record` was the first choice but is blocked on this host
+(`perf_event_paranoid=4`), so callgrind was used instead. `Ir` is a
+deterministic count, not a sampled estimate.
+
+#### Per-component breakdown
+
+Grouped by *logical activity* rather than by file (since inlining
+attributes things across files differently in each toolchain):
+
+| Component | Rust Ir | C++ Ir | Ratio | Notes |
+|---|---|---|---|---|
+| **Binary search in node** | 2.38 M | 3.23 M | 1.36× | `find_key_index` (C++) ≈ `search.rs` (Rust); plus C++ pays 615 K in slice/array.hpp bounds wrappers |
+| **Key comparison** | 1.95 M | (inlined into find) | — | Rust attributes `three_way_compare` to `core/cmp.rs`; C++ folds into the search call |
+| **Slice/iter helpers** | 0.51 M | 1.05 M (slice.hpp + stl_iterator.h) | 2.07× | C++ slice machinery is heavier than Rust's `NonNull`-based iter |
+| **Insert path** (`insert_fit`, `insert_recursing`, `Handle`) | 2.39 M | 5.90 M | **2.47×** | Biggest single delta — split across 5 file:function lines in C++ |
+| **IIFE / lambda wrappers** | 0 | 3.61 M | **∞** | Pure codegen artifact (see below) |
+| **Entry API** | 0.55 M | (folded into lambda) | — | |
+| **memcpy / data movement** | 0.72 M (`memcpy_avx_unaligned_erms`) | (inlined into insert_fit) | — | Rust calls libc memcpy; C++ inlines a hand-rolled loop |
+| **Allocation** (malloc/free/alloc shim) | 0.52 M | 0.94 M | 1.78× | C++ does slightly more allocator round-trips per insert |
+| **`drop_in_place` / destructor** | 0.95 M | (inlined into main) | — | Rust attributes Drop separately; C++ inlines destruction into the bench loop |
+| **Dynamic linker startup** | 0.15 M | 1.70 M | **11.3×** | One-time cost; C++ template symbol resolution is expensive |
+| **Bench driver itself** | 0.49 M | 0.84 M | 1.73× | LCG, sink, etc. — proportional |
+
+Subtracting the **one-time** linker startup gives the steady-state
+per-op ratio:
+
+| | Total − startup | per op |
+|---|---|---|
+| Rust | 12.25 M | 122 |
+| C++ | 19.5 M | 195 |
+| Steady-state ratio | — | **1.59×** |
+
+#### Where the gap actually is
+
+1. **IIFE / lambda overhead — 3.6 M instructions (17 % of total)** is
+   the single biggest item with **no counterpart in Rust**. The
+   transpiler lowers `?`, `if let Some(...) = ...`, and `match` arms
+   with early returns into immediately-invoked-function-expression
+   (IIFE) lambdas to preserve control flow. The compiler does *not*
+   fully elide them — they show up as
+   `BTreeMap::insert::{lambda#1}::operator()`,
+   `VacantEntry::insert_entry::{lambda#1}`, etc., across multiple
+   files. This work is structurally absent in Rust.
+
+2. **Insert-path inflation: 2.47×**. `insert_fit` shows up in *two*
+   files (`ptr.hpp` 1.60 M + `btree_internal.cppm` 1.59 M) for a
+   single source-level call — the compiler is generating two
+   separately-attributed paths and not folding them. `insert_recursing`
+   and `insert` each add another ~1 M. Some of this is symbol-
+   attribution noise from inlining; some is real extra work.
+
+3. **Search: 1.36×**. The binary search itself is *already
+   well-tuned*. The wrappers around it
+   (`slice.hpp::validate_slice_bounds`, `array.hpp` bounds checks)
+   add ~600 K. Hot path.
+
+4. **Allocator: 1.78×**. C++ goes through `_int_malloc` more —
+   possibly because the `rusty::alloc::Global` pathway has an extra
+   layer compared to Rust's direct `__rdl_alloc`.
+
+5. **Dynamic linker startup: 11.3×, but one-time.** ~1.6 M extra Ir,
+   ~150 ns of wall time at program start. Amortized over 100 K ops
+   it's a rounding error; for short-running programs it would matter.
+
+#### What's *not* worse
+
+- **memcpy / shift loops in the leaf** — equivalent or better
+  (inlined as a hand loop, sometimes better than Rust's libc-memcpy
+  call for tiny shifts).
+- **Destructor cost** — gone from the profile after the §1.5 fix; no
+  per-element bookkeeping anymore.
+- **Get/lookup path** — essentially proportional to search cost
+  alone.
+
+#### Potential optimizations (not pursued — see "Recommendation")
+
+| Optimization | Est. savings | Difficulty |
+|---|---|---|
+| Eliminate IIFE codegen for simple `?` / `if let` chains | ~2–3 M Ir (10–15 % total) | High — transpiler change to lower these to plain branches when control flow permits |
+| Drop slice-bounds checks in `find_key_index` (UB-safe in B-tree internal code) | ~0.6 M Ir (3 %) | Low — add `Slice::get_unchecked` variant in `include/rusty/slice.hpp` |
+| Coalesce duplicate `insert_fit` symbol attribution | ~1.5 M Ir (7 %) | Medium — likely an `__always_inline` / module-linkage issue |
+| Switch to `mimalloc` / pool allocator | ~0.3–0.5 M Ir (2 %) | Low — orthogonal to the port |
+
+Realistic ceiling if all four were done: ~16 M Ir C++ vs 12.4 M
+Rust → **1.29× ratio**. We'd close roughly half the remaining gap,
+but matching Rust would require codegen surgery, not algorithmic
+changes — the algorithm is already isomorphic line-for-line.
+
+#### Recommendation
+
+**Stop optimizing the BTreeMap port for now.** The current state is:
+
+- Catastrophic 1700–10000× cliff: **fixed** in §1.5.
+- Versus libstdc++ `std::map`: **1.15–1.28× slower** (parity-ish).
+- Versus native Rust BTreeMap: **1.59× slower steady-state** /
+  **1.70× including startup**.
+
+The remaining gap is in **codegen artifacts**, not algorithm or data
+structure. The biggest single item (IIFE lambdas) accounts for ~17 %
+of total instructions and is a transpiler-emit-shape problem with no
+algorithmic counterpart in Rust.
+
+Better ROI is on:
+- broader port coverage (`Vec`, `HashMap`, `Arc`/`Rc`, …) — the
+  workflow in Chapter 0 is now well-trodden,
+- **or**, if perf parity becomes important later, a focused
+  IIFE-elimination pass in the transpiler. Single biggest win at
+  ~15 % of total cost.
+
+The full callgrind dumps are at `/tmp/callgrind.rust.out` and
+`/tmp/callgrind.cpp.out` for re-analysis if priorities change.
