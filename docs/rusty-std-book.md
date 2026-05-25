@@ -63,6 +63,11 @@ Sibling docs:
   - [3.6 Keep hand-written (don't transpile)](#36-keep-hand-written-dont-transpile)
   - [3.7 Out of scope](#37-out-of-scope)
   - [3.8 Recommended order for the first 3 ports](#38-recommended-order-for-the-first-3-ports)
+- [Chapter 4 — `alloc::vec::Vec` (in progress)](#chapter-4--allocvecvec-in-progress)
+  - [4.1 Source + dependency graph](#41-source--dependency-graph)
+  - [4.2 Phase A — types compile (in progress)](#42-phase-a--types-compile-in-progress)
+  - [4.3 Phase A error catalogue](#43-phase-a-error-catalogue)
+  - [4.4 Phase plan + status snapshots](#44-phase-plan--status-snapshots)
 
 Each completed port will graduate into its own chapter (parallel to
 Chapter 1 for BTreeMap). Chapter 3's tables stay as the live
@@ -1762,3 +1767,183 @@ The point of this queue is **not** to port everything. The point
 is to port the types that **actually unlock value** for users of
 the borrow checker, where "value" = "type you'd reach for in real
 Rust code, and where the rustc semantics matter."
+
+---
+
+## Chapter 4 — `alloc::vec::Vec` (in progress)
+
+First port in Tier 1 / Phase 1. Following the §2.3 phase template
+strictly, with status snapshots as work progresses.
+
+**Port directory**: `docs/vec_port/`
+- `prep.sh` — vendoring + preprocessing pipeline (path rewrites,
+  unstable-syntax stripping)
+- `STATUS.md` — phase-by-phase status + reproducer
+- (forthcoming) `post_transpile_patch.py` — once Phase A surfaces
+  systemic emit-shape issues to codify
+
+**Existing hand-written**: `include/rusty/vec.hpp` (~860 LOC). Both
+ship together — the transpiled version provides exact rustc semantic
+parity; the hand-written version remains the API surface annotation
+target.
+
+### 4.1 Source + dependency graph
+
+**Source**: `library/alloc/src/vec/` (16 files, 6,711 LOC) +
+`library/alloc/src/raw_vec/` (1 file, 904 LOC) = **7,615 LOC** total.
+
+Roughly BTreeMap-comparable in size (BTreeMap was ~7K LOC of stdlib
+source, similar grand-total).
+
+Source-level dependencies and how each is resolved in the port:
+
+| Path | Resolution | Status |
+|---|---|---|
+| `crate::raw_vec::RawVec` | Sibling module, vendored as `raw_vec/` | Bundled in port |
+| `crate::alloc::{Allocator, Global, Layout, AllocError, handle_alloc_error}` | `include/rusty/alloc.hpp` | ✅ exists |
+| `crate::boxed::Box` | `include/rusty/box.hpp` | ✅ exists |
+| `crate::collections::TryReserveError` | Small struct, will hand-port or stub | Net-new |
+| `crate::collections::VecDeque` | Deferred (only used in `From` conversions in cow.rs / extract_if.rs) | Deferred |
+| `crate::fmt` | `include/rusty/fmt.hpp` | ✅ exists |
+| `crate::borrow::{Cow, ToOwned}` | Used in cow.rs / partial_eq.rs — deferred | Deferred |
+| `core::ptr::{NonNull, Unique, Alignment}` | `include/rusty/ptr.hpp` (partial: `NonNull` ✅, `Unique` ❌, `Alignment` ❌) | Partial |
+| `core::num::niche_types::UsizeNoHighBit` (for `type Cap`) | Stripped to plain `usize` in prep.sh (loses niche optimization but preserves semantics) | ✅ via prep.sh |
+| `core::mem::ManuallyDrop` | `include/rusty/mem.hpp` | ✅ exists |
+
+### 4.2 Phase A — types compile (in progress)
+
+**Status as of 2026-05-25**: prep.sh complete; **18 source files →
+18 .cppm modules, 0 parse errors**, 68 hand-override slots emitted.
+
+#### A1 — Parse stage (DONE)
+
+Cleared 3 syn-parse blockers via prep.sh:
+
+- Unstable `const impl<T, A: [const] Allocator + [const] Destruct>`
+  (RFC 3762, conditionally-const trait bounds). syn 2.x doesn't
+  parse `[const]` bracket form. Stripped via sed at 3 sites:
+  `vec/mod.rs:905`, `raw_vec/mod.rs:169`, `raw_vec/mod.rs:428`.
+  Behavior preserved (the resulting impls just aren't const-fn
+  callable).
+
+- `core::num::niche_types::UsizeNoHighBit` (rustc-internal niche
+  type for `type Cap` in raw_vec) → plain `usize`. Loses
+  `Option<Cap>` niche optimization (Option<usize> takes 16 bytes
+  instead of 8), but the functional behavior is preserved.
+
+After prep: **0 parse errors** across 18 files. All transpiled
+output written to `/tmp/vec_port/cpp_out/`.
+
+#### A2 — Build stage (in progress)
+
+First clang build with the full 18-module CMakeLists.txt produces
+**83 errors**, dominated by:
+
+| # err | Location | Root cause cluster |
+|---|---|---|
+| ~20 | `vec.cow.cppm` | `rusty::Cow` / `Cow_Borrowed` / `Cow_Owned` not in rusty namespace (Cow not hand-ported) |
+| ~10 | `raw_vec.cppm` | `Cap` type alias not properly emitted; `std::collections` / `std::ptr` namespace lookups; `Unique<T>`, `Alignment` from `rusty::ptr` missing |
+| ~10 | `in_place_collect.cppm`, `spec_extend.cppm` | `IntoIter`/`InPlaceDrop`/`InPlaceDstDataSrcBufDrop` cross-module imports missing; void-not-bool conversions |
+| ~5 | `partial_eq.cppm` | Same `Cow` issue propagated from cow.rs |
+| ~5 | `splice.cppm` | `Drain` template visibility issues; `std::move` namespace confusion |
+| ~5 | `is_zero.cppm` | Non-member function with `const` qualifier; redefinition of `is_zero`; `this` outside member |
+| ~3 | `set_len_on_drop.cppm` | `size_t& len` field with `= default` copy-assign (implicitly deleted) |
+
+Reduced-scope build (drop cow / extract_if / in_place_* / peek_mut /
+splice / spec_* / partial_eq from CMakeLists.txt — keep raw_vec +
+into_iter + drain + set_len_on_drop + is_zero + vec): **30 errors**
+remaining, all in `raw_vec.cppm` + `vec.is_zero.cppm` + `vec.cppm`.
+
+### 4.3 Phase A error catalogue
+
+The remaining 30 errors map to ~5 root-cause clusters that need
+addressing before Phase A exits.
+
+#### Cluster V-A — `Cap` type alias not emitting cleanly
+
+Source:
+```rust
+type Cap = usize;  // after prep.sh strips niche_types
+...
+cap: Cap,
+```
+
+Despite the prep.sh substitution, the transpiler still emits some
+sites that don't see the `Cap` alias (cross-module visibility?). The
+manifest reports "unknown type name 'Cap'" 4×.
+
+**Likely fix**: emit the type alias at the module level visible to
+all callers. If sibling modules import `raw_vec`, the alias needs
+to be exported. Investigate whether the transpiler honors `pub type`
+exports.
+
+#### Cluster V-B — `std::collections::TryReserveError` namespace
+
+Errors: `no member named 'collections' in namespace 'std'` (5×).
+
+After prep.sh rewrites `crate::collections::TryReserveError` →
+`std::collections::TryReserveError`, the transpiler doesn't have a
+mapping from `std::collections::TryReserveError` to our `rusty::`
+side. Need either:
+
+- Add `TryReserveError` to `include/rusty/std_minimal.hpp` (or a
+  new `collections.hpp`) and map via the transpiler's std-types
+  table.
+- OR: hand-port the small struct + map at transpile time.
+
+#### Cluster V-C — `rusty::ptr::{Unique, Alignment}` missing
+
+Errors: `no template named 'Unique' in namespace 'rusty::ptr'` and
+`no type named 'Alignment' in namespace 'rusty::ptr'`.
+
+`Unique<T>` is rustc's "owned NonNull" — used inside `RawVec` to
+mark sole ownership of the buffer. Two options:
+
+- Hand-port a tiny `rusty::ptr::Unique<T>` (wrapper around
+  `std::unique_ptr<T, NoDeleter>` semantically, but with rustc-
+  compatible API).
+- OR: replace `Unique<T>` references with `NonNull<T>` in
+  prep.sh (the semantic distinction matters for Rust's borrow
+  checker but not for the C++ port).
+
+Similarly for `Alignment` — small type, probably worth a stub.
+
+#### Cluster V-D — Reference-field default copy-assign
+
+`SetLenOnDrop` has `size_t& len; ... SetLenOnDrop& operator=(const
+SetLenOnDrop&) = default;` — implicitly deleted because of the
+reference field.
+
+**Transpiler fix**: don't emit `= default` for copy-assign on structs
+with reference (or `const`) members. Rust types don't have implicit
+copy assignment; emitting `= default` is wrong. The fix is in
+`transpiler/src/codegen.rs` — skip default-assign emit when the
+struct has non-copy-assignable members.
+
+#### Cluster V-E — Cross-module visibility of `IntoIter` / `InPlaceDrop`
+
+The auxiliary modules (`in_place_collect`, `spec_extend`) reference
+`IntoIter` and `InPlaceDrop` defined in their own dedicated modules,
+but the import isn't being emitted. Need to verify the transpiler
+emits the right `import` directives.
+
+### 4.4 Phase plan + status snapshots
+
+- [x] **A1** Parse stage: 0 errors after prep.sh `const impl` /
+      `[const]` / `niche_types` strips.
+- [ ] **A2** Build stage: catalogued 30-error long tail; need
+      transpiler/patcher work on clusters V-A through V-E.
+- [ ] **B1** Hand-port whatever the transpiler can't emit.
+- [ ] **C1** Smoke test: construct + push + iterate + drop.
+- [ ] **E1** Completeness coverage vs `include/rusty/vec.hpp`.
+- [ ] **E2** Bench: vs `std::vector` + native Rust `Vec`.
+- [ ] **E3** Callgrind component breakdown.
+- [ ] **E4** Retrospective (§4.5 forthcoming).
+
+**Estimated remaining effort**: similar shape to BTreeMap. Phase A
+will likely complete in another half-day of iterations; Phase E
+(the long tail of clusters) is the multi-day chunk.
+
+This chapter will grow in place as work progresses. Each completed
+phase gets a `[x]` mark and a brief commentary. The pattern then
+repeats for String (Chapter 5) and HashMap (Chapter 6) per §3.8.

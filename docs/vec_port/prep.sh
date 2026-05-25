@@ -114,6 +114,24 @@ find "$VEC_DIR" "$RAW_VEC_DIR" -name "*.rs" -exec sed -i \
   -e 's|\[const\] ||g' \
   {} \;
 
+# raw_vec uses `core::num::niche_types::UsizeNoHighBit` for the `Cap`
+# type alias — a rustc-internal niche-optimized usize. Replace with
+# plain usize so the C++ side gets a normal size_t. We lose the
+# Option<Cap> niche optimization (Option<Cap> now takes an extra word)
+# but functionality is preserved.
+#
+# After this:
+#   - `type Cap = core::num::niche_types::UsizeNoHighBit;` → `type Cap = usize;`
+#   - `Cap::new_unchecked(x)` calls become invalid → also rewrite to `x`
+#   - `Cap::ZERO` → `0usize`
+find "$VEC_DIR" "$RAW_VEC_DIR" -name "*.rs" -exec sed -i \
+  -e 's|core::num::niche_types::UsizeNoHighBit|usize|g' \
+  -e 's|unsafe { Cap::new_unchecked(\([^)]*\)) }|\1|g' \
+  -e 's|Cap::new_unchecked(\([^)]*\))|\1|g' \
+  -e 's|Cap::ZERO|0usize|g' \
+  -e 's|const ZERO_CAP: Cap = 0;|const ZERO_CAP: Cap = 0usize;|g' \
+  {} \;
+
 # Strip module-level cfg gates that are test-only or feature-gated and
 # would otherwise confuse the transpiler (it sees the cfg as part of
 # the parse tree but can't evaluate the predicate).
