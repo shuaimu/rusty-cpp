@@ -245,7 +245,24 @@ inline void write(T* dst, U&& value) {
     // A moved-from value may have left a forgotten-address marker at `dst`.
     // Writing a fresh value into that slot must clear stale marker state so
     // the new object's destructor is not skipped.
-    rusty::mem::clear_forgotten_address_range(static_cast<const void*>(dst), sizeof(T));
+    //
+    // Fast path: a forgotten-address marker can only exist for T if some
+    // operation (a `rusty_mark_forgotten()` method, `mem::forget`, or
+    // `ptr::copy`'s element-marking loop) added it. All of those require
+    // T to have a non-trivial destructor — primitive types like `int` and
+    // the transpiler-internal `MaybeUninit<int>` (whose `~T() = default`
+    // is trivial) have no such operations associated. For them the
+    // global-table scan in `clear_forgotten_address_range` is pure
+    // overhead. This is the 99.5% profile hotspot from
+    // docs/rusty-std-book.md §1.5.
+    //
+    // We use `is_trivially_destructible_v` rather than
+    // `is_trivially_copyable_v` because `MaybeUninit<T>` defines explicit
+    // copy/move ctors (defeating trivially-copyable) but keeps the trivial
+    // destructor, and that's the type at the BTreeMap-leaf hot path.
+    if constexpr (!std::is_trivially_destructible_v<T>) {
+        rusty::mem::clear_forgotten_address_range(static_cast<const void*>(dst), sizeof(T));
+    }
     std::construct_at(dst, std::forward<U>(value));
 }
 
@@ -286,6 +303,32 @@ inline void copy(const T* src, T* dst, Count count) {
     if constexpr (std::is_trivially_copyable_v<T>) {
         auto byte_count = element_count * sizeof(T);
         std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
+    } else if constexpr (std::is_trivially_destructible_v<T>) {
+        // No destructor means no forgotten-address bookkeeping can exist
+        // for any element of T (e.g. MaybeUninit<int>, which has user-defined
+        // copy/move ctors that defeat is_trivially_copyable_v but a trivial
+        // ~T() = default). Skip the entire mark/consume/clear dance.
+        //
+        // This is the BTreeMap-leaf hot path: every slice_insert shifts
+        // MaybeUninit<K>/<V> elements and the original element-wise loop
+        // was the 99.5% perf cliff from docs/rusty-std-book.md §1.5.
+        if (dst < src) {
+            for (std::size_t i = 0; i < element_count; ++i) {
+                T* const dst_i = dst + i;
+                T* const src_i = const_cast<T*>(src) + i;
+                std::destroy_at(dst_i);
+                std::construct_at(dst_i, std::move(*src_i));
+            }
+        } else {
+            for (std::size_t i = element_count; i-- > 0;) {
+                T* const dst_i = dst + i;
+                T* const src_i = const_cast<T*>(src) + i;
+                if (dst_i < src + element_count) {
+                    std::destroy_at(dst_i);
+                }
+                std::construct_at(dst_i, std::move(*src_i));
+            }
+        }
     } else if (dst < src) {
         // Left-shift overlap patterns (`dst` before `src`) move low→high.
         for (std::size_t i = 0; i < element_count; ++i) {

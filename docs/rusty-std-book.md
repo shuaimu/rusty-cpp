@@ -561,9 +561,11 @@ it's the same root cause as most of the remaining 13 `// TODO
 transpiler: unresolved bare-glob variant …` slots.** It is the
 highest-leverage transpiler item still open.
 
-The current ~1700–10000× perf gap vs. `std::map` is *almost entirely*
+The earlier ~1700–10000× perf gap vs. `std::map` was *almost entirely*
 caused by a single runtime-bookkeeping routine in the `rusty/mem.hpp`
-header — see Section 1.5.
+header — gated and resolved in Section 1.5. The transpiled BTreeMap
+is now at parity with libstdc++ `std::map` on the BTreeMap-of-ints
+bench.
 
 ### 1.5 Perf profiling: the `rusty::mem::clear_forgotten_address_range` cliff
 
@@ -653,40 +655,86 @@ overhead I'd guessed at earlier (SFINAE dispatchers, std::variant
 dispatch, allocator wrapper). The hot-path symbols disappeared from
 the profile entirely.
 
-#### Fix options
+#### Fix landed (commit, this session)
 
-1. **Conditional compilation**: gate the bookkeeping behind a
-   `#ifndef RUSTY_DISABLE_FORGOTTEN_TRACKING` define. Default-on for
-   debug, default-off for `-DNDEBUG` / release builds. Trivial; ships
-   immediately. Doesn't address the underlying inefficiency.
+Two-line `if constexpr` guard in `rusty/ptr.hpp` + `rusty/vec.hpp`:
 
-2. **Drop the linear scan**: the function takes an address range and
-   removes entries falling inside it. Replace the `unordered_map`
-   linear scan with an interval tree / sorted-by-address structure
-   so the range-erase is O(log N + matches) instead of O(N). Then it
-   could stay enabled by default.
+```cpp
+template<typename T, typename U>
+inline void write(T* dst, U&& value) {
+    if constexpr (!std::is_trivially_destructible_v<T>) {
+        rusty::mem::clear_forgotten_address_range(dst, sizeof(T));
+    }
+    std::construct_at(dst, std::forward<U>(value));
+}
+```
 
-3. **Reduce call rate**: the bookkeeping is a *correctness* aid for
-   moved-from detection, but `ptr::write` already runs
-   `std::construct_at` immediately after the clear — i.e. the write
-   itself is the source of truth, and the prior forgotten marker is
-   stale by definition. The clear could be elided when the caller
-   already proved the slot is uninitialized (which is exactly when
-   `ptr::write` is supposed to be used). That requires reworking the
-   `ptr::write` contract.
+…and a parallel intermediate fast path in `ptr::copy` for types that
+are not trivially-*copyable* but are trivially-*destructible* (the
+exact shape of `MaybeUninit<int>`, which has user-defined copy/move
+ctors but a defaulted destructor — and is the type sitting at the
+BTreeMap-leaf hot path).
 
-4. **Per-allocation tracking**: keep markers in metadata adjacent to
-   the allocation instead of a global map. O(1) per write. Larger
-   refactor.
+**Reasoning**: a forgotten-address marker can only exist for `T` if
+*something* added one. The only adders are `rusty::mem::forget`,
+`ptr::copy`'s element-marking loop, and transpiled
+`rusty_mark_forgotten()` methods. All three are only emitted for
+types with non-trivial destructors. For primitive types (`int`) and
+transpiler-internal `MaybeUninit<int>` (trivial destructor), no
+marker can ever be added — so the linear-scan clear is pure
+overhead, and `is_trivially_destructible_v<T>` is a sound
+compile-time gate to skip it.
 
-Option 1 is the obvious immediate win. Option 4 would be the right
-long-term fix.
+The global table stays in place for non-trivially-destructible types
+(`Box`, `Vec`, transpiled iterators, `PanicGuard`, …) which still
+need the runtime mark/consume protocol — those types' move ctors and
+destructors continue to consult it.
+
+#### Measured impact (full BTreeMap bench, N=10, REPS=100,000)
+
+```
+== transpiled BTreeMap<int,int,Global> ==
+  insert seq  + get seq    0.042 s    21.2 ns/op
+  insert rand + get rand   0.042 s    21.2 ns/op
+
+== libstdc++ std::map<int,int> (reference) ==
+  insert seq  + get seq    0.044 s    22.0 ns/op
+  insert rand + get rand   0.043 s    21.4 ns/op
+```
+
+The transpiled BTreeMap is now **at parity with libstdc++ `std::map`
+(actually ~4% faster)**, down from the original 1700–10000× gap. A
+>10,000× speedup from two `if constexpr` branches.
+
+Bench correctness verified on the isolation test (single + multi
+insert/get round-trips, splits past CAPACITY=11) — all six checks
+pass; the N=20 insert path that previously failed with the naive
+disable-everything experiment works because the slow-path bookkeeping
+stays active for the non-trivially-destructible scope-guard /
+transpiled-iterator types that actually rely on it (e.g. `PanicGuard`,
+whose destructor aborts unless explicitly forgotten).
+
+#### Other fix options (not pursued)
+
+These remain potentially useful for further perf wins on
+non-trivially-destructible-T workloads:
+
+- **Drop the linear scan**: replace `unordered_map` with a sorted
+  structure so `clear_forgotten_address_range` becomes O(log N +
+  matches) instead of O(N). Would help any port with heavy use of
+  owning types.
+- **Per-allocation tracking**: keep markers in metadata adjacent to
+  the allocation instead of a global map. O(1) per write. Larger
+  refactor; the right long-term fix.
+- **Reduce call rate**: the bookkeeping is a *correctness* aid for
+  moved-from detection in transpiled types; some sites could be
+  proven unnecessary at emit time and elided by the transpiler.
 
 #### Where this should live in the book
 
 Even though the cliff is in `rusty/mem.hpp` (the C++ runtime support
 library, not the transpiler or the patcher), the impact is so
-disproportionate that it dwarfs every other category in Sections
+disproportionate that it dwarfed every other category in Sections
 1.1–1.4. Any future std-library port using `ptr::write` or
-`ptr::copy` on hot paths will hit the same wall. Worth fixing
-*before* attempting the next port.
+`ptr::copy` on hot paths with trivially-destructible elements would
+have hit the same wall before this fix.
