@@ -714,21 +714,76 @@ stays active for the non-trivially-destructible scope-guard /
 transpiled-iterator types that actually rely on it (e.g. `PanicGuard`,
 whose destructor aborts unless explicitly forgotten).
 
-#### Other fix options (not pursued)
+#### Performance for non-trivially-destructible types
 
-These remain potentially useful for further perf wins on
-non-trivially-destructible-T workloads:
+The fast path above only applies when `T` is trivially-destructible.
+Naively one might expect non-trivial types to retain the
+1700–10000× cliff. Measurement shows they don't, because of two
+fortunate-by-design properties:
 
-- **Drop the linear scan**: replace `unordered_map` with a sorted
-  structure so `clear_forgotten_address_range` becomes O(log N +
-  matches) instead of O(N). Would help any port with heavy use of
-  owning types.
-- **Per-allocation tracking**: keep markers in metadata adjacent to
-  the allocation instead of a global map. O(1) per write. Larger
-  refactor; the right long-term fix.
-- **Reduce call rate**: the bookkeeping is a *correctness* aid for
-  moved-from detection in transpiled types; some sites could be
-  proven unnecessary at emit time and elided by the transpiler.
+1. **`MaybeUninit<T>` is always trivially-destructible regardless of
+   `T`** — its only member is an `unsigned char storage_[sizeof(T)]`
+   byte array, and `~MaybeUninit() = default` is trivial for that.
+   Container types (`std::array<MaybeUninit<T>, N>`) inherit the
+   property. Since the transpiler emits leaf storage as exactly
+   `std::array<MaybeUninit<K>, CAPACITY>` / `<V>`, **every B-tree
+   slice-shift hits the fast path** even for `BTreeMap<K, Vec<T>>`.
+
+2. **`rusty::Box` / `rusty::Vec` etc. use the `std::move` move-ctor
+   protocol, not the forgotten-address protocol, for ownership
+   transfer**. Their move ctors null the source pointer; their
+   destructors are guarded by `if (ptr != nullptr) delete ptr;`. No
+   global-table hit on the move path. The forgotten-address calls
+   that *do* exist (in transpiler-emitted move ctors / dtors of
+   composite types) are O(1) per object boundary, not per element.
+
+Measured overhead for non-trivially-destructible workloads:
+
+| Bench | Workload | Ratio vs std equivalent |
+|---|---|---|
+| `BTreeMap<int, NontrivialValue>` (user-defined dtor) | 5 N → 50 ops/iter, 100–2000 iters | **1.2–2.0×** vs `std::map` |
+| `Vec<rusty::Box<int>>` reserve + push_back × 100 | 50 reps | **1.0×** vs `std::vector<unique_ptr>` |
+| `Vec<rusty::Box<int>>` reserve + push_back × 100,000 | 50 reps | **0.9×** vs `std::vector<unique_ptr>` |
+
+The residual ~1–2× factor is mostly:
+- Per-object-boundary mark/consume (2 mutex acquires + 2 hash ops per
+  transpiled-type move).
+- The transpiler's variant-dispatch (`std::variant::index()` checks)
+  and SFINAE method-dispatch lambdas on the path leading to those
+  moves.
+
+#### Strategy for further perf gains (not currently pursued)
+
+- **Drop the linear scan**: replace the `unordered_map` with a
+  sorted structure (`std::map<address, refcount>`) so
+  `clear_forgotten_address_range` becomes O(log N + matches) instead
+  of O(N). Important if any future workload starts hitting the slow
+  path heavily (e.g. an aliased-pointer-heavy port that disables
+  MaybeUninit wrapping).
+- **Per-allocation tracking**: store a 1-byte "forgotten" flag
+  adjacent to each allocation (in the same `operator new` slab)
+  instead of a global map. O(1) per write, no mutex. Larger
+  refactor.
+- **Transpiler-side elision**: when the transpiler can prove a move
+  is *terminal* (the source is statically guaranteed not to be
+  dropped later — the analog of Rust's static drop tracking), skip
+  emitting the `mark_forgotten_address` call. Eliminates many
+  bookkeeping ops at the source rather than making them cheaper.
+- **"Null state" convention** (the strict version of the user's
+  original proposal): require every transpiler-emitted owning type
+  to have a "valid but inert" moved-from state encoded in its bytes,
+  and a destructor that short-circuits on it. Then delete the global
+  forgotten-address table entirely. Largest refactor; eliminates all
+  global-state cost; but every emit pattern that uses
+  `consume_forgotten_address(this)` in destructors / move ctors
+  needs to be rewritten to check the byte-state instead. Touches the
+  transpiler's emit logic for `Drop` impls and synthetic move ctors.
+
+None of these are currently bottlenecks given the measured
+parity-or-better numbers above, so none have been pursued. They are
+documented here so a future port that *does* stress the slow path
+(e.g. heavy aliasing / `ptr::read` of non-trivially-destructible
+types outside `MaybeUninit`) has a clear menu.
 
 #### Where this should live in the book
 
