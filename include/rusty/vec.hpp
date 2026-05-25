@@ -106,16 +106,10 @@ private:
     }
 
     void clear_forgotten_storage_marks() noexcept {
-        // Fast path: see note in rusty/ptr.hpp's write() — a
-        // forgotten-address marker can only exist for T if T's destructor
-        // is non-trivial. Skip the global-table scan otherwise.
-        if constexpr (!std::is_trivially_destructible_v<T>) {
-            if (data_ == nullptr || capacity_ == 0) {
-                return;
-            }
-            rusty::mem::clear_forgotten_address_range(
-                data_, storage_byte_count(capacity_));
-        }
+        // Strict null-state convention: there is no global
+        // forgotten-address table anymore (see rusty/mem.hpp). Per-element
+        // moved-from state lives in T itself. Vec storage doesn't carry
+        // its own forgotten markers across reallocations.
     }
     
     void grow() {

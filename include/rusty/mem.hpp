@@ -19,36 +19,15 @@ namespace rusty {
 namespace mem {
 
 namespace detail {
-struct forgotten_address_key {
-    const void* address;
-    const void* type_tag;
-
-    bool operator==(const forgotten_address_key& other) const noexcept {
-        return address == other.address && type_tag == other.type_tag;
-    }
-};
-
-struct forgotten_address_key_hash {
-    std::size_t operator()(const forgotten_address_key& key) const noexcept {
-        const std::size_t a = std::hash<const void*>{}(key.address);
-        const std::size_t b = std::hash<const void*>{}(key.type_tag);
-        return a ^ (b + 0x9e3779b97f4a7c15ULL + (a << 6) + (a >> 2));
-    }
-};
-
-inline std::unordered_map<forgotten_address_key, std::size_t, forgotten_address_key_hash>&
-forgotten_addresses() {
-    // Keep storage alive for the entire process lifetime to avoid teardown-order
-    // crashes when global/static destructors still call forgotten-address APIs.
-    static auto* addresses =
-        new std::unordered_map<forgotten_address_key, std::size_t, forgotten_address_key_hash>();
-    return *addresses;
-}
-
-inline platform::threading::mutex& forgotten_addresses_mutex() {
-    static auto* mutex = new platform::threading::mutex();
-    return *mutex;
-}
+// The global forgotten-address table is GONE under the strict null-state
+// convention (see docs/rusty-std-book.md §1.5). Every transpiler-emitted
+// owning type now carries a local `mutable bool _rusty_forgotten = false;`
+// that its move ctor / destructor / `mem::forget` set, replacing the
+// per-element global-table dance that was the 1700-10000x perf cliff.
+//
+// The `mark_forgotten_key` / `consume_forgotten_key` entry points are kept
+// as no-ops so any externally-vendored code that still calls them compiles
+// and runs without effect. New transpiled code never calls these.
 
 template<typename T>
 inline const void* forgotten_type_tag() noexcept {
@@ -56,32 +35,8 @@ inline const void* forgotten_type_tag() noexcept {
     return &tag;
 }
 
-inline void mark_forgotten_key(const void* address, const void* type_tag) noexcept {
-    if (address == nullptr) {
-        return;
-    }
-    platform::threading::lock_guard<platform::threading::mutex> lock(forgotten_addresses_mutex());
-    auto& addresses = forgotten_addresses();
-    addresses[forgotten_address_key{address, type_tag}] += 1;
-}
-
-inline bool consume_forgotten_key(const void* address, const void* type_tag) noexcept {
-    if (address == nullptr) {
-        return false;
-    }
-    platform::threading::lock_guard<platform::threading::mutex> lock(forgotten_addresses_mutex());
-    auto& addresses = forgotten_addresses();
-    const auto it = addresses.find(forgotten_address_key{address, type_tag});
-    if (it == addresses.end()) {
-        return false;
-    }
-    if (it->second > 1) {
-        it->second -= 1;
-    } else {
-        addresses.erase(it);
-    }
-    return true;
-}
+inline void mark_forgotten_key(const void*, const void*) noexcept {}
+inline bool consume_forgotten_key(const void*, const void*) noexcept { return false; }
 
 template<typename T, typename = void>
 struct rust_layout_size {
@@ -340,35 +295,9 @@ inline bool consume_forgotten_typed(const T* address) noexcept {
     return detail::consume_forgotten_key(address, detail::forgotten_type_tag<Value>());
 }
 
-inline void clear_forgotten_address_range(const void* base, std::size_t bytes) noexcept {
-    if (base == nullptr || bytes == 0) {
-        return;
-    }
-
-    const auto start = reinterpret_cast<std::uintptr_t>(base);
-    std::uintptr_t end = 0;
-    if (bytes > std::numeric_limits<std::uintptr_t>::max() - start) {
-        end = std::numeric_limits<std::uintptr_t>::max();
-    } else {
-        end = start + bytes;
-    }
-
-    platform::threading::lock_guard<platform::threading::mutex> lock(detail::forgotten_addresses_mutex());
-    auto& addresses = detail::forgotten_addresses();
-    for (auto it = addresses.begin(); it != addresses.end();) {
-        const auto current = reinterpret_cast<std::uintptr_t>(it->first.address);
-        if (current >= start && current < end) {
-            it = addresses.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-inline void clear_all_forgotten_addresses() noexcept {
-    platform::threading::lock_guard<platform::threading::mutex> lock(detail::forgotten_addresses_mutex());
-    detail::forgotten_addresses().clear();
-}
+// No-ops under strict null-state. See note in detail::mark_forgotten_key.
+inline void clear_forgotten_address_range(const void*, std::size_t) noexcept {}
+inline void clear_all_forgotten_addresses() noexcept {}
 
 template<typename T, typename U>
 inline T replace(T& destination, U&& value) {
@@ -401,20 +330,20 @@ inline void drop(T value) {
 }
 
 // Rust std::mem::forget consumes a value and intentionally leaks/drop-skips it.
-// For drop-enabled transpiled structs, mark the value as forgotten so generated
-// destructors can skip user Drop bodies on scope-exit/moved-from states.
+// For drop-enabled transpiled structs, set the value's local
+// `_rusty_forgotten` flag so its destructor short-circuits past the Drop body
+// at scope exit. Under the strict null-state convention this is purely local
+// state — no global table involved.
 template<typename T>
 inline void forget(T&& value) noexcept {
     using Value = std::remove_reference_t<T>;
     using Plain = std::remove_cv_t<Value>;
-    if constexpr (requires(Plain& v) { v.rusty_mark_forgotten(); }) {
-        if constexpr (std::is_const_v<Value>) {
-            // `mem::forget` may be emitted on const locals in generated code.
-            // Mark the object address directly so drop guards still short-circuit.
-            mark_forgotten_address(std::addressof(value));
-        } else {
-            value.rusty_mark_forgotten();
-        }
+    if constexpr (requires(const Plain& v) { v.rusty_mark_forgotten(); }) {
+        // `rusty_mark_forgotten()` is emitted `const` and sets a `mutable`
+        // member, so it works uniformly on const and non-const values
+        // (including const locals like the `PanicGuard` scope-guard in
+        // generated code).
+        value.rusty_mark_forgotten();
     } else if constexpr (std::is_move_constructible_v<Plain> && !std::is_const_v<Value>) {
         // Generic ownership-forget fallback for non-guarded owning types (e.g. rusty::Vec):
         // move payload into leaked storage so the source becomes moved-from and no longer owns.

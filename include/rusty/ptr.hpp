@@ -242,27 +242,12 @@ inline T read(T* src) {
 
 template<typename T, typename U>
 inline void write(T* dst, U&& value) {
-    // A moved-from value may have left a forgotten-address marker at `dst`.
-    // Writing a fresh value into that slot must clear stale marker state so
-    // the new object's destructor is not skipped.
-    //
-    // Fast path: a forgotten-address marker can only exist for T if some
-    // operation (a `rusty_mark_forgotten()` method, `mem::forget`, or
-    // `ptr::copy`'s element-marking loop) added it. All of those require
-    // T to have a non-trivial destructor — primitive types like `int` and
-    // the transpiler-internal `MaybeUninit<int>` (whose `~T() = default`
-    // is trivial) have no such operations associated. For them the
-    // global-table scan in `clear_forgotten_address_range` is pure
-    // overhead. This is the 99.5% profile hotspot from
-    // docs/rusty-std-book.md §1.5.
-    //
-    // We use `is_trivially_destructible_v` rather than
-    // `is_trivially_copyable_v` because `MaybeUninit<T>` defines explicit
-    // copy/move ctors (defeating trivially-copyable) but keeps the trivial
-    // destructor, and that's the type at the BTreeMap-leaf hot path.
-    if constexpr (!std::is_trivially_destructible_v<T>) {
-        rusty::mem::clear_forgotten_address_range(static_cast<const void*>(dst), sizeof(T));
-    }
+    // Under the strict null-state convention there is no global
+    // forgotten-address table for `dst` to consult — `T`'s own
+    // `_rusty_forgotten` flag (set by move ctors and `mem::forget`)
+    // is the single source of truth. `ptr::write` matches Rust's
+    // `ptr::write` semantics: bit-construct a fresh `T` at `dst`
+    // without touching whatever was there.
     std::construct_at(dst, std::forward<U>(value));
 }
 
@@ -303,68 +288,27 @@ inline void copy(const T* src, T* dst, Count count) {
     if constexpr (std::is_trivially_copyable_v<T>) {
         auto byte_count = element_count * sizeof(T);
         std::memmove(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
-    } else if constexpr (std::is_trivially_destructible_v<T>) {
-        // No destructor means no forgotten-address bookkeeping can exist
-        // for any element of T (e.g. MaybeUninit<int>, which has user-defined
-        // copy/move ctors that defeat is_trivially_copyable_v but a trivial
-        // ~T() = default). Skip the entire mark/consume/clear dance.
-        //
-        // This is the BTreeMap-leaf hot path: every slice_insert shifts
-        // MaybeUninit<K>/<V> elements and the original element-wise loop
-        // was the 99.5% perf cliff from docs/rusty-std-book.md §1.5.
-        if (dst < src) {
-            for (std::size_t i = 0; i < element_count; ++i) {
-                T* const dst_i = dst + i;
-                T* const src_i = const_cast<T*>(src) + i;
-                std::destroy_at(dst_i);
-                std::construct_at(dst_i, std::move(*src_i));
-            }
-        } else {
-            for (std::size_t i = element_count; i-- > 0;) {
-                T* const dst_i = dst + i;
-                T* const src_i = const_cast<T*>(src) + i;
-                if (dst_i < src + element_count) {
-                    std::destroy_at(dst_i);
-                }
-                std::construct_at(dst_i, std::move(*src_i));
-            }
-        }
     } else if (dst < src) {
-        // Left-shift overlap patterns (`dst` before `src`) move low→high.
+        // Left-shift overlap: process forward, destroy-then-construct each
+        // slot. The null-state convention makes destruction safe for
+        // moved-from slots (T's destructor sees `_rusty_forgotten == true`
+        // and short-circuits), so we no longer need a side-table to skip.
         for (std::size_t i = 0; i < element_count; ++i) {
             T* const dst_i = dst + i;
             T* const src_i = const_cast<T*>(src) + i;
-            // Destination is currently initialized; destroy it unless a prior
-            // move already marked the slot as forgotten.
-            if (!rusty::mem::consume_forgotten_address(static_cast<const void*>(dst_i))) {
-                std::destroy_at(dst_i);
-            }
+            std::destroy_at(dst_i);
             std::construct_at(dst_i, std::move(*src_i));
-            // Model move-shift semantics for drop-sensitive generated types.
-            rusty::mem::mark_forgotten_address(static_cast<const void*>(src_i));
         }
     } else {
-        // Right-shift overlap patterns need reverse order. Slots beyond source
-        // coverage are newly opened holes and require placement construction.
+        // Right-shift overlap: process reverse. Slots beyond the original
+        // source window are uninitialized holes — no destroy_at on those.
         for (std::size_t i = element_count; i-- > 0;) {
             T* const dst_i = dst + i;
             T* const src_i = const_cast<T*>(src) + i;
             if (dst_i < src + element_count) {
-                // Destination currently holds an object from the source window.
-                if (!rusty::mem::consume_forgotten_address(static_cast<const void*>(dst_i))) {
-                    std::destroy_at(dst_i);
-                }
-            } else {
-                // Newly opened hole: ensure stale marker state cannot leak to
-                // the newly constructed destination object.
-                rusty::mem::clear_forgotten_address_range(
-                    static_cast<const void*>(dst_i), sizeof(T));
+                std::destroy_at(dst_i);
             }
             std::construct_at(dst_i, std::move(*src_i));
-            // Rust `ptr::copy` move-shift callers treat this source slot as logically
-            // uninitialized after the move. Mark it forgotten so any later destructor
-            // path skips running user drop code on moved-from state.
-            rusty::mem::mark_forgotten_address(static_cast<const void*>(src_i));
         }
     }
 }

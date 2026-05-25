@@ -2387,23 +2387,24 @@ def apply_step66_map_runtime_fixes(path: Path) -> None:
     landed = 0
 
     # 1. ~BTreeMap destructor — replace the broken body with a leak.
+    # Under the strict null-state convention the local `_rusty_forgotten`
+    # flag replaces the old global-table dance.
     old_dtor_body = (
         "    ~BTreeMap() noexcept(false) {\n"
-        "        if (rusty::mem::consume_forgotten_address(this)) { return; }\n"
+        "        if (_rusty_forgotten) { return; }\n"
         "        rusty::mem::drop(rusty::iter(rusty::ptr::read(&(*this))));\n"
         "    }"
     )
     new_dtor_body = (
         "    ~BTreeMap() noexcept(false) {\n"
-        "        if (rusty::mem::consume_forgotten_address(this)) { return; }\n"
+        "        if (_rusty_forgotten) { return; }\n"
         "        // Step 66: the transpiler emitted\n"
         "        //   rusty::mem::drop(rusty::iter(rusty::ptr::read(&(*this))))\n"
         "        // which is wrong on two counts: (a) `rusty::iter` returns the\n"
         "        // BORROWING Iter<K,V>, not the consuming IntoIter, so heap\n"
         "        // nodes are never freed; (b) `ptr::read` produces a stack-\n"
         "        // temp BTreeMap whose own ~BTreeMap would `ptr::read` AGAIN\n"
-        "        // and recurse infinitely (consume_forgotten_address never\n"
-        "        // returns true for the temp's fresh address) → stack overflow.\n"
+        "        // and recurse infinitely → stack overflow.\n"
         "        //\n"
         "        // A proper drop would route through `into_iter()` + IntoIter's\n"
         "        // deallocating_next walk, but that path drags in more uninstan-\n"
@@ -2411,8 +2412,10 @@ def apply_step66_map_runtime_fixes(path: Path) -> None:
         "        // Member destructors are all trivial (NodeRef wraps a NonNull\n"
         "        // pointer, ManuallyDrop<A> doesn't drop A), so leaking the\n"
         "        // leaf-node allocations at program exit is the pragmatic\n"
-        "        // fix for the hybrid milestone.\n"
-        "        rusty::mem::mark_forgotten_address(this);\n"
+        "        // fix for the hybrid milestone. Setting `_rusty_forgotten`\n"
+        "        // skips any future destructor on this address (e.g. if a\n"
+        "        // ptr::read produces a stack-temp on the same slot).\n"
+        "        _rusty_forgotten = true;\n"
         "    }"
     )
     if old_dtor_body in src:
