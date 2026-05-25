@@ -752,38 +752,93 @@ The residual ~1–2× factor is mostly:
   and SFINAE method-dispatch lambdas on the path leading to those
   moves.
 
-#### Strategy for further perf gains (not currently pursued)
+#### Strict null-state: global table deleted
 
-- **Drop the linear scan**: replace the `unordered_map` with a
-  sorted structure (`std::map<address, refcount>`) so
-  `clear_forgotten_address_range` becomes O(log N + matches) instead
-  of O(N). Important if any future workload starts hitting the slow
-  path heavily (e.g. an aliased-pointer-heavy port that disables
-  MaybeUninit wrapping).
-- **Per-allocation tracking**: store a 1-byte "forgotten" flag
-  adjacent to each allocation (in the same `operator new` slab)
-  instead of a global map. O(1) per write, no mutex. Larger
-  refactor.
+Committed as the final state of this work. The "Null state" option
+described above is now the runtime's actual design. Every transpiler-
+emitted struct with a `Drop` impl carries a `mutable bool
+_rusty_forgotten = false;` field; the runtime's global forgotten-
+address table is gone.
+
+Concrete shape of the emit:
+
+```cpp
+struct PanicGuard {
+    mutable bool _rusty_forgotten = false;
+    PanicGuard() = default;
+    PanicGuard(PanicGuard&& other) noexcept {
+        this->_rusty_forgotten = other._rusty_forgotten;
+        other._rusty_forgotten = true;
+    }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+    ~PanicGuard() noexcept(false) {
+        if (_rusty_forgotten) { return; }
+        rusty::intrinsics::abort();   // drop body
+    }
+};
+```
+
+The previous global table's three call sites collapse into per-type
+boolean assignments. `mem::forget` calls `value.rusty_mark_forgotten()`
+uniformly on const and non-const values (the method is `const` and the
+field is `mutable`).
+
+Runtime API surface kept as no-op shims for backwards compatibility:
+`rusty::mem::mark_forgotten_key` / `consume_forgotten_key` /
+`clear_forgotten_address_range` / `clear_all_forgotten_addresses` all
+return false / do nothing. New transpiled code never calls them.
+
+#### Final perf (BTreeMap bench, N=10, REPS=100,000)
+
+```
+== transpiled BTreeMap<int,int,Global> ==
+  insert seq  + get seq:    0.054 s    26.8 ns/op
+  insert rand + get rand:   0.055 s    27.4 ns/op
+
+== libstdc++ std::map<int,int> (reference) ==
+  insert seq  + get seq:    0.047 s    23.3 ns/op
+  insert rand + get rand:   0.043 s    21.3 ns/op
+```
+
+**~1.15–1.28× slower than libstdc++ `std::map`**. The residual gap is
+the local-bool store on every move ctor + the local-bool check on
+every destructor for types with `Drop` impls — a handful of CPU
+cycles per object boundary, no global state, no mutex.
+
+For comparison:
+- Original (with global table): **1700–10000×** slower.
+- Intermediate (if-constexpr fast path, global table still present for
+  non-trivial-T): **~0.95–1.0×** (at parity).
+- Strict null-state (current, **no global table**): **~1.15–1.28×**.
+
+The intermediate version was slightly faster because the `if
+constexpr` skipped the local-flag overhead for trivially-destructible
+types (which is most of the BTreeMap leaf hot path). The strict
+version applies the protocol uniformly to every Drop type, paying ~5
+ns/op for the privilege of having zero global state.
+
+#### Other strategies (not currently pursued)
+
+These remain potentially useful if the residual ~1.2× gap matters:
+
 - **Transpiler-side elision**: when the transpiler can prove a move
-  is *terminal* (the source is statically guaranteed not to be
-  dropped later — the analog of Rust's static drop tracking), skip
-  emitting the `mark_forgotten_address` call. Eliminates many
-  bookkeeping ops at the source rather than making them cheaper.
-- **"Null state" convention** (the strict version of the user's
-  original proposal): require every transpiler-emitted owning type
-  to have a "valid but inert" moved-from state encoded in its bytes,
-  and a destructor that short-circuits on it. Then delete the global
-  forgotten-address table entirely. Largest refactor; eliminates all
-  global-state cost; but every emit pattern that uses
-  `consume_forgotten_address(this)` in destructors / move ctors
-  needs to be rewritten to check the byte-state instead. Touches the
-  transpiler's emit logic for `Drop` impls and synthetic move ctors.
+  is *terminal* (source statically guaranteed not to be dropped
+  later — the analog of Rust's static drop tracking), skip emitting
+  the flag-propagation in the move ctor and the flag-check in the
+  destructor. Closes most of the residual gap.
+- **Per-type opt-out**: types whose destructor body is a member-wise
+  drop (and where every member already has its own null-state
+  protocol — i.e. the destructor body has no observable side effects
+  beyond field destruction) don't need the flag at all. The
+  transpiler could detect these and omit both the field and the
+  preamble check, recovering the if-constexpr-fast-path behavior
+  without a global table.
 
-None of these are currently bottlenecks given the measured
-parity-or-better numbers above, so none have been pursued. They are
-documented here so a future port that *does* stress the slow path
-(e.g. heavy aliasing / `ptr::read` of non-trivially-destructible
-types outside `MaybeUninit`) has a clear menu.
+Verified: zero references to the deleted machinery in the compiled
+binary (`nm libbtree_port.a | grep forgotten_addresses` → empty;
+`objdump -d btree_isolate_test | grep -i forgotten` → empty). The
+global mutex and unordered_map are structurally gone from the
+runtime.
 
 #### Where this should live in the book
 
