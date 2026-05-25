@@ -37,6 +37,7 @@
 // #include "rusty/sync/weak.hpp"  // Namespace-organized: rusty::sync_impl::Weak<T>
 #include "rusty/vec.hpp"
 #include "rusty/vecdeque.hpp"
+#include "rusty/collections.hpp"  // TryReserveError (added for vec_port)
 #include "rusty/option.hpp"
 #include "rusty/result.hpp"
 #include "rusty/marker.hpp"

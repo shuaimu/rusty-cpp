@@ -393,6 +393,28 @@ requires requires(RangeLike r) { r.data(); r.size(); }
     std::destroy_n(data, count);
 }
 
+// ----- Unique<T>: like NonNull<T> but expresses sole ownership.
+// In rustc, `Unique<T>` is a `NonNull<T>` with a `PhantomData<T>` to
+// mark it as owning. For the C++ port we alias it directly to
+// NonNull — the ownership distinction matters for Rust's borrow
+// checker but not for the C++ semantics. (Added for vec_port.)
+template<typename T>
+using Unique = NonNull<T>;
+
+// ----- Alignment: like rustc's core::ptr::Alignment.
+// A power-of-two alignment value with type-driven constructors.
+// (Added for vec_port.)
+class Alignment {
+    std::size_t value_;
+public:
+    constexpr explicit Alignment(std::size_t v) noexcept : value_(v) {}
+    constexpr std::size_t as_usize() const noexcept { return value_; }
+    constexpr std::size_t as_nonzero() const noexcept { return value_; }
+    template<typename T>
+    static constexpr Alignment of() noexcept { return Alignment(alignof(T)); }
+    constexpr bool operator==(const Alignment& o) const noexcept = default;
+};
+
 } // namespace ptr
 
 } // namespace rusty

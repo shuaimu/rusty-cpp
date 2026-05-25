@@ -1854,6 +1854,37 @@ splice / spec_* / partial_eq from CMakeLists.txt — keep raw_vec +
 into_iter + drain + set_len_on_drop + is_zero + vec): **30 errors**
 remaining, all in `raw_vec.cppm` + `vec.is_zero.cppm` + `vec.cppm`.
 
+#### A2 — Patches landed so far
+
+Created `docs/vec_port/post_transpile_patch.py` with 5 patches:
+
+1. `set_len_on_drop` copy-assign: `= default` → `= delete` (Cluster V-D).
+2. `is_zero` free-fn `const` qualifier: stripped (transpiler bug).
+3. `std::collections::TryReserveError` → `rusty::collections::TryReserveError`
+   (Cluster V-B). Required adding `include/rusty/collections.hpp`
+   with a minimal `TryReserveError` struct.
+4. `std::ptr::{Unique, Alignment, NonNull, slice_from_raw_parts_mut}`
+   → `rusty::ptr::*` (Cluster V-C). Required adding `Unique<T>` (alias
+   to `NonNull<T>`) and `Alignment` (size_t wrapper) to
+   `include/rusty/ptr.hpp`.
+5. Trim `CMakeLists.txt` to 7 core modules.
+
+After patches: **26 errors**, with the dominant clusters now being:
+
+| # err | Cluster | Cause |
+|---|---|---|
+| 5 | `use of undeclared identifier 'old_layout'` | Transpiler emit bug — `old_layout` is a function parameter being referenced outside its scope. |
+| 4 | `'this' outside non-static member function` | Transpiler emits `this->` inside `const fn capacity_overflow() -> ! { ... }` which is a free function. |
+| 3 | `CapacityOverflow` undeclared | Should resolve to `TryReserveError::Kind::CapacityOverflow` after the namespace remap; one more text patch needed. |
+| 2 | `Cap` member ref on `unsigned long` | After `Cap = usize` strip, `Cap::ZERO` calls don't work — primitive size_t doesn't have member fns. Needs further prep.sh substitution. |
+| 2 | `hint` undeclared | `core::hint::*` (compiler hints) not mapped; small fix. |
+| 1 | `redefinition of 'is_zero'` | Trait specialization shape we haven't handled yet. |
+| 1 | `slice_from_raw_parts_mut` | Free function alias adjustment. |
+
+**Session state**: 26 errors remaining; clusters identified for the
+next half-day of iteration. Phase A1 (parse) DONE; Phase A2 (build)
+in progress.
+
 ### 4.3 Phase A error catalogue
 
 The remaining 30 errors map to ~5 root-cause clusters that need
