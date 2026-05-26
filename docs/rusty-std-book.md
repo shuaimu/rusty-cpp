@@ -1739,6 +1739,14 @@ specialization. `Vec::splice` and `Vec::drain` are gnarly.
 FromUtf8Error>`; the error type needs to round-trip the bytes.
 UTF-8 char-boundary checks must be inlined / fast.
 
+**Update after first attempt** (see `docs/string_port/STATUS.md`):
+the ½-day estimate was wrong. Phase A1 parses cleanly, but Phase
+A2 surfaces a `str::Pattern + str::Searcher` trait infrastructure
+dependency from `find`/`split`/`contains` etc. Pattern is a Rust
+trait with no C++ analogue — porting String fully requires either
+hand-porting Pattern/Searcher first or vendoring `core::str` as
+its own sibling port. **Revised estimate: 2–3 days minimum.**
+
 #### 3. `HashMap<K, V, S>` — third
 
 **Why third**: Highest value-per-effort *after* Vec/String are
