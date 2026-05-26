@@ -386,6 +386,11 @@ def patch_strip_orphan_using_decls(cpp_out: Path) -> int:
     `using submodule::Symbol;` declarations become bare `using Symbol;`
     which is invalid. Strip these lines entirely — they're now redundant
     (the symbols are already visible from the import).
+
+    Also handles `export using X;` form.
+
+    Also strip specific known-bad lines like `using std::ub_checks;`
+    (ub_checks isn't in C++ std).
     """
     import re
     n = 0
@@ -393,9 +398,17 @@ def patch_strip_orphan_using_decls(cpp_out: Path) -> int:
         text = path.read_text()
         original = text
         # Remove bare `using <ident>;` lines (no namespace qualification).
-        # The valid `using` shapes have :: in them.
         text = re.sub(r"^using\s+([A-Za-z_][A-Za-z_0-9]*);\s*\n",
                       "", text, flags=re.MULTILINE)
+        # Remove `export using <ident>;` lines.
+        text = re.sub(r"^export\s+using\s+([A-Za-z_][A-Za-z_0-9]*);\s*\n",
+                      "", text, flags=re.MULTILINE)
+        # Strip `using std::ub_checks;` — not in C++ std.
+        text = text.replace("using std::ub_checks;\n", "")
+        # Strip rusty::Cow / Cow_Borrowed / Cow_Owned usings (Cow not ported).
+        text = text.replace("using rusty::Cow;\n", "")
+        text = text.replace("using rusty::Cow_Borrowed;\n", "")
+        text = text.replace("using rusty::Cow_Owned;\n", "")
         if text != original:
             path.write_text(text)
             n += 1
