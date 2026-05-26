@@ -123,6 +123,17 @@ def patch_std_ptr_to_rusty(cpp_out: Path) -> int:
             "std::ptr::slice_from_raw_parts_mut",
             "rusty::ptr::from_raw_parts_mut",
         )
+        # Bare `ptr::slice_from_raw_parts_mut` (without `std::` prefix,
+        # emitted when the source had `use core::ptr;` and called `ptr::X`).
+        # Maps to `rusty::from_raw_parts_mut` (top-level, NOT `rusty::ptr::`).
+        text = text.replace(
+            "ptr::slice_from_raw_parts_mut",
+            "rusty::from_raw_parts_mut",
+        )
+        text = text.replace(
+            "rusty::ptr::from_raw_parts_mut",
+            "rusty::from_raw_parts_mut",
+        )
         if text != original:
             path.write_text(text)
             n += 1
@@ -180,6 +191,58 @@ def patch_bare_capacity_overflow(cpp_out: Path) -> int:
         text = text.replace(
             "CapacityOverflow(rusty::collections::TryReserveErrorKind::CapacityOverflow)",
             "rusty::collections::TryReserveErrorKind::CapacityOverflow",
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_cap_alias_order(cpp_out: Path) -> int:
+    """The emitted raw_vec.cppm has:
+        constexpr Cap ZERO_CAP = static_cast<size_t>(0);
+        using Cap = size_t;
+    But `Cap` is used before its alias is declared. Swap the order.
+    """
+    path = cpp_out / "vec_port.raw_vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    old = "constexpr Cap ZERO_CAP = static_cast<size_t>(0);\nusing Cap = size_t;"
+    new = "using Cap = size_t;\nconstexpr Cap ZERO_CAP = static_cast<size_t>(0);"
+    if old in text:
+        text = text.replace(old, new)
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_global_unit_struct_value(cpp_out: Path) -> int:
+    """In Rust, `Global` is a unit struct usable both as a type and a
+    value (`Global` is shorthand for `Global {}`). The transpiler
+    emits the bare name; C++ needs `Global{}` at value positions.
+
+    Targeted patch: just the literal pattern `new_in(rusty::alloc::Global)`
+    which is the call site shape that breaks. (Earlier broader regex
+    was too aggressive — broke template-arg sites.)
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # Exact patterns observed in raw_vec.cppm:
+        text = text.replace(
+            "new_in(rusty::alloc::Global)",
+            "new_in(rusty::alloc::Global{})",
+        )
+        # Cluster of similar call patterns where Global is the last arg:
+        text = text.replace(
+            ", rusty::alloc::Global)",
+            ", rusty::alloc::Global{})",
+        )
+        text = text.replace(
+            "(rusty::alloc::Global,",
+            "(rusty::alloc::Global{},",
         )
         if text != original:
             path.write_text(text)
@@ -262,6 +325,8 @@ def main(cpp_out: Path):
         ("std::collections → rusty::collections", patch_std_collections_to_rusty),
         ("std::ptr → rusty::ptr", patch_std_ptr_to_rusty),
         ("Cap.as_inner() → ''", patch_cap_as_inner),
+        ("Cap alias declaration order", patch_cap_alias_order),
+        ("rusty::alloc::Global → Global{}", patch_global_unit_struct_value),
         ("bare CapacityOverflow → fully-qualified", patch_bare_capacity_overflow),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),
