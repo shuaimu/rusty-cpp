@@ -429,11 +429,15 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
     text = path.read_text()
     if "// vec_port stubs for dropped aux types" in text:
         return 0  # idempotent
-    # Find the `export module` line and inject stubs right after it.
+    # Find the LAST `import vec_port.X;` line and inject stubs after it.
+    # Imports must immediately follow `export module`, so we can't put
+    # the stubs between module decl and imports.
     import re
-    m = re.search(r"^export module vec_port\.vec;\s*\n", text, re.MULTILINE)
-    if not m:
+    matches = list(re.finditer(r"^import\s+vec_port\.[^\n;]+;\s*\n",
+                               text, re.MULTILINE))
+    if not matches:
         return 0
+    insert_at = matches[-1].end()
     stubs = """
 // vec_port stubs for dropped aux types — see Chapter 4 of rusty-std-book.
 // These are forward-declared placeholders so vec.cppm parses; any code
@@ -446,7 +450,7 @@ export template<typename T, typename A = rusty::alloc::Global> class Splice;
 export template<typename T, typename A = rusty::alloc::Global> class PeekMut;
 
 """
-    text = text[:m.end()] + stubs + text[m.end():]
+    text = text[:insert_at] + stubs + text[insert_at:]
     path.write_text(text)
     return 1
 
