@@ -862,6 +862,34 @@ def patch_handle_error_function(cpp_out: Path) -> int:
     return 0
 
 
+def patch_rusty_intrinsics_stubs(cpp_out: Path) -> int:
+    """`rusty::intrinsics::const_make_global(x)` → just `x` (identity).
+    `rusty::intrinsics::assume(cond)` → `__builtin_assume(cond)`.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # const_make_global is identity — for our port the const-vs-non-const
+        # distinction is already captured by the surrounding cast.
+        # Strip `rusty::intrinsics::const_make_global(` so the call expression
+        # collapses to its argument. Tricky with closing paren — use a
+        # placeholder approach: just rewrite the qualified path.
+        text = text.replace(
+            "rusty::intrinsics::const_make_global(",
+            "/* const_make_global */ (",
+        )
+        # rusty::intrinsics::assume(x) → __builtin_assume(x)
+        text = text.replace(
+            "rusty::intrinsics::assume(",
+            "__builtin_assume(",
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_hint_assert_unchecked(cpp_out: Path) -> int:
     """`core::hint::assert_unchecked(cond)` is a Rust intrinsic that
     tells the compiler `cond` is true. Map to `__builtin_assume(cond)`
@@ -975,6 +1003,8 @@ def main(cpp_out: Path):
         ("strip std::ub_checks::assert_unsafe_precondition",
             patch_strip_ub_checks),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
+        ("rusty::intrinsics::{const_make_global,assume} → identity/builtin",
+            patch_rusty_intrinsics_stubs),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),
     ]
     total = 0
