@@ -1885,6 +1885,52 @@ After patches: **26 errors**, with the dominant clusters now being:
 next half-day of iteration. Phase A1 (parse) DONE; Phase A2 (build)
 in progress.
 
+#### A2 — Phase A clean (raw_vec + set_len_on_drop) ✅
+
+Reduced-build (3 modules: top-level + raw_vec + set_len_on_drop)
+**compiles + links cleanly** as of commit `00e6247`. 11 iterations,
+15 patcher rules, several rusty/* header additions:
+
+**New headers**: `include/rusty/collections.hpp` (TryReserveError stub).
+**Extended headers**:
+- `rusty/ptr.hpp`: `Unique<T>` alias, `Alignment` class,
+  `CastProxy::as_non_null_ptr()`, `NonNull::from(NonNull)`,
+  `NonNull::from(CastProxy)` overloads
+- `rusty/alloc.hpp`: `Layout::alignment()`, `Layout::repeat_packed()`,
+  `AllocError` fields `.layout` and `.non_exhaustive`
+
+**Patch families** in `docs/vec_port/post_transpile_patch.py`:
+1. Field-conflict fixes: `set_len_on_drop` copy-assign delete
+2. Free-fn fixes: strip `const` qualifier on `is_zero`
+3. Namespace remaps: `std::collections::*` → `rusty::collections::*`,
+   `std::ptr::*` / `ptr::*` → `rusty::ptr::*`
+4. Alias/type fixes: `Cap.as_inner()` strip, alias declaration
+   order swap, `bare Unique` → `Unique<uint8_t>`
+5. Value-vs-type fixes: `rusty::alloc::Global` → `Global{}` (targeted
+   call-site forms)
+6. Bare-enumerator → fully-qualified: `CapacityOverflow` →
+   `rusty::collections::TryReserveErrorKind::CapacityOverflow`
+7. Intrinsic remaps: `usize::unchecked_mul/add/sub` → operators,
+   `hint::assert_unchecked` → `__builtin_assume`,
+   `ptr::without_provenance_mut` → `reinterpret_cast<uint8_t*>`
+8. Hand-stubs: `handle_error` body (mixed 4 emit bugs)
+9. Layout-method fixes: `pad_to_align().size()` → `.size` (targeted)
+10. Build trimming: CMakeLists to 3 modules, top-level imports
+
+Build artifact: `/tmp/vec_port/cpp_out/build/libvec_port.a` with 3
+generated `.pcm` files.
+
+**What's NOT yet built** (Phase A2 remaining):
+- `vec_port.vec.cppm` — the actual `Vec<T>` impl, brings its own
+  cluster of errors
+- `vec_port.vec.into_iter.cppm` — 15 errors (VecDeque template-arg,
+  rusty::array, `NonZero<size_t>` non-literal-type, `RawVec`
+  undeclared)
+- Auxiliary modules (drain, peek_mut, splice, cow, …)
+
+Next iteration: add `vec.cppm` to the build, catalogue its error
+cluster.
+
 ### 4.3 Phase A error catalogue
 
 The remaining 30 errors map to ~5 root-cause clusters that need
