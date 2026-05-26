@@ -514,6 +514,35 @@ def patch_strip_noreturn_in_template_and_trailing_ret(cpp_out: Path) -> int:
     return n
 
 
+def patch_intoiter_alias_conflict(cpp_out: Path) -> int:
+    """Inside class Vec<T, A>, the transpiler emits:
+        using IntoIter = IntoIter<T, A>;
+    This shadows the namespace-level IntoIter template, making later
+    references like `IntoIter<T, A2>` (in template member functions
+    that need a different A) fail to parse.
+
+    Strip the `using IntoIter = ...;` line. Code that needs the
+    instantiated form will see the namespace-level template instead.
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # Remove `    using IntoIter = IntoIter<T, A>;` (with leading indent).
+    import re
+    text = re.sub(
+        r"^\s*using\s+IntoIter\s*=\s*IntoIter<[^>]+>;\s*\n",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def patch_hint_slice_iter_namespaces(cpp_out: Path) -> int:
     """`hint::unlikely(x)` → `(x)` (lose the branch hint).
     `slice::range(...)` → no-op replacement (need rusty::slice::range).
@@ -863,6 +892,8 @@ def main(cpp_out: Path):
             patch_strip_noreturn_in_template_and_trailing_ret),
         ("hint::/slice::/iter:: bare namespaces → rusty:: equivalents",
             patch_hint_slice_iter_namespaces),
+        ("strip Vec::IntoIter alias (conflicts with namespace template)",
+            patch_intoiter_alias_conflict),
         ("strip std::ub_checks::assert_unsafe_precondition",
             patch_strip_ub_checks),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
