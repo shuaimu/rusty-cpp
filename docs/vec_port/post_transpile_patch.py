@@ -578,6 +578,83 @@ struct SpecCloneIntoVec {
     return 1
 
 
+def patch_macro_template_arg_parens(cpp_out: Path) -> int:
+    """`RUSTY_TRY_INTO(RawVec<T, A>::method(...), ...)` — the comma inside
+    `<T, A>` confuses the preprocessor (macros split on commas).
+    Wrap such expressions in extra parens or use type aliases.
+
+    Quick fix: within the specific call, replace `RawVec<T, A>::` with
+    a typedef'd local alias before the macro call. For one-off
+    expressions we use the comma-trick: `(RawVec<T, A>())` wraps the
+    type-name in parens that the preprocessor sees as one arg.
+    Simpler: use a `using` declaration in a nearby IIFE-block. For
+    this specific known site, replace with a parenthesized form.
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # The specific site: `RUSTY_TRY_INTO(RawVec<T, A>::try_with_capacity_in(...)...)`
+    # Comma inside `<T, A>` confuses macro. Use a TYPED workaround:
+    #   `RUSTY_TRY_INTO((decltype(RawVec<T, A>::try_with_capacity_in(...))::value)::try_with_capacity_in(...))`
+    # is gross. Simplest: introduce a typedef *outside* the macro call.
+    # For now, leave the spot but use `RawVec<T,A>` no-space form which
+    # at least normalizes — but still has comma.
+    # Real fix: wrap the entire RawVec<T, A>::method(args) in an immediately
+    # invoked lambda that returns the result:
+    text = text.replace(
+        "RUSTY_TRY_INTO(RawVec<T, A>::try_with_capacity_in(",
+        "RUSTY_TRY_INTO(([&]{ return RawVec<T, A>::try_with_capacity_in(",
+    )
+    # Close the wrapping — need to match the call's closing paren.
+    # Conservatively, only do this when the previous replace ran:
+    text = text.replace(
+        "RUSTY_TRY_INTO(([&]{ return RawVec<T, A>::try_with_capacity_in(std::move(capacity), std::move(alloc)), rusty::Result<Vec<T, A>, rusty::collections::TryReserveError>)",
+        "RUSTY_TRY_INTO(([&]{ return RawVec<T, A>::try_with_capacity_in(std::move(capacity), std::move(alloc)); }()), rusty::Result<Vec<T, A>, rusty::collections::TryReserveError>)",
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_auto_ret_init(cpp_out: Path) -> int:
+    """`auto ret;` is invalid (no initializer). Replace with a
+    placeholder type — `int ret;` is good enough since this is
+    inside an unused code path for our stub-heavy build.
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = text.replace("            auto ret;", "            int ret = 0;  // stub")
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_box_from_template(cpp_out: Path) -> int:
+    """`static auto from(rusty::Vec<T, A> v)` at namespace scope uses
+    `T` and `A` undeclared. Prefix with `template<typename T, typename A>`.
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = text.replace(
+        "// Methods for Box\nstatic auto from(rusty::Vec<T, A> v) {",
+        "// Methods for Box\ntemplate<typename T, typename A>\nstatic auto from(rusty::Vec<T, A> v) {",
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def patch_template_arg_recovery_for_aux_types(cpp_out: Path) -> int:
     """Specific call sites where the transpiler emitted bare names for
     template types (RawVec, PeekMut, IntoIter) without their template
@@ -1037,6 +1114,12 @@ def main(cpp_out: Path):
             patch_intoiter_alias_conflict),
         ("template-arg recovery for RawVec/PeekMut/IntoIter call sites",
             patch_template_arg_recovery_for_aux_types),
+        ("wrap RawVec<T,A>::method in IIFE to dodge macro comma",
+            patch_macro_template_arg_parens),
+        ("auto ret; → int ret = 0; (no-init placeholder)",
+            patch_auto_ret_init),
+        ("add template<> prefix to free `Box::from(Vec<T,A>)`",
+            patch_box_from_template),
         ("inject stub SpecFromElem/SpecExtend/SpecFromIter + rusty_ext::spec_extend",
             patch_spec_trait_stubs),
         ("strip std::ub_checks::assert_unsafe_precondition",
