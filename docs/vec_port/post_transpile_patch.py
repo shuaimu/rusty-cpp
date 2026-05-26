@@ -306,6 +306,47 @@ def patch_without_provenance_mut(cpp_out: Path) -> int:
     return n
 
 
+def patch_handle_error_function(cpp_out: Path) -> int:
+    """The transpiler's emit of raw_vec::handle_error mixes 4 separate
+    bugs into a single line: `[[noreturn]]` in trailing-return-type
+    position, variant-as-pattern declaration `const auto& X::Y =
+    _m;`, `.kind()` method call when `kind` is a field, and an
+    unreachable!() return-from-IIFE that needs the explicit form.
+    Hand-stub the function body.
+    """
+    import re
+    path = cpp_out / "vec_port.raw_vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    # Find the line that starts with `[[noreturn]] void handle_error(` and
+    # spans through the matching `; }` (the body).
+    # Source pattern (single-line):
+    #   [[noreturn]] void handle_error(<args>) {
+    #     return [&]() -> [[noreturn]] void { ... }();
+    #   }
+    # Replace the body with a simple throw.
+    pattern = re.compile(
+        r"\[\[noreturn\]\] void handle_error\(([^)]+)\) \{[\s\S]*?\n\}",
+        re.MULTILINE,
+    )
+    replacement = (
+        "[[noreturn]] void handle_error(\\1) {\n"
+        "    if (e.kind == rusty::collections::TryReserveErrorKind::CapacityOverflow) {\n"
+        "        ::capacity_overflow();\n"
+        "    }\n"
+        "    // AllocError branch — abort for now; full impl would call handle_alloc_error.\n"
+        "    rusty::intrinsics::abort();\n"
+        "}"
+    )
+    m = pattern.search(text)
+    if m and "rusty::intrinsics::abort" not in m.group(0):
+        text = pattern.sub(replacement, text, count=1)
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def patch_hint_assert_unchecked(cpp_out: Path) -> int:
     """`core::hint::assert_unchecked(cond)` is a Rust intrinsic that
     tells the compiler `cond` is true. Map to `__builtin_assume(cond)`
@@ -386,6 +427,7 @@ def main(cpp_out: Path):
         ("bare CapacityOverflow → fully-qualified", patch_bare_capacity_overflow),
         ("usize::unchecked_mul/add/sub → operators", patch_unchecked_arith_intrinsics),
         ("ptr::without_provenance_mut → reinterpret_cast", patch_without_provenance_mut),
+        ("handle_error body stub (4 mixed emit bugs)", patch_handle_error_function),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),
     ]
