@@ -96,6 +96,19 @@ public:
         return NonNull<T>(ptr);
     }
 
+    // Overload accepting an existing NonNull<T> — identity, used by
+    // Unique::from(NonNull) in raw_vec. Added for vec_port.
+    static constexpr NonNull<T> from(NonNull<T> other) noexcept {
+        return other;
+    }
+
+    // Overload accepting a CastProxy — completes the cast and yields
+    // NonNull<T>. Used by `Unique::from(ptr.cast())` patterns where
+    // `cast()` returns the proxy. Added for vec_port.
+    static constexpr NonNull<T> from(CastProxy proxy) noexcept {
+        return NonNull<T>(reinterpret_cast<T*>(proxy.ptr_));
+    }
+
     constexpr T* as_ptr() const noexcept {
         return ptr_;
     }
