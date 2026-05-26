@@ -23,35 +23,47 @@ Output: one `.cppm` file, ~3600 lines of input → ~3700 lines of C++.
 
 ## Blockers for Phase A2 (compile)
 
-The transpiler emits 20 errors at first build, all of one shape:
-unqualified module-path identifiers that aren't in scope.
+First pass: 20 errors of one shape — unqualified module-path
+identifiers. I patched those with stubs to see what's underneath:
 
-| Identifier | Should resolve to | Status |
-|------------|-------------------|--------|
-| `rusty::ascii` | namespace `rusty::ascii` (does not exist) | missing |
-| `std::Allocator` | `rusty::alloc::Allocator` | bad path |
-| `::borrow::Cow` | `rusty::borrow::Cow` | missing namespace |
-| `::collections::TryReserveError` | `rusty::collections::TryReserveError` | bad qual |
-| `::str::CharIndices`, `::str::Chars`, etc. | `rusty::str::*` | namespace missing |
-| `::vec::Vec` | `rusty::Vec` | namespace + alias |
+| Identifier | Patch applied |
+|------------|---------------|
+| `using std::Allocator;` | commented out |
+| `::borrow::Cow` / `::borrow::ToOwned` | stubbed |
+| `::collections::TryReserveError` | aliased to `rusty::collections::TryReserveError` |
+| `::str::Chars`, `CharIndices`, `Utf8Error`, `FromStr`, `from_utf8_unchecked_mut`, `from_boxed_utf8_unchecked` | stubbed (no rusty::str namespace) |
+| `::vec::Vec` | aliased to `rusty::Vec` |
+| `rusty::ascii::Char` | replaced with `uint8_t` |
 
-Two distinct problems hide here:
+Second pass: 20 *different* errors now. The shape of remaining
+blockers is heavier:
+
+| Error | Why hard |
+|-------|----------|
+| `rusty::Vec` requires template args | trivial fix |
+| `Searcher` not in `std::basic_string_view` | needs Pattern/Searcher trait infrastructure that has no C++ analogue |
+| unqualified `collections::` references | one more pass of namespace rewrites |
+| `std::str` doesn't exist | str/Chars/CharIndices need ports of their own (from `core/src/str/`) |
+| `this` outside non-static member function | transpiler emit bug |
+| `const` qualifier on non-member function | transpiler emit bug |
+| class member redeclared | template specialization mishap |
+
+Two distinct problem clusters underneath:
 
 1. **The transpiler isn't applying `rusty::` prefix for top-level
-   modules from std.** For Vec we patched these case-by-case
-   (V-A cluster). The fix lives in `post_transpile_patch.py` —
-   add an analogue for the string surface.
+   modules.** Patchable case-by-case (Vec played this game in
+   V-A cluster). Maybe ~40 occurrences in string_port; mechanical.
 
-2. **Hand-port collision.** `include/rusty/string.hpp` defines a
-   stand-alone `rusty::String` class. A transpiled `String` would
-   redeclare in the same namespace. Two paths:
-     - Wrap the transpile output in `namespace string_port`
-       (cheap; requires a `using rusty::String = string_port::String;`
-       alias somewhere so user code stays the same).
-     - Replace `rusty::String` with the transpiled version, retire
-       the hand-port (better long-term but more work — the
-       hand-port has API surface the transpiled module is missing,
-       e.g. `String::from(const char*)`).
+2. **The str/Pattern dependency tree.** `String` calls into
+   `str::Pattern::Searcher`, which is its own trait surface (also
+   under `core/src/str/pattern.rs`). Porting String fully would
+   chain to porting `core::str` — that's a project of its own.
+   The transpiler can't synthesize Pattern/Searcher; would need
+   either hand-port stubs or a separate `core_str_port` crate.
+
+3. **Hand-port collision.** `include/rusty/string.hpp` already
+   defines `rusty::String`. The transpile would need to live in
+   `string_port::String` then alias.
 
 ## Phase plan when work resumes
 
@@ -63,8 +75,12 @@ Two distinct problems hide here:
 - [ ] E1 — completeness vs hand-port
 - [ ] E2 — bench vs `std::string`
 
-Effort estimate (per playbook §2.8): half a day if we wrap in
-`string_port::` namespace; one day if we replace the hand-port.
+Effort estimate (per playbook §2.8): revised after second pass —
+this is **2–3 days minimum**, not half a day. The Pattern/Searcher
+dependency was hidden underneath the namespace errors. A "core
+str port" prerequisite has to land first; that's its own Tier 1
+project. The original §3.8 estimate of ½ day for String was
+optimistic — it assumed Pattern/Searcher were already available.
 
 ## Why pause here
 
