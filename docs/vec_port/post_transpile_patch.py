@@ -514,6 +514,33 @@ def patch_strip_noreturn_in_template_and_trailing_ret(cpp_out: Path) -> int:
     return n
 
 
+def patch_hint_slice_iter_namespaces(cpp_out: Path) -> int:
+    """`hint::unlikely(x)` → `(x)` (lose the branch hint).
+    `slice::range(...)` → no-op replacement (need rusty::slice::range).
+    `iter::zip(a, b)` → `rusty::iter::zip(a, b)`.
+
+    Conservative: replace specific bare-namespace calls with rusty:: form
+    or with simple identity expansion.
+    """
+    import re
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # hint::unlikely(x) → (x). The branch hint is lost; doesn't change semantics.
+        text = re.sub(r"hint::unlikely\(((?:[^()]|\([^()]*\))*)\)", r"(\1)", text)
+        text = re.sub(r"hint::likely\(((?:[^()]|\([^()]*\))*)\)", r"(\1)", text)
+        # iter::zip(...) → rusty::iter::zip(...)
+        text = text.replace("iter::zip(", "rusty::iter::zip(")
+        # slice::range — needs proper implementation. For now point to
+        # a hypothetical rusty::slice::range which we may need to add.
+        text = text.replace("slice::range(", "rusty::slice::range(")
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_strip_ub_checks(cpp_out: Path) -> int:
     """`std::ub_checks::assert_unsafe_precondition!(...)` is a Rust
     nightly intrinsic. Map to a no-op `(void)0` or strip entirely.
@@ -833,6 +860,8 @@ def main(cpp_out: Path):
             patch_aggregate_raw_ptr_to_span_ctor),
         ("strip [[noreturn]] in template-arg / trailing-return",
             patch_strip_noreturn_in_template_and_trailing_ret),
+        ("hint::/slice::/iter:: bare namespaces → rusty:: equivalents",
+            patch_hint_slice_iter_namespaces),
         ("strip std::ub_checks::assert_unsafe_precondition",
             patch_strip_ub_checks),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
