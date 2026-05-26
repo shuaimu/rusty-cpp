@@ -29,11 +29,27 @@ struct TryReserveError {
     std::size_t layout_align = 0;
 
     constexpr TryReserveError() = default;
-    constexpr explicit TryReserveError(Kind k) noexcept : kind(k) {}
+    constexpr /*implicit*/ TryReserveError(Kind k) noexcept : kind(k) {}
     constexpr TryReserveError(Kind k, std::size_t size, std::size_t align) noexcept
         : kind(k), layout_size(size), layout_align(align) {}
 
     constexpr Kind kind_of() const noexcept { return kind; }
+
+    // From conversions for rusty::from_into.
+    static constexpr TryReserveError from(Kind k) noexcept {
+        return TryReserveError(k);
+    }
+    // Accept anything aggregate-shaped with .layout / .non_exhaustive
+    // (i.e. rusty::alloc::AllocError) — extract size/align if present.
+    template<typename AllocErr>
+    static constexpr TryReserveError from(AllocErr e) noexcept {
+        TryReserveError err{Kind::AllocError};
+        if constexpr (requires { e.layout.size; e.layout.align; }) {
+            err.layout_size = e.layout.size;
+            err.layout_align = e.layout.align;
+        }
+        return err;
+    }
 };
 
 // Enum re-exported as `TryReserveErrorKind::CapacityOverflow` /

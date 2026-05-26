@@ -655,6 +655,72 @@ def patch_box_from_template(cpp_out: Path) -> int:
     return 0
 
 
+def patch_from_into_identity_shortcircuit(cpp_out: Path) -> int:
+    """`from_into<X>(X)` (identity) falls through all `if constexpr`
+    branches and hits a static_assert. Add an identity short-circuit
+    as the FIRST branch.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # Find the from_into definition (`Target from_into(Input&& input) {` followed by `if constexpr (requires { Target::from(...)`)
+        old = """Target from_into(Input&& input) {
+if constexpr (requires { Target::from(std::forward<Input>(input)); }) {"""
+        new = """Target from_into(Input&& input) {
+if constexpr (std::is_same_v<std::remove_cvref_t<Input>, Target>) {
+    return Target(std::forward<Input>(input));
+} else if constexpr (requires { Target::from(std::forward<Input>(input)); }) {"""
+        if old in text:
+            text = text.replace(old, new)
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_t_max_slice_len_t_layout(cpp_out: Path) -> int:
+    """`T::MAX_SLICE_LEN` and similar Rust trait associated constants
+    that primitive types don't have. Map to compile-time constants.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # MAX_SLICE_LEN: isize::MAX / size_of::<T>() in Rust
+        text = text.replace(
+            "rusty::clone(T::MAX_SLICE_LEN)",
+            "(static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / sizeof(T))",
+        )
+        text = text.replace(
+            "T::MAX_SLICE_LEN",
+            "(static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / sizeof(T))",
+        )
+        # size_of<T>() → sizeof(T)
+        import re
+        text = re.sub(r"\bsize_of<([^>]+)>\(\)", r"sizeof(\1)", text)
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_layout_align_method_to_field(cpp_out: Path) -> int:
+    """`old_layout.align()` — `align` is a Layout field, not method.
+    Strip the parens.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = text.replace("old_layout.align()", "old_layout.align")
+        text = text.replace("new_layout.align()", "new_layout.align")
+        text = text.replace("elem_layout.align()", "elem_layout.align")
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_t_layout_to_layout_new(cpp_out: Path) -> int:
     """`T::LAYOUT` is a Rust trait associated constant that primitive
     types (like `int`) don't have. Map to `rusty::alloc::Layout::new_<T>()`.
@@ -1174,6 +1240,12 @@ def main(cpp_out: Path):
             patch_setlenondrop_addrof),
         ("T::LAYOUT → rusty::alloc::Layout::new_<T>()",
             patch_t_layout_to_layout_new),
+        ("T::MAX_SLICE_LEN + size_of<T>() Rust intrinsics",
+            patch_t_max_slice_len_t_layout),
+        ("Layout.align() → .align field access",
+            patch_layout_align_method_to_field),
+        ("from_into<X>(X) identity short-circuit",
+            patch_from_into_identity_shortcircuit),
         ("strip .as_non_null_ptr() so CastProxy→NonNull<T> implicit conv fires",
             patch_castproxy_implicit_conv),
         ("wrap RawVec<T,A>::method in IIFE to dodge macro comma",
