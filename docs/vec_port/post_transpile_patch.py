@@ -655,6 +655,26 @@ def patch_box_from_template(cpp_out: Path) -> int:
     return 0
 
 
+def patch_setlenondrop_addrof(cpp_out: Path) -> int:
+    """`SetLenOnDrop::new_(&this->len_field)` — transpiler emitted `&`
+    (address-of) when calling a `size_t&` reference parameter. Strip
+    the `&`.
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = text.replace(
+        "SetLenOnDrop::new_(&this->len_field)",
+        "SetLenOnDrop::new_(this->len_field)",
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def patch_template_arg_recovery_for_aux_types(cpp_out: Path) -> int:
     """Specific call sites where the transpiler emitted bare names for
     template types (RawVec, PeekMut, IntoIter) without their template
@@ -1114,6 +1134,8 @@ def main(cpp_out: Path):
             patch_intoiter_alias_conflict),
         ("template-arg recovery for RawVec/PeekMut/IntoIter call sites",
             patch_template_arg_recovery_for_aux_types),
+        ("SetLenOnDrop::new_(&this->len_field) → drop the &",
+            patch_setlenondrop_addrof),
         ("wrap RawVec<T,A>::method in IIFE to dodge macro comma",
             patch_macro_template_arg_parens),
         ("auto ret; → int ret = 0; (no-init placeholder)",
