@@ -487,6 +487,29 @@ def patch_aggregate_raw_ptr_to_span_ctor(cpp_out: Path) -> int:
     return n
 
 
+def patch_strip_noreturn_in_template_and_trailing_ret(cpp_out: Path) -> int:
+    """`[[noreturn]]` is being emitted in two positions where C++ rejects it:
+    - Template argument: `SafeFn<[[noreturn]] void(size_t)>` — `[[noreturn]]`
+      gets parsed as `[lambda capture list]`.
+    - Trailing return type: `-> [[noreturn]] void { ... }` — attribute
+      placement is invalid here.
+
+    Strip `[[noreturn]] ` from both positions. The function still works
+    semantically (just loses the noreturn hint).
+    """
+    import re
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # Strip `[[noreturn]]` when followed by `void` (most common case).
+        text = re.sub(r"\[\[noreturn\]\]\s+void", "void", text)
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_strip_ub_checks(cpp_out: Path) -> int:
     """`std::ub_checks::assert_unsafe_precondition!(...)` is a Rust
     nightly intrinsic. Map to a no-op `(void)0` or strip entirely.
@@ -804,6 +827,8 @@ def main(cpp_out: Path):
             patch_stub_dropped_iter_types),
         ("aggregate_raw_ptr<...,auto,auto> → direct std::span ctor",
             patch_aggregate_raw_ptr_to_span_ctor),
+        ("strip [[noreturn]] in template-arg / trailing-return",
+            patch_strip_noreturn_in_template_and_trailing_ret),
         ("strip std::ub_checks::assert_unsafe_precondition",
             patch_strip_ub_checks),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
