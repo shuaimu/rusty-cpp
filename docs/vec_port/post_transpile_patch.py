@@ -349,7 +349,8 @@ def patch_top_level_import_subset(cpp_out: Path) -> int:
         return 0
     text = path.read_text()
     original = text
-    # Keep only raw_vec and set_len_on_drop imports.
+    # Keep only raw_vec and set_len_on_drop (clean baseline).
+    # When vec.cppm builds clean (Phase A2 part 2), add "vec_port.vec".
     keep = {
         "vec_port.raw_vec",
         "vec_port.vec.set_len_on_drop",

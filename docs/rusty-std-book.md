@@ -1931,6 +1931,38 @@ generated `.pcm` files.
 Next iteration: add `vec.cppm` to the build, catalogue its error
 cluster.
 
+#### A2 — vec.cppm preliminary catalogue (deferred)
+
+Adding `vec_port.vec.cppm` to the build surfaces **20 new errors**
+of a structurally different shape from raw_vec's:
+
+- **10× `imports must immediately follow the module declaration`** —
+  module-syntax issue. `vec.cppm` has code/declarations before its
+  imports, which C++20 doesn't allow.
+- **8× references to dropped submodules**: `spec_from_elem`,
+  `peek_mut`, `is_zero`, `into_iter`, `in_place_collect`,
+  `extract_if`, `drain`, `splice` — `vec.cppm` re-exports / uses
+  identifiers from all these auxiliary modules.
+- **1× `std::ub_checks`** — `core::hint::assert_unsafe_precondition`
+  macro family.
+
+These imply two structural problems to solve before `vec.cppm` can
+build standalone:
+1. **Module-declaration order** — patcher needs to find the
+   first `import` and move all imports above the rest of the
+   module body.
+2. **Auxiliary-module dependency chain** — `vec.cppm` is the
+   public surface that re-exports from the helper modules. Either
+   (a) bring those modules in one-by-one (each with its own bug
+   cluster), or (b) hand-stub the symbols `vec.cppm` references so
+   it can stand alone.
+
+For the next iteration, option (b) is cheaper. The functions
+`vec.cppm` references from auxiliary modules are mostly spec-trait
+implementations — the actual `Vec<T>` operations don't need them
+to compile (they only kick in for specialization at instantiation).
+Stub at the namespace level should be enough.
+
 ### 4.3 Phase A error catalogue
 
 The remaining 30 errors map to ~5 root-cause clusters that need
