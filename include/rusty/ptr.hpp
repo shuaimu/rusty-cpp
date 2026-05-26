@@ -61,6 +61,15 @@ private:
         constexpr operator NonNull<U>() const noexcept {
             return NonNull<U>(reinterpret_cast<U*>(ptr_));
         }
+
+        // Rust's `NonNull::cast::<U>().as_non_null_ptr()` chain — the
+        // `as_non_null_ptr` is identity on NonNull<T>. For the CastProxy
+        // form we need an explicit terminator method that the call-site
+        // typing tells us the target U. With CTAD we can't get U here;
+        // fall back to T (no-op cast).
+        constexpr NonNull<T> as_non_null_ptr() const noexcept {
+            return NonNull<T>(ptr_);
+        }
     };
 
 public:

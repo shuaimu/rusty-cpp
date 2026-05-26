@@ -137,6 +137,15 @@ find "$VEC_DIR" "$RAW_VEC_DIR" -name "*.rs" -exec sed -i \
 # the parse tree but can't evaluate the predicate).
 # (Conservative — only remove patterns we've seen blocking specifically.)
 
+# raw_vec/mod.rs::RawVecInner::new_in uses nightly `Unique::from_non_null` and
+# `NonNull::without_provenance` (provenance-aware nightly APIs). Rewrite to
+# the older `Unique::new_unchecked(ptr::without_provenance_mut(addr))`
+# pattern that's already used in deallocate. Transpiler-friendly and
+# semantically identical for our port.
+if [[ -f "$RAW_VEC_DIR/mod.rs" ]]; then
+  sed -i 's|let ptr = Unique::from_non_null(NonNull::without_provenance(align.as_nonzero()));|let ptr = unsafe { Unique::new_unchecked(ptr::without_provenance_mut(align.as_usize())) };|' "$RAW_VEC_DIR/mod.rs"
+fi
+
 # raw_vec/mod.rs::finish_grow uses `if let Some((ptr, old_layout)) = ...`
 # tuple-destructure pattern that the transpiler emits without binding
 # the tuple components. Rewrite to a plain match with explicit field
