@@ -578,6 +578,42 @@ struct SpecCloneIntoVec {
     return 1
 
 
+def patch_template_arg_recovery_for_aux_types(cpp_out: Path) -> int:
+    """Specific call sites where the transpiler emitted bare names for
+    template types (RawVec, PeekMut, IntoIter) without their template
+    args. These appear inside Vec<T, A> methods, so we know T and A
+    are in scope.
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # `RawVec::try_with_capacity_in(...)` → `RawVec<T, A>::try_with_capacity_in(...)`
+    text = text.replace(
+        "RawVec::try_with_capacity_in(",
+        "RawVec<T, A>::try_with_capacity_in(",
+    )
+    text = text.replace(
+        "RawVec::with_capacity_in(",
+        "RawVec<T, A>::with_capacity_in(",
+    )
+    # `PeekMut::new_((*this))` → `PeekMut<T, A>::new_((*this))`
+    text = text.replace(
+        "PeekMut::new_(",
+        "PeekMut<T, A>::new_(",
+    )
+    # `IntoIter into_iter()` (member function return type) → `IntoIter<T, A> into_iter()`
+    text = text.replace(
+        "    IntoIter into_iter() {",
+        "    IntoIter<T, A> into_iter() {",
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def patch_intoiter_alias_conflict(cpp_out: Path) -> int:
     """Inside class Vec<T, A>, the transpiler emits:
         using IntoIter = IntoIter<T, A>;
@@ -999,6 +1035,8 @@ def main(cpp_out: Path):
             patch_hint_slice_iter_namespaces),
         ("strip Vec::IntoIter alias (conflicts with namespace template)",
             patch_intoiter_alias_conflict),
+        ("template-arg recovery for RawVec/PeekMut/IntoIter call sites",
+            patch_template_arg_recovery_for_aux_types),
         ("inject stub SpecFromElem/SpecExtend/SpecFromIter + rusty_ext::spec_extend",
             patch_spec_trait_stubs),
         ("strip std::ub_checks::assert_unsafe_precondition",
