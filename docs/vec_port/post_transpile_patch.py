@@ -340,6 +340,162 @@ def patch_layout_size_align_paren(cpp_out: Path) -> int:
     return n
 
 
+def patch_module_qualified_refs(cpp_out: Path) -> int:
+    """vec.cppm has `raw_vec::RawVec<T, A>`, `into_iter::IntoIter<T, A>`,
+    etc. — submodule-qualified references. C++ modules don't preserve
+    the Rust-style submodule namespace; the imported symbols are
+    flat. Strip the submodule prefix.
+
+    Affects: raw_vec::, peek_mut::, into_iter::, in_place_drop::,
+    spec_from_iter_nested::, spec_from_iter::, spec_from_elem::,
+    spec_extend::, set_len_on_drop::, is_zero::, in_place_collect::,
+    extract_if::, drain::, splice::, partial_eq::, cow::
+    """
+    submodules = [
+        "raw_vec",
+        "peek_mut",
+        "into_iter",
+        "in_place_drop",
+        "in_place_collect",
+        "spec_from_iter_nested",
+        "spec_from_iter",
+        "spec_from_elem",
+        "spec_extend",
+        "set_len_on_drop",
+        "is_zero",
+        "extract_if",
+        "drain",
+        "splice",
+        "partial_eq",
+        "cow",
+    ]
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        for sub in submodules:
+            text = text.replace(f"{sub}::", "")
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_strip_orphan_using_decls(cpp_out: Path) -> int:
+    """After `patch_module_qualified_refs` strips submodule prefixes,
+    `using submodule::Symbol;` declarations become bare `using Symbol;`
+    which is invalid. Strip these lines entirely — they're now redundant
+    (the symbols are already visible from the import).
+    """
+    import re
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # Remove bare `using <ident>;` lines (no namespace qualification).
+        # The valid `using` shapes have :: in them.
+        text = re.sub(r"^using\s+([A-Za-z_][A-Za-z_0-9]*);\s*\n",
+                      "", text, flags=re.MULTILINE)
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
+    """Inject forward-declared stubs for IntoIter / Drain / PeekMut
+    (etc.) so that vec.cppm parses even though the actual modules
+    aren't built. The stubs are empty class templates; any code path
+    that actually uses them will fail at instantiation, which is
+    fine — vec.cppm's `Vec<T>` core API doesn't construct these
+    types at module compile time.
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if "// vec_port stubs for dropped aux types" in text:
+        return 0  # idempotent
+    # Find the `export module` line and inject stubs right after it.
+    import re
+    m = re.search(r"^export module vec_port\.vec;\s*\n", text, re.MULTILINE)
+    if not m:
+        return 0
+    stubs = """
+// vec_port stubs for dropped aux types — see Chapter 4 of rusty-std-book.
+// These are forward-declared placeholders so vec.cppm parses; any code
+// path that actually instantiates them will fail at the use site,
+// which is acceptable for Phase A2 (core compile-only milestone).
+export template<typename T, typename A = rusty::alloc::Global> class IntoIter;
+export template<typename T, typename A = rusty::alloc::Global> class Drain;
+export template<typename T, typename A = rusty::alloc::Global> class ExtractIf;
+export template<typename T, typename A = rusty::alloc::Global> class Splice;
+export template<typename T, typename A = rusty::alloc::Global> class PeekMut;
+
+"""
+    text = text[:m.end()] + stubs + text[m.end():]
+    path.write_text(text)
+    return 1
+
+
+def patch_strip_ub_checks(cpp_out: Path) -> int:
+    """`std::ub_checks::assert_unsafe_precondition!(...)` is a Rust
+    nightly intrinsic. Map to a no-op `(void)0` or strip entirely.
+    Conservatively replace the call site as a no-op.
+    """
+    import re
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # Find `std::ub_checks::assert_unsafe_precondition(...)` (1 paren level).
+        text = re.sub(
+            r"std::ub_checks::assert_unsafe_precondition\(((?:[^()]|\([^()]*\))*)\)",
+            "((void)0)",
+            text,
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_strip_vec_cppm_aux_imports(cpp_out: Path) -> int:
+    """Strip imports of auxiliary modules that aren't in our build
+    (cow, drain, extract_if, in_place_*, into_iter, is_zero,
+    partial_eq, peek_mut, spec_*, splice). Each removed import
+    leaves symbols undeclared — those are handled by later patches
+    (stub injection or commenting out the offending call sites).
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    dropped = [
+        "vec_port.vec.cow",
+        "vec_port.vec.drain",
+        "vec_port.vec.extract_if",
+        "vec_port.vec.in_place_collect",
+        "vec_port.vec.in_place_drop",
+        "vec_port.vec.into_iter",
+        "vec_port.vec.is_zero",
+        "vec_port.vec.partial_eq",
+        "vec_port.vec.peek_mut",
+        "vec_port.vec.spec_extend",
+        "vec_port.vec.spec_from_elem",
+        "vec_port.vec.spec_from_iter",
+        "vec_port.vec.spec_from_iter_nested",
+        "vec_port.vec.splice",
+    ]
+    for mod in dropped:
+        text = text.replace(f"import {mod};\n", "")
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def patch_hoist_imports_after_module_decl(cpp_out: Path) -> int:
     """C++20 requires `import X;` declarations to immediately follow the
     `export module Y;` declaration. The transpiler interleaves struct
@@ -396,11 +552,10 @@ def patch_top_level_import_subset(cpp_out: Path) -> int:
         return 0
     text = path.read_text()
     original = text
-    # Keep only raw_vec and set_len_on_drop (clean baseline).
-    # When vec.cppm builds clean (Phase A2 part 2), add "vec_port.vec".
     keep = {
         "vec_port.raw_vec",
         "vec_port.vec.set_len_on_drop",
+        "vec_port.vec",
     }
     out_lines = []
     for line in text.splitlines(keepends=True):
@@ -552,12 +707,14 @@ add_library(vec_port
     vec_port.cppm
     vec_port.raw_vec.cppm
     vec_port.vec.set_len_on_drop.cppm
+    vec_port.vec.cppm
 )
 
 target_sources(vec_port PUBLIC FILE_SET CXX_MODULES FILES
     vec_port.cppm
     vec_port.raw_vec.cppm
     vec_port.vec.set_len_on_drop.cppm
+    vec_port.vec.cppm
 )
 """
     path.write_text(reduced)
@@ -588,6 +745,16 @@ def main(cpp_out: Path):
             patch_top_level_import_subset),
         ("hoist module-internal imports up to after `export module`",
             patch_hoist_imports_after_module_decl),
+        ("strip vec.cppm imports of dropped aux modules",
+            patch_strip_vec_cppm_aux_imports),
+        ("strip submodule:: qualifiers (flat namespace from import)",
+            patch_module_qualified_refs),
+        ("strip orphan `using X;` decls (no namespace qual)",
+            patch_strip_orphan_using_decls),
+        ("stub dropped aux types (IntoIter/Drain/etc.)",
+            patch_stub_dropped_iter_types),
+        ("strip std::ub_checks::assert_unsafe_precondition",
+            patch_strip_ub_checks),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),
     ]
