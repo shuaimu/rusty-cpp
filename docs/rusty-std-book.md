@@ -1765,6 +1765,30 @@ deterministic seed for the C++ port. Rehash logic moves entries
 en-masse — equivalent to BTreeMap's `slice_insert` for our
 moved-from protocol; expect the same kind of fast-path gating.
 
+**Update after first attempt** (see `docs/hashmap_port/STATUS.md`):
+the ~1-week estimate didn't account for `hashbrown` being a
+separate crate. `std::HashMap` is a thin wrapper; the real
+SwissTable implementation has to be vendored from `hashbrown`
+first. Real total: hashbrown port (5–7 days) + std::HashMap
+wrapper (~1 day). **Revised estimate: ~2 weeks.**
+
+#### Phase 1 actual status (so far)
+
+| Port | Predicted | Actual | Status |
+|------|-----------|--------|--------|
+| Vec  | 1–2 days  | ~1 day | **complete** (Chapter 4) |
+| String | ½ day  | discovered 2–3 day blocker | A1 only — see `docs/string_port/STATUS.md` |
+| HashMap | ~1 week | discovered ~2 week blocker (hashbrown sibling port) | A1 probe — see `docs/hashmap_port/STATUS.md` |
+
+The Vec result matched the prediction. The String and HashMap
+predictions were too low because both depended on sibling crates
+or trait families that were not in scope:
+- String: needs `core::str::Pattern` + `Searcher` infrastructure.
+- HashMap: needs the `hashbrown` crate ported separately.
+
+Updated next-port ordering: **port `core::str` and `hashbrown`
+as sibling Tier 0 projects before resuming String / HashMap**.
+
 #### After these three
 
 Reassess. Likely candidates: `BinaryHeap` (cheap after Vec),
