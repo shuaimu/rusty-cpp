@@ -91,6 +91,27 @@ int main() {
     CHECK(v.as_slice()[0] == 1, "extended[0]");
     CHECK(v.as_slice()[4] == 5, "extended[4]");
 
-    std::printf("ALL CHECKS PASSED\n");
+    // with_capacity (free function on Vec)
+    auto v2 = Vec<int, rusty::alloc::Global>::with_capacity_in(64, rusty::alloc::Global{});
+    CHECK(v2.len() == 0, "with_capacity starts empty");
+    CHECK(v2.capacity() >= 64, "with_capacity sets capacity");
+
+    for (int i = 100; i < 110; ++i) v2.push(i);
+    CHECK(v2.len() == 10, "len after 10 pushes");
+    CHECK(v2.as_slice()[5] == 105, "v2[5]==105");
+
+    // shrink_to_fit
+    v2.shrink_to_fit();
+    CHECK(v2.capacity() == 10, "shrink_to_fit capacity == len");
+    CHECK(v2.len() == 10, "shrink_to_fit preserves len");
+
+    // Compare slice equality
+    int expected[] = {100, 101, 102, 103, 104, 105, 106, 107, 108, 109};
+    auto s = v2.as_slice();
+    bool eq = true;
+    for (size_t i = 0; i < 10; ++i) if (s[i] != expected[i]) eq = false;
+    CHECK(eq, "v2 contents match expected after shrink");
+
+    std::printf("ALL CHECKS PASSED (%d ops covered)\n", 30);
     return 0;
 }

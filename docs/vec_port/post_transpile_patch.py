@@ -756,6 +756,62 @@ def patch_castproxy_implicit_conv(cpp_out: Path) -> int:
     return n
 
 
+def patch_let_pat_double_unwrap(cpp_out: Path) -> int:
+    """Rust destructuring let:
+        let (ptr, layout) = self.current_memory(elem_layout).unwrap();
+    The transpiler emits a `_let_pat` that holds the Option<tuple>
+    and then calls `.unwrap()` twice — once per binding. Option's
+    unwrap is destructive (moves the inner out), so the second
+    unwrap throws "Called unwrap on None".
+
+    Hoist the unwrap onto the binding line so it runs once.
+    Pattern matched: the specific shrink_unchecked emit.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        old = (
+            "        auto&& _let_pat = (this->current_memory(std::move(elem_layout)));\n"
+            "        auto&& ptr_shadow1 = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap())));\n"
+            "        auto&& layout = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap())));"
+        )
+        new = (
+            "        auto _let_pat_inner = (this->current_memory(std::move(elem_layout))).unwrap();\n"
+            "        auto&& ptr_shadow1 = rusty::detail::deref_if_pointer(std::get<0>(_let_pat_inner));\n"
+            "        auto&& layout = rusty::detail::deref_if_pointer(std::get<1>(_let_pat_inner));"
+        )
+        if old in text:
+            text = text.replace(old, new)
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_return_handle_error_void(cpp_out: Path) -> int:
+    """Same pattern as patch_return_assert_failed_void, but for
+    `handle_error` (the panic path for try_allocate_in failures).
+    Emitted as `return handle_error(err)` from an IIFE returning
+    RawVecInner<A>; handle_error itself is void.
+
+    Rewrite to `handle_error(err); std::abort();` — abort's
+    [[noreturn]] satisfies the IIFE's required return type.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = re.sub(
+            r"return\s+::handle_error\(([^;]*?)\);",
+            r"::handle_error(\1); std::abort();",
+            text,
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_spec_extend_slice_iter(cpp_out: Path) -> int:
     """`spec_extend(rusty::slice_iter::Iter<const T> iterator)` tries
     to grab `rusty::as_slice(iterator)` and forward to
@@ -1443,6 +1499,10 @@ def main(cpp_out: Path):
             patch_append_elements_span_param),
         ("hand-port spec_extend(slice_iter::Iter) to copy-out loop",
             patch_spec_extend_slice_iter),
+        ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
+            patch_return_handle_error_void),
+        ("shrink_unchecked: hoist double-unwrap on Option<tuple>",
+            patch_let_pat_double_unwrap),
         ("T::LAYOUT → rusty::alloc::Layout::new_<T>()",
             patch_t_layout_to_layout_new),
         ("T::MAX_SLICE_LEN + size_of<T>() Rust intrinsics",
