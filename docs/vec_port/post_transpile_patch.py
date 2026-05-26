@@ -340,6 +340,53 @@ def patch_layout_size_align_paren(cpp_out: Path) -> int:
     return n
 
 
+def patch_hoist_imports_after_module_decl(cpp_out: Path) -> int:
+    """C++20 requires `import X;` declarations to immediately follow the
+    `export module Y;` declaration. The transpiler interleaves struct
+    declarations / namespace setups between `export module` and the
+    first `import`. Find all `import` lines after the module
+    declaration and hoist them right after it.
+
+    Conservative: only re-orders within the module body; never reorders
+    code before `export module`.
+    """
+    import re
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        # Find the `export module X;` line.
+        m = re.search(r"^export module [^\n;]+;\s*\n", text, re.MULTILINE)
+        if not m:
+            continue
+        body_start = m.end()
+        prefix = text[:body_start]
+        body = text[body_start:]
+        # Find all `import X;` lines in the body.
+        import_re = re.compile(r"^import\s+[^\n;]+;\s*\n", re.MULTILINE)
+        imports = import_re.findall(body)
+        if not imports:
+            continue
+        # Already correctly ordered? Check if every line between body
+        # start and the last import is either an import or whitespace.
+        last_import_end = 0
+        for ie in import_re.finditer(body):
+            last_import_end = ie.end()
+        between = body[:last_import_end]
+        non_import = import_re.sub("", between).strip()
+        if not non_import:
+            # Already in order.
+            continue
+        # Strip all imports from body, then re-prepend them.
+        body_without = import_re.sub("", body)
+        # Build: prefix + imports_block + "\n" + body_without
+        imports_block = "".join(imports)
+        new_text = prefix + imports_block + "\n" + body_without
+        if new_text != text:
+            path.write_text(new_text)
+            n += 1
+    return n
+
+
 def patch_top_level_import_subset(cpp_out: Path) -> int:
     """Match the reduced CMakeLists.txt: strip top-level
     `export import vec_port.X` lines for modules not in the build.
@@ -539,6 +586,8 @@ def main(cpp_out: Path):
             patch_layout_size_align_targeted),
         ("strip top-level imports for dropped modules",
             patch_top_level_import_subset),
+        ("hoist module-internal imports up to after `export module`",
+            patch_hoist_imports_after_module_decl),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),
     ]
