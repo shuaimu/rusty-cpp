@@ -1618,16 +1618,14 @@ inline constexpr add_fn_t add_fn{};
 
 } // namespace ops
 
-// ---- rusty::slice namespace — minimal helpers for vec_port. ----
-namespace slice {
+// ---- rusty::slice_ext namespace — minimal helpers for vec_port.
+// Cannot live in `rusty::slice` because that's a free function in
+// array.hpp; patcher rewrites `slice::range` → `rusty::slice_ext::range`. ----
+namespace slice_ext {
 
 // Mirrors `core::slice::range<R: RangeBounds<usize>>(range, ..len)` —
 // converts a generic range expression + bounds into a concrete
 // (start, end) pair. Returns std::pair<size_t, size_t>.
-//
-// Heuristic: if `r` has start/end members use them; if `bounds` has
-// `end`, use it as the upper bound. Vec-side callers pass either a
-// concrete rusty::range or a range_to/range_from wrapper.
 template<typename R, typename Bounds>
 inline std::pair<std::size_t, std::size_t> range(R r, Bounds bounds) noexcept {
     std::size_t start = 0;
@@ -1644,7 +1642,7 @@ inline std::pair<std::size_t, std::size_t> range(R r, Bounds bounds) noexcept {
     return {start, end};
 }
 
-} // namespace slice
+} // namespace slice_ext
 
 // ---- rusty::iter_ext namespace — `iter_ext::zip(a, b)` helper.
 // Cannot live in `rusty::iter` because that's already a free function;

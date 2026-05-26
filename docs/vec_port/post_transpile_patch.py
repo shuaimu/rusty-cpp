@@ -655,6 +655,41 @@ def patch_box_from_template(cpp_out: Path) -> int:
     return 0
 
 
+def patch_t_layout_to_layout_new(cpp_out: Path) -> int:
+    """`T::LAYOUT` is a Rust trait associated constant that primitive
+    types (like `int`) don't have. Map to `rusty::alloc::Layout::new_<T>()`.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = text.replace("T::LAYOUT", "rusty::alloc::Layout::new_<T>()")
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_castproxy_implicit_conv(cpp_out: Path) -> int:
+    """`this->ptr_field.cast().as_non_null_ptr()` returns NonNull<u8>
+    (CastProxy's source type) but the function returns NonNull<T>.
+    Strip `.as_non_null_ptr()` so the implicit CastProxy → NonNull<T>
+    conversion fires at the return statement.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = text.replace(
+            "this->ptr_field.cast().as_non_null_ptr()",
+            "this->ptr_field.cast()",
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_setlenondrop_addrof(cpp_out: Path) -> int:
     """`SetLenOnDrop::new_(&this->len_field)` — transpiler emitted `&`
     (address-of) when calling a `size_t&` reference parameter. Strip
@@ -759,9 +794,10 @@ def patch_hint_slice_iter_namespaces(cpp_out: Path) -> int:
         # iter::zip(...) → rusty::iter_ext::zip(...) — cannot use
         # rusty::iter:: because `rusty::iter` is a free function.
         text = text.replace("iter::zip(", "rusty::iter_ext::zip(")
-        # slice::range — needs proper implementation. For now point to
-        # a hypothetical rusty::slice::range which we may need to add.
-        text = text.replace("slice::range(", "rusty::slice::range(")
+        # slice::range — `rusty::slice` is a free function in array.hpp,
+        # so we cannot use `rusty::slice::range`. Use `rusty::slice_ext::range`.
+        text = text.replace("rusty::slice::range(", "rusty::slice_ext::range(")
+        text = text.replace("slice::range(", "rusty::slice_ext::range(")
         # ::slice::SpecCloneIntoVec / slice::SpecCloneIntoVec → bare
         # SpecCloneIntoVec (stub defined at module scope without
         # `rusty::slice::` nesting to avoid conflict).
@@ -1136,6 +1172,10 @@ def main(cpp_out: Path):
             patch_template_arg_recovery_for_aux_types),
         ("SetLenOnDrop::new_(&this->len_field) → drop the &",
             patch_setlenondrop_addrof),
+        ("T::LAYOUT → rusty::alloc::Layout::new_<T>()",
+            patch_t_layout_to_layout_new),
+        ("strip .as_non_null_ptr() so CastProxy→NonNull<T> implicit conv fires",
+            patch_castproxy_implicit_conv),
         ("wrap RawVec<T,A>::method in IIFE to dodge macro comma",
             patch_macro_template_arg_parens),
         ("auto ret; → int ret = 0; (no-init placeholder)",
