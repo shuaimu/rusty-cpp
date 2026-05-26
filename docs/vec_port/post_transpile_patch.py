@@ -241,6 +241,10 @@ def patch_global_unit_struct_value(cpp_out: Path) -> int:
             ", rusty::alloc::Global{})",
         )
         text = text.replace(
+            ", rusty::alloc::Global,",
+            ", rusty::alloc::Global{},",
+        )
+        text = text.replace(
             "(rusty::alloc::Global,",
             "(rusty::alloc::Global{},",
         )
@@ -262,16 +266,23 @@ def patch_unchecked_arith_intrinsics(cpp_out: Path) -> int:
     for path in cpp_out.glob("*.cppm"):
         text = path.read_text()
         original = text
-        # `.unchecked_mul(arg)` → ` * arg` (sloppy form). Use carefully —
-        # only matches a single non-paren argument.
+        # `.unchecked_mul(arg)` → ` * arg`. Allow one level of nested
+        # parens to catch forms like `.unchecked_mul(std::move(cap))`.
         text = re.sub(
-            r"\.unchecked_mul\(([^()]+)\)",
+            r"\.unchecked_mul\(((?:[^()]|\([^()]*\))+)\)",
             r" * (\1)",
             text,
         )
-        # Same for unchecked_add / unchecked_sub if they show up
-        text = re.sub(r"\.unchecked_add\(([^()]+)\)", r" + (\1)", text)
-        text = re.sub(r"\.unchecked_sub\(([^()]+)\)", r" - (\1)", text)
+        text = re.sub(
+            r"\.unchecked_add\(((?:[^()]|\([^()]*\))+)\)",
+            r" + (\1)",
+            text,
+        )
+        text = re.sub(
+            r"\.unchecked_sub\(((?:[^()]|\([^()]*\))+)\)",
+            r" - (\1)",
+            text,
+        )
         if text != original:
             path.write_text(text)
             n += 1
@@ -299,6 +310,53 @@ def patch_without_provenance_mut(cpp_out: Path) -> int:
         text = text.replace(
             "rusty::ptr::without_provenance_mut(",
             "reinterpret_cast<uint8_t*>(",
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_layout_size_align_paren(cpp_out: Path) -> int:
+    """`Layout.size()` and `Layout.align()` in rustc are methods, but our
+    `rusty::alloc::Layout` has `size` and `align` as fields (can't make
+    them methods due to name conflict with field). Strip the parens
+    from `.size()` and `.align()` calls on Layout objects.
+
+    Conservative: only strip when `()` is followed by space or `;` `,`
+    `)` `.` `<` `=` (i.e., not when chained with another method call).
+    """
+    import re
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # `.size()` followed by a "stop" character → just `.size`
+        text = re.sub(r"\.size\(\)(\s*[;,)\.<=])", r".size\1", text)
+        text = re.sub(r"\.align\(\)(\s*[;,)\.<=])", r".align\1", text)
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_layout_size_align_targeted(cpp_out: Path) -> int:
+    """Targeted replacements for `Layout.size()` / `Layout.align()` at
+    the specific known sites where they cause errors. Conservative
+    list maintained by hand; expanded as new sites are surfaced.
+
+    The general regex form is too aggressive — it would strip `.size()`
+    from std::span and other valid call sites.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # raw_vec layout_array:
+        #   `elem_layout.size == elem_layout.pad_to_align().size()`
+        text = text.replace(
+            "elem_layout.pad_to_align().size()",
+            "elem_layout.pad_to_align().size",
         )
         if text != original:
             path.write_text(text)
@@ -428,6 +486,12 @@ def main(cpp_out: Path):
         ("usize::unchecked_mul/add/sub → operators", patch_unchecked_arith_intrinsics),
         ("ptr::without_provenance_mut → reinterpret_cast", patch_without_provenance_mut),
         ("handle_error body stub (4 mixed emit bugs)", patch_handle_error_function),
+        # ("Layout.size()/.align() → field access", patch_layout_size_align_paren),
+        # ^ DISABLED: regex too aggressive; hits std::span::size and others.
+        #   Need a context-aware rewrite (only on Layout-typed exprs).
+        #   Targeted alternative: patch the specific exprs by exact match.
+        ("Layout.size()/.align() targeted (specific call sites)",
+            patch_layout_size_align_targeted),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),
     ]
