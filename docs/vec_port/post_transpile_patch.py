@@ -542,11 +542,11 @@ namespace rusty_ext {
 }
 
 // SpecFromElem stub — real impl in dropped spec_from_elem module.
+// (Body uses `auto`/`decltype` to avoid forward-referencing Vec.)
 struct SpecFromElem {
     template<typename T, typename A>
-    static auto from_elem(T elem, std::size_t n, A alloc) -> Vec<T, A> {
-        // Stub: returns empty Vec. Real impl would replicate elem n times.
-        return Vec<T, A>::new_in(std::move(alloc));
+    static auto from_elem(T elem, std::size_t n, A alloc) {
+        return decltype(Vec<T, A>::new_in(std::move(alloc)))::new_in(std::move(alloc));
     }
 };
 
@@ -554,16 +554,26 @@ struct SpecFromElem {
 template<typename T, typename Iter>
 struct SpecFromIter {
     template<typename I>
-    static auto from_iter(I) -> Vec<T> {
-        return Vec<T>{};
+    static auto from_iter(I) {
+        return decltype(Vec<T>{}){};
     }
 };
 
 // SpecExtend stub.
 template<typename T, typename Iter>
 struct SpecExtend {
-    template<typename Vec, typename I>
-    static void spec_extend(Vec&, I) {}
+    template<typename V, typename I>
+    static void spec_extend(V&, I) {}
+};
+
+// SpecCloneIntoVec stub — bridge for slice::clone_from_slice.
+// Cannot nest in `namespace rusty::slice` because the module-scope
+// `rusty::slice` would conflict with the header-level one.
+// Patcher rewrites `::slice::SpecCloneIntoVec` / `slice::SpecCloneIntoVec`
+// to bare `SpecCloneIntoVec` for these stubs.
+struct SpecCloneIntoVec {
+    template<typename Src, typename Dst>
+    static void clone_into(Src, Dst&) {}
 };
 
 """
@@ -623,6 +633,11 @@ def patch_hint_slice_iter_namespaces(cpp_out: Path) -> int:
         # slice::range — needs proper implementation. For now point to
         # a hypothetical rusty::slice::range which we may need to add.
         text = text.replace("slice::range(", "rusty::slice::range(")
+        # ::slice::SpecCloneIntoVec / slice::SpecCloneIntoVec → bare
+        # SpecCloneIntoVec (stub defined at module scope without
+        # `rusty::slice::` nesting to avoid conflict).
+        text = text.replace("::slice::SpecCloneIntoVec", "SpecCloneIntoVec")
+        text = text.replace("slice::SpecCloneIntoVec", "SpecCloneIntoVec")
         if text != original:
             path.write_text(text)
             n += 1
@@ -856,9 +871,12 @@ def patch_hint_assert_unchecked(cpp_out: Path) -> int:
     for path in cpp_out.glob("*.cppm"):
         text = path.read_text()
         original = text
-        text = text.replace("hint::assert_unchecked(", "__builtin_assume(")
-        # Sometimes emitted with full path
+        # Order matters: longest prefix first so we don't leave dangling `rusty::__builtin_assume(`.
+        text = text.replace("rusty::hint::assert_unchecked(", "__builtin_assume(")
         text = text.replace("core::hint::assert_unchecked(", "__builtin_assume(")
+        text = text.replace("hint::assert_unchecked(", "__builtin_assume(")
+        # If a prior pass produced `rusty::__builtin_assume(`, fix it up.
+        text = text.replace("rusty::__builtin_assume(", "__builtin_assume(")
         if text != original:
             path.write_text(text)
             n += 1
