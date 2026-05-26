@@ -250,6 +250,62 @@ def patch_global_unit_struct_value(cpp_out: Path) -> int:
     return n
 
 
+def patch_unchecked_arith_intrinsics(cpp_out: Path) -> int:
+    """`usize::unchecked_mul(a, b)` is a Rust nightly intrinsic — replace
+    method-call form `expr.unchecked_mul(arg)` with `(expr * arg)`.
+
+    Loses overflow-UB semantics, but for our use sites (vec capacity
+    arithmetic) overflow is checked upstream.
+    """
+    import re
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # `.unchecked_mul(arg)` → ` * arg` (sloppy form). Use carefully —
+        # only matches a single non-paren argument.
+        text = re.sub(
+            r"\.unchecked_mul\(([^()]+)\)",
+            r" * (\1)",
+            text,
+        )
+        # Same for unchecked_add / unchecked_sub if they show up
+        text = re.sub(r"\.unchecked_add\(([^()]+)\)", r" + (\1)", text)
+        text = re.sub(r"\.unchecked_sub\(([^()]+)\)", r" - (\1)", text)
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_without_provenance_mut(cpp_out: Path) -> int:
+    """`ptr::without_provenance_mut(addr)` is a nightly fn that
+    constructs a raw pointer from a usize address. C++ equivalent is
+    just `reinterpret_cast<T*>(addr)`. For now, map to a small inline
+    helper or just cast.
+
+    Used in raw_vec to create a dangling-aligned pointer for
+    zero-capacity vecs. Replace `ptr::without_provenance_mut(addr)`
+    with `reinterpret_cast<uint8_t*>(addr)`.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = text.replace(
+            "ptr::without_provenance_mut(",
+            "reinterpret_cast<uint8_t*>(",
+        )
+        text = text.replace(
+            "rusty::ptr::without_provenance_mut(",
+            "reinterpret_cast<uint8_t*>(",
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_hint_assert_unchecked(cpp_out: Path) -> int:
     """`core::hint::assert_unchecked(cond)` is a Rust intrinsic that
     tells the compiler `cond` is true. Map to `__builtin_assume(cond)`
@@ -328,6 +384,8 @@ def main(cpp_out: Path):
         ("Cap alias declaration order", patch_cap_alias_order),
         ("rusty::alloc::Global → Global{}", patch_global_unit_struct_value),
         ("bare CapacityOverflow → fully-qualified", patch_bare_capacity_overflow),
+        ("usize::unchecked_mul/add/sub → operators", patch_unchecked_arith_intrinsics),
+        ("ptr::without_provenance_mut → reinterpret_cast", patch_without_provenance_mut),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),
     ]
