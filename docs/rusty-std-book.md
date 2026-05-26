@@ -1963,6 +1963,49 @@ implementations — the actual `Vec<T>` operations don't need them
 to compile (they only kick in for specialization at instantiation).
 Stub at the namespace level should be enough.
 
+#### A2 — Full core Vec.cppm COMPILES ✅ (commit `56bcb1f`)
+
+After 27 iterations of cluster-by-cluster patching, vec.cppm
+achieves **0 build errors**:
+
+```
+20 → 20 (kind-shift 5×) → 19 → 17 → 15 → 12 → 11 → 10 → 7 → 2 → 0
+```
+
+**Final patcher state**: 38 patches in `post_transpile_patch.py`,
+5 prep.sh rewrites. Highlights of the long-tail Phase A2 work:
+
+| Cluster | Fix |
+|---|---|
+| iter / slice namespace ambiguity | `rusty::iter_ext` for `zip`, add `rusty::slice::range` |
+| `aggregate_raw_ptr<…, auto, auto>` | strip to direct `std::span<T>` ctor |
+| `[[noreturn]] void` in template arg | strip the attribute (clang parses as lambda capture) |
+| `Vec::IntoIter` alias | strip — conflicts with namespace template |
+| auxiliary spec-trait calls | stub `SpecFromElem`, `SpecExtend`, `SpecFromIter`, `SpecCloneIntoVec` |
+| `hint::*` / `intrinsics::*` | map to `__builtin_assume` / identity strip |
+| `RawVec<T,A>::method` inside `RUSTY_TRY_INTO` macro | wrap in IIFE to dodge comma-eating macro |
+| Variadic stub templates for `IntoIter`/`Drain`/`PeekMut`/etc. | `template<typename... Ts> class X;` so call sites with any arity work |
+| `SetLenOnDrop::new_(&this->len_field)` | strip `&` — transpiler emitted address-of for ref-param |
+
+**Build artifact**: `/tmp/vec_port/cpp_out/build/libvec_port.a`
+(480 KB), 4 PCM files:
+- `vec_port.pcm` (top-level)
+- `vec_port.raw_vec.pcm`
+- `vec_port.vec.set_len_on_drop.pcm`
+- **`vec_port.vec.pcm` (the actual `Vec<T, A>` module!)**
+
+#### A2 → B transition: smoke test reveals template-instantiation gaps
+
+The PCM compiles, but `Vec<int, Global>::new_in(Global{})` instantiation
+surfaces deeper issues — `NonNull<u8>` → `NonNull<int>` conversion path,
+etc. This is the natural Phase A → B boundary: "declarations parse" vs
+"instantiation works."
+
+Phase B work (next session): peel template-instantiation cascades by
+exercising the API with concrete types and patching each emit-shape
+issue that surfaces. Same iteration loop, narrower scope (only
+methods actually called by the smoke test).
+
 ### 4.3 Phase A error catalogue
 
 The remaining 30 errors map to ~5 root-cause clusters that need
