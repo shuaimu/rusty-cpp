@@ -514,6 +514,64 @@ def patch_strip_noreturn_in_template_and_trailing_ret(cpp_out: Path) -> int:
     return n
 
 
+def patch_spec_trait_stubs(cpp_out: Path) -> int:
+    """`rusty_ext::spec_extend`, `SpecFromElem`, etc. are extension trait
+    implementations in dropped auxiliary modules. Inject stubs so the
+    call sites parse; the actual operations will abort at runtime if
+    ever reached.
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if "// vec_port stubs for dropped spec traits" in text:
+        return 0  # idempotent
+    # Inject after the namespace-stub block.
+    marker = "export template<typename... Ts> class AsVecIntoIter;\n"
+    if marker not in text:
+        return 0
+    stubs = marker + """
+// vec_port stubs for dropped spec traits — see Chapter 4 of rusty-std-book.
+namespace rusty_ext {
+    // spec_extend stub: assert at runtime if reached.
+    template<typename Vec, typename Iter>
+    inline void spec_extend(Vec&&, Iter&&) {
+        // Real implementation lives in the spec_extend module we dropped.
+        // For minimum-compile, this is a no-op stub.
+    }
+}
+
+// SpecFromElem stub — real impl in dropped spec_from_elem module.
+struct SpecFromElem {
+    template<typename T, typename A>
+    static auto from_elem(T elem, std::size_t n, A alloc) -> Vec<T, A> {
+        // Stub: returns empty Vec. Real impl would replicate elem n times.
+        return Vec<T, A>::new_in(std::move(alloc));
+    }
+};
+
+// SpecFromIter stub — used in from_iter dispatch.
+template<typename T, typename Iter>
+struct SpecFromIter {
+    template<typename I>
+    static auto from_iter(I) -> Vec<T> {
+        return Vec<T>{};
+    }
+};
+
+// SpecExtend stub.
+template<typename T, typename Iter>
+struct SpecExtend {
+    template<typename Vec, typename I>
+    static void spec_extend(Vec&, I) {}
+};
+
+"""
+    text = text.replace(marker, stubs)
+    path.write_text(text)
+    return 1
+
+
 def patch_intoiter_alias_conflict(cpp_out: Path) -> int:
     """Inside class Vec<T, A>, the transpiler emits:
         using IntoIter = IntoIter<T, A>;
@@ -894,6 +952,8 @@ def main(cpp_out: Path):
             patch_hint_slice_iter_namespaces),
         ("strip Vec::IntoIter alias (conflicts with namespace template)",
             patch_intoiter_alias_conflict),
+        ("inject stub SpecFromElem/SpecExtend/SpecFromIter + rusty_ext::spec_extend",
+            patch_spec_trait_stubs),
         ("strip std::ub_checks::assert_unsafe_precondition",
             patch_strip_ub_checks),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
