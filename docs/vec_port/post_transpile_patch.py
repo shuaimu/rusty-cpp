@@ -530,8 +530,9 @@ def patch_hint_slice_iter_namespaces(cpp_out: Path) -> int:
         # hint::unlikely(x) → (x). The branch hint is lost; doesn't change semantics.
         text = re.sub(r"hint::unlikely\(((?:[^()]|\([^()]*\))*)\)", r"(\1)", text)
         text = re.sub(r"hint::likely\(((?:[^()]|\([^()]*\))*)\)", r"(\1)", text)
-        # iter::zip(...) → rusty::iter::zip(...)
-        text = text.replace("iter::zip(", "rusty::iter::zip(")
+        # iter::zip(...) → rusty::iter_ext::zip(...) — cannot use
+        # rusty::iter:: because `rusty::iter` is a free function.
+        text = text.replace("iter::zip(", "rusty::iter_ext::zip(")
         # slice::range — needs proper implementation. For now point to
         # a hypothetical rusty::slice::range which we may need to add.
         text = text.replace("slice::range(", "rusty::slice::range(")
