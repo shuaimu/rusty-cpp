@@ -181,7 +181,7 @@ def patch_bare_capacity_overflow(cpp_out: Path) -> int:
         # ctor form `CapacityOverflow(...)` which is a function call).
         # Match: `CapacityOverflow` not followed by `(`
         text = re.sub(
-            r"\bCapacityOverflow\b(?!\s*\()",
+            r"(?<!TryReserveErrorKind::)\bCapacityOverflow\b(?!\s*\()",
             "rusty::collections::TryReserveErrorKind::CapacityOverflow",
             text,
         )
@@ -756,6 +756,147 @@ def patch_castproxy_implicit_conv(cpp_out: Path) -> int:
     return n
 
 
+def patch_spec_extend_slice_iter(cpp_out: Path) -> int:
+    """`spec_extend(rusty::slice_iter::Iter<const T> iterator)` tries
+    to grab `rusty::as_slice(iterator)` and forward to
+    `append_elements`, but `as_slice` on Iter returns
+    `span<const Elem>` with Elem = const T (so `span<const const T>`),
+    which doesn't convert to the `span<const T>` parameter.
+
+    Hand-port the body to a simple copy-out loop using `.next()`.
+    Works for any T that's copyable (which is exactly when this path
+    is reachable from `extend_from_slice`).
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        old = (
+            "    void spec_extend(rusty::slice_iter::Iter<const T> iterator) {\n"
+            "        auto slice = rusty::as_slice(iterator);\n"
+            "        // @unsafe\n"
+            "        {\n"
+            "            this->append_elements(slice);\n"
+            "        }\n"
+            "    }"
+        )
+        new = (
+            "    void spec_extend(rusty::slice_iter::Iter<const T> iterator) {\n"
+            "        while (true) {\n"
+            "            auto opt = iterator.next();\n"
+            "            if (opt.is_none()) break;\n"
+            "            T value = *opt.unwrap();\n"
+            "            this->push_mut(std::move(value));\n"
+            "        }\n"
+            "    }"
+        )
+        if old in text:
+            text = text.replace(old, new)
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_append_elements_span_param(cpp_out: Path) -> int:
+    """Rust source: `unsafe fn append_elements(&mut self, other: *const [T])`
+    transpiles to `append_elements(std::add_pointer_t<std::add_const_t<
+    std::span<const T>>> other)` — but the body then uses
+    `rusty::len(other)` (fails: pointer doesn't have size()) and
+    `reinterpret_cast<T const*>(other)` (also broken).
+
+    Rewrite the parameter to plain `std::span<const T> other` and the
+    body's reinterpret_cast to `other.data()`. Then strip the same
+    cast-chain at call sites: pass `as_slice(...)` directly.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # 1. Parameter type: pointer-to-span → value span
+        text = text.replace(
+            "void append_elements(std::add_pointer_t<std::add_const_t<std::span<const T>>> other)",
+            "void append_elements(std::span<const T> other)",
+        )
+        # 2. Body: reinterpret_cast<T const*>(other) → other.data()
+        text = text.replace(
+            "reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(other)",
+            "other.data()",
+        )
+        # 3. Call sites: strip the const_cast/reinterpret_cast/addr_of_temp
+        #    chain wrapping `rusty::as_slice(...)`. Replace the whole
+        #    chain with the inner as_slice call.
+        text = re.sub(
+            r"const_cast<std::add_pointer_t<std::add_const_t<std::span<const T>>>>\(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<std::span<const T>>>>>\(rusty::addr_of_temp\(std::move\(rusty::as_slice\(([^)]+)\)\)\)\)\)",
+            r"rusty::as_slice(\1)",
+            text,
+        )
+        # 4. spec_extend(slice_iter::Iter) body: was `auto& slice =
+        #    rusty::as_slice(...);` then `append_elements(slice)`.
+        #    Drop the &; now passes by value matching the new param.
+        text = text.replace(
+            "auto& slice = rusty::as_slice(iterator);",
+            "auto slice = rusty::as_slice(iterator);",
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_return_assert_failed_void(cpp_out: Path) -> int:
+    """Rust panic paths translate as `return panic_fn(...)` where
+    panic_fn returns `!` — but in C++ it returns void, and the IIFE
+    expects to return T. Pattern in IIFE arms:
+        if (_m.is_none()) { return assert_failed(...); }
+    Replace `return assert_failed(...)` with `assert_failed(...);
+    std::abort()` so abort's [[noreturn]] makes the dead path
+    type-check (and the abort inside assert_failed itself still runs).
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = re.sub(
+            r"return\s+assert_failed\(([^;]*?)\);",
+            r"assert_failed(\1); std::abort();",
+            text,
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_println_assert_lambdas(cpp_out: Path) -> int:
+    """The transpiler emits assertion paths as:
+        SafeFn<void(...)> assert_failed = +[](...) -> void {
+            std::println(stderr, "msg (is {var}) ...");
+            std::abort();
+        };
+    Two problems:
+    1. libstdc++ marks parts of std::println as consteval, which
+       makes the lambda's operator() implicitly immediate — clang
+       then rejects `+lambda` ("cannot take address of immediate
+       call operator outside of an immediate invocation").
+    2. The format strings use Rust-style named placeholders
+       (`{index}`, `{len}`) that std::format doesn't accept.
+    Both are dead-end abort paths, so collapse them to fprintf.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = re.sub(
+            r'std::println\(stderr, "[^"]*"\);',
+            r'std::fprintf(stderr, "[vec_port] assertion failed\\n");',
+            text,
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_slice_ref_tmp_static(cpp_out: Path) -> int:
     """The transpiler emits lifetime-extension IIFEs like:
         [&]() -> std::span<const T> {
@@ -1294,6 +1435,14 @@ def main(cpp_out: Path):
             patch_as_mut_slice_pointer_wrap),
         ("drop `static` from _slice_ref_tmp lifetime-extension IIFEs",
             patch_slice_ref_tmp_static),
+        ("collapse std::println assert messages to std::fprintf",
+            patch_println_assert_lambdas),
+        ("`return assert_failed(...)` → `assert_failed(...); std::abort()`",
+            patch_return_assert_failed_void),
+        ("append_elements param: pointer-to-span → value span",
+            patch_append_elements_span_param),
+        ("hand-port spec_extend(slice_iter::Iter) to copy-out loop",
+            patch_spec_extend_slice_iter),
         ("T::LAYOUT → rusty::alloc::Layout::new_<T>()",
             patch_t_layout_to_layout_new),
         ("T::MAX_SLICE_LEN + size_of<T>() Rust intrinsics",

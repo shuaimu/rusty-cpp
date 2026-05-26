@@ -49,19 +49,47 @@ int main() {
     std::printf("after 20 more pushes: len=%zu, capacity=%zu\n",
                 v.len(), v.capacity());
 
-    std::printf("right before as_slice: len=%zu capacity=%zu\n", v.len(), v.capacity());
     auto slice2 = v.as_slice();
-    std::printf("post-realloc slice (size=%zu): ", slice2.size());
-    for (size_t i = 0; i < slice2.size(); ++i) std::printf("%d ", slice2[i]);
-    std::printf("\n");
     CHECK(slice2[0] == 10, "slice2[0] still 10 after reallocs");
     CHECK(slice2[1] == 20, "slice2[1] still 20 after reallocs");
     CHECK(slice2[21] == 19 * 100, "last element correct");
 
-    // Clear
+    // truncate
+    v.truncate(5);
+    CHECK(v.len() == 5, "len after truncate(5)");
+    CHECK(v.as_slice()[4] == 200, "element 4 still 200 after truncate");
+
+    // insert / remove
+    v.insert(0, 999);
+    CHECK(v.len() == 6, "len after insert");
+    CHECK(v.as_slice()[0] == 999, "inserted at front");
+    CHECK(v.as_slice()[1] == 10, "shifted right");
+
+    auto removed = v.remove(0);
+    CHECK(removed == 999, "remove returns inserted value");
+    CHECK(v.len() == 5, "len after remove");
+    CHECK(v.as_slice()[0] == 10, "shifted back left");
+
+    // swap_remove
+    v.push(7777);  // len=6, last is 7777
+    auto sw = v.swap_remove(1);  // remove [1]=20, last (7777) moves to [1]
+    CHECK(sw == 20, "swap_remove returns 20");
+    CHECK(v.len() == 5, "len after swap_remove");
+    CHECK(v.as_slice()[1] == 7777, "swap_remove swapped last in");
+
+    // clear
     v.clear();
     CHECK(v.len() == 0, "len after clear");
     CHECK(v.is_empty(), "is_empty after clear");
+
+    // reserve / extend_from_slice
+    v.reserve(100);
+    CHECK(v.capacity() >= 100, "reserve grew capacity");
+    int seed[] = {1, 2, 3, 4, 5};
+    v.extend_from_slice(std::span<const int>(seed, 5));
+    CHECK(v.len() == 5, "extend_from_slice added 5");
+    CHECK(v.as_slice()[0] == 1, "extended[0]");
+    CHECK(v.as_slice()[4] == 5, "extended[4]");
 
     std::printf("ALL CHECKS PASSED\n");
     return 0;
