@@ -443,11 +443,15 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
 // These are forward-declared placeholders so vec.cppm parses; any code
 // path that actually instantiates them will fail at the use site,
 // which is acceptable for Phase A2 (core compile-only milestone).
-export template<typename T, typename A = rusty::alloc::Global> class IntoIter;
-export template<typename T, typename A = rusty::alloc::Global> class Drain;
-export template<typename T, typename A = rusty::alloc::Global> class ExtractIf;
-export template<typename T, typename A = rusty::alloc::Global> class Splice;
-export template<typename T, typename A = rusty::alloc::Global> class PeekMut;
+//
+// Variadic templates accept any arity (rustc uses 2-4 type params
+// across these types after dropping the lifetime).
+export template<typename... Ts> class IntoIter;
+export template<typename... Ts> class Drain;
+export template<typename... Ts> class ExtractIf;
+export template<typename... Ts> class Splice;
+export template<typename... Ts> class PeekMut;
+export template<typename... Ts> class AsVecIntoIter;
 
 """
     text = text[:insert_at] + stubs + text[insert_at:]
