@@ -756,6 +756,58 @@ def patch_castproxy_implicit_conv(cpp_out: Path) -> int:
     return n
 
 
+def patch_slice_ref_tmp_static(cpp_out: Path) -> int:
+    """The transpiler emits lifetime-extension IIFEs like:
+        [&]() -> std::span<const T> {
+            static const auto _slice_ref_tmp = ...;
+            return std::span<const T>(_slice_ref_tmp);
+        }();
+    The `static` makes the slice persist across calls — the buffer
+    pointer captured on first invocation never refreshes after Vec
+    grows, so callers see a dangling span with stale len. Drop
+    `static` so the binding is a normal local recomputed every call.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = text.replace(
+            "static const auto _slice_ref_tmp =",
+            "const auto _slice_ref_tmp =",
+        )
+        text = text.replace(
+            "static auto _slice_ref_tmp =",
+            "auto _slice_ref_tmp =",
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_as_mut_slice_pointer_wrap(cpp_out: Path) -> int:
+    """Rust source: `let elems: *mut [T] = self.as_mut_slice();`
+    transpiles to:
+        const std::add_pointer_t<std::span<T>> elems = rusty::as_mut_slice(...);
+    but `as_mut_slice` returns `std::span<T>` by value, not a pointer.
+    Drop the `std::add_pointer_t<>` wrap so `elems` is a span and the
+    `drop_in_place(RangeLike)` overload fires.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = re.sub(
+            r"std::add_pointer_t<std::span<([^>]+)>>\s+(\w+)\s*=\s*rusty::as_mut_slice\(",
+            r"std::span<\1> \2 = rusty::as_mut_slice(",
+            text,
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_setlenondrop_addrof(cpp_out: Path) -> int:
     """`SetLenOnDrop::new_(&this->len_field)` — transpiler emitted `&`
     (address-of) when calling a `size_t&` reference parameter. Strip
@@ -1238,6 +1290,10 @@ def main(cpp_out: Path):
             patch_template_arg_recovery_for_aux_types),
         ("SetLenOnDrop::new_(&this->len_field) → drop the &",
             patch_setlenondrop_addrof),
+        ("strip std::add_pointer_t<std::span<T>> on as_mut_slice() binding",
+            patch_as_mut_slice_pointer_wrap),
+        ("drop `static` from _slice_ref_tmp lifetime-extension IIFEs",
+            patch_slice_ref_tmp_static),
         ("T::LAYOUT → rusty::alloc::Layout::new_<T>()",
             patch_t_layout_to_layout_new),
         ("T::MAX_SLICE_LEN + size_of<T>() Rust intrinsics",
