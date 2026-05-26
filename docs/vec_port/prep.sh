@@ -137,5 +137,53 @@ find "$VEC_DIR" "$RAW_VEC_DIR" -name "*.rs" -exec sed -i \
 # the parse tree but can't evaluate the predicate).
 # (Conservative — only remove patterns we've seen blocking specifically.)
 
+# raw_vec/mod.rs::finish_grow uses `if let Some((ptr, old_layout)) = ...`
+# tuple-destructure pattern that the transpiler emits without binding
+# the tuple components. Rewrite to a plain match with explicit field
+# access — transpiler-friendly and semantically identical.
+#
+# Affects: raw_vec/mod.rs::finish_grow L548-558.
+if [[ -f "$RAW_VEC_DIR/mod.rs" ]]; then
+  python3 - "$RAW_VEC_DIR/mod.rs" <<'PYEOF'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+old = """        let memory = if let Some((ptr, old_layout)) = unsafe { self.current_memory(elem_layout) } {
+            // FIXME(const-hack): switch to `debug_assert_eq`
+            debug_assert!(old_layout.align() == new_layout.align());
+            unsafe {
+                // The allocator checks for alignment equality
+                hint::assert_unchecked(old_layout.align() == new_layout.align());
+                self.alloc.grow(ptr, old_layout, new_layout)
+            }
+        } else {
+            self.alloc.allocate(new_layout)
+        };"""
+new = """        let _curmem = unsafe { self.current_memory(elem_layout) };
+        let memory = if _curmem.is_some() {
+            let _pair = _curmem.unwrap();
+            let ptr = _pair.0;
+            let old_layout = _pair.1;
+            // FIXME(const-hack): switch to `debug_assert_eq`
+            debug_assert!(old_layout.align() == new_layout.align());
+            unsafe {
+                // The allocator checks for alignment equality
+                hint::assert_unchecked(old_layout.align() == new_layout.align());
+                self.alloc.grow(ptr, old_layout, new_layout)
+            }
+        } else {
+            self.alloc.allocate(new_layout)
+        };"""
+if old in s and new not in s:
+    s = s.replace(old, new)
+    p.write_text(s)
+    print("  rewrote finish_grow if-let-tuple-destructure")
+elif new in s:
+    print("  finish_grow already rewritten (idempotent)")
+else:
+    print("  WARNING: finish_grow pattern not found exactly — may need re-checking")
+PYEOF
+fi
+
 echo "prep.sh complete: vec_dir=$VEC_DIR raw_vec_dir=$RAW_VEC_DIR"
 echo "(idempotent — safe to re-run)"

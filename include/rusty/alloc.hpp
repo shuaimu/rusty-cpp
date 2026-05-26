@@ -24,6 +24,14 @@ struct Layout {
     std::size_t size;
     std::size_t align;
 
+    // Rust-style accessor mirroring `core::alloc::Layout::alignment()`.
+    // (`.size()` and `.align()` are mapped via post_transpile_patch.py
+    // strip-parens, since they conflict with field names.)
+    // Added for vec_port.
+    constexpr rusty::ptr::Alignment alignment() const noexcept {
+        return rusty::ptr::Alignment(align);
+    }
+
     static constexpr Layout from_size_align_unchecked(
         std::size_t size,
         std::size_t align) noexcept {
