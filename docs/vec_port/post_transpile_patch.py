@@ -542,21 +542,17 @@ namespace rusty_ext {
 }
 
 // SpecFromElem stub — real impl in dropped spec_from_elem module.
-// (Body uses `auto`/`decltype` to avoid forward-referencing Vec.)
+// Returns auto with no body referencing Vec — defer to instantiation.
 struct SpecFromElem {
     template<typename T, typename A>
-    static auto from_elem(T elem, std::size_t n, A alloc) {
-        return decltype(Vec<T, A>::new_in(std::move(alloc)))::new_in(std::move(alloc));
-    }
+    static auto from_elem(T elem, std::size_t n, A alloc);
 };
 
 // SpecFromIter stub — used in from_iter dispatch.
 template<typename T, typename Iter>
 struct SpecFromIter {
     template<typename I>
-    static auto from_iter(I) {
-        return decltype(Vec<T>{}){};
-    }
+    static auto from_iter(I);
 };
 
 // SpecExtend stub.
@@ -882,6 +878,11 @@ def patch_rusty_intrinsics_stubs(cpp_out: Path) -> int:
         # rusty::intrinsics::assume(x) → __builtin_assume(x)
         text = text.replace(
             "rusty::intrinsics::assume(",
+            "__builtin_assume(",
+        )
+        # Also bare `intrinsics::assume(` (no rusty:: prefix)
+        text = text.replace(
+            "intrinsics::assume(",
             "__builtin_assume(",
         )
         if text != original:
