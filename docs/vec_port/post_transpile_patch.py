@@ -455,6 +455,38 @@ export template<typename T, typename A = rusty::alloc::Global> class PeekMut;
     return 1
 
 
+def patch_aggregate_raw_ptr_to_span_ctor(cpp_out: Path) -> int:
+    """Rust's `intrinsics::aggregate_raw_ptr::<&[T], _, _>(ptr, len)`
+    constructs a slice from ptr+len. The transpiler emits it with
+    `auto, auto>` template args (Rust's `_`), which C++ rejects.
+
+    Replace the wrapping pattern with a direct std::span constructor call.
+    The slice/span type is in the outer return type position, so we can
+    extract it from the template-arg [0] of aggregate_raw_ptr.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        # The two observed patterns:
+        # std::add_pointer_t<std::add_const_t<std::span<const T>>>, auto, auto
+        # std::add_pointer_t<std::span<T>>, auto, auto
+        # Strip the outer aggregate_raw_ptr<...>, replacing the whole
+        # thing with the inner span type for a direct ctor call.
+        text = text.replace(
+            "rusty::intrinsics::aggregate_raw_ptr<std::add_pointer_t<std::add_const_t<std::span<const T>>>, auto, auto>",
+            "std::span<const T>",
+        )
+        text = text.replace(
+            "rusty::intrinsics::aggregate_raw_ptr<std::add_pointer_t<std::span<T>>, auto, auto>",
+            "std::span<T>",
+        )
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_strip_ub_checks(cpp_out: Path) -> int:
     """`std::ub_checks::assert_unsafe_precondition!(...)` is a Rust
     nightly intrinsic. Map to a no-op `(void)0` or strip entirely.
@@ -770,6 +802,8 @@ def main(cpp_out: Path):
             patch_strip_orphan_using_decls),
         ("stub dropped aux types (IntoIter/Drain/etc.)",
             patch_stub_dropped_iter_types),
+        ("aggregate_raw_ptr<...,auto,auto> → direct std::span ctor",
+            patch_aggregate_raw_ptr_to_span_ctor),
         ("strip std::ub_checks::assert_unsafe_precondition",
             patch_strip_ub_checks),
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
