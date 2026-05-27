@@ -2218,15 +2218,15 @@ Closed since last revision:
   forced realloc with 13 elements. ASAN-clean (no leaks, no
   use-after-free during move-during-realloc). Tests in
   `docs/vec_port/vec_box_test.cpp` and `vec_string_test.cpp`.
+- ✅ **partial_eq cross-type** — Vec == std::array and Vec ==
+  std::span both work via the generic operators in
+  `include/rusty/array.hpp` (lines 209-256).
 
 Still deferred:
 - **into_iter / drain / extract_if**: dropped from the reduced-
   scope build (see `patch_trim_cmakelists`). The auxiliary modules
   have their own cluster-V error long tails. A future iteration
   could re-enable them with targeted patches.
-- **partial_eq trait specialization**: equality with C-arrays or
-  std::array works; Vec<T1> == Vec<T2> with different T not
-  tested.
 - **Iterator adapter chain**: filter/map/collect through Vec —
   none tested. The iter modules weren't built.
 - **Custom allocator paths**: only Global tested; alternate
