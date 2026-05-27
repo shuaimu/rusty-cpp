@@ -6,6 +6,8 @@
 tests/build/
 build/*
 *.lock
+__pycache__/
+*.pyc
 
 build-tests/
 .apas

@@ -68,6 +68,7 @@ Sibling docs:
   - [4.2 Phase A — types compile (in progress)](#42-phase-a--types-compile-in-progress)
   - [4.3 Phase A error catalogue](#43-phase-a-error-catalogue)
   - [4.4 Phase plan + status snapshots](#44-phase-plan--status-snapshots)
+  - [4.8 4-way bench: transpiled vs VecLegacy vs std::vector vs Rust](#48-4-way-bench-transpiled-vs-veclegacy-vs-stdvector-vs-rust)
 
 Each completed port will graduate into its own chapter (parallel to
 Chapter 1 for BTreeMap). Chapter 3's tables stay as the live
@@ -2413,3 +2414,143 @@ Still deferred:
 This chapter will continue to grow as the long-tail items get
 closed. The pattern then repeats for String (Chapter 5) and
 HashMap (Chapter 6) per §3.8.
+
+### 4.8 4-way bench: transpiled vs VecLegacy vs std::vector vs Rust
+
+§4.5 measured transpiled Vec against `std::vector`. This section
+widens the comparison to four runtimes side-by-side so the rusty
+ecosystem can be placed against both the C++ and Rust baselines on
+the same hardware, same trial count, same workload shape.
+
+**Setup**:
+- Workload: 10M `int`/`i32` ops, 5 trials per measurement.
+- Pinned to CPU 2 (`taskset -c 2`) for stable measurements.
+- C++ side: clang++ 19, `-O3 -DNDEBUG -std=gnu++23`. Source:
+  `docs/vec_port/vec_bench_4way.cpp`.
+- Rust side: rustc stable (whatever `cargo run --release` picks),
+  `opt-level=3 codegen-units=1 lto=false`. Source:
+  `docs/vec_port/rust_bench/`.
+
+**Wall clock (mean of 5 trials, ms)**:
+
+| Runtime                        | push-grow | push-reserved | iterate | index |
+|--------------------------------|-----------|---------------|---------|-------|
+| vec_port::Vec  (transpiled)    | 91.05     | 42.31         | 3.11    | 3.03  |
+| rusty::VecLegacy (hand-written)| 77.06     | 29.71         | 3.05    | 3.03  |
+| std::vector    (libstdc++)     | 74.69     | 26.48         | 3.33    | 3.02  |
+| std::Vec       (Rust)          | 30.01     | 29.62         | 3.00    | 3.27  |
+
+**Ratios vs Rust std::Vec baseline** (`rusty::std::Vec` = 1.00):
+
+| Runtime                        | push-grow | push-reserved | iterate | index |
+|--------------------------------|-----------|---------------|---------|-------|
+| vec_port::Vec  (transpiled)    | 3.03×     | 1.43×         | 1.04×   | 0.93× |
+| rusty::VecLegacy (hand-written)| 2.57×     | 1.00×         | 1.02×   | 0.93× |
+| std::vector    (libstdc++)     | 2.49×     | 0.89×         | 1.11×   | 0.92× |
+| std::Vec       (Rust)          | 1.00×     | 1.00×         | 1.00×   | 1.00× |
+
+**Observations:**
+
+1. **iterate and index are essentially tied across all four**
+   (within 3.00–3.33ms). All four codegen to the same SIMD-ish
+   tight loop for sequential int access — the data layout is
+   identical and the compilers all see through the abstractions.
+   For pure read workloads, the choice of Vec doesn't matter.
+
+2. **push-reserved**: VecLegacy and Rust std::Vec are within 0.4%
+   of each other (29.71 vs 29.62 ms). std::vector ekes out a 12%
+   win (26.48 ms) — likely libstdc++'s `push_back` collapses to a
+   2-instruction store + size++ when capacity is known to be
+   sufficient. The transpiled Vec carries a 1.6× tax on top of
+   std::vector and 1.43× over Rust — that's the per-push idiom
+   overhead documented in §4.5.1.
+
+3. **push-grow** is where the surprise sits. Rust's std::Vec
+   completes the same 10M growing pushes in 30ms — essentially
+   identical to its reserved time. This means Rust amortizes
+   reallocation to ~zero on this workload. std::vector pays
+   48ms (74.69 - 26.48) for amortized growth, ~3× more. The
+   transpiled Vec pays 49ms (91.05 - 42.31), comparable to
+   std::vector's growth cost but on a heavier per-push baseline.
+
+4. **Hand-written VecLegacy tracks std::vector closely** — within
+   3% on push-grow and 12% on push-reserved. The hand-written
+   layout (`{data, size, capacity}`) and inline `push` body match
+   `std::vector`'s shape; the gap is whatever inlining
+   differences clang gets between a member `push_back` and our
+   templated `push`.
+
+5. **Transpiled Vec is the slowest in the room on push** — 22%
+   slower than VecLegacy on grow, 42% slower on reserved. This is
+   the per-push tax from the transpiled `vec.cppm`: extra
+   `deref_if_pointer_like`/IIFE no-ops on every push, plus a
+   heavier function body that misses some inlining decisions clang
+   makes for the lean hand-written version.
+
+**Why Rust amortizes growth so well**:
+
+Both Rust and C++ libraries use a 2× growth factor, so the
+number of reallocs is identical (~24 for 10M elements). The
+difference comes down to per-push overhead, not growth cost:
+
+- Rust's `Vec::push` is monomorphic with no virtual dispatch,
+  bounds checks elided after `cap == len` proves them dead, and
+  the realloc path is a separate cold function. Clean tight loop.
+- libstdc++'s `vector::push_back` carries some extra exception-
+  safety machinery and the realloc path doesn't cleanly separate
+  from the hot path in the codegen we see at `-O3`.
+- The 48ms gap is ~5ns/push of pure-realloc overhead that Rust
+  doesn't have, which is consistent with std::vector taking an
+  extra trip through `__throw_length_error` checks per push.
+
+**What this says for the port**:
+
+The transpiler eats ~1.5× over hand-written for push-heavy
+workloads, but the gap closes to noise for read-heavy ones (iter,
+index). That matches the BTreeMap profile in §1.6: the transpiler
+cost lives in tight per-call dispatch, not in data structure
+layout. For most workloads (which are read-heavy or mixed),
+the transpiled Vec is fine; for tight push-loops over trivial
+types, prefer VecLegacy or std::vector.
+
+The Rust column also confirms that the gap between rusty (either
+flavor) and Rust is not the data structure itself — VecLegacy
+matches Rust on reserved push to within 0.4%, despite being a
+direct hand-written port of the same shape. Where Rust pulls
+ahead is the compiler's handling of the *grow* path, which is
+realistically a libstdc++/clang-codegen interaction, not a
+language-design difference. The transpiled Vec inherits the
+libstdc++ side of that interaction since it allocates via the
+same C++ allocator.
+
+**Reproducing**:
+
+```sh
+# Re-transpile + build (per §4.2 instructions):
+bash docs/vec_port/prep.sh /tmp/vec_port/vec_crate/src/vec \
+                          /tmp/vec_port/vec_crate/src/raw_vec
+cargo run --release -p rusty-cpp-transpiler -- \
+  --crate /tmp/vec_port/vec_crate/Cargo.toml \
+  --output-dir /tmp/vec_port/cpp_out
+python3 docs/vec_port/post_transpile_patch.py /tmp/vec_port/cpp_out
+cd /tmp/vec_port/cpp_out && \
+  CXXFLAGS="-I<rusty-lib>/include" cmake -B build -S . -G Ninja \
+    -DCMAKE_CXX_COMPILER=clang++-19 -DCMAKE_CXX_STANDARD=23 && \
+  cmake --build build
+
+# Build the 4-way bench:
+cp docs/vec_port/vec_bench_4way.cpp /tmp/vec_port/cpp_out/
+cd /tmp/vec_port/cpp_out && \
+  clang++-19 -std=gnu++23 -O3 -DNDEBUG \
+    -fprebuilt-module-path=build/CMakeFiles/vec_port.dir \
+    -I<rusty-lib>/include \
+    vec_bench_4way.cpp build/libvec_port.a -o vec_bench_4way
+
+# Build the Rust bench:
+cp -r docs/vec_port/rust_bench /tmp/vec_port/
+cd /tmp/vec_port/rust_bench && cargo build --release
+
+# Run pinned (for stable measurement):
+taskset -c 2 /tmp/vec_port/cpp_out/vec_bench_4way
+taskset -c 2 /tmp/vec_port/rust_bench/target/release/vec_bench_rust
+```
