@@ -10,22 +10,25 @@ import vec_port;
 int main() {
     auto v = Vec<int, rusty::alloc::Global>::new_in(rusty::alloc::Global{});
     for (int i = 1; i <= 6; ++i) v.push(i);  // [1,2,3,4,5,6]
-    std::printf("vec.len() before extract_if = %zu\n", v.len());
 
     {
         auto ei = v.extract_if(rusty::range_from(static_cast<size_t>(0)),
                                [](int& x) { return x % 2 == 0; });
         int count = 0;
-        for (int n = 0; n < 10; ++n) {
+        int expected[3] = {2, 4, 6};
+        while (true) {
             auto next = ei.next();
-            std::printf("  call %d: is_some=%d", n, (int)next.is_some());
-            if (next.is_some()) std::printf(" value=%d", next.unwrap());
-            std::printf("\n");
-            if (next.is_none()) break;
+            if (!next.is_some()) break;
+            int val = next.unwrap();
+            CHECK(count < 3, "extract_if yielded too many");
+            CHECK(val == expected[count], "extract_if value");
             count++;
         }
-        std::printf("Total extracted: %d\n", count);
+        CHECK(count == 3, "extracted exactly 3");
     }
-    std::printf("vec.len() after extract_if = %zu\n", v.len());
+    auto s = v.as_slice();
+    CHECK(s.size() == 3, "len 3 remaining");
+    CHECK(s[0] == 1 && s[1] == 3 && s[2] == 5, "remaining is [1, 3, 5]");
+    std::printf("ALL CHECKS PASSED\n");
     return 0;
 }

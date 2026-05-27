@@ -1638,6 +1638,12 @@ inline std::pair<std::size_t, std::size_t> range(R r, Bounds bounds) noexcept {
     }
     if constexpr (requires { r.end; }) {
         end = r.end;
+    } else if constexpr (requires { r.end_value(); }) {
+        // `rusty::range<T>` keeps its end as a private `end_` field
+        // exposed via `end_value()`. Without this branch the caller
+        // sees `bounds.end` (= len), so a partial range like
+        // `range(0, 2)` becomes a full-range drain.
+        end = r.end_value();
     }
     return {start, end};
 }

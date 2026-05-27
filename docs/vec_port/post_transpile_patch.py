@@ -441,8 +441,11 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
     # When an aux module is in the build, vec.cppm `import`s it and
     # gets the real binary arity; skip stubbing it then.
     has_into_iter_import = "import vec_port.vec.into_iter;" in text
-    has_drain_import = "import vec_port.vec.drain;" in text
-    has_extract_if_import = "import vec_port.vec.extract_if;" in text
+    # Drain and ExtractIf get merged INTO vec.cppm later in the patch
+    # pipeline (patch_merge_*_into_vec), bringing their real binary-arity
+    # struct defs with them. Always skip the variadic stubs for those.
+    has_drain_import = True
+    has_extract_if_import = True
     intoiter_stub = "" if has_into_iter_import else \
         "export template<typename... Ts> class IntoIter;\n"
     drain_stub = "" if has_drain_import else \
@@ -820,6 +823,226 @@ def patch_return_handle_error_void(cpp_out: Path) -> int:
     return n
 
 
+def patch_merge_drain_into_vec(cpp_out: Path) -> int:
+    """Merge drain.cppm's content into vec.cppm so Drain's
+    `NonNull<rusty::Vec<T,A>>` field can be rewritten to `NonNull<Vec<T,A>>`
+    (the local transpiled Vec). Without this, drain.cppm references
+    `rusty::Vec` which the alias maps to VecLegacy with a different
+    layout — passing a transpiled Vec* through reinterpret_cast leads
+    to runtime corruption via wrong method dispatch.
+
+    Pattern borrowed from btreemap_port (step 52): C++20 modules can't
+    express the cyclic reference (drain.cppm needs Vec, vec.cppm needs
+    drain), so merge them into one module.
+    """
+    map_path = cpp_out / "vec_port.vec.cppm"
+    drain_path = cpp_out / "vec_port.vec.drain.cppm"
+    if not map_path.exists() or not drain_path.exists():
+        return 0
+    map_src = map_path.read_text()
+    sentinel = "// vec_port: drain content merged from vec_port.vec.drain.cppm"
+    if sentinel in map_src:
+        return 0  # already merged
+
+    # 1. Strip `import vec_port.vec.drain;` (its content is being inlined).
+    #    The import may already have been stripped by
+    #    patch_strip_vec_cppm_aux_imports — proceed either way.
+    new_src, _ = re.subn(
+        r"^import vec_port\.vec\.drain;\s*\n",
+        f"// {sentinel} (import removed).\n",
+        map_src,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    map_src = new_src
+
+    # 2. Extract content from drain.cppm: everything after the
+    #    `export module vec_port.vec.drain;` line (and any imports).
+    drain_src = drain_path.read_text()
+    module_anchor = "export module vec_port.vec.drain;\n"
+    pos = drain_src.find(module_anchor)
+    if pos == -1:
+        return 0
+    content_start = pos + len(module_anchor)
+    # Skip any leading import lines + blank lines.
+    while True:
+        # Skip blank lines.
+        while content_start < len(drain_src) and drain_src[content_start] == "\n":
+            content_start += 1
+        # If next line is `import X;`, skip it.
+        line_end = drain_src.find("\n", content_start)
+        if line_end == -1:
+            break
+        line = drain_src[content_start:line_end]
+        if line.startswith("import "):
+            content_start = line_end + 1
+        else:
+            break
+    drain_content = drain_src[content_start:]
+
+    # 3. Substitute rusty::Vec → Vec in the injected content. After the
+    #    merge, "Vec" refers to the local transpiled Vec (same module).
+    drain_content = drain_content.replace("rusty::Vec", "Vec")
+
+    # 4. Inject right before `struct Vec {` so the field type
+    #    `NonNull<Vec<T,A>>` has Vec forward-declared (line 3726-ish in
+    #    vec.cppm already has `export template<...> struct Vec;`).
+    inject_anchor = "struct Vec {"
+    ix = map_src.find(inject_anchor)
+    if ix == -1:
+        return 0
+    # Walk back to the start of the line containing the template header
+    # above `struct Vec {`.
+    lstart = map_src.rfind("\n", 0, ix) + 1
+    # Walk back further to find `export template<typename T, typename A...`
+    template_line_start = map_src.rfind(
+        "export template<typename T, typename A = rusty::alloc::Global>",
+        0, ix
+    )
+    if template_line_start != -1:
+        lstart = template_line_start
+    inject = f"\n// {sentinel}\n// rusty::Vec rewritten to Vec (local transpiled) inside this block.\n\n{drain_content}\n\n"
+    map_src = map_src[:lstart] + inject + map_src[lstart:]
+
+    # 5. In vec.cppm's own body, the drain() method returns Drain<T, A>
+    #    by reinterpret_cast-ing this. Now that Drain expects Vec<T,A>*
+    #    (not rusty::Vec<T,A>*), drop the reinterpret_cast.
+    map_src = map_src.replace(
+        "rusty::ptr::NonNull<rusty::Vec<T, A>>::new_unchecked(\n"
+        "                    reinterpret_cast<rusty::Vec<T, A>*>(this))",
+        "rusty::ptr::NonNull<Vec<T, A>>::new_unchecked(this)",
+    )
+    # Any remaining rusty::Vec references inside vec.cppm's own scope —
+    # leave them; user-facing API still says rusty::Vec.
+
+    map_path.write_text(map_src)
+    return 1
+
+
+def patch_merge_extract_if_into_vec(cpp_out: Path) -> int:
+    """Same as patch_merge_drain_into_vec, for extract_if. Merging
+    eliminates the rusty::Vec vs vec_port::Vec layout mismatch by
+    putting ExtractIf in the same module as Vec.
+    """
+    map_path = cpp_out / "vec_port.vec.cppm"
+    ei_path = cpp_out / "vec_port.vec.extract_if.cppm"
+    if not map_path.exists() or not ei_path.exists():
+        return 0
+    map_src = map_path.read_text()
+    sentinel = "// vec_port: extract_if content merged from vec_port.vec.extract_if.cppm"
+    if sentinel in map_src:
+        return 0
+
+    # The import line may have already been stripped by
+    # patch_strip_vec_cppm_aux_imports — that's fine, we still merge.
+    new_src, _ = re.subn(
+        r"^import vec_port\.vec\.extract_if;\s*\n",
+        f"// {sentinel} (import removed).\n",
+        map_src,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    map_src = new_src
+
+    ei_src = ei_path.read_text()
+    module_anchor = "export module vec_port.vec.extract_if;\n"
+    pos = ei_src.find(module_anchor)
+    if pos == -1:
+        return 0
+    content_start = pos + len(module_anchor)
+    while True:
+        while content_start < len(ei_src) and ei_src[content_start] == "\n":
+            content_start += 1
+        line_end = ei_src.find("\n", content_start)
+        if line_end == -1:
+            break
+        line = ei_src[content_start:line_end]
+        if line.startswith("import "):
+            content_start = line_end + 1
+        else:
+            break
+    ei_content = ei_src[content_start:]
+    ei_content = ei_content.replace("rusty::Vec", "Vec")
+
+    inject_anchor = "struct Vec {"
+    ix = map_src.find(inject_anchor)
+    if ix == -1:
+        return 0
+    template_line_start = map_src.rfind(
+        "export template<typename T, typename A = rusty::alloc::Global>",
+        0, ix
+    )
+    if template_line_start != -1:
+        lstart = template_line_start
+    else:
+        lstart = map_src.rfind("\n", 0, ix) + 1
+    inject = f"\n// {sentinel}\n// rusty::Vec rewritten to Vec (local transpiled) inside this block.\n\n{ei_content}\n\n"
+    map_src = map_src[:lstart] + inject + map_src[lstart:]
+
+    # After merge, ExtractIf::new_'s sig is `Vec<T,A>&` (local), and
+    # vec.cppm's call site is plain `(*this)`. No cast adjustment needed.
+
+    map_path.write_text(map_src)
+    return 1
+
+
+def patch_drop_extract_if_from_build(cpp_out: Path) -> int:
+    cm = cpp_out / "CMakeLists.txt"
+    if not cm.exists():
+        return 0
+    text = cm.read_text()
+    if "vec_port.vec.extract_if.cppm" not in text:
+        return 0
+    text = text.replace("    vec_port.vec.extract_if.cppm\n", "")
+    cm.write_text(text)
+    return 1
+
+
+def patch_drain_dropguard_byte_cast(cpp_out: Path) -> int:
+    """The transpiled Drain DropGuard destructor casts typed pointers
+    to `uint8_t*` before `ptr::add` and `ptr::copy`. That converts
+    element offsets to byte offsets — `tail_len` (3 ints) ends up
+    meaning 3 BYTES copied, not 12. The tail-shift after partial
+    drain corrupts the buffer.
+
+    Strip the reinterpret_cast<uint8_t*> wrappers so ptr::add and
+    ptr::copy operate on the typed (T*) pointers, where their
+    arithmetic is in element units.
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = text.replace(
+        "rusty::ptr::add(reinterpret_cast<const uint8_t*>(rusty::as_ptr(source_vec)), std::move(tail))",
+        "rusty::ptr::add(rusty::as_ptr(source_vec), std::move(tail))",
+    )
+    text = text.replace(
+        "rusty::ptr::add(reinterpret_cast<uint8_t*>(rusty::as_mut_ptr(source_vec)), std::move(start))",
+        "rusty::ptr::add(rusty::as_mut_ptr(source_vec), std::move(start))",
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_drop_drain_from_build(cpp_out: Path) -> int:
+    """Remove vec_port.vec.drain.cppm from CMakeLists since its content
+    was merged into vec.cppm. Runs AFTER patch_trim_cmakelists.
+    """
+    cm = cpp_out / "CMakeLists.txt"
+    if not cm.exists():
+        return 0
+    text = cm.read_text()
+    if "vec_port.vec.drain.cppm" not in text:
+        return 0
+    text = text.replace("    vec_port.vec.drain.cppm\n", "")
+    cm.write_text(text)
+    return 1
+
+
 def patch_extract_if_runtime(cpp_out: Path) -> int:
     """extract_if instantiation: same _let_pat.start/.end → .first/.second
     fix as drain, plus reinterpret_cast for the rusty::Vec namespace
@@ -827,18 +1050,10 @@ def patch_extract_if_runtime(cpp_out: Path) -> int:
     """
     n = 0
 
-    # vec.cppm: cast `(*this)` to rusty::Vec<T,A>& for ExtractIf::new_
-    p_vec = cpp_out / "vec_port.vec.cppm"
-    if p_vec.exists():
-        t = p_vec.read_text()
-        orig = t
-        t = t.replace(
-            "return ExtractIf<T, F, A>::new_((*this), std::move(filter), std::move(range));",
-            "return ExtractIf<T, F, A>::new_(*reinterpret_cast<rusty::Vec<T, A>*>(this), std::move(filter), std::move(range));",
-        )
-        if t != orig:
-            p_vec.write_text(t)
-            n += 1
+    # vec.cppm: ExtractIf::new_ takes `rusty::Vec<T,A>&`; after the
+    # merge into vec.cppm, the merge has already rewritten that to
+    # `Vec<T,A>&` (the local transpiled type), so `(*this)` works
+    # directly. No reinterpret_cast needed.
 
     # extract_if.cppm: _let_pat .start/.end → .first/.second
     p_ei = cpp_out / "vec_port.vec.extract_if.cppm"
@@ -1727,11 +1942,10 @@ def patch_strip_vec_cppm_aux_imports(cpp_out: Path) -> int:
     original = text
     dropped = [
         "vec_port.vec.cow",
-        # vec_port.vec.drain — keeping; see CMakeLists trim
-        "vec_port.vec.extract_if",  # back to dropped — layout mismatch
-                                    # with hand-written rusty::Vec crashes
-                                    # ExtractIf::new_() (set_len reads wrong
-                                    # offset). See Ch4 §4.7.
+        # vec_port.vec.drain — merged into vec.cppm; import stripped here too
+        "vec_port.vec.drain",
+        # vec_port.vec.extract_if — merged into vec.cppm; import stripped here too
+        "vec_port.vec.extract_if",
         "vec_port.vec.in_place_collect",
         "vec_port.vec.in_place_drop",
         # vec_port.vec.into_iter — keeping; see CMakeLists trim
@@ -2087,8 +2301,20 @@ def main(cpp_out: Path):
             patch_t_is_zst_constexpr_if),
         ("drain runtime: _let_pat.start/end -> .first/.second + NonNull::from -> new_unchecked",
             patch_drain_runtime),
-        ("extract_if runtime: vec namespace cast + _let_pat field rename",
+        # extract_if_runtime fixes _let_pat.start/.end in extract_if.cppm.
+        # Must run BEFORE the merge so the fixed content gets injected.
+        ("extract_if runtime: _let_pat field rename (pre-merge)",
             patch_extract_if_runtime),
+        ("merge drain.cppm into vec.cppm (rusty::Vec -> local Vec, fixes layout mismatch)",
+            patch_merge_drain_into_vec),
+        ("drop drain.cppm from CMakeLists (now merged)",
+            patch_drop_drain_from_build),
+        ("merge extract_if.cppm into vec.cppm (same fix as drain)",
+            patch_merge_extract_if_into_vec),
+        ("drop extract_if.cppm from CMakeLists (now merged)",
+            patch_drop_extract_if_from_build),
+        ("drain DropGuard: strip reinterpret_cast<u8*> (byte vs element offset)",
+            patch_drain_dropguard_byte_cast),
         ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
             patch_return_handle_error_void),
         ("shrink_unchecked: hoist double-unwrap on Option<tuple>",
