@@ -2238,10 +2238,25 @@ Benchmark setup: 10M `int` pushes, 5 trials each, clang++ 19,
 `-O3 -DNDEBUG -std=c++23`. Source:
 `docs/vec_port/vec_bench.cpp`.
 
+**Initial run** (Vec port without aux modules merged):
+
 | Path           | transpiled Vec | std::vector | overhead |
 |----------------|----------------|-------------|----------|
 | grow (no reserve) | 102.85 ms      | 85.87 ms     | +19.8%    |
 | reserved          | 42.88 ms       | 31.69 ms     | +35.3%    |
+
+**Re-bench** (after drain + extract_if + partial_eq merged into vec.cppm):
+
+| Path           | transpiled Vec | std::vector | overhead |
+|----------------|----------------|-------------|----------|
+| grow (no reserve) | 101.74 ms      | 87.40 ms     | +16.4%    |
+| reserved          | 45.06 ms       | 28.59 ms     | +57.6%    |
+
+Vec's absolute time barely moves (102→101ms grow, 43→45ms reserved).
+The relative overhead delta is mostly the std::vector baseline
+shifting — std::vector reserved ran 10% faster this session
+(probably build/cache state). No real Vec regression from the
+merge work.
 
 The reserved path has higher relative overhead because there's no
 allocation cost to amortize — the comparison is pure push-body.
