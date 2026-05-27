@@ -2223,10 +2223,21 @@ Closed since last revision:
   `include/rusty/array.hpp` (lines 209-256).
 
 Still deferred:
-- **into_iter / drain / extract_if**: dropped from the reduced-
-  scope build (see `patch_trim_cmakelists`). The auxiliary modules
-  have their own cluster-V error long tails. A future iteration
-  could re-enable them with targeted patches.
+- **into_iter**: library now builds with `vec_port.vec.into_iter.cppm`
+  included (10 patches required, mostly stubbing the rare methods
+  like `next_chunk`, `into_vecdeque`, `last`, `default_`, `clone`).
+  Phase A2 milestone reached: type compiles. But Phase B/E remain
+  pending — actually calling `Vec<int>::into_iter()` surfaces ~10
+  deeper emit bugs in `next()`/`next_back()` bodies: `T::IS_ZST`
+  assumption (`int` isn't a class), ManuallyDrop field-access on
+  wrong type, `NonNull::read` missing, etc. That's a separate
+  iteration set focused on the instantiation path. The library now
+  *links* with into_iter symbols present, so user code can take a
+  reference to IntoIter without dragging the broken body through
+  template instantiation.
+- **drain / extract_if**: same situation as into_iter before this
+  iteration — still dropped from the build. Each is a separate
+  aux module with its own error cluster.
 - **Iterator adapter chain**: filter/map/collect through Vec —
   none tested. The iter modules weren't built.
 - **Custom allocator paths**: only Global tested; alternate
