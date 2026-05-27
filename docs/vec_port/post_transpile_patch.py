@@ -452,6 +452,11 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
         "export template<typename... Ts> class Drain;\n"
     extract_if_stub = "" if has_extract_if_import else \
         "export template<typename... Ts> class ExtractIf;\n"
+    # Splice and PeekMut: stub only if NOT in AUX_MERGE_MODULES list.
+    splice_stub = "" if "splice" in AUX_MERGE_MODULES else \
+        "export template<typename... Ts> class Splice;\n"
+    peek_mut_stub = "" if "peek_mut" in AUX_MERGE_MODULES else \
+        "export template<typename... Ts> class PeekMut;\n"
     stubs = f"""
 // vec_port stubs for dropped aux types — see Chapter 4 of rusty-std-book.
 // These are forward-declared placeholders so vec.cppm parses; any code
@@ -460,9 +465,7 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
 //
 // Variadic templates accept any arity (rustc uses 2-4 type params
 // across these types after dropping the lifetime).
-{intoiter_stub}{drain_stub}{extract_if_stub}export template<typename... Ts> class Splice;
-export template<typename... Ts> class PeekMut;
-export template<typename... Ts> class AsVecIntoIter;
+{intoiter_stub}{drain_stub}{extract_if_stub}{splice_stub}{peek_mut_stub}export template<typename... Ts> class AsVecIntoIter;
 
 """
     text = text[:insert_at] + stubs + text[insert_at:]
@@ -996,6 +999,125 @@ def patch_drop_extract_if_from_build(cpp_out: Path) -> int:
     text = text.replace("    vec_port.vec.extract_if.cppm\n", "")
     cm.write_text(text)
     return 1
+
+
+def _merge_aux_module_into_vec(cpp_out: Path, mod_name: str) -> int:
+    """Generic merge helper. Same shape as patch_merge_drain_into_vec
+    but parametric on module name. Used for the remaining aux modules
+    (cow, in_place_*, is_zero, partial_eq, peek_mut, spec_*, splice).
+    """
+    map_path = cpp_out / "vec_port.vec.cppm"
+    aux_path = cpp_out / f"vec_port.vec.{mod_name}.cppm"
+    if not map_path.exists() or not aux_path.exists():
+        return 0
+    map_src = map_path.read_text()
+    sentinel = f"// vec_port: {mod_name} content merged from vec_port.vec.{mod_name}.cppm"
+    if sentinel in map_src:
+        return 0  # already merged
+
+    # 1. Strip the import line (may already be stripped by
+    #    patch_strip_vec_cppm_aux_imports — proceed either way).
+    new_src, _ = re.subn(
+        rf"^import vec_port\.vec\.{re.escape(mod_name)};\s*\n",
+        f"// {sentinel} (import removed).\n",
+        map_src,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    map_src = new_src
+
+    # 2. Extract content from aux module: everything after the
+    #    `export module ...;` line + any leading imports.
+    aux_src = aux_path.read_text()
+    module_anchor = f"export module vec_port.vec.{mod_name};\n"
+    pos = aux_src.find(module_anchor)
+    if pos == -1:
+        return 0
+    content_start = pos + len(module_anchor)
+    while True:
+        while content_start < len(aux_src) and aux_src[content_start] == "\n":
+            content_start += 1
+        line_end = aux_src.find("\n", content_start)
+        if line_end == -1:
+            break
+        line = aux_src[content_start:line_end]
+        if line.startswith("import "):
+            content_start = line_end + 1
+        else:
+            break
+    aux_content = aux_src[content_start:]
+    aux_content = aux_content.replace("rusty::Vec", "Vec")
+
+    # 3. Inject before the Vec struct definition.
+    inject_anchor = "struct Vec {"
+    ix = map_src.find(inject_anchor)
+    if ix == -1:
+        return 0
+    template_line_start = map_src.rfind(
+        "export template<typename T, typename A = rusty::alloc::Global>",
+        0, ix
+    )
+    if template_line_start != -1:
+        lstart = template_line_start
+    else:
+        lstart = map_src.rfind("\n", 0, ix) + 1
+    inject = (f"\n// {sentinel}\n"
+              f"// rusty::Vec rewritten to Vec (local transpiled).\n\n"
+              f"{aux_content}\n\n")
+    map_src = map_src[:lstart] + inject + map_src[lstart:]
+
+    map_path.write_text(map_src)
+    return 1
+
+
+def _drop_aux_from_build(cpp_out: Path, mod_name: str) -> int:
+    """Generic CMakeLists drop helper."""
+    cm = cpp_out / "CMakeLists.txt"
+    if not cm.exists():
+        return 0
+    text = cm.read_text()
+    line = f"    vec_port.vec.{mod_name}.cppm\n"
+    if line not in text:
+        return 0
+    text = text.replace(line, "")
+    cm.write_text(text)
+    return 1
+
+
+# Aux modules merged into vec.cppm via the generic merge helper.
+# Order matters: dependencies must be merged before dependents.
+# Generally these modules are independent of each other; ordering by
+# size (small first) for quicker incremental debug.
+AUX_MERGE_MODULES = [
+    # Modules verified to merge cleanly without surfacing emit-bug
+    # clusters. The merge inlines content from vec_port.vec.X into
+    # vec.cppm so `rusty::Vec` → `Vec` (local) rewrites match the
+    # same module attachment as Vec's own definition.
+    "partial_eq",       # operator== between vecs
+
+    # Modules NOT merged — each surfaces emit-bug clusters when
+    # added to vec.cppm. Documented in book Ch4 §4.7.
+    #
+    # Deferred:
+    #   spec_from_iter         (ambiguous SpecFromIter ref vs caller)
+    #   spec_from_iter_nested  (T leak)
+    #   spec_from_elem         (T leak + is_zero ref)
+    #   spec_extend            (T leak)
+    #   cow                    (auto-as-template-arg)
+    #   in_place_drop
+    #   peek_mut               (pulls in PeekMut surface)
+    #   splice                 (pulls in Splice surface)
+    #   in_place_collect       (biggest cluster)
+    #   is_zero                (free-standing `this` orphan emits)
+]
+
+
+def patch_merge_remaining_aux(cpp_out: Path) -> int:
+    n = 0
+    for mod in AUX_MERGE_MODULES:
+        n += _merge_aux_module_into_vec(cpp_out, mod)
+        _drop_aux_from_build(cpp_out, mod)
+    return n
 
 
 def patch_drain_dropguard_byte_cast(cpp_out: Path) -> int:
@@ -2315,6 +2437,8 @@ def main(cpp_out: Path):
             patch_drop_extract_if_from_build),
         ("drain DropGuard: strip reinterpret_cast<u8*> (byte vs element offset)",
             patch_drain_dropguard_byte_cast),
+        ("merge remaining aux modules (cow, peek_mut, splice, spec_*, etc) into vec.cppm",
+            patch_merge_remaining_aux),
         ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
             patch_return_handle_error_void),
         ("shrink_unchecked: hoist double-unwrap on Option<tuple>",
