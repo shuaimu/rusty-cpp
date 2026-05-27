@@ -2221,23 +2221,21 @@ Closed since last revision:
 - ✅ **partial_eq cross-type** — Vec == std::array and Vec ==
   std::span both work via the generic operators in
   `include/rusty/array.hpp` (lines 209-256).
+- ✅ **into_iter** — Phase A2 (library compiles) + Phase B
+  (`Vec<int>::into_iter()` works end-to-end) both reached.
+  Hand-port replaced the transpiled bodies of `Vec::into_iter()`,
+  `IntoIter::next()`, `size_hint()`, `advance_by()` to bypass
+  `T::IS_ZST` (fails for non-class T), `NonNull<T>::read()`
+  (doesn't exist in rusty), and the ManuallyDrop-wrapper dance
+  (`me.buf.allocator()` doesn't compile when `me: ManuallyDrop<Vec>`).
+  Verified by `docs/vec_port/vec_iter_test.cpp` (Vec<int> drain) and
+  `vec_iter_box_test.cpp` (Vec<Box<int>> partial-drain Drop chain).
+  Both ASAN-clean.
 
 Still deferred:
-- **into_iter**: library now builds with `vec_port.vec.into_iter.cppm`
-  included (10 patches required, mostly stubbing the rare methods
-  like `next_chunk`, `into_vecdeque`, `last`, `default_`, `clone`).
-  Phase A2 milestone reached: type compiles. But Phase B/E remain
-  pending — actually calling `Vec<int>::into_iter()` surfaces ~10
-  deeper emit bugs in `next()`/`next_back()` bodies: `T::IS_ZST`
-  assumption (`int` isn't a class), ManuallyDrop field-access on
-  wrong type, `NonNull::read` missing, etc. That's a separate
-  iteration set focused on the instantiation path. The library now
-  *links* with into_iter symbols present, so user code can take a
-  reference to IntoIter without dragging the broken body through
-  template instantiation.
-- **drain / extract_if**: same situation as into_iter before this
-  iteration — still dropped from the build. Each is a separate
-  aux module with its own error cluster.
+- **drain / extract_if**: still dropped from the build. Each is a
+  separate aux module with its own error cluster — same shape as
+  into_iter before its Phase A2 / B were closed.
 - **Iterator adapter chain**: filter/map/collect through Vec —
   none tested. The iter modules weren't built.
 - **Custom allocator paths**: only Global tested; alternate
