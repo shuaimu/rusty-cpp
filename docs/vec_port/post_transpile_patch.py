@@ -438,11 +438,17 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
     if not matches:
         return 0
     insert_at = matches[-1].end()
-    # When into_iter is in the build, vec.cppm `import`s it and gets
-    # the real binary `IntoIter<T, A>`; skip stubbing it then.
+    # When an aux module is in the build, vec.cppm `import`s it and
+    # gets the real binary arity; skip stubbing it then.
     has_into_iter_import = "import vec_port.vec.into_iter;" in text
+    has_drain_import = "import vec_port.vec.drain;" in text
+    has_extract_if_import = "import vec_port.vec.extract_if;" in text
     intoiter_stub = "" if has_into_iter_import else \
         "export template<typename... Ts> class IntoIter;\n"
+    drain_stub = "" if has_drain_import else \
+        "export template<typename... Ts> class Drain;\n"
+    extract_if_stub = "" if has_extract_if_import else \
+        "export template<typename... Ts> class ExtractIf;\n"
     stubs = f"""
 // vec_port stubs for dropped aux types — see Chapter 4 of rusty-std-book.
 // These are forward-declared placeholders so vec.cppm parses; any code
@@ -451,9 +457,7 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
 //
 // Variadic templates accept any arity (rustc uses 2-4 type params
 // across these types after dropping the lifetime).
-{intoiter_stub}export template<typename... Ts> class Drain;
-export template<typename... Ts> class ExtractIf;
-export template<typename... Ts> class Splice;
+{intoiter_stub}{drain_stub}{extract_if_stub}export template<typename... Ts> class Splice;
 export template<typename... Ts> class PeekMut;
 export template<typename... Ts> class AsVecIntoIter;
 
@@ -812,6 +816,82 @@ def patch_return_handle_error_void(cpp_out: Path) -> int:
         )
         if text != original:
             path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_drain_runtime(cpp_out: Path) -> int:
+    """drain() instantiation surfaces several emit bugs:
+
+    1. vec.cppm:`_let_pat.start` / `.end` — _let_pat is a
+       `std::pair<size_t, size_t>` from `rusty::slice_ext::range`,
+       so the Rust-style `.start`/`.end` access fails. Rewrite to
+       `.first` / `.second`.
+    2. drain.cppm: `T::IS_ZST` ternary and `const T` field access
+       fail for non-class T. Stub the affected helper.
+    3. NonNull::from(*this) — needs an addressable lvalue overload.
+    """
+    n = 0
+
+    # 1. vec.cppm field rename in drain() + designated→positional ctor
+    p_vec = cpp_out / "vec_port.vec.cppm"
+    if p_vec.exists():
+        t = p_vec.read_text()
+        orig = t
+        t = t.replace(
+            "auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);",
+            "auto&& start = rusty::detail::deref_if_pointer(_let_pat.first);",
+        )
+        t = t.replace(
+            "auto&& end = rusty::detail::deref_if_pointer(_let_pat.end);",
+            "auto&& end = rusty::detail::deref_if_pointer(_let_pat.second);",
+        )
+        # Drain has positional ctor — convert designated init.
+        old_drain_ret = (
+            "            return Drain<T, A>{.tail_start = std::move(end), "
+            ".tail_len = rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(end), "
+            ".iter = rusty::iter(range_slice), "
+            ".vec = NonNull<std::remove_pointer_t<std::remove_reference_t<decltype(((*this)))>>>::from((*this))};"
+        )
+        new_drain_ret = (
+            "            return Drain<T, A>(\n"
+            "                std::move(end),\n"
+            "                rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(end),\n"
+            "                rusty::iter(range_slice),\n"
+            "                rusty::ptr::NonNull<rusty::Vec<T, A>>::new_unchecked(\n"
+            "                    reinterpret_cast<rusty::Vec<T, A>*>(this))\n"
+            "            );"
+        )
+        t = t.replace(old_drain_ret, new_drain_ret)
+        if t != orig:
+            p_vec.write_text(t)
+            n += 1
+
+    # 2. drain.cppm IS_ZST + const T method access.
+    p_dr = cpp_out / "vec_port.vec.drain.cppm"
+    if p_dr.exists():
+        t = p_dr.read_text()
+        orig = t
+        # Generic `if (T::IS_ZST)` → `if constexpr (false)`
+        t = re.sub(
+            r"\bif \(T::IS_ZST\) \{",
+            "if constexpr (requires { T::IS_ZST; } && false) {",
+            t,
+        )
+        # `T::IS_ZST ? a : b` → just `b` (we never use ZSTs)
+        t = re.sub(
+            r"T::IS_ZST \? [^:]*?: ",
+            "",
+            t,
+        )
+        # `drop_ptr->offset_from_unsigned(vec_ptr)` is Rust pointer
+        # method, not in C++; use pointer subtraction.
+        t = t.replace(
+            "drop_ptr->offset_from_unsigned(vec_ptr)",
+            "static_cast<size_t>(drop_ptr - vec_ptr)",
+        )
+        if t != orig:
+            p_dr.write_text(t)
             n += 1
     return n
 
@@ -1608,7 +1688,7 @@ def patch_strip_vec_cppm_aux_imports(cpp_out: Path) -> int:
     original = text
     dropped = [
         "vec_port.vec.cow",
-        "vec_port.vec.drain",
+        # vec_port.vec.drain — keeping; see CMakeLists trim
         "vec_port.vec.extract_if",
         "vec_port.vec.in_place_collect",
         "vec_port.vec.in_place_drop",
@@ -1878,6 +1958,7 @@ add_library(vec_port
     vec_port.raw_vec.cppm
     vec_port.vec.set_len_on_drop.cppm
     vec_port.vec.into_iter.cppm
+    vec_port.vec.drain.cppm
     vec_port.vec.cppm
 )
 
@@ -1886,6 +1967,7 @@ target_sources(vec_port PUBLIC FILE_SET CXX_MODULES FILES
     vec_port.raw_vec.cppm
     vec_port.vec.set_len_on_drop.cppm
     vec_port.vec.into_iter.cppm
+    vec_port.vec.drain.cppm
     vec_port.vec.cppm
 )
 """
@@ -1961,6 +2043,8 @@ def main(cpp_out: Path):
             patch_into_iter_runtime_body),
         ("raw_vec new_cap<T>: elide ZST branch for non-class T",
             patch_t_is_zst_constexpr_if),
+        ("drain runtime: _let_pat.start/end -> .first/.second + NonNull::from -> new_unchecked",
+            patch_drain_runtime),
         ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
             patch_return_handle_error_void),
         ("shrink_unchecked: hoist double-unwrap on Option<tuple>",
