@@ -812,6 +812,50 @@ def patch_return_handle_error_void(cpp_out: Path) -> int:
     return n
 
 
+def patch_operator_index(cpp_out: Path) -> int:
+    """`Vec::operator[]` and `Vec::index_mut` call `.index(...)` on
+    the dereffed `*this` — that resolves to a Rust trait method
+    `Index::index`, which std::span doesn't have. Hand-port to the
+    obvious `as_slice()[i]` / `as_mut_slice()[i]` form.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        old_op_index = (
+            "    template<typename I>\n"
+            "    decltype(auto) operator[](I index) const {\n"
+            "        return (rusty::detail::deref_if_pointer_like((*this))).index(std::move(index));\n"
+            "    }"
+        )
+        new_op_index = (
+            "    template<typename I>\n"
+            "    decltype(auto) operator[](I index) const {\n"
+            "        return rusty::as_slice(*this)[static_cast<size_t>(index)];\n"
+            "    }"
+        )
+        if old_op_index in text:
+            text = text.replace(old_op_index, new_op_index)
+        old_index_mut = (
+            "    template<typename I>\n"
+            "    decltype(auto) index_mut(I index) {\n"
+            "        return (rusty::detail::deref_if_pointer_like((*this))).index_mut(std::move(index));\n"
+            "    }"
+        )
+        new_index_mut = (
+            "    template<typename I>\n"
+            "    decltype(auto) index_mut(I index) {\n"
+            "        return this->as_mut_slice()[static_cast<size_t>(index)];\n"
+            "    }"
+        )
+        if old_index_mut in text:
+            text = text.replace(old_index_mut, new_index_mut)
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_clone_to_vec_in(cpp_out: Path) -> int:
     """`Vec::clone()` ends with `std::span<const T>::to_vec_in(...)`,
     but `to_vec_in` is a Rust extension-trait method on slices —
@@ -1535,6 +1579,8 @@ def main(cpp_out: Path):
             patch_spec_extend_slice_iter),
         ("hand-port Vec::clone() to with_capacity_in + push loop",
             patch_clone_to_vec_in),
+        ("hand-port Vec::operator[] and index_mut to slice indexing",
+            patch_operator_index),
         ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
             patch_return_handle_error_void),
         ("shrink_unchecked: hoist double-unwrap on Option<tuple>",

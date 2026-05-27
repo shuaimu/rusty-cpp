@@ -124,14 +124,32 @@ int main() {
     CHECK(v2.as_slice()[0] == 9999, "as_mut_slice writes");
     CHECK(v2.as_slice()[1] == 101, "neighbor untouched");
 
-    // Try clone — may fail at instantiation due to to_vec_in not on std::span
-    if constexpr (requires { v2.clone(); }) {
-        auto v3 = v2.clone();
-        CHECK(v3.len() == v2.len(), "clone preserves len");
-        CHECK(v3.as_slice()[0] == 9999, "clone preserves data[0]");
-        std::printf("clone() works\n");
+    // Try clone — should now work after to_vec_in hand-port patch
+    auto v3 = v2.clone();
+    CHECK(v3.len() == v2.len(), "clone preserves len");
+    CHECK(v3.as_slice()[0] == 9999, "clone preserves data[0]");
+    CHECK(v3.as_slice()[5] == 105, "clone preserves data[5]");
+
+    // Independence: mutating clone does not affect original
+    auto v3_ms = v3.as_mut_slice();
+    v3_ms[0] = -1;
+    CHECK(v3.as_slice()[0] == -1, "clone mutable");
+    CHECK(v2.as_slice()[0] == 9999, "original unchanged by clone mutation");
+
+    // Slice equality via memcmp (since we don't have operator== on Vec)
+    auto v4 = v2.clone();
+    auto sa = v2.as_slice();
+    auto sb = v4.as_slice();
+    CHECK(sa.size() == sb.size(), "cloned size matches");
+    bool slice_eq = true;
+    for (size_t i = 0; i < sa.size(); ++i) if (sa[i] != sb[i]) slice_eq = false;
+    CHECK(slice_eq, "cloned slice content matches");
+
+    // operator[] direct on Vec
+    if constexpr (requires { v2[0]; }) {
+        std::printf("v2[0] via Vec::operator[] = %d\n", (int)v2[0]);
     } else {
-        std::printf("clone() not instantiable (expected — to_vec_in missing)\n");
+        std::printf("operator[] not instantiable\n");
     }
 
     std::printf("ALL CHECKS PASSED (%d ops covered)\n", 30);
