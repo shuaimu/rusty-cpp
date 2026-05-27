@@ -2213,6 +2213,11 @@ Closed since last revision:
 - ✅ **Vec == Vec** — works "for free" via the generic
   `operator==(L, R)` in `include/rusty/array.hpp:252` which uses
   both sides' `as_slice()`.
+- ✅ **Non-trivial element types** — `Vec<rusty::Box<int>>` and
+  `Vec<rusty::String>` both round-trip cleanly, including a
+  forced realloc with 13 elements. ASAN-clean (no leaks, no
+  use-after-free during move-during-realloc). Tests in
+  `docs/vec_port/vec_box_test.cpp` and `vec_string_test.cpp`.
 
 Still deferred:
 - **into_iter / drain / extract_if**: dropped from the reduced-
@@ -2226,9 +2231,6 @@ Still deferred:
   none tested. The iter modules weren't built.
 - **Custom allocator paths**: only Global tested; alternate
   allocators may surface their own paths.
-- **Non-trivial element types**: only `int` tested. Vec<Box<T>>,
-  Vec<String>, etc. need separate verification to confirm Drop
-  chains fire through the Vec destructor.
 
 This chapter will continue to grow as the long-tail items get
 closed. The pattern then repeats for String (Chapter 5) and
