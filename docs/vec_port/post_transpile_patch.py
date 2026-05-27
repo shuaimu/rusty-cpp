@@ -1084,6 +1084,42 @@ def _drop_aux_from_build(cpp_out: Path, mod_name: str) -> int:
     return 1
 
 
+def patch_strip_is_zero_orphans(cpp_out: Path) -> int:
+    """The is_zero aux module emits 4 `bool is_zero()` definitions at
+    file scope (2 for Option, 1 for Wrapping, 1 for Saturating). Each
+    is an inherent-impl method whose host type lives in another TU;
+    the transpiler can't attach them as members so they land at file
+    scope where `this->...` is invalid C++.
+
+    The `rusty_ext::is_zero` free-function templates in the same file
+    serve the same purpose via ADL. Strip the orphan emits and keep
+    only the free functions.
+
+    Runs BEFORE patch_merge_remaining_aux so the merged content is
+    already clean.
+    """
+    path = cpp_out / "vec_port.vec.is_zero.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # Match each orphan block: the TODO comment block + single-line
+    # `bool is_zero() { ... }` body. Body is one line in all 4 cases.
+    pattern = re.compile(
+        r"^// TODO orphan impl: methods for `[^`]+` were declared in this file but the\n"
+        r"(?://[^\n]*\n)+"
+        r"bool is_zero\(\) \{\n"
+        r"    [^\n]+\n"
+        r"\}\n",
+        re.MULTILINE,
+    )
+    text = pattern.sub("", text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 # Aux modules merged into vec.cppm via the generic merge helper.
 # Order matters: dependencies must be merged before dependents.
 # Generally these modules are independent of each other; ordering by
@@ -1094,6 +1130,9 @@ AUX_MERGE_MODULES = [
     # vec.cppm so `rusty::Vec` → `Vec` (local) rewrites match the
     # same module attachment as Vec's own definition.
     "partial_eq",       # operator== between vecs
+    "is_zero",          # rusty_ext::is_zero free templates
+                        # (orphan `bool is_zero()` emits stripped first
+                        #  by patch_strip_is_zero_orphans)
 
     # Modules NOT merged — each surfaces emit-bug clusters when
     # added to vec.cppm. Documented in book Ch4 §4.7.
@@ -1108,7 +1147,6 @@ AUX_MERGE_MODULES = [
     #   peek_mut               (pulls in PeekMut surface)
     #   splice                 (pulls in Splice surface)
     #   in_place_collect       (biggest cluster)
-    #   is_zero                (free-standing `this` orphan emits)
 ]
 
 
@@ -2437,6 +2475,8 @@ def main(cpp_out: Path):
             patch_drop_extract_if_from_build),
         ("drain DropGuard: strip reinterpret_cast<u8*> (byte vs element offset)",
             patch_drain_dropguard_byte_cast),
+        ("strip is_zero orphan `bool is_zero()` file-scope emits (pre-merge)",
+            patch_strip_is_zero_orphans),
         ("merge remaining aux modules (cow, peek_mut, splice, spec_*, etc) into vec.cppm",
             patch_merge_remaining_aux),
         ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
