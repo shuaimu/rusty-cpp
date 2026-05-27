@@ -1560,6 +1560,10 @@ representative bench has been run with callgrind.
 
 ### 2.8 Estimating effort for the next port
 
+(Also see §2.9 below — the aux-module merging tactic added during
+the Vec port that solves cross-module type-name resolution.)
+
+
 Using BTreeMap as one calibration point:
 
 - **Single-file simple type** (e.g. `Range`, `Cell`): a few hours,
@@ -1585,6 +1589,97 @@ Phase D (parity testing) like BTreeMap did, similar shape.
 The patcher is the artifact that lives on: ~50% of its hand-ports
 were transpiler debt at the time of writing — and every transpiler
 fix reduces the patcher size and helps the *next* port.
+
+### 2.9 Aux-module merging (BTreeMap-style)
+
+When a transpiled sub-module references a type defined in the
+parent module — `vec_port.vec.drain.cppm` referencing
+`rusty::Vec<T, A>` which lives in `vec_port.vec.cppm` — you have
+a **C++20 module-attachment cycle** the language cannot express:
+
+- drain.cppm imports nothing about Vec, references `rusty::Vec`
+  hoping ADL or a header alias resolves it.
+- vec.cppm `import`s drain.cppm to use `Drain<T, A>`.
+- A forward-decl `template<...> class Vec;` in drain.cppm attaches
+  to *its* module — entities imported from the parent are attached
+  to a *different* module. The forward-decl is a permanent
+  placeholder; even after parent imports the parent's Vec, drain's
+  Vec stays incomplete.
+
+There is no language-level bridge. The fix that BTreeMap discovered
+(`btreemap_port` step 52, `merge_map_entry_into_map`) is to
+**inline the submodule's content into the parent module** so both
+are in the same module attachment and the name resolution just
+works. The patcher does this textually after transpile.
+
+#### The pattern
+
+```python
+def merge_aux_into_parent(parent_path, aux_path, parent_module_name):
+    # 1. Sentinel for idempotency
+    if "<sentinel>" in parent_text: return 0
+
+    # 2. Strip `import vec_port.vec.X;` line from the parent.
+    parent_text = re.sub(r"^import vec_port\.vec\.X;\s*\n",
+                         "// merged comment\n", parent_text, ...)
+
+    # 3. Extract content from aux module — everything after
+    #    `export module vec_port.vec.X;` and its imports.
+    aux_content = aux_text[content_start:]
+    aux_content = aux_content.replace("rusty::Vec", "Vec")
+
+    # 4. Inject before parent's `struct Vec {` (the type still
+    #    needs to be forward-declared earlier; the existing
+    #    `export template<...> struct Vec;` decl in vec.cppm
+    #    satisfies this).
+    parent_text = inject_before(parent_text, "struct Vec {",
+                                aux_content)
+
+    # 5. Drop the aux .cppm from CMakeLists.
+```
+
+#### When it works cleanly
+
+- The aux module's content is small (≤200 lines after the
+  `export module` line) and self-contained.
+- It defines its own types (Drain, ExtractIf, Splice…) and only
+  references the parent type through pointer-typed fields
+  (e.g. `NonNull<Vec<T, A>>`), so forward-decl suffices.
+- The transpiled aux content doesn't contain "orphan emit" stubs
+  (free-standing methods with bare `this->...` references).
+
+#### Failure modes (each costs its own patch)
+
+- **Orphan method emits**: the transpiler couldn't relocate methods
+  intended to live in the parent type (`is_zero`'s `bool is_zero()
+  { return this->is_none(); }`). After merge, these end up at file
+  scope where `this` is invalid. Either rewrite into the parent
+  struct body or stub them out.
+- **Ambiguous type references**: parent module already used a
+  variadic forward-decl stub for the aux's exported type. After
+  merge, the real binary-arity type collides with the variadic
+  stub. Skip the stub when the module is in the merge list.
+- **Bare `T` outside class scope**: the aux's content references
+  `T` at file scope (an absorbed-but-not-actually-absorbed
+  method). Each needs a targeted rewrite or stub.
+- **auto-as-template-arg leak**: emit bug where `Vec<auto, auto>`
+  appears at a non-deduced site. Patch by recovering the concrete
+  T/A from context.
+
+#### When NOT to use it
+
+If the aux module is a self-contained leaf (no parent-type
+references), keep it as a separate module — that's the C++20
+modules way. Merging only buys you something when the
+module-attachment cycle is blocking.
+
+#### Reusable scaffolding
+
+`docs/vec_port/post_transpile_patch.py` has
+`_merge_aux_module_into_vec` (generic) and an `AUX_MERGE_MODULES`
+list. To enable a new aux module, add it to the list and re-run.
+If it crashes with new emit errors, document them in the list's
+"deferred" section so the next attempt knows what to expect.
 
 ---
 
