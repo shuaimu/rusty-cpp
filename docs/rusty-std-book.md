@@ -2265,25 +2265,36 @@ Closed since last revision:
   (instantiation works for the "drain all" path). Source:
   `docs/vec_port/vec_drain_test.cpp`. ASAN-clean.
 
+- ✅ **drain (partial)** — was implicitly broken before the layout
+  fix; only "drain all" worked because the destructor short-circuited.
+  Partial drain `range(0, 2)` now works correctly: yields [10,20],
+  shifts tail [30,40,50] forward, leaves vec at length 3. Test:
+  `docs/vec_port/vec_partial_drain_test.cpp`. ASAN-clean.
+- ✅ **extract_if** — was crashing on first call (`vec.set_len(0)`
+  hit a `new_len <= capacity_` assertion in the wrong-layout type).
+  Fixed by the same BTreeMap-style merge: drain.cppm and extract_if.cppm
+  content moved into vec.cppm so `rusty::Vec` → `Vec` (local)
+  rewrites resolve correctly. C++20 module attachment makes the
+  forward-decl approach impossible (the merge is the right
+  resolution). Test: `docs/vec_port/vec_extract_if_test.cpp`.
+
+Two ancillary fixes landed with the merge:
+- `slice_ext::range` in `include/rusty/slice.hpp` now also detects
+  `r.end_value()` on `rusty::range<T>` (in addition to the `.end`
+  field on `range_to`/`range_from`). Without this, partial-range
+  calls like `drain(range(0, 2))` silently degraded to full-range
+  because the end fell back to `bounds.end = len`.
+- `patch_drain_dropguard_byte_cast` strips
+  `reinterpret_cast<uint8_t*>` wrappers around `ptr::add` /
+  `ptr::copy` args — the byte-cast turned element offsets into
+  byte offsets, so the partial-drain tail-shift was copying
+  N bytes instead of N * sizeof(T) bytes.
+
 Still deferred:
-- **extract_if** — module compiles, but `Vec::extract_if()` crashes
-  at runtime. Root cause: the transpiled module declares
-  `rusty::Vec<T, A>&` parameters (hand-written rusty::Vec layout:
-  data_/size_/capacity_), but the caller passes a `vec_port::Vec`
-  (layout: buf::RawVec/len_field). reinterpret_cast bridge worked
-  for drain because its destructor short-circuits on empty drain,
-  but extract_if's `new_()` immediately calls `vec.set_len(0)` —
-  which trips an assertion in rusty::Vec::set_len on the wrong
-  layout. Partial drain would hit the same bug. The right long-
-  term fix is transpiler-level: alias vec_port::Vec to rusty::Vec
-  in the namespace remapping pass (matches the rusty-lib
-  convention). Until then, drain works for full-drain only, and
-  extract_if stays out of the build. WIP test:
-  `docs/vec_port/vec_extract_if_test.cpp.WIP`.
 - **Other aux modules** (cow, in_place_*, peek_mut, splice, spec_*,
   partial_eq, is_zero): still dropped from the build. Lower-priority
-  than the layout-mismatch fix — once that's resolved, each of these
-  should follow the same shape as drain (one or two patches).
+  than the layout-mismatch fix — most should follow the same merge
+  pattern (one or two patches per module).
 - **Iterator adapter chain**: filter/map/collect through Vec —
   none tested. The iter modules weren't built.
 - **Custom allocator paths**: only Global tested; alternate
