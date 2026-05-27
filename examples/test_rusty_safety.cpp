@@ -22,7 +22,7 @@ void test_box_use_after_move() {
 // Test 2: Vec use-after-move (should error)
 // @safe
 void test_vec_use_after_move() {
-    rusty::Vec<int> vec;
+    rusty::VecLegacy<int> vec;
     vec.push(10);
     vec.push(20);
     
@@ -124,7 +124,7 @@ void test_box_no_double_free() {
 // Test 8: Vec bounds checking
 // @safe
 void test_vec_bounds() {
-    rusty::Vec<int> vec;
+    rusty::VecLegacy<int> vec;
     vec.push(1);
     vec.push(2);
     

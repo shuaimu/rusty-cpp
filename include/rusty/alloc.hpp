@@ -300,7 +300,7 @@ struct Global {
     allocate(Layout layout) const {
         // Rust's Allocator contract for ZSTs: return a dangling-but-aligned
         // pointer, never call the underlying allocator. Matching that here
-        // makes `Box<()>` / `Vec<()>` work as expected and avoids passing
+        // makes `Box<()>` / `VecLegacy<()>` work as expected and avoids passing
         // `malloc(0)` (whose behaviour is implementation-defined).
         if (layout.size == 0) {
             return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Ok(

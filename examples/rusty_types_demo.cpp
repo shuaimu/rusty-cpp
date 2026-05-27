@@ -58,7 +58,7 @@ void demo_vec() {
     printf("\n=== Vec Demo ===\n");
     
     // Create a Vec
-    rusty::Vec<int> vec;
+    rusty::VecLegacy<int> vec;
     vec.push(10);
     vec.push(20);
     vec.push(30);
@@ -187,7 +187,7 @@ void demo_combined() {
     printf("\n=== Combined Types Demo ===\n");
     
     // Vec of Boxes
-    rusty::Vec<rusty::Box<Data>> vec;
+    rusty::VecLegacy<rusty::Box<Data>> vec;
     vec.push(rusty::make_box<Data>(1));
     vec.push(rusty::make_box<Data>(2));
     vec.push(rusty::make_box<Data>(3));

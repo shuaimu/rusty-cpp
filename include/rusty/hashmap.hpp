@@ -950,8 +950,8 @@ public:
     
     // Collect all keys
     // @lifetime: owned
-    Vec<K> keys() const {
-        Vec<K> result = Vec<K>::with_capacity(size_);
+    VecLegacy<K> keys() const {
+        VecLegacy<K> result = VecLegacy<K>::with_capacity(size_);
         size_t capacity = bucket_mask_ + 1;
         
         for (size_t i = 0; i < capacity; i++) {
@@ -965,8 +965,8 @@ public:
     
     // Collect all values
     // @lifetime: owned
-    Vec<V> values() const {
-        Vec<V> result = Vec<V>::with_capacity(size_);
+    VecLegacy<V> values() const {
+        VecLegacy<V> result = VecLegacy<V>::with_capacity(size_);
         size_t capacity = bucket_mask_ + 1;
         
         for (size_t i = 0; i < capacity; i++) {

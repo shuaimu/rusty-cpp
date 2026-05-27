@@ -308,7 +308,7 @@ fd_set_nonblocking(int raw_fd, bool nonblocking) {
 // Default-constructible to an "empty" state (no fd) — methods on an
 // empty TcpStream return io::Error::Kind::InvalidInput. This keeps
 // compatibility with the original stub (which is default-constructed
-// by the transpiler's generic Vec instantiation).
+// by the transpiler's generic VecLegacy instantiation).
 
 class TcpStream {
  public:

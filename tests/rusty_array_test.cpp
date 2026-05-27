@@ -214,7 +214,7 @@ void test_to_vec_helper_uses_slice_surface_shape() {
     const SliceOnlyContainer& const_container = container;
 
     auto vec = rusty::to_vec(const_container);
-    static_assert(std::is_same_v<decltype(vec), rusty::Vec<int>>);
+    static_assert(std::is_same_v<decltype(vec), rusty::VecLegacy<int>>);
     assert(vec.len() == 4);
     assert(vec[0] == 1);
     assert(vec[1] == 2);
@@ -312,7 +312,7 @@ void test_vector_span_equality_helper_shape() {
 void test_span_vec_equality_helper_shape() {
     printf("test_span_vec_equality_helper_shape: ");
     {
-        rusty::Vec<uint8_t> bytes = rusty::Vec<uint8_t>::new_();
+        rusty::VecLegacy<uint8_t> bytes = rusty::VecLegacy<uint8_t>::new_();
         bytes.push(1);
         bytes.push(2);
         bytes.push(3);
@@ -334,7 +334,7 @@ void test_span_vec_equality_helper_shape() {
             bool operator==(const Z& other) const { return value == other.value; }
         };
 
-        rusty::Vec<Z> values = rusty::Vec<Z>::new_();
+        rusty::VecLegacy<Z> values = rusty::VecLegacy<Z>::new_();
         values.push(Z{1});
         values.push(Z{2});
         values.push(Z{3});
@@ -352,7 +352,7 @@ void test_span_vec_equality_helper_shape() {
     {
         struct Marker {};
 
-        rusty::Vec<Marker> values = rusty::Vec<Marker>::new_();
+        rusty::VecLegacy<Marker> values = rusty::VecLegacy<Marker>::new_();
         values.push(Marker{});
         values.push(Marker{});
         values.push(Marker{});
@@ -651,12 +651,12 @@ void test_rev_enumerate_iterator_adapter_shape() {
 
 void test_iter_vec_enumerate_adapter_shape() {
     printf("test_iter_vec_enumerate_adapter_shape: ");
-    rusty::Vec<int> values = rusty::Vec<int>::new_();
+    rusty::VecLegacy<int> values = rusty::VecLegacy<int>::new_();
     values.push(7);
     values.push(9);
     values.push(11);
 
-    const rusty::Vec<int>& values_ref = values;
+    const rusty::VecLegacy<int>& values_ref = values;
     size_t idx = 0;
     for (auto&& [i, elt] : rusty::for_in(rusty::enumerate(rusty::iter(values_ref)))) {
         assert(i == idx);

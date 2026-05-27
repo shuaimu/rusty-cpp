@@ -12,7 +12,7 @@ namespace rusty {
 template<typename T, typename A> class Box;
 template<typename T> class Arc;
 template<typename T> class Rc;  // NOT Send!
-template<typename T, typename A> class Vec;
+template<typename T, typename A> class VecLegacy;
 template<typename T> class Option;
 template<typename T, typename E> class Result;
 
@@ -20,9 +20,9 @@ template<typename T, typename E> class Result;
 // handled in traits.hpp. This file provides additional specializations
 // for container types.
 
-// Vec<T, A> is Send if T is Send
+// VecLegacy<T, A> is Send if T is Send
 template<typename T, typename A>
-struct is_send<Vec<T, A>> : is_send<T> {};
+struct is_send<VecLegacy<T, A>> : is_send<T> {};
 
 // Option<T> is Send if T is Send
 template<typename T>

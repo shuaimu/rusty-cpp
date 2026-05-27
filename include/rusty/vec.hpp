@@ -23,12 +23,12 @@
 #include <rusty/mem.hpp>
 #include <rusty/option.hpp>
 
-// Vec<T> - A growable array with owned elements
-// Equivalent to Rust's Vec<T>
+// VecLegacy<T> - A growable array with owned elements
+// Equivalent to Rust's VecLegacy<T>
 //
 // Guarantees:
 // - Single ownership of the container
-// - Elements are owned by the Vec
+// - Elements are owned by the VecLegacy
 // - Automatic memory management
 // - Move semantics for the container
 
@@ -36,17 +36,17 @@
 namespace rusty {
 
 template<typename T, typename A = rusty::alloc::Global>
-class Vec {
+class VecLegacy {
 private:
     T* data_;
     size_t size_;
     size_t capacity_;
     // Stored allocator. `[[no_unique_address]]` collapses A to 0 bytes when
-    // A is empty (the common A = Global case), so sizeof(Vec<T>) is
+    // A is empty (the common A = Global case), so sizeof(VecLegacy<T>) is
     // unchanged on all major compilers.
     [[no_unique_address]] A alloc_;
 
-    template<typename, typename> friend class Vec;
+    template<typename, typename> friend class VecLegacy;
 
     static constexpr bool can_materialize_capacity(size_t capacity) noexcept {
         return capacity <= std::numeric_limits<size_t>::max() / sizeof(T);
@@ -99,7 +99,7 @@ private:
         using std::size;
         auto* ptr = data(bytes);
         using Elem = std::remove_cv_t<std::remove_pointer_t<decltype(ptr)>>;
-        static_assert(sizeof(Elem) == 1, "Vec<u8>::write expects a byte-sized buffer");
+        static_assert(sizeof(Elem) == 1, "VecLegacy<u8>::write expects a byte-sized buffer");
         return std::span<const uint8_t>(
             reinterpret_cast<const uint8_t*>(ptr),
             static_cast<size_t>(size(bytes)));
@@ -108,7 +108,7 @@ private:
     void clear_forgotten_storage_marks() noexcept {
         // Strict null-state convention: there is no global
         // forgotten-address table anymore (see rusty/mem.hpp). Per-element
-        // moved-from state lives in T itself. Vec storage doesn't carry
+        // moved-from state lives in T itself. VecLegacy storage doesn't carry
         // its own forgotten markers across reallocations.
     }
     
@@ -133,32 +133,32 @@ public:
     // `type Item = T`, but several C++ APIs (gtest's ValuesIn,
     // generic algorithms that probe for value_type) require the
     // STL-conventional `typename C::value_type`. Exposing it here
-    // costs nothing and lets Vec<T> drop into those APIs unchanged.
+    // costs nothing and lets VecLegacy<T> drop into those APIs unchanged.
     using value_type = T;
 
     // Default constructor - empty vec
-    Vec() : data_(nullptr), size_(0), capacity_(0) {}
+    VecLegacy() : data_(nullptr), size_(0), capacity_(0) {}
     
-    // Factory method - Vec::new_() (Rust's Vec::new, _ suffix because `new` is C++ keyword)
+    // Factory method - VecLegacy::new_() (Rust's VecLegacy::new, _ suffix because `new` is C++ keyword)
     // @lifetime: owned
-    static Vec<T> new_() {
-        return Vec<T>();
+    static VecLegacy<T> new_() {
+        return VecLegacy<T>();
     }
 
-    // Rust's `Vec::new_in(alloc)` — construct an empty Vec that will allocate
+    // Rust's `VecLegacy::new_in(alloc)` — construct an empty VecLegacy that will allocate
     // through `alloc_inst` when it grows. Zero allocation until first push.
     // @lifetime: owned
-    static Vec new_in(A alloc_inst) {
-        Vec v;
+    static VecLegacy new_in(A alloc_inst) {
+        VecLegacy v;
         v.alloc_ = std::move(alloc_inst);
         return v;
     }
 
-    // Rust's `Vec::with_capacity_in(cap, alloc)` — pre-reserve `cap` slots
+    // Rust's `VecLegacy::with_capacity_in(cap, alloc)` — pre-reserve `cap` slots
     // through the supplied allocator.
     // @lifetime: owned
-    static Vec with_capacity_in(size_t cap, A alloc_inst) {
-        Vec v;
+    static VecLegacy with_capacity_in(size_t cap, A alloc_inst) {
+        VecLegacy v;
         v.alloc_ = std::move(alloc_inst);
         if (cap > 0) {
             v.data_ = v.allocate_storage(cap);
@@ -170,11 +170,11 @@ public:
     // Unsafe constructor from raw parts.
     // Caller must guarantee `ptr` points to `cap` contiguous `T` slots with
     // the first `len` elements fully initialized and uniquely owned.
-    static Vec<T> from_raw_parts(T* ptr, size_t len, size_t cap) {
+    static VecLegacy<T> from_raw_parts(T* ptr, size_t len, size_t cap) {
         assert(len <= cap);
         assert(ptr != nullptr || cap == 0);
         assert(can_materialize_capacity(cap));
-        Vec<T> v;
+        VecLegacy<T> v;
         v.data_ = ptr;
         v.size_ = len;
         v.capacity_ = cap;
@@ -182,23 +182,23 @@ public:
     }
 
     template<typename U>
-    static Vec<U> from_raw_parts(U* ptr, size_t len, size_t cap) {
-        return Vec<U>::from_raw_parts(ptr, len, cap);
+    static VecLegacy<U> from_raw_parts(U* ptr, size_t len, size_t cap) {
+        return VecLegacy<U>::from_raw_parts(ptr, len, cap);
     }
 
     template<typename Alloc>
-    static Vec<T> from_raw_parts_in(T* ptr, size_t len, size_t cap, Alloc&&) {
+    static VecLegacy<T> from_raw_parts_in(T* ptr, size_t len, size_t cap, Alloc&&) {
         return from_raw_parts(ptr, len, cap);
     }
 
     template<typename U, typename Alloc>
-    static Vec<U> from_raw_parts_in(U* ptr, size_t len, size_t cap, Alloc&&) {
-        return Vec<U>::from_raw_parts(ptr, len, cap);
+    static VecLegacy<U> from_raw_parts_in(U* ptr, size_t len, size_t cap, Alloc&&) {
+        return VecLegacy<U>::from_raw_parts(ptr, len, cap);
     }
 
     template<typename Iter>
-    static Vec<T> from_iter(Iter&& iter) {
-        Vec<T> result;
+    static VecLegacy<T> from_iter(Iter&& iter) {
+        VecLegacy<T> result;
         auto option_like_has_value = [](const auto& opt) {
             if constexpr (requires { opt.is_some(); }) {
                 return opt.is_some();
@@ -268,14 +268,14 @@ public:
     }
 
     // Alias for backward compatibility
-    static Vec<T> make() {
-        return Vec<T>();
+    static VecLegacy<T> make() {
+        return VecLegacy<T>();
     }
     
-    // Rust-idiomatic factory with capacity - Vec::with_capacity()
+    // Rust-idiomatic factory with capacity - VecLegacy::with_capacity()
     // @lifetime: owned
-    static Vec<T> with_capacity(size_t cap) {
-        Vec<T> v;
+    static VecLegacy<T> with_capacity(size_t cap) {
+        VecLegacy<T> v;
         if (cap > 0) {
             v.data_ = v.allocate_storage(cap);
             v.capacity_ = cap;
@@ -284,7 +284,7 @@ public:
     }
     
     // Constructor with initial capacity (C++ style)
-    explicit Vec(size_t initial_capacity) 
+    explicit VecLegacy(size_t initial_capacity) 
         : data_(nullptr), size_(0), capacity_(0) {
         if (initial_capacity > 0) {
             data_ = allocate_storage(initial_capacity);
@@ -293,7 +293,7 @@ public:
     }
     
     // Initializer list constructor
-    Vec(std::initializer_list<T> init) 
+    VecLegacy(std::initializer_list<T> init) 
         : data_(nullptr), size_(0), capacity_(0) {
         reserve(init.size());
         for (const T& item : init) {
@@ -302,7 +302,7 @@ public:
     }
     
     // Copy constructor with clone()-fallback for move-only Rust-like payloads.
-    Vec(const Vec& other) : data_(nullptr), size_(0), capacity_(0) {
+    VecLegacy(const VecLegacy& other) : data_(nullptr), size_(0), capacity_(0) {
         reserve(other.size_);
         for (size_t i = 0; i < other.size_; ++i) {
             if constexpr (std::is_copy_constructible_v<T>) {
@@ -312,12 +312,12 @@ public:
             } else {
                 static_assert(
                     std::is_copy_constructible_v<T>,
-                    "Vec copy requires copy-constructible or clone()-able elements");
+                    "VecLegacy copy requires copy-constructible or clone()-able elements");
             }
         }
     }
 
-    Vec& operator=(const Vec& other) {
+    VecLegacy& operator=(const VecLegacy& other) {
         if (this == &other) {
             return *this;
         }
@@ -331,24 +331,24 @@ public:
             } else {
                 static_assert(
                     std::is_copy_constructible_v<T>,
-                    "Vec copy assignment requires copy-constructible or clone()-able elements");
+                    "VecLegacy copy assignment requires copy-constructible or clone()-able elements");
             }
         }
         return *this;
     }
     
     // Move constructor
-    Vec(Vec&& other) noexcept 
+    VecLegacy(VecLegacy&& other) noexcept 
         : data_(other.data_), size_(other.size_), capacity_(other.capacity_) {
         other.data_ = nullptr;
         other.size_ = 0;
         other.capacity_ = 0;
     }
 
-    // Converting move constructor for Vec<U, UA> -> Vec<T, A> when element conversion exists.
+    // Converting move constructor for VecLegacy<U, UA> -> VecLegacy<T, A> when element conversion exists.
     template<typename U, typename UA>
     requires (!(std::is_same_v<U, T> && std::is_same_v<UA, A>) && std::is_constructible_v<T, U>)
-    Vec(Vec<U, UA>&& other) : data_(nullptr), size_(0), capacity_(0) {
+    VecLegacy(VecLegacy<U, UA>&& other) : data_(nullptr), size_(0), capacity_(0) {
         reserve(other.len());
         for (size_t i = 0; i < other.len(); ++i) {
             if constexpr (std::is_convertible_v<U, T>) {
@@ -361,7 +361,7 @@ public:
     }
     
     // Move assignment
-    Vec& operator=(Vec&& other) {
+    VecLegacy& operator=(VecLegacy&& other) {
         if (this != &other) {
             // Clean up existing data
             clear();
@@ -399,13 +399,13 @@ public:
     // clear(), which invokes ~T() for each element. The other two
     // calls are noexcept (operator delete and pure bookkeeping).
     // Mirror std::vector's design: propagate T's destructor's
-    // exception specification. That way Vec<T> for T with a
+    // exception specification. That way VecLegacy<T> for T with a
     // noexcept destructor (uint64_t, std::string, ...) is itself
     // noexcept-destructible, which is required for any class that
-    // holds a Vec<T> member and overrides a virtual destructor of
+    // holds a VecLegacy<T> member and overrides a virtual destructor of
     // a noexcept base — the situation that arises in gtest fixture
     // hierarchies and Masstree's search_range_callback.
-    ~Vec() noexcept(std::is_nothrow_destructible_v<T>) {
+    ~VecLegacy() noexcept(std::is_nothrow_destructible_v<T>) {
         clear();
         clear_forgotten_storage_marks();
         deallocate_storage(data_, capacity_);
@@ -431,7 +431,7 @@ public:
         auto bytes = write_byte_span(buf);
         reserve(size_ + bytes.size());
         // Fast path: memcpy. The per-byte push loop below was ~10x
-        // slower on Marshal V2 / Cursor<Vec<u8>> byte writes.
+        // slower on Marshal V2 / Cursor<VecLegacy<u8>> byte writes.
         if (bytes.size() > 0) {
             std::memcpy(data_ + size_, bytes.data(), bytes.size());
         }
@@ -550,7 +550,7 @@ public:
                       && !requires(const T& t) { t.clone(); }) {
             // Fast path: memcpy the whole slice. For uint8_t this is ~10x
             // faster than the per-element push loop below — both Marshal
-            // V2 and io::Cursor<Vec<u8>>::write depend on this.
+            // V2 and io::Cursor<VecLegacy<u8>>::write depend on this.
             if (other.size() > 0) {
                 std::memcpy(data_ + size_, other.data(), other.size() * sizeof(T));
             }
@@ -663,12 +663,12 @@ public:
     // Get size
     size_t len() const { return size_; }
 
-    // Access the stored allocator. Mirrors Rust's `Vec::allocator(&self) -> &A`.
+    // Access the stored allocator. Mirrors Rust's `VecLegacy::allocator(&self) -> &A`.
     // @lifetime: (&'a) -> &'a
     const A& allocator() const noexcept { return alloc_; }
     size_t size() const { return size_; }
 
-    // Unsafe-style length override (Rust Vec::set_len semantics).
+    // Unsafe-style length override (Rust VecLegacy::set_len semantics).
     // Caller is responsible for initialization/drop invariants.
     void set_len(size_t new_len) {
         assert(new_len <= capacity_);
@@ -683,7 +683,7 @@ public:
     
     // Reserve capacity. Grows geometrically (max of requested and
     // 2*current) so a sequence of small reserve(size+N) calls
-    // amortizes to O(N) total work — matches Rust's Vec::reserve.
+    // amortizes to O(N) total work — matches Rust's VecLegacy::reserve.
     // Use `reserve_exact` if you want the exact bound.
     void reserve(size_t new_capacity) {
         if (new_capacity > capacity_) {
@@ -745,10 +745,10 @@ public:
     T* end() { return data_ + size_; }
     const T* end() const { return data_ + size_; }
     
-    // Clone the Vec (explicit deep copy)
+    // Clone the VecLegacy (explicit deep copy)
     // @lifetime: owned
-    Vec clone() const {
-        Vec result = Vec::with_capacity(capacity_);
+    VecLegacy clone() const {
+        VecLegacy result = VecLegacy::with_capacity(capacity_);
         for (size_t i = 0; i < size_; ++i) {
             if constexpr (std::is_copy_constructible_v<T>) {
                 result.push(data_[i]);
@@ -757,14 +757,14 @@ public:
             } else {
                 static_assert(
                     std::is_copy_constructible_v<T>,
-                    "Vec::clone requires copy-constructible or clone()-able elements");
+                    "VecLegacy::clone requires copy-constructible or clone()-able elements");
             }
         }
         return result;
     }
     
     // Equality comparison
-    bool operator==(const Vec& other) const {
+    bool operator==(const VecLegacy& other) const {
         if (size_ != other.size_) return false;
         for (size_t i = 0; i < size_; ++i) {
             if (!(data_[i] == other.data_[i])) return false;
@@ -773,7 +773,7 @@ public:
     }
 
     template<typename U, typename UA>
-    bool operator==(const Vec<U, UA>& other) const {
+    bool operator==(const VecLegacy<U, UA>& other) const {
         if (size_ != other.len()) return false;
         for (size_t i = 0; i < size_; ++i) {
             if constexpr (requires(const T& lhs, const U& rhs) { lhs == rhs; }) {
@@ -790,17 +790,17 @@ public:
         return true;
     }
 
-    bool operator!=(const Vec& other) const {
+    bool operator!=(const VecLegacy& other) const {
         return !(*this == other);
     }
 
     template<typename U, typename UA>
-    bool operator!=(const Vec<U, UA>& other) const {
+    bool operator!=(const VecLegacy<U, UA>& other) const {
         return !(*this == other);
     }
 
     // Retain only elements where predicate returns true
-    // Similar to Rust's Vec::retain
+    // Similar to Rust's VecLegacy::retain
     // Uses rusty::Function for type-erased, move-only callable (no ref captures)
     // Predicate signature: bool(const T&) - takes immutable borrow of element
     void retain(Function<bool(const T&)> predicate) {
@@ -821,21 +821,21 @@ public:
         size_ = write;
     }
 
-    // Extract elements where predicate returns true, removing them from this Vec
-    // Similar to Rust's Vec::extract_if (formerly drain_filter)
-    // Returns a new Vec containing the extracted elements
+    // Extract elements where predicate returns true, removing them from this VecLegacy
+    // Similar to Rust's VecLegacy::extract_if (formerly drain_filter)
+    // Returns a new VecLegacy containing the extracted elements
     // Uses rusty::Function for type-erased, move-only callable (no ref captures)
     // Predicate signature: bool(const T&) - takes immutable borrow of element
-    Vec<T> extract_if(Function<bool(const T&)> predicate) {
-        Vec<T> extracted = Vec<T>::with_capacity(size_ / 2);  // Reasonable initial guess
+    VecLegacy<T> extract_if(Function<bool(const T&)> predicate) {
+        VecLegacy<T> extracted = VecLegacy<T>::with_capacity(size_ / 2);  // Reasonable initial guess
         size_t write = 0;
         for (size_t read = 0; read < size_; ++read) {
             if (predicate(static_cast<const T&>(data_[read]))) {
-                // Move to extracted Vec
+                // Move to extracted VecLegacy
                 extracted.push(std::move(data_[read]));
                 data_[read].~T();
             } else {
-                // Keep in this Vec
+                // Keep in this VecLegacy
                 if (write != read) {
                     new (&data_[write]) T(std::move(data_[read]));
                     data_[read].~T();
@@ -848,15 +848,15 @@ public:
     }
 };
 
-// Helper function to create a Vec
+// Helper function to create a VecLegacy
 template<typename T>
 // @lifetime: owned
-Vec<T> vec_of(std::initializer_list<T> init) {
-    return Vec<T>(init);
+VecLegacy<T> vec_of(std::initializer_list<T> init) {
+    return VecLegacy<T>(init);
 }
 
 template<typename T>
-void vec_extend_from_slice(Vec<T>& self, std::span<const T> other) {
+void vec_extend_from_slice(VecLegacy<T>& self, std::span<const T> other) {
     self.reserve(self.size() + other.size());
     for (const auto& item : other) {
         if constexpr (requires { item.clone(); }) {
@@ -866,6 +866,17 @@ void vec_extend_from_slice(Vec<T>& self, std::span<const T> other) {
         }
     }
 }
+
+// Transitional alias: `rusty::Vec` is now an alias for the hand-written
+// `rusty::VecLegacy`. The transpiled vec_port::Vec is the long-term
+// canonical name; this alias keeps existing code (BTreeMap internals,
+// HashMap, tests, examples) working while the migration completes.
+//
+// When the transpiled Vec is mature enough to drop in, retire this
+// alias in favor of `using Vec = vec_port::Vec` (or rename
+// vec_port::Vec → rusty::Vec at the module level).
+template<typename T, typename A = rusty::alloc::Global>
+using Vec = VecLegacy<T, A>;
 
 } // namespace rusty
 

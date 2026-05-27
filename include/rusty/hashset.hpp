@@ -224,10 +224,10 @@ public:
         });
     }
     
-    // Drain all elements into a Vec
+    // Drain all elements into a VecLegacy
     // @lifetime: owned
-    Vec<T> drain() {
-        Vec<T> result = Vec<T>::with_capacity(map_.len());
+    VecLegacy<T> drain() {
+        VecLegacy<T> result = VecLegacy<T>::with_capacity(map_.len());
         for (auto [key, _] : map_) {
             result.push(key);
         }
@@ -314,10 +314,10 @@ public:
         return const_iterator(map_.end());
     }
     
-    // Convert to Vec
+    // Convert to VecLegacy
     // @lifetime: owned
-    Vec<T> to_vec() const {
-        Vec<T> result = Vec<T>::with_capacity(map_.len());
+    VecLegacy<T> to_vec() const {
+        VecLegacy<T> result = VecLegacy<T>::with_capacity(map_.len());
         for (auto [key, _] : map_) {
             result.push(key);
         }
@@ -355,10 +355,10 @@ HashSet<T> hashset_with_capacity(size_t cap) {
     return HashSet<T>::with_capacity(cap);
 }
 
-// Create HashSet from Vec
+// Create HashSet from VecLegacy
 template<typename T>
 // @lifetime: owned
-HashSet<T> hashset_from_vec(Vec<T> vec) {
+HashSet<T> hashset_from_vec(VecLegacy<T> vec) {
     HashSet<T> set;
     for (size_t i = 0; i < vec.len(); i++) {
         set.insert(std::move(vec[i]));
