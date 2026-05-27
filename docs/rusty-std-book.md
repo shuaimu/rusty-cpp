@@ -2123,11 +2123,12 @@ emits the right `import` directives.
 - [x] **C1** Smoke test: construct + push end-to-end. Output:
       `constructed Vec<int>; size hint: 48` followed by len = 2
       after two pushes.
-- [x] **E1** Completeness coverage: 16 operations exercised and
-      pass — new_in, push, pop, len, capacity, is_empty, as_slice,
-      truncate, insert, remove, swap_remove, clear, reserve,
-      extend_from_slice, with_capacity_in, shrink_to_fit. See
-      `docs/vec_port/vec_smoke_test.cpp`.
+- [x] **E1** Completeness coverage: 22 operations exercised and
+      pass — new_in, with_capacity_in, push, pop, len, capacity,
+      is_empty, as_slice, as_mut_slice, slice iteration, slice
+      equality, truncate, insert, remove, swap_remove, clear,
+      reserve, shrink_to_fit, extend_from_slice, clone,
+      operator[], Vec == Vec. See `docs/vec_port/vec_smoke_test.cpp`.
 - [x] **E2** Bench vs `std::vector` (§4.5). Native Rust `Vec`
       cross-comparison deferred — same numerics as our BTreeMap
       bench in §1.6, runs against rustc -O3.
@@ -2203,16 +2204,31 @@ keyword issued in the wrong scope by the transpiler.
 
 ### 4.7 What's deferred
 
+Closed since last revision:
+- ✅ **clone()** — hand-ported via with_capacity_in + push loop
+  (was a `std::span::to_vec_in` block; `to_vec_in` is a Rust
+  extension-trait method, not on `std::span`).
+- ✅ **operator[]** — hand-ported to `as_slice()[i]`
+  (`Index::index` is a Rust trait method, not on `std::span`).
+- ✅ **Vec == Vec** — works "for free" via the generic
+  `operator==(L, R)` in `include/rusty/array.hpp:252` which uses
+  both sides' `as_slice()`.
+
+Still deferred:
 - **into_iter / drain / extract_if**: dropped from the reduced-
   scope build (see `patch_trim_cmakelists`). The auxiliary modules
   have their own cluster-V error long tails. A future iteration
   could re-enable them with targeted patches.
-- **clone() / partial_eq**: hits `to_vec_in` which isn't on
-  `std::span`. Wrap or hand-port.
+- **partial_eq trait specialization**: equality with C-arrays or
+  std::array works; Vec<T1> == Vec<T2> with different T not
+  tested.
 - **Iterator adapter chain**: filter/map/collect through Vec —
   none tested. The iter modules weren't built.
 - **Custom allocator paths**: only Global tested; alternate
   allocators may surface their own paths.
+- **Non-trivial element types**: only `int` tested. Vec<Box<T>>,
+  Vec<String>, etc. need separate verification to confirm Drop
+  chains fire through the Vec destructor.
 
 This chapter will continue to grow as the long-tail items get
 closed. The pattern then repeats for String (Chapter 5) and
