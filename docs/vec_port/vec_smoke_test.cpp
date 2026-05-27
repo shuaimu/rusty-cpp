@@ -167,6 +167,19 @@ int main() {
         CHECK(v2 != v4, "v2 != v4 after modify");
     }
 
+    // Cross-type: Vec vs std::array
+    auto v5 = Vec<int, rusty::alloc::Global>::with_capacity_in(3, rusty::alloc::Global{});
+    v5.push(1); v5.push(2); v5.push(3);
+    std::array<int, 3> expected_arr = {1, 2, 3};
+    if constexpr (requires { v5 == expected_arr; }) {
+        CHECK(v5 == expected_arr, "Vec == std::array");
+        std::printf("Vec == std::array works (cross-type)\n");
+    }
+    std::array<int, 3> different_arr = {1, 2, 99};
+    if constexpr (requires { v5 != different_arr; }) {
+        CHECK(v5 != different_arr, "Vec != different std::array");
+    }
+
     std::printf("ALL CHECKS PASSED (%d ops covered)\n", 30);
     return 0;
 }
