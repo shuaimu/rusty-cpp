@@ -438,7 +438,12 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
     if not matches:
         return 0
     insert_at = matches[-1].end()
-    stubs = """
+    # When into_iter is in the build, vec.cppm `import`s it and gets
+    # the real binary `IntoIter<T, A>`; skip stubbing it then.
+    has_into_iter_import = "import vec_port.vec.into_iter;" in text
+    intoiter_stub = "" if has_into_iter_import else \
+        "export template<typename... Ts> class IntoIter;\n"
+    stubs = f"""
 // vec_port stubs for dropped aux types — see Chapter 4 of rusty-std-book.
 // These are forward-declared placeholders so vec.cppm parses; any code
 // path that actually instantiates them will fail at the use site,
@@ -446,8 +451,7 @@ def patch_stub_dropped_iter_types(cpp_out: Path) -> int:
 //
 // Variadic templates accept any arity (rustc uses 2-4 type params
 // across these types after dropping the lifetime).
-export template<typename... Ts> class IntoIter;
-export template<typename... Ts> class Drain;
+{intoiter_stub}export template<typename... Ts> class Drain;
 export template<typename... Ts> class ExtractIf;
 export template<typename... Ts> class Splice;
 export template<typename... Ts> class PeekMut;
@@ -810,6 +814,170 @@ def patch_return_handle_error_void(cpp_out: Path) -> int:
             path.write_text(text)
             n += 1
     return n
+
+
+def patch_into_iter_more_fixes(cpp_out: Path) -> int:
+    """Second pass for vec_port.vec.into_iter:
+
+    1. `/* non_null!(self . end , T) */` — macro that got elided.
+       Replace with `this->end` (which is already T* / non-null).
+    2. `NonZero::new_(...)` → `rusty::num::NonZero<size_t>::new_(...)`
+       at remaining call sites.
+    3. `last()` body calls `next_back()` which IntoIter doesn't
+       expose under that name in our build; stub with a forwarding
+       call to next() and a comment.
+    4. `next_chunk()` body uses rusty::array::IntoIter; replace the
+       whole method body with std::abort().
+    """
+    path = cpp_out / "vec_port.vec.into_iter.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+
+    # Fix 1: macro placeholder → actual expression. `this->end` is
+    # already a `const T*` field; the original Rust `non_null!(...)`
+    # macro built a NonNull-wrapped fat pointer. For our purposes,
+    # treat as the bare pointer.
+    text = text.replace(
+        "/* non_null!(self . end , T) */",
+        "rusty::detail::deref_if_pointer_like(this->end)",
+    )
+
+    # Fix 2: bare NonZero::new_ → fully-qualified
+    text = re.sub(
+        r"(?<![:\w])NonZero::new_\(",
+        "rusty::num::NonZero<size_t>::new_(",
+        text,
+    )
+
+    # Fix 3: stub last() — IntoIter doesn't have next_back in our cut
+    text = text.replace(
+        "    rusty::Option<T> last() {\n        return this->next_back();\n    }",
+        "    rusty::Option<T> last() {\n        // STUBBED: next_back not exposed\n        rusty::Option<T> result{rusty::None};\n        while (true) {\n            auto next = this->next();\n            if (next.is_none()) break;\n            result = std::move(next);\n        }\n        return result;\n    }",
+    )
+
+    # Fix 4: stub next_chunk by replacing from the template header
+    # to the next `^    \}\n` matched at the right indentation. Match
+    # by exact start line then sweep through to the closing brace.
+    start_marker = "    template<size_t N>\n    rusty::Result<std::array<T,"
+    if start_marker in text:
+        sidx = text.find(start_marker)
+        # Find the closing brace at the same indent ("\n    }")
+        eidx = text.find("\n    }\n", sidx)
+        if eidx != -1:
+            stub = (
+                "    template<size_t N>\n"
+                "    auto next_chunk() {\n"
+                "        // STUBBED: rusty::array::IntoIter unavailable\n"
+                "        std::abort();\n"
+                "    }"
+            )
+            text = text[:sidx] + stub + text[eidx + 7:]
+
+    # Fix 5: stub default_() — uses `super::rusty::Vec<auto>` (bogus path)
+    old_default = (
+        "    static IntoIter<T, A> default_() {\n"
+        "        return rusty::iter(super::rusty::Vec<auto>::new_in(A::default_()));\n"
+        "    }"
+    )
+    new_default = (
+        "    static IntoIter<T, A> default_() {\n"
+        "        // STUBBED: super::rusty::Vec<auto>::new_in path doesn't resolve\n"
+        "        std::abort();\n"
+        "    }"
+    )
+    text = text.replace(old_default, new_default)
+
+    # Fix 6: stub clone() — uses span::to_vec_in (same blocker as Vec::clone)
+    old_clone = (
+        "    IntoIter<T, A> clone() const {\n"
+        "        return rusty::iter(rusty::as_slice((*this)).to_vec_in(rusty::clone(rusty::deref_ref(this->alloc))));\n"
+        "    }"
+    )
+    new_clone = (
+        "    IntoIter<T, A> clone() const {\n"
+        "        // STUBBED: span::to_vec_in unavailable\n"
+        "        std::abort();\n"
+        "    }"
+    )
+    text = text.replace(old_clone, new_clone)
+
+    # Fix 7: bare `RawVec::from_nonnull_in(...)` → with template args
+    text = text.replace(
+        "RawVec::from_nonnull_in(this->_0.buf, this->_0.cap, std::move(alloc))",
+        "RawVec<T, A>::from_nonnull_in(this->_0.buf, this->_0.cap, std::move(alloc))",
+    )
+
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_into_iter_compile_errors(cpp_out: Path) -> int:
+    """Cluster of small fixes for re-enabling vec_port.vec.into_iter:
+
+    1. `rusty::VecDeque<T, A>` is unary in rusty/vec_deque.hpp; the
+       transpiler emits the binary form. Stub `into_vecdeque()` body
+       since we don't need this interop method.
+    2. `next_chunk<N>()` references `rusty::array::IntoIter<T, N>`
+       which doesn't exist in rusty. Stub the body — rare API.
+    3. `RawVec::new_()` and `NonZero::new_(1)` need template args.
+    4. `static constexpr Option<NonZero<size_t>> EXPAND_BY` — the
+       literal-type requirement isn't met by Option. Drop `constexpr`.
+    """
+    path = cpp_out / "vec_port.vec.into_iter.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+
+    # Fix 1: stub into_vecdeque body
+    old_vd = (
+        "    rusty::VecDeque<T, A> into_vecdeque() {\n"
+        "        auto this_ = rusty::mem::manually_drop_new(std::move((*this)));"
+    )
+    if old_vd in text:
+        idx = text.find(old_vd)
+        # Find the closing `}` of the method
+        end_idx = text.find("\n    }\n", idx)
+        if end_idx != -1:
+            stub = (
+                "    auto into_vecdeque() {\n"
+                "        // STUBBED: rusty::VecDeque API arity mismatch\n"
+                "        std::abort();\n"
+                "    }"
+            )
+            text = text[:idx] + stub + text[end_idx + 7:]
+
+    # Fix 2: stub next_chunk body
+    text = re.sub(
+        r"(    template<size_t N>\n    )rusty::Result<std::array<T[^>]*>, rusty::array::IntoIter<T, N>> next_chunk\(\) \{",
+        r"\1auto next_chunk() {\n        // STUBBED: rusty::array::IntoIter unavailable\n        std::abort();\n        // (legacy body follows but unreachable)\n        if (false) {",
+        text,
+    )
+
+    # Fix 3: bare `RawVec::new_()` → `RawVec<T, A>::new_()`
+    text = text.replace(
+        "this->buf = RawVec::new_().non_null();",
+        "this->buf = RawVec<T, A>::new_().non_null();",
+    )
+
+    # Fix 4: drop `static constexpr` on Option<NonZero<...>> bindings
+    text = text.replace(
+        "    static constexpr rusty::Option<rusty::num::NonZero<size_t>> EXPAND_BY = NonZero::new_(1);",
+        "    static inline const rusty::Option<rusty::num::NonZero<size_t>> EXPAND_BY = rusty::num::NonZero<size_t>::new_(1);",
+    )
+    text = text.replace(
+        "    static constexpr rusty::Option<rusty::num::NonZero<size_t>> MERGE_BY = NonZero::new_(1);",
+        "    static inline const rusty::Option<rusty::num::NonZero<size_t>> MERGE_BY = rusty::num::NonZero<size_t>::new_(1);",
+    )
+
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
 
 
 def patch_operator_index(cpp_out: Path) -> int:
@@ -1242,7 +1410,7 @@ def patch_strip_vec_cppm_aux_imports(cpp_out: Path) -> int:
         "vec_port.vec.extract_if",
         "vec_port.vec.in_place_collect",
         "vec_port.vec.in_place_drop",
-        "vec_port.vec.into_iter",
+        # vec_port.vec.into_iter — keeping; see CMakeLists trim
         "vec_port.vec.is_zero",
         "vec_port.vec.partial_eq",
         "vec_port.vec.peek_mut",
@@ -1507,6 +1675,7 @@ add_library(vec_port
     vec_port.cppm
     vec_port.raw_vec.cppm
     vec_port.vec.set_len_on_drop.cppm
+    vec_port.vec.into_iter.cppm
     vec_port.vec.cppm
 )
 
@@ -1514,6 +1683,7 @@ target_sources(vec_port PUBLIC FILE_SET CXX_MODULES FILES
     vec_port.cppm
     vec_port.raw_vec.cppm
     vec_port.vec.set_len_on_drop.cppm
+    vec_port.vec.into_iter.cppm
     vec_port.vec.cppm
 )
 """
@@ -1581,6 +1751,10 @@ def main(cpp_out: Path):
             patch_clone_to_vec_in),
         ("hand-port Vec::operator[] and index_mut to slice indexing",
             patch_operator_index),
+        ("into_iter compile-error cluster (VecDeque/array::IntoIter/NonZero/RawVec)",
+            patch_into_iter_compile_errors),
+        ("into_iter pass 2 (non_null! macro, NonZero qual, last/next_chunk stubs)",
+            patch_into_iter_more_fixes),
         ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
             patch_return_handle_error_void),
         ("shrink_unchecked: hoist double-unwrap on Option<tuple>",
