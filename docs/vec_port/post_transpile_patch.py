@@ -816,6 +816,208 @@ def patch_return_handle_error_void(cpp_out: Path) -> int:
     return n
 
 
+def patch_t_is_zst_constexpr_if(cpp_out: Path) -> int:
+    """Several emit sites have `if (T::IS_ZST)` or `T::IS_ZST ? ... : ...`
+    which fail when T is a non-class (e.g. `int` has no members).
+
+    Wrap each in `if constexpr (requires { T::IS_ZST; })` style. For
+    the targeted `new_cap` free function we can simplify aggressively:
+    we never use ZST so just always take the non-ZST branch.
+    """
+    n = 0
+    p_rv = cpp_out / "vec_port.raw_vec.cppm"
+    if p_rv.exists():
+        t = p_rv.read_text()
+        orig = t
+        # `new_cap<T>`: hard-code non-ZST branch.
+        t = t.replace(
+            "Cap new_cap(size_t cap) {\n    if (T::IS_ZST) {\n        return ZERO_CAP;\n    } else {\n        return std::move(cap);\n    }\n}",
+            "Cap new_cap(size_t cap) {\n    // HAND-PORT: ZST branch elided (non-class T fails T::IS_ZST).\n    return std::move(cap);\n}",
+        )
+        if t != orig:
+            p_rv.write_text(t)
+            n += 1
+    return n
+
+
+def patch_into_iter_runtime_body(cpp_out: Path) -> int:
+    """Phase B for into_iter: hand-port the methods that actually
+    run when user code calls v.into_iter().
+
+    The transpiled bodies assume:
+      - T has `T::IS_ZST` constexpr static (fails for non-class T
+        like `int`)
+      - `NonNull<T>::read()` exists (rusty's doesn't)
+      - `me.buf` field access on ManuallyDrop<Vec<...>> (it's
+        actually wrapped)
+
+    Replace next(), next() back side, size_hint() with simple
+    pointer-based implementations. as_raw_mut_slice's return type
+    is also flipped (was &mut [T] pointer-typed, returns by value).
+    """
+    n = 0
+
+    # Vec::into_iter() in vec.cppm — replace ManuallyDrop dance + IS_ZST.
+    p_vec = cpp_out / "vec_port.vec.cppm"
+    if p_vec.exists():
+        t = p_vec.read_text()
+        orig = t
+        old = (
+            "    IntoIter<T, A> into_iter() {\n"
+            "        // @unsafe\n"
+            "        {\n"
+            "            const auto me = rusty::mem::manually_drop_new(std::move((*this)));\n"
+            "            auto alloc = rusty::mem::manually_drop_new(rusty::ptr::read(me.allocator()));\n"
+            "            auto buf = me.buf.non_null();\n"
+            "            const auto begin = const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(buf)));\n"
+            "            auto end = (T::IS_ZST ? begin->wrapping_byte_add(rusty::len(me)) : reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::ptr::add(begin, rusty::len(me))));\n"
+            "            auto cap = me.buf.capacity();\n"
+            "            return IntoIter{.buf = std::move(buf), .phantom = rusty::PhantomData<std::tuple<>>{}, .cap = std::move(cap), .alloc = std::move(alloc), .ptr = std::move(buf), .end = std::move(end)};\n"
+            "        }\n"
+            "    }"
+        )
+        new = (
+            "    IntoIter<T, A> into_iter() {\n"
+            "        // HAND-PORT: bypass ManuallyDrop wrapper + T::IS_ZST.\n"
+            "        auto buf = this->buf.non_null();\n"
+            "        auto cap = this->buf.capacity();\n"
+            "        auto* begin = rusty::as_ptr(buf);\n"
+            "        auto* end_ptr = static_cast<std::add_pointer_t<std::add_const_t<T>>>(begin + this->len_field);\n"
+            "        // Steal the allocator (move-construct into a fresh holder)\n"
+            "        auto alloc_copy = rusty::mem::manually_drop_new(\n"
+            "            std::move(const_cast<A&>(this->buf.allocator())));\n"
+            "        // Neutralize this Vec's RawVec so ~Vec doesn't double-free —\n"
+            "        // IntoIter takes ownership of the buffer.\n"
+            "        this->len_field = 0;\n"
+            "        this->buf.rusty_mark_forgotten();\n"
+            "        return IntoIter<T, A>(\n"
+            "            buf,\n"
+            "            rusty::PhantomData<T>{},\n"
+            "            cap,\n"
+            "            std::move(alloc_copy),\n"
+            "            buf,\n"
+            "            end_ptr\n"
+            "        );\n"
+            "    }"
+        )
+        if old in t:
+            t = t.replace(old, new)
+        if t != orig:
+            p_vec.write_text(t)
+            n += 1
+
+    # IntoIter::next() — replace with simple pointer-based body.
+    p_ii = cpp_out / "vec_port.vec.into_iter.cppm"
+    if p_ii.exists():
+        t = p_ii.read_text()
+        orig = t
+
+        old_next = (
+            "    rusty::Option<T> next() {\n"
+            "        decltype(this->ptr) ptr_shadow1 {};\n"
+            "        {\n"
+            "            if (T::IS_ZST) {\n"
+            "                if (rusty::as_ptr(this->ptr) == (const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(this->end)))) {\n"
+            "                    return rusty::Option<T>{rusty::None};\n"
+            "                }\n"
+            "                this->end = this->end->wrapping_byte_sub(1);\n"
+            "                ptr_shadow1 = this->ptr;\n"
+            "            } else {\n"
+            "                if (rusty::detail::deref_if_pointer_like(this->ptr) == rusty::detail::deref_if_pointer_like(this->end)) {\n"
+            "                    return rusty::Option<T>{rusty::None};\n"
+            "                }\n"
+            "                const auto old = this->ptr;\n"
+            "                this->ptr = old.add(1);\n"
+            "                ptr_shadow1 = old;\n"
+            "            }\n"
+            "        }\n"
+            "        return rusty::Option<T>(ptr_shadow1.read());\n"
+            "    }"
+        )
+        new_next = (
+            "    rusty::Option<T> next() {\n"
+            "        // HAND-PORT: simple pointer-based; no IS_ZST, no .read().\n"
+            "        auto* p = rusty::as_ptr(this->ptr);\n"
+            "        if (p == this->end) return rusty::Option<T>{rusty::None};\n"
+            "        T value = std::move(*p);\n"
+            "        this->ptr = rusty::ptr::NonNull<T>::new_unchecked(p + 1);\n"
+            "        return rusty::Option<T>(std::move(value));\n"
+            "    }"
+        )
+        if old_next in t:
+            t = t.replace(old_next, new_next)
+
+        # size_hint() — drop IS_ZST branch
+        old_sh = (
+            "    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {\n"
+            "        auto exact = (T::IS_ZST ? (static_cast<size_t>(this->end->addr()) - static_cast<size_t>(rusty::as_ptr(this->ptr)->addr())) : rusty::detail::deref_if_pointer_like(this->end).offset_from_unsigned(this->ptr));\n"
+            "        return std::make_tuple(std::move(exact), rusty::Option<size_t>(std::move(exact)));\n"
+            "    }"
+        )
+        new_sh = (
+            "    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {\n"
+            "        // HAND-PORT: no IS_ZST.\n"
+            "        size_t exact = static_cast<size_t>(this->end - rusty::as_ptr(this->ptr));\n"
+            "        return std::make_tuple(exact, rusty::Option<size_t>(exact));\n"
+            "    }"
+        )
+        if old_sh in t:
+            t = t.replace(old_sh, new_sh)
+
+        # as_raw_mut_slice — wrong return type wrapping
+        old_asraw = (
+            "    std::add_pointer_t<std::span<T>> as_raw_mut_slice() {\n"
+            "        return rusty::from_raw_parts_mut(rusty::as_ptr(this->ptr), rusty::len((*this)));\n"
+            "    }"
+        )
+        new_asraw = (
+            "    std::span<T> as_raw_mut_slice() {\n"
+            "        // HAND-PORT: drop the bogus pointer wrap.\n"
+            "        return rusty::from_raw_parts_mut(rusty::as_ptr(this->ptr), rusty::len((*this)));\n"
+            "    }"
+        )
+        if old_asraw in t:
+            t = t.replace(old_asraw, new_asraw)
+
+        # as_mut_slice — was deref'ing the as_raw_mut_slice ptr
+        t = t.replace(
+            "    std::span<T> as_mut_slice() {\n        // @unsafe\n        {\n            return *this->as_raw_mut_slice();\n        }\n    }",
+            "    std::span<T> as_mut_slice() {\n        return this->as_raw_mut_slice();\n    }",
+        )
+
+        # forget_allocation_drop_remaining used the pointer form — fix
+        t = t.replace(
+            "    void forget_allocation_drop_remaining() {\n        const auto remaining = this->as_raw_mut_slice();\n",
+            "    void forget_allocation_drop_remaining() {\n        auto remaining = this->as_raw_mut_slice();\n",
+        )
+
+        # Stub advance_by — uses T::IS_ZST
+        t = re.sub(
+            r"    auto advance_by\(size_t n\) -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> \{[\s\S]*?\n    \}\n",
+            (
+                "    auto advance_by(size_t n) -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> {\n"
+                "        // HAND-PORT: no IS_ZST.\n"
+                "        auto avail = static_cast<size_t>(this->end - rusty::as_ptr(this->ptr));\n"
+                "        auto step = (n < avail) ? n : avail;\n"
+                "        for (size_t i = 0; i < step; ++i) { (void)this->next(); }\n"
+                "        if (n > avail) {\n"
+                "            return rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Err(\n"
+                "                rusty::num::NonZero<size_t>::new_(n - avail).unwrap());\n"
+                "        }\n"
+                "        return rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple());\n"
+                "    }\n"
+            ),
+            t,
+            count=1,
+        )
+
+        if t != orig:
+            p_ii.write_text(t)
+            n += 1
+
+    return n
+
+
 def patch_into_iter_more_fixes(cpp_out: Path) -> int:
     """Second pass for vec_port.vec.into_iter:
 
@@ -1755,6 +1957,10 @@ def main(cpp_out: Path):
             patch_into_iter_compile_errors),
         ("into_iter pass 2 (non_null! macro, NonZero qual, last/next_chunk stubs)",
             patch_into_iter_more_fixes),
+        ("into_iter Phase B: hand-port next/size_hint/advance_by + Vec::into_iter",
+            patch_into_iter_runtime_body),
+        ("raw_vec new_cap<T>: elide ZST branch for non-class T",
+            patch_t_is_zst_constexpr_if),
         ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
             patch_return_handle_error_void),
         ("shrink_unchecked: hoist double-unwrap on Option<tuple>",
