@@ -333,7 +333,7 @@ void test_from_vec() {
     // assert(set1.contains(2));
     // assert(set1.contains(3));
     
-    // Test with rusty::Vec
+    // Test with rusty::VecLegacy
     Vec<int> vec = Vec<int>::make();
     vec.push(1);
     vec.push(2);

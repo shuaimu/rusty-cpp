@@ -89,13 +89,13 @@ void demo_vec_rust_style() {
     printf("\n=== Vec (Rust-style API) ===\n");
     
     // Rust style: Vec::new()
-    auto vec1 = rusty::Vec<int>::make();
+    auto vec1 = rusty::VecLegacy<int>::make();
     vec1.push(10);
     vec1.push(20);
     printf("Vec::make() with pushes, len: %zu\n", vec1.len());
     
     // Rust style: Vec::with_capacity()
-    auto vec2 = rusty::Vec<int>::with_capacity(100);
+    auto vec2 = rusty::VecLegacy<int>::with_capacity(100);
     printf("Vec::with_capacity(100), cap: %zu\n", vec2.cap());
     
     // Rust-style methods
@@ -198,7 +198,7 @@ void demo_combined_rust_style() {
     printf("\n=== Combined Types (Rust-style) ===\n");
     
     // Vec of Boxes
-    auto vec = rusty::Vec<rusty::Box<int>>::make();
+    auto vec = rusty::VecLegacy<rusty::Box<int>>::make();
     vec.push(rusty::Box<int>::new_(1));
     vec.push(rusty::Box<int>::new_(2));
     vec.push(rusty::make_box<int>(3));

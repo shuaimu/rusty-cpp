@@ -345,7 +345,7 @@ inline void forget(T&& value) noexcept {
         // generated code).
         value.rusty_mark_forgotten();
     } else if constexpr (std::is_move_constructible_v<Plain> && !std::is_const_v<Value>) {
-        // Generic ownership-forget fallback for non-guarded owning types (e.g. rusty::Vec):
+        // Generic ownership-forget fallback for non-guarded owning types (e.g. rusty::VecLegacy):
         // move payload into leaked storage so the source becomes moved-from and no longer owns.
         detail::leak_construct<Plain>(std::move(value));
     } else if constexpr (std::is_copy_constructible_v<Plain>) {

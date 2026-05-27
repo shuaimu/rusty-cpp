@@ -22,7 +22,7 @@
 // that work with the Rusty C++ Checker to ensure memory safety.
 //
 // All types follow Rust's ownership and borrowing principles:
-// - Single ownership (Box, Vec)
+// - Single ownership (Box, VecLegacy)
 // - Shared immutable access (Rc, Arc) with built-in polymorphism support
 // - Explicit nullability (Option)
 // - Explicit error handling (Result)
@@ -37,6 +37,7 @@
 // #include "rusty/sync/weak.hpp"  // Namespace-organized: rusty::sync_impl::Weak<T>
 #include "rusty/vec.hpp"
 #include "rusty/vecdeque.hpp"
+#include "rusty/collections.hpp"  // TryReserveError (added for vec_port)
 #include "rusty/option.hpp"
 #include "rusty/result.hpp"
 #include "rusty/marker.hpp"
@@ -410,9 +411,9 @@ namespace rusty {
     }
 
     template<typename T, std::size_t Extent>
-    Vec<std::remove_const_t<T>> to_owned(std::span<T, Extent> value) {
+    VecLegacy<std::remove_const_t<T>> to_owned(std::span<T, Extent> value) {
         using Elem = std::remove_const_t<T>;
-        Vec<Elem> out(value.size());
+        VecLegacy<Elem> out(value.size());
         for (const auto& item : value) {
             out.push(static_cast<Elem>(item));
         }
@@ -816,8 +817,8 @@ namespace rusty {
     }
 
     template<typename T, std::size_t N>
-    Vec<T> into_vec(std::array<T, N> values) {
-        Vec<T> out(N);
+    VecLegacy<T> into_vec(std::array<T, N> values) {
+        VecLegacy<T> out(N);
         for (auto& value : values) {
             out.push(std::move(value));
         }
@@ -826,8 +827,8 @@ namespace rusty {
 
     #if !defined(RUSTY_NO_STD_VECTOR_INTEROP)
     template<typename T, typename Alloc>
-    Vec<T> into_vec(std::vector<T, Alloc> values) {
-        Vec<T> out(values.size());
+    VecLegacy<T> into_vec(std::vector<T, Alloc> values) {
+        VecLegacy<T> out(values.size());
         for (auto& value : values) {
             out.push(std::move(value));
         }

@@ -562,8 +562,8 @@ public:
     // - Reduces function call overhead
     // - Better cache locality
     // - Amortizes atomic operations
-    rusty::Vec<T> batch_recv_rusty(size_t max_count) {
-        rusty::Vec<T> results = rusty::Vec<T>::with_capacity(max_count);
+    rusty::VecLegacy<T> batch_recv_rusty(size_t max_count) {
+        rusty::VecLegacy<T> results = rusty::VecLegacy<T>::with_capacity(max_count);
         for (size_t i = 0; i < max_count; ++i) {
             auto value = try_pop();
             if (value.is_none()) {
@@ -575,7 +575,7 @@ public:
     }
 
 #if defined(RUSTY_NO_STD_VECTOR_BATCH_API)
-    rusty::Vec<T> batch_recv(size_t max_count) {
+    rusty::VecLegacy<T> batch_recv(size_t max_count) {
         return batch_recv_rusty(max_count);
     }
 #else
@@ -840,17 +840,17 @@ public:
     //   for (const auto& msg : messages) {
     //       process(msg);
     //   }
-    rusty::Vec<T> recv_batch_rusty(size_t max_count) {
+    rusty::VecLegacy<T> recv_batch_rusty(size_t max_count) {
         if (!state_) {
-            return rusty::Vec<T>::new_();
+            return rusty::VecLegacy<T>::new_();
         }
         return state_->batch_recv_rusty(max_count);
     }
 
 #if defined(RUSTY_NO_STD_VECTOR_BATCH_API)
-    rusty::Vec<T> recv_batch(size_t max_count) {
+    rusty::VecLegacy<T> recv_batch(size_t max_count) {
         if (!state_) {
-            return rusty::Vec<T>::new_();
+            return rusty::VecLegacy<T>::new_();
         }
         return state_->batch_recv(max_count);
     }

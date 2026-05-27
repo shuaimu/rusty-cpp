@@ -154,9 +154,9 @@ public:
     
     // Get all elements in range [min, max]
     // @lifetime: owned
-    Vec<T> range(const T& min, const T& max) const {
+    VecLegacy<T> range(const T& min, const T& max) const {
         auto map_range = map_.range(min, max);
-        Vec<T> result = Vec<T>::with_capacity(map_range.size());
+        VecLegacy<T> result = VecLegacy<T>::with_capacity(map_range.size());
         for (size_t i = 0; i < map_range.size(); i++) {
             result.push(map_range[i].first);
         }
@@ -278,10 +278,10 @@ public:
         });
     }
     
-    // Drain all elements into a Vec (in sorted order)
+    // Drain all elements into a VecLegacy (in sorted order)
     // @lifetime: owned
-    Vec<T> drain() {
-        Vec<T> result = Vec<T>::with_capacity(map_.len());
+    VecLegacy<T> drain() {
+        VecLegacy<T> result = VecLegacy<T>::with_capacity(map_.len());
         for (const auto& [key, _] : map_) {
             result.push(key);
         }
@@ -387,10 +387,10 @@ public:
         return const_iterator(map_.end());
     }
     
-    // Convert to Vec (in sorted order)
+    // Convert to VecLegacy (in sorted order)
     // @lifetime: owned
-    Vec<T> to_vec() const {
-        Vec<T> result = Vec<T>::with_capacity(map_.len());
+    VecLegacy<T> to_vec() const {
+        VecLegacy<T> result = VecLegacy<T>::with_capacity(map_.len());
         for (const auto& [key, _] : map_) {
             result.push(key);
         }
@@ -414,10 +414,10 @@ BTreeSet<T> btreeset() {
     return BTreeSet<T>::make();
 }
 
-// Create BTreeSet from Vec
+// Create BTreeSet from VecLegacy
 template<typename T>
 // @lifetime: owned
-BTreeSet<T> btreeset_from_vec(Vec<T> vec) {
+BTreeSet<T> btreeset_from_vec(VecLegacy<T> vec) {
     BTreeSet<T> set;
     for (size_t i = 0; i < vec.len(); i++) {
         set.insert(std::move(vec[i]));

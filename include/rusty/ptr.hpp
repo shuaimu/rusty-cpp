@@ -61,6 +61,15 @@ private:
         constexpr operator NonNull<U>() const noexcept {
             return NonNull<U>(reinterpret_cast<U*>(ptr_));
         }
+
+        // Rust's `NonNull::cast::<U>().as_non_null_ptr()` chain — the
+        // `as_non_null_ptr` is identity on NonNull<T>. For the CastProxy
+        // form we need an explicit terminator method that the call-site
+        // typing tells us the target U. With CTAD we can't get U here;
+        // fall back to T (no-op cast).
+        constexpr NonNull<T> as_non_null_ptr() const noexcept {
+            return NonNull<T>(ptr_);
+        }
     };
 
 public:
@@ -85,6 +94,19 @@ public:
     // @unsafe
     static constexpr NonNull<T> from(T* ptr) noexcept {
         return NonNull<T>(ptr);
+    }
+
+    // Overload accepting an existing NonNull<T> — identity, used by
+    // Unique::from(NonNull) in raw_vec. Added for vec_port.
+    static constexpr NonNull<T> from(NonNull<T> other) noexcept {
+        return other;
+    }
+
+    // Overload accepting a CastProxy — completes the cast and yields
+    // NonNull<T>. Used by `Unique::from(ptr.cast())` patterns where
+    // `cast()` returns the proxy. Added for vec_port.
+    static constexpr NonNull<T> from(CastProxy proxy) noexcept {
+        return NonNull<T>(reinterpret_cast<T*>(proxy.ptr_));
     }
 
     constexpr T* as_ptr() const noexcept {
@@ -392,6 +414,28 @@ requires requires(RangeLike r) { r.data(); r.size(); }
     auto count = static_cast<std::size_t>(range.size());
     std::destroy_n(data, count);
 }
+
+// ----- Unique<T>: like NonNull<T> but expresses sole ownership.
+// In rustc, `Unique<T>` is a `NonNull<T>` with a `PhantomData<T>` to
+// mark it as owning. For the C++ port we alias it directly to
+// NonNull — the ownership distinction matters for Rust's borrow
+// checker but not for the C++ semantics. (Added for vec_port.)
+template<typename T>
+using Unique = NonNull<T>;
+
+// ----- Alignment: like rustc's core::ptr::Alignment.
+// A power-of-two alignment value with type-driven constructors.
+// (Added for vec_port.)
+class Alignment {
+    std::size_t value_;
+public:
+    constexpr explicit Alignment(std::size_t v) noexcept : value_(v) {}
+    constexpr std::size_t as_usize() const noexcept { return value_; }
+    constexpr std::size_t as_nonzero() const noexcept { return value_; }
+    template<typename T>
+    static constexpr Alignment of() noexcept { return Alignment(alignof(T)); }
+    constexpr bool operator==(const Alignment& o) const noexcept = default;
+};
 
 } // namespace ptr
 

@@ -24,6 +24,14 @@ struct Layout {
     std::size_t size;
     std::size_t align;
 
+    // Rust-style accessor mirroring `core::alloc::Layout::alignment()`.
+    // (`.size()` and `.align()` are mapped via post_transpile_patch.py
+    // strip-parens, since they conflict with field names.)
+    // Added for vec_port.
+    constexpr rusty::ptr::Alignment alignment() const noexcept {
+        return rusty::ptr::Alignment(align);
+    }
+
     static constexpr Layout from_size_align_unchecked(
         std::size_t size,
         std::size_t align) noexcept {
@@ -110,6 +118,18 @@ struct Layout {
             std::make_tuple(Layout{padded * n, align}, padded));
     }
 
+    // Mirrors unstable Rust's `Layout::repeat_packed(self, n) -> Result<Layout, LayoutError>`.
+    // Returns the layout for `n` copies of `self` packed back-to-back
+    // with no internal padding. Added for vec_port.
+    rusty::Result<Layout, LayoutErr>
+    repeat_packed(std::size_t n) const {
+        if (size != 0 && n != 0
+            && size > std::numeric_limits<std::size_t>::max() / n) {
+            return rusty::Result<Layout, LayoutErr>::Err(LayoutErr{});
+        }
+        return rusty::Result<Layout, LayoutErr>::Ok(Layout{size * n, align});
+    }
+
     // Mirrors Rust's `Layout::dangling`. Returns a dangling-but-aligned
     // raw byte pointer — never deallocate this pointer.
     rusty::NonNull<std::uint8_t> dangling() const noexcept {
@@ -118,8 +138,15 @@ struct Layout {
     }
 };
 
-// AllocError mirrors core::alloc::AllocError — a zero-sized error type.
-struct AllocError {};
+// AllocError mirrors core::alloc::AllocError. Originally zero-sized
+// in rustc, but the vec_port emits aggregate-init with `.layout` and
+// `.non_exhaustive` fields per the TryReserveErrorKind::AllocError
+// variant shape. Added the fields with defaults so old `AllocError{}`
+// call sites still work.
+struct AllocError {
+    Layout layout{0, 1};                      // failed layout (defaults are harmless)
+    std::tuple<> non_exhaustive{};            // rustc ABI-stability marker
+};
 
 inline std::uint8_t* alloc(Layout layout) {
     void* memory = nullptr;
@@ -273,7 +300,7 @@ struct Global {
     allocate(Layout layout) const {
         // Rust's Allocator contract for ZSTs: return a dangling-but-aligned
         // pointer, never call the underlying allocator. Matching that here
-        // makes `Box<()>` / `Vec<()>` work as expected and avoids passing
+        // makes `Box<()>` / `VecLegacy<()>` work as expected and avoids passing
         // `malloc(0)` (whose behaviour is implementation-defined).
         if (layout.size == 0) {
             return rusty::Result<rusty::NonNull<std::uint8_t>, AllocError>::Ok(

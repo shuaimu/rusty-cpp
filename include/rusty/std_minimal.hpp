@@ -95,7 +95,7 @@ namespace std {
         return v.e_val;  // Simplified, no checking
     }
     
-    // initializer_list for Vec
+    // initializer_list for VecLegacy
     template<typename T>
     class initializer_list {
         const T* ptr;

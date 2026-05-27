@@ -1618,6 +1618,53 @@ inline constexpr add_fn_t add_fn{};
 
 } // namespace ops
 
+// ---- rusty::slice_ext namespace — minimal helpers for vec_port.
+// Cannot live in `rusty::slice` because that's a free function in
+// array.hpp; patcher rewrites `slice::range` → `rusty::slice_ext::range`. ----
+namespace slice_ext {
+
+// Mirrors `core::slice::range<R: RangeBounds<usize>>(range, ..len)` —
+// converts a generic range expression + bounds into a concrete
+// (start, end) pair. Returns std::pair<size_t, size_t>.
+template<typename R, typename Bounds>
+inline std::pair<std::size_t, std::size_t> range(R r, Bounds bounds) noexcept {
+    std::size_t start = 0;
+    std::size_t end = 0;
+    if constexpr (requires { bounds.end; }) {
+        end = bounds.end;
+    }
+    if constexpr (requires { r.start; }) {
+        start = r.start;
+    }
+    if constexpr (requires { r.end; }) {
+        end = r.end;
+    } else if constexpr (requires { r.end_value(); }) {
+        // `rusty::range<T>` keeps its end as a private `end_` field
+        // exposed via `end_value()`. Without this branch the caller
+        // sees `bounds.end` (= len), so a partial range like
+        // `range(0, 2)` becomes a full-range drain.
+        end = r.end_value();
+    }
+    return {start, end};
+}
+
+} // namespace slice_ext
+
+// ---- rusty::iter_ext namespace — `iter_ext::zip(a, b)` helper.
+// Cannot live in `rusty::iter` because that's already a free function;
+// patcher maps `iter::zip` → `rusty::iter_ext::zip` to disambiguate. ----
+namespace iter_ext {
+
+template<typename A, typename B>
+inline auto zip(A&& a, B&& b) {
+    // Minimal stub: returns a tuple of references. Real implementation
+    // would be a lazy zipped iterator. vec_port uses this in code paths
+    // that may not be exercised at module-compile time.
+    return std::make_pair(std::forward<A>(a), std::forward<B>(b));
+}
+
+} // namespace iter_ext
+
 } // namespace rusty
 
 #endif // RUSTY_SLICE_HPP

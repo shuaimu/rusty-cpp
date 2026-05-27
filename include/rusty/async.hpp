@@ -277,7 +277,7 @@ public:
     }
 
 private:
-    rusty::Vec<Task<void>> tasks_;
+    rusty::VecLegacy<Task<void>> tasks_;
     std::queue<size_t> ready_queue_;
 };
 

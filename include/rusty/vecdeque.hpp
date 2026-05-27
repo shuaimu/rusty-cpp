@@ -13,7 +13,7 @@
 // Equivalent to Rust's VecDeque<T>
 //
 // This is a sequence container that allows efficient insertion and removal
-// at both ends. Unlike Vec, it uses a ring buffer internally, so push_front
+// at both ends. Unlike VecLegacy, it uses a ring buffer internally, so push_front
 // is O(1) amortized instead of O(n).
 //
 // Guarantees:
@@ -554,12 +554,12 @@ public:
     // Conversion operations
     // ========================================================================
 
-    // Convert to Vec (consumes the VecDeque)
+    // Convert to VecLegacy (consumes the VecDeque)
     // Note: This is a method, not a conversion operator, to be explicit
     // @lifetime: owned
-    // Vec<T> into_vec() && {
+    // VecLegacy<T> into_vec() && {
     //     make_contiguous();
-    //     // ... would need Vec header
+    //     // ... would need VecLegacy header
     // }
 
     // Check if the internal buffer is contiguous

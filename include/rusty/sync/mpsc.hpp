@@ -319,7 +319,7 @@ public:
 // 1. Add: static constexpr bool is_send = true; to your type
 // 2. Or specialize: template<> struct rusty::is_explicitly_send<YourType> : std::true_type {};
 //
-// Note: Primitives (int, double, etc.) and rusty types (Box, Arc, Vec, Option) are already marked.
+// Note: Primitives (int, double, etc.) and rusty types (Box, Arc, VecLegacy, Option) are already marked.
 //       Rc<T> is NOT Send - use Arc<T> instead for thread-safe sharing.
 #if __cplusplus >= 202002L  // C++20 concepts
 template<Send T>

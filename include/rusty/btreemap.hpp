@@ -793,8 +793,8 @@ public:
         return Option<std::pair<K, V>>(std::move(out));
     }
 
-    rusty::Vec<std::pair<K, V>> range_rusty(const K& min, const K& max) const {
-        rusty::Vec<std::pair<K, V>> out = rusty::Vec<std::pair<K, V>>::new_();
+    rusty::VecLegacy<std::pair<K, V>> range_rusty(const K& min, const K& max) const {
+        rusty::VecLegacy<std::pair<K, V>> out = rusty::VecLegacy<std::pair<K, V>>::new_();
         auto cmp = map_.key_comp();
         auto it = map_.lower_bound(min);
         while (it != map_.end() && cmp(it->first, max)) {
@@ -805,7 +805,7 @@ public:
     }
 
 #if defined(RUSTY_NO_STD_VECTOR_INTEROP)
-    rusty::Vec<std::pair<K, V>> range(const K& min, const K& max) const {
+    rusty::VecLegacy<std::pair<K, V>> range(const K& min, const K& max) const {
         return range_rusty(min, max);
     }
 #else

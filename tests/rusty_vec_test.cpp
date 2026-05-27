@@ -1,4 +1,4 @@
-// Tests for rusty::Vec<T>
+// Tests for rusty::VecLegacy<T>
 #include "../include/rusty/vec.hpp"
 #include <cassert>
 #include <cstdio>
@@ -292,7 +292,7 @@ void test_vec_set_len() {
 }
 
 int main() {
-    printf("=== Testing rusty::Vec<T> ===\n");
+    printf("=== Testing rusty::VecLegacy<T> ===\n");
     
     test_vec_construction();
     test_vec_push_pop();
