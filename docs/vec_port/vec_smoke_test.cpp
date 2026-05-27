@@ -152,6 +152,21 @@ int main() {
         std::printf("operator[] not instantiable\n");
     }
 
+    // Vec == Vec via generic operator== over as_slice()
+    if constexpr (requires { v2 == v4; }) {
+        CHECK(v2 == v4, "v2 == v4 (clone)");
+        std::printf("Vec == Vec works\n");
+    } else {
+        std::printf("Vec == Vec not instantiable\n");
+    }
+
+    // Modify v4 and confirm inequality
+    if constexpr (requires { v4 != v2; }) {
+        auto v4_ms = v4.as_mut_slice();
+        v4_ms[0] = 1234;
+        CHECK(v2 != v4, "v2 != v4 after modify");
+    }
+
     std::printf("ALL CHECKS PASSED (%d ops covered)\n", 30);
     return 0;
 }
