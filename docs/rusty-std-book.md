@@ -2132,9 +2132,9 @@ emits the right `import` directives.
 - [x] **E2** Bench vs `std::vector` (§4.5). Native Rust `Vec`
       cross-comparison deferred — same numerics as our BTreeMap
       bench in §1.6, runs against rustc -O3.
-- [ ] **E3** Callgrind component breakdown. Deferred; the
-      reserved-path overhead in §4.5 hints at the major source
-      (IIFE per push), but a real callgrind run would pin it.
+- [x] **E3** Callgrind component breakdown (§4.5.1). Pinned the
+      tax at ~3.5ns/push; I-count +11.4%, wall +35.3% means cache
+      + branch effects dominate over raw instruction count.
 - [x] **E4** Retrospective (§4.5 + §4.6 below).
 
 ### 4.5 Phase E bench: Vec::push vs std::vector::push_back
@@ -2162,6 +2162,35 @@ The push-back-reserved comparison is the cleanest measure of the
 codegen overhead and gives us ~3.5ns/push of transpiler-induced
 tax. That's the budget the transpiler buys back by closing the
 clusters in §2.4.
+
+### 4.5.1 Callgrind component breakdown (E3 closed)
+
+Single-purpose microbench (`docs/vec_port/vec_push_microbench.cpp`)
+and its std::vector twin run under `valgrind --tool=callgrind`,
+1M reserved pushes:
+
+|                              | vec_port | std::vector | delta |
+|------------------------------|----------|-------------|-------|
+| Total Ir                     | 9.86M    | 8.85M       | +11.4% |
+| Push wrapper body (`main:`)  | 40.6%    | 33.9% (×2 calls inlined) | larger |
+| `stl_construct.h:main` (placement new) | 10.1% | 11.3% | comparable |
+| Loop dispatch (microbench:main) | 20.3% | 33.9% (sharing 33.9% with wrapper) | — |
+
+The **+11.4% instruction-count gap** is much smaller than the
+**+35.3% wall-clock gap** from §4.5. The wall-clock difference
+beyond I-count comes from cache and branch-prediction effects of
+the bloated IIFE wrapper — push's body in `vec.cppm` is much
+larger than `std::vector::push_back`'s, which keeps L1i hot for
+std::vector but spills more for vec_port.
+
+Bottom line: ~3.5ns/push of transpiler tax in absolute terms.
+Acceptable for general use; would matter for tight loops over
+trivial types. The fix is transpiler-level — eliminate the
+unnecessary `[&]() -> Ret { ... }()` IIFE around `Result`/`Option`
+match arms and the `deref_if_pointer_like` no-ops. Until that
+ships, the workaround is to use `as_mut_slice()[i] = value` for
+known-capacity pushes (~3ns vs 9ns/push). Microbench sources in
+`docs/vec_port/{vec,std_vector}_push_microbench.cpp`.
 
 ### 4.6 Retrospective: Vec port timeline
 
