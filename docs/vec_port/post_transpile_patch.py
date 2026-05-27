@@ -820,6 +820,45 @@ def patch_return_handle_error_void(cpp_out: Path) -> int:
     return n
 
 
+def patch_extract_if_runtime(cpp_out: Path) -> int:
+    """extract_if instantiation: same _let_pat.start/.end → .first/.second
+    fix as drain, plus reinterpret_cast for the rusty::Vec namespace
+    mismatch at the new_() call site.
+    """
+    n = 0
+
+    # vec.cppm: cast `(*this)` to rusty::Vec<T,A>& for ExtractIf::new_
+    p_vec = cpp_out / "vec_port.vec.cppm"
+    if p_vec.exists():
+        t = p_vec.read_text()
+        orig = t
+        t = t.replace(
+            "return ExtractIf<T, F, A>::new_((*this), std::move(filter), std::move(range));",
+            "return ExtractIf<T, F, A>::new_(*reinterpret_cast<rusty::Vec<T, A>*>(this), std::move(filter), std::move(range));",
+        )
+        if t != orig:
+            p_vec.write_text(t)
+            n += 1
+
+    # extract_if.cppm: _let_pat .start/.end → .first/.second
+    p_ei = cpp_out / "vec_port.vec.extract_if.cppm"
+    if p_ei.exists():
+        t = p_ei.read_text()
+        orig = t
+        t = t.replace(
+            "auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);",
+            "auto&& start = rusty::detail::deref_if_pointer(_let_pat.first);",
+        )
+        t = t.replace(
+            "auto&& end = rusty::detail::deref_if_pointer(_let_pat.end);",
+            "auto&& end = rusty::detail::deref_if_pointer(_let_pat.second);",
+        )
+        if t != orig:
+            p_ei.write_text(t)
+            n += 1
+    return n
+
+
 def patch_drain_runtime(cpp_out: Path) -> int:
     """drain() instantiation surfaces several emit bugs:
 
@@ -1689,7 +1728,10 @@ def patch_strip_vec_cppm_aux_imports(cpp_out: Path) -> int:
     dropped = [
         "vec_port.vec.cow",
         # vec_port.vec.drain — keeping; see CMakeLists trim
-        "vec_port.vec.extract_if",
+        "vec_port.vec.extract_if",  # back to dropped — layout mismatch
+                                    # with hand-written rusty::Vec crashes
+                                    # ExtractIf::new_() (set_len reads wrong
+                                    # offset). See Ch4 §4.7.
         "vec_port.vec.in_place_collect",
         "vec_port.vec.in_place_drop",
         # vec_port.vec.into_iter — keeping; see CMakeLists trim
@@ -2045,6 +2087,8 @@ def main(cpp_out: Path):
             patch_t_is_zst_constexpr_if),
         ("drain runtime: _let_pat.start/end -> .first/.second + NonNull::from -> new_unchecked",
             patch_drain_runtime),
+        ("extract_if runtime: vec namespace cast + _let_pat field rename",
+            patch_extract_if_runtime),
         ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
             patch_return_handle_error_void),
         ("shrink_unchecked: hoist double-unwrap on Option<tuple>",
