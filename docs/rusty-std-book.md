@@ -2232,10 +2232,29 @@ Closed since last revision:
   `vec_iter_box_test.cpp` (Vec<Box<int>> partial-drain Drop chain).
   Both ASAN-clean.
 
+- ✅ **drain** — Phase A2 (0 errors at module level) + Phase B
+  (instantiation works for the "drain all" path). Source:
+  `docs/vec_port/vec_drain_test.cpp`. ASAN-clean.
+
 Still deferred:
-- **drain / extract_if**: still dropped from the build. Each is a
-  separate aux module with its own error cluster — same shape as
-  into_iter before its Phase A2 / B were closed.
+- **extract_if** — module compiles, but `Vec::extract_if()` crashes
+  at runtime. Root cause: the transpiled module declares
+  `rusty::Vec<T, A>&` parameters (hand-written rusty::Vec layout:
+  data_/size_/capacity_), but the caller passes a `vec_port::Vec`
+  (layout: buf::RawVec/len_field). reinterpret_cast bridge worked
+  for drain because its destructor short-circuits on empty drain,
+  but extract_if's `new_()` immediately calls `vec.set_len(0)` —
+  which trips an assertion in rusty::Vec::set_len on the wrong
+  layout. Partial drain would hit the same bug. The right long-
+  term fix is transpiler-level: alias vec_port::Vec to rusty::Vec
+  in the namespace remapping pass (matches the rusty-lib
+  convention). Until then, drain works for full-drain only, and
+  extract_if stays out of the build. WIP test:
+  `docs/vec_port/vec_extract_if_test.cpp.WIP`.
+- **Other aux modules** (cow, in_place_*, peek_mut, splice, spec_*,
+  partial_eq, is_zero): still dropped from the build. Lower-priority
+  than the layout-mismatch fix — once that's resolved, each of these
+  should follow the same shape as drain (one or two patches).
 - **Iterator adapter chain**: filter/map/collect through Vec —
   none tested. The iter modules weren't built.
 - **Custom allocator paths**: only Global tested; alternate
