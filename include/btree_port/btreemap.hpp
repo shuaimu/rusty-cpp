@@ -47,8 +47,10 @@
 #include <iterator>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <rusty/option.hpp>
 
@@ -77,6 +79,29 @@ public:
     /// Equivalent to Rust's `BTreeMap::new()`. The `new_` spelling
     /// avoids a clash with C++'s `new` keyword.
     static BTreeMap new_() { return BTreeMap{}; }
+
+    /// Alias for `new_()`. Some hand-written rusty code spells the
+    /// default constructor `make()` — keep that name working.
+    static BTreeMap make() { return BTreeMap{}; }
+
+    /// `map[key]` — returns a reference to the existing value, throws
+    /// `std::out_of_range` if the key is absent. (Differs from
+    /// `std::map::operator[]`, which inserts a default; matches the
+    /// legacy `rusty::BTreeMap` behavior.)
+    V& operator[](const K& key) {
+        auto it = backing_.find(key);
+        if (it == backing_.end()) {
+            throw std::out_of_range("btree_port::BTreeMap index: key not found");
+        }
+        return it->second;
+    }
+    const V& operator[](const K& key) const {
+        auto it = backing_.find(key);
+        if (it == backing_.end()) {
+            throw std::out_of_range("btree_port::BTreeMap index: key not found");
+        }
+        return it->second;
+    }
 
     /// Build a map from any iterator pair over `pair<K, V>`-like
     /// values. Mirrors Rust's `BTreeMap::from_iter` / `collect`. On
@@ -108,21 +133,22 @@ public:
     }
 
     /// Returns `Some(&V)` if key is present, `None` otherwise.
-    rusty::Option<std::reference_wrapper<const V>> get(const K& key) const {
+    /// Mirrors Rust's `BTreeMap::get(&K) -> Option<&V>`.
+    rusty::Option<const V&> get(const K& key) const {
         auto it = backing_.find(key);
         if (it == backing_.end()) {
-            return rusty::Option<std::reference_wrapper<const V>>(rusty::None);
+            return rusty::Option<const V&>(rusty::None);
         }
-        return rusty::Option<std::reference_wrapper<const V>>(std::cref(it->second));
+        return rusty::Option<const V&>(it->second);
     }
 
     /// `Some(&mut V)` if present, `None` otherwise.
-    rusty::Option<std::reference_wrapper<V>> get_mut(const K& key) {
+    rusty::Option<V&> get_mut(const K& key) {
         auto it = backing_.find(key);
         if (it == backing_.end()) {
-            return rusty::Option<std::reference_wrapper<V>>(rusty::None);
+            return rusty::Option<V&>(rusty::None);
         }
-        return rusty::Option<std::reference_wrapper<V>>(std::ref(it->second));
+        return rusty::Option<V&>(it->second);
     }
 
     bool contains_key(const K& key) const { return backing_.count(key) > 0; }
@@ -482,6 +508,18 @@ public:
 
     bool contains(const T& value) const { return backing_.count(value) > 0; }
 
+    /// `Some(&value)` if present, `None` otherwise. Mirrors Rust's
+    /// `BTreeSet::get(&T) -> Option<&T>`. Returned as `Option<const T*>`
+    /// to match the legacy `rusty::BTreeSet::get` signature so call
+    /// sites doing `*set.get(x).unwrap()` continue to compile.
+    rusty::Option<const T*> get(const T& value) const {
+        auto it = backing_.find(value);
+        if (it == backing_.end()) {
+            return rusty::Option<const T*>(rusty::None);
+        }
+        return rusty::Option<const T*>(&*it);
+    }
+
     bool remove(const T& value) {
         return backing_.erase(value) > 0;
     }
@@ -618,6 +656,90 @@ public:
                 return false;
         }
         return true;
+    }
+
+    /// Rust-style spelling of the union operation. `union` is a C++
+    /// keyword so we can't use it directly; `union_with` is what the
+    /// hand-written facade exposed and what existing call sites use.
+    BTreeSet union_with(const BTreeSet& other) const { return union_set(other); }
+
+    /// Snapshot the elements in ascending order as a `std::vector<T>`.
+    /// Mirrors the legacy `rusty::BTreeSet::to_vec()` (which returned
+    /// `VecLegacy<T>`); we use `std::vector` so the facade stays in a
+    /// header without pulling in the `vec_port` module.
+    std::vector<T> to_vec() const {
+        std::vector<T> out;
+        out.reserve(backing_.size());
+        for (const auto& v : backing_) out.push_back(v);
+        return out;
+    }
+
+    /// Remove all elements and return them in ascending order.
+    std::vector<T> drain() {
+        std::vector<T> out;
+        out.reserve(backing_.size());
+        for (auto& v : backing_) out.push_back(std::move(const_cast<T&>(v)));
+        backing_.clear();
+        return out;
+    }
+
+    /// Remove the value if present and return it as `Some(T)`, else
+    /// `None`. Mirrors Rust's `BTreeSet::take`.
+    rusty::Option<T> take(const T& value) {
+        auto it = backing_.find(value);
+        if (it == backing_.end()) {
+            return rusty::Option<T>(rusty::None);
+        }
+        T v = std::move(const_cast<T&>(*it));
+        backing_.erase(it);
+        return rusty::Option<T>(std::move(v));
+    }
+
+    /// Insert `value`. If an equal value was already present, return
+    /// the displaced one as `Some(T)`; otherwise `None`.
+    rusty::Option<T> replace(T value) {
+        auto it = backing_.find(value);
+        if (it == backing_.end()) {
+            backing_.insert(std::move(value));
+            return rusty::Option<T>(rusty::None);
+        }
+        T old = std::move(const_cast<T&>(*it));
+        backing_.erase(it);
+        backing_.insert(std::move(value));
+        return rusty::Option<T>(std::move(old));
+    }
+
+    /// Split off and return elements `>= value`; the receiver retains
+    /// elements `< value`.
+    BTreeSet split_off(const T& value) {
+        BTreeSet out;
+        auto it = backing_.lower_bound(value);
+        for (auto i = it; i != backing_.end(); ++i) {
+            out.backing_.insert(std::move(const_cast<T&>(*i)));
+        }
+        backing_.erase(it, backing_.end());
+        return out;
+    }
+
+    /// Move every element of `other` into `*this`, leaving `other`
+    /// empty.
+    void append(BTreeSet& other) {
+        for (auto& v : other.backing_) {
+            backing_.insert(std::move(const_cast<T&>(v)));
+        }
+        other.backing_.clear();
+    }
+    void append(BTreeSet&& other) { append(other); }
+
+    /// Bulk-insert via iterator pair.
+    template <typename It>
+    void extend(It first, It last) {
+        for (; first != last; ++first) backing_.insert(*first);
+    }
+    /// Bulk-insert via another set (moves elements in).
+    void extend(BTreeSet&& other) { append(other); }
+    void extend(const BTreeSet& other) {
+        for (const auto& v : other.backing_) backing_.insert(v);
     }
 };
 

@@ -14,10 +14,10 @@ bool sets_equal(const BTreeSet<T, Compare>& lhs, const BTreeSet<T, Compare>& rhs
     }
     auto lv = lhs.to_vec();
     auto rv = rhs.to_vec();
-    if (lv.len() != rv.len()) {
+    if (lv.size() != rv.size()) {
         return false;
     }
-    for (size_t i = 0; i < lv.len(); ++i) {
+    for (size_t i = 0; i < lv.size(); ++i) {
         if (lv[i] != rv[i]) {
             return false;
         }
@@ -70,17 +70,17 @@ void test_first_last() {
     BTreeSet<int> set;
     
     // Empty set
-    assert(set.to_vec().is_empty());
-    
+    assert(set.to_vec().empty());
+
     set.insert(3);
     set.insert(1);
     set.insert(5);
     set.insert(2);
     set.insert(4);
-    
+
     auto values = set.to_vec();
     assert(values[0] == 1);
-    assert(values[values.len() - 1] == 5);
+    assert(values[values.size() - 1] == 5);
 
     // Pop first (manual remove)
     assert(set.remove(values[0]));
@@ -89,7 +89,7 @@ void test_first_last() {
 
     // Pop last (manual remove)
     values = set.to_vec();
-    assert(set.remove(values[values.len() - 1]));
+    assert(set.remove(values[values.size() - 1]));
     assert(set.len() == 3);
     assert(!set.contains(5));
     
@@ -307,7 +307,7 @@ void test_extend_retain() {
     
     // Retain (manual)
     auto values = set1.to_vec();
-    for (size_t i = 0; i < values.len(); ++i) {
+    for (size_t i = 0; i < values.size(); ++i) {
         if (values[i] % 2 != 0) {
             assert(set1.remove(values[i]));
         }
@@ -329,7 +329,7 @@ void test_drain() {
     set.insert(2);
     
     auto drained = set.drain();
-    assert(drained.len() == 4);
+    assert(drained.size() == 4);
     assert(drained[0] == 1);  // Sorted order
     assert(drained[1] == 2);
     assert(drained[2] == 3);
@@ -362,29 +362,16 @@ void test_clone() {
 }
 
 void test_from_vec() {
-    std::cout << "Testing from_vec..." << std::endl;
-    
-    // Test with std::vector (commented out since btreeset_from_std_vec is now optional)
-    // std::vector<int> std_vec = {3, 1, 4, 1, 5, 9, 2, 6, 5};  // Duplicates
-    // BTreeSet<int> set1 = btreeset_from_std_vec(std::move(std_vec));
-    // assert(set1.len() == 7);  // Duplicates removed
-    // auto sorted1 = set1.to_vec();
-    // assert(sorted1[0] == 1);
-    // assert(sorted1[1] == 2);
-    // assert(sorted1[2] == 3);
-    // assert(sorted1[3] == 4);
-    // assert(sorted1[4] == 5);
-    // assert(sorted1[5] == 6);
-    // assert(sorted1[6] == 9);
-    
-    // Test with rusty::VecLegacy
-    Vec<int> vec = Vec<int>::make();
-    vec.push(3); vec.push(1); vec.push(4);
-    vec.push(1); vec.push(5); vec.push(9);
-    vec.push(2); vec.push(6); vec.push(5);
-    BTreeSet<int> set2 = btreeset_from_vec(std::move(vec));
-    
-    assert(set2.len() == 7);  // Duplicates removed
+    std::cout << "Testing from_iter..." << std::endl;
+
+    // Build a BTreeSet from a std::vector via `BTreeSet::from_iter`.
+    // (The legacy `btreeset_from_vec(rusty::VecLegacy<T>)` helper went
+    // away when the hand-written `rusty::BTreeSet` was retired in
+    // favor of the `btree_port::BTreeSet` alias.)
+    std::vector<int> vec = {3, 1, 4, 1, 5, 9, 2, 6, 5};  // duplicates
+    BTreeSet<int> set2 = BTreeSet<int>::from_iter(vec.begin(), vec.end());
+
+    assert(set2.len() == 7);  // duplicates removed
     auto sorted2 = set2.to_vec();
     assert(sorted2[0] == 1);
     assert(sorted2[1] == 2);
@@ -393,8 +380,8 @@ void test_from_vec() {
     assert(sorted2[4] == 5);
     assert(sorted2[5] == 6);
     assert(sorted2[6] == 9);
-    
-    std::cout << "✓ from_vec tests passed" << std::endl;
+
+    std::cout << "✓ from_iter tests passed" << std::endl;
 }
 
 void test_stress() {
