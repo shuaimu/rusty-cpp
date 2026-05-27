@@ -812,6 +812,40 @@ def patch_return_handle_error_void(cpp_out: Path) -> int:
     return n
 
 
+def patch_clone_to_vec_in(cpp_out: Path) -> int:
+    """`Vec::clone()` ends with `std::span<const T>::to_vec_in(...)`,
+    but `to_vec_in` is a Rust extension-trait method on slices —
+    `std::span` doesn't have it. Hand-port the body to build a Vec
+    via with_capacity_in + element-by-element push.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        old = (
+            "    Vec<T, A> clone() const {\n"
+            "        const auto alloc = rusty::clone(this->allocator());\n"
+            "        return std::span<const T>::to_vec_in(rusty::detail::deref_if_pointer_like((*this)), std::move(alloc));\n"
+            "    }"
+        )
+        new = (
+            "    Vec<T, A> clone() const {\n"
+            "        auto alloc = rusty::clone(this->allocator());\n"
+            "        auto out = Vec<T, A>::with_capacity_in(this->len_field, std::move(alloc));\n"
+            "        auto src = rusty::as_slice(*this);\n"
+            "        for (size_t i = 0; i < src.size(); ++i) {\n"
+            "            out.push(src[i]);\n"
+            "        }\n"
+            "        return out;\n"
+            "    }"
+        )
+        if old in text:
+            text = text.replace(old, new)
+            path.write_text(text)
+            n += 1
+    return n
+
+
 def patch_spec_extend_slice_iter(cpp_out: Path) -> int:
     """`spec_extend(rusty::slice_iter::Iter<const T> iterator)` tries
     to grab `rusty::as_slice(iterator)` and forward to
@@ -1499,6 +1533,8 @@ def main(cpp_out: Path):
             patch_append_elements_span_param),
         ("hand-port spec_extend(slice_iter::Iter) to copy-out loop",
             patch_spec_extend_slice_iter),
+        ("hand-port Vec::clone() to with_capacity_in + push loop",
+            patch_clone_to_vec_in),
         ("`return ::handle_error(...)` → `::handle_error(...); std::abort()`",
             patch_return_handle_error_void),
         ("shrink_unchecked: hoist double-unwrap on Option<tuple>",

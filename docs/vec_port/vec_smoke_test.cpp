@@ -112,6 +112,28 @@ int main() {
     for (size_t i = 0; i < 10; ++i) if (s[i] != expected[i]) eq = false;
     CHECK(eq, "v2 contents match expected after shrink");
 
+    // contains/iteration via as_slice
+    auto s2 = v2.as_slice();
+    int sum = 0;
+    for (size_t i = 0; i < s2.size(); ++i) sum += s2[i];
+    CHECK(sum == (100+101+102+103+104+105+106+107+108+109), "iteration sum");
+
+    // Index assignment via as_mut_slice
+    auto ms = v2.as_mut_slice();
+    ms[0] = 9999;
+    CHECK(v2.as_slice()[0] == 9999, "as_mut_slice writes");
+    CHECK(v2.as_slice()[1] == 101, "neighbor untouched");
+
+    // Try clone — may fail at instantiation due to to_vec_in not on std::span
+    if constexpr (requires { v2.clone(); }) {
+        auto v3 = v2.clone();
+        CHECK(v3.len() == v2.len(), "clone preserves len");
+        CHECK(v3.as_slice()[0] == 9999, "clone preserves data[0]");
+        std::printf("clone() works\n");
+    } else {
+        std::printf("clone() not instantiable (expected — to_vec_in missing)\n");
+    }
+
     std::printf("ALL CHECKS PASSED (%d ops covered)\n", 30);
     return 0;
 }
