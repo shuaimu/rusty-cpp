@@ -787,7 +787,13 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
                 k -= 1
             expr_start = k + 1
         expr = text[expr_start:i]
-        replacement = "reinterpret_cast<const uint8_t*>(" + expr + ")"
+        # Cast to `Tag*` — most call sites want Tag* (e.g. `ctrl()`
+        # accessor). The few `Group::load_aligned(ptr->cast())` sites
+        # then get wrapped by `patch_raw_misc_fixups`'s Group-arg
+        # wrap (which adds `reinterpret_cast<const uint8_t*>`).
+        # Use `const_cast`+`reinterpret_cast` to handle both const-
+        # and non-const-source pointers.
+        replacement = "const_cast<Tag*>(reinterpret_cast<const Tag*>(" + expr + "))"
         text = text[:expr_start] + replacement + text[idx + len("->cast()"):]
         # Advance search past the replacement.
         search_from = expr_start + len(replacement)
