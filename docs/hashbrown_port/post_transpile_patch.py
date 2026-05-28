@@ -465,6 +465,12 @@ export struct Group {
         std::memcpy(ptr, &_0, sizeof(_0));
     }
 
+    // Overload accepting Tag-shaped types (any T with `_0` byte
+    // field) — covers control.tag::Tag from callers.
+    template<typename T>
+    auto match_tag(const T& t) const -> std::enable_if_t<!std::is_integral_v<T>, BitMask> {
+        return match_tag(static_cast<uint8_t>(t._0));
+    }
     BitMask match_tag(uint8_t tag_byte) const {
         GroupWord cmp = _0 ^ repeat_tag(Tag{tag_byte});
         // x - 0x01... will overflow into the high bit if the byte was 0.
@@ -579,6 +585,16 @@ def patch_control_module_namespaces(cpp_out: Path) -> int:
     text = text.replace("using bitmask::", "using ::")
     text = text.replace("using group::", "using ::")
     text = text.replace("using tag::", "using ::")
+    # Some `using X;` declarations weren't originally `export`-ed
+    # (e.g. `using bitmask::BitMask;` was internal-only). For our
+    # purposes downstream modules (raw.cppm) need BitMask visible,
+    # so promote those to `export using` too.
+    text = re.sub(
+        r"^using\s+::(\w+);",
+        r"export using ::\1;",
+        text,
+        flags=re.MULTILINE,
+    )
     # TagSliceExt is an extension-trait adapter class living in an
     # anonymous namespace inside control.tag — not exported. Drop
     # the re-export attempt.
@@ -757,6 +773,43 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     text = text.replace(".cast_mut()", "")
     # Rust `usize` type → C++ size_t.
     text = re.sub(r"\busize\b(?!\w)", "size_t", text)
+
+    # Group::load*/store_aligned take `const uint8_t*`/`uint8_t*` in
+    # our hand-rolled body, but call sites pass `Tag*` (real control.
+    # tag::Tag). Wrap the arg in a reinterpret_cast. Scan once,
+    # left-to-right; rebuild via segments.
+    for fn in ("Group::load_aligned", "Group::load", "Group::store_aligned"):
+        prefix = fn + "("
+        out_parts = []
+        search_from = 0
+        while True:
+            idx = text.find(prefix, search_from)
+            if idx == -1:
+                out_parts.append(text[search_from:])
+                break
+            arg_start = idx + len(prefix)
+            depth = 1
+            j = arg_start
+            while j < len(text) and depth > 0:
+                if text[j] == '(':
+                    depth += 1
+                elif text[j] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if depth != 0:
+                out_parts.append(text[search_from:])
+                break
+            arg = text[arg_start:j]
+            # Skip if already cast.
+            if arg.lstrip().startswith("reinterpret_cast"):
+                out_parts.append(text[search_from:j+1])
+            else:
+                out_parts.append(text[search_from:idx])
+                out_parts.append(fn + "(reinterpret_cast<const uint8_t*>(" + arg + "))")
+            search_from = j + 1
+        text = "".join(out_parts)
     # Rust integer trait methods on size_t: `.checked_add`, `.checked_mul`,
     # `.checked_sub`. Reuse the rusty::num helpers when available.
     text = re.sub(
@@ -798,11 +851,41 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         text,
     )
     # `expr->cast_mut().cast()` (chained) — flatten both at once.
-    text = re.sub(
-        r"(this->)?(\w+)->cast_mut\(\)\.cast\(\)",
-        lambda m: "const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(" + (m.group(1) or "") + m.group(2) + "))",
-        text,
-    )
+    # Use brace-matching to walk back across nested parens, since
+    # `expr` may be `rusty::as_ptr(foo)` etc.
+    while True:
+        idx = text.find("->cast_mut().cast()")
+        if idx == -1:
+            break
+        # Walk back to find the start of the expression that owns
+        # the `->`. It might be a parenthesized call.
+        i = idx
+        if i > 0 and text[i-1] == ')':
+            # Balanced-paren walk back.
+            depth = 1
+            j = i - 2
+            while j >= 0 and depth > 0:
+                if text[j] == ')':
+                    depth += 1
+                elif text[j] == '(':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j -= 1
+            # Continue back across identifier chars and `::` to grab the
+            # call's name.
+            k = j - 1
+            while k >= 0 and (text[k].isalnum() or text[k] in "_:"):
+                k -= 1
+            expr_start = k + 1
+        else:
+            # Plain identifier (or `->`-chain).
+            k = i - 1
+            while k >= 0 and (text[k].isalnum() or text[k] in "_:>."):
+                k -= 1
+            expr_start = k + 1
+        expr = text[expr_start:i]
+        text = text[:expr_start] + "const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(" + expr + "))" + text[idx + len("->cast_mut().cast()"):]
     # `rusty::alloc::Global` used as a value (no `{}`) — `Global` is
     # a struct type. Only replace when it appears as a function call
     # argument: preceded by `,` or `(` and followed by `,` or `)`.
@@ -811,6 +894,60 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         r"([,(]\s*)rusty::alloc::Global(\s*[,)])",
         r"\1rusty::alloc::Global{}\2",
         text,
+    )
+
+    # `rusty::iter(X.match_full())` — Rust source has `.match_full()
+    # .into_iter()`. Our Group::match_* methods return
+    # `group_internal::BitMask` (module-private, layout-compatible).
+    # The call site needs to wrap that into the real
+    # `control.bitmask::BitMask` (which has `.into_iter()`) by
+    # constructing one from the `_0` field.
+    # Use brace-matching to allow nested parens in X.
+    while True:
+        idx = text.find("rusty::iter(")
+        # Only iterate for those whose content ends with `.match_full()`.
+        found = False
+        start = 0
+        while True:
+            i = text.find("rusty::iter(", start)
+            if i == -1:
+                break
+            content_start = i + len("rusty::iter(")
+            depth = 1
+            j = content_start
+            while j < len(text) and depth > 0:
+                if text[j] == '(':
+                    depth += 1
+                elif text[j] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if depth != 0:
+                break
+            content = text[content_start:j]
+            if content.rstrip().endswith(".match_full()"):
+                # Wrap the group_internal::BitMask via `_0` into the
+                # real control.bitmask::BitMask, then call its
+                # into_iter().
+                text = text[:i] + "BitMask{" + content + "._0}.into_iter()" + text[j+1:]
+                found = True
+                break
+            start = j + 1
+        if not found:
+            break
+
+    # TableLayout::calculate_layout_for — the method only reads
+    # struct fields; add const to the declaration so it can be
+    # called from const contexts (TABLE_LAYOUT is a `constexpr`
+    # static member which is const-qualified).
+    text = text.replace(
+        "rusty::Option<std::tuple<rusty::alloc::Layout, size_t>> calculate_layout_for(size_t buckets);",
+        "rusty::Option<std::tuple<rusty::alloc::Layout, size_t>> calculate_layout_for(size_t buckets) const;",
+    )
+    text = text.replace(
+        "rusty::Option<std::tuple<rusty::alloc::Layout, size_t>> TableLayout::calculate_layout_for(size_t buckets) {",
+        "rusty::Option<std::tuple<rusty::alloc::Layout, size_t>> TableLayout::calculate_layout_for(size_t buckets) const {",
     )
 
     if text != original:
