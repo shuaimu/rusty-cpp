@@ -392,6 +392,19 @@ inline const Tag Tag::DELETED = Tag{0x80};
 
 struct BitMask {
     uint64_t _0;
+    // Methods used by raw.cppm's match-result chains. Layout
+    // semantics mirror the real `control::BitMask` in
+    // hashbrown's control/bitmask.rs.
+    bool any_bit_set() const { return _0 != 0; }
+    BitMask remove_lowest_bit() const { return BitMask{_0 & (_0 - 1)}; }
+    size_t trailing_zeros() const { return _0 == 0 ? 64 : __builtin_ctzll(_0); }
+    size_t leading_zeros() const { return _0 == 0 ? 64 : __builtin_clzll(_0); }
+    // `lowest_set_bit() -> Option<size_t>`. Rust returns Some(idx) if
+    // any bit set, None if all zero.
+    rusty::Option<size_t> lowest_set_bit() const {
+        if (_0 == 0) return rusty::Option<size_t>(rusty::None);
+        return rusty::Option<size_t>(static_cast<size_t>(__builtin_ctzll(_0)));
+    }
 };
 }
 using group_internal::Tag;
@@ -733,6 +746,63 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     # `scopeguard::guard(...)` — drop the `::` qualifier; `guard`
     # is already imported via `import hashbrown_port.scopeguard;`.
     text = text.replace("scopeguard::", "")
+    # `cast_mut()` — Rust ptr method; same treatment as `.cast()`.
+    text = re.sub(
+        r"(this->)?(\w+)->cast_mut\(\)",
+        lambda m: "reinterpret_cast<uint8_t*>(const_cast<uint8_t*>(" + (m.group(1) or "") + m.group(2) + "))",
+        text,
+    )
+    # `.cast_mut()` on Tag-typed values used as `Tag::EMPTY.cast_mut()`
+    # etc — replace with address-of of the byte.
+    text = text.replace(".cast_mut()", "")
+    # Rust `usize` type → C++ size_t.
+    text = re.sub(r"\busize\b(?!\w)", "size_t", text)
+    # Rust integer trait methods on size_t: `.checked_add`, `.checked_mul`,
+    # `.checked_sub`. Reuse the rusty::num helpers when available.
+    text = re.sub(
+        r"(\w+)\.checked_mul\(([^)]+)\)",
+        r"rusty::num::checked_mul(\1, \2)",
+        text,
+    )
+    text = re.sub(
+        r"(\w+)\.checked_add\(([^)]+)\)",
+        r"rusty::num::checked_add(\1, \2)",
+        text,
+    )
+    text = re.sub(
+        r"(\w+)\.checked_sub\(([^)]+)\)",
+        r"rusty::num::checked_sub(\1, \2)",
+        text,
+    )
+    # `size_t::max(a, b)` → `std::max(a, b)`. Rust associated fn on
+    # integer type.
+    text = text.replace("size_t::max(", "std::max<size_t>(")
+    text = text.replace("size_t::min(", "std::min<size_t>(")
+    # `x.is_power_of_two()` on integer → bit check.
+    text = re.sub(
+        r"(\w+)\.is_power_of_two\(\)",
+        r"((\1) != 0 && ((\1) & ((\1) - 1)) == 0)",
+        text,
+    )
+    # `x.next_power_of_two()` → __builtin-style impl.
+    text = re.sub(
+        r"(\w+)\.next_power_of_two\(\)",
+        r"(static_cast<size_t>(1) << (64 - __builtin_clzll((\1) - 1)))",
+        text,
+    )
+    # `x.count_ones()`, `.count_zeros()`, `.trailing_ones()`,
+    # `.leading_ones()` — integer popcount-like.
+    text = re.sub(
+        r"(\w+)\.count_ones\(\)",
+        r"__builtin_popcountll(\1)",
+        text,
+    )
+    # `expr->cast_mut().cast()` (chained) — flatten both at once.
+    text = re.sub(
+        r"(this->)?(\w+)->cast_mut\(\)\.cast\(\)",
+        lambda m: "const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(" + (m.group(1) or "") + m.group(2) + "))",
+        text,
+    )
 
     if text != original:
         path.write_text(text)
