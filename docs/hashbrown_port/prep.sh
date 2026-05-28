@@ -201,6 +201,38 @@ find "$SRC" -name "*.rs" -exec sed -i \
   -e '/^#!\[rustc_/d' \
   {} \;
 
+# --- 7.5. alloc.rs: strip the allocator_api2 cfg branch ---
+# alloc.rs has two `mod inner` blocks gated on cfg features. The
+# allocator-api2 one re-exports an external crate we don't have;
+# the other hand-rolls its own Allocator trait. Keep only the
+# latter so we get exactly one definition.
+if [[ -f "$SRC/alloc.rs" ]]; then
+  python3 - "$SRC/alloc.rs" <<'PYEOF'
+import sys, pathlib, re
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+# Drop the allocator-api2 branch entirely. Match the cfg attribute
+# plus its mod inner { ... } body (brace-matched).
+m = re.search(r'#\[cfg\(all\(not\(feature\s*=\s*"nightly"\),\s*feature\s*=\s*"allocator-api2"\)\)\]\s*\n\s*mod\s+inner\s*\{', s)
+if m:
+    depth = 1
+    j = m.end()
+    while j < len(s) and depth > 0:
+        if s[j] == '{':
+            depth += 1
+        elif s[j] == '}':
+            depth -= 1
+        j += 1
+    s = s[:m.start()] + s[j:]
+    s = re.sub(r'#\[cfg\(not\(any\(feature\s*=\s*"nightly",\s*feature\s*=\s*"allocator-api2"\)\)\)\]\s*\n', '', s)
+# Strip the #[cfg(test)] re-export for AllocError (test-only;
+# the non-feature inner mod doesn't define AllocError).
+s = re.sub(r'(^|\n)\s*#\[cfg\(test\)\]\s*\n\s*pub\(crate\) use self::inner::AllocError;\s*\n', r'\1', s)
+p.write_text(s)
+print("  stripped allocator-api2 cfg branch from alloc.rs")
+PYEOF
+fi
+
 # --- 8. Strip nightly-gated items + #[may_dangle] etc. ---
 # The transpiler can't evaluate cfg conditions; nightly-gated impl
 # blocks (TrivialClone, may_dangle Drop) just need to go entirely so

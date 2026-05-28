@@ -16,7 +16,11 @@ excluding `external_trait_impls/{serde,rayon}` and tests).
 - [x] **A1** First transpile pass. Vendor + prep.sh + transpiler.
       **17 / 17 files transpile cleanly, 0 parser errors.**
       4 / 17 modules fail compile at cmake (catalogued below).
-- [ ] **A2** Per-module compile fixes (post-transpile patches).
+- [~] **A2** Per-module compile fixes (in progress).
+      **2 / 4 first-wave modules fixed**: `control.tag` and `hasher`.
+      Remaining: `alloc` (rusty allocator API mismatch),
+      `control.group.generic` (cross-module `Tag`/`BitMask` imports,
+      Rust-syntax `u64::from_ne_bytes`, transpiler IIFE artifacts).
 - [ ] **A3** Resolve cross-module import cycles.
 
 ### Phase B — hand-port unknowns
