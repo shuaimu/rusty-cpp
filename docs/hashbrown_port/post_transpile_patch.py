@@ -645,9 +645,11 @@ def patch_raw_tryreserveerror(cpp_out: Path) -> int:
     text = path.read_text()
     original = text
     # `::TryReserveError` (leading double-colon, global namespace ref) →
-    # `rusty::collections::TryReserveError`.
+    # `rusty::collections::TryReserveError`. Negative-lookbehind on
+    # `s` to avoid matching the `s::TryReserveError` tail of an
+    # already-qualified `rusty::collections::TryReserveError`.
     text = re.sub(
-        r"::TryReserveError\b(?!_)",
+        r"(?<!s)::TryReserveError\b(?!_)",
         "rusty::collections::TryReserveError",
         text,
     )
@@ -933,38 +935,49 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
                 text = text[:i] + "BitMask{" + content + "._0}.into_iter()" + text[j+1:]
                 found = True
                 break
+            start = j + 1
+        # Outer loop terminates when inner scan found no
+        # `.match_full()`-ending rusty::iter — otherwise the outer
+        # `while True` would spin forever scanning the same text.
+        if not found:
+            break
 
     # `rusty::for_in(group.match_X(arg))` — `match_X` returns our
     # group_internal::BitMask which isn't iterable. Wrap with real
-    # BitMask first. Brace-matching to find the inner call.
-    for match_method in (".match_tag(", ".match_empty(", ".match_empty_or_deleted(",
-                          ".match_full("):
-        for_in_prefix = "rusty::for_in("
-        while True:
-            idx = text.find(for_in_prefix)
-            if idx == -1:
-                break
-            content_start = idx + len(for_in_prefix)
-            depth = 1
-            j = content_start
-            while j < len(text) and depth > 0:
-                if text[j] == '(':
-                    depth += 1
-                elif text[j] == ')':
-                    depth -= 1
-                    if depth == 0:
-                        break
-                j += 1
-            if depth != 0:
-                break
-            content = text[content_start:j]
-            if match_method in content and "BitMask{" not in content:
-                wrapped = "rusty::for_in(BitMask{" + content + "._0})"
-                text = text[:idx] + wrapped + text[j+1:]
-            else:
-                # Skip past this match and find the next.
-                text = text[:idx] + "__FORINSEEN__" + text[idx+len("__FORINSEEN__"):]
-        text = text.replace("__FORINSEEN__", for_in_prefix[:len("__FORINSEEN__")])
+    # BitMask first. Build via segments (single pass, no markers).
+    for_in_prefix = "rusty::for_in("
+    out_parts = []
+    search_from = 0
+    while True:
+        idx = text.find(for_in_prefix, search_from)
+        if idx == -1:
+            out_parts.append(text[search_from:])
+            break
+        content_start = idx + len(for_in_prefix)
+        depth = 1
+        j = content_start
+        while j < len(text) and depth > 0:
+            if text[j] == '(':
+                depth += 1
+            elif text[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if depth != 0:
+            out_parts.append(text[search_from:])
+            break
+        content = text[content_start:j]
+        has_match = any(m in content for m in
+                        (".match_tag(", ".match_empty(",
+                         ".match_empty_or_deleted(", ".match_full("))
+        if has_match and "BitMask{" not in content:
+            out_parts.append(text[search_from:idx])
+            out_parts.append("rusty::for_in(BitMask{" + content + "._0})")
+        else:
+            out_parts.append(text[search_from:j+1])
+        search_from = j + 1
+    text = "".join(out_parts)
 
     # TableLayout::calculate_layout_for — the method only reads
     # struct fields; add const to the declaration so it can be
