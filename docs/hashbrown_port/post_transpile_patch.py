@@ -898,6 +898,32 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         text,
     )
 
+    # `auto guard = guard(...)` — Rust allows local `guard` shadowing
+    # the function `guard`; C++ rejects (the local declaration tries
+    # to call itself). Qualify the RHS function with `::` so the
+    # global `guard()` is named, then the local `guard` can keep
+    # its name and subsequent body refs work.
+    text = text.replace("auto guard = guard(", "auto guard = ::guard(")
+
+    # `ScopeGuard::into_inner(x)` — static template member can't
+    # deduce ScopeGuard<T, F> from x. Provide a forwarding helper
+    # at the top of raw.cppm and rewrite call sites to use it.
+    if "// raw: into_inner-deduction helper" not in text:
+        helper = (
+            "// raw: into_inner-deduction helper — avoid `ScopeGuard::into_inner(x)`\n"
+            "// which can't deduce ScopeGuard<T, F> template args.\n"
+            "template<typename T, typename F>\n"
+            "static inline T __raw_into_inner(::ScopeGuard<T, F> g) {\n"
+            "    return ::ScopeGuard<T, F>::into_inner(std::move(g));\n"
+            "}\n\n"
+        )
+        # Insert after the last import directive.
+        anchor = "import hashbrown_port.util;\n"
+        pos = text.find(anchor)
+        if pos != -1:
+            text = text[:pos + len(anchor)] + "\n" + helper + text[pos + len(anchor):]
+    text = text.replace("ScopeGuard::into_inner(", "__raw_into_inner(")
+
     # `rusty::iter(X.match_full())` — Rust source has `.match_full()
     # .into_iter()`. Our Group::match_* methods return
     # `group_internal::BitMask` (module-private, layout-compatible).
