@@ -748,16 +748,49 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     )
 
     # Rust `.cast::<T>()` on a raw pointer → C++ reinterpret_cast.
-    # The transpiler emitted these as `expr->cast()`. Match the full
-    # member-access chain (including any `this->` prefix) so we don't
-    # leave a dangling `this->reinterpret_cast<...>` after replacement.
-    # Cast to `const uint8_t*` — our hand-rolled Group::load_aligned
-    # takes that signature (avoids cross-module Tag-type mismatch).
-    text = re.sub(
-        r"(this->)?(\w+)->cast\(\)",
-        lambda m: "reinterpret_cast<const uint8_t*>(" + (m.group(1) or "") + m.group(2) + ")",
-        text,
-    )
+    # The transpiler emitted these as `expr->cast()`. Brace-walk-back
+    # to handle arbitrary `expr` (including `rusty::as_ptr(...)->cast()`).
+    # Process left-to-right with explicit positions to skip the
+    # `->cast_mut()` variant.
+    search_from = 0
+    while True:
+        idx = text.find("->cast()", search_from)
+        if idx == -1:
+            break
+        # Skip if this is actually `->cast_mut()`.
+        # (Look back 4 chars to see `_mut`. No — `->cast()` and
+        # `->cast_mut()` overlap on `->cast`; the substring search
+        # for `->cast()` won't match `->cast_mut()` because it
+        # requires `()` immediately after `cast`. So no overlap.)
+        i = idx
+        if i > 0 and text[i-1] == ')':
+            depth = 1
+            j = i - 2
+            while j >= 0 and depth > 0:
+                if text[j] == ')':
+                    depth += 1
+                elif text[j] == '(':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j -= 1
+            k = j - 1
+            while k >= 0 and (text[k].isalnum() or text[k] in "_:"):
+                k -= 1
+            expr_start = k + 1
+        else:
+            # Walk back over identifier chars / `::` / `.` / `->`.
+            # We include `-` so `this->ctrl` walks correctly across
+            # member-access. Stop at whitespace, `(`, `,`, or `=`.
+            k = i - 1
+            while k >= 0 and (text[k].isalnum() or text[k] in "_:>.-"):
+                k -= 1
+            expr_start = k + 1
+        expr = text[expr_start:i]
+        replacement = "reinterpret_cast<const uint8_t*>(" + expr + ")"
+        text = text[:expr_start] + replacement + text[idx + len("->cast()"):]
+        # Advance search past the replacement.
+        search_from = expr_start + len(replacement)
     # `rusty::mem::MaybeUninit<X>` → `rusty::MaybeUninit<X>` (real path).
     text = text.replace("rusty::mem::MaybeUninit", "rusty::MaybeUninit")
     text = text.replace("mem::MaybeUninit", "rusty::MaybeUninit")
