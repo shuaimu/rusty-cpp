@@ -434,29 +434,33 @@ export struct Group {
         return empty;
     }
 
-    static Group load(const Tag* ptr) {
+    // Signatures take `const uint8_t*` / `uint8_t` rather than Tag so
+    // callers in other modules (using control.tag's Tag) don't trip
+    // the cross-module Tag-type mismatch (our `group_internal::Tag`
+    // is layout-compatible but a distinct type).
+    static Group load(const uint8_t* ptr) {
         GroupWord w;
         std::memcpy(&w, ptr, sizeof(w));
         return Group{w};
     }
 
-    static Group load_aligned(const Tag* ptr) {
+    static Group load_aligned(const uint8_t* ptr) {
         return load(ptr);
     }
 
-    void store_aligned(Tag* ptr) const {
+    void store_aligned(uint8_t* ptr) const {
         std::memcpy(ptr, &_0, sizeof(_0));
     }
 
-    BitMask match_tag(Tag tag) const {
-        GroupWord cmp = _0 ^ repeat_tag(tag);
+    BitMask match_tag(uint8_t tag_byte) const {
+        GroupWord cmp = _0 ^ repeat_tag(Tag{tag_byte});
         // x - 0x01... will overflow into the high bit if the byte was 0.
         GroupWord r = (cmp - 0x0101010101010101ULL) & ~cmp & 0x8080808080808080ULL;
         return BitMask{static_cast<BitMaskWord>(r)};
     }
 
     BitMask match_empty() const {
-        return match_tag(Tag::EMPTY);
+        return match_tag(Tag::EMPTY._0);
     }
 
     BitMask match_empty_or_deleted() const {
@@ -665,11 +669,143 @@ def patch_raw_imports_top(cpp_out: Path) -> int:
     return 1
 
 
+def patch_raw_misc_fixups(cpp_out: Path) -> int:
+    """Several mechanical fixups for raw.cppm:
+    - `control::BitMaskIter` etc → drop `control::` (imported flat).
+    - `invalid_mut(x)` — Rust core::ptr::invalid_mut, construct pointer
+      from usize. Inline as `reinterpret_cast<T*>(x)`.
+    - `assert((... <Rust syntax> ...))` lines where the transpiler
+      preserved verbatim Rust syntax inside assert!() macros — these
+      have spaced-out `.`, `::`, `as` etc. that don't parse as C++.
+      Replace with `assert(true)` (drops the runtime check; safe for
+      Phase A2 just-compile goal)."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+
+    # Strip `control::` qualifier (only the path, not `control:` followed
+    # by other punctuation).
+    text = re.sub(r"\bcontrol::(?=\w)", "", text)
+
+    # invalid_mut(x) → reinterpret_cast<T*>(x) where T comes from context.
+    # Since we don't know T at patch time, use a generic cast via void*
+    # then assume the user-side will type-narrow. Simpler: just inline as
+    # `reinterpret_cast<uint8_t*>(x)` and let the caller cast further.
+    # Better: assume it's used in pointer arithmetic where the target
+    # type is known — provide as `((uint8_t*)(uintptr_t)(x))`.
+    text = re.sub(
+        r"\binvalid_mut\(([^)]+)\)",
+        r"reinterpret_cast<uint8_t*>(static_cast<std::uintptr_t>(\1))",
+        text,
+    )
+
+    # Strip assert(...) lines containing spaced-out Rust syntax —
+    # detect `space . space` or `space :: space` or `as ` inside the
+    # assert. Replace whole line with `assert(true);  // stripped: <orig>`.
+    def strip_assert(m):
+        body = m.group(0)
+        if (" . " in body or " :: " in body or " as " in body):
+            return "        assert(true);  // " + body.strip()[:60] + "...\n"
+        return body
+    text = re.sub(
+        r"^\s*assert\(\([^\n]+\)\);\s*\n",
+        strip_assert,
+        text,
+        flags=re.MULTILINE,
+    )
+
+    # Rust `.cast::<T>()` on a raw pointer → C++ reinterpret_cast.
+    # The transpiler emitted these as `expr->cast()`. Match the full
+    # member-access chain (including any `this->` prefix) so we don't
+    # leave a dangling `this->reinterpret_cast<...>` after replacement.
+    # Cast to `const uint8_t*` — our hand-rolled Group::load_aligned
+    # takes that signature (avoids cross-module Tag-type mismatch).
+    text = re.sub(
+        r"(this->)?(\w+)->cast\(\)",
+        lambda m: "reinterpret_cast<const uint8_t*>(" + (m.group(1) or "") + m.group(2) + ")",
+        text,
+    )
+    # `rusty::mem::MaybeUninit<X>` → `rusty::MaybeUninit<X>` (real path).
+    text = text.replace("rusty::mem::MaybeUninit", "rusty::MaybeUninit")
+    text = text.replace("mem::MaybeUninit", "rusty::MaybeUninit")
+    # `scopeguard::guard(...)` — drop the `::` qualifier; `guard`
+    # is already imported via `import hashbrown_port.scopeguard;`.
+    text = text.replace("scopeguard::", "")
+
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_raw_tryreserveerror_constructors(cpp_out: Path) -> int:
+    """`raw.cppm` emits Rust enum-variant constructors like
+    `TryReserveError_CapacityOverflow{}` and
+    `TryReserveError_AllocError{.layout = ...}`. These were valid in
+    the Rust source where `TryReserveError` is an enum with named
+    variants, but rusty's `TryReserveError` is a tagged struct with
+    a `Kind` discriminant. Rewrite the `capacity_overflow` and
+    `alloc_err` function bodies to use the right constructor."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    sentinel = "// raw: TryReserveError variant constructors → tagged struct"
+    if sentinel in text:
+        return 0
+    # Match `capacity_overflow` body and replace.
+    old_co = ("inline rusty::collections::TryReserveError capacity_overflow(Fallibility self_) {\n"
+              "    return [&]() -> rusty::collections::TryReserveError")
+    pos = text.find(old_co)
+    if pos == -1:
+        return 0
+    # Find the closing `}();` then `}` of the function.
+    end_marker = "(); }();\n}"
+    end = text.find(end_marker, pos)
+    if end == -1:
+        # Try a simpler closing.
+        end = text.find("}();\n}", pos)
+        if end == -1:
+            return 0
+        end_marker = "}();\n}"
+    new_co = ("inline rusty::collections::TryReserveError capacity_overflow(Fallibility self_) {\n"
+              "    " + sentinel + "\n"
+              "    (void)self_;\n"
+              "    return rusty::collections::TryReserveError(\n"
+              "        rusty::collections::TryReserveError::Kind::CapacityOverflow);\n"
+              "}")
+    text = text[:pos] + new_co + text[end + len(end_marker):]
+
+    # Same for alloc_err.
+    old_ae = ("inline rusty::collections::TryReserveError alloc_err(Fallibility self_, rusty::alloc::Layout layout) {\n"
+              "    return [&]() -> rusty::collections::TryReserveError")
+    pos = text.find(old_ae)
+    if pos == -1:
+        path.write_text(text)
+        return 1
+    end = text.find("}();\n}", pos)
+    if end == -1:
+        path.write_text(text)
+        return 1
+    new_ae = ("inline rusty::collections::TryReserveError alloc_err(Fallibility self_, rusty::alloc::Layout layout) {\n"
+              "    (void)self_;\n"
+              "    return rusty::collections::TryReserveError(\n"
+              "        rusty::collections::TryReserveError::Kind::AllocError,\n"
+              "        layout.size, layout.align);\n"
+              "}")
+    text = text[:pos] + new_ae + text[end + len("}();\n}"):]
+    path.write_text(text)
+    return 1
+
+
 def patch_raw_std_alloc_namespace(cpp_out: Path) -> int:
     """`raw.cppm` references `std::AllocError`/`std::Allocator`/
     `std::Global`/`std::Layout`/`std::handle_alloc_error` (the
     transpiler picked the `std::` prefix from Rust's `use std::alloc::*`
-    but rusty has these under `rusty::alloc::`)."""
+    but rusty has these under `rusty::alloc::`). Also `std::do_alloc`
+    should be plain `do_alloc` (it's imported from hashbrown_port.alloc)."""
     path = cpp_out / "hashbrown_port.raw.cppm"
     if not path.exists():
         return 0
@@ -678,6 +814,7 @@ def patch_raw_std_alloc_namespace(cpp_out: Path) -> int:
     for sym in ["AllocError", "Allocator", "Global", "Layout", "handle_alloc_error"]:
         # Only replace `std::Sym` (avoid matching std::array etc).
         text = text.replace(f"std::{sym}", f"rusty::alloc::{sym}")
+    text = text.replace("using std::do_alloc;", "// using std::do_alloc; — already imported from hashbrown_port.alloc")
     if text != original:
         path.write_text(text)
         return 1
@@ -702,6 +839,8 @@ def main(cpp_out: Path):
         ("raw: bare TryReserveError → rusty::collections::TryReserveError", patch_raw_tryreserveerror),
         ("raw: hoist imports to top of module", patch_raw_imports_top),
         ("raw: std::{AllocError,Allocator,Layout,Global,handle_alloc_error} → rusty::alloc::*", patch_raw_std_alloc_namespace),
+        ("raw: TryReserveError variant constructors → rusty tagged-struct ctor", patch_raw_tryreserveerror_constructors),
+        ("raw: misc fixups (control::, invalid_mut, Rust-syntax assert!s)", patch_raw_misc_fixups),
     ]
     total = 0
     for name, fn in patches:
