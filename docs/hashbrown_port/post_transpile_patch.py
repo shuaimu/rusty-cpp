@@ -611,12 +611,73 @@ def patch_raw_tryreserveerror(cpp_out: Path) -> int:
         return 0
     text = path.read_text()
     original = text
-    # Match bare TryReserveError (not already qualified).
+    # `::TryReserveError` (leading double-colon, global namespace ref) →
+    # `rusty::collections::TryReserveError`.
     text = re.sub(
-        r"(?<![\w:])TryReserveError\b",
+        r"::TryReserveError\b(?!_)",
         "rusty::collections::TryReserveError",
         text,
     )
+    # Bare TryReserveError (not preceded by word char or `::`) → qualified.
+    text = re.sub(
+        r"(?<![\w:])TryReserveError\b(?!_)",
+        "rusty::collections::TryReserveError",
+        text,
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_raw_imports_top(cpp_out: Path) -> int:
+    """`raw.cppm` has `import hashbrown_port.control;` (and friends)
+    appearing after forward decls. C++20 requires all imports right
+    after the module decl."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    sentinel = "// raw: imports hoisted to top"
+    if sentinel in text:
+        return 0
+    # Collect all `import hashbrown_port.X;` lines (and `import vec_port.X;`
+    # etc.) appearing in the file body.
+    imports = re.findall(r"^import\s+[\w.]+\s*;\s*\n", text, flags=re.MULTILINE)
+    if not imports:
+        return 0
+    # Strip them from their current positions.
+    new_text = re.sub(r"^import\s+[\w.]+\s*;\s*\n", "", text, flags=re.MULTILINE)
+    # Re-inject all (unique, preserving order) right after module decl.
+    seen = set()
+    uniq = []
+    for line in imports:
+        if line not in seen:
+            seen.add(line)
+            uniq.append(line)
+    anchor = "export module hashbrown_port.raw;\n"
+    pos = new_text.find(anchor)
+    if pos == -1:
+        return 0
+    insertion = "\n" + sentinel + "\n" + "".join(uniq)
+    new_text = new_text[:pos + len(anchor)] + insertion + new_text[pos + len(anchor):]
+    path.write_text(new_text)
+    return 1
+
+
+def patch_raw_std_alloc_namespace(cpp_out: Path) -> int:
+    """`raw.cppm` references `std::AllocError`/`std::Allocator`/
+    `std::Global`/`std::Layout`/`std::handle_alloc_error` (the
+    transpiler picked the `std::` prefix from Rust's `use std::alloc::*`
+    but rusty has these under `rusty::alloc::`)."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    for sym in ["AllocError", "Allocator", "Global", "Layout", "handle_alloc_error"]:
+        # Only replace `std::Sym` (avoid matching std::array etc).
+        text = text.replace(f"std::{sym}", f"rusty::alloc::{sym}")
     if text != original:
         path.write_text(text)
         return 1
@@ -639,6 +700,8 @@ def main(cpp_out: Path):
         ("control parent: strip bitmask::/group::/tag:: qualifiers", patch_control_module_namespaces),
         ("control.bitmask: move import + strip group:: prefix + rusty::clone", patch_control_bitmask_imports),
         ("raw: bare TryReserveError → rusty::collections::TryReserveError", patch_raw_tryreserveerror),
+        ("raw: hoist imports to top of module", patch_raw_imports_top),
+        ("raw: std::{AllocError,Allocator,Layout,Global,handle_alloc_error} → rusty::alloc::*", patch_raw_std_alloc_namespace),
     ]
     total = 0
     for name, fn in patches:

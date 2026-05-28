@@ -33,15 +33,28 @@ excluding `external_trait_impls/{serde,rayon}` and tests).
         neutralize ARM cfg!() dead branch
       - `control` (parent): strip `bitmask::`/`group::`/`tag::`
         qualifiers; drop unexported `TagSliceExt` re-export
-      - `raw`: partial — bare `TryReserveError` → `rusty::collections::
-        TryReserveError`. Substantial work remaining:
-        - `::TryReserveError` (leading-`::`) needs the same rewrite
-        - Rust enum variant constructors (`TryReserveError_CapacityOverflow{}`,
-          `TryReserveError_AllocError{...}`) — semantic gap, need
-          either matching tagged-struct emits in rusty or a stub layer
-        - Misplaced `import` lines
-        - `std::AllocError`/`std::Allocator` → `rusty::alloc::*`
+      - `raw`: partial. Patches landed:
+        - `::TryReserveError` (leading `::`) and bare
+          `TryReserveError` → `rusty::collections::TryReserveError`
+        - Imports hoisted to top of module
+        - `std::{AllocError,Allocator,Layout,Global,handle_alloc_error}`
+          → `rusty::alloc::*`
+        Remaining error patterns (11 unique categories, ~19 sites):
+        - Rust enum-variant constructors (`TryReserveError_CapacityOverflow{}`,
+          `_AllocError{...}`) — semantic gap needs a tagged-struct
+          shim layer in rusty::collections, or pattern-rewrite to
+          tagged constructors that exist
+        - `std::do_alloc` — should be `rusty::alloc::do_alloc`
+        - `invalid_mut` (pointer fn) — not in rusty::ptr
+        - `control::` namespace qualifier (similar shape to earlier
+          `bitmask::`/`group::` issues)
+        - `ctrl` undeclared identifier — likely Rust let-binding the
+          transpiler got confused on; investigate emit shape
+        - `self` undeclared (free-fn referring to method receiver?)
         - `handle_alloc_error` returns void but signature wants Result
+        - `RawTableInner` incomplete type in nested-name-specifier
+        - Member-of-uint8_t access — likely transpiler treating
+          `Tag.0` access as struct field access on raw byte
 - [ ] **A3** Once raw compiles, cascading errors in map/set/table/
       raw_entry/rustc_entry will surface. (Most likely the same
       classes of issues; the patcher framework is now in place.)
