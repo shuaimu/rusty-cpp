@@ -598,6 +598,31 @@ def patch_control_group_imp_alias(cpp_out: Path) -> int:
     return 0
 
 
+# ── raw.cppm ────────────────────────────────────────────────────────
+
+def patch_raw_tryreserveerror(cpp_out: Path) -> int:
+    """`raw.cppm` uses bare `TryReserveError` (the Rust source has
+    `use crate::TryReserveError;` which resolves to a re-export from
+    `std::collections::TryReserveError`). The transpiler emitted it
+    unqualified but rusty has it under `rusty::collections`. Add the
+    namespace qualifier."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # Match bare TryReserveError (not already qualified).
+    text = re.sub(
+        r"(?<![\w:])TryReserveError\b",
+        "rusty::collections::TryReserveError",
+        text,
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 # ── orchestration ───────────────────────────────────────────────────
 
 def main(cpp_out: Path):
@@ -613,6 +638,7 @@ def main(cpp_out: Path):
         ("control.group: drop generic:: qualifier (no sibling C++ namespace)", patch_control_group_imp_alias),
         ("control parent: strip bitmask::/group::/tag:: qualifiers", patch_control_module_namespaces),
         ("control.bitmask: move import + strip group:: prefix + rusty::clone", patch_control_bitmask_imports),
+        ("raw: bare TryReserveError → rusty::collections::TryReserveError", patch_raw_tryreserveerror),
     ]
     total = 0
     for name, fn in patches:

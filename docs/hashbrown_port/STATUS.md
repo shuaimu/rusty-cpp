@@ -17,11 +17,34 @@ excluding `external_trait_impls/{serde,rayon}` and tests).
       **17 / 17 files transpile cleanly, 0 parser errors.**
       4 / 17 modules fail compile at cmake (catalogued below).
 - [~] **A2** Per-module compile fixes (in progress).
-      **2 / 4 first-wave modules fixed**: `control.tag` and `hasher`.
-      Remaining: `alloc` (rusty allocator API mismatch),
-      `control.group.generic` (cross-module `Tag`/`BitMask` imports,
-      Rust-syntax `u64::from_ne_bytes`, transpiler IIFE artifacts).
-- [ ] **A3** Resolve cross-module import cycles.
+      **16 / 17 modules compile**, only `raw.cppm` remains.
+      Total patches: ~11 in `post_transpile_patch.py`.
+      Cluster fixes landed:
+      - `control.tag`: const-qualify member methods; stub Tag::fmt
+      - `hasher`: replace body with FNV-1a stub (drops foldhash dep)
+      - `alloc`: inner::Global → std::malloc/free; AllocatorAdapter
+        maps `rusty::alloc::AllocError` → `std::tuple<>{}`
+      - `control.group.generic`: hand-rolled (~150 LOC) replacement
+        with `group_internal::{Tag,BitMask}` to avoid cross-module
+        redefinition conflicts
+      - `control.group`: drop `generic::` qualifier
+      - `control.bitmask`: move misplaced import; strip `group::`
+        qualifier; Rust integer-trait methods → __builtin_ctzll etc.;
+        neutralize ARM cfg!() dead branch
+      - `control` (parent): strip `bitmask::`/`group::`/`tag::`
+        qualifiers; drop unexported `TagSliceExt` re-export
+      - `raw`: partial — bare `TryReserveError` → `rusty::collections::
+        TryReserveError`. Substantial work remaining:
+        - `::TryReserveError` (leading-`::`) needs the same rewrite
+        - Rust enum variant constructors (`TryReserveError_CapacityOverflow{}`,
+          `TryReserveError_AllocError{...}`) — semantic gap, need
+          either matching tagged-struct emits in rusty or a stub layer
+        - Misplaced `import` lines
+        - `std::AllocError`/`std::Allocator` → `rusty::alloc::*`
+        - `handle_alloc_error` returns void but signature wants Result
+- [ ] **A3** Once raw compiles, cascading errors in map/set/table/
+      raw_entry/rustc_entry will surface. (Most likely the same
+      classes of issues; the patcher framework is now in place.)
 
 ### Phase B — hand-port unknowns
 
