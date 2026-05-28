@@ -803,6 +803,15 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         lambda m: "const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(" + (m.group(1) or "") + m.group(2) + "))",
         text,
     )
+    # `rusty::alloc::Global` used as a value (no `{}`) — `Global` is
+    # a struct type. Only replace when it appears as a function call
+    # argument: preceded by `,` or `(` and followed by `,` or `)`.
+    # (Avoid breaking `using` decls and template default args.)
+    text = re.sub(
+        r"([,(]\s*)rusty::alloc::Global(\s*[,)])",
+        r"\1rusty::alloc::Global{}\2",
+        text,
+    )
 
     if text != original:
         path.write_text(text)
