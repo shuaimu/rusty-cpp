@@ -139,6 +139,27 @@ export struct DefaultHasher {
     void write_u64(uint64_t v) { state ^= v; state *= 1099511628211ULL; }
     uint64_t finish() const { return state; }
     DefaultHasher clone() const { return *this; }
+    static DefaultHasher new_() { return DefaultHasher{}; }
+    static DefaultHasher default_() { return DefaultHasher{}; }
+
+    // Rust's `BuildHasher::hash_one<T: Hash>(&self, x: T) -> u64`.
+    // Doubles as the Hasher's convenience method here (we use the
+    // same struct as both hash builder and hasher, FNV-1a state=0).
+    template<typename T>
+    uint64_t hash_one(const T& x) const {
+        DefaultHasher h{};
+        if constexpr (std::is_integral_v<T>) {
+            h.write_u64(static_cast<uint64_t>(x));
+        } else if constexpr (requires { x.size(); x.data(); }) {
+            h.write(std::span<const uint8_t>(
+                reinterpret_cast<const uint8_t*>(x.data()),
+                x.size() * sizeof(*x.data())));
+        } else {
+            h.write(std::span<const uint8_t>(
+                reinterpret_cast<const uint8_t*>(&x), sizeof(T)));
+        }
+        return h.finish();
+    }
 };
 
 export struct DefaultHashBuilder {
@@ -286,6 +307,38 @@ def patch_alloc_global_impl(cpp_out: Path) -> int:
         )
     path.write_text(new_text)
     return 1
+
+
+def patch_drop_dup_defaulthasher_global(cpp_out: Path) -> int:
+    """Several non-hasher modules (alloc, control.tag, raw, …) carry
+    a leftover `struct DefaultHasher` stub from the expanded
+    #[derive(Hash)] pre-amble. They conflict with the exported
+    `DefaultHasher` from hashbrown_port.hasher (C++ modules don't
+    allow the same name to be declared in multiple modules' global-
+    module fragments). Strip the stub from every module except
+    hasher."""
+    total = 0
+    stub_block = (
+        "// DefaultHasher stub — used by expanded #[derive(Hash)] test code.\n"
+        "struct DefaultHasher {\n"
+        "std::size_t state = 14695981039346656037ULL;\n"
+        "static DefaultHasher new_() { return DefaultHasher{}; }\n"
+        "std::size_t finish() const { return state; }\n"
+        "};\n"
+    )
+    for path in cpp_out.glob("hashbrown_port.*.cppm"):
+        if path.name == "hashbrown_port.hasher.cppm":
+            continue
+        text = path.read_text()
+        if stub_block not in text:
+            continue
+        text = text.replace(
+            stub_block,
+            "// (DefaultHasher stub removed — use hasher::DefaultHasher.)\n",
+        )
+        path.write_text(text)
+        total += 1
+    return 1 if total else 0
 
 
 def patch_alloc_inner_do_alloc_convert(cpp_out: Path) -> int:
@@ -1059,6 +1112,32 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     # unwrap_unchecked; `unwrap()` is the safe equivalent (panics
     # on Err instead of UB).
     text = text.replace(".unwrap_unchecked()", ".unwrap()")
+    # `Option<UnsafeFn<void(uint8_t*)>>([&](...) -> UnsafeFn<void(uint8_t*)> { return drop_in_place(...); })`
+    # — the transpiler emitted a lambda that returns drop_in_place's
+    # void result, treating it as a UnsafeFn. The actual shape needed
+    # is: the lambda IS the function pointer that gets wrapped by
+    # UnsafeFn. Rewrite to a stateless lambda converted to fn ptr.
+    text = text.replace(
+        "((!std::is_trivially_destructible_v<T>) ? rusty::Option<rusty::UnsafeFn<void(uint8_t*)>>([&](auto&& ptr_shadow1) -> rusty::UnsafeFn<void(uint8_t*)> { return rusty::ptr::drop_in_place(ptr_shadow1.template cast<T>()); }) : rusty::Option<rusty::UnsafeFn<void(uint8_t*)>>{rusty::None})",
+        "((!std::is_trivially_destructible_v<T>) "
+        "? rusty::Option<rusty::UnsafeFn<void(uint8_t*)>>("
+        "rusty::UnsafeFn<void(uint8_t*)>("
+        "+[](uint8_t* __p) { "
+        "std::destroy_at(reinterpret_cast<T*>(__p)); }"
+        ")) "
+        ": rusty::Option<rusty::UnsafeFn<void(uint8_t*)>>{rusty::None})",
+    )
+
+    # `bucket.write(value)` — Rust's Bucket::write does a raw write
+    # through the slot pointer (placement new semantics for the
+    # uninitialized memory returned by the allocator). C++
+    # equivalent: `std::construct_at(bucket.as_ptr(), value)`.
+    text = re.sub(
+        r"\bbucket\.write\(std::move\(value\)\)",
+        "std::construct_at(rusty::as_ptr(bucket), std::move(value))",
+        text,
+    )
+
     # `rusty::len(block)` where `block` is `NonNull<u8>` — Rust
     # hashbrown gets a slice from do_alloc and calls `.len()` on it.
     # rusty represents allocations as just `NonNull<u8>` (no slice
@@ -1196,31 +1275,65 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     # RawTableInner in C++. Use `(*guard).method()` explicitly.
     # Rust auto-derefs via the Deref trait; C++ ScopeGuard exposes
     # `operator*` returning `T&`.
-    for method in ("num_buckets", "ctrl", "bucket_mask", "items",
-                   "growth_left", "num_ctrl_bytes", "bucket_ptr",
-                   "find_insert_index", "is_bucket_full", "bucket",
-                   "bucket_mask_to_capacity", "buckets",
-                   "record_item_insert_at", "set_ctrl_h2",
-                   "growth_left_for", "capacity",
-                   "is_in_same_group", "set_ctrl_hash",
-                   "replace_ctrl_hash", "set_ctrl",
-                   "probe_seq", "prepare_rehash_in_place",
-                   "allocation_info"):
-        text = re.sub(
-            r"\bguard\." + re.escape(method) + r"\(",
-            f"(*guard).{method}(",
-            text,
-        )
+    # Same auto-deref for both `guard` and `new_table` (both are
+    # ScopeGuard-wrapped RawTableInner values in different methods).
+    guard_method_names = (
+        "num_buckets", "ctrl", "bucket_mask", "items",
+        "growth_left", "num_ctrl_bytes", "bucket_ptr",
+        "find_insert_index", "is_bucket_full", "bucket",
+        "bucket_mask_to_capacity", "buckets",
+        "record_item_insert_at", "set_ctrl_h2",
+        "growth_left_for", "capacity",
+        "is_in_same_group", "set_ctrl_hash",
+        "replace_ctrl_hash", "set_ctrl",
+        "probe_seq", "prepare_rehash_in_place",
+        "allocation_info", "prepare_insert_index",
+    )
+    guard_field_names = (
+        "growth_left", "bucket_mask", "items", "ctrl_field",
+    )
+    # `rusty::mem::swap((*this), new_table)` — new_table is a
+    # ScopeGuard; the swap needs both args to be RawTableInner.
+    text = text.replace(
+        "rusty::mem::swap((*this), new_table);",
+        "rusty::mem::swap(*this, *new_table);",
+    )
 
-    # `guard.<field>` (no parens after) — field-access form. C++
-    # ScopeGuard doesn't auto-deref; rewrite to `(*guard).<field>`.
-    # Match identifier-followed-by-NOT `(`.
-    for field in ("growth_left", "bucket_mask", "items", "ctrl_field"):
-        text = re.sub(
-            r"\bguard\." + re.escape(field) + r"(?![\w(])",
-            f"(*guard).{field}",
-            text,
-        )
+    # `Result<ScopeGuard<RawTableInner, std::function<...>>>::Ok(guard(value, lambda))`
+    # — guard() returns ScopeGuard with the lambda's concrete type,
+    # which doesn't match the Result's std::function-typed
+    # ScopeGuard. Wrap the lambda in std::function explicitly so
+    # the types match.
+    text = text.replace(
+        "::Ok(guard(std::move(new_table), [=, alloc = std::move(alloc), table_layout = std::move(table_layout)](auto&& self_) mutable {",
+        "::Ok(guard(std::move(new_table), std::function<void(RawTableInner&)>([=, alloc = std::move(alloc), table_layout = std::move(table_layout)](auto&& self_) mutable {",
+    )
+    # And add the closing `)` for the std::function wrapper at the
+    # `});` that follows.
+    text = text.replace(
+        "        self_.free_buckets(alloc, std::move(table_layout));\n"
+        "    }\n"
+        "}\n"
+        "}));",
+        "        self_.free_buckets(alloc, std::move(table_layout));\n"
+        "    }\n"
+        "}\n"
+        "})));",
+    )
+
+    for var in ("guard", "new_table"):
+        for method in guard_method_names:
+            text = re.sub(
+                r"\b" + var + r"\." + re.escape(method) + r"\(",
+                f"(*{var}).{method}(",
+                text,
+            )
+        for field in guard_field_names:
+            text = re.sub(
+                r"\b" + var + r"\." + re.escape(field) + r"(?![\w(])",
+                f"(*{var}).{field}",
+                text,
+            )
 
     # Bare `ptr::<fn>(` — Rust has `use core::ptr` or hashbrown imports.
     # In C++ we want `rusty::ptr::<fn>(`. Avoid double-prefix on already
@@ -1974,18 +2087,45 @@ def patch_map_module(cpp_out: Path) -> int:
         "export template<typename K, typename Q, typename V, typename S, typename A>\n"
         "struct EntryRef;\n",
     )
+    # `rusty::addr_of_temp(X)` — undefined in rusty (transpiler-only
+    # helper). The C++ code just needs the lvalue X passed directly;
+    # `mem::replace` takes a reference. Strip the wrapper via
+    # brace-walk so nested parens in X don't break it.
+    while True:
+        idx = text.find("rusty::addr_of_temp(")
+        if idx == -1:
+            break
+        arg_start = idx + len("rusty::addr_of_temp(")
+        depth = 1
+        j = arg_start
+        while j < len(text) and depth > 0:
+            if text[j] == '(':
+                depth += 1
+            elif text[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if depth != 0:
+            break
+        text = text[:idx] + text[arg_start:j] + text[j+1:]
+
     # Stub `make_hasher` and `equivalent_key` helper functions before
     # HashMap uses them. The transpiler doesn't emit these; the
-    # bodies are simple lambdas.
+    # bodies are simple lambdas. `make_hasher` takes only S as a
+    # template param (the others are deduced at call time from the
+    # closure arg) so the bare `::make_hasher(hash_builder)` call
+    # site can deduce S.
     helpers_sentinel = "// auto-stubs: make_hasher / equivalent_key"
     if helpers_sentinel not in text:
         helpers = (
             helpers_sentinel + "\n"
-            "template<typename Q, typename V, typename S>\n"
+            "template<typename S>\n"
             "auto make_hasher(const S& hash_builder) {\n"
             "    return [&hash_builder](const auto& val) -> uint64_t {\n"
-            "        return ::make_hash<std::remove_cvref_t<\n"
-            "            decltype(std::get<0>(val))>, S>(hash_builder, std::get<0>(val));\n"
+            "        using KeyT = std::remove_cvref_t<\n"
+            "            decltype(std::get<0>(val))>;\n"
+            "        return ::make_hash<KeyT, S>(hash_builder, std::get<0>(val));\n"
             "    };\n"
             "}\n"
             "template<typename Q>\n"
@@ -2413,6 +2553,7 @@ def main(cpp_out: Path):
         ("alloc: inner::Global::{allocate,deallocate} → std::malloc/free", patch_alloc_global_impl),
         ("alloc: AllocatorAdapter — convert rusty AllocError to std::tuple<>", patch_alloc_adapter_error_convert),
         ("alloc: inner::do_alloc — convert rusty AllocError to std::tuple<>", patch_alloc_inner_do_alloc_convert),
+        ("drop duplicate DefaultHasher stubs (alloc/control.tag/raw)", patch_drop_dup_defaulthasher_global),
         ("control.group.generic: replace whole body with hand-rolled impl", patch_group_generic_replace),
         ("control.group: drop generic:: qualifier (no sibling C++ namespace)", patch_control_group_imp_alias),
         ("control parent: strip bitmask::/group::/tag:: qualifiers", patch_control_module_namespaces),

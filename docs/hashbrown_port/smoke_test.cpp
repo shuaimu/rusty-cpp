@@ -29,6 +29,16 @@ int main() {
         return 1;
     }
 
+    // Step 3: insert(42, 100) — exercises hash + ctrl-tag write path.
+    try {
+        auto m3 = HashMap<int, int>::with_capacity(16);
+        m3.insert(42, 100);
+        std::puts("smoke step 3: insert(42, 100) — completed");
+    } catch (const std::exception& e) {
+        std::printf("smoke step 3: FAILED with: %s\n", e.what());
+        return 1;
+    }
+
     std::puts("smoke test passed");
     return 0;
 }
