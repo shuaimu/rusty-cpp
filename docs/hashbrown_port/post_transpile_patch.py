@@ -288,6 +288,44 @@ def patch_alloc_global_impl(cpp_out: Path) -> int:
     return 1
 
 
+def patch_alloc_inner_do_alloc_convert(cpp_out: Path) -> int:
+    """`inner::do_alloc<A>(alloc, layout)` is declared to return
+    `Result<NonNull<u8>, std::tuple<>>` but delegates to
+    `alloc.allocate(layout)` which (for A = rusty::alloc::Global)
+    returns `Result<NonNull<u8>, AllocError>`. Wrap the delegation
+    with the same error-type conversion the adapter patch uses."""
+    path = cpp_out / "hashbrown_port.alloc.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    sentinel = "// do_alloc-error-convert: rusty AllocError → std::tuple<>"
+    if sentinel in text:
+        return 0
+    original = text
+    # Locate the exported templated do_alloc body and wrap.
+    # The body is one long line — match conservatively.
+    old = (
+        "    rusty::Result<rusty::ptr::NonNull<uint8_t>, std::tuple<>> do_alloc(const A& alloc, rusty::alloc::Layout layout) {\n"
+        "        return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc));\n"
+        "    }"
+    )
+    new = (
+        "    rusty::Result<rusty::ptr::NonNull<uint8_t>, std::tuple<>> do_alloc(const A& alloc, rusty::alloc::Layout layout) {\n"
+        "        " + sentinel + "\n"
+        "        auto r = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc));\n"
+        "        if (r.is_ok()) return rusty::Result<rusty::ptr::NonNull<uint8_t>, std::tuple<>>::Ok(r.unwrap());\n"
+        "        return rusty::Result<rusty::ptr::NonNull<uint8_t>, std::tuple<>>::Err(std::make_tuple());\n"
+        "    }"
+    )
+    if old not in text:
+        return 0
+    text = text.replace(old, new)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def patch_alloc_adapter_error_convert(cpp_out: Path) -> int:
     """The transpiled `AllocatorAdapter<rusty::alloc::Global>` (and
     Ref/RefMut variants) override Allocator::allocate to return
@@ -979,17 +1017,19 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         "T::NEEDS_DROP",
         "(!std::is_trivially_destructible_v<T>)",
     )
-    # `layout.size()` / `layout.align()` — Rust core::alloc::Layout
-    # has these as methods, but rusty::alloc::Layout exposes them as
-    # plain fields. Strip the parens.
+    # `<X>layout.size()` / `<X>layout.align()` — Rust
+    # core::alloc::Layout has these as methods, but rusty::alloc::
+    # Layout exposes them as plain fields. Strip the parens for any
+    # identifier ending in `layout` (covers `layout`,
+    # `oversized_layout`, `table_layout`, etc.).
     text = re.sub(
-        r"\blayout\.size\(\)",
-        "layout.size",
+        r"\b(\w*layout)\.size\(\)",
+        r"\1.size",
         text,
     )
     text = re.sub(
-        r"\blayout\.align\(\)",
-        "layout.align",
+        r"\b(\w*layout)\.align\(\)",
+        r"\1.align",
         text,
     )
     # `static constexpr TableLayout TABLE_LAYOUT = TableLayout::new_<T>();`
@@ -1015,6 +1055,58 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         "drop_inner_table<T, std::remove_cvref_t<decltype((rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT))))>>",
         "drop_inner_table<T, A>",
     )
+    # `result.unwrap_unchecked()` — rusty::Result has no
+    # unwrap_unchecked; `unwrap()` is the safe equivalent (panics
+    # on Err instead of UB).
+    text = text.replace(".unwrap_unchecked()", ".unwrap()")
+    # `rusty::len(block)` where `block` is `NonNull<u8>` — Rust
+    # hashbrown gets a slice from do_alloc and calls `.len()` on it.
+    # rusty represents allocations as just `NonNull<u8>` (no slice
+    # length tracking). The allocator returns exactly what was
+    # requested, so substitute `layout.size` for the length.
+    text = text.replace(
+        "rusty::len(block)",
+        "layout.size  /* substituted: allocator returns exactly layout.size bytes */",
+    )
+
+    # Transpiler bug: `new_uninitialized` emitted `_let_pat.unwrap()`
+    # twice to destructure tuple — but rusty::Option::unwrap()
+    # CONSUMES the value, so the second call throws "Called unwrap
+    # on None". Replace the two-unwrap pattern with one-unwrap +
+    # structured binding.
+    old_pat = (
+        "    auto&& _let_pat = table_layout.calculate_layout_for(std::move(buckets));\n"
+        "    auto&& layout = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap())));\n"
+        "    auto ctrl_offset = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap())));"
+    )
+    new_pat = (
+        "    auto&& _let_pat = table_layout.calculate_layout_for(std::move(buckets));\n"
+        "    auto _let_unwrapped = _let_pat.unwrap();\n"
+        "    auto layout = std::get<0>(_let_unwrapped);\n"
+        "    auto ctrl_offset = std::get<1>(_let_unwrapped);"
+    )
+    text = text.replace(old_pat, new_pat)
+    # raw.cppm uses `do_alloc(alloc, ...)` but doesn't import
+    # `hashbrown_port.alloc`. Add the import.
+    if ("import hashbrown_port.alloc;\n" not in text
+            and "do_alloc(" in text):
+        text = text.replace(
+            "import hashbrown_port.control;\n",
+            "import hashbrown_port.control;\nimport hashbrown_port.alloc;\n",
+            1,
+        )
+        # The import re-exports `Global` (and Allocator), which
+        # conflicts with the existing `using rusty::alloc::Global;`
+        # / `using rusty::alloc::Allocator;` decls. Drop the
+        # using-decls (alloc imports them in scope already).
+        text = text.replace(
+            "using rusty::alloc::Allocator;\n",
+            "// using rusty::alloc::Allocator; — alloc module imports it\n",
+        )
+        text = text.replace(
+            "using rusty::alloc::Global;\n",
+            "// using rusty::alloc::Global; — alloc module imports it\n",
+        )
     # `T::IS_ZERO_SIZED` — Rust zero-sized type marker. Use
     # std::is_empty_v<T> as the closest C++ approximation, and
     # promote bare `if (...)` to `if constexpr (...)` so the
@@ -2320,6 +2412,7 @@ def main(cpp_out: Path):
         ("alloc: drop duplicate do_alloc definition", patch_alloc_do_alloc_dup),
         ("alloc: inner::Global::{allocate,deallocate} → std::malloc/free", patch_alloc_global_impl),
         ("alloc: AllocatorAdapter — convert rusty AllocError to std::tuple<>", patch_alloc_adapter_error_convert),
+        ("alloc: inner::do_alloc — convert rusty AllocError to std::tuple<>", patch_alloc_inner_do_alloc_convert),
         ("control.group.generic: replace whole body with hand-rolled impl", patch_group_generic_replace),
         ("control.group: drop generic:: qualifier (no sibling C++ namespace)", patch_control_group_imp_alias),
         ("control parent: strip bitmask::/group::/tag:: qualifiers", patch_control_module_namespaces),

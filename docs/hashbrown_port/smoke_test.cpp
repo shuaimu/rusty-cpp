@@ -19,6 +19,16 @@ int main() {
     std::puts("smoke step 1: HashMap<int, int>::new_() — constructed");
     (void)m;
 
+    // Step 2: with_capacity(16) — exercises the alloc path.
+    try {
+        auto m2 = HashMap<int, int>::with_capacity(16);
+        std::puts("smoke step 2: with_capacity(16) — constructed");
+        (void)m2;
+    } catch (const std::exception& e) {
+        std::printf("smoke step 2: FAILED with: %s\n", e.what());
+        return 1;
+    }
+
     std::puts("smoke test passed");
     return 0;
 }
