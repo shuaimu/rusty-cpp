@@ -1448,10 +1448,58 @@ def patch_scopeguard_dropfn_arg(cpp_out: Path) -> int:
     return 0
 
 
+def _delete_conflated_iter_methods(text: str) -> str:
+    """Remove methods inside `Iter<T>`-style structs in table.cppm that
+    were mistakenly merged from other Iter variants (Set's Iter<K>,
+    Map's Iter<K,V>). These show up as `template<typename K, ...>`
+    methods that reference fields or types not present on the
+    containing struct. Detection: any method that opens with
+    `    template<typename K` (4-space indent inside struct), spanning
+    until the next `    }` at the same indent.
+
+    The method bodies span multiple lines including nested braces. Use
+    a brace-counting scan to find the matching closing brace."""
+    lines = text.splitlines(keepends=True)
+    out_lines = []
+    i = 0
+    K_in_template_re = re.compile(r"^    template<[^>]*\bK\b[^>]*>$")
+    while i < len(lines):
+        line = lines[i]
+        # Detect a conflated method header at indent 4: template line
+        # mentioning K as one of the parameters.
+        if (K_in_template_re.match(line.rstrip("\n"))
+                and i + 1 < len(lines)):
+            # Find the closing `    }` for this method.
+            # Track braces from the first `{` onward.
+            j = i + 1
+            depth = 0
+            started = False
+            while j < len(lines):
+                for ch in lines[j]:
+                    if ch == '{':
+                        depth += 1
+                        started = True
+                    elif ch == '}':
+                        depth -= 1
+                if started and depth == 0:
+                    break
+                j += 1
+            # Skip lines i..=j (both inclusive). Also skip a single
+            # following blank line if present.
+            i = j + 1
+            if i < len(lines) and lines[i].strip() == "":
+                i += 1
+            continue
+        out_lines.append(line)
+        i += 1
+    return "".join(out_lines)
+
+
 def _patch_downstream_module(path: Path) -> bool:
     """Generic fixups for hashbrown downstream modules
     (table/map/set/raw_entry/rustc_entry): hoist stray imports;
-    std::Allocator/Global → rusty::alloc::*; drop `raw::` qualifier."""
+    std::Allocator/Global → rusty::alloc::*; drop `raw::` qualifier;
+    delete Iter-overload-conflated methods."""
     if not path.exists():
         return False
     text = path.read_text()
@@ -1489,6 +1537,10 @@ def _patch_downstream_module(path: Path) -> bool:
     text = text.replace("using std::Global;", "using rusty::alloc::Global;")
     # `raw::` qualifier in this file — strip; types imported flat.
     text = re.sub(r"\braw::(?=\w)", "", text)
+    # Delete Iter-overload-conflated methods (template<typename K, ...>
+    # methods that got merged from Set's Iter<K> / Map's Iter<K,V>
+    # into the table::Iter<T> struct).
+    text = _delete_conflated_iter_methods(text)
     if text != original:
         path.write_text(text)
         return True
