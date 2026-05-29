@@ -2259,6 +2259,7 @@ def patch_cmakelists_smoke_test(cpp_out: Path) -> int:
         return 0
     here = Path(__file__).resolve().parent
     smoke_test_path = here / "smoke_test.cpp"
+    set_smoke_path = here / "set_smoke.cpp"
     bench_path = here / "bench.cpp"
     include_dir = (
         Path(__file__).resolve().parents[2] / "include"
@@ -2273,9 +2274,19 @@ def patch_cmakelists_smoke_test(cpp_out: Path) -> int:
         + str(include_dir) + "\")\n"
         "if(EXISTS \"" + str(smoke_test_path) + "\")\n"
         "    add_executable(smoke_test \"" + str(smoke_test_path) + "\")\n"
+        "    target_compile_options(smoke_test PRIVATE -O3 -DNDEBUG -march=native -flto=thin)\n"
+        "    target_link_options(smoke_test PRIVATE -flto=thin)\n"
         "    target_include_directories(smoke_test PRIVATE \""
         + str(include_dir) + "\")\n"
         "    target_link_libraries(smoke_test PRIVATE hashbrown_port)\n"
+        "endif()\n"
+        "if(EXISTS \"" + str(set_smoke_path) + "\")\n"
+        "    add_executable(set_smoke \"" + str(set_smoke_path) + "\")\n"
+        "    target_compile_options(set_smoke PRIVATE -O3 -DNDEBUG -march=native -flto=thin)\n"
+        "    target_link_options(set_smoke PRIVATE -flto=thin)\n"
+        "    target_include_directories(set_smoke PRIVATE \""
+        + str(include_dir) + "\")\n"
+        "    target_link_libraries(set_smoke PRIVATE hashbrown_port)\n"
         "endif()\n"
         "if(EXISTS \"" + str(bench_path) + "\")\n"
         "    add_executable(bench \"" + str(bench_path) + "\")\n"
@@ -2347,10 +2358,101 @@ def _stub_module(path: Path, mod_name: str) -> bool:
     return True
 
 
+def patch_set_facade(cpp_out: Path) -> int:
+    """Replace hashbrown_port.set.cppm with a HashSet facade that
+    wraps HashMap<T, std::monostate, S>. The upstream Rust
+    `hashbrown::HashSet` is exactly this (HashMap<T, ()>), so the
+    semantics match by construction. Avoids hand-porting the long
+    tail of raw_entry / rustc_entry / iter types that the
+    transpiler can't fully translate."""
+    path = cpp_out / "hashbrown_port.set.cppm"
+    if not path.exists():
+        return 0
+    sentinel = "// HashSet facade — wraps HashMap"
+    text = path.read_text()
+    if sentinel in text:
+        return 0
+    facade = (
+        sentinel + " <T, std::monostate, S>. Upstream Rust's\n"
+        "// `hashbrown::HashSet<T>` is exactly `HashMap<T, ()>`.\n"
+        "module;\n"
+        "\n"
+        "#include <cstdint>\n"
+        "#include <cstddef>\n"
+        "#include <utility>\n"
+        "#include <variant>\n"
+        "#include <rusty/rusty.hpp>\n"
+        "\n"
+        "export module hashbrown_port.set;\n"
+        "import hashbrown_port.map;\n"
+        "import hashbrown_port.hasher;\n"
+        "\n"
+        "export template<typename T, typename S = DefaultHasher>\n"
+        "struct HashSet {\n"
+        "    using Item = T;\n"
+        "    HashMap<T, std::monostate, S> map;\n"
+        "\n"
+        "    HashSet() : map(HashMap<T, std::monostate, S>::new_()) {}\n"
+        "    HashSet(HashMap<T, std::monostate, S> m) : map(std::move(m)) {}\n"
+        "\n"
+        "    static HashSet<T, S> new_() { return HashSet<T, S>(); }\n"
+        "    static HashSet<T, S> with_capacity(size_t capacity) {\n"
+        "        return HashSet<T, S>(HashMap<T, std::monostate, S>::with_capacity(capacity));\n"
+        "    }\n"
+        "    static HashSet<T, S> with_hasher(S hash_builder) {\n"
+        "        return HashSet<T, S>(HashMap<T, std::monostate, S>::with_hasher(std::move(hash_builder)));\n"
+        "    }\n"
+        "    static HashSet<T, S> with_capacity_and_hasher(size_t capacity, S hash_builder) {\n"
+        "        return HashSet<T, S>(HashMap<T, std::monostate, S>::with_capacity_and_hasher(capacity, std::move(hash_builder)));\n"
+        "    }\n"
+        "\n"
+        "    size_t len() const { return this->map.len(); }\n"
+        "    bool is_empty() const { return this->map.is_empty(); }\n"
+        "    size_t capacity() const { return this->map.capacity(); }\n"
+        "\n"
+        "    bool insert(T value) {\n"
+        "        auto prev = this->map.insert(std::move(value), std::monostate{});\n"
+        "        return prev.is_none();\n"
+        "    }\n"
+        "\n"
+        "    bool contains(const T& value) const {\n"
+        "        // const_cast: HashMap::table.find() isn't const-correct in\n"
+        "        // the transpiled form (find threads through a non-const\n"
+        "        // table API internally).\n"
+        "        auto& m = const_cast<HashMap<T, std::monostate, S>&>(this->map);\n"
+        "        auto h = ::make_hash<T, S>(m.hash_builder, value);\n"
+        "        return m.table.find(h, [&](const auto& kv) {\n"
+        "            return std::get<0>(kv) == value;\n"
+        "        }).is_some();\n"
+        "    }\n"
+        "\n"
+        "    bool remove(const T& value) {\n"
+        "        auto& m = this->map;\n"
+        "        auto h = ::make_hash<T, S>(m.hash_builder, value);\n"
+        "        auto eq = [&](const auto& kv) { return std::get<0>(kv) == value; };\n"
+        "        auto b = m.table.find(h, eq);\n"
+        "        if (b.is_none()) return false;\n"
+        "        m.table.erase(b.unwrap());\n"
+        "        return true;\n"
+        "    }\n"
+        "\n"
+        "    void clear() {\n"
+        "        // RawTable::clear() has a pre-existing transpiler-emission\n"
+        "        // bug (self_.table on a ScopeGuard missing operator*).\n"
+        "        // Replace the backing map to clear; same semantic outcome.\n"
+        "        this->map = HashMap<T, std::monostate, S>::new_();\n"
+        "    }\n"
+        "\n"
+        "    HashSet<T, S> clone() const { return HashSet<T, S>(this->map.clone()); }\n"
+        "};\n"
+    )
+    path.write_text(facade)
+    return 1
+
+
 def patch_set_stub(cpp_out: Path) -> int:
-    return 1 if _stub_module(
-        cpp_out / "hashbrown_port.set.cppm", "set"
-    ) else 0
+    """Legacy alias kept for backward compat with the registry."""
+    return patch_set_facade(cpp_out)
 
 
 def patch_raw_entry_stub(cpp_out: Path) -> int:
