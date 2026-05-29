@@ -20,7 +20,7 @@
 // `union { T value; char dummy; }` storage and placement-new manipulation
 // inside method bodies is encapsulated and not exposed to callers. The
 // namespace is therefore marked `@safe` (parity with `rusty/vec.hpp`,
-// `rusty/hashmap.hpp`, `rusty/btreemap.hpp`, `rusty/refcell.hpp`); methods
+// `rusty/btreemap.hpp`, `rusty/refcell.hpp`); methods
 // that internally do truly unsafe work wrap those operations in
 // `@unsafe { ... }` blocks.
 

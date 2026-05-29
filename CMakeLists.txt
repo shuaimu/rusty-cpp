@@ -61,19 +61,12 @@ set(TEST_SOURCES
     # BTreeMap tests - RE-ENABLED (all methods implemented)
     tests/rusty_btreemap_test.cpp
 
-    # HashMap/HashSet tests — disabled. The old hand-written
-    # include/rusty/{hashmap,hashset}.hpp was replaced by the
-    # transpiled hashbrown_port C++20 module. New tests below.
-    # tests/rusty_hashmap_test.cpp
-    # tests/rusty_hashset_test.cpp
-
-    # New module-based tests (import hashbrown_port.{map,set};)
+    # HashMap/HashSet now exposed via the transpiled hashbrown_port
+    # C++20 module (transpiled/hashbrown_port/*.cppm). Tests import
+    # the module directly; the old hand-written
+    # include/rusty/{hashmap,hashset}.hpp is deleted.
     tests/hashbrown_port_map_test.cpp
     tests/hashbrown_port_set_test.cpp
-
-    # Portable-intrinsics opt-out smoke test — disabled with the old
-    # HashMap header (uses rusty::HashMap from the deleted header).
-    # tests/rusty_portable_intrinsics_test.cpp
 
     # BTreeSet tests - RE-ENABLED (fixed range and iterator)
     tests/rusty_btreeset_test.cpp
@@ -83,9 +76,7 @@ set(TEST_SOURCES
     # tests/test_all_types.cpp
 
     # TODO: Re-enable when performance/analysis features are complete
-    # tests/btreemap_analysis.cpp
     # tests/final_btree_test.cpp
-    # tests/final_performance_test.cpp
 )
 
 find_package(Threads REQUIRED)
