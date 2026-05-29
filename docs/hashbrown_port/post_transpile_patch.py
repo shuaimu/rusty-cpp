@@ -979,6 +979,42 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         "T::NEEDS_DROP",
         "(!std::is_trivially_destructible_v<T>)",
     )
+    # `layout.size()` / `layout.align()` — Rust core::alloc::Layout
+    # has these as methods, but rusty::alloc::Layout exposes them as
+    # plain fields. Strip the parens.
+    text = re.sub(
+        r"\blayout\.size\(\)",
+        "layout.size",
+        text,
+    )
+    text = re.sub(
+        r"\blayout\.align\(\)",
+        "layout.align",
+        text,
+    )
+    # `static constexpr TableLayout TABLE_LAYOUT = TableLayout::new_<T>();`
+    # — `TableLayout::new_<T>()` isn't constexpr (it uses Layout::new_
+    # and ternaries that are non-constexpr). Drop the constexpr.
+    text = text.replace(
+        "static constexpr TableLayout TABLE_LAYOUT = TableLayout::new_<T>();",
+        "static inline const TableLayout TABLE_LAYOUT = TableLayout::new_<T>();",
+    )
+    # `drop_inner_table<T, std::remove_cvref_t<decltype((rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT))))>>`
+    # — the transpiler recovered the table_layout arg's type as a
+    # template param, but it's an ARG, not a param. Method signature
+    # is `drop_inner_table<T, A>(alloc, table_layout)`. Correct the
+    # explicit template args.
+    text = re.sub(
+        r"drop_inner_table<T, std::remove_cvref_t<[^>]+>>",
+        "drop_inner_table<T, A>",
+        text,
+    )
+    # Same shape may appear nested — handle once more for cases with
+    # extra `>>` groups.
+    text = text.replace(
+        "drop_inner_table<T, std::remove_cvref_t<decltype((rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT))))>>",
+        "drop_inner_table<T, A>",
+    )
     # `T::IS_ZERO_SIZED` — Rust zero-sized type marker. Use
     # std::is_empty_v<T> as the closest C++ approximation, and
     # promote bare `if (...)` to `if constexpr (...)` so the
