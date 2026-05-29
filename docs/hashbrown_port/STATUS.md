@@ -17,9 +17,9 @@ excluding `external_trait_impls/{serde,rayon}` and tests).
       **17 / 17 files transpile cleanly, 0 parser errors.**
       4 / 17 modules fail compile at cmake (catalogued below).
 - [~] **A2** Per-module compile fixes (in progress).
-      **16 / 17 modules compile**, only `raw.cppm` remains.
-      Total patches: ~11 in `post_transpile_patch.py`.
-      Cluster fixes landed:
+      **raw.cppm compiles clean**. Downstream cluster (table, map,
+      set, raw_entry, rustc_entry) being peeled. Total: 20 patches.
+      Cluster fixes landed (all module-by-module):
       - `control.tag`: const-qualify member methods; stub Tag::fmt
       - `hasher`: replace body with FNV-1a stub (drops foldhash dep)
       - `alloc`: inner::Global → std::malloc/free; AllocatorAdapter
@@ -33,31 +33,37 @@ excluding `external_trait_impls/{serde,rayon}` and tests).
         neutralize ARM cfg!() dead branch
       - `control` (parent): strip `bitmask::`/`group::`/`tag::`
         qualifiers; drop unexported `TagSliceExt` re-export
-      - `raw`: partial. Patches landed:
-        - `::TryReserveError` (leading `::`) and bare
-          `TryReserveError` → `rusty::collections::TryReserveError`
-        - Imports hoisted to top of module
-        - `std::{AllocError,Allocator,Layout,Global,handle_alloc_error}`
-          → `rusty::alloc::*`
-        Remaining error patterns (11 unique categories, ~19 sites):
-        - Rust enum-variant constructors (`TryReserveError_CapacityOverflow{}`,
-          `_AllocError{...}`) — semantic gap needs a tagged-struct
-          shim layer in rusty::collections, or pattern-rewrite to
-          tagged constructors that exist
-        - `std::do_alloc` — should be `rusty::alloc::do_alloc`
-        - `invalid_mut` (pointer fn) — not in rusty::ptr
-        - `control::` namespace qualifier (similar shape to earlier
-          `bitmask::`/`group::` issues)
-        - `ctrl` undeclared identifier — likely Rust let-binding the
-          transpiler got confused on; investigate emit shape
-        - `self` undeclared (free-fn referring to method receiver?)
-        - `handle_alloc_error` returns void but signature wants Result
-        - `RawTableInner` incomplete type in nested-name-specifier
-        - Member-of-uint8_t access — likely transpiler treating
-          `Tag.0` access as struct field access on raw byte
-- [ ] **A3** Once raw compiles, cascading errors in map/set/table/
-      raw_entry/rustc_entry will surface. (Most likely the same
-      classes of issues; the patcher framework is now in place.)
+      - `raw`: now compiling. Patches landed (15 distinct):
+        - TryReserveError variant constructors → rusty tagged-struct
+        - Imports hoisted to top
+        - `std::{AllocError,Allocator,Layout,Global}` → `rusty::alloc::*`
+        - misc fixups: control::, invalid_mut, Rust-syntax assert!s,
+          ScopeGuard CTAD helper, guard auto-deref (15+ methods, 4
+          field accesses), bare `ptr::` → `rusty::ptr::`, fill_empty
+          IIFE, BitMask leading/trailing_zeros method-form, RawIter
+          and FullBucketsIndices default_() stubs, data_end<uint8_t>(),
+          MaybeUninit<Tag>* span cast, drop.call_unsafe(), step_by
+          rewrite to manual stride loop, RUSTY_TRY_OPT lambda return
+          types, rusty::iter on BitMask + RawTableInner method-form,
+          .store_aligned() non-const cast, scopeguard dropfn by ref
+      - `scopeguard`: dropfn called with `this->value` (T&) not
+        `&this->value` (T*) — matches Rust `FnMut(&mut T)`
+      - `rusty::ptr::swap_nonoverlapping` added to ptr.hpp
+      - Generic downstream fixups (table/map/set/raw_entry/rustc_entry):
+        hoist `import` lines that land after `using` decls;
+        `std::Allocator/Global` → `rusty::alloc::*`; strip `raw::`
+        qualifier (types re-exported flat from raw module).
+      
+      **Remaining (Phase A3 transition):**
+      - `table.cppm`: Iter field-vs-method conflation (struct has
+        `inner` field; some methods reference `this->iter` instead);
+        too-many-template-arg errors from overload collisions where
+        Set's `Iter<K>` got merged into table's `Iter<T>`.
+      - `map.cppm`, `set.cppm`, `raw_entry.cppm`, `rustc_entry.cppm`:
+        cascading from `table.cppm`.
+- [ ] **A3** Downstream modules: table → map → set → raw_entry →
+      rustc_entry. Pattern likely needs both textual patches AND
+      transpiler-side fixes (Iter overload split, K-V trait mapping).
 
 ### Phase B — hand-port unknowns
 
