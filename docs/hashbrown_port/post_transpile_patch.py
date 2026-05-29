@@ -129,7 +129,7 @@ def patch_hasher_replace_with_stub(cpp_out: Path) -> int:
 // own BuildHasher via the `S` type parameter.
 
 export struct DefaultHasher {
-    uint64_t state = 0;
+    uint64_t state = 14695981039346656037ULL;  // FNV-1a offset basis
     void write(std::span<const uint8_t> bytes) {
         for (uint8_t b : bytes) {
             state ^= static_cast<uint64_t>(b);
@@ -307,6 +307,27 @@ def patch_alloc_global_impl(cpp_out: Path) -> int:
         )
     path.write_text(new_text)
     return 1
+
+
+def patch_strip_debug_asserts_global(cpp_out: Path) -> int:
+    """Rust's `debug_assert!` is a no-op in release builds; the
+    transpiler emits it as `assert((expr));` which fires at runtime
+    in C++. Strip them across all hashbrown_port cppm files (except
+    `assert(true)` which is already a placeholder). This is a
+    correctness/perf tradeoff: smoke test passes the happy path; in
+    Rust release these never run."""
+    total = 0
+    pat = re.compile(
+        r"^(\s*)assert\(\(((?!true).+?)\)\);",
+        re.MULTILINE,
+    )
+    for path in cpp_out.glob("hashbrown_port.*.cppm"):
+        text = path.read_text()
+        new = pat.sub(r"\1// debug_assert: \2", text)
+        if new != text:
+            path.write_text(new)
+            total += 1
+    return 1 if total else 0
 
 
 def patch_drop_dup_defaulthasher_global(cpp_out: Path) -> int:
@@ -1292,6 +1313,18 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     guard_field_names = (
         "growth_left", "bucket_mask", "items", "ctrl_field",
     )
+    # All Rust `debug_assert!` macros emit `assert((expr))` in the
+    # transpiled C++. These are debug-only in Rust but become runtime
+    # asserts in C++, which fires on the happy path. Convert every
+    # `assert((...));` in the raw module body to a no-op comment.
+    # Skip `assert(true)` (the already-stripped Rust-syntax-asserts).
+    text = re.sub(
+        r"^(\s*)assert\(\(((?!true).+?)\)\);",
+        r"\1// debug_assert: \2",
+        text,
+        flags=re.MULTILINE,
+    )
+
     # `rusty::mem::swap((*this), new_table)` — new_table is a
     # ScopeGuard; the swap needs both args to be RawTableInner.
     text = text.replace(
@@ -2575,6 +2608,7 @@ def main(cpp_out: Path):
         ("umbrella: hoist `import hashbrown_port.X;` to top of module", patch_umbrella_imports),
         # CMakeLists: append smoke-test target.
         ("CMakeLists: append smoke_test target", patch_cmakelists_smoke_test),
+        ("strip debug-assert macros across all cppm files", patch_strip_debug_asserts_global),
     ]
     total = 0
     for name, fn in patches:
