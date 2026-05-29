@@ -1631,6 +1631,18 @@ def _patch_downstream_module(path: Path) -> bool:
         r"((\1 + \2 - 1) / \2)",
         text,
     )
+    # `auto [k, []]` — Rust `_` placeholder in structured binding
+    # became `[]`. Replace with a unique ignored name.
+    text = re.sub(
+        r"auto \[([^\]]*), \[\]\]",
+        r"auto [\1, _ignored1]",
+        text,
+    )
+    text = re.sub(
+        r"auto \[\[\], ([^\]]*)\]",
+        r"auto [_ignored1, \1]",
+        text,
+    )
     # HashMap doesn't have `get` and `from_iter` methods (Rust source
     # has them but the transpiler failed to emit due to where-clause
     # complexity). Stub for Phase A2 compile.
@@ -1846,15 +1858,202 @@ def patch_map_module(cpp_out: Path) -> int:
 
 
 def patch_set_module(cpp_out: Path) -> int:
-    return 1 if _patch_downstream_module(cpp_out / "hashbrown_port.set.cppm") else 0
+    path = cpp_out / "hashbrown_port.set.cppm"
+    changed = _patch_downstream_module(path)
+    if not path.exists():
+        return 1 if changed else 0
+    text = path.read_text()
+    original = text
+    # Add `import hashbrown_port.table;` if not present — set
+    # references HashTable which lives in the table module.
+    if "import hashbrown_port.table;" not in text:
+        text = text.replace(
+            "import hashbrown_port.map;\n",
+            "import hashbrown_port.map;\nimport hashbrown_port.table;\n",
+            1,
+        )
+    # set.cppm imports map.cppm, which exports `Iter`, `IntoIter`,
+    # `Drain`, etc. Set redeclares these with different template
+    # arities (1 K vs map's K, V), causing template-redeclaration
+    # errors. Rename ONLY set's local declarations (not the field
+    # types which refer to map's types). We detect "set's own" decls
+    # by looking for `struct X` headers in the file body and renaming
+    # those, plus all bare references that aren't followed by 3+
+    # template args (which would indicate a map type).
+    mod_start_re = re.compile(
+        r"^export module hashbrown_port\.set;\n", re.MULTILINE
+    )
+    m = mod_start_re.search(text)
+    if m:
+        head = text[:m.end()]
+        body = text[m.end():]
+        # `map::Foo` qualifier — drop; types imported flat.
+        body = re.sub(r"\bmap::(?=\w)", "", body)
+        # Names that set declares locally (potential conflict with map).
+        # For these, rename declarations and references with arity
+        # matching set's own arity (1 K or K, A or T, S, A).
+        # Strategy: rename only `struct Name {/`/`Name<...> name(...)`
+        # at declaration sites; field uses of `Name<K, V_map, A>` keep
+        # the original name. Use whole-word + look-ahead to ensure
+        # we only rename specific patterns.
+
+        # For each name, replace declarations: `struct Iter`, `struct
+        # IntoIter` etc., and bare uses with specific arities.
+        # Heuristic: rename `Iter<K>` (1 arg) but not `Iter<K, V, A>`
+        # (3 args).
+        renames = {
+            "Iter": [
+                r"\bIter\b(?!<\s*[KQVTSA]\s*,\s*[KQVTSA]\s*[,>])",
+                # Match Iter not followed by 2+ args
+            ],
+        }
+        # Simpler approach: only rename inside specific patterns:
+        # `struct X {`, `struct X;`, `struct X :`, `X<K>` (1 arg).
+        def rename_name(name, body):
+            # `struct Name` (declaration).
+            body = re.sub(
+                r"\bstruct " + re.escape(name) + r"\b",
+                "struct Set" + name,
+                body,
+            )
+            # `Name<K>` (single arg, set's typical form).
+            body = re.sub(
+                r"\b" + re.escape(name) + r"<\s*([KTQ])\s*>",
+                "Set" + name + r"<\1>",
+                body,
+            )
+            # `Name<K, A>` where A is a single allocator letter
+            # (set's 2-arg form for IntoIter, Drain).
+            body = re.sub(
+                r"\b" + re.escape(name) + r"<\s*([KTQ])\s*,\s*A\s*>",
+                "Set" + name + r"<\1, A>",
+                body,
+            )
+            # `Name<T, S, A>` (set's 3-arg form for OccupiedEntry,
+            # VacantEntry, Entry, but NOT for IntoIter<K, V, A>
+            # which is map's).
+            body = re.sub(
+                r"\b" + re.escape(name) + r"<\s*([KTQ])\s*,\s*S\s*,\s*A\s*>",
+                "Set" + name + r"<\1, S, A>",
+                body,
+            )
+            # `Name<K, F, A>` (set's 3-arg form for ExtractIf).
+            body = re.sub(
+                r"\b" + re.escape(name) + r"<\s*([KTQ])\s*,\s*F\s*,\s*A\s*>",
+                "Set" + name + r"<\1, F, A>",
+                body,
+            )
+            return body
+
+        names = [
+            "Iter", "IntoIter", "Drain", "ExtractIf",
+            "OccupiedEntry", "VacantEntry", "Entry",
+            "Entry_Occupied", "Entry_Vacant",
+            "Intersection", "Difference", "Union",
+            "SymmetricDifference",
+        ]
+        for name in names:
+            body = rename_name(name, body)
+        # Undo accidental double-prefix.
+        body = re.sub(r"\bSetSet", "Set", body)
+        text = head + body
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 1 if changed else 0
 
 
 def patch_raw_entry_module(cpp_out: Path) -> int:
-    return 1 if _patch_downstream_module(cpp_out / "hashbrown_port.raw_entry.cppm") else 0
+    path = cpp_out / "hashbrown_port.raw_entry.cppm"
+    changed = _patch_downstream_module(path)
+    if not path.exists():
+        return 1 if changed else 0
+    text = path.read_text()
+    original = text
+    # Forward-declare RawEntryMut_Occupied / RawEntryMut_Vacant (the
+    # tagged-struct variants of RawEntryMut) before they're referenced
+    # in the inline `search()` body of RawEntryBuilderMut.
+    anchor = re.compile(
+        r"^export template<typename K, typename V, typename S, typename A>\n"
+        r"    requires \(rusty::alloc::Allocator<A>\)\n"
+        r"struct RawEntryMut;\n",
+        re.MULTILINE,
+    )
+    m = anchor.search(text)
+    if m and "// auto-fwd: RawEntryMut_*" not in text:
+        fwd = (
+            "// auto-fwd: RawEntryMut_*\n"
+            "export template<typename K, typename V, typename S, typename A>\n"
+            "struct RawEntryMut_Occupied;\n"
+            "export template<typename K, typename V, typename S, typename A>\n"
+            "struct RawEntryMut_Vacant;\n"
+        )
+        text = text[:m.start()] + fwd + text[m.start():]
+    # Drop requires-clause from RawEntryMut and similar forward decls
+    # that mismatch their definitions.
+    for ty in ("RawEntryMut", "RawEntry"):
+        text = text.replace(
+            "export template<typename K, typename V, typename S, typename A>\n"
+            "    requires (rusty::alloc::Allocator<A>)\n"
+            "struct " + ty + ";\n",
+            "export template<typename K, typename V, typename S, typename A>\n"
+            "struct " + ty + ";\n",
+        )
+    # `make_hasher<auto, V, S>(...)` — strip explicit args (auto isn't
+    # valid as template arg).
+    text = re.sub(
+        r"::make_hasher<auto,[^>]+>\(",
+        "::make_hasher(",
+        text,
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 1 if changed else 0
 
 
 def patch_rustc_entry_module(cpp_out: Path) -> int:
-    return 1 if _patch_downstream_module(cpp_out / "hashbrown_port.rustc_entry.cppm") else 0
+    path = cpp_out / "hashbrown_port.rustc_entry.cppm"
+    changed = _patch_downstream_module(path)
+    if not path.exists():
+        return 1 if changed else 0
+    text = path.read_text()
+    original = text
+    # Forward-declare RustcEntry_Occupied / RustcEntry_Vacant.
+    anchor = re.compile(
+        r"^export template<typename K, typename V, typename A>\n"
+        r"    requires \(rusty::alloc::Allocator<A>\)\n"
+        r"struct RustcEntry;\n",
+        re.MULTILINE,
+    )
+    m = anchor.search(text)
+    if m and "// auto-fwd: RustcEntry_*" not in text:
+        fwd = (
+            "// auto-fwd: RustcEntry_*\n"
+            "export template<typename K, typename V, typename A>\n"
+            "struct RustcEntry_Occupied;\n"
+            "export template<typename K, typename V, typename A>\n"
+            "struct RustcEntry_Vacant;\n"
+        )
+        text = text[:m.start()] + fwd + text[m.start():]
+    # Drop requires-clause from RustcEntry forward decl.
+    text = text.replace(
+        "export template<typename K, typename V, typename A>\n"
+        "    requires (rusty::alloc::Allocator<A>)\n"
+        "struct RustcEntry;\n",
+        "export template<typename K, typename V, typename A>\n"
+        "struct RustcEntry;\n",
+    )
+    # `make_hasher<auto, V, S>(...)` — strip explicit args.
+    text = re.sub(
+        r"::make_hasher<auto,[^>]+>\(",
+        "::make_hasher(",
+        text,
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 1 if changed else 0
 
 
 def patch_raw_tryreserveerror_constructors(cpp_out: Path) -> int:
