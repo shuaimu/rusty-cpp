@@ -1612,7 +1612,7 @@ def _patch_downstream_module(path: Path) -> bool:
     # Negative-lookbehind avoids double-prefix on `s::TryReserveError`
     # (the `collections::` tail).
     text = re.sub(
-        r"(?<!s)\bTryReserveError\b",
+        r"(?<![:s])\bTryReserveError\b",
         "rusty::collections::TryReserveError",
         text,
     )
@@ -1885,6 +1885,37 @@ def patch_map_module(cpp_out: Path) -> int:
         path.write_text(text)
         return 1
     return 1 if changed else 0
+
+
+def patch_cmakelists_smoke_test(cpp_out: Path) -> int:
+    """Append a `smoke_test` executable target to CMakeLists.txt
+    that links against the hashbrown_port module. The test file
+    lives in the source repo at docs/hashbrown_port/smoke_test.cpp."""
+    path = cpp_out / "CMakeLists.txt"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    sentinel = "# Phase B smoke test"
+    if sentinel in text:
+        return 0
+    smoke_test_path = (
+        Path(__file__).resolve().parent / "smoke_test.cpp"
+    )
+    include_dir = (
+        Path(__file__).resolve().parents[2] / "include"
+    )
+    addition = (
+        "\n"
+        + sentinel + "\n"
+        "if(EXISTS \"" + str(smoke_test_path) + "\")\n"
+        "    add_executable(smoke_test \"" + str(smoke_test_path) + "\")\n"
+        "    target_include_directories(smoke_test PRIVATE \""
+        + str(include_dir) + "\")\n"
+        "    target_link_libraries(smoke_test PRIVATE hashbrown_port)\n"
+        "endif()\n"
+    )
+    path.write_text(text + addition)
+    return 1
 
 
 def patch_umbrella_imports(cpp_out: Path) -> int:
@@ -2272,6 +2303,8 @@ def main(cpp_out: Path):
         ("rustc_entry: stub (Phase A2)", patch_rustc_entry_stub),
         # Umbrella module imports come after struct decls; hoist.
         ("umbrella: hoist `import hashbrown_port.X;` to top of module", patch_umbrella_imports),
+        # CMakeLists: append smoke-test target.
+        ("CMakeLists: append smoke_test target", patch_cmakelists_smoke_test),
     ]
     total = 0
     for name, fn in patches:

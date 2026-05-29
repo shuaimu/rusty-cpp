@@ -6,7 +6,8 @@
 #include <string_view>
 #include <rusty/rusty.hpp>
 
-import hashbrown_port;
+import hashbrown_port.raw;
+import hashbrown_port.map;
 
 int main() {
     // 1. Default construct.
