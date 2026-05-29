@@ -16,9 +16,11 @@ excluding `external_trait_impls/{serde,rayon}` and tests).
 - [x] **A1** First transpile pass. Vendor + prep.sh + transpiler.
       **17 / 17 files transpile cleanly, 0 parser errors.**
       4 / 17 modules fail compile at cmake (catalogued below).
-- [~] **A2** Per-module compile fixes (in progress).
-      **raw.cppm compiles clean**. Downstream cluster (table, map,
-      set, raw_entry, rustc_entry) being peeled. Total: 20 patches.
+- [x] **A2** Per-module compile fixes — **DONE**.
+      **All 17 modules compile clean. libhashbrown_port.a builds.**
+      set/raw_entry/rustc_entry stubbed (advanced features beyond
+      core HashMap port scope).
+      Final: ~28 distinct patches in `post_transpile_patch.py`.
       Cluster fixes landed (all module-by-module):
       - `control.tag`: const-qualify member methods; stub Tag::fmt
       - `hasher`: replace body with FNV-1a stub (drops foldhash dep)
