@@ -13,7 +13,7 @@ import hashbrown_port.raw;
 import hashbrown_port.map;
 import hashbrown_port.hasher;
 
-constexpr int N = 100;  // inserts per iteration; small to fit growth_left
+constexpr int N = 200;  // inserts per iteration; small to fit growth_left
 
 // generate a workload of N unique int keys + values once
 struct Workload {

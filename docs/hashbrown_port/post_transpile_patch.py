@@ -145,20 +145,28 @@ export struct DefaultHasher {
     // Rust's `BuildHasher::hash_one<T: Hash>(&self, x: T) -> u64`.
     // Doubles as the Hasher's convenience method here (we use the
     // same struct as both hash builder and hasher, FNV-1a state=0).
+    // Integer fast path: splitmix64 finalizer — single inline mix,
+    // no allocator-trip, matches the std::hash<int> identity-style
+    // perf characteristics.
     template<typename T>
     uint64_t hash_one(const T& x) const {
-        DefaultHasher h{};
         if constexpr (std::is_integral_v<T>) {
-            h.write_u64(static_cast<uint64_t>(x));
+            uint64_t z = static_cast<uint64_t>(x) + 0x9E3779B97F4A7C15ULL;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            return z ^ (z >> 31);
         } else if constexpr (requires { x.size(); x.data(); }) {
+            DefaultHasher h{};
             h.write(std::span<const uint8_t>(
                 reinterpret_cast<const uint8_t*>(x.data()),
                 x.size() * sizeof(*x.data())));
+            return h.finish();
         } else {
+            DefaultHasher h{};
             h.write(std::span<const uint8_t>(
                 reinterpret_cast<const uint8_t*>(&x), sizeof(T)));
+            return h.finish();
         }
-        return h.finish();
     }
 };
 
@@ -1313,6 +1321,28 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     guard_field_names = (
         "growth_left", "bucket_mask", "items", "ctrl_field",
     )
+    # Hot-path inlining: `find_inner` and `find_or_find_insert_index_inner`
+    # take `const std::function<bool(size_t)>&` which adds an indirect
+    # call to the equality callback inside the tight probe-seq loop —
+    # the main lookup/insert-perf killer. Replace the std::function
+    # with a template parameter so the callback inlines.
+    text = text.replace(
+        "    rusty::Option<size_t> find_inner(uint64_t hash, const std::function<bool(size_t)>& eq) const;",
+        "    template<typename Eq>\n    rusty::Option<size_t> find_inner(uint64_t hash, const Eq& eq) const;",
+    )
+    text = text.replace(
+        "rusty::Option<size_t> RawTableInner::find_inner(uint64_t hash, const std::function<bool(size_t)>& eq) const {",
+        "template<typename Eq>\nrusty::Option<size_t> RawTableInner::find_inner(uint64_t hash, const Eq& eq) const {",
+    )
+    text = text.replace(
+        "    rusty::Result<size_t, size_t> find_or_find_insert_index_inner(uint64_t hash, const std::function<bool(size_t)>& eq) const;",
+        "    template<typename Eq>\n    rusty::Result<size_t, size_t> find_or_find_insert_index_inner(uint64_t hash, const Eq& eq) const;",
+    )
+    text = text.replace(
+        "rusty::Result<size_t, size_t> RawTableInner::find_or_find_insert_index_inner(uint64_t hash, const std::function<bool(size_t)>& eq) const {",
+        "template<typename Eq>\nrusty::Result<size_t, size_t> RawTableInner::find_or_find_insert_index_inner(uint64_t hash, const Eq& eq) const {",
+    )
+
     # All Rust `debug_assert!` macros emit `assert((expr))` in the
     # transpiled C++. These are debug-only in Rust but become runtime
     # asserts in C++, which fires on the happy path. Convert every
