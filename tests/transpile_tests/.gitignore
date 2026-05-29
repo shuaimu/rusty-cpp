@@ -34,3 +34,11 @@ compile_test*
 !cpp_std_complex/src/
 !cpp_std_complex/src/lib.rs
 !cpp_std_complex/cpp_module_index.toml
+
+# Track committed BTreeMap insert/get fixture assets
+!btreemap/
+!btreemap/Cargo.toml
+!btreemap/README.md
+!btreemap/src/
+!btreemap/src/lib.rs
+!run_btreemap_check.sh
