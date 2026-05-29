@@ -2189,9 +2189,9 @@ def patch_map_module(cpp_out: Path) -> int:
 
 
 def patch_cmakelists_smoke_test(cpp_out: Path) -> int:
-    """Append a `smoke_test` executable target to CMakeLists.txt
-    that links against the hashbrown_port module. The test file
-    lives in the source repo at docs/hashbrown_port/smoke_test.cpp."""
+    """Append `smoke_test` + `bench` executable targets to CMakeLists.txt
+    that link against the hashbrown_port module. Sources live at
+    docs/hashbrown_port/{smoke_test,bench}.cpp."""
     path = cpp_out / "CMakeLists.txt"
     if not path.exists():
         return 0
@@ -2199,9 +2199,9 @@ def patch_cmakelists_smoke_test(cpp_out: Path) -> int:
     sentinel = "# Phase B smoke test"
     if sentinel in text:
         return 0
-    smoke_test_path = (
-        Path(__file__).resolve().parent / "smoke_test.cpp"
-    )
+    here = Path(__file__).resolve().parent
+    smoke_test_path = here / "smoke_test.cpp"
+    bench_path = here / "bench.cpp"
     include_dir = (
         Path(__file__).resolve().parents[2] / "include"
     )
@@ -2213,6 +2213,13 @@ def patch_cmakelists_smoke_test(cpp_out: Path) -> int:
         "    target_include_directories(smoke_test PRIVATE \""
         + str(include_dir) + "\")\n"
         "    target_link_libraries(smoke_test PRIVATE hashbrown_port)\n"
+        "endif()\n"
+        "if(EXISTS \"" + str(bench_path) + "\")\n"
+        "    add_executable(bench \"" + str(bench_path) + "\")\n"
+        "    target_compile_options(bench PRIVATE -O3 -DNDEBUG)\n"
+        "    target_include_directories(bench PRIVATE \""
+        + str(include_dir) + "\")\n"
+        "    target_link_libraries(bench PRIVATE hashbrown_port)\n"
         "endif()\n"
     )
     path.write_text(text + addition)
