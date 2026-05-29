@@ -973,6 +973,70 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         text,
     )
 
+    # `T::NEEDS_DROP` — Rust mem::needs_drop trait check. Replace with
+    # the C++ equivalent: !std::is_trivially_destructible_v<T>.
+    text = text.replace(
+        "T::NEEDS_DROP",
+        "(!std::is_trivially_destructible_v<T>)",
+    )
+    # `T::IS_ZERO_SIZED` — Rust zero-sized type marker. Use
+    # std::is_empty_v<T> as the closest C++ approximation, and
+    # promote bare `if (...)` to `if constexpr (...)` so the
+    # divergent branches don't type-check.
+    text = text.replace(
+        "if (T::IS_ZERO_SIZED)",
+        "if constexpr (std::is_empty_v<T>)",
+    )
+    # In ternary / boolean expression contexts, just use the const.
+    text = text.replace(
+        "T::IS_ZERO_SIZED",
+        "(std::is_empty_v<T>)",
+    )
+    # Bucket<T> next_n / from_base_index — ternary returns uint8_t*
+    # in the empty-T branch but T* in the else branch. Wrap the
+    # whole uint8_t* expression in a reinterpret_cast<T*>(...).
+    # Brace-walk to find the matching `)` of the
+    # `reinterpret_cast<uint8_t*>(...)` opening.
+    ternary_open = "((std::is_empty_v<T>) ? reinterpret_cast<uint8_t*>("
+    out_parts = []
+    search_from = 0
+    while True:
+        idx = text.find(ternary_open, search_from)
+        if idx == -1:
+            out_parts.append(text[search_from:])
+            break
+        rc_arg_start = idx + len(ternary_open)
+        depth = 1
+        j = rc_arg_start
+        while j < len(text) and depth > 0:
+            if text[j] == '(':
+                depth += 1
+            elif text[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if depth != 0:
+            out_parts.append(text[search_from:])
+            break
+        # rebuild: outer wrap (rc<T*>) around the existing rc<uint8_t*>(...)
+        out_parts.append(text[search_from:idx])
+        out_parts.append(
+            "((std::is_empty_v<T>) ? "
+            "reinterpret_cast<std::add_pointer_t<T>>(reinterpret_cast<uint8_t*>("
+            + text[rc_arg_start:j]
+            + "))"
+        )
+        search_from = j + 1
+    text = "".join(out_parts)
+    # `ptr->drop_in_place()` — Rust raw-pointer method. Use
+    # std::destroy_at, which calls ptr->~T() for any T.
+    text = re.sub(
+        r"rusty::as_ptr\(\(\*this\)\)->drop_in_place\(\)",
+        "std::destroy_at(rusty::as_ptr((*this)))",
+        text,
+    )
+
     # `auto guard = guard(...)` — Rust allows local `guard` shadowing
     # the function `guard`; C++ rejects (the local declaration tries
     # to call itself). Qualify the RHS function with `::` so the
@@ -1555,9 +1619,59 @@ def _patch_downstream_module(path: Path) -> bool:
     # `DefaultHashBuilder` → DefaultHasher (in-module stub, see
     # patch_hasher_replace_with_stub for the definition).
     text = re.sub(r"\bDefaultHashBuilder\b", "DefaultHasher", text)
-    # `f.debug_set()` — rusty::fmt::Formatter has no debug_set;
-    # fall back to debug_list (same prefix-suffix behaviour).
+    # `f.debug_set()` / `.debug_map()` — rusty::fmt::Formatter doesn't
+    # have these; fall back to debug_list (preserves bracket-style
+    # output for compile-only).
     text = text.replace(".debug_set()", ".debug_list()")
+    text = text.replace(".debug_map()", ".debug_list()")
+    # `additional.div_ceil(N)` — Rust integer method; inline as
+    # (a + N - 1) / N. Common pattern in extend_reserve.
+    text = re.sub(
+        r"\b(\w+)\.div_ceil\((\d+)\)",
+        r"((\1 + \2 - 1) / \2)",
+        text,
+    )
+    # HashMap doesn't have `get` and `from_iter` methods (Rust source
+    # has them but the transpiler failed to emit due to where-clause
+    # complexity). Stub for Phase A2 compile.
+    # `other.get(...)`: use table.find with equivalent_key.
+    text = text.replace(
+        "other.get(rusty::detail::deref_if_pointer_like(key)).is_some_and([&](auto&& v) { return rusty::detail::deref_if_pointer_like(value) == rusty::deref_mut(v); })",
+        "other.table.find(::make_hash(other.hash_builder, key), ::equivalent_key(key)).is_some_and([&](auto&& v) { return rusty::detail::deref_if_pointer_like(value) == std::get<1>(v.as_ref()); })",
+    )
+    # `HashMap<K, V, S, A>::from_iter(...)`: stub as default + extend.
+    text = text.replace(
+        "return HashMap<K, V, S, A>::from_iter(rusty::iter(arr));",
+        "auto m = HashMap<K, V, S, A>::default_();\n"
+        "        for (auto&& [k, v] : arr) {\n"
+        "            m.insert(std::move(k), std::move(v));\n"
+        "        }\n"
+        "        return m;",
+    )
+    # `rusty_ext::equivalent(...)` — fallback resolution for the
+    # `Equivalent` trait. The transpiler doesn't generate the proper
+    # de:: prefix; rewrite as `operator==`.
+    text = re.sub(
+        r"\brusty_ext::equivalent\b",
+        "::__rusty_ext_equivalent",
+        text,
+    )
+    # Inject a `__rusty_ext_equivalent` helper at top of file
+    # (after the module export).
+    helper_sentinel = "// auto-stub: __rusty_ext_equivalent"
+    if helper_sentinel not in text and "::__rusty_ext_equivalent" in text:
+        helper = (
+            helper_sentinel + "\n"
+            "// rusty_ext::equivalent fallback (just `operator==`).\n"
+            "template<typename A, typename B>\n"
+            "constexpr bool __rusty_ext_equivalent(const A& a, const B& b)\n"
+            "{ return a == b; }\n"
+        )
+        anchor = "using rusty::PhantomData;\n"
+        pos = text.find(anchor)
+        if pos != -1:
+            insert_at = pos + len(anchor)
+            text = text[:insert_at] + "\n" + helper + text[insert_at:]
     # `DefaultHasher::default_()` — the stub doesn't have this method.
     # Use the existing `new_()` (default-constructible).
     text = text.replace(
@@ -1649,7 +1763,86 @@ def patch_table_module(cpp_out: Path) -> int:
 
 
 def patch_map_module(cpp_out: Path) -> int:
-    return 1 if _patch_downstream_module(cpp_out / "hashbrown_port.map.cppm") else 0
+    path = cpp_out / "hashbrown_port.map.cppm"
+    changed = _patch_downstream_module(path)
+    if not path.exists():
+        return 1 if changed else 0
+    text = path.read_text()
+    original = text
+    # Forward-declare Entry_Occupied / Entry_Vacant with map's 4-arg
+    # template signature, before HashMap is defined.
+    fwd_anchor = re.compile(
+        r"^export template<typename K, typename V, typename S, typename A>\n"
+        r"    requires \(rusty::alloc::Allocator<A>\)\n"
+        r"struct Entry;\n",
+        re.MULTILINE,
+    )
+    m = fwd_anchor.search(text)
+    if m and "// auto-fwd: map Entry_Occupied / Entry_Vacant" not in text:
+        fwd = (
+            "// auto-fwd: map Entry_Occupied / Entry_Vacant\n"
+            "export template<typename K, typename V, typename S, typename A>\n"
+            "struct Entry_Occupied;\n"
+            "export template<typename K, typename V, typename S, typename A>\n"
+            "struct Entry_Vacant;\n"
+        )
+        text = text[:m.start()] + fwd + text[m.start():]
+    # Drop the requires clause from `struct Entry;` forward decl (the
+    # definition has no requires).
+    text = text.replace(
+        "export template<typename K, typename V, typename S, typename A>\n"
+        "    requires (rusty::alloc::Allocator<A>)\n"
+        "struct Entry;\n",
+        "export template<typename K, typename V, typename S, typename A>\n"
+        "struct Entry;\n",
+    )
+    # Same for `struct EntryRef;` — 5-arg template.
+    text = text.replace(
+        "export template<typename K, typename Q, typename V, typename S, typename A>\n"
+        "    requires (rusty::alloc::Allocator<A>)\n"
+        "struct EntryRef;\n",
+        "export template<typename K, typename Q, typename V, typename S, typename A>\n"
+        "struct EntryRef;\n",
+    )
+    # Stub `make_hasher` and `equivalent_key` helper functions before
+    # HashMap uses them. The transpiler doesn't emit these; the
+    # bodies are simple lambdas.
+    helpers_sentinel = "// auto-stubs: make_hasher / equivalent_key"
+    if helpers_sentinel not in text:
+        helpers = (
+            helpers_sentinel + "\n"
+            "template<typename Q, typename V, typename S>\n"
+            "auto make_hasher(const S& hash_builder) {\n"
+            "    return [&hash_builder](const auto& val) -> uint64_t {\n"
+            "        return ::make_hash<std::remove_cvref_t<\n"
+            "            decltype(std::get<0>(val))>, S>(hash_builder, std::get<0>(val));\n"
+            "    };\n"
+            "}\n"
+            "template<typename Q>\n"
+            "auto equivalent_key(const Q& k) {\n"
+            "    return [&k](const auto& x) {\n"
+            "        return std::get<0>(x) == k;\n"
+            "    };\n"
+            "}\n"
+        )
+        # Insert after the `using rusty::PhantomData;` line near the top.
+        anchor2 = "using rusty::PhantomData;\n"
+        pos = text.find(anchor2)
+        if pos != -1:
+            insert_at = pos + len(anchor2)
+            text = text[:insert_at] + "\n" + helpers + text[insert_at:]
+    # `make_hasher<auto, V, S>(...)` — drop the explicit template
+    # args; C++ can't have `auto` as template arg. Let template
+    # arg deduction work.
+    text = re.sub(
+        r"::make_hasher<auto,[^>]+>\(",
+        "::make_hasher(",
+        text,
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 1 if changed else 0
 
 
 def patch_set_module(cpp_out: Path) -> int:
