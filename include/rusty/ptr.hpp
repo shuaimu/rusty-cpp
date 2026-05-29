@@ -372,6 +372,40 @@ requires (!std::is_same_v<std::remove_cv_t<Src>, std::remove_cv_t<Dst>>)
 }
 
 template<typename T, typename Count>
+inline void swap_nonoverlapping(T* x, T* y, Count count) {
+    const auto element_count = static_cast<std::size_t>(count);
+    if (element_count == 0) {
+        return;
+    }
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        auto byte_count = element_count * sizeof(T);
+        // Use a small fixed stack buffer chunked swap for large counts.
+        constexpr std::size_t CHUNK = 256;
+        unsigned char buf[CHUNK];
+        auto px = reinterpret_cast<unsigned char*>(x);
+        auto py = reinterpret_cast<unsigned char*>(y);
+        while (byte_count >= CHUNK) {
+            std::memcpy(buf, px, CHUNK);
+            std::memcpy(px, py, CHUNK);
+            std::memcpy(py, buf, CHUNK);
+            px += CHUNK;
+            py += CHUNK;
+            byte_count -= CHUNK;
+        }
+        if (byte_count != 0) {
+            std::memcpy(buf, px, byte_count);
+            std::memcpy(px, py, byte_count);
+            std::memcpy(py, buf, byte_count);
+        }
+    } else {
+        for (std::size_t i = 0; i < element_count; ++i) {
+            using std::swap;
+            swap(x[i], y[i]);
+        }
+    }
+}
+
+template<typename T, typename Count>
 inline const T* add(const T* ptr, Count count) {
     return ptr + static_cast<std::size_t>(count);
 }

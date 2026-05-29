@@ -819,7 +819,43 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     # our hand-rolled body, but call sites pass `Tag*` (real control.
     # tag::Tag). Wrap the arg in a reinterpret_cast. Scan once,
     # left-to-right; rebuild via segments.
+    # `.store_aligned(arg)` — instance method form. Wrap with
+    # `reinterpret_cast<uint8_t*>` since callers pass `Tag*` from
+    # `this->ctrl(i)`.
+    out_parts = []
+    search_from = 0
+    while True:
+        idx = text.find(".store_aligned(", search_from)
+        if idx == -1:
+            out_parts.append(text[search_from:])
+            break
+        arg_start = idx + len(".store_aligned(")
+        depth = 1
+        j = arg_start
+        while j < len(text) and depth > 0:
+            if text[j] == '(':
+                depth += 1
+            elif text[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if depth != 0:
+            out_parts.append(text[search_from:])
+            break
+        arg = text[arg_start:j]
+        if arg.lstrip().startswith("reinterpret_cast"):
+            out_parts.append(text[search_from:j+1])
+        else:
+            out_parts.append(text[search_from:idx])
+            out_parts.append(".store_aligned(reinterpret_cast<uint8_t*>(" + arg + "))")
+        search_from = j + 1
+    text = "".join(out_parts)
+
     for fn in ("Group::load_aligned", "Group::load", "Group::store_aligned"):
+        # `store_aligned` wants `uint8_t*` (non-const); the loads want
+        # `const uint8_t*`.
+        const_q = "" if fn == "Group::store_aligned" else "const "
         prefix = fn + "("
         out_parts = []
         search_from = 0
@@ -848,7 +884,7 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
                 out_parts.append(text[search_from:j+1])
             else:
                 out_parts.append(text[search_from:idx])
-                out_parts.append(fn + "(reinterpret_cast<const uint8_t*>(" + arg + "))")
+                out_parts.append(fn + "(reinterpret_cast<" + const_q + "uint8_t*>(" + arg + "))")
             search_from = j + 1
         text = "".join(out_parts)
     # Rust integer trait methods on size_t: `.checked_add`, `.checked_mul`,
@@ -963,16 +999,156 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
             text = text[:pos + len(anchor)] + "\n" + helper + text[pos + len(anchor):]
     text = text.replace("ScopeGuard::into_inner(", "__raw_into_inner(")
 
-    # `rusty::iter(X.match_full())` — Rust source has `.match_full()
+    # `guard.num_buckets()` / `guard.ctrl(...)` — `guard` is a
+    # ScopeGuard<RawTableInner, F> which doesn't auto-deref to
+    # RawTableInner in C++. Use `(*guard).method()` explicitly.
+    # Rust auto-derefs via the Deref trait; C++ ScopeGuard exposes
+    # `operator*` returning `T&`.
+    for method in ("num_buckets", "ctrl", "bucket_mask", "items",
+                   "growth_left", "num_ctrl_bytes", "bucket_ptr",
+                   "find_insert_index", "is_bucket_full", "bucket",
+                   "bucket_mask_to_capacity", "buckets",
+                   "record_item_insert_at", "set_ctrl_h2",
+                   "growth_left_for", "capacity",
+                   "is_in_same_group", "set_ctrl_hash",
+                   "replace_ctrl_hash", "set_ctrl",
+                   "probe_seq", "prepare_rehash_in_place",
+                   "allocation_info"):
+        text = re.sub(
+            r"\bguard\." + re.escape(method) + r"\(",
+            f"(*guard).{method}(",
+            text,
+        )
+
+    # `guard.<field>` (no parens after) — field-access form. C++
+    # ScopeGuard doesn't auto-deref; rewrite to `(*guard).<field>`.
+    # Match identifier-followed-by-NOT `(`.
+    for field in ("growth_left", "bucket_mask", "items", "ctrl_field"):
+        text = re.sub(
+            r"\bguard\." + re.escape(field) + r"(?![\w(])",
+            f"(*guard).{field}",
+            text,
+        )
+
+    # Bare `ptr::<fn>(` — Rust has `use core::ptr` or hashbrown imports.
+    # In C++ we want `rusty::ptr::<fn>(`. Avoid double-prefix on already
+    # qualified `rusty::ptr::`.
+    text = re.sub(
+        r"(?<!rusty::)\bptr::(?=\w)",
+        "rusty::ptr::",
+        text,
+    )
+
+    # `this->ctrl_slice().fill_empty()` (and any `<expr>.fill_empty()`
+    # on a `std::span<MaybeUninit<Tag>>`) — Rust source writes
+    # `for c in ctrl_slice { c.write(Tag::EMPTY) }`. The transpiler
+    # emitted `.fill_empty()` because it doesn't know the receiver's
+    # type. Replace with a do{...}while(0) block doing a manual fill.
+    # Use a brace-walk-back so arbitrary expressions are handled.
+    while True:
+        idx = text.find(".fill_empty()")
+        if idx == -1:
+            break
+        # Walk back over identifier / dot / arrow / colon / paren chain.
+        i = idx
+        if i > 0 and text[i-1] == ')':
+            depth = 1
+            j = i - 2
+            while j >= 0 and depth > 0:
+                if text[j] == ')':
+                    depth += 1
+                elif text[j] == '(':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j -= 1
+            k = j - 1
+            while k >= 0 and (text[k].isalnum() or text[k] in "_:>.-"):
+                k -= 1
+            expr_start = k + 1
+        else:
+            k = i - 1
+            while k >= 0 and (text[k].isalnum() or text[k] in "_:>.-"):
+                k -= 1
+            expr_start = k + 1
+        expr = text[expr_start:i]
+        replacement = ("([&](auto&& __s) { for (auto& __c : __s) "
+                       "{ __c.write(Tag::EMPTY); } }(" + expr + "))")
+        text = text[:expr_start] + replacement + text[idx + len(".fill_empty()"):]
+
+    # `rusty::leading_zeros(<expr>)` / `rusty::trailing_zeros(<expr>)`
+    # where `<expr>` is a BitMask. These should be method calls on
+    # BitMask. Use brace-walk to find the arg.
+    for fn in ("leading_zeros", "trailing_zeros"):
+        prefix = "rusty::" + fn + "("
+        out_parts = []
+        search_from = 0
+        while True:
+            idx = text.find(prefix, search_from)
+            if idx == -1:
+                out_parts.append(text[search_from:])
+                break
+            arg_start = idx + len(prefix)
+            depth = 1
+            j = arg_start
+            while j < len(text) and depth > 0:
+                if text[j] == '(':
+                    depth += 1
+                elif text[j] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if depth != 0:
+                out_parts.append(text[search_from:])
+                break
+            arg = text[arg_start:j]
+            # Only rewrite when arg references a BitMask-named local
+            # (`empty_before` / `empty_after` from the rehash routine).
+            # Otherwise leave the function-call form (it still works for
+            # integers via rusty::num).
+            if any(name in arg for name in
+                   ("empty_before", "empty_after")):
+                out_parts.append(text[search_from:idx])
+                out_parts.append("(" + arg + ")." + fn + "()")
+            else:
+                out_parts.append(text[search_from:j+1])
+            search_from = j + 1
+        text = "".join(out_parts)
+
+    # `rusty::iter(X.match_*())` — Rust source has `.match_*()
     # .into_iter()`. Our Group::match_* methods return
     # `group_internal::BitMask` (module-private, layout-compatible).
     # The call site needs to wrap that into the real
     # `control.bitmask::BitMask` (which has `.into_iter()`) by
     # constructing one from the `_0` field.
     # Use brace-matching to allow nested parens in X.
+    match_endings_re = re.compile(
+        r"\.match_(?:full|tag|empty|empty_or_deleted)\("
+    )
+    def ends_with_match_call(s: str) -> bool:
+        """Return True if s ends with `.match_X(...)` (balanced parens)."""
+        m = match_endings_re.search(s)
+        if not m:
+            return False
+        # Verify the match is followed by balanced parens to EOS.
+        depth = 1
+        i = m.end()
+        while i < len(s) and depth > 0:
+            if s[i] == '(':
+                depth += 1
+            elif s[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0:
+            return False
+        return s[i+1:].strip() == ""
     while True:
         idx = text.find("rusty::iter(")
-        # Only iterate for those whose content ends with `.match_full()`.
+        # Only iterate for those whose content ends with a
+        # `.match_*()` call. Use regex to allow .match_tag(arg) too.
         found = False
         start = 0
         while True:
@@ -993,7 +1169,7 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
             if depth != 0:
                 break
             content = text[content_start:j]
-            if content.rstrip().endswith(".match_full()"):
+            if ends_with_match_call(content):
                 # Wrap the group_internal::BitMask via `_0` into the
                 # real control.bitmask::BitMask, then call its
                 # into_iter().
@@ -1002,10 +1178,197 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
                 break
             start = j + 1
         # Outer loop terminates when inner scan found no
-        # `.match_full()`-ending rusty::iter — otherwise the outer
+        # `.match_*()`-ending rusty::iter — otherwise the outer
         # `while True` would spin forever scanning the same text.
         if not found:
             break
+
+    # `rusty::iter(std::move(current_group))` where current_group
+    # is a group_internal::BitMask from .match_full(). Wrap with
+    # the real BitMask to construct an iterator.
+    text = text.replace(
+        ".current_group = rusty::iter(std::move(current_group)),",
+        ".current_group = BitMask{current_group._0}.into_iter(),",
+    )
+
+    # `rusty::iter(this->table)` inside `RawTable<T>::iter` — the
+    # Rust source is `self.table.iter::<T>()` (the method on
+    # RawTableInner). Use the method explicitly.
+    text = text.replace(
+        "return rusty::iter(this->table);",
+        "return this->table.template iter<T>();",
+    )
+
+    # `rusty::iter((*this))` inside `RawIter<T>::drop_elements` and
+    # `RawTableInner::drop_elements<T>` — Rust uses `for item in self`
+    # (implicit IntoIterator). Rewrite to a while-let loop over
+    # this->next() since both types expose option-like `next()` (and
+    # RawTableInner exposes a method `iter<T>()` that constructs a
+    # RawIter<T>).
+    # Locate the unique source and replace with a while-loop.
+    # Pattern A: inside RawIter<T>::drop_elements — `iter` is a field
+    # (RawIterRange<T>), so `this->iter()` doesn't work. Use the
+    # field's `next()` method directly.
+    text = text.replace(
+        "for (auto&& item : rusty::for_in(rusty::iter((*this)))) {\n"
+        "                    item.drop();\n"
+        "                }",
+        "for (;;) {\n"
+        "                    auto __opt = this->iter.template next_impl<false>();\n"
+        "                    if (!__opt.is_some()) break;\n"
+        "                    auto item = __opt.unwrap();\n"
+        "                    item.drop();\n"
+        "                }",
+    )
+    # Pattern B: inside `RawTableInner::drop_elements<T>` — there is a
+    # `RawTableInner::iter<T>()` method on RawTableInner that returns
+    # `RawIter<T>`. Use it.
+    text = text.replace(
+        "for (auto&& item : rusty::for_in(rusty::iter((*this)))) {\n"
+        "                item.drop();\n"
+        "            }",
+        "{ auto __it = this->template iter<T>();\n"
+        "              for (;;) {\n"
+        "                  auto __opt = __it.next();\n"
+        "                  if (!__opt.is_some()) break;\n"
+        "                  auto item = __opt.unwrap();\n"
+        "                  item.drop();\n"
+        "              } }",
+    )
+
+    # `rusty::iter(RawTableInner::NEW)` — Rust source is
+    # `RawTableInner::NEW.iter<T>()` but RawTableInner is incomplete
+    # in the inline definition site. Stub `RawIter<T>::default_()`
+    # to return an empty iterator (items=0 short-circuits next()).
+    text = text.replace(
+        "static RawIter<T> default_() {\n"
+        "        // @unsafe\n"
+        "        {\n"
+        "            return rusty::iter(RawTableInner::NEW);\n"
+        "        }\n"
+        "    }",
+        "static RawIter<T> default_() {\n"
+        "        // Empty iterator — `items = 0` short-circuits `next()`\n"
+        "        // before `iter` is ever touched.\n"
+        "        RawIter<T> r{};\n"
+        "        r.items = 0;\n"
+        "        return r;\n"
+        "    }",
+    )
+    # Same for FullBucketsIndices::default_. Construct fields
+    # explicitly since NonNull<uint8_t> has no default ctor; reuse
+    # the same static-empty-group pointer that RawTableInner::new_()
+    # uses, with items=0 so iteration short-circuits.
+    text = text.replace(
+        "FullBucketsIndices FullBucketsIndices::default_() {\n"
+        "    using Item = typename FullBucketsIndices::Item;\n"
+        "    // @unsafe\n"
+        "    {\n"
+        "        return RawTableInner::NEW.full_buckets_indices();\n"
+        "    }\n"
+        "}",
+        "FullBucketsIndices FullBucketsIndices::default_() {\n"
+        "    using Item = typename FullBucketsIndices::Item;\n"
+        "    // Empty iterator — items=0 short-circuits next().\n"
+        "    return FullBucketsIndices{\n"
+        "        .current_group = BitMaskIter{},\n"
+        "        .group_first_index = 0,\n"
+        "        .ctrl = rusty::ptr::NonNull<uint8_t>::new_unchecked(\n"
+        "            const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(\n"
+        "                rusty::as_ptr(Group::static_empty())))),\n"
+        "        .items = 0,\n"
+        "    };\n"
+        "}",
+    )
+
+    # `data_end()` in `RawTableInner::bucket_ptr` (no template args)
+    # — Rust source disambiguates by return type annotation.
+    # `RawTableInner::data_end<T>()` is templated; force T=uint8_t at
+    # this specific call site. The RawTable<T>::data_end is a non-
+    # templated method, so be specific to bucket_ptr's literal line.
+    text = text.replace(
+        "uint8_t* const base = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rusty::as_ptr(this->data_end())));",
+        "uint8_t* const base = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rusty::as_ptr(this->template data_end<uint8_t>())));",
+    )
+
+    # `ctrl_slice()` returns `span<MaybeUninit<Tag>>` but the body
+    # passes `Tag*` to `from_raw_parts_mut`. Cast pointer.
+    text = text.replace(
+        "return rusty::from_raw_parts_mut(const_cast<Tag*>(reinterpret_cast<const Tag*>(rusty::as_ptr(this->ctrl_field))), this->num_ctrl_bytes());",
+        "return rusty::from_raw_parts_mut(reinterpret_cast<rusty::MaybeUninit<Tag>*>(const_cast<uint8_t*>(rusty::as_ptr(this->ctrl_field))), this->num_ctrl_bytes());",
+    )
+
+    # `drop(arg)` where drop is `UnsafeFn<...>` — UnsafeFn requires
+    # `.call_unsafe(args...)` to invoke. Only this single call site.
+    text = text.replace(
+        "drop(self_.bucket_ptr(std::move(i), std::move(size_of)));",
+        "drop.call_unsafe(self_.bucket_ptr(std::move(i), std::move(size_of)));",
+    )
+
+    # `(rusty::range(0, N)).step_by(W)` — rusty::range has no step_by.
+    # Rewrite the for-loop to manually stride: `for (auto i = 0; i < N;
+    # i += W) { ... }`. The pattern only appears in
+    # `prepare_rehash_in_place`. Brace-match the iterator expression
+    # to extract N and W.
+    step_by_pattern = "for (auto&& i : rusty::for_in((rusty::range(0, "
+    idx = text.find(step_by_pattern)
+    if idx != -1:
+        # Find matching `).step_by(`.
+        n_start = idx + len(step_by_pattern)
+        depth = 1
+        j = n_start
+        while j < len(text) and depth > 0:
+            if text[j] == '(':
+                depth += 1
+            elif text[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        N = text[n_start:j]
+        step_marker = ")).step_by("
+        if text[j:j+len(step_marker)] == step_marker:
+            w_start = j + len(step_marker)
+            depth = 1
+            k = w_start
+            while k < len(text) and depth > 0:
+                if text[k] == '(':
+                    depth += 1
+                elif text[k] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k += 1
+            W = text[w_start:k]
+            # Match the closing `)) {` of the for-line (2 closes
+            # for `for_in(` and `for (` after step_by's own close).
+            tail_marker = ")) {"
+            if text[k+1:k+1+len(tail_marker)] == tail_marker:
+                new_for = (
+                    "for (size_t i = 0; i < (" + N + "); i += (" + W + ")) {"
+                )
+                text = text[:idx] + new_for + text[k+1+len(tail_marker):]
+
+    # `TableLayout::calculate_layout_for` body — the inner lambdas
+    # are wrapped by RUSTY_TRY_OPT which uses GCC statement-expr
+    # `return` from the enclosing lambda. The lambda has two return
+    # types (None_t and Option<size_t>); deduction fails. Add the
+    # return-type annotation explicitly.
+    text = re.sub(
+        r"auto ctrl_offset = RUSTY_TRY_OPT\(\[&\]\(\) \{",
+        "auto ctrl_offset = RUSTY_TRY_OPT([&]() -> rusty::Option<size_t> {",
+        text,
+    )
+    text = re.sub(
+        r"auto&& _checked_lhs = RUSTY_TRY_OPT\(\[&\]\(\) \{",
+        "auto&& _checked_lhs = RUSTY_TRY_OPT([&]() -> rusty::Option<size_t> {",
+        text,
+    )
+    text = re.sub(
+        r"const auto len = RUSTY_TRY_OPT\(\[&\]\(\) \{",
+        "const auto len = RUSTY_TRY_OPT([&]() -> rusty::Option<size_t> {",
+        text,
+    )
 
     # `rusty::for_in(group.match_X(arg))` — `match_X` returns our
     # group_internal::BitMask which isn't iterable. Wrap with real
@@ -1061,6 +1424,96 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         path.write_text(text)
         return 1
     return 0
+
+
+def patch_scopeguard_dropfn_arg(cpp_out: Path) -> int:
+    """The transpiled scopeguard.cppm calls `(this->dropfn)(&this->value)`
+    in the destructor — passing a pointer to value. Rust's
+    `F: FnMut(&mut T)` corresponds to `void(T&)` in C++; passing the
+    address gives `T*` which doesn't bind to `T&` in lambdas using
+    `auto&&` (deduces to T*& instead of T&). Change to pass
+    `this->value` directly so auto&& deduces T&."""
+    path = cpp_out / "hashbrown_port.scopeguard.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = text.replace(
+        "(this->dropfn)(&this->value);",
+        "(this->dropfn)(this->value);",
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def _patch_downstream_module(path: Path) -> bool:
+    """Generic fixups for hashbrown downstream modules
+    (table/map/set/raw_entry/rustc_entry): hoist stray imports;
+    std::Allocator/Global → rusty::alloc::*; drop `raw::` qualifier."""
+    if not path.exists():
+        return False
+    text = path.read_text()
+    original = text
+    # Collect any stray `import hashbrown_port.X;` lines NOT at the top.
+    import_lines = re.findall(
+        r"^import hashbrown_port\.[\w.]+;\n", text, flags=re.MULTILINE
+    )
+    # Identify the "header" import block (lines starting at the
+    # `export module` line and forward).
+    mod_re = re.compile(
+        r"^(export module hashbrown_port\.\w+;\n)((?:import hashbrown_port\.[\w.]+;\n)*)",
+        re.MULTILINE,
+    )
+    m = mod_re.search(text)
+    if m and import_lines:
+        header_imports = m.group(2)
+        stray = [
+            line for line in import_lines if line not in header_imports
+        ]
+        if stray:
+            # Remove all occurrences of stray lines, then re-insert
+            # at the header block.
+            for line in stray:
+                # Skip if this line is already in the header.
+                pass
+            # Remove stray imports from body.
+            body = text[m.end():]
+            for line in stray:
+                body = body.replace(line, "", 1)
+            # Combine.
+            text = text[:m.end()] + "".join(stray) + body
+    # std::Allocator / std::Global → rusty::alloc.
+    text = text.replace("using std::Allocator;", "using rusty::alloc::Allocator;")
+    text = text.replace("using std::Global;", "using rusty::alloc::Global;")
+    # `raw::` qualifier in this file — strip; types imported flat.
+    text = re.sub(r"\braw::(?=\w)", "", text)
+    if text != original:
+        path.write_text(text)
+        return True
+    return False
+
+
+def patch_table_module(cpp_out: Path) -> int:
+    """table.cppm cluster fixups."""
+    return 1 if _patch_downstream_module(cpp_out / "hashbrown_port.table.cppm") else 0
+
+
+def patch_map_module(cpp_out: Path) -> int:
+    return 1 if _patch_downstream_module(cpp_out / "hashbrown_port.map.cppm") else 0
+
+
+def patch_set_module(cpp_out: Path) -> int:
+    return 1 if _patch_downstream_module(cpp_out / "hashbrown_port.set.cppm") else 0
+
+
+def patch_raw_entry_module(cpp_out: Path) -> int:
+    return 1 if _patch_downstream_module(cpp_out / "hashbrown_port.raw_entry.cppm") else 0
+
+
+def patch_rustc_entry_module(cpp_out: Path) -> int:
+    return 1 if _patch_downstream_module(cpp_out / "hashbrown_port.rustc_entry.cppm") else 0
 
 
 def patch_raw_tryreserveerror_constructors(cpp_out: Path) -> int:
@@ -1164,6 +1617,12 @@ def main(cpp_out: Path):
         ("raw: std::{AllocError,Allocator,Layout,Global,handle_alloc_error} → rusty::alloc::*", patch_raw_std_alloc_namespace),
         ("raw: TryReserveError variant constructors → rusty tagged-struct ctor", patch_raw_tryreserveerror_constructors),
         ("raw: misc fixups (control::, invalid_mut, Rust-syntax assert!s)", patch_raw_misc_fixups),
+        ("scopeguard: dropfn arg by reference, not pointer", patch_scopeguard_dropfn_arg),
+        ("table: hoist imports + std::* → rusty::* + drop raw:: qualifier", patch_table_module),
+        ("map: same fixups as table", patch_map_module),
+        ("set: same fixups as table", patch_set_module),
+        ("raw_entry: same fixups as table", patch_raw_entry_module),
+        ("rustc_entry: same fixups as table", patch_rustc_entry_module),
     ]
     total = 0
     for name, fn in patches:
