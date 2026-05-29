@@ -106,9 +106,19 @@ int main() {
             if (len_b != 1000) { std::puts("FAIL: len_b != 1000"); return 1; }
         }
         // 6c: 1000 inserts with new_() (triggers multiple resizes).
+        // Per-insert tracing to pinpoint which entry is lost.
         auto m6 = HashMap<int, int>::new_();
+        int last_len = 0;
         for (int i = 0; i < 1000; ++i) {
             m6.insert(i, i * 7);
+            size_t cur = rusty::len(m6);
+            if ((int)cur != i + 1) {
+                std::printf("  trace: insert(%d) → len=%zu (expected %d)\n",
+                            i, cur, i + 1);
+                if (i < 30 || i > 990) {}
+                else if (cur != static_cast<size_t>(last_len + 1)) break;
+            }
+            last_len = (int)cur;
         }
         size_t len = rusty::len(m6);
         std::printf("smoke step 6: 1000 inserts; len=%zu\n", len);
