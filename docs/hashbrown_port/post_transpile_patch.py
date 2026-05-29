@@ -1321,6 +1321,26 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     guard_field_names = (
         "growth_left", "bucket_mask", "items", "ctrl_field",
     )
+    # Hot-path inlining: small RawTableInner methods declared in
+    # the struct body but defined out-of-line are NOT inlined under
+    # the modular-build model. Add `inline` to the definitions so
+    # the compiler can fold them into callers (insert path: ctrl,
+    # set_ctrl, record_item_insert_at, etc.).
+    for inline_target in (
+        "Tag* RawTableInner::ctrl(size_t index) const {",
+        "void RawTableInner::set_ctrl(size_t index, Tag ctrl) {",
+        "void RawTableInner::record_item_insert_at(size_t index, Tag old_ctrl, Tag new_ctrl) {",
+        "Tag RawTableInner::replace_ctrl_hash(size_t index, uint64_t hash) {",
+        "void RawTableInner::set_ctrl_hash(size_t index, uint64_t hash) {",
+        "size_t RawTableInner::find_insert_index(uint64_t hash) const {",
+        "size_t RawTableInner::num_buckets() const {",
+        "size_t RawTableInner::num_ctrl_bytes() const {",
+        "bool RawTableInner::is_bucket_full(size_t index) const {",
+        "ProbeSeq RawTableInner::probe_seq(uint64_t hash) const {",
+        "uint8_t* RawTableInner::bucket_ptr(size_t index, size_t size_of) const {",
+    ):
+        text = text.replace(inline_target, "inline " + inline_target)
+
     # Hot-path inlining: `find_inner` and `find_or_find_insert_index_inner`
     # take `const std::function<bool(size_t)>&` which adds an indirect
     # call to the equality callback inside the tight probe-seq loop —
@@ -2238,6 +2258,11 @@ def patch_cmakelists_smoke_test(cpp_out: Path) -> int:
     addition = (
         "\n"
         + sentinel + "\n"
+        "# Compile the library with the same release flags as the bench so\n"
+        "# LTO can see across the boundary (static archives carry no flags).\n"
+        "target_compile_options(hashbrown_port PRIVATE -O3 -DNDEBUG -march=native -flto=thin)\n"
+        "target_include_directories(hashbrown_port PRIVATE \""
+        + str(include_dir) + "\")\n"
         "if(EXISTS \"" + str(smoke_test_path) + "\")\n"
         "    add_executable(smoke_test \"" + str(smoke_test_path) + "\")\n"
         "    target_include_directories(smoke_test PRIVATE \""
@@ -2246,7 +2271,8 @@ def patch_cmakelists_smoke_test(cpp_out: Path) -> int:
         "endif()\n"
         "if(EXISTS \"" + str(bench_path) + "\")\n"
         "    add_executable(bench \"" + str(bench_path) + "\")\n"
-        "    target_compile_options(bench PRIVATE -O3 -DNDEBUG)\n"
+        "    target_compile_options(bench PRIVATE -O3 -DNDEBUG -march=native -flto=thin)\n"
+        "    target_link_options(bench PRIVATE -flto=thin)\n"
         "    target_include_directories(bench PRIVATE \""
         + str(include_dir) + "\")\n"
         "    target_link_libraries(bench PRIVATE hashbrown_port)\n"
