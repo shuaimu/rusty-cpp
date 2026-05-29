@@ -1462,12 +1462,17 @@ def _delete_conflated_iter_methods(text: str) -> str:
     lines = text.splitlines(keepends=True)
     out_lines = []
     i = 0
-    K_in_template_re = re.compile(r"^    template<[^>]*\bK\b[^>]*>$")
+    # Match a `template<...>` line at indent 4 whose type-param list
+    # references any single-uppercase-letter type param OTHER than
+    # B (Bn) or F (Func), which are legitimate fold-method params.
+    # These extra params are typically conflations from sibling
+    # Iter/Entry struct variants.
+    conflated_template_re = re.compile(
+        r"^    template<[^>]*\b(?:K|V|T|S|U|W|R|Q|H)\b[^>]*>$"
+    )
     while i < len(lines):
         line = lines[i]
-        # Detect a conflated method header at indent 4: template line
-        # mentioning K as one of the parameters.
-        if (K_in_template_re.match(line.rstrip("\n"))
+        if (conflated_template_re.match(line.rstrip("\n"))
                 and i + 1 < len(lines)):
             # Find the closing `    }` for this method.
             # Track braces from the first `{` onward.
@@ -1537,9 +1542,100 @@ def _patch_downstream_module(path: Path) -> bool:
     text = text.replace("using std::Global;", "using rusty::alloc::Global;")
     # `raw::` qualifier in this file — strip; types imported flat.
     text = re.sub(r"\braw::(?=\w)", "", text)
-    # Delete Iter-overload-conflated methods (template<typename K, ...>
-    # methods that got merged from Set's Iter<K> / Map's Iter<K,V>
-    # into the table::Iter<T> struct).
+    # `control::` qualifier — strip too (types imported flat).
+    text = re.sub(r"\bcontrol::(?=\w)", "", text)
+    # `TryReserveError` (bare, no rusty:: prefix) → qualify.
+    # Negative-lookbehind avoids double-prefix on `s::TryReserveError`
+    # (the `collections::` tail).
+    text = re.sub(
+        r"(?<!s)\bTryReserveError\b",
+        "rusty::collections::TryReserveError",
+        text,
+    )
+    # `DefaultHashBuilder` → DefaultHasher (in-module stub, see
+    # patch_hasher_replace_with_stub for the definition).
+    text = re.sub(r"\bDefaultHashBuilder\b", "DefaultHasher", text)
+    # `f.debug_set()` — rusty::fmt::Formatter has no debug_set;
+    # fall back to debug_list (same prefix-suffix behaviour).
+    text = text.replace(".debug_set()", ".debug_list()")
+    # `DefaultHasher::default_()` — the stub doesn't have this method.
+    # Use the existing `new_()` (default-constructible).
+    text = text.replace(
+        "DefaultHasher::default_()",
+        "DefaultHasher::new_()",
+    )
+    # Delete `raw_entry_mut`, `raw_entry`, `rustc_entry` methods of
+    # HashMap — they reference types from raw_entry/rustc_entry
+    # modules which create a cyclic-module dependency. Not part of
+    # the core HashMap API; safe to drop for Phase A2 compile.
+    for method_name in ("raw_entry_mut", "raw_entry", "rustc_entry"):
+        # Match `RetType ... methodname(...) { ... }` at indent 4.
+        pat = re.compile(
+            r"^    [^\n]*\b" + re.escape(method_name) + r"\b[^\n]*\{\n",
+            re.MULTILINE,
+        )
+        while True:
+            m = pat.search(text)
+            if not m:
+                break
+            # Walk braces from the `{` on the matched header line.
+            i = m.end() - 1  # back to the newline
+            j = m.end()
+            depth = 1
+            while j < len(text) and depth > 0:
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if depth != 0:
+                break
+            # Delete header + body + trailing newline.
+            end = j + 1
+            if end < len(text) and text[end] == '\n':
+                end += 1
+            text = text[:m.start()] + text[end:]
+    # Add forward declarations for tagged-struct variant types
+    # (Entry_Occupied / Entry_Vacant in table.cppm,
+    #  RawEntryMut_*, RustcEntry_*, etc. in others). The transpiler
+    # emits these as `struct ${Enum}_${Variant} { … }; ` at the bottom
+    # of the file, but call sites reference them earlier inside
+    # HashTable's inline method bodies. Inject forward declarations
+    # for `Entry_Occupied` / `Entry_Vacant` right before the
+    # `struct Entry;` line.
+    fwd_anchor = re.compile(
+        r"^export template<typename T, typename A>\n"
+        r"    requires \(rusty::alloc::Allocator<A>\)\n"
+        r"struct Entry;\n",
+        re.MULTILINE,
+    )
+    m = fwd_anchor.search(text)
+    if m:
+        sentinel = "// auto-fwd: Entry_Occupied / Entry_Vacant\n"
+        if sentinel not in text:
+            fwd_decls = (
+                sentinel
+                + "export template<typename T, typename A>\n"
+                + "struct Entry_Occupied;\n"
+                + "export template<typename T, typename A>\n"
+                + "struct Entry_Vacant;\n"
+            )
+            text = text[:m.start()] + fwd_decls + text[m.start():]
+    # Fix `Entry` forward-vs-definition requires-clause mismatch:
+    # the forward decl has `requires (rusty::alloc::Allocator<A>)`
+    # but the definition omits it. Drop the requires from the forward.
+    text = text.replace(
+        "export template<typename T, typename A>\n"
+        "    requires (rusty::alloc::Allocator<A>)\n"
+        "struct Entry;\n",
+        "export template<typename T, typename A>\n"
+        "struct Entry;\n",
+    )
+    # Delete conflated methods (template<typename K|V|T, ...>) —
+    # covers Iter/IterMut/Entry/OccupiedEntry/VacantEntry overload
+    # mixing across struct variants.
     text = _delete_conflated_iter_methods(text)
     if text != original:
         path.write_text(text)
