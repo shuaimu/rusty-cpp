@@ -52,8 +52,11 @@
 #include "rusty/string.hpp"
 #include "rusty/fn.hpp"
 #include "rusty/function.hpp"
-#include "rusty/hashmap.hpp"
-#include "rusty/hashset.hpp"
+// rusty::HashMap / HashSet replaced by hashbrown_port C++20 modules.
+// Consumers `import hashbrown_port.map;` or `import hashbrown_port.set;`
+// directly. See docs/rusty-std-book.md §5 for the migration story.
+// #include "rusty/hashmap.hpp"  // deleted
+// #include "rusty/hashset.hpp"  // deleted
 #include "rusty/btreemap.hpp"
 #include "rusty/btreeset.hpp"
 
