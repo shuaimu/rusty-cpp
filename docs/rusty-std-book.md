@@ -69,6 +69,14 @@ Sibling docs:
   - [4.3 Phase A error catalogue](#43-phase-a-error-catalogue)
   - [4.4 Phase plan + status snapshots](#44-phase-plan--status-snapshots)
   - [4.8 4-way bench: transpiled vs VecLegacy vs std::vector vs Rust](#48-4-way-bench-transpiled-vs-veclegacy-vs-stdvector-vs-rust)
+- [Chapter 5 — `collections::HashMap` / `HashSet` (hashbrown port)](#chapter-5--collectionshashmap--hashset-hashbrown-port)
+  - [5.1 Source acquisition + prep](#51-source-acquisition--prep)
+  - [5.2 Patcher inventory](#52-patcher-inventory)
+  - [5.3 HashSet as a facade](#53-hashset-as-a-facade)
+  - [5.4 The silent correctness bug — `BitMask` bit→byte index](#54-the-silent-correctness-bug--bitmask-bitbyte-index)
+  - [5.5 Performance: honest disclosure about the hasher](#55-performance-honest-disclosure-about-the-hasher)
+  - [5.6 LTO is mandatory across the module boundary](#56-lto-is-mandatory-across-the-module-boundary)
+  - [5.7 Status summary](#57-status-summary)
 
 Each completed port will graduate into its own chapter (parallel to
 Chapter 1 for BTreeMap). Chapter 3's tables stay as the live
@@ -2554,3 +2562,340 @@ cd /tmp/vec_port/rust_bench && cargo build --release
 taskset -c 2 /tmp/vec_port/cpp_out/vec_bench_4way
 taskset -c 2 /tmp/vec_port/rust_bench/target/release/vec_bench_rust
 ```
+
+---
+
+## Chapter 5 — `collections::HashMap` / `HashSet` (hashbrown port)
+
+`std::collections::HashMap` in Rust has been backed by the
+**hashbrown** crate since Rust 1.36 — it's the same `RawTable<K,V>`
+SwissTable code. So porting hashbrown ports `std::HashMap` by
+construction. We vendor hashbrown-0.17.0, prep, transpile, patch,
+and end with two C++20 modules (`hashbrown_port.map` /
+`hashbrown_port.set`) that pass smoke tests and bench within ~1.5x
+of the original Rust crate on integer workloads.
+
+This chapter is shorter than Chapter 1: the playbook from
+BTreeMap and Vec carried over almost entirely. The interesting
+content is concentrated in two places: **§5.4** (the silent
+correctness bug we shipped twice before catching) and **§5.5**
+(the honest hasher disclosure that demolishes the "0.95x faster
+than Rust" claim).
+
+### 5.1 Source acquisition + prep
+
+Standard playbook:
+
+```sh
+mkdir -p /tmp/hashbrown_port
+cd /tmp/hashbrown_port
+cargo download --output=. --extract hashbrown==0.17.0
+mv hashbrown-0.17.0 hashbrown_crate
+bash docs/hashbrown_port/prep.sh hashbrown_crate/src
+```
+
+`prep.sh` does three things the transpiler can't:
+
+1. **Force the generic (no-SIMD) group impl.** `control/group/mod.rs`
+   normally picks among `sse2.rs` / `neon.rs` / `lsx.rs` /
+   `generic.rs` via `cfg_if!`. The transpiler can't evaluate cfg
+   conditions; if you don't collapse the cfg_if it emits *all
+   branches*, which then fight over `pub use imp::Group;`. Hard-pick
+   `generic` here; delete the SIMD files (they use `core::arch`
+   intrinsics we'd have to port).
+2. **Strip nightly-only items.** Anything `#[cfg(feature = "nightly")]`
+   is removed via a brace-matching pass — covers `default fn`
+   specializations, `#[may_dangle]` Drop impls, the `TrivialClone`
+   block, etc.
+3. **Inline the `Equivalent` trait.** `pub use equivalent::Equivalent;`
+   pulls in the `equivalent` crate; replace with a hand-rolled trait
+   in the crate itself so the transpiler doesn't need cross-crate
+   lookup.
+
+Outcome: 17 .rs files transpile cleanly, 0 parser errors.
+
+### 5.2 Patcher inventory
+
+`docs/hashbrown_port/post_transpile_patch.py` — ~30 patches,
+grouped by module. The pattern matches BTreeMap and Vec: small
+text fixups (paths, qualifiers, `std::*` → `rusty::*`), a few
+module-body rewrites where the transpiler emit was too tangled,
+and one big hand-rolled replacement.
+
+The hand-rolled replacement is **`control/group/generic.cppm`**
+— the original transpile emitted unresolved `Tag` / `BitMask`
+cross-module references plus verbatim `u64::from_ne_bytes(...)`
+and IIFE artifacts clustered too tightly to peel surgically.
+~150 LOC of bit-twiddling, replaced wholesale with the
+hashbrown logic in C++. This is the same playbook §1.4 used
+for `clear_forgotten_address_range` and §2.3 phase B normally
+recommends.
+
+Stubs deferred to facades (see §5.3):
+- `raw_entry.cppm` — advanced API, not commonly used
+- `rustc_entry.cppm` — internal, rustc-specific
+
+The full HashMap surface (new_/with_capacity/insert/contains/
+remove/clear/iter/len) is reachable through the patched
+`map.cppm` + `raw.cppm` chain.
+
+### 5.3 HashSet as a facade
+
+Rust hashbrown's `HashSet<T>` is literally `HashMap<T, ()>`. The
+upstream module has its own iter types, raw_entry, rustc_entry,
+plus a tangle of trait impls — too much surface to chase. So
+we replace the 7-line `set.cppm` stub with a thin facade:
+
+```cpp
+export template<typename T, typename S = DefaultHasher>
+struct HashSet {
+    HashMap<T, std::monostate, S> map;
+    // insert/contains/remove/clear/len/iter/clone delegate to map.
+};
+```
+
+`std::monostate` plays the role of Rust's `()`. The facade adds
+~80 LOC and replaces ~3000 LOC of upstream set/raw_entry/
+rustc_entry that we'd otherwise have to port. Same pattern
+Chapter 1's BTreeSet facade uses over BTreeMap, and Chapter 2.9's
+aux-module merging recommends.
+
+`clear()` sidesteps `RawTable::clear()` (which has a pre-existing
+transpiler emission bug — `self_.table` on a ScopeGuard without
+the operator*); replacing the backing map with `HashMap::new_()`
+gives identical semantics without chasing that.
+
+### 5.4 The silent correctness bug — `BitMask` bit→byte index
+
+**This is the most important paragraph in this chapter.** It
+demonstrates how a port can ship "passing" benchmarks while
+losing 15-30% of lookups, and how the bench timing can *mask*
+the bug if you set up the comparison wrong.
+
+#### Symptom
+
+`smoke_test.cpp` step 6a (20 inserts at cap=64, then look up each
+of the 20 keys): `len=20 found=15`. Five entries silently missing.
+
+The bench `bench.cpp` LOOKUP timing nonetheless looked plausible —
+~1200 ns/iter at N=200 — because lookups that *miss* return faster
+than lookups that hit. The "fast" lookups were measuring partial
+misses dressed up as hits.
+
+#### The bug
+
+`control/group/generic.cppm` has a hand-inlined
+`group_internal::BitMask` type used by the inner group methods
+(`match_tag`, `match_empty_or_deleted`). The original emit was:
+
+```cpp
+rusty::Option<size_t> lowest_set_bit() const {
+    if (_0 == 0) return rusty::Option<size_t>(rusty::None);
+    return rusty::Option<size_t>(static_cast<size_t>(__builtin_ctzll(_0)));
+}
+```
+
+But this is a **SWAR-encoded bitmask**: the word stores 1 match
+bit per *byte* (high bit of each byte). `match_empty_or_deleted`
+on an all-empty group returns `0x8080808080808080`, whose
+`__builtin_ctzll` is 7 — the bit position of the lowest set
+high bit. The slot index, which is what callers want, is
+`7 / BITMASK_STRIDE = 7 / 8 = 0`.
+
+Without the divide, the function returned **byte position 7**
+when it meant **slot 0**. Every insert that landed in
+`find_insert_index_in_group` got placed at `h1 + 7` instead of
+`h1 + 0`, displacing entries across the table.
+
+#### Why didn't earlier smoke tests catch this?
+
+- `smoke_test` step 4 (3 inserts, no lookup) only checked `len=3`.
+- Step 5 inserted 2 entries and looked up 1 by hash — happened
+  to be the one that landed at a position where the +7 displacement
+  was masked by hash collision.
+- Step 6a was the first test that inserted *and* round-tripped
+  all entries through lookup.
+
+The bug was present from the first compile of `raw.cppm`. We
+just hadn't written a test that asked the right question.
+
+#### Why didn't the bench catch this?
+
+The bench compared C++ port (transpiled hashbrown with our stub
+hasher) to Rust `std::HashMap` (hashbrown with SipHash). C++
+LOOKUP looked ~0.56x faster than Rust. Some of that was the
+hasher, but ~25% of the "speedup" was actually **lookup misses
+returning faster than hits would**. With ~15% miss rate, the
+average lookup time drops because:
+
+- A hit walks the probe chain → finds an entry → reads `val`.
+- A miss walks until empty → bails.
+
+For low-load tables, miss is shorter than hit. We were measuring
+miss/hit blend, not pure hit timing.
+
+#### The fix
+
+```cpp
+rusty::Option<size_t> lowest_set_bit() const {
+    if (_0 == 0) return rusty::Option<size_t>(rusty::None);
+    return rusty::Option<size_t>(static_cast<size_t>(__builtin_ctzll(_0)) / 8);
+}
+```
+
+Plus the same `/ 8` fix in `trailing_zeros()` and `leading_zeros()`
+on the same type. Three lines, 100% lookup hit rate restored
+across all 10 cap/N configurations in `debug_hash.cpp`. The
+codified patch lives in `post_transpile_patch.py`'s hand-rolled
+`generic.cppm` body.
+
+#### Lesson for future ports
+
+The bench is only as honest as your hit rate. **Every bench
+that measures LOOKUP must also count missed lookups and assert
+miss=0** (or fail loudly otherwise). If the algorithm has any
+silent failure mode where wrong results return faster than right
+ones — which any algorithm with early-exit branching has — your
+"speedup" can be entirely an artifact.
+
+This is the single most-actionable result of this whole chapter.
+Add a `miss_count` invariant to every map/set bench from now on.
+The cost is 1 line in the inner loop.
+
+### 5.5 Performance: honest disclosure about the hasher
+
+Rust `std::collections::HashMap` uses SipHash-1-3 by default
+(DoS-resistant, slow). The transpiled C++ port uses **splitmix64**
+for integers (the patcher's `DefaultHasher::hash_one<T>` for
+`is_integral_v<T>`), because hashbrown's actual default — foldhash
+— depends on `core::arch` intrinsics we'd have to hand-port.
+
+These hashers are roughly an order of magnitude apart in cost:
+
+| Hasher       | ~ns / hash, integer key |
+|--------------|-----:|
+| splitmix64   |    5 |
+| foldhash     |    5 |
+| FxHash       |    5 |
+| SipHash-1-3  |   30 |
+
+For a 200-key INSERT + 200-key LOOKUP workload, the hasher
+dominates total time. The original bench reported:
+
+```
+C++ port (splitmix64) vs Rust std::HashMap (SipHash):
+  INSERT 0.95x  ← C++ faster
+  LOOKUP 0.60x  ← C++ much faster
+```
+
+This is misleading. The *algorithm* is the same. The comparison
+is really `splitmix64` vs `SipHash-1-3`. To get an apples-to-
+apples result, set up a 3-way Rust bench:
+
+```rust
+// 1. std::HashMap with default SipHash
+// 2. std::HashMap with foldhash (same algorithm, fast hasher)
+// 3. hashbrown::HashMap (literally what (1) wraps)
+```
+
+Measured (`docs/hashbrown_port/rust_bench/`, 3-run avg, cpu0):
+
+|                                            |  INSERT |  LOOKUP |
+|--------------------------------------------|--------:|--------:|
+| C++ port (splitmix64)                      | 2409 ns |  978 ns |
+| Rust std::HashMap (SipHash)                | 2832 ns | 1740 ns |
+| **Rust std::HashMap + foldhash**           | 1361 ns |  628 ns |
+| **Rust hashbrown::HashMap (foldhash)**     | 1557 ns |  642 ns |
+
+The bottom two rows are within noise — confirming they're the
+same algorithm. Apples-to-apples ratios (C++ port / Rust):
+
+|                                          | INSERT     | LOOKUP    |
+|------------------------------------------|-----------:|----------:|
+| vs Rust std (SipHash)                    | 0.85x      | 0.56x     |
+| vs Rust std + foldhash                   | **1.77x**  | **1.56x** |
+| vs Rust hashbrown                        | **1.55x**  | **1.52x** |
+
+The real transpiled-vs-handwritten overhead is **~1.5x**, not
+"0.95x faster." Both under the 2x goal, but the goal was being
+hit for the wrong reason.
+
+#### Where the overhead actually comes from
+
+(Not callgrind-profiled at the level of detail Chapter 1 used for
+BTreeMap; left as future work.)
+
+Educated guesses, ranked by suspected cost:
+1. **`std::function`-shaped equality predicates** in `find_inner` /
+   `find_or_find_insert_index_inner`. The patcher templatizes the
+   `Eq` parameter to remove the indirect call, but the call site
+   inside the `for_in(BitMask)` loop still incurs lambda-copy
+   overhead per iteration. Rust's monomorphization here is total.
+2. **`ScopeGuard` overhead** on the `reserve`/`resize` paths. Each
+   guard is a wrapper struct with a `dropfn` lambda; LTO can sometimes
+   see through but not always.
+3. **The doubled `std::move(ctrl)` in `set_ctrl`** — for `Tag` (one
+   byte) it's a no-op for value but may inhibit some store coalescing.
+4. **`deref_if_pointer_like` wrappers** in transpiled member access.
+   On `size_t` they're no-ops at runtime but they're not always
+   inlined cleanly.
+
+The Rust hashbrown crate sees none of these.
+
+#### What we'd need to do to close the gap further
+
+Mostly transpiler work, not port work:
+- Drop `deref_if_pointer_like` for trivially-copyable types at
+  the call site. The transpiler emits it defensively because
+  it doesn't know whether the operand is a pointer wrapper.
+- Inline the `Eq` predicate into `find_inner` / `find_or_find_
+  insert_index_inner` instead of taking it by reference. Same
+  templatization the patcher already does but in the transpiler.
+- Avoid `ScopeGuard` wrapping where the body has no exception-
+  emitting calls.
+
+None of these are blockers for shipping. They'd be the work
+for a "Chapter 5.6: bench-driven transpiler optimizations" that
+doesn't yet exist.
+
+### 5.6 LTO is mandatory across the module boundary
+
+The original generated CMakeLists builds the library and the
+bench as separate targets linked through a static archive. Without
+LTO, the bench's call to `HashMap::insert` is a function call into
+the archive — no inlining, no escape analysis, no folding of
+`set_ctrl` / `record_item_insert_at` into the caller. Before LTO:
+
+```
+INSERT: 8787 ns/iter  (2.95x slower than Rust std)
+LOOKUP: 3478 ns/iter  (1.60x slower)
+```
+
+After enabling `-flto=thin` on **both** the library and the bench
+target (and ensuring the library has matching `-march=native`):
+
+```
+INSERT: 2606 ns/iter  (was 8787; ~3.4x faster)
+LOOKUP: 1093 ns/iter  (was 3478; ~3.2x faster)
+```
+
+The codified `target_compile_options(hashbrown_port PRIVATE
+-O3 -DNDEBUG -march=native -flto=thin)` lives in
+`patch_cmakelists_smoke_test`. Required for the bench numbers in
+§5.5 to be meaningful. If a future port has the same module-
+library-bench layout, copy this CMake stanza.
+
+### 5.7 Status summary
+
+- ✅ HashMap surface: ctor / with_capacity / insert / contains /
+  find / len / capacity / clear, plus growth via `new_()` and
+  resize correctness.
+- ✅ HashSet: facade over `HashMap<T, std::monostate>`.
+- ✅ smoke_test, set_smoke, debug_hash (10-config matrix) all pass.
+- ✅ Perf: under 2x vs Rust hashbrown apples-to-apples (1.55x
+  INSERT, 1.52x LOOKUP) after the bit→byte fix and LTO.
+- ⏳ Deferred: iter() iteration order tests; iter_mut; entry API
+  beyond stub; rehash/shrink_to_fit beyond happy path.
+- ⏳ Deferred: foldhash port (currently using splitmix64 stub for
+  integers, FNV for everything else).
+
