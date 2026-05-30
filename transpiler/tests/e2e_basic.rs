@@ -756,3 +756,171 @@ fn test_inline_rust_rewrite_then_check_passes() {
         String::from_utf8_lossy(&check.stderr)
     );
 }
+
+// ── #[cpp_ctor] lowering ────────────────────────────────
+
+#[test]
+fn test_inline_rust_cpp_ctor_lowers_to_real_ctor() {
+    // `#[cpp_ctor]` on a factory whose body is a single `Self { ... }`
+    // literal should emit a C++ constructor (no `static`, no return
+    // type, name = owner struct, body = member init list) — instead of
+    // the default `static Owner Owner::new_(args)` factory.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("ctor.hpp");
+    let source = r#"#if RUSTYCPP_RUST
+struct Calc {
+    limit: u32,
+    seen: u32,
+}
+
+impl Calc {
+    #[cpp_ctor]
+    fn new(limit: u32) -> Calc {
+        Calc { limit: limit, seen: 0u32 }
+    }
+
+    fn over(&self) -> bool {
+        self.seen >= self.limit
+    }
+}
+#endif
+/*RUSTYCPP:GEN-BEGIN id=demo.calc version=1 rust_sha256=deadbeef*/
+/*RUSTYCPP:GEN-END id=demo.calc*/
+"#;
+    std::fs::write(&file, source).unwrap();
+
+    let rewrite = transpiler_bin()
+        .arg("inline-rust")
+        .arg("--rewrite")
+        .arg("--files")
+        .arg(file.to_str().unwrap())
+        .output()
+        .expect("failed to run rewrite");
+    assert!(
+        rewrite.status.success(),
+        "rewrite stderr: {}",
+        String::from_utf8_lossy(&rewrite.stderr)
+    );
+
+    let content = std::fs::read_to_string(&file).unwrap();
+    // In-class declaration: `Calc(uint32_t limit);` — no `static`, no
+    // return type.
+    assert!(
+        content.contains("Calc(uint32_t limit);"),
+        "missing ctor decl: {content}"
+    );
+    assert!(
+        !content.contains("static Calc Calc::new_"),
+        "factory leaked through despite #[cpp_ctor]: {content}"
+    );
+    assert!(
+        !content.contains("static Calc new_"),
+        "factory leaked through despite #[cpp_ctor]: {content}"
+    );
+    // Out-of-line definition with member init list.
+    assert!(
+        content.contains("Calc::Calc(uint32_t limit)"),
+        "missing out-of-line ctor: {content}"
+    );
+    assert!(
+        content.contains(": limit(limit)"),
+        "missing init list head: {content}"
+    );
+    assert!(
+        content.contains("seen("),
+        "missing seen init: {content}"
+    );
+    // Regular method continues to emit normally.
+    assert!(
+        content.contains("bool over() const"),
+        "missing regular method: {content}"
+    );
+}
+
+#[test]
+fn test_inline_rust_cpp_ctor_no_fields() {
+    // An empty struct ctor should emit `Owner() {}`.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("empty_ctor.hpp");
+    let source = r#"#if RUSTYCPP_RUST
+struct Empty {
+}
+
+impl Empty {
+    #[cpp_ctor]
+    fn new() -> Empty {
+        Empty {}
+    }
+}
+#endif
+/*RUSTYCPP:GEN-BEGIN id=demo.empty version=1 rust_sha256=deadbeef*/
+/*RUSTYCPP:GEN-END id=demo.empty*/
+"#;
+    std::fs::write(&file, source).unwrap();
+
+    let rewrite = transpiler_bin()
+        .arg("inline-rust")
+        .arg("--rewrite")
+        .arg("--files")
+        .arg(file.to_str().unwrap())
+        .output()
+        .expect("failed to run rewrite");
+    assert!(
+        rewrite.status.success(),
+        "rewrite stderr: {}",
+        String::from_utf8_lossy(&rewrite.stderr)
+    );
+
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("Empty();"),
+        "missing empty ctor decl: {content}"
+    );
+    assert!(
+        content.contains("Empty::Empty() {}"),
+        "missing empty ctor def: {content}"
+    );
+}
+
+#[test]
+fn test_inline_rust_no_attribute_keeps_factory() {
+    // Without `#[cpp_ctor]`, factory-style `fn new` continues to lower
+    // to `static Owner Owner::new_(args)` — preserves backward
+    // compatibility for all existing call sites.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("factory.hpp");
+    let source = r#"#if RUSTYCPP_RUST
+struct Calc {
+    limit: u32,
+}
+
+impl Calc {
+    fn new(limit: u32) -> Calc {
+        Calc { limit: limit }
+    }
+}
+#endif
+/*RUSTYCPP:GEN-BEGIN id=demo.fact version=1 rust_sha256=deadbeef*/
+/*RUSTYCPP:GEN-END id=demo.fact*/
+"#;
+    std::fs::write(&file, source).unwrap();
+
+    let rewrite = transpiler_bin()
+        .arg("inline-rust")
+        .arg("--rewrite")
+        .arg("--files")
+        .arg(file.to_str().unwrap())
+        .output()
+        .expect("failed to run rewrite");
+    assert!(rewrite.status.success());
+
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("static Calc new_(uint32_t limit);"),
+        "factory decl missing without attr: {content}"
+    );
+    assert!(
+        !content.contains("Calc(uint32_t limit);"),
+        "ctor leaked through without attr: {content}"
+    );
+}
