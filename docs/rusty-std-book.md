@@ -2388,6 +2388,26 @@ Closed since last revision:
   forward-decl approach impossible (the merge is the right
   resolution). Test: `docs/vec_port/vec_extract_if_test.cpp`.
 
+  Root cause audit (TODO-005): commit `0680e4c` correctly isolated
+  the crash to a value-type mismatch, not sizeof/alignment or vtable
+  shape. The generated `ExtractIf<T, F, A>` body came from
+  `vec_port.vec.extract_if.cppm`, where `rusty::Vec<T, A>` resolves to
+  the hand-written compatibility alias in `include/rusty/vec.hpp`
+  (`VecLegacy`, fields `data_`, `size_`, `capacity_`). The object
+  passed by `Vec<T, A>::extract_if` is the transpiled module-local
+  `vec_port::Vec<T, A>` (`RawVec<T, A> buf` plus `len_field`), so the
+  old reinterpret-cast made `ExtractIf::new_` call `VecLegacy::set_len`
+  through the wrong layout. `drain` masked the same class of bug on
+  full-range tests because its destructor could short-circuit before
+  touching the parent vec; partial drain and `extract_if` both need the
+  real parent layout. The viable shape is therefore the `8a8154f`
+  merge: inject the aux-module content into `vec.cppm` under the same
+  C++20 module attachment and rewrite `rusty::Vec` to the local
+  transpiled `Vec`. This is now pinned by
+  `tests/vec_port/run_extract_if_check.sh`, which rebuilds the port
+  from rustc sources and runs `tests/vec_port/vec_extract_if_test.cpp`
+  under ASAN.
+
 Two ancillary fixes landed with the merge:
 - `slice_ext::range` in `include/rusty/slice.hpp` now also detects
   `r.end_value()` on `rusty::range<T>` (in addition to the `.end`
