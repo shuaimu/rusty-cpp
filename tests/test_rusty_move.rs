@@ -216,6 +216,28 @@ void test() {
     );
 }
 
+#[test]
+fn test_rusty_clone() {
+    let code = r#"
+#include <rusty/move.hpp>
+
+enum class Color : int { RED = 0, GREEN = 1, BLUE = 2 };
+
+// @safe
+void test() {
+    Color c = Color::RED;
+    Color d = rusty::clone(c);  // Explicit clone (mirrors Rust Clone::clone)
+    Color e = c;  // c is still valid after clone
+}
+"#;
+    let output = run_checker(code);
+    assert!(
+        output.contains("no violations") || !output.contains("error"),
+        "rusty::clone should not invalidate source. Output: {}",
+        output
+    );
+}
+
 // ============================================================================
 // Compare std::move vs rusty::move behavior
 // ============================================================================

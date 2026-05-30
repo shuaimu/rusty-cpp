@@ -94,4 +94,26 @@ constexpr T copy(const T& t) noexcept(std::is_nothrow_copy_constructible_v<T>) {
     return t;
 }
 
+/// @brief Explicitly clone a value (mirrors Rust's `Clone::clone`)
+///
+/// In Rust, `Clone::clone(&v)` creates a duplicate of `v`. For `Copy` types
+/// (trivially copyable enums, integers, etc.) this is identical to a copy.
+/// The rusty-cpp transpiler emits `rusty::clone(...)` defensively when it
+/// needs an owned value from a non-owned expression (e.g., when materializing
+/// an enum literal into a temporary that will be moved into a setter).
+///
+/// This is a thin alias for `rusty::copy` — same semantics, same codegen.
+/// Kept as a distinct name so generated code reads closer to the Rust source.
+///
+/// @note Only works for types that are Copy / copy-constructible.
+// @safe
+template<typename T>
+constexpr T clone(const T& t) noexcept(std::is_nothrow_copy_constructible_v<T>) {
+    static_assert(
+        std::is_copy_constructible_v<T>,
+        "rusty::clone requires a copyable type"
+    );
+    return t;
+}
+
 } // namespace rusty
