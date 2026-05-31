@@ -1,8 +1,11 @@
-# Cell / RefCell port — Phase A1 (transpile clean)
+# Cell / RefCell port — Phase A2 partial (namespace patches applied)
 
-Vendored `library/core/src/cell.rs` (2737 LOC) → `transpiled/cell_port/cell_port.cppm`.
-Transpiled with `--auto-namespace`: zero errors, 20 hand-port slots
-(Cell+RefCell+UnsafeCell+OnceCell+LazyCell live in this one file).
+Vendored `library/core/src/cell.rs` (2737 LOC) →
+`transpiled/cell_port/cell_port.cppm`. Phase A2 patches landed
+(transpiler emit had bare `using ::cmp::Foo;` for cross-crate
+imports; rewrote to `using rusty::cmp::Foo;` for cmp/fmt/marker/mem/
+ops/ptr/iter/hash. Also reordered `using BorrowCounter = ptrdiff_t;`
+to come before its first use).
 
 ## Pipeline summary
 
@@ -10,25 +13,30 @@ Transpiled with `--auto-namespace`: zero errors, 20 hand-port slots
 |---|---|
 | 1. Source acquisition | ✅ |
 | 2. Prep | ✅ |
-| 3. Transpile | ✅ Zero errors, 20 hand-slots |
-| 4. Patcher | ⏸️ |
-| 5. Build | ⏸️ |
+| 3. Transpile | ✅ |
+| 4. Patcher | 🟡 **Partial.** Namespace `using ::ns::` → `using rusty::ns::` rewrites applied + `BorrowCounter` alias reorder. Hits next-layer issue: Rust trait names (`Debug`, `Display`, `CoerceUnsized`, `Deref`, `DerefMut`, `Destruct`, `PhantomData`, `Unsize`, etc.) don't exist as C++ types in `rusty::fmt::`, `rusty::ops::`, `rusty::marker::`. |
+| 5. Build | 🔴 Blocked on the trait-stub work above. |
+
+## Remaining Phase B work
+
+The `using rusty::ops::Deref;` etc. fail because Rust's `Deref` etc.
+are trait declarations that don't have a C++ analogue. They're
+referenced for SFINAE / variance markers but never invoked at runtime.
+
+Two paths to close Phase B:
+1. **Stub the trait names** in `rusty/ops.hpp` / `rusty/marker.hpp` /
+   `rusty/fmt.hpp` as empty marker types. Each is ~5 lines.
+2. **Comment out the `using` declarations** in cell_port that pull in
+   undefined Rust traits (the body of cell_port doesn't actually use
+   them — they're decorative from the rustc source's `use ops::*;`).
+
+Path 2 is faster; Path 1 is cleaner long-term and would unblock
+similar issues in rc_port / arc_port (they reference the same trait
+names from `core::ops::*`).
+
+Predicted effort: **2-3 days** for full Phase B (covering Path 1 +
+the per-trait stub declarations + cell_port's own internal hand-ports).
 
 ## Reproducing
 
-```bash
-RUSTSRC=$(ls -d ~/.rustup/toolchains/*/lib/rustlib/src/rust/library/core/src/ | head -1)
-mkdir -p /tmp/cell_port/cell_crate/src
-cp $RUSTSRC/cell.rs /tmp/cell_port/cell_crate/src/lib.rs
-cp docs/cell_port/Cargo.toml.template /tmp/cell_port/cell_crate/Cargo.toml
-bash docs/cell_port/prep.sh /tmp/cell_port/cell_crate/src/lib.rs
-./target/release/rusty-cpp-transpiler --crate /tmp/cell_port/cell_crate/Cargo.toml \
-    --output-dir /tmp/cell_port/cpp_out --auto-namespace
-cp /tmp/cell_port/cpp_out/*.cppm transpiled/cell_port/
-```
-
-## Predicted Phase B effort
-
-Per §2.8: **1-2 days** — small file, mostly bookkeeping. Hand-written
-`refcell.hpp` / `cell.hpp` / `unsafe_cell.hpp` already cover the basic
-cases; transpiling is opportunistic per Tier 3.
+See §6.9 in the rusty-std-book.

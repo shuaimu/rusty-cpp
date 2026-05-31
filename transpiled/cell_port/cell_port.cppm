@@ -96,15 +96,7 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Clone: dispatches to .clone() if available, otherwise copy-constructs.
-template<typename T>
-auto clone(const T& value) {
-if constexpr (requires { value.clone(); }) {
-return value.clone();
-} else {
-return value;
-}
-}
+// Local clone() template removed.
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -333,8 +325,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
-return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
+rusty::Result<Value, E> visit_byte_buf(auto&& value) {
+(void)value; return rusty::Result<Value, E>::Err(E{});
 }
 
 template<typename E>
@@ -3661,40 +3653,40 @@ export template<typename T>
 struct RefCell;
 export template<typename T>
 struct SyncUnsafeCell;
-constexpr BorrowCounter UNUSED = 0;
 using BorrowCounter = ptrdiff_t;
+constexpr BorrowCounter UNUSED = 0;
 [[noreturn]] void panic_already_borrowed(const auto& err);
 [[noreturn]] void panic_already_mutably_borrowed(const auto& err);
 bool is_writing(const auto& x);
 bool is_reading(const auto& x);
 void assert_coerce_unsized(rusty::UnsafeCell<const int32_t&> a, SyncUnsafeCell<const int32_t&> b, rusty::Cell<const int32_t&> c, rusty::RefCell<const int32_t&> d);
 
-using ::cmp::Ordering;
+using rusty::cmp::Ordering;
 
 // Rust-only namespace re-export: using fmt;
-using ::fmt::Debug;
-using ::fmt::Display;
+using rusty::fmt::Debug;
+using rusty::fmt::Display;
 
-using ::marker::Destruct;
-using ::marker::PhantomData;
-using ::marker::Unsize;
+using rusty::marker::Destruct;
+using rusty::marker::PhantomData;
+using rusty::marker::Unsize;
 
 // Rust-only namespace re-export: using mem;
-using ::mem::ManuallyDrop;
+using rusty::mem::ManuallyDrop;
 
 // Rust-only namespace re-export: using ops;
-using ::ops::CoerceUnsized;
-using ::ops::Deref;
-using ::ops::DerefMut;
-using ::ops::DerefPure;
-using ::ops::DispatchFromDyn;
+using rusty::ops::CoerceUnsized;
+using rusty::ops::Deref;
+using rusty::ops::DerefMut;
+using rusty::ops::DerefPure;
+using rusty::ops::DispatchFromDyn;
 
 using ::panic::const_panic;
 
 using ::pin::PinCoerceUnsized;
 
 // Rust-only namespace re-export: using ptr;
-using ::ptr::NonNull;
+using rusty::ptr::NonNull;
 
 // Rust-only namespace re-export: using range;
 
