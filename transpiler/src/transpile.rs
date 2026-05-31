@@ -112,6 +112,18 @@ pub struct TranspileOptions {
     /// module tree). Empty in single-file mode; populated by main.rs
     /// before per-file transpilation begins.
     pub crate_module_names: Vec<String>,
+    /// Optional C++ namespace to wrap all exported items in. When
+    /// `Some("foo::bar")`, codegen emits `export namespace foo::bar { … }`
+    /// around the module's items (in module mode); `None` keeps the
+    /// legacy flat-export behavior. Used to disambiguate sibling
+    /// modules that export same-named types — see rusty-std-book §2.10.
+    pub cxx_namespace: Option<String>,
+    /// When true, auto-derive `cxx_namespace` from the module name
+    /// (replace `.` with `::`) AND emit namespace aliases for each
+    /// imported sibling module so path-qualified emit shapes resolve
+    /// to the sibling's namespace. Option 2 in rusty-std-book §2.10's
+    /// fix matrix — the spec-correct rendering of Rust's module tree.
+    pub auto_namespace: bool,
 }
 
 pub fn load_cpp_module_symbol_index_files(
@@ -457,6 +469,8 @@ pub fn transpile_full_with_options(
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
+    codegen.set_cxx_namespace(options.cxx_namespace.clone());
+    codegen.set_auto_namespace(options.auto_namespace);
     codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);
     codegen.set_prefer_rusty_view_aliases(options.prefer_rusty_view_aliases);
     codegen.set_interface_traits(options.interface_traits);
