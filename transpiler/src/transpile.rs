@@ -52,7 +52,7 @@ fn default_cpp_module_symbol_index_version() -> u32 {
     1
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranspileOptions {
     /// Opt-in diagnostic-only prototype for by-value SCC cycle-breaking planning.
     /// Default is `false`.
@@ -68,7 +68,12 @@ pub struct TranspileOptions {
     /// In module mode, prefer `import std;` over explicit standard-header includes.
     /// Requires Stage D toolchain setup that provides a prebuilt `std` module.
     pub use_import_std_in_modules: bool,
-    /// Prefer `rusty::Unit` alias spelling in generated output.
+    /// Prefer `rusty::Unit` alias spelling for Rust `()` in generated
+    /// output. Defaults to `true` (see `impl Default`) — the two C++
+    /// types are identical via `using Unit = std::tuple<>;` but the
+    /// alias reads cleaner in generated DSL code. Set `false` (or pass
+    /// `--prefer-std-tuple-alias` on the CLI) to keep the legacy
+    /// `std::tuple<>` spelling.
     pub prefer_rusty_unit_alias: bool,
     /// Prefer `rusty::StrView` / `rusty::Span<...>` spellings in generated output.
     pub prefer_rusty_view_aliases: bool,
@@ -124,6 +129,36 @@ pub struct TranspileOptions {
     /// to the sibling's namespace. Option 2 in rusty-std-book §2.10's
     /// fix matrix — the spec-correct rendering of Rust's module tree.
     pub auto_namespace: bool,
+}
+
+impl Default for TranspileOptions {
+    fn default() -> Self {
+        Self {
+            by_value_cycle_breaking_prototype: false,
+            cpp_module_symbol_index: None,
+            cpp_module_symbol_index_sources: Vec::new(),
+            external_crate_module_aliases: HashMap::new(),
+            use_import_std_in_modules: false,
+            // Default to the `rusty::Unit` alias spelling (replacing
+            // `std::tuple<>` post-emission). The two C++ types are
+            // identical via `using Unit = std::tuple<>;`, but the alias
+            // reads cleaner in DSL-generated code and matches the
+            // hand-written rusty-cpp surface. Set
+            // `prefer_rusty_unit_alias: false` (or pass
+            // `--prefer-std-tuple-alias` on the CLI) for the legacy
+            // `std::tuple<>` spelling.
+            prefer_rusty_unit_alias: true,
+            prefer_rusty_view_aliases: false,
+            interface_traits: false,
+            cross_file_enums: Vec::new(),
+            cross_file_impl_blocks: Vec::new(),
+            cross_file_structs: Vec::new(),
+            cross_file_type_aliases: Vec::new(),
+            crate_module_names: Vec::new(),
+            cxx_namespace: None,
+            auto_namespace: false,
+        }
+    }
 }
 
 pub fn load_cpp_module_symbol_index_files(
