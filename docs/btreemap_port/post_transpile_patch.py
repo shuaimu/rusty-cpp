@@ -4061,6 +4061,40 @@ int main() {
 """
 
 
+def drop_redundant_rusty_clone(path: Path) -> None:
+    """Drop the local `rusty::clone` template the transpiler emits at
+    the top of every module — it conflicts with the canonical
+    `rusty::clone` in `include/rusty/move.hpp` (both are valid overloads
+    for primitive types, leading to "call to 'clone' is ambiguous" at
+    consumer instantiation time).
+
+    The local `rusty::clone` was added before move.hpp had one; now
+    redundant.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: local rusty::clone removed (canonical lives in move.hpp)"
+    if sentinel in src:
+        return
+    # Match: `// Clone: dispatches…\ntemplate<typename T>\nauto clone(const T& value) { … }\n`
+    block = (
+        "// Clone: dispatches to .clone() if available, otherwise copy-constructs.\n"
+        "template<typename T>\n"
+        "auto clone(const T& value) {\n"
+        "if constexpr (requires { value.clone(); }) {\n"
+        "return value.clone();\n"
+        "} else {\n"
+        "return value;\n"
+        "}\n"
+        "}\n"
+    )
+    if block in src:
+        src = src.replace(block, sentinel + "\n")
+        path.write_text(src)
+        print(f"  dropped local rusty::clone in: {path.name}")
+    else:
+        print(f"  no local rusty::clone block in: {path.name}")
+
+
 def fix_template_args_primary_scope(path: Path) -> None:
     """Move the `template<typename T> struct __TemplateArgs;` primary
     declaration from module purview into the namespace wrap, matching
@@ -4779,6 +4813,11 @@ def main() -> int:
     rusty_include_dir = Path(__file__).resolve().parent.parent.parent / "include"
 
     print(f"[1/6] patching {internal.name}")
+    # Apply the local-clone drop to every transpiled .cppm — each file
+    # gets a copy from the transpiler's prelude.
+    for p in (internal, map_mod, map_entry, set_mod, set_entry):
+        if p.exists():
+            drop_redundant_rusty_clone(p)
     patch_internal(internal)
     # Phase B: replace stubs with real impls. Runs AFTER patch_internal
     # so that on fresh transpile output we first install the stub
