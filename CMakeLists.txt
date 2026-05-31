@@ -108,6 +108,24 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
+# binary_heap_port — transpiled rustc BinaryHeap (priority queue),
+# exposed as a C++20 module. Single .cppm vendored from the
+# transpiler+patcher pipeline (docs/binary_heap_port/).
+# ──────────────────────────────────────────────────────────────────────
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    file(GLOB BINARY_HEAP_PORT_CPPM transpiled/binary_heap_port/*.cppm)
+    add_library(binary_heap_port STATIC)
+    target_sources(binary_heap_port
+        PUBLIC FILE_SET CXX_MODULES FILES ${BINARY_HEAP_PORT_CPPM}
+    )
+    target_include_directories(binary_heap_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(binary_heap_port PUBLIC cxx_std_23)
+    target_compile_options(binary_heap_port PRIVATE -O3 -DNDEBUG -march=native )
+    target_link_libraries(binary_heap_port PUBLIC vec_port)
+endif()
+
+# ──────────────────────────────────────────────────────────────────────
 # rusty_async — first hand-written rusty header converted to a C++20
 # module (was include/rusty/async.hpp, now include/rusty/async.cppm).
 # Migration goal: replace the legacy VecLegacy-backed Executor task store

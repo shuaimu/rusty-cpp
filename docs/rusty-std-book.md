@@ -79,6 +79,12 @@ Sibling docs:
   - [5.5 Performance: honest disclosure about the hasher](#55-performance-honest-disclosure-about-the-hasher)
   - [5.6 LTO is mandatory across the module boundary](#56-lto-is-mandatory-across-the-module-boundary)
   - [5.7 Status summary](#57-status-summary)
+- [Chapter 6 — Tier 2 collection ports (BinaryHeap / VecDeque / LinkedList)](#chapter-6--tier-2-collection-ports-binaryheap--vecdeque--linkedlist)
+  - [6.1 `collections::BinaryHeap`](#61-collectionsbinaryheap--single-file-priority-queue)
+  - [6.2 `collections::VecDeque`](#62-collectionsvecdeque--multi-file-ring-buffer)
+  - [6.3 `collections::LinkedList`](#63-collectionslinkedlist--intrusive-doubly-linked)
+  - [6.4 What's still on deck (Tier 2 → Tier 1 follow-up)](#64-whats-still-on-deck-tier-2--tier-1-follow-up)
+  - [6.5 Recipe used across all three Tier-2 ports](#65-recipe-used-across-all-three-tier-2-ports)
 
 Each completed port will graduate into its own chapter (parallel to
 Chapter 1 for BTreeMap). Chapter 3's tables stay as the live
@@ -2179,12 +2185,12 @@ structures. Every subsequent port reuses pieces of this work.
 Useful collection types that **don't yet exist** in `include/rusty/`
 or where the existing hand-written version is a thin wrapper.
 
-| Type | rustc source | Hand-written? | Difficulty | Why port |
-|---|---|---|---|---|
-| **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
-| **`VecDeque<T, A>`** | `library/alloc/src/collections/vec_deque/` | ✅ `vecdeque.hpp` | Medium — ring buffer with separate head/tail; wraparound arithmetic; some unsafe but not exotic | Hand-written exists but transpiling locks in Rust's exact wraparound semantics + `drain` / `swap_remove_back`. Common in BFS / queue workloads. |
-| **`LinkedList<T>`** | `library/alloc/src/collections/linked_list.rs` | ❌ none | Medium — doubly-linked with raw-pointer plumbing; cursor API uses unsafe heavily | Net-new functionality. Rarely used compared to `Vec`/`VecDeque`, but completes the collections family. Tests the transpiler against intrusive-list shapes. |
-| **`HashSet<T, S>`** | `library/std/src/collections/hash/set.rs` | ✅ `hashset.hpp` | Low — ~free once `HashMap` is done (it's literally `HashMap<T, ()>` underneath) | Lands automatically with HashMap. |
+| Type | rustc source | Hand-written? | Difficulty | Status | Why port |
+|---|---|---|---|---|---|
+| **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | 🟡 **Phase A1** — transpile clean, partial compile. See `docs/binary_heap_port/STATUS.md` and §5.1. | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
+| **`VecDeque<T, A>`** | `library/alloc/src/collections/vec_deque/` | ✅ `vecdeque.hpp` | Medium — ring buffer with separate head/tail; wraparound arithmetic; some unsafe but not exotic | 🟡 **Phase A1** — transpile clean. See `docs/vec_deque_port/STATUS.md` and §5.2. | Hand-written exists but transpiling locks in Rust's exact wraparound semantics + `drain` / `swap_remove_back`. Common in BFS / queue workloads. |
+| **`LinkedList<T>`** | `library/alloc/src/collections/linked_list.rs` | ❌ none | Medium — doubly-linked with raw-pointer plumbing; cursor API uses unsafe heavily | 🟡 **Phase A1** — transpile clean. See `docs/linked_list_port/STATUS.md` and §5.3. | Net-new functionality. Rarely used compared to `Vec`/`VecDeque`, but completes the collections family. Tests the transpiler against intrusive-list shapes. |
+| **`HashSet<T, S>`** | `library/std/src/collections/hash/set.rs` | ✅ `hashset.hpp` | Low — ~free once `HashMap` is done (it's literally `HashMap<T, ()>` underneath) | ✅ **Done** as part of hashbrown_port. | Lands automatically with HashMap. |
 
 ### 3.4 Tier 3 — Worth porting opportunistically
 
@@ -3337,3 +3343,129 @@ library-bench layout, copy this CMake stanza.
 - ⏳ Deferred: foldhash port (currently using splitmix64 stub for
   integers, FNV for everything else).
 
+
+## Chapter 6 — Tier 2 collection ports (BinaryHeap / VecDeque / LinkedList)
+
+This chapter tracks the three Tier-2 collection ports started in
+follow-up to BTreeMap, Vec, and HashMap. All three were scaffolded
+through Phase A1 (vendor + transpile) in a single session. Each one
+needs subsequent Phase A2 → C work (post-transpile patcher iteration,
+hand-ports for the remaining error clusters, smoke test, bench)
+following Chapter 2's playbook.
+
+### 6.1 `collections::BinaryHeap` — single-file priority queue
+
+**Source**: `library/alloc/src/collections/binary_heap/mod.rs`
+(2038 LOC, single file). Net-new — no hand-written `rusty::BinaryHeap`
+existed before.
+
+**Status**: Phase A1 done (`transpile clean, 0 errors, 5 hand-port
+slots`). Partial Phase A2 — first compile produces ~6 error clusters
+documented in [`docs/binary_heap_port/STATUS.md`](binary_heap_port/STATUS.md):
+
+| Cluster | Shape | Patcher rule needed |
+|---|---|---|
+| A | `const Option<NonZero<usize>>` not a literal type for `constexpr` | lower to non-`constexpr` static const |
+| B | `std::collections::TryReserveError` not mapped to `rusty::collections::TryReserveError` | s/std::collections/rusty::collections/g (two sites) |
+| C | One `rusty::Vec{}` default-construct missed by the bulk `rusty::Vec → ::Vec` rename | regex with no template args |
+| D | `rusty::ptr::swap` not implemented; rustc uses `core::ptr::swap` | add to `rusty/ptr.hpp` or substitute `std::swap` |
+| E | bare `usize` identifier (one site) | s/\busize\b/size_t/ |
+| F | "T does not refer to a value" emit bug at line 4538 | trace + hand-port like BTreeMap Cluster A |
+
+Predicted effort to Phase B: **1–2 days** (per §2.8 small-port
+estimate). Predicted effort to Phase C: ½ day after that — heap surface
+is small (`push`/`pop`/`peek`/`len`).
+
+The vendored .cppm lives at `transpiled/binary_heap_port/`; CMake
+target `binary_heap_port` is wired (clang-only, depends on `vec_port`).
+
+### 6.2 `collections::VecDeque` — multi-file ring buffer
+
+**Source**: `library/alloc/src/collections/vec_deque/` (10 .rs files,
+5527 LOC excluding `tests.rs`). Hand-written `rusty::VecDeque` exists
+in `include/rusty/vecdeque.hpp`; the transpiled port will eventually
+retire it following the [VecLegacy retirement playbook](#chapter-4--allocvecvec-in-progress).
+
+**Status**: Phase A1 done. Transpiled to 10 `.cppm` files (one per
+Rust submodule: drain, extract_if, into_iter, iter, iter_mut, macros,
+spec_extend, spec_from_iter, splice + umbrella). 14 hand-port slots
+across 3 files — mostly the `Item` associated-type alias markers
+(decorative). See [`docs/vec_deque_port/STATUS.md`](vec_deque_port/STATUS.md).
+
+Predicted effort to Phase B: **3–5 days** — multi-file is the lift.
+The patcher will be similar in shape to vec_port's. Phase B → C the
+shape of the existing `rusty::VecDeque` API can guide test coverage.
+
+Replaces `include/rusty/vecdeque.hpp` once Phase B clears.
+
+### 6.3 `collections::LinkedList` — intrusive doubly-linked
+
+**Source**: `library/alloc/src/collections/linked_list.rs` (2255 LOC,
+single file). Net-new — no hand-written `rusty::LinkedList`. Brings
+the cursor API (`CursorMut::insert_before`, etc.) that `std::list`
+lacks.
+
+**Status**: Phase A1 done. Single `.cppm` file, 1 hand-port slot. See
+[`docs/linked_list_port/STATUS.md`](linked_list_port/STATUS.md).
+
+Predicted effort to Phase B: **2–3 days** — single-file but the
+intrusive raw-pointer plumbing inside the cursor API will need careful
+audit. Drop ordering for the head/tail/length triplet under
+`mem::take`-shaped operations is where the BTreeMap-style "ref-returning
+let bindings" issue could resurface.
+
+Dependencies: just `rusty::Box` (hand-written). No vec_port dep.
+
+### 6.4 What's still on deck (Tier 2 → Tier 1 follow-up)
+
+- `core::str` + `alloc::string` — Phase A1 blocked on `Searcher` trait
+  + `Chars/CharIndices` cross-port dependencies. See
+  [`docs/string_port/STATUS.md`](string_port/STATUS.md) and
+  [`docs/core_str_port/STATUS.md`](core_str_port/STATUS.md). These
+  remain the next-largest user-value ports per §3.2.
+- `Rc<T>` / `Arc<T>` retranspile — Tier 3 in §3.4. Would close the
+  smart-pointer family. Hand-written versions are workable; transpile
+  is opportunistic.
+- Tier 4 items (`OnceCell`, `CString`, `Path`, etc.) — defer per §3.5.
+
+### 6.5 Recipe used across all three Tier-2 ports
+
+Synthesizes the playbook (§2.3) into a per-port checklist:
+
+```bash
+# 1. Vendor rustc source
+RUSTSRC=$(ls -d ~/.rustup/toolchains/*/lib/rustlib/src/rust/library/alloc/src/collections/<PORT>/ | head -1)
+mkdir -p /tmp/<PORT>_port/<PORT>_crate/src
+cp $RUSTSRC/*.rs /tmp/<PORT>_port/<PORT>_crate/src/   # or just mod.rs / linked_list.rs
+# Rename mod.rs → lib.rs if multi-file; otherwise the single .rs becomes lib.rs
+cp docs/<PORT>_port/Cargo.toml.template /tmp/<PORT>_port/<PORT>_crate/Cargo.toml
+
+# 2. Preprocess (strip tests, normalize std:: paths)
+bash docs/<PORT>_port/prep.sh /tmp/<PORT>_port/<PORT>_crate/src/{lib.rs OR .}
+
+# 3. Transpile with --auto-namespace so internal types don't collide
+./target/release/rusty-cpp-transpiler \
+    --crate /tmp/<PORT>_port/<PORT>_crate/Cargo.toml \
+    --output-dir /tmp/<PORT>_port/cpp_out \
+    --auto-namespace
+
+# 4. Vendor the cppm output
+cp /tmp/<PORT>_port/cpp_out/*.cppm transpiled/<PORT>_port/
+
+# 5. Apply standard patches (the VecLegacy-retirement boilerplate):
+#    - rusty::Vec<…> → ::Vec<…>
+#    - visit_byte_buf(rusty::Vec<uint8_t>) → visit_byte_buf(auto&&), stub body
+#    - delete local `template<typename T> auto clone(...)` (collides with rusty::clone)
+#    - delete `using rusty::Vec;` lines
+#    - add `import vec_port.vec;` (+ submodule imports as needed)
+#    - vec::IntoIter / vec::Drain → ::IntoIter / ::Drain
+
+# 6. Wire into CMakeLists.txt as a STATIC library with FILE_SET CXX_MODULES
+#    (clang-only, link vec_port)
+
+# 7. Iterate on remaining compile errors using the patcher script pattern
+#    (see docs/btreemap_port/post_transpile_patch.py for the canonical example)
+```
+
+Once a port reaches "library builds clean," a single smoke test
+exercising the most-used public methods is enough to call Phase C done.
