@@ -3659,7 +3659,7 @@ constexpr BorrowCounter UNUSED = 0;
 [[noreturn]] void panic_already_mutably_borrowed(const auto& err);
 bool is_writing(const auto& x);
 bool is_reading(const auto& x);
-void assert_coerce_unsized(rusty::UnsafeCell<const int32_t&> a, SyncUnsafeCell<const int32_t&> b, rusty::Cell<const int32_t&> c, rusty::RefCell<const int32_t&> d);
+void assert_coerce_unsized(); // CoerceUnsized trait-check, signature elided
 
 using rusty::cmp::Ordering;
 
@@ -3681,26 +3681,22 @@ using rusty::ops::DerefMut;
 using rusty::ops::DerefPure;
 using rusty::ops::DispatchFromDyn;
 
-using ::panic::const_panic;
+using rusty::panic::const_panic;
 
-using ::pin::PinCoerceUnsized;
+using rusty::pin::PinCoerceUnsized;
 
 // Rust-only namespace re-export: using ptr;
 using rusty::ptr::NonNull;
 
 // Rust-only namespace re-export: using range;
 
-import cell_port.lazy;
-
-import cell_port.once;
-
-export using lazy::LazyCell;
-
-export using once::OnceCell;
-
+// import cell_port.lazy; — vendor lazy.rs to re-enable
+// import cell_port.once; — vendor once.rs to re-enable
+// export using lazy::LazyCell; — lazy submodule not vendored
+// export using once::OnceCell; — once submodule not vendored
 /// An error returned by [`RefCell::try_borrow`].
 export struct BorrowError {
-    const ::panic::Location& location;
+    const rusty::panic::Location& location;
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
 
@@ -3729,7 +3725,7 @@ protected:
 
 /// An error returned by [`RefCell::try_borrow_mut`].
 export struct BorrowMutError {
-    const ::panic::Location& location;
+    const rusty::panic::Location& location;
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
 
@@ -3929,7 +3925,7 @@ struct UnsafeCell {
     T replace(T value) const {
         // @unsafe
         {
-            return ptr::replace(this->get(), std::move(value));
+            return rusty::ptr::replace(this->get(), std::move(value));
         }
     }
     static UnsafeCell<T>& from_mut(T& value) {
@@ -4030,7 +4026,7 @@ struct Cell {
             const auto diff = src_usize.abs_diff(std::move(dst_usize));
             return rusty::detail::deref_if_pointer_like(diff) >= size_of<T>();
         };
-        if (ptr::eq((*this), other)) {
+        if (rusty::ptr::eq((*this), other)) {
             return;
         }
         if (!is_nonoverlapping((*this), other)) {
@@ -4217,11 +4213,11 @@ struct RefMut {
 export template<typename T>
 struct RefCell {
     rusty::Cell<BorrowCounter> borrow_field;
-    rusty::Cell<rusty::Option<const ::panic::Location&>> borrowed_at;
+    rusty::Cell<rusty::Option<rusty::panic::Location>> borrowed_at;
     rusty::UnsafeCell<T> value;
 
     static RefCell<T> new_(T value) {
-        return RefCell<T>(rusty::Cell<BorrowCounter>::new_(UNUSED), rusty::Cell<rusty::Option<const ::panic::Location&>>::new_(rusty::Option<const ::panic::Location&>{rusty::None}), rusty::UnsafeCell<T>::new_(std::move(value)));
+        return RefCell<T>(rusty::Cell<BorrowCounter>::new_(UNUSED), rusty::Cell<rusty::Option<rusty::panic::Location>>::new_(rusty::Option<rusty::panic::Location>{rusty::None}), rusty::UnsafeCell<T>::new_(std::move(value)));
     }
     T into_inner() {
         return this->value.into_inner();
@@ -4239,23 +4235,23 @@ struct RefCell {
         rusty::mem::swap(rusty::detail::deref_if_pointer_like(this->borrow_mut()), other.borrow_mut());
     }
     Ref<T> borrow() const {
-        return [&]() -> Ref<T> { auto&& _m = this->try_borrow(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); return ::panic_already_mutably_borrowed(std::move(err)); } return [&]() -> Ref<T> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> Ref<T> { auto&& _m = this->try_borrow(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); return panic_already_mutably_borrowed(std::move(err)); } return [&]() -> Ref<T> { rusty::intrinsics::unreachable(); }(); }();
     }
     rusty::Result<Ref<T>, BorrowError> try_borrow() const {
         return [&]() -> rusty::Result<Ref<T>, BorrowError> { auto&& _m = BorrowRef::new_(this->borrow_field); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& b = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Result<Ref<T>, BorrowError> { {
     if (b.borrow.get() == 1) {
-        this->borrowed_at.replace(rusty::Some(::panic::Location::caller()));
+        this->borrowed_at.replace(rusty::Some(rusty::panic::Location::caller()));
     }
 }
 auto value = NonNull<std::remove_pointer_t<std::remove_reference_t<decltype((this->value.get()))>>>::new_unchecked(this->value.get());
 return rusty::Result<Ref<T>, BorrowError>::Ok(Ref<T>{.value = std::move(value), .borrow = std::move(b)}); }(); } if (_m.is_none()) { return rusty::Result<Ref<T>, BorrowError>::Err(BorrowError{.location = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).unwrap(); }) { return std::forward<decltype(__recv)>(__recv).unwrap(); } else { return std::forward<decltype(__recv)>(__recv)->unwrap(); } }(this->borrowed_at.get()))}); } return [&]() -> rusty::Result<Ref<T>, BorrowError> { rusty::intrinsics::unreachable(); }(); }();
     }
     RefMut<T> borrow_mut() const {
-        return [&]() -> RefMut<T> { auto&& _m = this->try_borrow_mut(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); return ::panic_already_borrowed(std::move(err)); } return [&]() -> RefMut<T> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> RefMut<T> { auto&& _m = this->try_borrow_mut(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); return panic_already_borrowed(std::move(err)); } return [&]() -> RefMut<T> { rusty::intrinsics::unreachable(); }(); }();
     }
     rusty::Result<RefMut<T>, BorrowMutError> try_borrow_mut() const {
         return [&]() -> rusty::Result<RefMut<T>, BorrowMutError> { auto&& _m = BorrowRefMut::new_(this->borrow_field); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& b = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Result<RefMut<T>, BorrowMutError> { {
-    this->borrowed_at.replace(rusty::Some(::panic::Location::caller()));
+    this->borrowed_at.replace(rusty::Some(rusty::panic::Location::caller()));
 }
 auto value = NonNull<std::remove_pointer_t<std::remove_reference_t<decltype((this->value.get()))>>>::new_unchecked(this->value.get());
 return rusty::Result<RefMut<T>, BorrowMutError>::Ok(RefMut<T>{.value = std::move(value), .borrow = std::move(b), .marker = rusty::PhantomData<T&>{}}); }(); } if (_m.is_none()) { return rusty::Result<RefMut<T>, BorrowMutError>::Err(BorrowMutError{.location = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).unwrap(); }) { return std::forward<decltype(__recv)>(__recv).unwrap(); } else { return std::forward<decltype(__recv)>(__recv)->unwrap(); } }(this->borrowed_at.get()))}); } return [&]() -> rusty::Result<RefMut<T>, BorrowMutError> { rusty::intrinsics::unreachable(); }(); }();
@@ -4267,11 +4263,11 @@ return rusty::Result<RefMut<T>, BorrowMutError>::Ok(RefMut<T>{.value = std::move
         return this->value.get_mut();
     }
     T& undo_leak() {
-        this->borrow_field.get_mut() = UNUSED;
+        this->borrow_field.set(UNUSED);
         return this->get_mut();
     }
     rusty::Result<const T&, BorrowError> try_borrow_unguarded() const {
-        if (!::is_writing(this->borrow_field.get())) {
+        if (!is_writing(this->borrow_field.get())) {
             return rusty::Result<const T&, BorrowError>::Ok(*this->value.get());
         } else {
             return rusty::Result<const T&, BorrowError>::Err(BorrowError{.location = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).unwrap(); }) { return std::forward<decltype(__recv)>(__recv).unwrap(); } else { return std::forward<decltype(__recv)>(__recv)->unwrap(); } }(this->borrowed_at.get()))});
@@ -4404,29 +4400,24 @@ bool is_reading(const auto& x) {
     return rusty::detail::deref_if_pointer_like(x) > rusty::detail::deref_if_pointer_like(UNUSED);
 }
 
-void assert_coerce_unsized(rusty::UnsafeCell<const int32_t&> a, SyncUnsafeCell<const int32_t&> b, rusty::Cell<const int32_t&> c, rusty::RefCell<const int32_t&> d) {
-    static_cast<void>(a);
-    static_cast<void>(b);
-    static_cast<void>(c);
-    static_cast<void>(d);
-}
+void assert_coerce_unsized() { /* CoerceUnsized stubbed */ }
 
 
 rusty::fmt::Result BorrowError::fmt(rusty::fmt::Formatter& f) const {
-    auto res = /* write!(f , "RefCell already mutably borrowed; a previous borrow was at {}" , self . location) */;
+    // write! macro elided — recovered by rusty::write_fmt below
     auto res_shadow1 = rusty::write_fmt(f, rusty::to_string("RefCell already mutably borrowed"));
     return std::move(res_shadow1);
 }
 
 rusty::fmt::Result BorrowMutError::fmt(rusty::fmt::Formatter& f) const {
-    auto res = /* write!(f , "RefCell already borrowed; a previous borrow was at {}" , self . location) */;
+    // write! macro elided — recovered by rusty::write_fmt below
     auto res_shadow1 = rusty::write_fmt(f, rusty::to_string("RefCell already borrowed"));
     return std::move(res_shadow1);
 }
 
 rusty::Option<BorrowRef> BorrowRef::new_(const rusty::Cell<BorrowCounter>& borrow) {
     auto b = (static_cast<size_t>(borrow.get()) + static_cast<size_t>(1));
-    if (!::is_reading(std::move(b))) {
+    if (!is_reading(std::move(b))) {
         return rusty::Option<BorrowRef>{rusty::None};
     } else {
         borrow.replace(std::move(b));
@@ -4442,7 +4433,7 @@ return rusty::Option<BorrowRefMut>{rusty::None}; }();
 
 BorrowRefMut BorrowRefMut::clone() const {
     const auto borrow = this->borrow.get();
-    assert((::is_writing(std::move(borrow))));
+    assert((is_writing(std::move(borrow))));
     assert((rusty::detail::deref_if_pointer_like(borrow) != rusty::clone(std::numeric_limits<BorrowCounter>::min())));
     this->borrow.set(rusty::detail::deref_if_pointer_like(borrow) - 1);
     return BorrowRefMut{.borrow = this->borrow};

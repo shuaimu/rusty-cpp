@@ -12,6 +12,23 @@ struct Error {};
 
 struct Write {};
 
+// Stub declarations for Rust's `core::fmt` traits.
+//
+// `Debug`, `Display`, etc. appear in transpiled rustc source as
+// `using fmt::Debug;` to import the trait name. In C++ they have no
+// runtime analogue (Rust dispatches through vtables; we use ad-hoc
+// `T::fmt(Formatter&)` member calls — see DisplayRef below). Empty
+// stubs are enough to make the `using` declarations resolve.
+template<typename T = void> struct Debug {};
+template<typename T = void> struct Display {};
+template<typename T = void> struct Binary {};
+template<typename T = void> struct Octal {};
+template<typename T = void> struct LowerHex {};
+template<typename T = void> struct UpperHex {};
+template<typename T = void> struct LowerExp {};
+template<typename T = void> struct UpperExp {};
+template<typename T = void> struct Pointer {};
+
 /// Result type for formatting operations.
 using Result = rusty::Result<std::tuple<>, Error>;
 

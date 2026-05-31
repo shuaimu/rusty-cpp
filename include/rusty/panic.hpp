@@ -78,6 +78,35 @@ template<typename Message, typename... Args>
     }
 }
 
+// Stand-in for Rust's `core::panic::Location` (the `&'static panic::Location`
+// pointer carried in BorrowError / BorrowMutError for diagnostics). The
+// transpiled cell port references `rusty::panic::Location` by reference and
+// reads only `.caller()` for formatting; we surface that as a no-op that
+// returns the same Location, which is enough to satisfy method-lookup at
+// instantiation time.
+struct Location {
+    constexpr const char* file() const noexcept { return ""; }
+    constexpr unsigned line() const noexcept { return 0; }
+    constexpr unsigned column() const noexcept { return 0; }
+    // `core::panic::Location::caller()` is a static intrinsic in Rust
+    // (it returns the &'static Location pointing at the caller). We
+    // return a reference to a global zero-Location — accurate enough
+    // for an empty stub, since cell_port only stores+forwards it.
+    static const Location& caller() noexcept {
+        static const Location _;
+        return _;
+    }
+};
+
+// `const_panic` is the Rust-side const-eval-friendly panic shim. The
+// transpiled code uses it through `using panic::const_panic;`, but the
+// expanded calls land in unreachable! / panic! branches. Map it onto
+// `begin_panic` so any residual call site still aborts.
+template<typename... Args>
+[[noreturn]] inline void const_panic(Args&&... args) {
+    begin_panic(std::forward<Args>(args)...);
+}
+
 } // namespace panic
 } // namespace rusty
 

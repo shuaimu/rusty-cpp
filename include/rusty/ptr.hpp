@@ -471,6 +471,25 @@ public:
     constexpr bool operator==(const Alignment& o) const noexcept = default;
 };
 
+// `core::ptr::replace(dst, src)` — atomic-ish swap that returns the
+// old value while overwriting `*dst`. For our purposes (cell_port
+// uses it in `Cell::replace`), a sequential read-write is fine.
+template<typename T>
+inline T replace(T* dst, T src) noexcept(std::is_nothrow_move_constructible_v<T> &&
+                                          std::is_nothrow_move_assignable_v<T>) {
+    T old = std::move(*dst);
+    *dst = std::move(src);
+    return old;
+}
+
+// `core::ptr::eq(p, q)` — pointer-identity comparison. Distinguished
+// from `==` only for fat pointers in Rust; for our T* / NonNull<T>
+// surface a plain `==` suffices.
+template<typename T, typename U>
+inline bool eq(const T* a, const U* b) noexcept {
+    return static_cast<const void*>(a) == static_cast<const void*>(b);
+}
+
 } // namespace ptr
 
 } // namespace rusty

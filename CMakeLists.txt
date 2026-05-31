@@ -126,6 +126,26 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
+# cell_port — transpiled rustc Cell / RefCell port (library/core/src/cell.rs).
+# Single .cppm vendored from the transpiler+patcher pipeline
+# (docs/cell_port/). Phase A2 patches: namespace `using ::ns::` →
+# `using rusty::ns::` rewrites, plus Rust trait stubs added to
+# include/rusty/{ops,marker,fmt}.hpp to unblock the `using
+# rusty::ops::Deref;` etc. imports.
+# ──────────────────────────────────────────────────────────────────────
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    file(GLOB CELL_PORT_CPPM transpiled/cell_port/*.cppm)
+    add_library(cell_port STATIC)
+    target_sources(cell_port
+        PUBLIC FILE_SET CXX_MODULES FILES ${CELL_PORT_CPPM}
+    )
+    target_include_directories(cell_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(cell_port PUBLIC cxx_std_23)
+    target_compile_options(cell_port PRIVATE -O3 -DNDEBUG -march=native )
+endif()
+
+# ──────────────────────────────────────────────────────────────────────
 # vec_deque_port — transpiled rustc VecDeque (ring buffer).
 # Multi-file (10 .cppm files). CMake target intentionally not wired
 # yet — vendored sources are in transpiled/vec_deque_port/ but the
@@ -253,6 +273,11 @@ set(TEST_SOURCES
     # asserts they come out in descending order.
     tests/binary_heap_port_module_test.cpp
 
+    # cell_port — transpiled rustc Cell / RefCell (library/core/src/cell.rs).
+    # Phase B/C smoke test: import cell_port, build BorrowError /
+    # BorrowMutError + format them via operator<<.
+    tests/cell_port_module_test.cpp
+
     # TODO: Re-enable when String API is complete
     # tests/rusty_string_test.cpp
     # tests/test_all_types.cpp
@@ -274,7 +299,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     set(_vec_consuming_tests
         test_mutex test_thread rusty_vec_test rusty_array_test)
     list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
-    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port)_"
+    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|cell_port)_"
         OR test_name STREQUAL "async_module_test"
         OR NOT _vec_consume_idx EQUAL -1)
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
@@ -311,6 +336,13 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # binary_heap_port_* tests link binary_heap_port (which pulls vec_port).
     if(test_name MATCHES "^binary_heap_port_")
         target_link_libraries(${test_executable} PRIVATE binary_heap_port)
+        target_compile_features(${test_executable} PRIVATE cxx_std_23)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+        target_link_options(${test_executable} PRIVATE )
+    endif()
+    # cell_port_* tests link cell_port (single-file C++20 module).
+    if(test_name MATCHES "^cell_port_")
+        target_link_libraries(${test_executable} PRIVATE cell_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
         target_link_options(${test_executable} PRIVATE )

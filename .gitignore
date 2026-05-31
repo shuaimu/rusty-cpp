@@ -5,6 +5,7 @@
 *.swp
 tests/build/
 build/*
+build_cell/
 *.lock
 __pycache__/
 *.pyc

@@ -41,6 +41,8 @@
 #include "rusty/option.hpp"
 #include "rusty/result.hpp"
 #include "rusty/marker.hpp"
+#include "rusty/ops.hpp"
+#include "rusty/pin.hpp"
 #include "rusty/ptr.hpp"
 #include "rusty/num.hpp"
 #include "rusty/mem.hpp"
