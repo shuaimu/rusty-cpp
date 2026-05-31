@@ -79,6 +79,22 @@ struct Cli {
     #[arg(long)]
     prefer_rusty_view_aliases: bool,
 
+    /// Wrap all exported items in `export namespace <NS> { … }` (module
+    /// mode only). Off by default. Lets sibling modules export the same
+    /// names without colliding at importer scope. See
+    /// docs/rusty-std-book.md §2.10.
+    #[arg(long = "cxx-namespace")]
+    cxx_namespace: Option<String>,
+
+    /// Auto-derive the C++ namespace from `--module-name` (replace `.`
+    /// with `::`) AND emit namespace aliases for each imported sibling
+    /// module — the spec-correct rendering of Rust's module tree as
+    /// C++20 modules + namespaces. See docs/rusty-std-book.md §2.10
+    /// Option 2. Implies `--cxx-namespace <derived>` when set without
+    /// an explicit override.
+    #[arg(long = "auto-namespace")]
+    auto_namespace: bool,
+
     /// Deprecated no-op: interface+adapter is now the only trait
     /// lowering path. Kept for CLI compatibility with older scripts.
     #[arg(long, hide = true)]
@@ -3419,6 +3435,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
         crate_module_names: Vec::new(),
+        cxx_namespace: None,
+        auto_namespace: false,
     };
 
     let mut generated_cppm_files: Vec<GeneratedCppmArtifact> = Vec::new();
@@ -3857,6 +3875,8 @@ fn main() {
         cross_file_structs: Vec::new(),
         cross_file_type_aliases: Vec::new(),
         crate_module_names: Vec::new(),
+        cxx_namespace: cli.cxx_namespace.clone(),
+        auto_namespace: cli.auto_namespace,
     };
 
     // Handle --crate: transpile entire crate

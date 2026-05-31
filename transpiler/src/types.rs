@@ -97,8 +97,19 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Vec" | "std::vec::Vec" => Some(("rusty::Vec", true)),
         "HashMap" | "std::collections::HashMap" => Some(("rusty::HashMap", true)),
         "HashSet" | "std::collections::HashSet" => Some(("rusty::HashSet", true)),
-        "BTreeMap" | "std::collections::BTreeMap" => Some(("rusty::BTreeMap", true)),
-        "BTreeSet" | "std::collections::BTreeSet" => Some(("rusty::BTreeSet", true)),
+        // BTreeMap maps to bare `::BTreeMap` (consumer imports
+        // `btree_port.btree.map`). Previously mapped to `rusty::BTreeMap`,
+        // a std::map-backed facade in `include/rusty/btreemap.hpp` —
+        // that header was deleted (rusty-std-book §1 / btreemap_port
+        // STATUS Step 83) in favor of the transpiled module. The bare
+        // `::BTreeMap` resolves via unqualified lookup once the consumer
+        // (or another transpiled port like `set.rs`) imports
+        // `btree_port.btree.map`.
+        "BTreeMap" | "std::collections::BTreeMap" => Some(("::BTreeMap", true)),
+        // `rusty::BTreeSet` was dropped (the std::set facade is gone);
+        // BTreeSet now lives in the transpiled `btree_port.btree.set`
+        // module exported at file scope.
+        "BTreeSet" | "std::collections::BTreeSet" => Some(("::BTreeSet", true)),
         "VecDeque" | "std::collections::VecDeque" => Some(("rusty::VecDeque", true)),
         "std::collections::hash_map::DefaultHasher" => Some(("DefaultHasher", false)),
         // Fallback aliases for collection families not yet modeled separately.
@@ -815,8 +826,8 @@ mod tests {
         assert_eq!(map_std_type("Vec"), Some(("rusty::Vec", true)));
         assert_eq!(map_std_type("HashMap"), Some(("rusty::HashMap", true)));
         assert_eq!(map_std_type("HashSet"), Some(("rusty::HashSet", true)));
-        assert_eq!(map_std_type("BTreeMap"), Some(("rusty::BTreeMap", true)));
-        assert_eq!(map_std_type("BTreeSet"), Some(("rusty::BTreeSet", true)));
+        assert_eq!(map_std_type("BTreeMap"), Some(("::BTreeMap", true)));
+        assert_eq!(map_std_type("BTreeSet"), Some(("::BTreeSet", true)));
         assert_eq!(map_std_type("VecDeque"), Some(("rusty::VecDeque", true)));
     }
 
