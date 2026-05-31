@@ -3769,7 +3769,7 @@ struct LinkedList {
                 }
                 if (!_m_matched) {
                     if (_m.is_some()) {
-                        auto&& _mv1 = _m.unwrap();
+                        auto&& _mv1 = _m.as_ref().unwrap();
                         auto&& head = rusty::detail::deref_if_pointer(_mv1);
                         (*rusty::as_ptr(head)).prev = node_shadow1;
                         _m_matched = true;
@@ -3794,7 +3794,7 @@ this->head = std::move(node_shadow1->next);
     }
     if (!_m_matched) {
         if (_m.is_some()) {
-            auto&& _mv1 = _m.unwrap();
+            auto&& _mv1 = _m.as_ref().unwrap();
             auto&& head = rusty::detail::deref_if_pointer(_mv1);
             (*rusty::as_ptr(head)).prev = rusty::None;
             _m_matched = true;
@@ -3821,7 +3821,7 @@ return std::move(node_shadow1); }(); });
                 }
                 if (!_m_matched) {
                     if (_m.is_some()) {
-                        auto&& _mv1 = _m.unwrap();
+                        auto&& _mv1 = _m.as_ref().unwrap();
                         auto&& tail = rusty::detail::deref_if_pointer(_mv1);
                         (*rusty::as_ptr(tail)).next = node_shadow1;
                         _m_matched = true;
@@ -3846,7 +3846,7 @@ this->tail = std::move(node_shadow1->prev);
     }
     if (!_m_matched) {
         if (_m.is_some()) {
-            auto&& _mv1 = _m.unwrap();
+            auto&& _mv1 = _m.as_ref().unwrap();
             auto&& tail = rusty::detail::deref_if_pointer(_mv1);
             (*rusty::as_ptr(tail)).next = rusty::None;
             _m_matched = true;
@@ -3863,7 +3863,7 @@ return std::move(node_shadow1); }(); });
             bool _m_matched = false;
             if (!_m_matched) {
                 if (_m.is_some()) {
-                    auto&& _mv0 = _m.unwrap();
+                    auto&& _mv0 = _m.as_ref().unwrap();
                     auto&& prev = rusty::detail::deref_if_pointer(_mv0);
                     // @unsafe
                     {
@@ -3884,7 +3884,7 @@ return std::move(node_shadow1); }(); });
             bool _m_matched = false;
             if (!_m_matched) {
                 if (_m.is_some()) {
-                    auto&& _mv0 = _m.unwrap();
+                    auto&& _mv0 = _m.as_ref().unwrap();
                     auto&& next = rusty::detail::deref_if_pointer(_mv0);
                     // @unsafe
                     {
@@ -4011,7 +4011,7 @@ return std::move(node_shadow1); }(); });
             }
             if (!_m_matched) {
                 if (_m.is_some()) {
-                    auto&& _mv1 = _m.unwrap();
+                    auto&& _mv1 = _m.as_ref().unwrap();
                     auto tail = rusty::detail::deref_if_pointer(_mv1);
                     if (auto&& _iflet_scrutinee = other.head.take(); _iflet_scrutinee.is_some()) {
                         decltype(auto) other_head = _iflet_scrutinee.unwrap();
@@ -4451,7 +4451,7 @@ struct Cursor {
             }
             if (!_m_matched) {
                 if (_m.is_some()) {
-                    auto&& _mv1 = _m.unwrap();
+                    auto&& _mv1 = _m.as_ref().unwrap();
                     auto&& current = rusty::detail::deref_if_pointer(_mv1);
                     // @unsafe
                     {
@@ -4476,7 +4476,7 @@ struct Cursor {
             }
             if (!_m_matched) {
                 if (_m.is_some()) {
-                    auto&& _mv1 = _m.unwrap();
+                    auto&& _mv1 = _m.as_ref().unwrap();
                     auto&& current = rusty::detail::deref_if_pointer(_mv1);
                     // @unsafe
                     {
@@ -4497,14 +4497,14 @@ struct Cursor {
     rusty::Option<const T&> peek_next() const {
         // @unsafe
         {
-            auto next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& current = rusty::detail::deref_if_pointer(_mv1); return current.as_ref().next; } rusty::intrinsics::unreachable(); }();
+            auto next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = _m.as_ref().unwrap(); auto&& current = rusty::detail::deref_if_pointer(_mv1); return current.as_ref().next; } rusty::intrinsics::unreachable(); }();
             return next.map([&](auto&& next) { return (*rusty::as_ptr(next)).element; });
         }
     }
     rusty::Option<const T&> peek_prev() const {
         // @unsafe
         {
-            auto prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& current = rusty::detail::deref_if_pointer(_mv1); return current.as_ref().prev; } rusty::intrinsics::unreachable(); }();
+            auto prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = _m.as_ref().unwrap(); auto&& current = rusty::detail::deref_if_pointer(_mv1); return current.as_ref().prev; } rusty::intrinsics::unreachable(); }();
             return prev.map([&](auto&& prev) { return (*rusty::as_ptr(prev)).element; });
         }
     }
@@ -4556,7 +4556,7 @@ struct CursorMut {
             }
             if (!_m_matched) {
                 if (_m.is_some()) {
-                    auto&& _mv1 = _m.unwrap();
+                    auto&& _mv1 = _m.as_ref().unwrap();
                     auto&& current = rusty::detail::deref_if_pointer(_mv1);
                     // @unsafe
                     {
@@ -4581,7 +4581,7 @@ struct CursorMut {
             }
             if (!_m_matched) {
                 if (_m.is_some()) {
-                    auto&& _mv1 = _m.unwrap();
+                    auto&& _mv1 = _m.as_ref().unwrap();
                     auto&& current = rusty::detail::deref_if_pointer(_mv1);
                     // @unsafe
                     {
@@ -4602,14 +4602,14 @@ struct CursorMut {
     rusty::Option<T&> peek_next() {
         // @unsafe
         {
-            auto next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& current = rusty::detail::deref_if_pointer(_mv1); return current.as_ref().next; } rusty::intrinsics::unreachable(); }();
+            auto next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = _m.as_ref().unwrap(); auto&& current = rusty::detail::deref_if_pointer(_mv1); return current.as_ref().next; } rusty::intrinsics::unreachable(); }();
             return next.map([&](auto&& next) { return (*rusty::as_ptr(next)).element; });
         }
     }
     rusty::Option<T&> peek_prev() {
         // @unsafe
         {
-            auto prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& current = rusty::detail::deref_if_pointer(_mv1); return current.as_ref().prev; } rusty::intrinsics::unreachable(); }();
+            auto prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = _m.as_ref().unwrap(); auto&& current = rusty::detail::deref_if_pointer(_mv1); return current.as_ref().prev; } rusty::intrinsics::unreachable(); }();
             return prev.map([&](auto&& prev) { return (*rusty::as_ptr(prev)).element; });
         }
     }
@@ -4626,7 +4626,7 @@ struct CursorMut {
             auto&& splice_head = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap())));
             auto&& splice_tail = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap())));
             auto&& splice_len = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap())));
-            auto node_next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().next; } rusty::intrinsics::unreachable(); }();
+            auto node_next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = _m.as_ref().unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().next; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(this->current_field, std::move(node_next), std::move(splice_head), std::move(splice_tail), std::move(splice_len));
             if (this->current_field.is_none()) {
                 this->index_field = this->list.len_field;
@@ -4642,7 +4642,7 @@ struct CursorMut {
                 bool _m_matched = false;
                 if (!_m_matched) {
                     if (_m.is_some()) {
-                        auto&& _mv0 = _m.unwrap();
+                        auto&& _mv0 = _m.as_ref().unwrap();
                         auto&& parts = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv0));
                         _tuple_match_value.emplace(parts);
                         _m_matched = true;
@@ -4657,7 +4657,7 @@ struct CursorMut {
                 if (!_m_matched) { rusty::intrinsics::unreachable(); }
             }
             auto [splice_head, splice_tail, splice_len] = std::move(_tuple_match_value).value();
-            auto node_prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().prev; } rusty::intrinsics::unreachable(); }();
+            auto node_prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = _m.as_ref().unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().prev; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(std::move(node_prev), this->current_field, std::move(splice_head), std::move(splice_tail), std::move(splice_len));
             this->index_field += splice_len;
         }
@@ -4666,7 +4666,7 @@ struct CursorMut {
         // @unsafe
         {
             auto spliced_node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
-            auto node_next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().next; } rusty::intrinsics::unreachable(); }();
+            auto node_next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = _m.as_ref().unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().next; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(this->current_field, std::move(node_next), std::move(spliced_node), std::move(spliced_node), static_cast<size_t>(1));
             if (this->current_field.is_none()) {
                 this->index_field = this->list.len_field;
@@ -4677,7 +4677,7 @@ struct CursorMut {
         // @unsafe
         {
             auto spliced_node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
-            auto node_prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().prev; } rusty::intrinsics::unreachable(); }();
+            auto node_prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = _m.as_ref().unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().prev; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(std::move(node_prev), this->current_field, std::move(spliced_node), std::move(spliced_node), static_cast<size_t>(1));
             this->index_field += 1;
         }

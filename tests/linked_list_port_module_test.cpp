@@ -38,7 +38,20 @@ int main() {
     CHECK(first.unwrap() == 0, "pop_front = %d, expected 0", first.unwrap());
     CHECK(ll.len() == 2, "len after pop_front = %zu, expected 2", ll.len());
 
+    // ── Phase C: peek-after-mutate (regression for the destructive
+    //                                  match-arm unwrap bug) ─────────
+    {
+        auto f = ll.front();
+        auto b = ll.back();
+        CHECK(f.is_some() && f.unwrap() == 1,
+              "front() after pop = %d, expected 1",
+              f.is_some() ? f.unwrap() : -1);
+        CHECK(b.is_some() && b.unwrap() == 2,
+              "back() after pop = %d, expected 2",
+              b.is_some() ? b.unwrap() : -1);
+    }
+
     std::printf("linked_list_port smoke OK: Phase B (push/pop/len) + "
-                "Phase C (front/back peek)\n");
+                "Phase C (peek before AND after mutate)\n");
     return 0;
 }

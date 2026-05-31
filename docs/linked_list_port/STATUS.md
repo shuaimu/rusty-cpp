@@ -57,17 +57,24 @@ cp /tmp/linked_list_port/cpp_out/linked_list_port.cppm transpiled/linked_list_po
 
 ## Remaining for Phase D+
 
-- **front-after-pop state-corruption** — after a successful `pop_front`,
-  the subsequent `front()` returns `None` even though `len()` is correct
-  (`2` after popping from a 3-element list). Looks like a moved-from
-  Option storage being read mid-lambda inside `Option::map`. Smoke test
-  deliberately exercises peek BEFORE the pop to sidestep this; adding
-  a `front()` call after the `pop_front` reliably trips it. Real bug
-  worth chasing later.
 - `cursor_*`, `into_iter`, `iter_mut`, `extend`, `split_off`, etc.
   not exercised yet — same Option::map / NonNull deref pattern likely
   to trip on first instantiation.
 - Bench against `std::list<int>` not run.
+
+## Resolved bugs
+
+- **front-after-pop state-corruption** (fixed). Root cause: the
+  transpiler lowers Rust `match` arms as `auto&& _m = field; if
+  (_m.is_some()) { auto&& _mv1 = _m.unwrap(); … }`. Hand-written
+  `Option<T>::unwrap()` (non-const lvalue) is destructive — moves
+  value out and sets `has_value = false` — so the match arm nuked
+  the real field. Rust's match on a Copy-type Option (NonNull is
+  Copy) copies the inner value into the arm binding rather than
+  consuming the scrutinee. Patcher now rewrites
+  `_m.unwrap()` → `_m.as_ref().unwrap()` which goes through the
+  `Option<T&>::unwrap()` specialization (returns `T&`,
+  non-destructive). 20 sites in linked_list_port.cppm.
 
 ## Box helper
 
