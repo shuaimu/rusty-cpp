@@ -127,13 +127,12 @@ endif()
 
 # ──────────────────────────────────────────────────────────────────────
 # rc_port — transpiled rustc Rc port (library/alloc/src/rc.rs).
-# Patcher in docs/rc_port/post_transpile_patch.py now applies 6
-# transformations: namespace prefix fixups, rusty::Rc<T,A>→Rc<T,A>,
-# rusty::Weak<T,A>→Weak<T,A>, rusty::alloc::Global type→value,
-# inject `import vec_port.vec;`, visit_byte_buf body stub, to_rc_slice
-# default-Global. ~14 errors remain (mostly bare `::cast` free-fn
-# calls and Cluster A `auto`-template-arg regression — both
-# transpiler-side). See docs/rc_port/STATUS.md.
+# Patcher in docs/rc_port/post_transpile_patch.py covers ~12 transforms.
+# Box<auto>::* Cluster A closed, ::cast → identity-stub, namespace
+# fixups, visit_byte_buf stub. ~9 deeper errors remain (data_offset
+# scoping, rusty::ptr::addr_eq/from_ref missing, second-layer Cluster
+# A sites, Rc::is trait-method call). CMake target stays commented;
+# see docs/rc_port/STATUS.md for the full punch list.
 #
 # if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 #    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")

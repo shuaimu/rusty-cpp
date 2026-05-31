@@ -118,19 +118,61 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
         "Weak<std::span<const T>> to_weak_slice(",
         "Weak<std::span<const T>, rusty::alloc::Global> to_weak_slice(")
 
-    # `rusty::ptr::slice_from_raw_parts_mut` — our header surfaces it as
-    # `from_raw_parts_mut` (no `slice_` prefix). Rename.
+    # `rusty::ptr::slice_from_raw_parts_mut` and bare `ptr::*` — our
+    # header surfaces it as top-level `rusty::from_raw_parts_mut`
+    # (not in the `ptr` sub-namespace).
     text = text.replace(
         "rusty::ptr::slice_from_raw_parts_mut",
-        "rusty::ptr::from_raw_parts_mut")
+        "rusty::from_raw_parts_mut")
+    text = re.sub(
+        r"(?<![A-Za-z0-9_:])ptr::slice_from_raw_parts_mut",
+        "rusty::from_raw_parts_mut", text)
 
-    # Cluster A regression: `rusty::Box<auto>::try_new(RcInner<T>{...})`
-    # — auto in template argument. The argument's type IS the box's
-    # value type, so substitute auto with the explicit type. Uniform
-    # pattern in rc_port: only RcInner<T>.
+    # Cluster A regression: `rusty::Box<auto>::FACTORY(RcInner<T>{...})`
+    # — auto in template argument. The constructor argument's type IS
+    # the box's value type, so substitute auto with the explicit type.
+    # Uniform pattern in rc_port: arg is always RcInner<T> or ManuallyDrop.
+    for factory in ("try_new", "new_in", "try_new_in", "write_"):
+        text = text.replace(
+            f"rusty::Box<auto>::{factory}(RcInner",
+            f"rusty::Box<RcInner<T>>::{factory}(RcInner")
+    # `Box<auto>::new_uninit()` returns Box<MaybeUninit<T>>.
     text = text.replace(
-        "rusty::Box<auto>::try_new(RcInner",
-        "rusty::Box<RcInner<T>>::try_new(RcInner")
+        "rusty::Box<auto>::new_uninit()",
+        "rusty::Box<rusty::MaybeUninit<RcInner<T>>>::new_uninit()")
+    # `Box<auto>::write_(MaybeUninit-box, RcInner<T>{})` — the
+    # MaybeUninit-box has been substituted above, so Box<auto> here is
+    # the MaybeUninit one (write_ is a method on MaybeUninit-box).
+    text = text.replace(
+        "rusty::Box<auto>::write_(rusty::Box<rusty::MaybeUninit<RcInner<T>>>",
+        "rusty::Box<rusty::MaybeUninit<RcInner<T>>>::write_(rusty::Box<rusty::MaybeUninit<RcInner<T>>>")
+    # `Box<auto>::into_raw_with_allocator(boxed)` / `into_unique(boxed)`
+    # / `allocator(boxed)` — operate on existing Box<RcInner<T>> so
+    # template arg is RcInner<T>.
+    for op in ("into_raw_with_allocator", "into_unique", "allocator",
+               "from_raw_in"):
+        text = text.replace(
+            f"rusty::Box<auto>::{op}(",
+            f"rusty::Box<RcInner<T>>::{op}(")
+
+    # Bare `::cast` (used as a function reference, typical pattern is
+    # `.map_err(::cast)` or `.map(::cast)`) — replace with an identity
+    # lambda so the call site at least type-checks. Phase B compile
+    # only; the runtime path may need different handling for Phase C.
+    text = text.replace(
+        ", ::cast)",
+        ", cast_identity_stub)")
+    # Then inject the helper lambda at the top of the module (just
+    # after the namespace open). Idempotent.
+    cast_stub = ("namespace { inline constexpr auto cast_identity_stub = "
+                 "[](auto&& x) { return std::forward<decltype(x)>(x); }; "
+                 "}\n")
+    if "cast_identity_stub" in text and cast_stub not in text:
+        # Add right after `namespace rc_port {`.
+        text = text.replace(
+            "namespace rc_port {\n",
+            "namespace rc_port {\n" + cast_stub + "\n",
+            1)
 
     if text != original:
         path.write_text(text)
