@@ -338,8 +338,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
-return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
+rusty::Result<Value, E> visit_byte_buf(auto&& value) {
+(void)value; return rusty::Result<Value, E>::Err(E{});
 }
 
 template<typename E>

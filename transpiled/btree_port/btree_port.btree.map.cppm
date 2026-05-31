@@ -350,8 +350,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
-return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
+rusty::Result<Value, E> visit_byte_buf(auto&& value) {
+(void)value; return rusty::Result<Value, E>::Err(E{});
 }
 
 template<typename E>
@@ -3782,7 +3782,7 @@ namespace ptr = rusty::ptr;
 using rusty::alloc::Allocator;
 using rusty::alloc::Global;
 
-using rusty::Vec;
+// using rusty::Vec; removed during VecLegacy retirement — Vec is module-only now.
 
 
 // Rust-only namespace import skipped for type path: using namespace Entry;

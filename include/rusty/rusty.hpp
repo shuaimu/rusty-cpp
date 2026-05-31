@@ -22,7 +22,7 @@
 // that work with the Rusty C++ Checker to ensure memory safety.
 //
 // All types follow Rust's ownership and borrowing principles:
-// - Single ownership (Box, VecLegacy)
+// - Single ownership (Box, Vec)
 // - Shared immutable access (Rc, Arc) with built-in polymorphism support
 // - Explicit nullability (Option)
 // - Explicit error handling (Result)
@@ -420,15 +420,9 @@ namespace rusty {
         return String::from(value.as_str());
     }
 
-    template<typename T, std::size_t Extent>
-    VecLegacy<std::remove_const_t<T>> to_owned(std::span<T, Extent> value) {
-        using Elem = std::remove_const_t<T>;
-        VecLegacy<Elem> out(value.size());
-        for (const auto& item : value) {
-            out.push(static_cast<Elem>(item));
-        }
-        return out;
-    }
+    // to_owned(span) returning rusty::Vec removed during Vec
+    // retirement (Vec is module-only). Callers should import rusty;
+    // and use rusty::Vec ctors directly.
 
     template<typename T>
     auto to_owned(const T& value) {
@@ -826,26 +820,9 @@ namespace rusty {
         return std::forward<T>(value);
     }
 
-    template<typename T, std::size_t N>
-    VecLegacy<T> into_vec(std::array<T, N> values) {
-        VecLegacy<T> out(N);
-        for (auto& value : values) {
-            out.push(std::move(value));
-        }
-        return out;
-    }
-
-    #if !defined(RUSTY_NO_STD_VECTOR_INTEROP)
-    template<typename T, typename Alloc>
-    VecLegacy<T> into_vec(std::vector<T, Alloc> values) {
-        VecLegacy<T> out(values.size());
-        for (auto& value : values) {
-            out.push(std::move(value));
-        }
-        return out;
-    }
-    #endif
-
+    // into_vec(array)/into_vec(vector) overloads returning rusty::Vec
+    // removed during Vec retirement (Vec is module-only). Identity
+    // overload retained for transpiled `into_vec(self)` calls.
     template<typename T>
     constexpr std::decay_t<T> into_vec(T&& value) {
         return std::forward<T>(value);

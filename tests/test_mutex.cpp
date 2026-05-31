@@ -1,9 +1,13 @@
 #include <rusty/mutex.hpp>
 #include <rusty/arc.hpp>
 #include <rusty/thread.hpp>
-#include <rusty/vec.hpp>
+#include <rusty/vec.hpp>     // stub — see import below for the real Vec
 #include <iostream>
 #include <cassert>
+
+import vec_port.vec;          // ::Vec<T, A> — the transpiled rustc Vec.
+                              // After VecLegacy retirement, unqualified
+                              // `Vec<...>` here resolves to global ::Vec.
 
 using namespace rusty;
 

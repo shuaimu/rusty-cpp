@@ -106,6 +106,19 @@ export {
 #include <rusty/async.hpp>
 } // export
 
+// `rusty::Executor` and `rusty::Vec` live in C++20 modules now. Re-export
+// both via the rusty umbrella so `import rusty;` keeps providing them.
+export import rusty.async;
+export import vec_port.vec;
+
+export namespace rusty {
+
+// VecLegacy retired — `rusty::Vec<T,A>` is the transpiled rustc Vec.
+template<typename T, typename A = ::rusty::alloc::Global>
+using Vec = ::Vec<T, A>;
+
+} // export namespace rusty
+
 export namespace rusty {
 
 using Unit = std::tuple<>;

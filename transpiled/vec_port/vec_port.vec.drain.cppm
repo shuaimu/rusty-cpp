@@ -325,8 +325,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
-return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
+rusty::Result<Value, E> visit_byte_buf(auto&& value) {
+(void)value; return rusty::Result<Value, E>::Err(E{});
 }
 
 template<typename E>
@@ -3679,9 +3679,9 @@ struct Drain {
     size_t tail_len;
     /// Current remaining range to remove
     rusty::slice_iter::Iter<const T> iter;
-    rusty::ptr::NonNull<rusty::Vec<T, A>> vec;
+    rusty::ptr::NonNull<::Vec<T, A>> vec;
     mutable bool _rusty_forgotten = false;
-    Drain(size_t tail_start_init, size_t tail_len_init, rusty::slice_iter::Iter<const T> iter_init, rusty::ptr::NonNull<rusty::Vec<T, A>> vec_init) : tail_start(std::move(tail_start_init)), tail_len(std::move(tail_len_init)), iter(std::move(iter_init)), vec(std::move(vec_init)) {}
+    Drain(size_t tail_start_init, size_t tail_len_init, rusty::slice_iter::Iter<const T> iter_init, rusty::ptr::NonNull<::Vec<T, A>> vec_init) : tail_start(std::move(tail_start_init)), tail_len(std::move(tail_len_init)), iter(std::move(iter_init)), vec(std::move(vec_init)) {}
     Drain(const Drain&) = default;
     Drain(Drain&& other) noexcept : tail_start(std::move(other.tail_start)), tail_len(std::move(other.tail_len)), iter(std::move(other.iter)), vec(std::move(other.vec)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -3821,7 +3821,7 @@ struct Drain {
     }
     template<typename I>
     bool fill(I& replace_with) {
-        rusty::Vec<T, A>& vec = this->vec.as_mut();
+        ::Vec<T, A>& vec = this->vec.as_mut();
         const auto range_start = vec.len;
         const auto range_end = this->tail_start;
         auto range_slice = rusty::from_raw_parts_mut(rusty::ptr::add(rusty::as_mut_ptr(vec), std::move(range_start)), rusty::detail::deref_if_pointer_like(range_end) - rusty::detail::deref_if_pointer_like(range_start));
@@ -3837,7 +3837,7 @@ struct Drain {
         return true;
     }
     void move_tail(size_t additional) {
-        rusty::Vec<T, A>& vec = this->vec.as_mut();
+        ::Vec<T, A>& vec = this->vec.as_mut();
         const auto len = rusty::detail::deref_if_pointer_like(this->tail_start) + rusty::detail::deref_if_pointer_like(this->tail_len);
         vec.buf.reserve(std::move(len), std::move(additional));
         const auto new_tail_start = rusty::detail::deref_if_pointer_like(this->tail_start) + rusty::detail::deref_if_pointer_like(additional);

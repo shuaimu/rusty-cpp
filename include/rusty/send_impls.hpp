@@ -12,7 +12,9 @@ namespace rusty {
 template<typename T, typename A> class Box;
 template<typename T> class Arc;
 template<typename T> class Rc;  // NOT Send!
-template<typename T, typename A> class VecLegacy;
+// VecLegacy retired — the rusty::Vec is_send specialization for the
+// transpiled vec_port::Vec lives in vec_port itself (or its consumer
+// module). No header-mode forward decl needed.
 template<typename T> class Option;
 template<typename T, typename E> class Result;
 
@@ -20,9 +22,10 @@ template<typename T, typename E> class Result;
 // handled in traits.hpp. This file provides additional specializations
 // for container types.
 
-// VecLegacy<T, A> is Send if T is Send
-template<typename T, typename A>
-struct is_send<VecLegacy<T, A>> : is_send<T> {};
+// is_send specialization for the retired VecLegacy class is gone with the
+// class. rusty::Vec is now an alias of ::Vec<T,A> from vec_port.vec; if
+// channels need is_send<rusty::Vec<T,A>>, declare it in a module unit
+// that imports vec_port.vec rather than here.
 
 // Option<T> is Send if T is Send
 template<typename T>

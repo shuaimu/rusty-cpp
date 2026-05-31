@@ -61,7 +61,7 @@ constexpr bool operator==(const std::array<L, N>& lhs, std::span<R, RExtent> rhs
     return rhs == lhs;
 }
 
-// VecLegacy/slice assertion scaffolding often compares owned buffers (`std::vector`)
+// Vec/slice assertion scaffolding often compares owned buffers (`std::vector`)
 // with borrowed slice views (`std::span`). Mirror Rust slice equality semantics
 // for these mixed container/view shapes.
 template<typename L, typename Alloc, typename R, std::size_t RExtent>
@@ -99,78 +99,6 @@ constexpr bool operator==(std::span<L, LExtent> lhs, const std::vector<R, Alloc>
     return rhs == lhs;
 }
 
-// Mirror Rust slice equality semantics across borrowed spans and owned
-// rusty::VecLegacy payloads used by transpiled assertion scaffolding.
-template<typename L, std::size_t LExtent, typename R>
-requires (
-    requires(const L& l, const R& r) { l == r; } ||
-    requires(const L& l, const R& r) { r == l; } ||
-    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
-constexpr bool operator==(std::span<L, LExtent> lhs, const rusty::VecLegacy<R>& rhs) {
-    if (lhs.size() != rhs.size()) {
-        return false;
-    }
-    if constexpr (requires(const L& l, const R& r) { l == r; }) {
-        return std::equal(
-            lhs.begin(),
-            lhs.end(),
-            rhs.begin(),
-            [](const L& l, const R& r) { return static_cast<bool>(l == r); });
-    } else if constexpr (requires(const L& l, const R& r) { r == l; }) {
-        return std::equal(
-            lhs.begin(),
-            lhs.end(),
-            rhs.begin(),
-            [](const L& l, const R& r) { return static_cast<bool>(r == l); });
-    } else {
-        return true;
-    }
-}
-
-template<typename L, typename R, std::size_t RExtent>
-requires (
-    requires(const L& l, const R& r) { l == r; } ||
-    requires(const L& l, const R& r) { r == l; } ||
-    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
-constexpr bool operator==(const rusty::VecLegacy<L>& lhs, std::span<R, RExtent> rhs) {
-    return rhs == lhs;
-}
-
-template<typename L, typename R, std::size_t N>
-requires (
-    requires(const L& l, const R& r) { l == r; } ||
-    requires(const L& l, const R& r) { r == l; } ||
-    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
-constexpr bool operator==(const rusty::VecLegacy<L>& lhs, const std::array<R, N>& rhs) {
-    if (lhs.size() != rhs.size()) {
-        return false;
-    }
-    if constexpr (requires(const L& l, const R& r) { l == r; }) {
-        return std::equal(
-            lhs.begin(),
-            lhs.end(),
-            rhs.begin(),
-            [](const L& l, const R& r) { return static_cast<bool>(l == r); });
-    } else if constexpr (requires(const L& l, const R& r) { r == l; }) {
-        return std::equal(
-            lhs.begin(),
-            lhs.end(),
-            rhs.begin(),
-            [](const L& l, const R& r) { return static_cast<bool>(r == l); });
-    } else {
-        return true;
-    }
-}
-
-template<typename L, std::size_t N, typename R>
-requires (
-    requires(const L& l, const R& r) { l == r; } ||
-    requires(const L& l, const R& r) { r == l; } ||
-    (std::is_empty_v<std::remove_cv_t<L>> && std::is_empty_v<std::remove_cv_t<R>>))
-constexpr bool operator==(const std::array<L, N>& lhs, const rusty::VecLegacy<R>& rhs) {
-    return rhs == lhs;
-}
-
 // Mixed-element std::array equality for transpiled assertion scaffolding.
 // Keep this narrow: only for different element types and only when one-sided
 // element equality is well-formed.
@@ -203,7 +131,7 @@ struct has_member_as_slice<T, std::void_t<decltype(std::declval<const T&>().as_s
     : std::true_type {};
 
 // Mixed equality between std::array and container-like types that expose
-// `.as_slice()` (for example transpiled SmallVec and rusty::VecLegacy surfaces).
+// `.as_slice()` (for example transpiled SmallVec and rusty::Vec surfaces).
 template<typename L, typename R, std::size_t N>
 requires has_member_as_slice<L>::value
 constexpr bool operator==(const L& lhs, const std::array<R, N>& rhs) {
@@ -507,20 +435,6 @@ public:
         return *this;
     }
 
-    ArrayRepeatResult& operator=(const rusty::VecLegacy<T>& rhs) {
-        values_.assign(rhs.begin(), rhs.end());
-        return *this;
-    }
-
-    ArrayRepeatResult& operator=(rusty::VecLegacy<T>&& rhs) {
-        values_.clear();
-        values_.reserve(rhs.size());
-        for (auto& item : rhs) {
-            values_.push_back(std::move(item));
-        }
-        return *this;
-    }
-
     std::span<const T> as_slice() const noexcept {
         return std::span<const T>(values_.data(), values_.size());
     }
@@ -569,15 +483,6 @@ public:
             }
             return out;
         }
-    }
-
-    template<typename U = T>
-    operator rusty::VecLegacy<U>() const {
-        rusty::VecLegacy<U> out = rusty::VecLegacy<U>::with_capacity(values_.size());
-        for (const auto& item : values_) {
-            out.push(static_cast<U>(item));
-        }
-        return out;
     }
 
     template<typename U, size_t N>
@@ -667,22 +572,31 @@ Box<std::span<T>> into_boxed_slice(std::vector<T, Alloc> values) {
 }
 
 template<typename T>
-Box<std::span<T>> into_boxed_slice(VecLegacy<T> values) {
-    const auto len = values.len();
-    T* storage =
-        (len == 0) ? nullptr : static_cast<T*>(::operator new(sizeof(T) * len));
-    for (size_t i = 0; i < len; ++i) {
-        new (storage + i) T(std::move(values[i]));
-    }
-    return Box<std::span<T>>::new_(std::span<T>(storage, len));
-}
-
-template<typename T>
 Box<std::span<T>> into_boxed_slice(ArrayRepeatResult<T> values) {
     return into_boxed_slice(static_cast<std::vector<T>>(values));
 }
 
-/// Collect any iterable range into rusty::VecLegacy<T>.
+namespace detail {
+template<typename VecLike, typename Item>
+void push_back_collect_item(VecLike& out, Item&& item) {
+    using ItemRef = Item&&;
+    using ItemValue = std::remove_cvref_t<ItemRef>;
+    if constexpr (requires(VecLike& v, Item&& i) { v.push_back(std::forward<Item>(i)); }) {
+        out.push_back(std::forward<Item>(item));
+    } else if constexpr (requires(const ItemValue& value) { value.clone(); }) {
+        out.push_back(item.clone());
+    } else if constexpr (!std::is_const_v<std::remove_reference_t<ItemRef>>
+                         && std::is_move_constructible_v<ItemValue>) {
+        out.push_back(std::move(item));
+    } else {
+        static_assert(
+            std::is_copy_constructible_v<ItemValue>,
+            "cannot collect/filter_map non-copy, non-cloneable elements");
+    }
+}
+}  // namespace detail
+
+/// Collect any iterable range into std::vector<T>.
 /// Used by transpiled Rust range `.collect()` calls.
 template<typename Range>
 auto collect_range(Range&& range_like) {
@@ -691,9 +605,9 @@ auto collect_range(Range&& range_like) {
         std::end(r);
     }) {
         using Elem = std::decay_t<decltype(*std::begin(range_like))>;
-        VecLegacy<Elem> out = VecLegacy<Elem>::new_();
+        std::vector<Elem> out;
         for (auto&& item : range_like) {
-            detail::push_collect_item(out, std::forward<decltype(item)>(item));
+            detail::push_back_collect_item(out, std::forward<decltype(item)>(item));
         }
         return out;
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).next(); }) {
@@ -710,14 +624,14 @@ auto collect_range(Range&& range_like) {
             "rusty::collect_range requires next() to return an Option/optional-like value");
         using Elem = std::decay_t<decltype(detail::option_take_value(
             std::declval<NextResult&>()))>;
-        VecLegacy<Elem> out = VecLegacy<Elem>::new_();
+        std::vector<Elem> out;
         while (true) {
             auto item = iter.next();
             if (!detail::option_has_value(item)) {
                 break;
             }
             decltype(auto) value = detail::option_take_value(item);
-            detail::push_collect_item(out, std::forward<decltype(value)>(value));
+            detail::push_back_collect_item(out, std::forward<decltype(value)>(value));
         }
         return out;
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
@@ -1073,34 +987,6 @@ auto filter_map(Range&& range, Func&& func) {
             std::forward<Range>(range),
             std::forward<Func>(func)
         );
-    } else if constexpr (requires(StoredRange& r) { r.next(); }) {
-        auto iter = std::forward<Range>(range);
-        auto mapper = std::forward<Func>(func);
-        using NextResult = std::decay_t<decltype(iter.next())>;
-        static_assert(
-            detail::has_is_some<NextResult>::value || detail::has_has_value<NextResult>::value,
-            "rusty::filter_map iterator fallback requires next() to return Option-like value"
-        );
-        using Item = detail::option_value_t<NextResult>;
-        using MapResult = std::decay_t<decltype(mapper(std::declval<Item>()))>;
-        static_assert(
-            detail::has_is_some<MapResult>::value || detail::has_has_value<MapResult>::value,
-            "rusty::filter_map mapper must return Option-like value"
-        );
-        using Value = detail::option_value_t<MapResult>;
-        rusty::VecLegacy<Value> out;
-        while (true) {
-            auto item = iter.next();
-            if (!detail::option_has_value(item)) {
-                break;
-            }
-            auto mapped = mapper(detail::option_take_value(item));
-            if (detail::option_has_value(mapped)) {
-                decltype(auto) value = detail::option_take_value(mapped);
-                detail::push_collect_item(out, std::forward<decltype(value)>(value));
-            }
-        }
-        return out;
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
         return filter_map(std::forward<Range>(range).into_iter(), std::forward<Func>(func));
     } else {
@@ -1183,7 +1069,7 @@ struct owned_array_slice {
 };
 
 // Preserve backing storage when `slice_full` is invoked with an rvalue
-// non-array container (for example `rusty::VecLegacy` or transpiled `SmallVec`).
+// non-array container (for example `rusty::Vec` or transpiled `SmallVec`).
 // Returning a plain `std::span` from a temporary container would dangle
 // immediately after the full expression.
 template<typename Container>
@@ -1418,7 +1304,7 @@ auto as_u8_array(ArrayLike&& value) {
 }
 
 // Explicit helper surface for Rust-style `.get(index)` lowering on
-// slice-like/VecLegacy-like containers. Returns Option<&T> in const-view form.
+// slice-like/Vec-like containers. Returns Option<&T> in const-view form.
 template<typename Container, typename Index>
 auto get(const Container& container, Index idx) {
     const auto span = slice_full(container);
@@ -1496,18 +1382,18 @@ auto last_mut(Container& container) {
     return Opt(*(rusty::as_ptr(span) + last_index));
 }
 
-// Collect a slice-like container into rusty::VecLegacy by value-cloning elements.
+// Collect a slice-like container into std::vector by value-cloning elements.
 // Used by transpiled Rust `.to_vec()` lowering for slice/array/ArrayVec shapes.
 template<typename Container>
 auto to_vec(const Container& container) {
     auto span = slice_full(container);
     using Elem = std::remove_cv_t<std::remove_reference_t<decltype(*span.data())>>;
-    VecLegacy<Elem> out = VecLegacy<Elem>::new_();
+    std::vector<Elem> out;
     for (const auto& item : span) {
         if constexpr (requires(const Elem& e) { e.clone(); }) {
-            out.push(item.clone());
+            out.push_back(item.clone());
         } else {
-            out.push(item);
+            out.push_back(item);
         }
     }
     return out;

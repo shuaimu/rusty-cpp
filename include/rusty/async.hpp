@@ -1,7 +1,7 @@
 #ifndef RUSTY_ASYNC_HPP
 #define RUSTY_ASYNC_HPP
 
-// Rust-like async runtime on C++20 coroutines.
+// Rust-like async runtime on C++20 coroutines — header subset.
 // Implements a pollable state machine model matching Rust's Future trait.
 //
 // Architecture:
@@ -11,13 +11,17 @@
 //   - Executor: Event loop that drives tasks to completion
 //
 // Key design: initial_suspend = suspend_always → lazy semantics (like Rust)
+//
+// MIGRATION NOTE: `Executor` lives in module `rusty.async` (file
+// include/rusty/async.cppm) because its task storage uses vec_port::Vec
+// — a C++20 module that headers cannot `import`. The non-Executor types
+// stay here so transpiled prelude code (vec_port/btree_port/...) which
+// references `rusty::Poll<T>` / `rusty::Context` keeps compiling.
 
 #include <coroutine>
 #include <functional>
-#include <queue>
 #include <thread>
 #include <utility>
-#include <rusty/vec.hpp>
 
 namespace rusty {
 
@@ -254,32 +258,9 @@ auto block_on(FutureLike&& future_like) {
     }
 }
 
-// ── Executor: event loop ───────────────────────────────────────
-class Executor {
-public:
-    void spawn(Task<void> task) {
-        tasks_.push(std::move(task));
-        ready_queue_.push(tasks_.len() - 1);
-    }
-
-    void run() {
-        while (!ready_queue_.empty()) {
-            auto idx = ready_queue_.front();
-            ready_queue_.pop();
-
-            Waker waker{[this, idx]() { ready_queue_.push(idx); }};
-            Context cx{&waker};
-
-            auto result = tasks_[idx].poll(cx);
-            // If Pending, waker will re-enqueue when IO fires
-            // If Ready, task is done
-        }
-    }
-
-private:
-    rusty::VecLegacy<Task<void>> tasks_;
-    std::queue<size_t> ready_queue_;
-};
+// NOTE: class Executor lives in the C++20 module `rusty.async` (file
+// include/rusty/async.cppm) so its task storage can use vec_port::Vec.
+// Header consumers can't access Executor without `import rusty.async;`.
 
 } // namespace rusty
 

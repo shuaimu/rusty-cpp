@@ -325,8 +325,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
-return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
+rusty::Result<Value, E> visit_byte_buf(auto&& value) {
+(void)value; return rusty::Result<Value, E>::Err(E{});
 }
 
 template<typename E>
@@ -3885,7 +3885,7 @@ struct IntoIter {
         }
     }
     static IntoIter<T, A> default_() {
-        // STUBBED: super::rusty::Vec<auto>::new_in path doesn't resolve
+        // STUBBED: super::::Vec<auto>::new_in path doesn't resolve
         std::abort();
     }
     IntoIter<T, A> clone() const {

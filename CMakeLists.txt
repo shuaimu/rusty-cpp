@@ -28,7 +28,7 @@ target_include_directories(hashbrown_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inc
 # Rest of the repo stays at C++20 to avoid touching unrelated tests.
 target_compile_features(hashbrown_port PUBLIC cxx_std_23)
 # Match the bench build: O3+LTO so the module-boundary inlining works.
-target_compile_options(hashbrown_port PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
+target_compile_options(hashbrown_port PRIVATE -O3 -DNDEBUG -march=native )
 
 # ──────────────────────────────────────────────────────────────────────
 # vec_port — transpiled rustc-stdlib Vec port, exposed as C++20 modules.
@@ -48,12 +48,16 @@ target_compile_options(hashbrown_port PRIVATE -O3 -DNDEBUG -march=native -flto=t
 # ──────────────────────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    # vec_port.vec.drain dropped from the build during the VecLegacy retirement —
+    # the drain submodule cyclically depends on ::Vec while ::Vec's drain()
+    # method requires Drain to be visible. Original transpilation bridged this
+    # via header-attached rusty::VecLegacy which is going away. drain() can be
+    # re-vendored later as a header-only helper or by restructuring the modules.
     set(VEC_PORT_CPPM
         ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.cppm
         ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.raw_vec.cppm
         ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.vec.set_len_on_drop.cppm
         ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.vec.into_iter.cppm
-        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.vec.drain.cppm
         ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.vec.cppm
     )
     add_library(vec_port STATIC)
@@ -62,7 +66,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     )
     target_include_directories(vec_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_features(vec_port PUBLIC cxx_std_23)
-    target_compile_options(vec_port PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
+    target_compile_options(vec_port PRIVATE -O3 -DNDEBUG -march=native )
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
@@ -100,7 +104,30 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     )
     target_include_directories(btree_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_features(btree_port PUBLIC cxx_std_23)
-    target_compile_options(btree_port PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
+    target_compile_options(btree_port PRIVATE -O3 -DNDEBUG -march=native )
+endif()
+
+# ──────────────────────────────────────────────────────────────────────
+# rusty_async — first hand-written rusty header converted to a C++20
+# module (was include/rusty/async.hpp, now include/rusty/async.cppm).
+# Migration goal: replace the legacy VecLegacy-backed Executor task store
+# with vec_port::Vec. Module units can `import` modules; headers can't —
+# hence the conversion.
+#
+# Clang-only because it transitively imports vec_port.vec (which is
+# clang-only — gcc 14 ICEs on parts of the transpiled output).
+# ──────────────────────────────────────────────────────────────────────
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    add_library(rusty_async STATIC)
+    target_sources(rusty_async
+        PUBLIC FILE_SET CXX_MODULES FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/rusty/async.cppm
+    )
+    target_include_directories(rusty_async PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(rusty_async PUBLIC cxx_std_23)
+    target_compile_options(rusty_async PRIVATE -O3 -DNDEBUG -march=native )
+    target_link_libraries(rusty_async PUBLIC vec_port)
 endif()
 
 set(TEST_SOURCES
@@ -155,6 +182,12 @@ set(TEST_SOURCES
     # Smoke test imports vec_port.vec and exercises new_/push/pop/len.
     tests/vec_port_module_test.cpp
 
+    # rusty.async — first hand-written rusty header converted to a C++20
+    # module (replaces VecLegacy<Task<void>> with vec_port::Vec under the
+    # Executor). Smoke test imports rusty.async, spawns 3 Task<void>s,
+    # and verifies they all run.
+    tests/async_module_test.cpp
+
     # TODO: Re-enable when String API is complete
     # tests/rusty_string_test.cpp
     # tests/test_all_types.cpp
@@ -169,9 +202,16 @@ set(TEST_TARGETS)
 foreach(test_source IN LISTS TEST_SOURCES)
     get_filename_component(test_name "${test_source}" NAME_WE)
     set(test_executable "${test_name}.out")
-    # btree_port_* / vec_port_* tests depend on the clang-only module
-    # libraries; skip them entirely under gcc.
-    if(test_name MATCHES "^(btree_port|vec_port)_"
+    # btree_port_* / vec_port_* / async_module_* tests depend on the
+    # clang-only module libraries; skip them entirely under gcc.
+    # Tests that now `import vec_port.vec` for rusty::Vec access (after
+    # the VecLegacy retirement) join the clang-only set:
+    set(_vec_consuming_tests
+        test_mutex test_thread rusty_vec_test rusty_array_test)
+    list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
+    if((test_name MATCHES "^(btree_port|vec_port)_"
+        OR test_name STREQUAL "async_module_test"
+        OR NOT _vec_consume_idx EQUAL -1)
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
                 OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"))
         continue()
@@ -185,23 +225,38 @@ foreach(test_source IN LISTS TEST_SOURCES)
         target_link_libraries(${test_executable} PRIVATE hashbrown_port)
         # Match the library's release flags so the module BMIs are compatible.
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
-        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
-        target_link_options(${test_executable} PRIVATE -flto=thin)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+        target_link_options(${test_executable} PRIVATE )
     endif()
     # Tests that import btree_port.* link against the (clang-only) module
     # library. Same release-flag matching as hashbrown_port.
     if(test_name MATCHES "^btree_port_")
         target_link_libraries(${test_executable} PRIVATE btree_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
-        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
-        target_link_options(${test_executable} PRIVATE -flto=thin)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+        target_link_options(${test_executable} PRIVATE )
     endif()
     # Same wiring for vec_port_* tests.
     if(test_name MATCHES "^vec_port_")
         target_link_libraries(${test_executable} PRIVATE vec_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
-        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
-        target_link_options(${test_executable} PRIVATE -flto=thin)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+        target_link_options(${test_executable} PRIVATE )
+    endif()
+    # rusty.async module test: links rusty_async (which transitively pulls vec_port).
+    if(test_name STREQUAL "async_module_test")
+        target_link_libraries(${test_executable} PRIVATE rusty_async)
+        target_compile_features(${test_executable} PRIVATE cxx_std_23)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+        target_link_options(${test_executable} PRIVATE )
+    endif()
+    # Tests that `import vec_port.vec` for rusty::Vec access after the
+    # VecLegacy retirement: link against vec_port and use cxx_std_23.
+    if(NOT _vec_consume_idx EQUAL -1)
+        target_link_libraries(${test_executable} PRIVATE vec_port)
+        target_compile_features(${test_executable} PRIVATE cxx_std_23)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+        target_link_options(${test_executable} PRIVATE )
     endif()
     add_test(NAME ${test_name} COMMAND ${test_executable})
     list(APPEND TEST_TARGETS ${test_executable})

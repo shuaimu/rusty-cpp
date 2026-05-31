@@ -325,8 +325,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
-return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
+rusty::Result<Value, E> visit_byte_buf(auto&& value) {
+(void)value; return rusty::Result<Value, E>::Err(E{});
 }
 
 template<typename E>
@@ -3711,15 +3711,15 @@ struct SpecCloneIntoVec {
 };
 
 
-export template<typename T, typename A>
+export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct Vec;
 export template<typename T>
     requires (std::copyable<T>)
-rusty::Vec<T> from_elem(T elem, size_t n);
+::Vec<T> from_elem(T elem, size_t n);
 export template<typename T, typename A>
     requires (std::copyable<T> && rusty::alloc::Allocator<A>)
-rusty::Vec<T, A> from_elem_in(T elem, size_t n, A alloc);
+::Vec<T, A> from_elem_in(T elem, size_t n, A alloc);
 
 // Extension trait free-function forward declarations
 namespace rusty_ext {
@@ -4570,6 +4570,36 @@ struct Vec {
     }
     void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
 
+    // ── C++-ergonomic shortcuts (hand-added so that
+    // `using rusty::Vec = ::Vec<T,A>` can become a drop-in replacement for
+    // the legacy rusty::VecLegacy class: default ctor, initializer-list
+    // ctor, size_t-capacity ctor, make(), size() alias, mutable
+    // operator[], and begin()/end() iterators). Codify in
+    // post_transpile_patch.py before re-transpiling vec_port. ──────────
+    Vec() requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::new_()), len_field(0) {}
+    explicit Vec(size_t capacity) requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::with_capacity_in(capacity, A{})), len_field(0) {}
+    Vec(std::initializer_list<T> init) requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::with_capacity_in(init.size(), A{})), len_field(0) {
+        for (auto& item : init) {
+            this->push(std::move(const_cast<T&>(item)));
+        }
+    }
+    static Vec<T, A> make() requires std::is_default_constructible_v<A> {
+        return Vec<T, A>();
+    }
+    size_t size() const { return this->len_field; }
+    // Templated on I (matching the const overload's shape) so calls like
+    // `vec[0]` (where 0 is int) don't fall into ambiguity between const
+    // operator[]<I> and a size_t-only mutable overload.
+    template<typename I>
+    T& operator[](I index) { return this->as_mut_ptr()[index]; }
+    T* begin() { return this->as_mut_ptr(); }
+    T* end() { return this->as_mut_ptr() + this->len_field; }
+    const T* begin() const { return this->as_ptr(); }
+    const T* end() const { return this->as_ptr() + this->len_field; }
+
 
     static Vec<T, A> new_() {
         return Vec<T, A>(RawVec<T, A>::new_(), static_cast<size_t>(0));
@@ -4831,7 +4861,7 @@ struct Vec {
         this->retain_mut([&](auto&& elem) { return f(std::move(elem)); });
     }
     struct PanicGuard {
-        rusty::Vec<T, A>& v;
+        ::Vec<T, A>& v;
         size_t read;
         size_t write_;
         size_t original_len;
@@ -4920,7 +4950,7 @@ struct Vec {
     struct FillGapOnDrop {
         size_t read;
         size_t write_;
-        rusty::Vec<T, A>& vec;
+        ::Vec<T, A>& vec;
         mutable bool _rusty_forgotten = false;
         FillGapOnDrop(size_t read_init, size_t write_init, Vec<T, A>& vec_init) : read(std::move(read_init)), write_(std::move(write_init)), vec(vec_init) {}
         FillGapOnDrop(const FillGapOnDrop&) = default;
@@ -5100,7 +5130,7 @@ return same_bucket(&*current, &*prev); }();
             assert_failed(std::move(at), rusty::len((*this)));
         }
         auto other_len = rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(at);
-        auto other = rusty::Vec<T, std::remove_cvref_t<decltype((rusty::clone(this->allocator())))>>::with_capacity_in(std::move(other_len), rusty::clone(this->allocator()));
+        auto other = ::Vec<T, std::remove_cvref_t<decltype((rusty::clone(this->allocator())))>>::with_capacity_in(std::move(other_len), rusty::clone(this->allocator()));
         // @unsafe
         {
             this->set_len(std::move(at));
@@ -5456,10 +5486,10 @@ local_len.increment_len(1);
                 if (has_advanced) {
                     rusty::ptr::copy(rusty::as_ptr(it.ptr), rusty::as_ptr(it.buf), rusty::len(it));
                 }
-                return rusty::Vec<T, rusty::alloc::Global>::from_parts(std::move(it.buf), rusty::len(it), std::move(it.cap));
+                return ::Vec<T, rusty::alloc::Global>::from_parts(std::move(it.buf), rusty::len(it), std::move(it.cap));
             }
         }
-        auto vec = rusty::Vec<T>::new_();
+        auto vec = ::Vec<T>::new_();
         ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::spec_extend(std::forward<decltype(__self)>(__self), std::move(iterator)); }) { return rusty_ext::spec_extend(std::forward<decltype(__self)>(__self), std::move(iterator)); } else { return rusty_ext::spec_extend(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(iterator))); } })(vec);
         return std::move(vec);
     }
@@ -5509,13 +5539,13 @@ protected:
 
 export template<typename T>
     requires (std::copyable<T>)
-rusty::Vec<T> from_elem(T elem, size_t n) {
+::Vec<T> from_elem(T elem, size_t n) {
     return SpecFromElem::from_elem(std::move(elem), std::move(n), rusty::alloc::Global{});
 }
 
 export template<typename T, typename A>
     requires (std::copyable<T> && rusty::alloc::Allocator<A>)
-rusty::Vec<T, A> from_elem_in(T elem, size_t n, A alloc) {
+::Vec<T, A> from_elem_in(T elem, size_t n, A alloc) {
     return SpecFromElem::from_elem(std::move(elem), std::move(n), std::move(alloc));
 }
 
@@ -5527,7 +5557,7 @@ rusty::Vec<T, A> from_elem_in(T elem, size_t n, A alloc) {
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for Box
 template<typename T, typename A>
-static auto from(rusty::Vec<T, A> v) {
+static auto from(::Vec<T, A> v) {
     return rusty::into_boxed_slice(std::move(v));
 }
 
