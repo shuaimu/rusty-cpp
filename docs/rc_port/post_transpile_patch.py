@@ -66,6 +66,13 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
         r"// using rusty::borrow::\1; — borrow module not vendored",
         text, flags=re.MULTILINE)
 
+    # `rusty::Rc<T, A>` / `rusty::Weak<T, A>` — these qualify to the
+    # hand-written single-template-arg rusty::Rc<T> which doesn't
+    # accept two args. Inside rc_port, the local two-arg `Rc<T, A>`
+    # is the right reference. Drop the `rusty::` prefix.
+    text = re.sub(r"(?<![A-Za-z0-9_])rusty::Rc<", "Rc<", text)
+    text = re.sub(r"(?<![A-Za-z0-9_])rusty::Weak<", "Weak<", text)
+
     if text != original:
         path.write_text(text)
         return 1

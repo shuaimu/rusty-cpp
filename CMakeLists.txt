@@ -127,12 +127,14 @@ endif()
 
 # ──────────────────────────────────────────────────────────────────────
 # rc_port — transpiled rustc Rc port (library/alloc/src/rc.rs).
-# CMake target intentionally not wired yet. Patcher in
-# docs/rc_port/post_transpile_patch.py is seeded with namespace
-# fixups; the library doesn't build clean due to: (a) hand-written
-# rusty::Rc<T> being single-template-arg while rc_port emits
-# Rc<T, Global>, (b) missing NonNull::cast<>(), (c) Cluster A regression.
-# See docs/rc_port/STATUS.md for the full punch list.
+# Patcher in docs/rc_port/post_transpile_patch.py extended to rewrite
+# `rusty::Rc<T,A>` → local `Rc<T,A>` (and same for Weak), unblocking the
+# template-arity errors. But ~16 deeper errors remain: missing
+# `import vec_port.vec;`, bare `cast<U>()` free-function calls,
+# `rusty::alloc::Global` passed as type instead of value, Cluster A
+# regression (auto-template-arg leakage), `Rc<T>` (one-arg) forward
+# decls needing default Allocator. CMake target stays commented; see
+# docs/rc_port/STATUS.md.
 #
 # if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 #    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
@@ -299,6 +301,10 @@ set(TEST_SOURCES
     # binary_heap_port Phase C: push() drive test, iterates on the 6
     # instantiation clusters documented in docs/binary_heap_port/STATUS.md.
     tests/binary_heap_port_push_test.cpp
+
+    # binary_heap_port Phase C: pop() exercise — sift-down path
+    # (hits clusters C4/C5/C6).
+    tests/binary_heap_port_pop_test.cpp
 
     # cell_port — transpiled rustc Cell / RefCell (library/core/src/cell.rs).
     # Phase B/C smoke test: import cell_port, build BorrowError /

@@ -4048,7 +4048,8 @@ struct BinaryHeap {
     rusty::Option<T> pop() {
         return this->data.pop().map([&](auto&& item) {
 if (!rusty::is_empty((*this))) {
-    rusty::mem::swap(&item, &this->data[0]);
+    // Phase C patch: rusty::mem::swap takes refs, not pointers.
+    rusty::mem::swap(item, this->data[0]);
     // @unsafe
     {
         this->sift_down_to_bottom(static_cast<size_t>(0));
@@ -4108,8 +4109,8 @@ return std::move(item);
         auto hole = Hole<T>::new_(this->data, std::move(pos));
         auto child = (static_cast<size_t>(2) * hole.pos()) + static_cast<size_t>(1);
         while (rusty::detail::deref_if_pointer_like(child) <= rusty::saturating_sub(end, rusty::detail::deref_if_pointer(2))) {
-            child += static_cast<size_t>(rusty::get(hole, std::move(child)) <= rusty::get(hole, rusty::detail::deref_if_pointer_like(child) + static_cast<size_t>(1)));
-            if (hole.element() >= rusty::get(hole, std::move(child))) {
+            child += static_cast<size_t>(hole.get(std::move(child)) <= hole.get(rusty::detail::deref_if_pointer_like(child) + static_cast<size_t>(1)));
+            if (hole.element() >= hole.get(std::move(child))) {
                 return hole.pos();
             }
             // @unsafe
@@ -4118,7 +4119,7 @@ return std::move(item);
             }
             child = (static_cast<size_t>(2) * hole.pos()) + static_cast<size_t>(1);
         }
-        if ((rusty::detail::deref_if_pointer_like(child) == (rusty::detail::deref_if_pointer_like(end) - static_cast<size_t>(1))) && (hole.element() < rusty::get(hole, std::move(child)))) {
+        if ((rusty::detail::deref_if_pointer_like(child) == (rusty::detail::deref_if_pointer_like(end) - static_cast<size_t>(1))) && (hole.element() < hole.get(std::move(child)))) {
             // @unsafe
             {
                 hole.move_to(std::move(child));
@@ -4139,7 +4140,7 @@ return std::move(item);
         auto hole = Hole<T>::new_(this->data, std::move(pos));
         auto child = (static_cast<size_t>(2) * hole.pos()) + static_cast<size_t>(1);
         while (rusty::detail::deref_if_pointer_like(child) <= rusty::saturating_sub(end, rusty::detail::deref_if_pointer(2))) {
-            child += static_cast<size_t>(rusty::get(hole, std::move(child)) <= rusty::get(hole, rusty::detail::deref_if_pointer_like(child) + static_cast<size_t>(1)));
+            child += static_cast<size_t>(hole.get(std::move(child)) <= hole.get(rusty::detail::deref_if_pointer_like(child) + static_cast<size_t>(1)));
             // @unsafe
             {
                 hole.move_to(std::move(child));

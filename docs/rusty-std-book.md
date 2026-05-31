@@ -2187,7 +2187,7 @@ or where the existing hand-written version is a thin wrapper.
 
 | Type | rustc source | Hand-written? | Difficulty | Status | Why port |
 |---|---|---|---|---|---|
-| **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | ✅ **Phase C** — `libbinary_heap_port.a` builds, push() exercise tested (`push(3); push(1); push(4); push(1); push(5); len() == 5`). Pop/peek still need 3 more patches. See `docs/binary_heap_port/STATUS.md` and §6.1. | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
+| **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | ✅ **Phase C** — `libbinary_heap_port.a` builds; push() and pop() both exercised (max-heap returns largest, len() decrements). All 6 instantiation clusters closed. See `docs/binary_heap_port/STATUS.md` and §6.1. | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
 | **`VecDeque<T, A>`** | `library/alloc/src/collections/vec_deque/` | ✅ `vecdeque.hpp` | Medium — ring buffer with separate head/tail; wraparound arithmetic; some unsafe but not exotic | 🟡 **Phase A1** — transpile clean. See `docs/vec_deque_port/STATUS.md` and §5.2. | Hand-written exists but transpiling locks in Rust's exact wraparound semantics + `drain` / `swap_remove_back`. Common in BFS / queue workloads. |
 | **`LinkedList<T>`** | `library/alloc/src/collections/linked_list.rs` | ❌ none | Medium — doubly-linked with raw-pointer plumbing; cursor API uses unsafe heavily | 🟡 **Phase A2 partial** — patches applied, hits 13 "auto not allowed in template arg" emit-bug sites (Cluster A signature). See `docs/linked_list_port/STATUS.md` and §6.3. | Net-new functionality. Rarely used compared to `Vec`/`VecDeque`, but completes the collections family. Tests the transpiler against intrusive-list shapes. |
 | **`HashSet<T, S>`** | `library/std/src/collections/hash/set.rs` | ✅ `hashset.hpp` | Low — ~free once `HashMap` is done (it's literally `HashMap<T, ()>` underneath) | ✅ **Done** as part of hashbrown_port. | Lands automatically with HashMap. |
@@ -3359,19 +3359,21 @@ following Chapter 2's playbook.
 (2038 LOC, single file). Net-new — no hand-written `rusty::BinaryHeap`
 existed before.
 
-**Status**: ✅ **Phase C — push() works, two smoke tests green.**
+**Status**: ✅ **Phase C — push() + pop() both work, three smoke tests green.**
 The Phase A2 patcher work landed (14 sed/perl patches enumerated in
 [`docs/binary_heap_port/STATUS.md`](binary_heap_port/STATUS.md));
-`libbinary_heap_port.a` builds clean. Two smoke tests:
-- `tests/binary_heap_port_module_test.cpp` — empty-heap invariants.
-- `tests/binary_heap_port_push_test.cpp` — `push(3); push(1); push(4); push(1); push(5);` followed by `len() == 5`.
+`libbinary_heap_port.a` builds clean. Three smoke tests:
+- `binary_heap_port_module_test.cpp` — empty-heap invariants.
+- `binary_heap_port_push_test.cpp` — five pushes, `len() == 5`.
+- `binary_heap_port_pop_test.cpp` — pop returns max element (5) after pushing `3,1,4,1,5`.
 
-Phase C closure landed three Hole-class patches (clusters C1/C2/C3
-in STATUS.md — pointer-vs-reference at `rusty::ptr::read` and
-`copy_nonoverlapping`, plus a `ManuallyDrop` deref in `Hole::element`).
-Pop/peek would still need three more patches (`std::swap` on
-`MaybeUninit<T>` slots, `Option<const Hole<int>&>` operator overload,
-`rusty::len` over `Hole<int>`) — none of which is hit by push().
+Phase C closed all six cluster sites:
+- **C1** (Hole::new_): `rusty::ptr::read(data[pos])` → `rusty::ptr::read(&data[pos])` (pointer, not ref).
+- **C2** (Hole::~Hole): `copy_nonoverlapping` second arg `data[pos]` → `&data[pos]`.
+- **C3** (Hole::element): `return this->elt` (ManuallyDrop<T>) → `return *this->elt`.
+- **C4** (pop sift-down): `rusty::mem::swap(&item, &this->data[0])` → `rusty::mem::swap(item, this->data[0])` (refs not ptrs).
+- **C5** (sift_down comparator): `rusty::get(hole, idx)` (free fn assumes slice) → `hole.get(idx)` (member surface).
+- **C6** (`rusty::len` over Hole): resolved as side-effect of C5.
 
 The original phase-A2 cluster catalogue, now all resolved:
 
