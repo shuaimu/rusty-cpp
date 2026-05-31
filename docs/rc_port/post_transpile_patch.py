@@ -73,6 +73,57 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
     text = re.sub(r"(?<![A-Za-z0-9_])rusty::Rc<", "Rc<", text)
     text = re.sub(r"(?<![A-Za-z0-9_])rusty::Weak<", "Weak<", text)
 
+    # `rusty::alloc::Global` used as a value instead of a type. Two
+    # cases:
+    #   - bare `rusty::alloc::Global)` (passed as an argument) →
+    #     `rusty::alloc::Global{})` (default-construct an instance).
+    #   - `rusty::alloc::Global.method(...)` (called as if instance) →
+    #     `rusty::alloc::Global{}.method(...)`.
+    text = re.sub(
+        r"(?<![A-Za-z0-9_]):?:?rusty::alloc::Global\)",
+        "rusty::alloc::Global{})", text)
+    text = re.sub(
+        r"(?<![A-Za-z0-9_]):?:?rusty::alloc::Global\.",
+        "rusty::alloc::Global{}.", text)
+
+    # Inject `import vec_port.vec;` into the module preamble so `::Vec`
+    # references resolve. The transpiler emits cross-port imports
+    # inline only when it knows the Cargo dep; for our offline pipeline
+    # the patcher has to wire it up. Insert right after the
+    # `export module rc_port;` line.
+    if "import vec_port.vec;" not in text and "export module rc_port;" in text:
+        text = text.replace(
+            "export module rc_port;\n",
+            "export module rc_port;\n\nimport vec_port.vec;  // patcher-injected for ::Vec\n",
+            1)
+
+    # `visit_byte_buf(::Vec<uint8_t>)` in the serde-de prelude lives in
+    # the GMF, where module imports haven't kicked in — `Vec` isn't
+    # visible. Same approach binary_heap_port took: stub the body.
+    # Match the function signature flexibly to survive prefix-rewrite
+    # iterations.
+    text = re.sub(
+        r"rusty::Result<Value, E> visit_byte_buf\([^)]+\)\s*\{[^}]*\}",
+        "rusty::Result<Value, E> visit_byte_buf(auto&&) { return rusty::Result<Value, E>::Err(E{}); }",
+        text)
+
+    # One-arg `Rc<T>` / `Weak<T>` forward decls — local two-arg
+    # template doesn't accept them. Targeted to the rusty_ext slot
+    # `Rc<std::span<const T>> to_rc_slice(` shape that the transpiler
+    # emits for to_rc_slice / to_arc_slice. Single literal match.
+    text = text.replace(
+        "Rc<std::span<const T>> to_rc_slice(",
+        "Rc<std::span<const T>, rusty::alloc::Global> to_rc_slice(")
+    text = text.replace(
+        "Weak<std::span<const T>> to_weak_slice(",
+        "Weak<std::span<const T>, rusty::alloc::Global> to_weak_slice(")
+
+    # `rusty::ptr::slice_from_raw_parts_mut` — our header surfaces it as
+    # `from_raw_parts_mut` (no `slice_` prefix). Rename.
+    text = text.replace(
+        "rusty::ptr::slice_from_raw_parts_mut",
+        "rusty::ptr::from_raw_parts_mut")
+
     if text != original:
         path.write_text(text)
         return 1

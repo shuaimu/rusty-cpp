@@ -127,14 +127,13 @@ endif()
 
 # ──────────────────────────────────────────────────────────────────────
 # rc_port — transpiled rustc Rc port (library/alloc/src/rc.rs).
-# Patcher in docs/rc_port/post_transpile_patch.py extended to rewrite
-# `rusty::Rc<T,A>` → local `Rc<T,A>` (and same for Weak), unblocking the
-# template-arity errors. But ~16 deeper errors remain: missing
-# `import vec_port.vec;`, bare `cast<U>()` free-function calls,
-# `rusty::alloc::Global` passed as type instead of value, Cluster A
-# regression (auto-template-arg leakage), `Rc<T>` (one-arg) forward
-# decls needing default Allocator. CMake target stays commented; see
-# docs/rc_port/STATUS.md.
+# Patcher in docs/rc_port/post_transpile_patch.py now applies 6
+# transformations: namespace prefix fixups, rusty::Rc<T,A>→Rc<T,A>,
+# rusty::Weak<T,A>→Weak<T,A>, rusty::alloc::Global type→value,
+# inject `import vec_port.vec;`, visit_byte_buf body stub, to_rc_slice
+# default-Global. ~14 errors remain (mostly bare `::cast` free-fn
+# calls and Cluster A `auto`-template-arg regression — both
+# transpiler-side). See docs/rc_port/STATUS.md.
 #
 # if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 #    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
@@ -146,6 +145,7 @@ endif()
 #     target_include_directories(rc_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 #     target_compile_features(rc_port PUBLIC cxx_std_23)
 #     target_compile_options(rc_port PRIVATE -O3 -DNDEBUG -march=native )
+#     target_link_libraries(rc_port PUBLIC vec_port)
 # endif()
 
 # ──────────────────────────────────────────────────────────────────────
