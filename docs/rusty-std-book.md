@@ -2187,7 +2187,7 @@ or where the existing hand-written version is a thin wrapper.
 
 | Type | rustc source | Hand-written? | Difficulty | Status | Why port |
 |---|---|---|---|---|---|
-| **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | ✅ **Phase B** — `libbinary_heap_port.a` builds clean, empty-heap smoke test passes. Phase C push/pop/peek still needs ~6 `rusty::ptr::*` helper-gap patches. See `docs/binary_heap_port/STATUS.md` and §6.1. | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
+| **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | ✅ **Phase C** — `libbinary_heap_port.a` builds, push() exercise tested (`push(3); push(1); push(4); push(1); push(5); len() == 5`). Pop/peek still need 3 more patches. See `docs/binary_heap_port/STATUS.md` and §6.1. | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
 | **`VecDeque<T, A>`** | `library/alloc/src/collections/vec_deque/` | ✅ `vecdeque.hpp` | Medium — ring buffer with separate head/tail; wraparound arithmetic; some unsafe but not exotic | 🟡 **Phase A1** — transpile clean. See `docs/vec_deque_port/STATUS.md` and §5.2. | Hand-written exists but transpiling locks in Rust's exact wraparound semantics + `drain` / `swap_remove_back`. Common in BFS / queue workloads. |
 | **`LinkedList<T>`** | `library/alloc/src/collections/linked_list.rs` | ❌ none | Medium — doubly-linked with raw-pointer plumbing; cursor API uses unsafe heavily | 🟡 **Phase A2 partial** — patches applied, hits 13 "auto not allowed in template arg" emit-bug sites (Cluster A signature). See `docs/linked_list_port/STATUS.md` and §6.3. | Net-new functionality. Rarely used compared to `Vec`/`VecDeque`, but completes the collections family. Tests the transpiler against intrusive-list shapes. |
 | **`HashSet<T, S>`** | `library/std/src/collections/hash/set.rs` | ✅ `hashset.hpp` | Low — ~free once `HashMap` is done (it's literally `HashMap<T, ()>` underneath) | ✅ **Done** as part of hashbrown_port. | Lands automatically with HashMap. |
@@ -2205,7 +2205,7 @@ validation gap appears.
 | **`Mutex<T>` / `RwLock<T>`** | `library/std/src/sync/{mutex,rwlock}.rs` | ✅ `mutex.hpp`, `rwlock.hpp` | Medium — but each platform-specific impl is its own subtree; pthread on Linux, SRWLock on Windows | ⏸️ Not scaffolded. | Hand-written exists and works. Transpiling adds value mainly if poisoning semantics matter to a user. Likely skip unless a poisoning bug appears. |
 | **`BTreeSet<T>`** | `library/alloc/src/collections/btree/set.rs` | ✅ Already done as part of BTreeMap port | — | ✅ **Done**. | Mentioned for completeness. |
 | **`Range`, `RangeInclusive`, `RangeFrom`, `RangeTo`, `RangeFull`** | `library/core/src/ops/range.rs` | ❌ partial (probably implicit in `slice.hpp`) | Low — trivial structs with iter impls | ⏸️ Not scaffolded. | Foundational for slicing. Small surface. Falls out nearly free. |
-| **`Cell<T>` / `RefCell<T>` / `OnceCell` / `LazyCell` / `UnsafeCell`** | `library/core/src/cell.rs` | ✅ `refcell.hpp`, `cell.hpp`, `unsafe_cell.hpp`, `once.hpp` | Low — small file; mostly bookkeeping | 🟡 **Phase A1** scaffolded (2737 LOC, 20 hand-slots, all five types in one .cppm). See `docs/cell_port/STATUS.md` and §6.8. | Hand-written is fine for typical cases. Transpiling validates Rust-specific borrow-runtime behavior. |
+| **`Cell<T>` / `RefCell<T>` / `OnceCell` / `LazyCell` / `UnsafeCell`** | `library/core/src/cell.rs` | ✅ `refcell.hpp`, `cell.hpp`, `unsafe_cell.hpp`, `once.hpp` | Low — small file; mostly bookkeeping | ✅ **Phase B + C** — `libcell_port.a` builds, `BorrowError`/`BorrowMutError` smoke test passes; introduced reusable `rusty::ops`/`marker`/`fmt`/`pin`/`panic` trait stubs. See `docs/cell_port/STATUS.md` and §6.8. | Hand-written is fine for typical cases. Transpiling validates Rust-specific borrow-runtime behavior. |
 
 ### 3.5 Tier 4 — Niche / narrow use case
 
@@ -3359,16 +3359,19 @@ following Chapter 2's playbook.
 (2038 LOC, single file). Net-new — no hand-written `rusty::BinaryHeap`
 existed before.
 
-**Status**: ✅ **Phase B reached — library + empty-heap smoke test green.**
+**Status**: ✅ **Phase C — push() works, two smoke tests green.**
 The Phase A2 patcher work landed (14 sed/perl patches enumerated in
 [`docs/binary_heap_port/STATUS.md`](binary_heap_port/STATUS.md));
-`libbinary_heap_port.a` builds clean and
-`tests/binary_heap_port_module_test.cpp` proves `BinaryHeap::new_in()`
-+ `len()` / `is_empty()` / `capacity()` work end-to-end.
+`libbinary_heap_port.a` builds clean. Two smoke tests:
+- `tests/binary_heap_port_module_test.cpp` — empty-heap invariants.
+- `tests/binary_heap_port_push_test.cpp` — `push(3); push(1); push(4); push(1); push(5);` followed by `len() == 5`.
 
-Phase C (full push/pop/peek) still needs ~6 instantiation-time
-clusters resolved (mostly `rusty::ptr::*` helper gaps that the
-BTreeMap port also hit — see STATUS.md "Remaining for Phase C").
+Phase C closure landed three Hole-class patches (clusters C1/C2/C3
+in STATUS.md — pointer-vs-reference at `rusty::ptr::read` and
+`copy_nonoverlapping`, plus a `ManuallyDrop` deref in `Hole::element`).
+Pop/peek would still need three more patches (`std::swap` on
+`MaybeUninit<T>` slots, `Option<const Hole<int>&>` operator overload,
+`rusty::len` over `Hole<int>`) — none of which is hit by push().
 
 The original phase-A2 cluster catalogue, now all resolved:
 
@@ -3452,13 +3455,13 @@ dependencies (`Searcher`/`Pattern` traits in `core::str::pattern`,
 `Cow`/`ToOwned` in `alloc::borrow`, `ascii::Char` in `alloc::ascii`).
 See [`docs/string_port/STATUS.md`](string_port/STATUS.md).
 
-### 6.7 `alloc::rc::Rc` + `alloc::sync::Arc` — Phase A1 (smart-pointer family)
+### 6.7 `alloc::rc::Rc` + `alloc::sync::Arc` — Phase A2 partial (rc patcher seeded)
 
 Two single-file ports scaffolded:
 
 | Port | LOC | Hand-slots | Hand-written exists? |
 |---|---|---|---|
-| `rc_port` | 4565 | 4 | ✅ `rusty::Rc` in `rc.hpp` |
+| `rc_port` | 5094 | 4 | ✅ `rusty::Rc` in `rc.hpp` |
 | `arc_port` | 4936 | 7 | ✅ `rusty::Arc` in `arc.hpp` |
 
 Both transpile zero-errors under `--auto-namespace`. Tier 3 per §3.4
@@ -3466,18 +3469,54 @@ Both transpile zero-errors under `--auto-namespace`. Tier 3 per §3.4
 single/multi-threaded refcounting; transpiling validates rustc's exact
 unsafe drop sequence + atomic memory orderings.
 
-Predicted Phase B effort: **2–3 days** (Rc), **3–5 days** (Arc).
+`docs/rc_port/post_transpile_patch.py` is seeded with namespace
+prefix fixups (`rusty::Vec` → `::Vec`, `rusty::mem::MaybeUninit` →
+`rusty::MaybeUninit`, `std::ptr::Alignment` → `rusty::ptr::Alignment`,
+`std::borrow::*` commented out). Library still does not build — the
+deeper blockers are:
 
-### 6.8 `core::cell` — Phase A1 (Cell / RefCell / OnceCell)
+1. Missing `import vec_port.vec;` in the module preamble (patcher needs to inject).
+2. `Rc<T, A>` two-template-arg shape vs hand-written single-arg `rusty::Rc<T>`.
+3. Missing `NonNull::cast<>()` method.
+4. Cluster A regression (`auto` template arg in absorbed methods).
+5. Cross-port dependencies on `rusty::Cell` / `rusty::UnsafeCell` / `rusty::Box` signatures.
 
-Single-file port scaffolded: `cell_port.cppm` from
-`library/core/src/cell.rs` (2737 LOC, 20 hand-slots). All of
-`Cell<T>`, `RefCell<T>`, `UnsafeCell<T>`, `OnceCell<T>`, `LazyCell<T>`
-live in this one rust file.
+See `docs/rc_port/STATUS.md` for the full punch list. Arc is expected
+to have the same shape (atomics-heavy version of Rc) plus its own
+memory-ordering issues.
 
-Tier 3 per §3.4 — hand-written `refcell.hpp` / `cell.hpp` /
-`unsafe_cell.hpp` / `once.hpp` cover the basic cases. Predicted Phase
-B effort: **1–2 days**.
+Predicted Phase B effort: **5–8 days** (Rc), **8–12 days** (Arc) given
+the layered blockers — both need transpiler-side work that didn't
+land for cell_port (cell.rs is simpler: no allocator-generic + no
+multi-arg smart-pointer template + no atomic ordering).
+
+### 6.8 `core::cell` — ✅ **Phase B + C**
+
+Single-file port: `cell_port.cppm` from
+`library/core/src/cell.rs` (2737 LOC). All of `Cell<T>`, `RefCell<T>`,
+`UnsafeCell<T>`, `OnceCell<T>`, `LazyCell<T>` live in this one rust
+file (we drop the LazyCell/OnceCell submodules — see `docs/cell_port/STATUS.md`).
+
+`libcell_port.a` builds clean against clang 19 + C++23; the smoke
+test `tests/cell_port_module_test.cpp` proves `BorrowError` and
+`BorrowMutError` are reachable and formattable.
+
+This port introduced new infra that the other ports get for free:
+
+| Header | What it added |
+|---|---|
+| `include/rusty/ops.hpp` (new) | empty-marker stubs for `Deref`, `DerefMut`, `CoerceUnsized`, ... |
+| `include/rusty/marker.hpp` (extended) | `marker::Copy`/`Sized`/`Send`/`Sync`/`Unpin`/... |
+| `include/rusty/fmt.hpp` (extended) | `Debug`/`Display`/`Binary`/`Octal`/... stubs |
+| `include/rusty/pin.hpp` (new) | `pin::PinCoerceUnsized`/`PinDerefMut` |
+| `include/rusty/panic.hpp` (extended) | `panic::Location` (with static `caller()`), `panic::const_panic` |
+| `include/rusty/ptr.hpp` (extended) | `ptr::replace` and `ptr::eq` |
+
+`docs/cell_port/post_transpile_patch.py` codifies 8 standard patches
+(see the STATUS.md for the catalogue). The trait stubs above are
+reusable for any other port that emits `using rusty::ops::Deref;`
+etc., including rc_port and arc_port (still blocked on other issues
+— see §6.7).
 
 ### 6.9 Recipe used across all Tier-2 / Tier-3 ports
 
