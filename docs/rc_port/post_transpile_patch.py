@@ -124,6 +124,14 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
         "rusty::ptr::slice_from_raw_parts_mut",
         "rusty::ptr::from_raw_parts_mut")
 
+    # Cluster A regression: `rusty::Box<auto>::try_new(RcInner<T>{...})`
+    # — auto in template argument. The argument's type IS the box's
+    # value type, so substitute auto with the explicit type. Uniform
+    # pattern in rc_port: only RcInner<T>.
+    text = text.replace(
+        "rusty::Box<auto>::try_new(RcInner",
+        "rusty::Box<RcInner<T>>::try_new(RcInner")
+
     if text != original:
         path.write_text(text)
         return 1
