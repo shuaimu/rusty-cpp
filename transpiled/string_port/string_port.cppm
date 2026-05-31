@@ -28,6 +28,11 @@ module;
 #pragma GCC diagnostic ignored "-Wunused-local-typedefs"
 #endif
 
+template<class... Ts>
+struct overloaded : Ts... { using Ts::operator()...; };
+template<class... Ts>
+overloaded(Ts...) -> overloaded<Ts...>;
+
 struct TokenTree;
 namespace rusty {
 namespace cmp {
@@ -96,7 +101,15 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.
+template<typename T>
+auto clone(const T& value) {
+if constexpr (requires { value.clone(); }) {
+return value.clone();
+} else {
+return value;
+}
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -325,8 +338,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
+return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
 }
 
 template<typename E>
@@ -3633,134 +3646,2325 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 }
 
-export module vec_deque_port.extract_if;
+export module string_port;
 
-namespace vec_deque_port::extract_if {
+namespace string_port {
 
-export template<typename T, typename F, typename A>
-    requires (rusty::alloc::Allocator<A>)
-struct ExtractIf;
+export struct FromUtf16Error;
+export struct Drain;
+export struct String;
+export struct FromUtf8Error;
+export struct IntoChars;
+export using ParseError = rusty::convert::Infallible;
 
+// Extension trait free-function forward declarations
+namespace rusty_ext {
+    export template<typename T>
+    void spec_extend_into(T self_, rusty::String& target);
+
+    export template<typename T>
+    rusty::String spec_to_string(const T& self_);
+
+    export rusty::String spec_to_string(const rusty::ascii::Char& self_);
+
+    export rusty::String spec_to_string(const char32_t& self_);
+
+    export rusty::String spec_to_string(const bool& self_);
+
+    export rusty::String spec_to_string(const uint8_t& self_);
+
+    export rusty::String spec_to_string(const int8_t& self_);
+
+    export rusty::String spec_to_string(const rusty::fmt::Arguments& self_);
+
+    export template<typename T>
+    rusty::String to_string(const T& self_);
+
+}
+
+
+// Rust-only: using std::error::Error;
+
+// Rust-only: using std::iter::FusedIterator;
+
+// Rust-only: using std::iter::from_fn;
+
+// Rust-only: using std::num::Saturating;
+
+// Rust-only: using std::ops::Add;
+
+// Rust-only: using std::ops::AddAssign;
+
+// Rust-only: using std::ops;
 // Rust-only: using std::ops::Range;
 // Rust-only: using std::ops::RangeBounds;
 
+// Rust-only: using std::str::pattern::Pattern;
+// Rust-only: using std::str::pattern::Utf8Pattern;
+
+// Rust-only: using std::hash;
 namespace ptr = rusty::ptr;
 // Rust-only: using std::slice;
 
-// Rust-only unresolved import: using VecDeque;
+using rusty::alloc::Allocator;
 
-using std::Allocator;
-using std::Global;
+using ::borrow::Cow;
+using ::borrow::ToOwned;
 
-/// An iterator which uses a closure to determine if an element should be removed.
+using rusty::Box;
+
+// Rust-only: using std::collections::TryReserveError;
+
+// Rust-only namespace re-export: using str;
+using ::str::CharIndices;
+using ::str::Chars;
+using ::str::Utf8Error;
+using ::str::from_utf8_unchecked_mut;
+
+using ::str::FromStr;
+using ::str::from_boxed_utf8_unchecked;
+
+// Rust-only: using std::vec;
+using rusty::Vec;
+
+/// A possible error value when converting a `String` from a UTF-16 byte slice.
 ///
-/// This struct is created by [`VecDeque::extract_if`].
-/// See its documentation for more.
+/// This type is the error type for the [`from_utf16`] method on [`String`].
 ///
-/// # Example
+/// [`from_utf16`]: String::from_utf16
+///
+/// # Examples
 ///
 /// ```
-/// #![feature(vec_deque_extract_if)]
+/// // 𝄞mu<invalid>ic
+/// let v = &[0xD834, 0xDD1E, 0x006d, 0x0075,
+///           0xD800, 0x0069, 0x0063];
 ///
-/// use std::collections::vec_deque::ExtractIf;
-/// use std::collections::vec_deque::VecDeque;
-///
-/// let mut v = VecDeque::from([0, 1, 2]);
-/// let iter: ExtractIf<'_, _, _> = v.extract_if(.., |x| *x % 2 == 0);
+/// assert!(String::from_utf16(v).is_err());
 /// ```
-export template<typename T, typename F, typename A = rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A>)
-struct ExtractIf {
-    using Item = T;
-    rusty::VecDeque<T, A>& vec;
-    /// The index of the item that will be inspected by the next call to `next`.
-    size_t idx;
-    /// Elements at and beyond this point will be retained. Must be equal or smaller than `old_len`.
+export struct FromUtf16Error {
+    std::tuple<> _0;
+
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
+
+    friend std::ostream& operator<<(std::ostream& os, const FromUtf16Error& v) {
+        return os << "FromUtf16Error { ... }";
+    }
+};
+
+/// A draining iterator for `String`.
+///
+/// This struct is created by the [`drain`] method on [`String`]. See its
+/// documentation for more.
+///
+/// [`drain`]: String::drain
+export struct Drain {
+    using Item = char32_t;
+    /// Will be used as &'a mut String in the destructor
+    rusty::String* string;
+    /// Start of part to remove
+    size_t start;
+    /// End of part to remove
     size_t end;
-    /// The number of items that have been drained (removed) thus far.
-    size_t del;
-    /// The original length of `vec` prior to draining.
-    size_t old_len;
-    /// The filter test predicate.
-    F pred;
+    /// Current remaining range to remove
+    rusty::str_runtime::Chars iter;
     mutable bool _rusty_forgotten = false;
-    ExtractIf(rusty::VecDeque<T, A>& vec_init, size_t idx_init, size_t end_init, size_t del_init, size_t old_len_init, F pred_init) : vec(vec_init), idx(std::move(idx_init)), end(std::move(end_init)), del(std::move(del_init)), old_len(std::move(old_len_init)), pred(std::move(pred_init)) {}
-    ExtractIf(const ExtractIf&) = default;
-    ExtractIf(ExtractIf&& other) noexcept : vec(other.vec), idx(std::move(other.idx)), end(std::move(other.end)), del(std::move(other.del)), old_len(std::move(other.old_len)), pred(std::move(other.pred)) {
+    Drain(rusty::String* string_init, size_t start_init, size_t end_init, rusty::str_runtime::Chars iter_init) : string(std::move(string_init)), start(std::move(start_init)), end(std::move(end_init)), iter(std::move(iter_init)) {}
+    Drain(const Drain&) = default;
+    Drain(Drain&& other) noexcept : string(std::move(other.string)), start(std::move(other.start)), end(std::move(other.end)), iter(std::move(other.iter)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    ExtractIf& operator=(const ExtractIf&) = default;
-    ExtractIf& operator=(ExtractIf&& other) noexcept {
+    Drain& operator=(const Drain&) = default;
+    Drain& operator=(Drain&& other) noexcept {
         if (this == &other) {
             return *this;
         }
-        this->~ExtractIf();
-        new (this) ExtractIf(std::move(other));
+        this->~Drain();
+        new (this) Drain(std::move(other));
         return *this;
     }
     void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
 
 
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
+    ~Drain() noexcept(false);
+    std::string_view as_str() const;
+    std::string_view as_ref() const;
+    rusty::Option<char32_t> next();
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const;
+    rusty::Option<char32_t> last();
+    rusty::Option<char32_t> next_back();
+};
+
+/// A UTF-8–encoded, growable string.
+///
+/// `String` is the most common string type. It has ownership over the contents
+/// of the string, stored in a heap-allocated buffer (see [Representation](#representation)).
+/// It is closely related to its borrowed counterpart, the primitive [`str`].
+///
+/// # Examples
+///
+/// You can create a `String` from [a literal string][`&str`] with [`String::from`]:
+///
+/// [`String::from`]: From::from
+///
+/// ```
+/// let hello = String::from("Hello, world!");
+/// ```
+///
+/// You can append a [`char`] to a `String` with the [`push`] method, and
+/// append a [`&str`] with the [`push_str`] method:
+///
+/// ```
+/// let mut hello = String::from("Hello, ");
+///
+/// hello.push('w');
+/// hello.push_str("orld!");
+/// ```
+///
+/// [`push`]: String::push
+/// [`push_str`]: String::push_str
+///
+/// If you have a vector of UTF-8 bytes, you can create a `String` from it with
+/// the [`from_utf8`] method:
+///
+/// ```
+/// // some bytes, in a vector
+/// let sparkle_heart = vec![240, 159, 146, 150];
+///
+/// // We know these bytes are valid, so we'll use `unwrap()`.
+/// let sparkle_heart = String::from_utf8(sparkle_heart).unwrap();
+///
+/// assert_eq!("💖", sparkle_heart);
+/// ```
+///
+/// [`from_utf8`]: String::from_utf8
+///
+/// # UTF-8
+///
+/// `String`s are always valid UTF-8. If you need a non-UTF-8 string, consider
+/// [`OsString`]. It is similar, but without the UTF-8 constraint. Because UTF-8
+/// is a variable width encoding, `String`s are typically smaller than an array of
+/// the same `char`s:
+///
+/// ```
+/// // `s` is ASCII which represents each `char` as one byte
+/// let s = "hello";
+/// assert_eq!(s.len(), 5);
+///
+/// // A `char` array with the same contents would be longer because
+/// // every `char` is four bytes
+/// let s = ['h', 'e', 'l', 'l', 'o'];
+/// let size: usize = s.into_iter().map(|c| size_of_val(&c)).sum();
+/// assert_eq!(size, 20);
+///
+/// // However, for non-ASCII strings, the difference will be smaller
+/// // and sometimes they are the same
+/// let s = "💖💖💖💖💖";
+/// assert_eq!(s.len(), 20);
+///
+/// let s = ['💖', '💖', '💖', '💖', '💖'];
+/// let size: usize = s.into_iter().map(|c| size_of_val(&c)).sum();
+/// assert_eq!(size, 20);
+/// ```
+///
+/// This raises interesting questions as to how `s[i]` should work.
+/// What should `i` be here? Several options include byte indices and
+/// `char` indices but, because of UTF-8 encoding, only byte indices
+/// would provide constant time indexing. Getting the `i`th `char`, for
+/// example, is available using [`chars`]:
+///
+/// ```
+/// let s = "hello";
+/// let third_character = s.chars().nth(2);
+/// assert_eq!(third_character, Some('l'));
+///
+/// let s = "💖💖💖💖💖";
+/// let third_character = s.chars().nth(2);
+/// assert_eq!(third_character, Some('💖'));
+/// ```
+///
+/// Next, what should `s[i]` return? Because indexing returns a reference
+/// to underlying data it could be `&u8`, `&[u8]`, or something similar.
+/// Since we're only providing one index, `&u8` makes the most sense but that
+/// might not be what the user expects and can be explicitly achieved with
+/// [`as_bytes()`]:
+///
+/// ```
+/// // The first byte is 104 - the byte value of `'h'`
+/// let s = "hello";
+/// assert_eq!(s.as_bytes()[0], 104);
+/// // or
+/// assert_eq!(s.as_bytes()[0], b'h');
+///
+/// // The first byte is 240 which isn't obviously useful
+/// let s = "💖💖💖💖💖";
+/// assert_eq!(s.as_bytes()[0], 240);
+/// ```
+///
+/// Due to these ambiguities/restrictions, indexing with a `usize` is simply
+/// forbidden:
+///
+/// ```compile_fail,E0277
+/// let s = "hello";
+///
+/// // The following will not compile!
+/// println!("The first letter of s is {}", s[0]);
+/// ```
+///
+/// It is more clear, however, how `&s[i..j]` should work (that is,
+/// indexing with a range). It should accept byte indices (to be constant-time)
+/// and return a `&str` which is UTF-8 encoded. This is also called "string slicing".
+/// Note this will panic if the byte indices provided are not character
+/// boundaries - see [`is_char_boundary`] for more details. See the implementations
+/// for [`SliceIndex<str>`] for more details on string slicing. For a non-panicking
+/// version of string slicing, see [`get`].
+///
+/// [`OsString`]: ../../std/ffi/struct.OsString.html "ffi::OsString"
+/// [`SliceIndex<str>`]: core::slice::SliceIndex
+/// [`as_bytes()`]: str::as_bytes
+/// [`get`]: str::get
+/// [`is_char_boundary`]: str::is_char_boundary
+///
+/// The [`bytes`] and [`chars`] methods return iterators over the bytes and
+/// codepoints of the string, respectively. To iterate over codepoints along
+/// with byte indices, use [`char_indices`].
+///
+/// [`bytes`]: str::bytes
+/// [`chars`]: str::chars
+/// [`char_indices`]: str::char_indices
+///
+/// # Deref
+///
+/// `String` implements <code>[Deref]<Target = [str]></code>, and so inherits all of [`str`]'s
+/// methods. In addition, this means that you can pass a `String` to a
+/// function which takes a [`&str`] by using an ampersand (`&`):
+///
+/// ```
+/// fn takes_str(s: &str) { }
+///
+/// let s = String::from("Hello");
+///
+/// takes_str(&s);
+/// ```
+///
+/// This will create a [`&str`] from the `String` and pass it in. This
+/// conversion is very inexpensive, and so generally, functions will accept
+/// [`&str`]s as arguments unless they need a `String` for some specific
+/// reason.
+///
+/// In certain cases Rust doesn't have enough information to make this
+/// conversion, known as [`Deref`] coercion. In the following example a string
+/// slice [`&'a str`][`&str`] implements the trait `TraitExample`, and the function
+/// `example_func` takes anything that implements the trait. In this case Rust
+/// would need to make two implicit conversions, which Rust doesn't have the
+/// means to do. For that reason, the following example will not compile.
+///
+/// ```compile_fail,E0277
+/// trait TraitExample {}
+///
+/// impl<'a> TraitExample for &'a str {}
+///
+/// fn example_func<A: TraitExample>(example_arg: A) {}
+///
+/// let example_string = String::from("example_string");
+/// example_func(&example_string);
+/// ```
+///
+/// There are two options that would work instead. The first would be to
+/// change the line `example_func(&example_string);` to
+/// `example_func(example_string.as_str());`, using the method [`as_str()`]
+/// to explicitly extract the string slice containing the string. The second
+/// way changes `example_func(&example_string);` to
+/// `example_func(&*example_string);`. In this case we are dereferencing a
+/// `String` to a [`str`], then referencing the [`str`] back to
+/// [`&str`]. The second way is more idiomatic, however both work to do the
+/// conversion explicitly rather than relying on the implicit conversion.
+///
+/// # Representation
+///
+/// A `String` is made up of three components: a pointer to some bytes, a
+/// length, and a capacity. The pointer points to the internal buffer which `String`
+/// uses to store its data. The length is the number of bytes currently stored
+/// in the buffer, and the capacity is the size of the buffer in bytes. As such,
+/// the length will always be less than or equal to the capacity.
+///
+/// This buffer is always stored on the heap.
+///
+/// You can look at these with the [`as_ptr`], [`len`], and [`capacity`]
+/// methods:
+///
+/// ```
+/// let story = String::from("Once upon a time...");
+///
+/// // Deconstruct the String into parts.
+/// let (ptr, len, capacity) = story.into_raw_parts();
+///
+/// // story has nineteen bytes
+/// assert_eq!(19, len);
+///
+/// // We can re-build a String out of ptr, len, and capacity. This is all
+/// // unsafe because we are responsible for making sure the components are
+/// // valid:
+/// let s = unsafe { String::from_raw_parts(ptr, len, capacity) } ;
+///
+/// assert_eq!(String::from("Once upon a time..."), s);
+/// ```
+///
+/// [`as_ptr`]: str::as_ptr
+/// [`len`]: String::len
+/// [`capacity`]: String::capacity
+///
+/// If a `String` has enough capacity, adding elements to it will not
+/// re-allocate. For example, consider this program:
+///
+/// ```
+/// let mut s = String::new();
+///
+/// println!("{}", s.capacity());
+///
+/// for _ in 0..5 {
+///     s.push_str("hello");
+///     println!("{}", s.capacity());
+/// }
+/// ```
+///
+/// This will output the following:
+///
+/// ```text
+/// 0
+/// 8
+/// 16
+/// 16
+/// 32
+/// 32
+/// ```
+///
+/// At first, we have no memory allocated at all, but as we append to the
+/// string, it increases its capacity appropriately. If we instead use the
+/// [`with_capacity`] method to allocate the correct capacity initially:
+///
+/// ```
+/// let mut s = String::with_capacity(25);
+///
+/// println!("{}", s.capacity());
+///
+/// for _ in 0..5 {
+///     s.push_str("hello");
+///     println!("{}", s.capacity());
+/// }
+/// ```
+///
+/// [`with_capacity`]: String::with_capacity
+///
+/// We end up with a different output:
+///
+/// ```text
+/// 25
+/// 25
+/// 25
+/// 25
+/// 25
+/// 25
+/// ```
+///
+/// Here, there's no need to allocate more memory inside the loop.
+///
+/// [str]: prim@str "str"
+/// [`str`]: prim@str "str"
+/// [`&str`]: prim@str "&str"
+/// [Deref]: core::ops::Deref "ops::Deref"
+/// [`Deref`]: core::ops::Deref "ops::Deref"
+/// [`as_str()`]: String::as_str
+export struct String {
+    using Searcher = std::string_view::Searcher;
+    using Target = std::string_view;
+    using Err = rusty::convert::Infallible;
+    using Error = FromUtf8Error;
+    rusty::Vec<uint8_t> vec;
+
+    static String new_();
+    static String with_capacity(size_t capacity);
+    static rusty::Result<String, std::collections::TryReserveError> try_with_capacity(size_t capacity);
+    static rusty::Result<String, FromUtf8Error> from_utf8(rusty::Vec<uint8_t> vec);
+    static rusty::Cow from_utf8_lossy(std::span<const uint8_t> v);
+    static String from_utf8_lossy_owned(rusty::Vec<uint8_t> v);
+    static rusty::Result<String, FromUtf16Error> from_utf16(std::span<const uint16_t> v);
+    static String from_utf16_lossy(std::span<const uint16_t> v);
+    static rusty::Result<String, FromUtf16Error> from_utf16le(std::span<const uint8_t> v);
+    static String from_utf16le_lossy(std::span<const uint8_t> v);
+    static rusty::Result<String, FromUtf16Error> from_utf16be(std::span<const uint8_t> v);
+    static String from_utf16be_lossy(std::span<const uint8_t> v);
+    std::tuple<uint8_t*, size_t, size_t> into_raw_parts();
+    static String from_raw_parts(uint8_t* buf, size_t length, size_t capacity);
+    static String from_utf8_unchecked(rusty::Vec<uint8_t> bytes);
+    rusty::Vec<uint8_t> into_bytes();
+    std::string_view as_str() const;
+    std::string_view as_mut_str();
+    void push_str(std::string_view string);
+    void push_str_slice(std::span<const std::string_view> slice);
     template<typename R>
-    static ExtractIf<T, F, A> new_(rusty::VecDeque<T, A>& vec, F pred, R range) {
-        auto old_len = rusty::len(vec);
-        auto&& _let_pat = slice::range(std::move(range), rusty::range_to(old_len));
-        auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);
-        auto&& end = rusty::detail::deref_if_pointer(_let_pat.end);
-        vec.len = 0;
-        return ExtractIf<T, F, A>(vec, std::move(start), std::move(end), static_cast<size_t>(0), std::move(old_len), std::move(pred));
+    void extend_from_within(R src);
+    size_t capacity() const;
+    void reserve(size_t additional);
+    void reserve_exact(size_t additional);
+    rusty::Result<std::tuple<>, std::collections::TryReserveError> try_reserve(size_t additional);
+    rusty::Result<std::tuple<>, std::collections::TryReserveError> try_reserve_exact(size_t additional);
+    void shrink_to_fit();
+    void shrink_to(size_t min_capacity);
+    void push(char32_t ch);
+    std::span<const uint8_t> as_bytes() const;
+    void truncate(size_t new_len);
+    rusty::Option<char32_t> pop();
+    char32_t remove(size_t idx);
+    template<typename P>
+    void remove_matches(P pat);
+    template<typename F>
+    void retain(F f);
+    void insert(size_t idx, char32_t ch);
+    void insert_str(size_t idx, std::string_view string);
+    rusty::Vec<uint8_t>& as_mut_vec();
+    size_t len() const;
+    bool is_empty() const;
+    String split_off(size_t at);
+    void clear();
+    template<typename R>
+    Drain drain(R range);
+    IntoChars into_chars();
+    template<typename R>
+    void replace_range(R range, std::string_view replace_with);
+    template<typename P>
+    void replace_first(P from, std::string_view to);
+    template<typename P>
+    void replace_last(P from, std::string_view to);
+    rusty::Box<rusty::String> into_boxed_str();
+    std::string_view leak();
+    String clone() const;
+    void clone_from(const String& source);
+    template<typename I>
+    static String from_iter(I iter);
+    template<typename I, typename A>
+        requires (rusty::alloc::Allocator<A>)
+    static String from_iter(I iter);
+    template<typename T>
+    static String from_iter(T iter);
+    template<typename I>
+    void extend(I iter);
+    void extend_one(char32_t c);
+    void extend_reserve(size_t additional);
+    void extend_one(const char32_t& _arg1);
+    void extend_one(std::string_view s);
+    template<typename I, typename A>
+        requires (rusty::alloc::Allocator<A>)
+    void extend(I iter);
+    void extend_one(const auto& s);
+    void extend_one(rusty::Cow s);
+    void extend_one(rusty::ascii::Char c);
+    void extend_one(const rusty::ascii::Char& c);
+    std::string_view::Searcher into_searcher(std::string_view haystack) const;
+    bool is_contained_in(std::string_view haystack) const;
+    bool is_prefix_of(std::string_view haystack) const;
+    rusty::Option<std::string_view> strip_prefix_of(std::string_view haystack) const;
+    bool is_suffix_of(std::string_view haystack) const;
+    rusty::Option<std::string_view> strip_suffix_of(std::string_view haystack) const;
+    rusty::Option<std::str::pattern::Utf8Pattern> as_utf8_pattern() const;
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
+    template<typename H>
+    void hash(H& hasher) const;
+    String operator+(std::string_view other) const;
+    void operator+=(std::string_view other);
+    template<typename I>
+    decltype(auto) operator[](I index) const;
+    template<typename I>
+    decltype(auto) index_mut(I index);
+    std::string_view operator*() const;
+    std::string_view operator*();
+    static rusty::Result<String, rusty::convert::Infallible> from_str(std::string_view s);
+    std::string_view as_ref() const;
+    std::string_view as_mut();
+    static String from(std::string_view s);
+    static String from(const String& s);
+    static String from(rusty::Box<rusty::String> s);
+    static String from(rusty::Cow s);
+    static rusty::Result<String, FromUtf8Error> try_from(rusty::Vec<uint8_t> bytes);
+    rusty::fmt::Result write_str(std::string_view s);
+    rusty::fmt::Result write_char(char32_t c);
+    static String from(char32_t c);
+
+    bool operator==(const String&) const = default;
+    auto operator<=>(const String&) const = default;
+};
+
+namespace {
+class SpecToString {
+public:
+    virtual ~SpecToString() noexcept(false) {}
+    virtual rusty::String spec_to_string() const = 0;
+    SpecToString(const SpecToString&) = delete;
+    SpecToString& operator=(const SpecToString&) = delete;
+    SpecToString(SpecToString&&) = delete;
+    SpecToString& operator=(SpecToString&&) = delete;
+protected:
+    SpecToString() = default;
+};
+}
+
+template <class U> class SpecToStringAdapter;
+template <class U> class SpecToStringAdapterRef;
+template <class U> class SpecToStringAdapterRefMut;
+
+// macro_rules! impl_eq { ... }
+
+// TODO: impl_eq!(...)
+
+// TODO: impl_eq!(...)
+
+// TODO: impl_eq!(...)
+
+// TODO: impl_eq!(...)
+
+// TODO: impl_eq!(...)
+
+// TODO: unhandled item kind
+
+
+namespace {
+class ToString {
+public:
+    virtual ~ToString() noexcept(false) {}
+    virtual rusty::String to_string() const = 0;
+    ToString(const ToString&) = delete;
+    ToString& operator=(const ToString&) = delete;
+    ToString(ToString&&) = delete;
+    ToString& operator=(ToString&&) = delete;
+protected:
+    ToString() = default;
+};
+}
+
+template <class U> class ToStringAdapter;
+template <class U> class ToStringAdapterRef;
+template <class U> class ToStringAdapterRefMut;
+
+namespace {
+class SpecExtendStr {
+public:
+    virtual ~SpecExtendStr() noexcept(false) {}
+    SpecExtendStr(const SpecExtendStr&) = delete;
+    SpecExtendStr& operator=(const SpecExtendStr&) = delete;
+    SpecExtendStr(SpecExtendStr&&) = delete;
+    SpecExtendStr& operator=(SpecExtendStr&&) = delete;
+protected:
+    SpecExtendStr() = default;
+};
+}
+
+
+// macro_rules! impl_to_string { ... }
+
+// TODO: impl_to_string!(...)
+
+// macro_rules! to_string_str { ... }
+
+// TODO: to_string_str!(...)
+
+/// A possible error value when converting a `String` from a UTF-8 byte vector.
+///
+/// This type is the error type for the [`from_utf8`] method on [`String`]. It
+/// is designed in such a way to carefully avoid reallocations: the
+/// [`into_bytes`] method will give back the byte vector that was used in the
+/// conversion attempt.
+///
+/// [`from_utf8`]: String::from_utf8
+/// [`into_bytes`]: FromUtf8Error::into_bytes
+///
+/// The [`Utf8Error`] type provided by [`std::str`] represents an error that may
+/// occur when converting a slice of [`u8`]s to a [`&str`]. In this sense, it's
+/// an analogue to `FromUtf8Error`, and you can get one from a `FromUtf8Error`
+/// through the [`utf8_error`] method.
+///
+/// [`Utf8Error`]: str::Utf8Error "std::str::Utf8Error"
+/// [`std::str`]: core::str "std::str"
+/// [`&str`]: prim@str "&str"
+/// [`utf8_error`]: FromUtf8Error::utf8_error
+///
+/// # Examples
+///
+/// ```
+/// // some invalid bytes, in a vector
+/// let bytes = vec![0, 159];
+///
+/// let value = String::from_utf8(bytes);
+///
+/// assert!(value.is_err());
+/// assert_eq!(vec![0, 159], value.unwrap_err().into_bytes());
+/// ```
+export struct FromUtf8Error {
+    rusty::Vec<uint8_t> bytes;
+    rusty::str_runtime::Utf8Error error;
+
+    std::span<const uint8_t> as_bytes() const;
+    rusty::String into_utf8_lossy();
+    rusty::Vec<uint8_t> into_bytes();
+    rusty::str_runtime::Utf8Error utf8_error() const;
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
+
+    friend std::ostream& operator<<(std::ostream& os, const FromUtf8Error& v) {
+        return os << "FromUtf8Error { ... }";
     }
-    const A& allocator() const {
-        return this->vec.allocator();
-    }
-    rusty::Option<T> next() {
-        while (rusty::detail::deref_if_pointer_like(this->idx) < rusty::detail::deref_if_pointer_like(this->end)) {
-            const auto i = this->idx;
-            const auto idx = this->vec.to_physical_idx(std::move(i));
-            const auto cur = rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(this->vec.ptr().add(std::move(idx))));
-            const auto drained = (this->pred)(std::move(cur));
-            this->idx += 1;
-            if (drained) {
-                this->del += 1;
-                return rusty::Option<T>(rusty::ptr::read(std::move(cur)));
-            } else if (rusty::detail::deref_if_pointer_like(this->del) > 0) {
-                const auto hole_slot = this->vec.to_physical_idx(rusty::detail::deref_if_pointer_like(i) - rusty::detail::deref_if_pointer_like(this->del));
-                // @unsafe
-                {
-                    this->vec.wrap_copy(std::move(idx), std::move(hole_slot), 1);
-                }
-            }
+    bool operator==(const FromUtf8Error&) const = default;
+};
+
+/// An iterator over the [`char`]s of a string.
+///
+/// This struct is created by the [`into_chars`] method on [`String`].
+/// See its documentation for more.
+///
+/// [`char`]: prim@char
+/// [`into_chars`]: String::into_chars
+export struct IntoChars {
+    using Item = char32_t;
+    decltype(rusty::iter(std::declval<rusty::Vec<uint8_t>>())) bytes;
+
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
+    std::string_view as_str() const;
+    rusty::String into_string();
+    rusty::str_runtime::CharIndices iter() const;
+    rusty::Option<char32_t> next();
+    size_t count();
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const;
+    rusty::Option<char32_t> last();
+    rusty::Option<char32_t> next_back();
+};
+
+// TODO orphan impl: methods for `T` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for T
+void spec_extend_into(rusty::String& target) {
+    rusty::for_each(this->into_iter(), [=, target = std::move(target)](auto&& s) mutable { return target.push_str(std::move(rusty::to_string_view(s))); });
+}
+
+// TODO orphan impl: methods for `T` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for T
+rusty::String to_string() const {
+    return (*this).spec_to_string();
+}
+
+// TODO orphan impl: methods for `T` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for T
+rusty::String spec_to_string() const {
+    auto buf = rusty::String::new_();
+    auto formatter = rusty::fmt::Formatter::new_(&buf, rusty::fmt::FormattingOptions::new_());
+    rusty::write_fmt(&formatter, rusty::to_string((*this))).expect("a Display implementation returned an error unexpectedly");
+    return std::move(buf);
+}
+
+// TODO orphan impl: methods for `core::ascii::Char` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for core::ascii::Char
+rusty::String spec_to_string() const {
+    return rusty::to_owned(this->as_str());
+}
+
+// TODO orphan impl: methods for `char` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for char
+rusty::String spec_to_string() const {
+    return rusty::String::from(this->encode_utf8(rusty::as_mut_slice(rusty::array_repeat(0, char_::MAX_LEN_UTF8))));
+}
+
+// TODO orphan impl: methods for `bool` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for bool
+rusty::String spec_to_string() const {
+    return rusty::String::from(((*this) ? std::string_view("true") : std::string_view("false")));
+}
+
+// TODO orphan impl: methods for `u8` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for u8
+rusty::String spec_to_string() const {
+    auto buf = String::with_capacity(static_cast<size_t>(3));
+    auto n = (*this);
+    if (rusty::detail::deref_if_pointer_like(n) >= 10) {
+        if (rusty::detail::deref_if_pointer_like(n) >= 100) {
+            buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + (rusty::detail::deref_if_pointer_like(n) / 100))));
+            rusty::detail::deref_if_pointer_like(n) %= 100;
         }
-        return rusty::Option<T>{rusty::None};
+        buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + (rusty::detail::deref_if_pointer_like(n) / 10))));
+        rusty::detail::deref_if_pointer_like(n) %= 10;
     }
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(this->end) - rusty::detail::deref_if_pointer_like(this->idx)));
+    buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + rusty::detail::deref_if_pointer_like(n))));
+    return std::move(buf);
+}
+
+// TODO orphan impl: methods for `i8` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for i8
+rusty::String spec_to_string() const {
+    auto buf = String::with_capacity(static_cast<size_t>(4));
+    if (this->is_negative()) {
+        buf.push(U'-');
     }
-    ~ExtractIf() noexcept(false) {
-        if (_rusty_forgotten) { return; }
-        if (rusty::detail::deref_if_pointer_like(this->del) > 0) {
-            const auto src = this->vec.to_physical_idx(this->idx);
-            const auto dst = this->vec.to_physical_idx(rusty::detail::deref_if_pointer_like(this->idx) - rusty::detail::deref_if_pointer_like(this->del));
-            const auto len = rusty::detail::deref_if_pointer_like(this->old_len) - rusty::detail::deref_if_pointer_like(this->idx);
+    auto n = ([&]() { auto&& _v = (*this); using _V = std::remove_cv_t<std::remove_reference_t<decltype(_v)>>; using _U = std::make_unsigned_t<_V>; if constexpr (std::is_signed_v<_V>) { auto _u = static_cast<_U>(_v); return (_v < 0) ? static_cast<_U>(0) - _u : _u; } else { return static_cast<_U>(_v); } })();
+    if (rusty::detail::deref_if_pointer_like(n) >= 10) {
+        if (rusty::detail::deref_if_pointer_like(n) >= 100) {
+            buf.push(U'1');
+            rusty::detail::deref_if_pointer_like(n) -= 100;
+        }
+        buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + (rusty::detail::deref_if_pointer_like(n) / 10))));
+        rusty::detail::deref_if_pointer_like(n) %= 10;
+    }
+    buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + rusty::detail::deref_if_pointer_like(n))));
+    return std::move(buf);
+}
+
+// TODO orphan impl: methods for `fmt::Arguments` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for fmt::Arguments
+rusty::String spec_to_string() const {
+    return fmt::format((*this));
+}
+
+// TODO orphan impl: methods for `Box` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Box
+static rusty::Box<rusty::String> from(rusty::String s) {
+    return rusty::into_boxed_str(std::move(s));
+}
+
+// TODO orphan impl: methods for `Cow` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Cow
+static rusty::Cow from(std::string_view s) {
+    return rusty::Cow(rusty::Cow_Borrowed(s));
+}
+
+// TODO orphan impl: methods for `Cow` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Cow
+static rusty::Cow from(rusty::String s) {
+    return rusty::Cow(rusty::Cow_Owned(std::move(s)));
+}
+
+// TODO orphan impl: methods for `Cow` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Cow
+static rusty::Cow from(const rusty::String& s) {
+    return rusty::Cow(rusty::Cow_Borrowed(s.as_str()));
+}
+
+// TODO orphan impl: methods for `Cow` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Cow
+template<typename I>
+static rusty::Cow from_iter(I it) {
+    return rusty::Cow(rusty::Cow_Owned(rusty::Cow<std::string_view>::from_iter(std::move(it))));
+}
+
+// TODO orphan impl: methods for `Cow` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Cow
+template<typename I>
+static rusty::Cow from_iter(I it) {
+    return rusty::Cow(rusty::Cow_Owned(rusty::Cow<std::string_view>::from_iter(std::move(it))));
+}
+
+// TODO orphan impl: methods for `Cow` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Cow
+template<typename I>
+static rusty::Cow from_iter(I it) {
+    return rusty::Cow(rusty::Cow_Owned(rusty::Cow<std::string_view>::from_iter(std::move(it))));
+}
+
+// TODO orphan impl: methods for `Cow` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Cow
+template<typename T>
+static auto from_iter(T it) {
+    return rusty::Cow(rusty::Cow_Owned(FromIterator::from_iter(std::move(it))));
+}
+
+// TODO orphan impl: methods for `Vec` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Vec
+static rusty::Vec<uint8_t> from(rusty::String string) {
+    return string.into_bytes();
+}
+
+
+rusty::fmt::Result FromUtf16Error::fmt(rusty::fmt::Formatter& f) const {
+    return rusty::write_fmt(f, rusty::to_string("invalid utf-16: lone surrogate found"));
+}
+
+rusty::fmt::Result Drain::fmt(rusty::fmt::Formatter& f) const {
+    using Item = typename Drain::Item;
+    return f.debug_tuple("Drain").field(this->as_str()).finish();
+}
+
+Drain::~Drain() noexcept(false) {
+    using Item = typename Drain::Item;
+    if (_rusty_forgotten) { return; }
+    // @unsafe
+    {
+        rusty::Vec<uint8_t>& self_vec = ((*this->string)).as_mut_vec();
+        if ((rusty::detail::deref_if_pointer_like(this->start) <= rusty::detail::deref_if_pointer_like(this->end)) && (rusty::detail::deref_if_pointer_like(this->end) <= rusty::len(self_vec))) {
+            self_vec.drain(rusty::range(this->start, this->end));
+        }
+    }
+}
+
+std::string_view Drain::as_str() const {
+    using Item = typename Drain::Item;
+    return this->iter.as_str();
+}
+
+std::string_view Drain::as_ref() const {
+    using Item = typename Drain::Item;
+    return this->as_str();
+}
+
+rusty::Option<char32_t> Drain::next() {
+    using Item = typename Drain::Item;
+    return this->iter.next();
+}
+
+std::tuple<size_t, rusty::Option<size_t>> Drain::size_hint() const {
+    using Item = typename Drain::Item;
+    return this->iter.size_hint();
+}
+
+rusty::Option<char32_t> Drain::last() {
+    using Item = typename Drain::Item;
+    return this->next_back();
+}
+
+rusty::Option<char32_t> Drain::next_back() {
+    using Item = typename Drain::Item;
+    return this->iter.next_back();
+}
+
+String String::new_() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return String(rusty::Vec<uint8_t>::new_());
+}
+
+String String::with_capacity(size_t capacity) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return String(rusty::Vec<uint8_t>::with_capacity(std::move(capacity)));
+}
+
+rusty::Result<String, std::collections::TryReserveError> String::try_with_capacity(size_t capacity) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::Result<String, std::collections::TryReserveError>::Ok(String(RUSTY_TRY_INTO(rusty::Vec<auto>::try_with_capacity(std::move(capacity)), rusty::Result<String, std::collections::TryReserveError>)));
+}
+
+rusty::Result<String, FromUtf8Error> String::from_utf8(rusty::Vec<uint8_t> vec) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return [&]() { auto&& _m = rusty::str_runtime::from_utf8(vec); return std::visit(overloaded { [&](Ok&& _v) -> rusty::Result<String, FromUtf8Error> {  return rusty::Result<String, FromUtf8Error>::Ok(String(std::move(vec))); }, [&](Err&& _v) -> rusty::Result<String, FromUtf8Error> { auto&& e = rusty::detail::deref_if_pointer(_v._0); return rusty::Result<String, FromUtf8Error>::Err(FromUtf8Error(std::move(vec), std::move(e))); } }, std::move(_m)); }();
+}
+
+rusty::Cow String::from_utf8_lossy(std::span<const uint8_t> v) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    const std::string_view REPLACEMENT = std::string_view("�");
+    auto iter = v.utf8_chunks();
+    auto&& _let_pat = iter.next();
+    auto&& chunk = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
+    auto first_valid = chunk.valid();
+    if (rusty::is_empty(chunk.invalid())) {
+        assert((first_valid . len () == v . len ()));
+        return rusty::Cow(rusty::Cow_Borrowed(std::move(first_valid)));
+    }
+    auto res = String::with_capacity(rusty::len(v));
+    res.push_str(std::move(rusty::to_string_view(first_valid)));
+    res.push_str(rusty::to_string_view(REPLACEMENT));
+    for (auto&& chunk : rusty::for_in(iter)) {
+        res.push_str(chunk.valid());
+        if (!rusty::is_empty(chunk.invalid())) {
+            res.push_str(rusty::to_string_view(REPLACEMENT));
+        }
+    }
+    return rusty::Cow(rusty::Cow_Owned(std::move(res)));
+}
+
+String String::from_utf8_lossy_owned(rusty::Vec<uint8_t> v) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    if (auto&& _iflet_scrutinee = rusty::String::from_utf8_lossy(&v); rusty::detail::deref_if_pointer(_iflet_scrutinee).index() == 1) {
+        auto&& string = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_iflet_scrutinee))._0);
+        return std::move(string);
+    } else {
+        // @unsafe
+        {
+            return rusty::str_runtime::from_utf8_unchecked(std::move(v));
+        }
+    }
+}
+
+rusty::Result<String, FromUtf16Error> String::from_utf16(std::span<const uint16_t> v) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto ret = String::with_capacity(rusty::len(v));
+    for (auto&& c : rusty::for_in(char_::decode_utf16(rusty::iter(v).cloned()))) {
+        auto&& _let_pat = c;
+        auto&& c_shadow1 = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
+        ret.push(std::move(c_shadow1));
+    }
+    return rusty::Result<String, FromUtf16Error>::Ok(std::move(ret));
+}
+
+String String::from_utf16_lossy(std::span<const uint16_t> v) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return String::from_iter(char_::decode_utf16(rusty::iter(v).cloned()).map([&](auto&& r) { return r.unwrap_or(char_::REPLACEMENT_CHARACTER); }));
+}
+
+rusty::Result<String, FromUtf16Error> String::from_utf16le(std::span<const uint8_t> v) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto [chunks, []] = rusty::detail::deref_if_pointer_like(v.template as_chunks<2>());
+    return [&]() -> rusty::Result<String, FromUtf16Error> { auto&& _m0 = /* cfg!(target_endian = "little") */; auto&& _m1 = v.template align_to<uint16_t>(); if (_m0 == true && (rusty::len(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m1)))) == 0 && rusty::len(rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m1)))) == 0)) { auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m1))); return String::from_utf16(std::move(v)); } if (true) { return rusty::Result<String, FromUtf16Error>::from_iter(char_::decode_utf16(rusty::map(rusty::iter(chunks).copied(), u16::from_le_bytes))).map_err([&](auto&& _err) -> FromUtf16Error { return ([&](auto _closure_wild0) { return FromUtf16Error(std::make_tuple()); }) (std::forward<decltype(_err)>(_err)); }); } return [&]() -> rusty::Result<String, FromUtf16Error> { rusty::intrinsics::unreachable(); }(); }();
+}
+
+String String::from_utf16le_lossy(std::span<const uint8_t> v) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return [&]() -> String { auto&& _m0 = /* cfg!(target_endian = "little") */; auto&& _m1 = v.template align_to<uint16_t>(); if (_m0 == true && (rusty::len(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m1)))) == 0 && rusty::len(rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m1)))) == 0)) { auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m1))); return String::from_utf16_lossy(std::move(v)); } if (_m0 == true && (rusty::len(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m1)))) == 0 && rusty::len(rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m1)))) == 1)) { auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m1))); auto&& _remainder = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m1)))[0]); return String::from_utf16_lossy(std::move(v)) + "�"; } if (true) { return [&]() -> String { auto [chunks, remainder] = rusty::detail::deref_if_pointer_like(v.template as_chunks<2>());
+auto string = rusty::collect_range(char_::decode_utf16(rusty::map(rusty::iter(chunks).copied(), u16::from_le_bytes)).map([&](auto&& r) { return r.unwrap_or(char_::REPLACEMENT_CHARACTER); }));
+if (rusty::is_empty(remainder)) {
+    return std::move(string);
+} else {
+    return rusty::detail::deref_if_pointer_like(string) + "�";
+} }(); } return [&]() -> String { rusty::intrinsics::unreachable(); }(); }();
+}
+
+rusty::Result<String, FromUtf16Error> String::from_utf16be(std::span<const uint8_t> v) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto [chunks, []] = rusty::detail::deref_if_pointer_like(v.template as_chunks<2>());
+    return [&]() -> rusty::Result<String, FromUtf16Error> { auto&& _m0 = /* cfg!(target_endian = "big") */; auto&& _m1 = v.template align_to<uint16_t>(); if (_m0 == true && (rusty::len(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m1)))) == 0 && rusty::len(rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m1)))) == 0)) { auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m1))); return String::from_utf16(std::move(v)); } if (true) { return rusty::Result<String, FromUtf16Error>::from_iter(char_::decode_utf16(rusty::map(rusty::iter(chunks).copied(), u16::from_be_bytes))).map_err([&](auto&& _err) -> FromUtf16Error { return ([&](auto _closure_wild0) { return FromUtf16Error(std::make_tuple()); }) (std::forward<decltype(_err)>(_err)); }); } return [&]() -> rusty::Result<String, FromUtf16Error> { rusty::intrinsics::unreachable(); }(); }();
+}
+
+String String::from_utf16be_lossy(std::span<const uint8_t> v) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return [&]() -> String { auto&& _m0 = /* cfg!(target_endian = "big") */; auto&& _m1 = v.template align_to<uint16_t>(); if (_m0 == true && (rusty::len(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m1)))) == 0 && rusty::len(rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m1)))) == 0)) { auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m1))); return String::from_utf16_lossy(std::move(v)); } if (_m0 == true && (rusty::len(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m1)))) == 0 && rusty::len(rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m1)))) == 1)) { auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m1))); auto&& _remainder = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m1)))[0]); return String::from_utf16_lossy(std::move(v)) + "�"; } if (true) { return [&]() -> String { auto [chunks, remainder] = rusty::detail::deref_if_pointer_like(v.template as_chunks<2>());
+auto string = rusty::collect_range(char_::decode_utf16(rusty::map(rusty::iter(chunks).copied(), u16::from_be_bytes)).map([&](auto&& r) { return r.unwrap_or(char_::REPLACEMENT_CHARACTER); }));
+if (rusty::is_empty(remainder)) {
+    return std::move(string);
+} else {
+    return rusty::detail::deref_if_pointer_like(string) + "�";
+} }(); } return [&]() -> String { rusty::intrinsics::unreachable(); }(); }();
+}
+
+std::tuple<uint8_t*, size_t, size_t> String::into_raw_parts() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return this->vec.into_raw_parts();
+}
+
+String String::from_raw_parts(uint8_t* buf, size_t length, size_t capacity) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    // @unsafe
+    {
+        return String(rusty::Vec<uint8_t>::from_raw_parts(buf, std::move(length), std::move(capacity)));
+    }
+}
+
+String String::from_utf8_unchecked(rusty::Vec<uint8_t> bytes) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return String(std::move(bytes));
+}
+
+rusty::Vec<uint8_t> String::into_bytes() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return std::move(this->vec);
+}
+
+std::string_view String::as_str() const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    // @unsafe
+    {
+        return rusty::str_runtime::from_utf8_unchecked(rusty::as_slice(this->vec));
+    }
+}
+
+std::string_view String::as_mut_str() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    // @unsafe
+    {
+        return rusty::str_runtime::from_utf8_unchecked_mut(rusty::as_mut_slice(this->vec));
+    }
+}
+
+void String::push_str(std::string_view string) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->vec.extend_from_slice(rusty::as_bytes(string));
+}
+
+void String::push_str_slice(std::span<const std::string_view> slice) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    const rusty::num::Saturating<size_t> additional = rusty::map(rusty::iter(slice), [&](auto&& x) { return rusty::num::Saturating(rusty::len(x)); }).sum();
+    this->reserve(std::move(additional._0));
+    auto [ptr_shadow1, len, cap] = rusty::detail::deref_if_pointer_like(rusty::mem::take((*this)).into_raw_parts());
+    // @unsafe
+    {
+        auto dst = ptr_shadow1.add(std::move(rusty::to_string_view(len)));
+        for (auto&& new : rusty::for_in(rusty::iter(slice))) {
+            rusty::ptr::copy_nonoverlapping(rusty::as_ptr(new), std::move(dst), rusty::len(new));
+            dst = dst.add(rusty::len(new));
+        }
+        (*this) = String::from_raw_parts(std::move(ptr_shadow1), rusty::detail::deref_if_pointer_like(len) + rusty::detail::deref_if_pointer_like(additional._0), std::move(cap));
+    }
+}
+
+template<typename R>
+void String::extend_from_within(R src) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto src_shadow1 = slice::range(std::move(src), rusty::range_to(rusty::len((*this))));
+    assert((rusty::str_runtime::is_char_boundary((*this), std::move(start))));
+    assert((rusty::str_runtime::is_char_boundary((*this), std::move(end))));
+    this->vec.extend_from_within(std::move(src_shadow1));
+}
+
+size_t String::capacity() const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return this->vec.capacity();
+}
+
+void String::reserve(size_t additional) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->vec.reserve(std::move(additional));
+}
+
+void String::reserve_exact(size_t additional) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->vec.reserve_exact(std::move(additional));
+}
+
+rusty::Result<std::tuple<>, std::collections::TryReserveError> String::try_reserve(size_t additional) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return this->vec.try_reserve(std::move(additional));
+}
+
+rusty::Result<std::tuple<>, std::collections::TryReserveError> String::try_reserve_exact(size_t additional) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return this->vec.try_reserve_exact(std::move(additional));
+}
+
+void String::shrink_to_fit() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->vec.shrink_to_fit();
+}
+
+void String::shrink_to(size_t min_capacity) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->vec.shrink_to(std::move(min_capacity));
+}
+
+void String::push(char32_t ch) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    const auto len = rusty::len((*this));
+    auto ch_len = rusty::char_runtime::len_utf8(ch);
+    this->reserve(std::move(ch_len));
+    // @unsafe
+    {
+        char32_t_::encode_utf8_raw_unchecked(static_cast<uint32_t>(ch), rusty::ptr::add(rusty::as_mut_ptr(this->vec), rusty::len((*this))));
+        this->vec.set_len(rusty::detail::deref_if_pointer_like(len) + rusty::detail::deref_if_pointer_like(ch_len));
+    }
+}
+
+std::span<const uint8_t> String::as_bytes() const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::as_slice(this->vec);
+}
+
+void String::truncate(size_t new_len) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    if (rusty::detail::deref_if_pointer_like(new_len) <= rusty::len((*this))) {
+        assert((rusty::str_runtime::is_char_boundary((*this), std::move(new_len))));
+        this->vec.truncate(std::move(new_len));
+    }
+}
+
+rusty::Option<char32_t> String::pop() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto ch = RUSTY_TRY_OPT(rusty::rev(rusty::str_runtime::chars((*this))).next());
+    const auto newlen = rusty::len((*this)) - rusty::char_runtime::len_utf8(ch);
+    // @unsafe
+    {
+        this->vec.set_len(std::move(newlen));
+    }
+    return rusty::Option<char32_t>(std::move(ch));
+}
+
+char32_t String::remove(size_t idx) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto ch = [&]() { auto&& _m = rusty::str_runtime::chars(rusty::slice_from((*this), idx)).next(); if (_m.is_some()) { return _m.unwrap(); } if (_m.is_none()) { /* panic!("cannot remove a char from the end of a string") */; } rusty::intrinsics::unreachable(); }();
+    auto next = rusty::detail::deref_if_pointer_like(idx) + rusty::char_runtime::len_utf8(ch);
+    const auto len = rusty::len((*this));
+    // @unsafe
+    {
+        rusty::ptr::copy(rusty::ptr::add(rusty::as_ptr(this->vec), std::move(rusty::to_string_view(next))), rusty::ptr::add(rusty::as_mut_ptr(this->vec), std::move(rusty::to_string_view(idx))), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(next));
+        this->vec.set_len(rusty::detail::deref_if_pointer_like(len) - ((rusty::detail::deref_if_pointer_like(next) - rusty::detail::deref_if_pointer_like(idx))));
+    }
+    return std::move(ch);
+}
+
+template<typename P>
+void String::remove_matches(P pat) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    // Rust-only: using std::str::pattern::Searcher;
+    auto rejections = [&]() { auto searcher = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).into_searcher(this->operator*()); }) { return std::forward<decltype(__recv)>(__recv).into_searcher(this->operator*()); } else { return std::forward<decltype(__recv)>(__recv)->into_searcher(this->operator*()); } }(pat));
+auto front = static_cast<size_t>(0);
+auto rejections_shadow1 = rusty::collect_range(std::iter::from_fn([&]() {
+auto [start, end] = rusty::detail::deref_if_pointer_like(RUSTY_TRY(searcher.next_match()));
+auto prev_front = std::move(front);
+front = std::move(end);
+return rusty::Some(std::make_tuple(std::move(prev_front), std::move(start)));
+}));
+return rusty::chain(rusty::iter(std::move(rejections_shadow1)), rusty::once(std::make_tuple(std::move(front), rusty::len((*this))))); }();
+    auto len = 0;
+    const auto ptr_shadow1 = reinterpret_cast<uint8_t*>(rusty::as_mut_ptr(this->vec));
+    for (auto&& _for_item : rusty::for_in(rejections)) {
+        auto&& start = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));
+        auto&& end = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));
+        auto count = rusty::detail::deref_if_pointer_like(end) - rusty::detail::deref_if_pointer_like(start);
+        if (rusty::detail::deref_if_pointer_like(rusty::to_string_view(start)) != rusty::detail::deref_if_pointer_like(len)) {
             // @unsafe
             {
-                this->vec.wrap_copy(std::move(src), std::move(dst), std::move(len));
+                rusty::ptr::copy(rusty::ptr::add(ptr_shadow1, std::move(rusty::to_string_view(start))), rusty::ptr::add(ptr_shadow1, rusty::to_string_view(len)), std::move(count));
             }
         }
-        this->vec.len = rusty::detail::deref_if_pointer_like(this->old_len) - rusty::detail::deref_if_pointer_like(this->del);
+        len += count;
     }
-    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        const auto peek = [&]() {
-if (rusty::detail::deref_if_pointer_like(this->idx) < rusty::detail::deref_if_pointer_like(this->end)) {
-const auto idx = this->vec.to_physical_idx(this->idx);
-return rusty::SomeRef([&]() -> const auto& { static const auto _some_ref_tmp = rusty::detail::deref_if_pointer_like(this->vec.ptr().add(std::move(idx))); return _some_ref_tmp; }());
-} else {
-return rusty::None;
+    // @unsafe
+    {
+        this->vec.set_len(len);
+    }
 }
-}();
-        return f.debug_struct("ExtractIf").field("peek", peek).finish_non_exhaustive();
+
+template<typename F>
+void String::retain(F f) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    struct SetLenOnDrop {
+        rusty::String& s;
+        size_t idx;
+        size_t del_bytes;
+        mutable bool _rusty_forgotten = false;
+        SetLenOnDrop(String& s_init, size_t idx_init, size_t del_bytes_init) : s(s_init), idx(std::move(idx_init)), del_bytes(std::move(del_bytes_init)) {}
+        SetLenOnDrop(const SetLenOnDrop&) = default;
+        SetLenOnDrop(SetLenOnDrop&& other) noexcept : s(other.s), idx(std::move(other.idx)), del_bytes(std::move(other.del_bytes)) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        SetLenOnDrop& operator=(const SetLenOnDrop&) = default;
+        SetLenOnDrop& operator=(SetLenOnDrop&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~SetLenOnDrop();
+            new (this) SetLenOnDrop(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~SetLenOnDrop() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            const auto new_len = rusty::detail::deref_if_pointer_like(this->idx) - rusty::detail::deref_if_pointer_like(this->del_bytes);
+            assert((rusty::detail::deref_if_pointer_like(new_len) <= rusty::len(this->s)));
+            // @unsafe
+            {
+                this->s.vec.set_len(std::move(new_len));
+            }
+        }
+    };
+    // Rust-only nested impl block skipped in local scope
+    const auto len = rusty::len((*this));
+    auto guard = SetLenOnDrop((*this), static_cast<size_t>(0), static_cast<size_t>(0));
+    while (rusty::detail::deref_if_pointer_like(guard.idx) < rusty::detail::deref_if_pointer_like(len)) {
+        const auto ch = rusty::str_runtime::chars(rusty::slice(guard.s, guard.idx, len)).next().unwrap_unchecked();
+        const auto ch_len = rusty::char_runtime::len_utf8(ch);
+        if (!f(std::move(ch))) {
+            guard.del_bytes += ch_len;
+        } else if (rusty::detail::deref_if_pointer_like(guard.del_bytes) > 0) {
+            ch.encode_utf8(rusty::from_raw_parts_mut(rusty::ptr::add(rusty::as_mut_ptr(guard.s), rusty::detail::deref_if_pointer_like(rusty::to_string_view(guard.idx)) - rusty::detail::deref_if_pointer_like(rusty::to_string_view(guard.del_bytes))), rusty::char_runtime::len_utf8(ch)));
+        }
+        guard.idx += ch_len;
+    }
+    rusty::mem::drop(std::move(guard));
+}
+
+void String::insert(size_t idx, char32_t ch) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    assert((rusty::str_runtime::is_char_boundary((*this), std::move(idx))));
+    const auto len = rusty::len((*this));
+    auto ch_len = rusty::char_runtime::len_utf8(ch);
+    this->reserve(std::move(ch_len));
+    // @unsafe
+    {
+        rusty::ptr::copy(rusty::ptr::add(rusty::as_ptr(this->vec), std::move(rusty::to_string_view(idx))), rusty::ptr::add(rusty::as_mut_ptr(this->vec), rusty::detail::deref_if_pointer_like(rusty::to_string_view(idx)) + rusty::detail::deref_if_pointer_like(rusty::to_string_view(ch_len))), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(idx));
+    }
+    // @unsafe
+    {
+        char32_t_::encode_utf8_raw_unchecked(static_cast<uint32_t>(ch), rusty::ptr::add(rusty::as_mut_ptr(this->vec), std::move(rusty::to_string_view(idx))));
+    }
+    // @unsafe
+    {
+        this->vec.set_len(rusty::detail::deref_if_pointer_like(len) + rusty::detail::deref_if_pointer_like(ch_len));
+    }
+}
+
+void String::insert_str(size_t idx, std::string_view string) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    assert((rusty::str_runtime::is_char_boundary((*this), std::move(idx))));
+    const auto len = rusty::len((*this));
+    auto amt = rusty::len(string);
+    this->reserve(std::move(amt));
+    // @unsafe
+    {
+        rusty::ptr::copy(rusty::ptr::add(rusty::as_ptr(this->vec), std::move(rusty::to_string_view(idx))), rusty::ptr::add(rusty::as_mut_ptr(this->vec), rusty::detail::deref_if_pointer_like(rusty::to_string_view(idx)) + rusty::detail::deref_if_pointer_like(rusty::to_string_view(amt))), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(idx));
+    }
+    // @unsafe
+    {
+        rusty::ptr::copy_nonoverlapping(rusty::as_ptr(string), rusty::ptr::add(rusty::as_mut_ptr(this->vec), std::move(rusty::to_string_view(idx))), std::move(amt));
+    }
+    // @unsafe
+    {
+        this->vec.set_len(rusty::detail::deref_if_pointer_like(len) + rusty::detail::deref_if_pointer_like(amt));
+    }
+}
+
+rusty::Vec<uint8_t>& String::as_mut_vec() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return this->vec;
+}
+
+size_t String::len() const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::len(this->vec);
+}
+
+bool String::is_empty() const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::len((*this)) == static_cast<size_t>(0);
+}
+
+String String::split_off(size_t at) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    assert((rusty::str_runtime::is_char_boundary((*this), std::move(at))));
+    auto other = this->vec.split_off(std::move(at));
+    // @unsafe
+    {
+        return rusty::str_runtime::from_utf8_unchecked(std::move(other));
+    }
+}
+
+void String::clear() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->vec.clear();
+}
+
+template<typename R>
+Drain String::drain(R range) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto&& _let_pat = slice::range(std::move(range), rusty::range_to(rusty::len((*this))));
+    auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);
+    auto&& end = rusty::detail::deref_if_pointer(_let_pat.end);
+    assert((rusty::str_runtime::is_char_boundary((*this), std::move(start))));
+    assert((rusty::str_runtime::is_char_boundary((*this), std::move(end))));
+    auto self_ptr = &(*this);
+    auto chars_iter = rusty::str_runtime::chars(rusty::slice((*this), start, end));
+    return Drain(std::move(self_ptr), std::move(start), std::move(end), std::move(chars_iter));
+}
+
+IntoChars String::into_chars() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return IntoChars(rusty::iter(this->into_bytes()));
+}
+
+template<typename R>
+void String::replace_range(R range, std::string_view replace_with) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    const auto checked_range = slice::range(std::move(range), rusty::range_to(rusty::len((*this))));
+    if (!(rusty::str_runtime::is_char_boundary((*this), std::move(checked_range.start)))) { throw std::logic_error("start of range should be a character boundary"); }
+    if (!(rusty::str_runtime::is_char_boundary((*this), std::move(rusty::field_end(checked_range))))) { throw std::logic_error("end of range should be a character boundary"); }
+    this->as_mut_vec().splice(std::move(checked_range), rusty::str_runtime::bytes(replace_with));
+}
+
+template<typename P>
+void String::replace_first(P from, std::string_view to) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto range = ({ auto&& _m = this->match_indices(std::move(from)).next(); std::optional<std::remove_cvref_t<decltype(([&]() -> decltype(auto) { auto&& _mv = _m.unwrap();
+auto&& start = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv))));
+auto&& match_str = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv))));
+return (rusty::range(start, rusty::detail::deref_if_pointer_like(start) + rusty::len(match_str))); })())>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
+auto&& start = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv))));
+auto&& match_str = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv))));
+_match_value.emplace(std::move(rusty::range(start, rusty::detail::deref_if_pointer_like(start) + rusty::len(match_str)))); } else { if (!(_m.is_none())) { rusty::intrinsics::unreachable(); } return; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); });
+    this->replace_range(std::move(range), rusty::to_string_view(to));
+}
+
+template<typename P>
+void String::replace_last(P from, std::string_view to) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto range = ({ auto&& _m = this->rmatch_indices(std::move(from)).next(); std::optional<std::remove_cvref_t<decltype(([&]() -> decltype(auto) { auto&& _mv = _m.unwrap();
+auto&& start = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv))));
+auto&& match_str = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv))));
+return (rusty::range(start, rusty::detail::deref_if_pointer_like(start) + rusty::len(match_str))); })())>> _match_value; if (_m.is_some()) { auto&& _mv = _m.unwrap();
+auto&& start = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv))));
+auto&& match_str = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv))));
+_match_value.emplace(std::move(rusty::range(start, rusty::detail::deref_if_pointer_like(start) + rusty::len(match_str)))); } else { if (!(_m.is_none())) { rusty::intrinsics::unreachable(); } return; } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); });
+    this->replace_range(std::move(range), rusty::to_string_view(to));
+}
+
+rusty::Box<rusty::String> String::into_boxed_str() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    const auto slice = rusty::into_boxed_slice(std::move(this->vec));
+    // @unsafe
+    {
+        return from_boxed_utf8_unchecked(std::move(slice));
+    }
+}
+
+std::string_view String::leak() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto& slice = this->vec.leak();
+    // @unsafe
+    {
+        return from_utf8_unchecked_mut(slice);
+    }
+}
+
+String String::clone() const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return String(rusty::clone(this->vec));
+}
+
+void String::clone_from(const String& source) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->vec.clone_from(source.vec);
+}
+
+template<typename I>
+String String::from_iter(I iter) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto buf = rusty::String::new_();
+    buf.extend(std::move(iter));
+    return std::move(buf);
+}
+
+template<typename I, typename A>
+    requires (rusty::alloc::Allocator<A>)
+String String::from_iter(I iter) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto buf = rusty::String::new_();
+    buf.extend(std::move(iter));
+    return std::move(buf);
+}
+
+template<typename T>
+String String::from_iter(T iter) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto buf = rusty::collect_range(rusty::map(rusty::iter(std::move(iter)), rusty::ascii::Char::to_u8));
+    // @unsafe
+    {
+        return rusty::str_runtime::from_utf8_unchecked(std::move(buf));
+    }
+}
+
+template<typename I>
+void String::extend(I iter) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    const auto iterator = rusty::iter(std::move(iter));
+    auto [lower_bound, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(iterator.size_hint());
+    this->reserve(std::move(lower_bound));
+    iterator.for_each([=](auto&& c) mutable { return this->push(std::move(c)); });
+}
+
+void String::extend_one(char32_t c) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->push(std::move(c));
+}
+
+void String::extend_reserve(size_t additional) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->reserve(std::move(additional));
+}
+
+void String::extend_one(const char32_t& _arg1) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    auto&& c = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_arg1));
+    this->push(std::move(c));
+}
+
+void String::extend_one(std::string_view s) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->push_str(rusty::to_string_view(s));
+}
+
+template<typename I, typename A>
+    requires (rusty::alloc::Allocator<A>)
+void String::extend(I iter) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    rusty::for_each(rusty::iter(std::move(iter)), [=](auto&& s) mutable { return this->push_str(rusty::to_string_view(s)); });
+}
+
+void String::extend_one(const auto& s) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->push_str(rusty::to_string_view(s.as_str()));
+}
+
+void String::extend_one(rusty::Cow s) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->push_str(rusty::to_string_view(s));
+}
+
+void String::extend_one(rusty::ascii::Char c) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->vec.push(c.to_u8());
+}
+
+void String::extend_one(const rusty::ascii::Char& c) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->vec.push(c.to_u8());
+}
+
+std::string_view::Searcher String::into_searcher(std::string_view haystack) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::slice_full((*this)).into_searcher(rusty::to_string_view(haystack));
+}
+
+bool String::is_contained_in(std::string_view haystack) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::slice_full((*this)).is_contained_in(rusty::to_string_view(haystack));
+}
+
+bool String::is_prefix_of(std::string_view haystack) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::slice_full((*this)).is_prefix_of(rusty::to_string_view(haystack));
+}
+
+rusty::Option<std::string_view> String::strip_prefix_of(std::string_view haystack) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::slice_full((*this)).strip_prefix_of(rusty::to_string_view(haystack));
+}
+
+bool String::is_suffix_of(std::string_view haystack) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::slice_full((*this)).is_suffix_of(rusty::to_string_view(haystack));
+}
+
+rusty::Option<std::string_view> String::strip_suffix_of(std::string_view haystack) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::slice_full((*this)).strip_suffix_of(rusty::to_string_view(haystack));
+}
+
+rusty::Option<std::str::pattern::Utf8Pattern> String::as_utf8_pattern() const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::Option<std::str::pattern::Utf8Pattern>(std::str::pattern::Utf8Pattern::StringPattern(rusty::as_bytes((*this))));
+}
+
+rusty::fmt::Result String::fmt(rusty::fmt::Formatter& f) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::write_fmt(f, rusty::to_string(rusty::detail::deref_if_pointer_like((*this))));
+}
+
+template<typename H>
+void String::hash(H& hasher) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    rusty::hash::hash(((rusty::detail::deref_if_pointer_like((*this)))), hasher);
+}
+
+String String::operator+(std::string_view other) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->push_str(rusty::to_string_view(other));
+    return std::move((*this));
+}
+
+void String::operator+=(std::string_view other) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->push_str(rusty::to_string_view(other));
+}
+
+template<typename I>
+decltype(auto) String::operator[](I index) const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).index(this->as_str()); }) { return std::forward<decltype(__recv)>(__recv).index(this->as_str()); } else { return std::forward<decltype(__recv)>(__recv)->index(this->as_str()); } }(index));
+}
+
+template<typename I>
+decltype(auto) String::index_mut(I index) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).index_mut(this->as_mut_str()); }) { return std::forward<decltype(__recv)>(__recv).index_mut(this->as_mut_str()); } else { return std::forward<decltype(__recv)>(__recv)->index_mut(this->as_mut_str()); } }(index));
+}
+
+std::string_view String::operator*() const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return this->as_str();
+}
+
+std::string_view String::operator*() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return this->as_mut_str();
+}
+
+rusty::Result<String, rusty::convert::Infallible> String::from_str(std::string_view s) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::Result<String, rusty::convert::Infallible>::Ok(rusty::String::from(rusty::to_string_view(s)));
+}
+
+std::string_view String::as_ref() const {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return this->operator*();
+}
+
+std::string_view String::as_mut() {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return this->operator*();
+}
+
+String String::from(std::string_view s) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::String::from(s);
+}
+
+String String::from(const String& s) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::clone(s);
+}
+
+String String::from(rusty::Box<rusty::String> s) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return s->into_string();
+}
+
+String String::from(rusty::Cow s) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::into_owned(std::move(s));
+}
+
+rusty::Result<String, FromUtf8Error> String::try_from(rusty::Vec<uint8_t> bytes) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return String::from_utf8(std::move(bytes));
+}
+
+rusty::fmt::Result String::write_str(std::string_view s) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->push_str(rusty::to_string_view(s));
+    return rusty::fmt::Result::Ok(std::make_tuple());
+}
+
+rusty::fmt::Result String::write_char(char32_t c) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    this->push(std::move(c));
+    return rusty::fmt::Result::Ok(std::make_tuple());
+}
+
+String String::from(char32_t c) {
+    using Err = typename String::Err;
+    using Error = typename String::Error;
+    using Searcher = typename String::Searcher;
+    using Target = typename String::Target;
+    return rusty::to_string(c);
+}
+
+std::span<const uint8_t> FromUtf8Error::as_bytes() const {
+    return rusty::slice_full(this->bytes);
+}
+
+rusty::String FromUtf8Error::into_utf8_lossy() {
+    const std::string_view REPLACEMENT = std::string_view("�");
+    auto res = [&]() { auto v = rusty::Vec<uint8_t>::with_capacity(rusty::len(this->bytes));
+v.extend_from_slice(rusty::slice_to(this->bytes, this->error.valid_up_to()));
+// @unsafe
+{
+    return rusty::str_runtime::from_utf8_unchecked(std::move(v));
+} }();
+    const auto iter = rusty::slice_from(this->bytes, this->error.valid_up_to()).utf8_chunks();
+    for (auto&& chunk : rusty::for_in(iter)) {
+        res.push_str(chunk.valid());
+        if (!rusty::is_empty(chunk.invalid())) {
+            res.push_str(rusty::to_string_view(REPLACEMENT));
+        }
+    }
+    return std::move(res);
+}
+
+rusty::Vec<uint8_t> FromUtf8Error::into_bytes() {
+    return std::move(this->bytes);
+}
+
+rusty::str_runtime::Utf8Error FromUtf8Error::utf8_error() const {
+    return this->error;
+}
+
+rusty::fmt::Result FromUtf8Error::fmt(rusty::fmt::Formatter& f) const {
+    return rusty::write_fmt(f, rusty::to_string(this->error));
+}
+
+rusty::fmt::Result IntoChars::fmt(rusty::fmt::Formatter& f) const {
+    using Item = typename IntoChars::Item;
+    return f.debug_tuple("IntoChars").field(this->as_str()).finish();
+}
+
+std::string_view IntoChars::as_str() const {
+    using Item = typename IntoChars::Item;
+    // @unsafe
+    {
+        return rusty::str_runtime::from_utf8_unchecked(rusty::as_slice(this->bytes));
+    }
+}
+
+rusty::String IntoChars::into_string() {
+    using Item = typename IntoChars::Item;
+    // @unsafe
+    {
+        return rusty::str_runtime::from_utf8_unchecked(rusty::collect_range(this->bytes));
+    }
+}
+
+rusty::str_runtime::CharIndices IntoChars::iter() const {
+    using Item = typename IntoChars::Item;
+    return rusty::str_runtime::char_indices(this->as_str());
+}
+
+rusty::Option<char32_t> IntoChars::next() {
+    using Item = typename IntoChars::Item;
+    auto iter = rusty::iter((*this));
+    return [&]() -> rusty::Option<char32_t> { auto&& _m = iter.next(); if (_m.is_none()) { return rusty::Option<char32_t>{rusty::None}; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& ch = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))); return [&]() -> rusty::Option<char32_t> { const auto offset = iter.offset();
+static_cast<void>(this->bytes.advance_by(std::move(offset)));
+return rusty::Option<char32_t>(ch); }(); } return [&]() -> rusty::Option<char32_t> { rusty::intrinsics::unreachable(); }(); }();
+}
+
+size_t IntoChars::count() {
+    using Item = typename IntoChars::Item;
+    return rusty::count(rusty::iter((*this)));
+}
+
+std::tuple<size_t, rusty::Option<size_t>> IntoChars::size_hint() const {
+    using Item = typename IntoChars::Item;
+    return rusty::iter((*this)).size_hint();
+}
+
+rusty::Option<char32_t> IntoChars::last() {
+    using Item = typename IntoChars::Item;
+    return this->next_back();
+}
+
+rusty::Option<char32_t> IntoChars::next_back() {
+    using Item = typename IntoChars::Item;
+    const auto len = rusty::len(this->as_str());
+    auto iter = rusty::iter((*this));
+    return [&]() -> rusty::Option<char32_t> { auto&& _m = iter.next_back(); if (_m.is_none()) { return rusty::Option<char32_t>{rusty::None}; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv1))); auto&& ch = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))); return [&]() -> rusty::Option<char32_t> { static_cast<void>(this->bytes.advance_back_by(rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(idx)));
+return rusty::Option<char32_t>(ch); }(); } return [&]() -> rusty::Option<char32_t> { rusty::intrinsics::unreachable(); }(); }();
+}
+
+// Extension trait SpecExtendStr lowered to rusty_ext:: free functions
+namespace rusty_ext {
+    export template<typename T>
+    void spec_extend_into(T self_, rusty::String& target) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        rusty::for_each(self_.into_iter(), [=, target = std::move(target)](auto&& s) mutable { return target.push_str(std::move(rusty::to_string_view(s))); });
+    }
+
+}
+
+// Extension trait SpecToString lowered to rusty_ext:: free functions
+namespace rusty_ext {
+    export template<typename T>
+    rusty::String spec_to_string(const T& self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        auto buf = rusty::String::new_();
+        auto formatter = rusty::fmt::Formatter::new_(&buf, rusty::fmt::FormattingOptions::new_());
+        rusty::write_fmt(&formatter, rusty::to_string(self_)).expect("a Display implementation returned an error unexpectedly");
+        return std::move(buf);
+    }
+
+    export rusty::String spec_to_string(const rusty::ascii::Char& self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        return rusty::to_owned(self_.as_str());
+    }
+
+    export rusty::String spec_to_string(const char32_t& self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        return rusty::String::from(self_.encode_utf8(rusty::as_mut_slice(rusty::array_repeat(0, char_::MAX_LEN_UTF8))));
+    }
+
+    export rusty::String spec_to_string(const bool& self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        return rusty::String::from((self_ ? std::string_view("true") : std::string_view("false")));
+    }
+
+    export rusty::String spec_to_string(const uint8_t& self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        auto buf = String::with_capacity(static_cast<size_t>(3));
+        auto n = self_;
+        if (rusty::detail::deref_if_pointer_like(n) >= 10) {
+            if (rusty::detail::deref_if_pointer_like(n) >= 100) {
+                buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + (rusty::detail::deref_if_pointer_like(n) / 100))));
+                rusty::detail::deref_if_pointer_like(n) %= 100;
+            }
+            buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + (rusty::detail::deref_if_pointer_like(n) / 10))));
+            rusty::detail::deref_if_pointer_like(n) %= 10;
+        }
+        buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + rusty::detail::deref_if_pointer_like(n))));
+        return std::move(buf);
+    }
+
+    export rusty::String spec_to_string(const int8_t& self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        auto buf = String::with_capacity(static_cast<size_t>(4));
+        if (self_.is_negative()) {
+            buf.push(U'-');
+        }
+        auto n = ([&]() { auto&& _v = self_; using _V = std::remove_cv_t<std::remove_reference_t<decltype(_v)>>; using _U = std::make_unsigned_t<_V>; if constexpr (std::is_signed_v<_V>) { auto _u = static_cast<_U>(_v); return (_v < 0) ? static_cast<_U>(0) - _u : _u; } else { return static_cast<_U>(_v); } })();
+        if (rusty::detail::deref_if_pointer_like(n) >= 10) {
+            if (rusty::detail::deref_if_pointer_like(n) >= 100) {
+                buf.push(U'1');
+                rusty::detail::deref_if_pointer_like(n) -= 100;
+            }
+            buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + (rusty::detail::deref_if_pointer_like(n) / 10))));
+            rusty::detail::deref_if_pointer_like(n) %= 10;
+        }
+        buf.push(static_cast<char32_t>((static_cast<uint8_t>(48) + rusty::detail::deref_if_pointer_like(n))));
+        return std::move(buf);
+    }
+
+    export rusty::String spec_to_string(const rusty::fmt::Arguments& self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        return fmt::format(self_);
+    }
+
+}
+
+// TODO(interface_traits): skipped generic impl `SpecToStringAdapter<T>`
+template <>
+class SpecToStringAdapter<rusty::ascii::Char> final : public SpecToString {
+    rusty::ascii::Char value_;
+public:
+    explicit SpecToStringAdapter(rusty::ascii::Char v) : value_(std::move(v)) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
     }
 };
 
-} // namespace vec_deque_port::extract_if
+template <>
+class SpecToStringAdapterRef<rusty::ascii::Char> final : public SpecToString {
+    const rusty::ascii::Char& value_;
+public:
+    explicit SpecToStringAdapterRef(const rusty::ascii::Char& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRefMut<rusty::ascii::Char> final : public SpecToString {
+    rusty::ascii::Char& value_;
+public:
+    explicit SpecToStringAdapterRefMut(rusty::ascii::Char& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapter<char32_t> final : public SpecToString {
+    char32_t value_;
+public:
+    explicit SpecToStringAdapter(char32_t v) : value_(std::move(v)) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRef<char32_t> final : public SpecToString {
+    const char32_t& value_;
+public:
+    explicit SpecToStringAdapterRef(const char32_t& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRefMut<char32_t> final : public SpecToString {
+    char32_t& value_;
+public:
+    explicit SpecToStringAdapterRefMut(char32_t& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapter<bool> final : public SpecToString {
+    bool value_;
+public:
+    explicit SpecToStringAdapter(bool v) : value_(std::move(v)) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRef<bool> final : public SpecToString {
+    const bool& value_;
+public:
+    explicit SpecToStringAdapterRef(const bool& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRefMut<bool> final : public SpecToString {
+    bool& value_;
+public:
+    explicit SpecToStringAdapterRefMut(bool& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapter<uint8_t> final : public SpecToString {
+    uint8_t value_;
+public:
+    explicit SpecToStringAdapter(uint8_t v) : value_(std::move(v)) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRef<uint8_t> final : public SpecToString {
+    const uint8_t& value_;
+public:
+    explicit SpecToStringAdapterRef(const uint8_t& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRefMut<uint8_t> final : public SpecToString {
+    uint8_t& value_;
+public:
+    explicit SpecToStringAdapterRefMut(uint8_t& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapter<int8_t> final : public SpecToString {
+    int8_t value_;
+public:
+    explicit SpecToStringAdapter(int8_t v) : value_(std::move(v)) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRef<int8_t> final : public SpecToString {
+    const int8_t& value_;
+public:
+    explicit SpecToStringAdapterRef(const int8_t& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRefMut<int8_t> final : public SpecToString {
+    int8_t& value_;
+public:
+    explicit SpecToStringAdapterRefMut(int8_t& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapter<rusty::fmt::Arguments> final : public SpecToString {
+    rusty::fmt::Arguments value_;
+public:
+    explicit SpecToStringAdapter(rusty::fmt::Arguments v) : value_(std::move(v)) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRef<rusty::fmt::Arguments> final : public SpecToString {
+    const rusty::fmt::Arguments& value_;
+public:
+    explicit SpecToStringAdapterRef(const rusty::fmt::Arguments& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+template <>
+class SpecToStringAdapterRefMut<rusty::fmt::Arguments> final : public SpecToString {
+    rusty::fmt::Arguments& value_;
+public:
+    explicit SpecToStringAdapterRefMut(rusty::fmt::Arguments& u) : value_(u) {}
+    rusty::String spec_to_string() const override {
+        return rusty_ext::spec_to_string(value_);
+    }
+};
+
+// Extension trait ToString lowered to rusty_ext:: free functions
+namespace rusty_ext {
+    export template<typename T>
+    rusty::String to_string(const T& self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        return self_.spec_to_string();
+    }
+
+}
+
+// TODO(interface_traits): skipped generic impl `ToStringAdapter<T>`
+
+} // namespace string_port

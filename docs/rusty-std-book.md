@@ -2200,12 +2200,12 @@ validation gap appears.
 
 | Type | rustc source | Hand-written? | Difficulty | Why port |
 |---|---|---|---|---|
-| **`Rc<T>` / `Weak<T>`** | `library/alloc/src/rc.rs` | ✅ `rc.hpp`, `rc/weak.hpp` | Medium — single file, but lots of unsafe pointer arithmetic + drop ordering | Single-thread refcount + cycle detection via `Weak`. Transpiling validates the unsafe drop sequence the hand-written version approximates. |
-| **`Arc<T>` / `Weak<T>`** | `library/alloc/src/sync.rs` | ✅ `arc.hpp`, `sync/weak.hpp`, `sync/atomic.hpp` | Hard — atomic operations everywhere; memory ordering matters; ABA-style concerns on `upgrade()` | Atomic refcount, fundamental to multi-threaded data. The hand-written version's atomics quarantine (see commit `ddee375`) suggests there are still rough edges. Transpiling could nail down the exact memory ordering rustc uses. |
-| **`Mutex<T>` / `RwLock<T>`** | `library/std/src/sync/{mutex,rwlock}.rs` | ✅ `mutex.hpp`, `rwlock.hpp` | Medium — but each platform-specific impl is its own subtree; pthread on Linux, SRWLock on Windows | Hand-written exists and works. Transpiling adds value mainly if poisoning semantics matter to a user. Likely skip unless a poisoning bug appears. |
-| **`BTreeSet<T>`** | `library/alloc/src/collections/btree/set.rs` | ✅ Already done as part of BTreeMap port | — | ✅ Done. Mentioned for completeness. |
-| **`Range`, `RangeInclusive`, `RangeFrom`, `RangeTo`, `RangeFull`** | `library/core/src/ops/range.rs` | ❌ partial (probably implicit in `slice.hpp`) | Low — trivial structs with iter impls | Foundational for slicing. Small surface. Falls out nearly free. |
-| **`RefCell<T>` / `Ref` / `RefMut`** | `library/core/src/cell.rs` | ✅ `refcell.hpp`, `cell.hpp`, `unsafe_cell.hpp` | Low — small file; mostly bookkeeping | Hand-written is fine for `Cell` / `RefCell`. Skip unless a Rust-specific borrow-runtime behavior is missing. |
+| **`Rc<T>` / `Weak<T>`** | `library/alloc/src/rc.rs` | ✅ `rc.hpp`, `rc/weak.hpp` | Medium — single file, but lots of unsafe pointer arithmetic + drop ordering | 🟡 **Phase A1** scaffolded (4565 LOC, 4 hand-slots). See `docs/rc_port/STATUS.md` and §6.7. | Single-thread refcount + cycle detection via `Weak`. Transpiling validates the unsafe drop sequence the hand-written version approximates. |
+| **`Arc<T>` / `Weak<T>`** | `library/alloc/src/sync.rs` | ✅ `arc.hpp`, `sync/weak.hpp`, `sync/atomic.hpp` | Hard — atomic operations everywhere; memory ordering matters; ABA-style concerns on `upgrade()` | 🟡 **Phase A1** scaffolded (4936 LOC, 7 hand-slots). See `docs/arc_port/STATUS.md` and §6.7. | Atomic refcount, fundamental to multi-threaded data. The hand-written version's atomics quarantine (see commit `ddee375`) suggests there are still rough edges. Transpiling could nail down the exact memory ordering rustc uses. |
+| **`Mutex<T>` / `RwLock<T>`** | `library/std/src/sync/{mutex,rwlock}.rs` | ✅ `mutex.hpp`, `rwlock.hpp` | Medium — but each platform-specific impl is its own subtree; pthread on Linux, SRWLock on Windows | ⏸️ Not scaffolded. | Hand-written exists and works. Transpiling adds value mainly if poisoning semantics matter to a user. Likely skip unless a poisoning bug appears. |
+| **`BTreeSet<T>`** | `library/alloc/src/collections/btree/set.rs` | ✅ Already done as part of BTreeMap port | — | ✅ **Done**. | Mentioned for completeness. |
+| **`Range`, `RangeInclusive`, `RangeFrom`, `RangeTo`, `RangeFull`** | `library/core/src/ops/range.rs` | ❌ partial (probably implicit in `slice.hpp`) | Low — trivial structs with iter impls | ⏸️ Not scaffolded. | Foundational for slicing. Small surface. Falls out nearly free. |
+| **`Cell<T>` / `RefCell<T>` / `OnceCell` / `LazyCell` / `UnsafeCell`** | `library/core/src/cell.rs` | ✅ `refcell.hpp`, `cell.hpp`, `unsafe_cell.hpp`, `once.hpp` | Low — small file; mostly bookkeeping | 🟡 **Phase A1** scaffolded (2737 LOC, 20 hand-slots, all five types in one .cppm). See `docs/cell_port/STATUS.md` and §6.8. | Hand-written is fine for typical cases. Transpiling validates Rust-specific borrow-runtime behavior. |
 
 ### 3.5 Tier 4 — Niche / narrow use case
 
@@ -3431,17 +3431,55 @@ Dependencies: just `rusty::Box` (hand-written). No vec_port dep.
 
 ### 6.4 What's still on deck (Tier 2 → Tier 1 follow-up)
 
-- `core::str` + `alloc::string` — Phase A1 blocked on `Searcher` trait
-  + `Chars/CharIndices` cross-port dependencies. See
-  [`docs/string_port/STATUS.md`](string_port/STATUS.md) and
-  [`docs/core_str_port/STATUS.md`](core_str_port/STATUS.md). These
-  remain the next-largest user-value ports per §3.2.
-- `Rc<T>` / `Arc<T>` retranspile — Tier 3 in §3.4. Would close the
-  smart-pointer family. Hand-written versions are workable; transpile
-  is opportunistic.
+- `core::str` + `alloc::string` — String is **Phase A1 done** (see §6.6
+  below); blocked on the str+borrow+ascii cross-port dependencies for
+  Phase B. See [`docs/string_port/STATUS.md`](string_port/STATUS.md)
+  and [`docs/core_str_port/STATUS.md`](core_str_port/STATUS.md). The
+  next-largest user-value ports per §3.2.
+- `Rc<T>` / `Arc<T>` — **Phase A1 done** as of this session (see §6.7).
 - Tier 4 items (`OnceCell`, `CString`, `Path`, etc.) — defer per §3.5.
 
-### 6.5 Recipe used across all three Tier-2 ports
+### 6.5 Recipe used across all Tier-2 / Tier-3 ports — see §6.9 below for the canonical block
+
+The recipe is below (§6.9 — duplicate trim left a forward reference here).
+
+### 6.6 `alloc::string::String` — Phase A1 re-vendored
+
+After a fresh `--auto-namespace` transpile, `string_port.cppm` (3606
+LOC source → ~3700 LOC C++) lives in `transpiled/string_port/`. 29
+hand-port slots. The Phase A2 patcher is blocked on cross-port
+dependencies (`Searcher`/`Pattern` traits in `core::str::pattern`,
+`Cow`/`ToOwned` in `alloc::borrow`, `ascii::Char` in `alloc::ascii`).
+See [`docs/string_port/STATUS.md`](string_port/STATUS.md).
+
+### 6.7 `alloc::rc::Rc` + `alloc::sync::Arc` — Phase A1 (smart-pointer family)
+
+Two single-file ports scaffolded:
+
+| Port | LOC | Hand-slots | Hand-written exists? |
+|---|---|---|---|
+| `rc_port` | 4565 | 4 | ✅ `rusty::Rc` in `rc.hpp` |
+| `arc_port` | 4936 | 7 | ✅ `rusty::Arc` in `arc.hpp` |
+
+Both transpile zero-errors under `--auto-namespace`. Tier 3 per §3.4
+— "opportunistic" — the hand-written headers work for typical
+single/multi-threaded refcounting; transpiling validates rustc's exact
+unsafe drop sequence + atomic memory orderings.
+
+Predicted Phase B effort: **2–3 days** (Rc), **3–5 days** (Arc).
+
+### 6.8 `core::cell` — Phase A1 (Cell / RefCell / OnceCell)
+
+Single-file port scaffolded: `cell_port.cppm` from
+`library/core/src/cell.rs` (2737 LOC, 20 hand-slots). All of
+`Cell<T>`, `RefCell<T>`, `UnsafeCell<T>`, `OnceCell<T>`, `LazyCell<T>`
+live in this one rust file.
+
+Tier 3 per §3.4 — hand-written `refcell.hpp` / `cell.hpp` /
+`unsafe_cell.hpp` / `once.hpp` cover the basic cases. Predicted Phase
+B effort: **1–2 days**.
+
+### 6.9 Recipe used across all Tier-2 / Tier-3 ports
 
 Synthesizes the playbook (§2.3) into a per-port checklist:
 

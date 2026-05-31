@@ -126,6 +126,25 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
+# vec_deque_port — transpiled rustc VecDeque (ring buffer).
+# Multi-file (10 .cppm files). CMake target intentionally not wired
+# yet — vendored sources are in transpiled/vec_deque_port/ but the
+# library doesn't build clean yet. See docs/vec_deque_port/STATUS.md.
+#
+# if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+#    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+#     file(GLOB VEC_DEQUE_PORT_CPPM transpiled/vec_deque_port/*.cppm)
+#     add_library(vec_deque_port STATIC)
+#     target_sources(vec_deque_port
+#         PUBLIC FILE_SET CXX_MODULES FILES ${VEC_DEQUE_PORT_CPPM}
+#     )
+#     target_include_directories(vec_deque_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+#     target_compile_features(vec_deque_port PUBLIC cxx_std_23)
+#     target_compile_options(vec_deque_port PRIVATE -O3 -DNDEBUG -march=native )
+#     target_link_libraries(vec_deque_port PUBLIC vec_port)
+# endif()
+
+# ──────────────────────────────────────────────────────────────────────
 # linked_list_port — transpiled rustc LinkedList (doubly-linked w/cursor).
 # Single .cppm vendored. Net-new functionality — no hand-written
 # rusty::LinkedList existed. CMake target intentionally not wired yet —

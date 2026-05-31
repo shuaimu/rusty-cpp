@@ -96,7 +96,15 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.
+template<typename T>
+auto clone(const T& value) {
+if constexpr (requires { value.clone(); }) {
+return value.clone();
+} else {
+return value;
+}
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -325,8 +333,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
+return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
 }
 
 template<typename E>
@@ -3633,134 +3641,819 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 }
 
-export module vec_deque_port.extract_if;
+export module cell_port;
 
-namespace vec_deque_port::extract_if {
+namespace cell_port {
 
-export template<typename T, typename F, typename A>
-    requires (rusty::alloc::Allocator<A>)
-struct ExtractIf;
+export struct BorrowError;
+export struct BorrowMutError;
+export template<typename T>
+struct UnsafeCell;
+export template<typename T>
+struct Cell;
+struct BorrowRef;
+export template<typename T>
+struct Ref;
+struct BorrowRefMut;
+export template<typename T>
+struct RefMut;
+export template<typename T>
+struct RefCell;
+export template<typename T>
+struct SyncUnsafeCell;
+constexpr BorrowCounter UNUSED = 0;
+using BorrowCounter = ptrdiff_t;
+[[noreturn]] void panic_already_borrowed(const auto& err);
+[[noreturn]] void panic_already_mutably_borrowed(const auto& err);
+bool is_writing(const auto& x);
+bool is_reading(const auto& x);
+void assert_coerce_unsized(rusty::UnsafeCell<const int32_t&> a, SyncUnsafeCell<const int32_t&> b, rusty::Cell<const int32_t&> c, rusty::RefCell<const int32_t&> d);
 
-// Rust-only: using std::ops::Range;
-// Rust-only: using std::ops::RangeBounds;
+using ::cmp::Ordering;
 
-namespace ptr = rusty::ptr;
-// Rust-only: using std::slice;
+// Rust-only namespace re-export: using fmt;
+using ::fmt::Debug;
+using ::fmt::Display;
 
-// Rust-only unresolved import: using VecDeque;
+using ::marker::Destruct;
+using ::marker::PhantomData;
+using ::marker::Unsize;
 
-using std::Allocator;
-using std::Global;
+// Rust-only namespace re-export: using mem;
+using ::mem::ManuallyDrop;
 
-/// An iterator which uses a closure to determine if an element should be removed.
-///
-/// This struct is created by [`VecDeque::extract_if`].
-/// See its documentation for more.
-///
-/// # Example
-///
-/// ```
-/// #![feature(vec_deque_extract_if)]
-///
-/// use std::collections::vec_deque::ExtractIf;
-/// use std::collections::vec_deque::VecDeque;
-///
-/// let mut v = VecDeque::from([0, 1, 2]);
-/// let iter: ExtractIf<'_, _, _> = v.extract_if(.., |x| *x % 2 == 0);
-/// ```
-export template<typename T, typename F, typename A = rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A>)
-struct ExtractIf {
-    using Item = T;
-    rusty::VecDeque<T, A>& vec;
-    /// The index of the item that will be inspected by the next call to `next`.
-    size_t idx;
-    /// Elements at and beyond this point will be retained. Must be equal or smaller than `old_len`.
-    size_t end;
-    /// The number of items that have been drained (removed) thus far.
-    size_t del;
-    /// The original length of `vec` prior to draining.
-    size_t old_len;
-    /// The filter test predicate.
-    F pred;
-    mutable bool _rusty_forgotten = false;
-    ExtractIf(rusty::VecDeque<T, A>& vec_init, size_t idx_init, size_t end_init, size_t del_init, size_t old_len_init, F pred_init) : vec(vec_init), idx(std::move(idx_init)), end(std::move(end_init)), del(std::move(del_init)), old_len(std::move(old_len_init)), pred(std::move(pred_init)) {}
-    ExtractIf(const ExtractIf&) = default;
-    ExtractIf(ExtractIf&& other) noexcept : vec(other.vec), idx(std::move(other.idx)), end(std::move(other.end)), del(std::move(other.del)), old_len(std::move(other.old_len)), pred(std::move(other.pred)) {
-        this->_rusty_forgotten = other._rusty_forgotten;
-        other._rusty_forgotten = true;
-    }
-    ExtractIf& operator=(const ExtractIf&) = default;
-    ExtractIf& operator=(ExtractIf&& other) noexcept {
-        if (this == &other) {
-            return *this;
-        }
-        this->~ExtractIf();
-        new (this) ExtractIf(std::move(other));
-        return *this;
-    }
-    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+// Rust-only namespace re-export: using ops;
+using ::ops::CoerceUnsized;
+using ::ops::Deref;
+using ::ops::DerefMut;
+using ::ops::DerefPure;
+using ::ops::DispatchFromDyn;
 
+using ::panic::const_panic;
 
-    template<typename R>
-    static ExtractIf<T, F, A> new_(rusty::VecDeque<T, A>& vec, F pred, R range) {
-        auto old_len = rusty::len(vec);
-        auto&& _let_pat = slice::range(std::move(range), rusty::range_to(old_len));
-        auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);
-        auto&& end = rusty::detail::deref_if_pointer(_let_pat.end);
-        vec.len = 0;
-        return ExtractIf<T, F, A>(vec, std::move(start), std::move(end), static_cast<size_t>(0), std::move(old_len), std::move(pred));
-    }
-    const A& allocator() const {
-        return this->vec.allocator();
-    }
-    rusty::Option<T> next() {
-        while (rusty::detail::deref_if_pointer_like(this->idx) < rusty::detail::deref_if_pointer_like(this->end)) {
-            const auto i = this->idx;
-            const auto idx = this->vec.to_physical_idx(std::move(i));
-            const auto cur = rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(this->vec.ptr().add(std::move(idx))));
-            const auto drained = (this->pred)(std::move(cur));
-            this->idx += 1;
-            if (drained) {
-                this->del += 1;
-                return rusty::Option<T>(rusty::ptr::read(std::move(cur)));
-            } else if (rusty::detail::deref_if_pointer_like(this->del) > 0) {
-                const auto hole_slot = this->vec.to_physical_idx(rusty::detail::deref_if_pointer_like(i) - rusty::detail::deref_if_pointer_like(this->del));
-                // @unsafe
-                {
-                    this->vec.wrap_copy(std::move(idx), std::move(hole_slot), 1);
-                }
-            }
-        }
-        return rusty::Option<T>{rusty::None};
-    }
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(this->end) - rusty::detail::deref_if_pointer_like(this->idx)));
-    }
-    ~ExtractIf() noexcept(false) {
-        if (_rusty_forgotten) { return; }
-        if (rusty::detail::deref_if_pointer_like(this->del) > 0) {
-            const auto src = this->vec.to_physical_idx(this->idx);
-            const auto dst = this->vec.to_physical_idx(rusty::detail::deref_if_pointer_like(this->idx) - rusty::detail::deref_if_pointer_like(this->del));
-            const auto len = rusty::detail::deref_if_pointer_like(this->old_len) - rusty::detail::deref_if_pointer_like(this->idx);
-            // @unsafe
-            {
-                this->vec.wrap_copy(std::move(src), std::move(dst), std::move(len));
-            }
-        }
-        this->vec.len = rusty::detail::deref_if_pointer_like(this->old_len) - rusty::detail::deref_if_pointer_like(this->del);
-    }
-    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        const auto peek = [&]() {
-if (rusty::detail::deref_if_pointer_like(this->idx) < rusty::detail::deref_if_pointer_like(this->end)) {
-const auto idx = this->vec.to_physical_idx(this->idx);
-return rusty::SomeRef([&]() -> const auto& { static const auto _some_ref_tmp = rusty::detail::deref_if_pointer_like(this->vec.ptr().add(std::move(idx))); return _some_ref_tmp; }());
-} else {
-return rusty::None;
-}
-}();
-        return f.debug_struct("ExtractIf").field("peek", peek).finish_non_exhaustive();
+using ::pin::PinCoerceUnsized;
+
+// Rust-only namespace re-export: using ptr;
+using ::ptr::NonNull;
+
+// Rust-only namespace re-export: using range;
+
+import cell_port.lazy;
+
+import cell_port.once;
+
+export using lazy::LazyCell;
+
+export using once::OnceCell;
+
+/// An error returned by [`RefCell::try_borrow`].
+export struct BorrowError {
+    const ::panic::Location& location;
+
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
+
+    friend std::ostream& operator<<(std::ostream& os, const BorrowError& v) {
+        return os << "BorrowError { ... }";
     }
 };
 
-} // namespace vec_deque_port::extract_if
+// TODO: unhandled item kind
+
+// TODO: unhandled item kind
+
+namespace {
+class CloneFromCell {
+public:
+    virtual ~CloneFromCell() noexcept(false) {}
+    CloneFromCell(const CloneFromCell&) = delete;
+    CloneFromCell& operator=(const CloneFromCell&) = delete;
+    CloneFromCell(CloneFromCell&&) = delete;
+    CloneFromCell& operator=(CloneFromCell&&) = delete;
+protected:
+    CloneFromCell() = default;
+};
+}
+
+
+/// An error returned by [`RefCell::try_borrow_mut`].
+export struct BorrowMutError {
+    const ::panic::Location& location;
+
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
+
+    friend std::ostream& operator<<(std::ostream& os, const BorrowMutError& v) {
+        return os << "BorrowMutError { ... }";
+    }
+};
+
+/// The core primitive for interior mutability in Rust.
+///
+/// If you have a reference `&T`, then normally in Rust the compiler performs optimizations based on
+/// the knowledge that `&T` points to immutable data. Mutating that data, for example through an
+/// alias or by transmuting a `&T` into a `&mut T`, is considered undefined behavior.
+/// `UnsafeCell<T>` opts-out of the immutability guarantee for `&T`: a shared reference
+/// `&UnsafeCell<T>` may point to data that is being mutated. This is called "interior mutability".
+///
+/// All other types that allow internal mutability, such as [`Cell<T>`] and [`RefCell<T>`], internally
+/// use `UnsafeCell` to wrap their data.
+///
+/// Note that only the immutability guarantee for shared references is affected by `UnsafeCell`. The
+/// uniqueness guarantee for mutable references is unaffected. There is *no* legal way to obtain
+/// aliasing `&mut`, not even with `UnsafeCell<T>`.
+///
+/// `UnsafeCell` does nothing to avoid data races; they are still undefined behavior. If multiple
+/// threads have access to the same `UnsafeCell`, they must follow the usual rules of the
+/// [concurrent memory model]: conflicting non-synchronized accesses must be done via the APIs in
+/// [`core::sync::atomic`].
+///
+/// The `UnsafeCell` API itself is technically very simple: [`.get()`] gives you a raw pointer
+/// `*mut T` to its contents. It is up to _you_ as the abstraction designer to use that raw pointer
+/// correctly.
+///
+/// [`.get()`]: `UnsafeCell::get`
+/// [concurrent memory model]: ../sync/atomic/index.html#memory-model-for-atomic-accesses
+///
+/// # Aliasing rules
+///
+/// The precise Rust aliasing rules are somewhat in flux, but the main points are not contentious:
+///
+/// - If you create a safe reference with lifetime `'a` (either a `&T` or `&mut T` reference), then
+///   you must not access the data in any way that contradicts that reference for the remainder of
+///   `'a`. For example, this means that if you take the `*mut T` from an `UnsafeCell<T>` and cast it
+///   to an `&T`, then the data in `T` must remain immutable (modulo any `UnsafeCell` data found
+///   within `T`, of course) until that reference's lifetime expires. Similarly, if you create a
+///   `&mut T` reference that is released to safe code, then you must not access the data within the
+///   `UnsafeCell` until that reference expires.
+///
+/// - For both `&T` without `UnsafeCell<_>` and `&mut T`, you must also not deallocate the data
+///   until the reference expires. As a special exception, given an `&T`, any part of it that is
+///   inside an `UnsafeCell<_>` may be deallocated during the lifetime of the reference, after the
+///   last time the reference is used (dereferenced or reborrowed). Since you cannot deallocate a part
+///   of what a reference points to, this means the memory an `&T` points to can be deallocated only if
+///   *every part of it* (including padding) is inside an `UnsafeCell`.
+///
+/// However, whenever a `&UnsafeCell<T>` is constructed or dereferenced, it must still point to
+/// live memory and the compiler is allowed to insert spurious reads if it can prove that this
+/// memory has not yet been deallocated.
+///
+/// To assist with proper design, the following scenarios are explicitly declared legal
+/// for single-threaded code:
+///
+/// 1. A `&T` reference can be released to safe code and there it can co-exist with other `&T`
+///    references, but not with a `&mut T`
+///
+/// 2. A `&mut T` reference may be released to safe code provided neither other `&mut T` nor `&T`
+///    co-exist with it. A `&mut T` must always be unique.
+///
+/// Note that whilst mutating the contents of an `&UnsafeCell<T>` (even while other
+/// `&UnsafeCell<T>` references alias the cell) is
+/// ok (provided you enforce the above invariants some other way), it is still undefined behavior
+/// to have multiple `&mut UnsafeCell<T>` aliases. That is, `UnsafeCell` is a wrapper
+/// designed to have a special interaction with _shared_ accesses (_i.e._, through an
+/// `&UnsafeCell<_>` reference); there is no magic whatsoever when dealing with _exclusive_
+/// accesses (_e.g._, through a `&mut UnsafeCell<_>`): neither the cell nor the wrapped value
+/// may be aliased for the duration of that `&mut` borrow.
+/// This is showcased by the [`.get_mut()`] accessor, which is a _safe_ getter that yields
+/// a `&mut T`.
+///
+/// [`.get_mut()`]: `UnsafeCell::get_mut`
+///
+/// # Memory layout
+///
+/// `UnsafeCell<T>` has the same in-memory representation as its inner type `T`. A consequence
+/// of this guarantee is that it is possible to convert between `T` and `UnsafeCell<T>`.
+/// Special care has to be taken when converting a nested `T` inside of an `Outer<T>` type
+/// to an `Outer<UnsafeCell<T>>` type: this is not sound when the `Outer<T>` type enables [niche]
+/// optimizations. For example, the type `Option<NonNull<u8>>` is typically 8 bytes large on
+/// 64-bit platforms, but the type `Option<UnsafeCell<NonNull<u8>>>` takes up 16 bytes of space.
+/// Therefore this is not a valid conversion, despite `NonNull<u8>` and `UnsafeCell<NonNull<u8>>>`
+/// having the same memory layout. This is because `UnsafeCell` disables niche optimizations in
+/// order to avoid its interior mutability property from spreading from `T` into the `Outer` type,
+/// thus this can cause distortions in the type size in these cases.
+///
+/// Note that the only valid way to obtain a `*mut T` pointer to the contents of a
+/// _shared_ `UnsafeCell<T>` is through [`.get()`]  or [`.raw_get()`]. A `&mut T` reference
+/// can be obtained by either dereferencing this pointer or by calling [`.get_mut()`]
+/// on an _exclusive_ `UnsafeCell<T>`. Even though `T` and `UnsafeCell<T>` have the
+/// same memory layout, the following is not allowed and undefined behavior:
+///
+/// ```rust,compile_fail
+/// # use std::cell::UnsafeCell;
+/// unsafe fn not_allowed<T>(ptr: &UnsafeCell<T>) -> &mut T {
+///   let t = ptr as *const UnsafeCell<T> as *mut T;
+///   // This is undefined behavior, because the `*mut T` pointer
+///   // was not obtained through `.get()` nor `.raw_get()`:
+///   unsafe { &mut *t }
+/// }
+/// ```
+///
+/// Instead, do this:
+///
+/// ```rust
+/// # use std::cell::UnsafeCell;
+/// // Safety: the caller must ensure that there are no references that
+/// // point to the *contents* of the `UnsafeCell`.
+/// unsafe fn get_mut<T>(ptr: &UnsafeCell<T>) -> &mut T {
+///   unsafe { &mut *ptr.get() }
+/// }
+/// ```
+///
+/// Converting in the other direction from a `&mut T`
+/// to an `&UnsafeCell<T>` is allowed:
+///
+/// ```rust
+/// # use std::cell::UnsafeCell;
+/// fn get_shared<T>(ptr: &mut T) -> &UnsafeCell<T> {
+///   let t = ptr as *mut T as *const UnsafeCell<T>;
+///   // SAFETY: `T` and `UnsafeCell<T>` have the same memory layout
+///   unsafe { &*t }
+/// }
+/// ```
+///
+/// [niche]: https://rust-lang.github.io/unsafe-code-guidelines/glossary.html#niche
+/// [`.raw_get()`]: `UnsafeCell::raw_get`
+///
+/// # Examples
+///
+/// Here is an example showcasing how to soundly mutate the contents of an `UnsafeCell<_>` despite
+/// there being multiple references aliasing the cell:
+///
+/// ```
+/// use std::cell::UnsafeCell;
+///
+/// let x: UnsafeCell<i32> = 42.into();
+/// // Get multiple / concurrent / shared references to the same `x`.
+/// let (p1, p2): (&UnsafeCell<i32>, &UnsafeCell<i32>) = (&x, &x);
+///
+/// unsafe {
+///     // SAFETY: within this scope there are no other references to `x`'s contents,
+///     // so ours is effectively unique.
+///     let p1_exclusive: &mut i32 = &mut *p1.get(); // -- borrow --+
+///     *p1_exclusive += 27; //                                     |
+/// } // <---------- cannot go beyond this point -------------------+
+///
+/// unsafe {
+///     // SAFETY: within this scope nobody expects to have exclusive access to `x`'s contents,
+///     // so we can have multiple shared accesses concurrently.
+///     let p2_shared: &i32 = &*p2.get();
+///     assert_eq!(*p2_shared, 42 + 27);
+///     let p1_shared: &i32 = &*p1.get();
+///     assert_eq!(*p1_shared, *p2_shared);
+/// }
+/// ```
+///
+/// The following example showcases the fact that exclusive access to an `UnsafeCell<T>`
+/// implies exclusive access to its `T`:
+///
+/// ```rust
+/// #![forbid(unsafe_code)]
+/// // with exclusive accesses, `UnsafeCell` is a transparent no-op wrapper, so no need for
+/// // `unsafe` here.
+/// use std::cell::UnsafeCell;
+///
+/// let mut x: UnsafeCell<i32> = 42.into();
+///
+/// // Get a compile-time-checked unique reference to `x`.
+/// let p_unique: &mut UnsafeCell<i32> = &mut x;
+/// // With an exclusive reference, we can mutate the contents for free.
+/// *p_unique.get_mut() = 0;
+/// // Or, equivalently:
+/// x = UnsafeCell::new(0);
+///
+/// // When we own the value, we can extract the contents for free.
+/// let contents: i32 = x.into_inner();
+/// assert_eq!(contents, 0);
+/// ```
+export template<typename T>
+struct UnsafeCell {
+    T value;
+
+    static UnsafeCell<T> new_(T value) {
+        return UnsafeCell<T>{.value = std::move(value)};
+    }
+    T into_inner() {
+        return std::move(this->value);
+    }
+    T replace(T value) const {
+        // @unsafe
+        {
+            return ptr::replace(this->get(), std::move(value));
+        }
+    }
+    static UnsafeCell<T>& from_mut(T& value) {
+        // @unsafe
+        {
+            return *(const_cast<std::add_pointer_t<UnsafeCell<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<UnsafeCell<T>>>>(static_cast<std::add_pointer_t<T>>(&value))));
+        }
+    }
+    std::add_pointer_t<T> get() const {
+        return const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(static_cast<std::add_pointer_t<std::add_const_t<UnsafeCell<T>>>>(&(*this)))));
+    }
+    T& get_mut() {
+        return this->value;
+    }
+    static std::add_pointer_t<T> raw_get(const UnsafeCell<T>* this_) {
+        return const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(this_)));
+    }
+    const T& as_ref_unchecked() const {
+        // @unsafe
+        {
+            return this->get()->as_ref_unchecked();
+        }
+    }
+    T& as_mut_unchecked() const {
+        // @unsafe
+        {
+            return this->get()->as_mut_unchecked();
+        }
+    }
+};
+
+/// A mutable memory location.
+///
+/// # Memory layout
+///
+/// `Cell<T>` has the same [memory layout and caveats as
+/// `UnsafeCell<T>`](UnsafeCell#memory-layout). In particular, this means that
+/// `Cell<T>` has the same in-memory representation as its inner type `T`.
+///
+/// # Examples
+///
+/// In this example, you can see that `Cell<T>` enables mutation inside an
+/// immutable struct. In other words, it enables "interior mutability".
+///
+/// ```
+/// use std::cell::Cell;
+///
+/// struct SomeStruct {
+///     regular_field: u8,
+///     special_field: Cell<u8>,
+/// }
+///
+/// let my_struct = SomeStruct {
+///     regular_field: 0,
+///     special_field: Cell::new(1),
+/// };
+///
+/// let new_value = 100;
+///
+/// // ERROR: `my_struct` is immutable
+/// // my_struct.regular_field = new_value;
+///
+/// // WORKS: although `my_struct` is immutable, `special_field` is a `Cell`,
+/// // which can always be mutated
+/// my_struct.special_field.set(new_value);
+/// assert_eq!(my_struct.special_field.get(), new_value);
+/// ```
+///
+/// See the [module-level documentation](self) for more.
+export template<typename T>
+struct Cell {
+    rusty::UnsafeCell<T> value;
+
+    Cell<T> clone() const {
+        return Cell<T>::new_(this->get());
+    }
+    bool operator==(const Cell<T>& other) const {
+        return this->get() == other.get();
+    }
+    std::partial_ordering operator<=>(const Cell<T>& other) const {
+        return rusty::to_partial_ordering([&]() -> rusty::Option<core::cmp::Ordering> {
+            return rusty::partial_cmp(this->get(), other.get());
+        }());
+    }
+    core::cmp::Ordering cmp(const Cell<T>& other) const {
+        return rusty::cmp::cmp(this->get(), other.get());
+    }
+    static Cell<T> new_(T value) {
+        return Cell<T>(rusty::UnsafeCell<T>::new_(std::move(value)));
+    }
+    void set(T val) const {
+        this->replace(std::move(val));
+    }
+    void swap(const Cell<T>& other) const {
+        const auto is_nonoverlapping = [](const auto* src, const auto* dst) -> bool {
+            const auto src_usize = src->addr();
+            const auto dst_usize = dst->addr();
+            const auto diff = src_usize.abs_diff(std::move(dst_usize));
+            return rusty::detail::deref_if_pointer_like(diff) >= size_of<T>();
+        };
+        if (ptr::eq((*this), other)) {
+            return;
+        }
+        if (!is_nonoverlapping((*this), other)) {
+            std::println(stderr, "`Cell::swap` on overlapping non-identical `Cell`s");
+            std::abort();
+        }
+        // @unsafe
+        {
+            rusty::mem::swap(*this->value.get(), *other.value.get());
+        }
+    }
+    T replace(T val) const {
+        return rusty::mem::replace(*this->value.get(), std::move(val));
+    }
+    T into_inner() {
+        return this->value.into_inner();
+    }
+    T get() const {
+        // @unsafe
+        {
+            return *this->value.get();
+        }
+    }
+    void update(const auto& f) const {
+        const T old = this->get();
+        this->set(f(std::move(old)));
+    }
+    std::add_pointer_t<T> as_ptr() const {
+        return this->value.get();
+    }
+    T& get_mut() {
+        return this->value.get_mut();
+    }
+    static const Cell<T>& from_mut(T& t) {
+        // @unsafe
+        {
+            return *(reinterpret_cast<std::add_pointer_t<std::add_const_t<Cell<T>>>>(static_cast<std::add_pointer_t<T>>(&t)));
+        }
+    }
+    T take() const {
+        return this->replace(rusty::default_value<T>());
+    }
+    template<size_t N>
+    const std::array<Cell<T>, rusty::sanitize_array_capacity<N>()>& as_ref() const {
+        return this->as_array_of_cells();
+    }
+    std::span<const Cell<T>> as_ref() const {
+        return this->as_slice_of_cells();
+    }
+    std::span<const Cell<T>> as_slice_of_cells() const {
+        // @unsafe
+        {
+            return *(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::span<const Cell<T>>>>>(static_cast<std::add_pointer_t<std::add_const_t<Cell<std::span<const T>>>>>(&(*this))));
+        }
+    }
+    template<size_t N>
+    const std::array<Cell<T>, rusty::sanitize_array_capacity<N>()>& as_array_of_cells() const {
+        // @unsafe
+        {
+            return *(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::array<Cell<T>, rusty::sanitize_array_capacity<N>()>>>>(static_cast<std::add_pointer_t<std::add_const_t<Cell<std::array<T, rusty::sanitize_array_capacity<N>()>>>>>(&(*this))));
+        }
+    }
+    Cell<T> get_cloned() const {
+        return Cell<std::remove_cvref_t<decltype(T::clone(*rusty::as_ptr((*this))))>>::new_(T::clone(*rusty::as_ptr((*this))));
+    }
+};
+
+
+
+// TODO: unhandled item kind
+
+// TODO: unhandled item kind
+
+struct BorrowRef {
+    const rusty::Cell<BorrowCounter>& borrow;
+
+    static rusty::Option<BorrowRef> new_(const rusty::Cell<BorrowCounter>& borrow);
+};
+
+// TODO: unhandled item kind
+
+// TODO: unhandled item kind
+
+/// Wraps a borrowed reference to a value in a `RefCell` box.
+/// A wrapper type for an immutably borrowed value from a `RefCell<T>`.
+///
+/// See the [module-level documentation](self) for more.
+export template<typename T>
+struct Ref {
+    rusty::ptr::NonNull<T> value;
+    BorrowRef borrow;
+
+    static Ref<T> clone(const Ref<T>& orig) {
+        return Ref<T>{.value = (*orig).value, .borrow = rusty::clone((*orig).borrow)};
+    }
+    template<typename U, typename F>
+    static Ref<U> map(Ref<T> orig, F f) {
+        return Ref<U>{.value = rusty::ptr::NonNull<U>::from(f(rusty::detail::deref_if_pointer_like(orig))), .borrow = std::move((*orig).borrow)};
+    }
+    template<typename U, typename F>
+    static rusty::Result<Ref<U>, Ref<T>> filter_map(Ref<T> orig, F f) {
+        return [&]() -> rusty::Result<Ref<U>, Ref<T>> { auto&& _m = f(rusty::detail::deref_if_pointer_like(orig)); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& value = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<Ref<U>, Ref<T>>::Ok(Ref<U>{.value = rusty::ptr::NonNull<U>::from(std::move(value)), .borrow = std::move((*orig).borrow)}); } if (_m.is_none()) { return rusty::Result<Ref<U>, Ref<T>>::Err(std::move(orig)); } return [&]() -> rusty::Result<Ref<U>, Ref<T>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename U, typename E>
+    static rusty::Result<Ref<U>, std::tuple<Ref<T>, E>> try_map(Ref<T> orig, const auto& f) {
+        return [&]() -> rusty::Result<Ref<U>, std::tuple<Ref<T>, E>> { auto&& _m = f(rusty::detail::deref_if_pointer_like(orig)); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& value = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<Ref<U>, std::tuple<Ref<T>, E>>::Ok(Ref<U>{.value = rusty::ptr::NonNull<U>::from(std::move(value)), .borrow = std::move((*orig).borrow)}); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& e = rusty::detail::deref_if_pointer(_mv1); return rusty::Result<Ref<U>, std::tuple<Ref<T>, E>>::Err(std::make_tuple(std::move(orig), std::move(e))); } return [&]() -> rusty::Result<Ref<U>, std::tuple<Ref<T>, E>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename U, typename V, typename F>
+    static std::tuple<Ref<U>, Ref<V>> map_split(Ref<T> orig, F f) {
+        auto [a, b] = rusty::detail::deref_if_pointer_like(f(rusty::detail::deref_if_pointer_like(orig)));
+        auto borrow = rusty::clone((*orig).borrow);
+        return std::make_tuple(Ref<U>{.value = rusty::ptr::NonNull<U>::from(std::move(a)), .borrow = std::move(borrow)}, Ref<V>{.value = rusty::ptr::NonNull<V>::from(std::move(b)), .borrow = std::move((*orig).borrow)});
+    }
+    static const T& leak(Ref<T> orig) {
+        rusty::mem::forget(std::move((*orig).borrow));
+        // @unsafe
+        {
+            return (*orig).value.as_ref();
+        }
+    }
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return ((rusty::detail::deref_if_pointer_like((*this)))).fmt(f);
+    }
+};
+
+// TODO: unhandled item kind
+
+struct BorrowRefMut {
+    const rusty::Cell<BorrowCounter>& borrow;
+
+    static rusty::Option<BorrowRefMut> new_(const rusty::Cell<BorrowCounter>& borrow);
+    BorrowRefMut clone() const;
+};
+
+// TODO: unhandled item kind
+
+/// A wrapper type for a mutably borrowed value from a `RefCell<T>`.
+///
+/// See the [module-level documentation](self) for more.
+export template<typename T>
+struct RefMut {
+    rusty::ptr::NonNull<T> value;
+    BorrowRefMut borrow;
+    rusty::PhantomData<T&> marker;
+
+    template<typename U, typename F>
+    static RefMut<U> map(RefMut<T> orig, F f) {
+        auto value = NonNull<std::remove_pointer_t<std::remove_reference_t<decltype((f(rusty::detail::deref_if_pointer_like(orig))))>>>::from(f(rusty::detail::deref_if_pointer_like(orig)));
+        return RefMut<U>{.value = std::move(value), .borrow = std::move((*orig).borrow), .marker = rusty::PhantomData<U&>{}};
+    }
+    template<typename U, typename F>
+    static rusty::Result<RefMut<U>, RefMut<T>> filter_map(RefMut<T> orig, F f) {
+        return [&]() -> rusty::Result<RefMut<U>, RefMut<T>> { auto&& _m = f(rusty::detail::deref_if_pointer_like(orig)); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& value = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<RefMut<U>, RefMut<T>>::Ok(RefMut<U>{.value = rusty::ptr::NonNull<U>::from(std::move(value)), .borrow = std::move((*orig).borrow), .marker = rusty::PhantomData<U&>{}}); } if (_m.is_none()) { return rusty::Result<RefMut<U>, RefMut<T>>::Err(std::move(orig)); } return [&]() -> rusty::Result<RefMut<U>, RefMut<T>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename U, typename E>
+    static rusty::Result<RefMut<U>, std::tuple<RefMut<T>, E>> try_map(RefMut<T> orig, const auto& f) {
+        return [&]() -> rusty::Result<RefMut<U>, std::tuple<RefMut<T>, E>> { auto&& _m = f(rusty::detail::deref_if_pointer_like(orig)); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& value = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<RefMut<U>, std::tuple<RefMut<T>, E>>::Ok(RefMut<U>{.value = rusty::ptr::NonNull<U>::from(std::move(value)), .borrow = std::move((*orig).borrow), .marker = rusty::PhantomData<U&>{}}); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& e = rusty::detail::deref_if_pointer(_mv1); return rusty::Result<RefMut<U>, std::tuple<RefMut<T>, E>>::Err(std::make_tuple(std::move(orig), std::move(e))); } return [&]() -> rusty::Result<RefMut<U>, std::tuple<RefMut<T>, E>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename U, typename V, typename F>
+    static std::tuple<RefMut<U>, RefMut<V>> map_split(RefMut<T> orig, F f) {
+        auto borrow = rusty::clone((*orig).borrow);
+        auto [a, b] = rusty::detail::deref_if_pointer_like(f(rusty::detail::deref_if_pointer_like(orig)));
+        return std::make_tuple(RefMut<U>{.value = rusty::ptr::NonNull<U>::from(std::move(a)), .borrow = std::move(borrow), .marker = rusty::PhantomData<U&>{}}, RefMut<V>{.value = rusty::ptr::NonNull<V>::from(std::move(b)), .borrow = std::move((*orig).borrow), .marker = rusty::PhantomData<V&>{}});
+    }
+    static T& leak(RefMut<T> orig) {
+        rusty::mem::forget(std::move((*orig).borrow));
+        // @unsafe
+        {
+            return (*orig).value.as_mut();
+        }
+    }
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return ((rusty::detail::deref_if_pointer_like((*this)))).fmt(f);
+    }
+};
+
+// TODO: unhandled item kind
+
+// TODO: unhandled item kind
+
+/// A mutable memory location with dynamically checked borrow rules
+///
+/// See the [module-level documentation](self) for more.
+export template<typename T>
+struct RefCell {
+    rusty::Cell<BorrowCounter> borrow_field;
+    rusty::Cell<rusty::Option<const ::panic::Location&>> borrowed_at;
+    rusty::UnsafeCell<T> value;
+
+    static RefCell<T> new_(T value) {
+        return RefCell<T>(rusty::Cell<BorrowCounter>::new_(UNUSED), rusty::Cell<rusty::Option<const ::panic::Location&>>::new_(rusty::Option<const ::panic::Location&>{rusty::None}), rusty::UnsafeCell<T>::new_(std::move(value)));
+    }
+    T into_inner() {
+        return this->value.into_inner();
+    }
+    T replace(T t) const {
+        return rusty::mem::replace(this->borrow_mut(), std::move(t));
+    }
+    template<typename F>
+    T replace_with(F f) const {
+        auto& mut_borrow = rusty::detail::deref_if_pointer_like(this->borrow_mut());
+        const auto replacement = f(mut_borrow);
+        return rusty::mem::replace(mut_borrow, std::move(replacement));
+    }
+    void swap(const RefCell<T>& other) const {
+        rusty::mem::swap(rusty::detail::deref_if_pointer_like(this->borrow_mut()), other.borrow_mut());
+    }
+    Ref<T> borrow() const {
+        return [&]() -> Ref<T> { auto&& _m = this->try_borrow(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); return ::panic_already_mutably_borrowed(std::move(err)); } return [&]() -> Ref<T> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    rusty::Result<Ref<T>, BorrowError> try_borrow() const {
+        return [&]() -> rusty::Result<Ref<T>, BorrowError> { auto&& _m = BorrowRef::new_(this->borrow_field); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& b = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Result<Ref<T>, BorrowError> { {
+    if (b.borrow.get() == 1) {
+        this->borrowed_at.replace(rusty::Some(::panic::Location::caller()));
+    }
+}
+auto value = NonNull<std::remove_pointer_t<std::remove_reference_t<decltype((this->value.get()))>>>::new_unchecked(this->value.get());
+return rusty::Result<Ref<T>, BorrowError>::Ok(Ref<T>{.value = std::move(value), .borrow = std::move(b)}); }(); } if (_m.is_none()) { return rusty::Result<Ref<T>, BorrowError>::Err(BorrowError{.location = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).unwrap(); }) { return std::forward<decltype(__recv)>(__recv).unwrap(); } else { return std::forward<decltype(__recv)>(__recv)->unwrap(); } }(this->borrowed_at.get()))}); } return [&]() -> rusty::Result<Ref<T>, BorrowError> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    RefMut<T> borrow_mut() const {
+        return [&]() -> RefMut<T> { auto&& _m = this->try_borrow_mut(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); return ::panic_already_borrowed(std::move(err)); } return [&]() -> RefMut<T> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    rusty::Result<RefMut<T>, BorrowMutError> try_borrow_mut() const {
+        return [&]() -> rusty::Result<RefMut<T>, BorrowMutError> { auto&& _m = BorrowRefMut::new_(this->borrow_field); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& b = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Result<RefMut<T>, BorrowMutError> { {
+    this->borrowed_at.replace(rusty::Some(::panic::Location::caller()));
+}
+auto value = NonNull<std::remove_pointer_t<std::remove_reference_t<decltype((this->value.get()))>>>::new_unchecked(this->value.get());
+return rusty::Result<RefMut<T>, BorrowMutError>::Ok(RefMut<T>{.value = std::move(value), .borrow = std::move(b), .marker = rusty::PhantomData<T&>{}}); }(); } if (_m.is_none()) { return rusty::Result<RefMut<T>, BorrowMutError>::Err(BorrowMutError{.location = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).unwrap(); }) { return std::forward<decltype(__recv)>(__recv).unwrap(); } else { return std::forward<decltype(__recv)>(__recv)->unwrap(); } }(this->borrowed_at.get()))}); } return [&]() -> rusty::Result<RefMut<T>, BorrowMutError> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    std::add_pointer_t<T> as_ptr() const {
+        return this->value.get();
+    }
+    T& get_mut() {
+        return this->value.get_mut();
+    }
+    T& undo_leak() {
+        this->borrow_field.get_mut() = UNUSED;
+        return this->get_mut();
+    }
+    rusty::Result<const T&, BorrowError> try_borrow_unguarded() const {
+        if (!::is_writing(this->borrow_field.get())) {
+            return rusty::Result<const T&, BorrowError>::Ok(*this->value.get());
+        } else {
+            return rusty::Result<const T&, BorrowError>::Err(BorrowError{.location = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).unwrap(); }) { return std::forward<decltype(__recv)>(__recv).unwrap(); } else { return std::forward<decltype(__recv)>(__recv)->unwrap(); } }(this->borrowed_at.get()))});
+        }
+    }
+    T take() const {
+        return this->replace(rusty::default_value<T>());
+    }
+    RefCell<T> clone() const {
+        return RefCell<T>::new_(rusty::clone(this->borrow()));
+    }
+    void clone_from(const RefCell<T>& source) {
+        ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).clone_from(source.borrow()); }) { return std::forward<decltype(__recv)>(__recv).clone_from(source.borrow()); } else { return std::forward<decltype(__recv)>(__recv)->clone_from(source.borrow()); } }(this->get_mut()));
+    }
+    bool operator==(const RefCell<T>& other) const {
+        return rusty::detail::deref_if_pointer_like(this->borrow()) == rusty::detail::deref_if_pointer_like(other.borrow());
+    }
+    std::partial_ordering operator<=>(const RefCell<T>& other) const {
+        return rusty::to_partial_ordering([&]() -> rusty::Option<core::cmp::Ordering> {
+            return rusty::partial_cmp(this->borrow(), rusty::detail::deref_if_pointer_like(other.borrow()));
+        }());
+    }
+    core::cmp::Ordering cmp(const RefCell<T>& other) const {
+        return rusty::cmp::cmp(this->borrow(), rusty::detail::deref_if_pointer_like(other.borrow()));
+    }
+};
+
+// TODO: unhandled item kind
+
+// TODO: unhandled item kind
+
+/// [`UnsafeCell`], but [`Sync`].
+///
+/// This is just an `UnsafeCell`, except it implements `Sync`
+/// if `T` implements `Sync`.
+///
+/// `UnsafeCell` doesn't implement `Sync`, to prevent accidental mis-use.
+/// You can use `SyncUnsafeCell` instead of `UnsafeCell` to allow it to be
+/// shared between threads, if that's intentional.
+/// Providing proper synchronization is still the task of the user,
+/// making this type just as unsafe to use.
+///
+/// See [`UnsafeCell`] for details.
+export template<typename T>
+struct SyncUnsafeCell {
+    rusty::UnsafeCell<T> value;
+
+    static SyncUnsafeCell<T> new_(T value) {
+        return SyncUnsafeCell<T>{.value = rusty::UnsafeCell<T>{.value = std::move(value)}};
+    }
+    T into_inner() {
+        return this->value.into_inner();
+    }
+    std::add_pointer_t<T> get() const {
+        return this->value.get();
+    }
+    T& get_mut() {
+        return this->value.get_mut();
+    }
+    static std::add_pointer_t<T> raw_get(const SyncUnsafeCell<T>* this_) {
+        return const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(this_)));
+    }
+};
+
+// TODO: unhandled item kind
+
+// TODO: unhandled item kind
+
+// TODO orphan impl: methods for `Option` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Option
+
+// TODO orphan impl: methods for `Result` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Result
+
+// TODO orphan impl: methods for `PhantomData` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for PhantomData
+
+// TODO orphan impl: methods for `ManuallyDrop` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for ManuallyDrop
+
+// TODO orphan impl: methods for `ops::Range` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for ops::Range
+
+// TODO orphan impl: methods for `range::Range` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for range::Range
+
+[[noreturn]] void panic_already_borrowed(const auto& err) {
+    return /* const_panic!("RefCell already borrowed" , "{err}" , err : BorrowMutError = err ,) */;
+}
+
+[[noreturn]] void panic_already_mutably_borrowed(const auto& err) {
+    return /* const_panic!("RefCell already mutably borrowed" , "{err}" , err : BorrowError = err ,) */;
+}
+
+bool is_writing(const auto& x) {
+    return rusty::detail::deref_if_pointer_like(x) < rusty::detail::deref_if_pointer_like(UNUSED);
+}
+
+bool is_reading(const auto& x) {
+    return rusty::detail::deref_if_pointer_like(x) > rusty::detail::deref_if_pointer_like(UNUSED);
+}
+
+void assert_coerce_unsized(rusty::UnsafeCell<const int32_t&> a, SyncUnsafeCell<const int32_t&> b, rusty::Cell<const int32_t&> c, rusty::RefCell<const int32_t&> d) {
+    static_cast<void>(a);
+    static_cast<void>(b);
+    static_cast<void>(c);
+    static_cast<void>(d);
+}
+
+
+rusty::fmt::Result BorrowError::fmt(rusty::fmt::Formatter& f) const {
+    auto res = /* write!(f , "RefCell already mutably borrowed; a previous borrow was at {}" , self . location) */;
+    auto res_shadow1 = rusty::write_fmt(f, rusty::to_string("RefCell already mutably borrowed"));
+    return std::move(res_shadow1);
+}
+
+rusty::fmt::Result BorrowMutError::fmt(rusty::fmt::Formatter& f) const {
+    auto res = /* write!(f , "RefCell already borrowed; a previous borrow was at {}" , self . location) */;
+    auto res_shadow1 = rusty::write_fmt(f, rusty::to_string("RefCell already borrowed"));
+    return std::move(res_shadow1);
+}
+
+rusty::Option<BorrowRef> BorrowRef::new_(const rusty::Cell<BorrowCounter>& borrow) {
+    auto b = (static_cast<size_t>(borrow.get()) + static_cast<size_t>(1));
+    if (!::is_reading(std::move(b))) {
+        return rusty::Option<BorrowRef>{rusty::None};
+    } else {
+        borrow.replace(std::move(b));
+        return rusty::Option<BorrowRef>(BorrowRef{.borrow = borrow});
+    }
+}
+
+rusty::Option<BorrowRefMut> BorrowRefMut::new_(const rusty::Cell<BorrowCounter>& borrow) {
+    return [&]() -> rusty::Option<BorrowRefMut> { auto&& _m = borrow.get(); if (_m == UNUSED) { return [&]() -> rusty::Option<BorrowRefMut> { borrow.replace(rusty::detail::deref_if_pointer_like(UNUSED) - 1);
+return rusty::Option<BorrowRefMut>(BorrowRefMut{.borrow = borrow}); }();  }
+return rusty::Option<BorrowRefMut>{rusty::None}; }();
+}
+
+BorrowRefMut BorrowRefMut::clone() const {
+    const auto borrow = this->borrow.get();
+    assert((::is_writing(std::move(borrow))));
+    assert((rusty::detail::deref_if_pointer_like(borrow) != rusty::clone(std::numeric_limits<BorrowCounter>::min())));
+    this->borrow.set(rusty::detail::deref_if_pointer_like(borrow) - 1);
+    return BorrowRefMut{.borrow = this->borrow};
+}
+
+} // namespace cell_port

@@ -96,7 +96,15 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.
+template<typename T>
+auto clone(const T& value) {
+if constexpr (requires { value.clone(); }) {
+return value.clone();
+} else {
+return value;
+}
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -325,8 +333,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
+return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
 }
 
 template<typename E>
@@ -3633,134 +3641,1657 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 }
 
-export module vec_deque_port.extract_if;
+export module arc_port;
 
-namespace vec_deque_port::extract_if {
 
-export template<typename T, typename F, typename A>
+// Cluster A completion: __TemplateArgs primary template (specializations at file end)
+template<typename T> struct __TemplateArgs;
+namespace arc_port {
+
+template<typename T>
+struct ArcInner;
+struct WeakInner;
+struct SliceArcInnerForStatic;
+export template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
-struct ExtractIf;
+struct Arc;
+export template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+struct Weak;
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+struct UniqueArcUninit;
+export template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+struct UniqueArc;
+constexpr size_t MAX_REFCOUNT = static_cast<size_t>((std::numeric_limits<ptrdiff_t>::max()));
+constexpr std::string_view INTERNAL_OVERFLOW_ERROR = std::string_view("Arc counter overflow");
+constexpr size_t MAX_STATIC_INNER_SLICE_ALIGNMENT = static_cast<size_t>(16);
+extern SliceArcInnerForStatic STATIC_INNER_SLICE;
+rusty::alloc::Layout arcinner_layout_for_value_layout(rusty::alloc::Layout layout);
+template<typename T>
+size_t data_offset(std::add_pointer_t<std::add_const_t<T>> ptr);
+size_t data_offset_alignment(std::ptr::Alignment alignment);
 
-// Rust-only: using std::ops::Range;
-// Rust-only: using std::ops::RangeBounds;
+// Extension trait free-function forward declarations
+namespace rusty_ext {
+    export template<typename T, typename I>
+    rusty::Arc<std::span<const T>> to_arc_slice(I self_);
+
+}
+
+
+// Rust-only: using std::any::Any;
+
+// Rust-only: using std::cell::CloneFromCell;
+
+// Rust-only: using std::clone::TrivialClone;
+
+// Rust-only: using std::clone::CloneToUninit;
+// Rust-only: using std::clone::UseCloned;
+
+using rusty::cmp::Ordering;
+
+// Rust-only: using std::hash::Hash;
+// Rust-only: using std::hash::Hasher;
+
+using rusty::intrinsics::abort;
+
+// Rust-only: using std::iter;
+
+using rusty::PhantomData;
+// Rust-only: using std::marker::Unsize;
+
+namespace mem = rusty::mem;
+using rusty::mem::ManuallyDrop;
+
+using rusty::num::NonZeroUsize;
+
+// Rust-only: using std::ops::CoerceUnsized;
+// Rust-only: using std::ops::Deref;
+// Rust-only: using std::ops::DerefMut;
+// Rust-only: using std::ops::DerefPure;
+// Rust-only: using std::ops::DispatchFromDyn;
+// Rust-only: using std::ops::LegacyReceiver;
+
+// Rust-only: using std::ops::Residual;
+// Rust-only: using std::ops::Try;
+
+// Rust-only: using std::panic::RefUnwindSafe;
+// Rust-only: using std::panic::UnwindSafe;
+
+// Rust-only: using std::pin::Pin;
+// Rust-only: using std::pin::PinCoerceUnsized;
 
 namespace ptr = rusty::ptr;
-// Rust-only: using std::slice;
+// Rust-only: using std::ptr::Alignment;
+using rusty::ptr::NonNull;
 
-// Rust-only unresolved import: using VecDeque;
+// Rust-only: using std::slice::from_raw_parts_mut;
 
-using std::Allocator;
-using std::Global;
+constexpr auto Acquire = rusty::sync::atomic::Ordering::Acquire;
+constexpr auto Relaxed = rusty::sync::atomic::Ordering::Relaxed;
+constexpr auto Release = rusty::sync::atomic::Ordering::Release;
 
-/// An iterator which uses a closure to determine if an element should be removed.
+namespace atomic = rusty::sync::atomic;
+// Rust-only: using std::sync::atomic::Atomic;
+
+// Rust-only: using std::borrow;
+// Rust-only: using std::hint;
+
+using rusty::alloc::handle_alloc_error;
+
+using rusty::alloc::AllocError;
+using rusty::alloc::Allocator;
+using rusty::alloc::Global;
+using rusty::alloc::Layout;
+
+using ::std::borrow::Cow;
+using ::std::borrow::ToOwned;
+
+using rusty::Box;
+
+using ::rc::is_dangling;
+
+using ::string::String;
+
+using rusty::Vec;
+
+
+
+// macro_rules! acquire { ... }
+
+// macro_rules! acquire { ... }
+
+template<typename T>
+struct ArcInner {
+    rusty::sync::atomic::Atomic<size_t> strong;
+    rusty::sync::atomic::Atomic<size_t> weak;
+    T data;
+
+};
+
+/// Helper type to allow accessing the reference counts without
+/// making any assertions about the data field.
+struct WeakInner {
+    const rusty::sync::atomic::Atomic<size_t>& weak;
+    const rusty::sync::atomic::Atomic<size_t>& strong;
+};
+
+/// Struct to hold the static `ArcInner` used for empty `Arc<str/CStr/[T]>` as
+/// returned by `Default::default`.
 ///
-/// This struct is created by [`VecDeque::extract_if`].
-/// See its documentation for more.
+/// Layout notes:
+/// * `repr(align(16))` so we can use it for `[T]` with `align_of::<T>() <= 16`.
+/// * `repr(C)` so `inner` is at offset 0 (and thus guaranteed to actually be aligned to 16).
+/// * `[u8; 1]` (to be initialized with 0) so it can be used for `Arc<CStr>`.
+struct SliceArcInnerForStatic {
+    ArcInner<std::array<uint8_t, 1>> inner;
+};
+
+namespace {
+class ToArcSlice {
+public:
+    virtual ~ToArcSlice() noexcept(false) {}
+    ToArcSlice(const ToArcSlice&) = delete;
+    ToArcSlice& operator=(const ToArcSlice&) = delete;
+    ToArcSlice(ToArcSlice&&) = delete;
+    ToArcSlice& operator=(ToArcSlice&&) = delete;
+protected:
+    ToArcSlice() = default;
+};
+}
+
+
+/// A thread-safe reference-counting pointer. 'Arc' stands for 'Atomically
+/// Reference Counted'.
 ///
-/// # Example
+/// The type `Arc<T>` provides shared ownership of a value of type `T`,
+/// allocated in the heap. Invoking [`clone`][clone] on `Arc` produces
+/// a new `Arc` instance, which points to the same allocation on the heap as the
+/// source `Arc`, while increasing a reference count. When the last `Arc`
+/// pointer to a given allocation is destroyed, the value stored in that allocation (often
+/// referred to as "inner value") is also dropped.
+///
+/// Shared references in Rust disallow mutation by default, and `Arc` is no
+/// exception: you cannot generally obtain a mutable reference to something
+/// inside an `Arc`. If you do need to mutate through an `Arc`, you have several options:
+///
+/// 1. Use interior mutability with synchronization primitives like [`Mutex`][mutex],
+///    [`RwLock`][rwlock], or one of the [`Atomic`][atomic] types.
+///
+/// 2. Use clone-on-write semantics with [`Arc::make_mut`] which provides efficient mutation
+///    without requiring interior mutability. This approach clones the data only when
+///    needed (when there are multiple references) and can be more efficient when mutations
+///    are infrequent.
+///
+/// 3. Use [`Arc::get_mut`] when you know your `Arc` is not shared (has a reference count of 1),
+///    which provides direct mutable access to the inner value without any cloning.
 ///
 /// ```
-/// #![feature(vec_deque_extract_if)]
+/// use std::sync::Arc;
 ///
-/// use std::collections::vec_deque::ExtractIf;
-/// use std::collections::vec_deque::VecDeque;
+/// let mut data = Arc::new(vec![1, 2, 3]);
 ///
-/// let mut v = VecDeque::from([0, 1, 2]);
-/// let iter: ExtractIf<'_, _, _> = v.extract_if(.., |x| *x % 2 == 0);
+/// // This will clone the vector only if there are other references to it
+/// Arc::make_mut(&mut data).push(4);
+///
+/// assert_eq!(*data, vec![1, 2, 3, 4]);
 /// ```
-export template<typename T, typename F, typename A = rusty::alloc::Global>
+///
+/// **Note**: This type is only available on platforms that support atomic
+/// loads and stores of pointers, which includes all platforms that support
+/// the `std` crate but not all those which only support [`alloc`](crate).
+/// This may be detected at compile time using `#[cfg(target_has_atomic = "ptr")]`.
+///
+/// ## Thread Safety
+///
+/// Unlike [`Rc<T>`], `Arc<T>` uses atomic operations for its reference
+/// counting. This means that it is thread-safe. The disadvantage is that
+/// atomic operations are more expensive than ordinary memory accesses. If you
+/// are not sharing reference-counted allocations between threads, consider using
+/// [`Rc<T>`] for lower overhead. [`Rc<T>`] is a safe default, because the
+/// compiler will catch any attempt to send an [`Rc<T>`] between threads.
+/// However, a library might choose `Arc<T>` in order to give library consumers
+/// more flexibility.
+///
+/// `Arc<T>` will implement [`Send`] and [`Sync`] as long as the `T` implements
+/// [`Send`] and [`Sync`]. Why can't you put a non-thread-safe type `T` in an
+/// `Arc<T>` to make it thread-safe? This may be a bit counter-intuitive at
+/// first: after all, isn't the point of `Arc<T>` thread safety? The key is
+/// this: `Arc<T>` makes it thread safe to have multiple ownership of the same
+/// data, but it  doesn't add thread safety to its data. Consider
+/// <code>Arc<[RefCell\<T>]></code>. [`RefCell<T>`] isn't [`Sync`], and if `Arc<T>` was always
+/// [`Send`], <code>Arc<[RefCell\<T>]></code> would be as well. But then we'd have a problem:
+/// [`RefCell<T>`] is not thread safe; it keeps track of the borrowing count using
+/// non-atomic operations.
+///
+/// In the end, this means that you may need to pair `Arc<T>` with some sort of
+/// [`std::sync`] type, usually [`Mutex<T>`][mutex].
+///
+/// ## Breaking cycles with `Weak`
+///
+/// The [`downgrade`][downgrade] method can be used to create a non-owning
+/// [`Weak`] pointer. A [`Weak`] pointer can be [`upgrade`][upgrade]d
+/// to an `Arc`, but this will return [`None`] if the value stored in the allocation has
+/// already been dropped. In other words, `Weak` pointers do not keep the value
+/// inside the allocation alive; however, they *do* keep the allocation
+/// (the backing store for the value) alive.
+///
+/// A cycle between `Arc` pointers will never be deallocated. For this reason,
+/// [`Weak`] is used to break cycles. For example, a tree could have
+/// strong `Arc` pointers from parent nodes to children, and [`Weak`]
+/// pointers from children back to their parents.
+///
+/// # Cloning references
+///
+/// Creating a new reference from an existing reference-counted pointer is done using the
+/// `Clone` trait implemented for [`Arc<T>`][Arc] and [`Weak<T>`][Weak].
+///
+/// ```
+/// use std::sync::Arc;
+/// let foo = Arc::new(vec![1.0, 2.0, 3.0]);
+/// // The two syntaxes below are equivalent.
+/// let a = foo.clone();
+/// let b = Arc::clone(&foo);
+/// // a, b, and foo are all Arcs that point to the same memory location
+/// ```
+///
+/// ## `Deref` behavior
+///
+/// `Arc<T>` automatically dereferences to `T` (via the [`Deref`] trait),
+/// so you can call `T`'s methods on a value of type `Arc<T>`. To avoid name
+/// clashes with `T`'s methods, the methods of `Arc<T>` itself are associated
+/// functions, called using [fully qualified syntax]:
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// let my_arc = Arc::new(());
+/// let my_weak = Arc::downgrade(&my_arc);
+/// ```
+///
+/// `Arc<T>`'s implementations of traits like `Clone` may also be called using
+/// fully qualified syntax. Some people prefer to use fully qualified syntax,
+/// while others prefer using method-call syntax.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// let arc = Arc::new(());
+/// // Method-call syntax
+/// let arc2 = arc.clone();
+/// // Fully qualified syntax
+/// let arc3 = Arc::clone(&arc);
+/// ```
+///
+/// [`Weak<T>`][Weak] does not auto-dereference to `T`, because the inner value may have
+/// already been dropped.
+///
+/// [`Rc<T>`]: crate::rc::Rc
+/// [clone]: Clone::clone
+/// [mutex]: ../../std/sync/struct.Mutex.html
+/// [rwlock]: ../../std/sync/struct.RwLock.html
+/// [atomic]: core::sync::atomic
+/// [downgrade]: Arc::downgrade
+/// [upgrade]: Weak::upgrade
+/// [RefCell\<T>]: core::cell::RefCell
+/// [`RefCell<T>`]: core::cell::RefCell
+/// [`std::sync`]: ../../std/sync/index.html
+/// [`Arc::clone(&from)`]: Arc::clone
+/// [fully qualified syntax]: https://doc.rust-lang.org/book/ch19-03-advanced-traits.html#fully-qualified-syntax-for-disambiguation-calling-methods-with-the-same-name
+///
+/// # Examples
+///
+/// Sharing some immutable data between threads:
+///
+/// ```
+/// use std::sync::Arc;
+/// use std::thread;
+///
+/// let five = Arc::new(5);
+///
+/// for _ in 0..10 {
+///     let five = Arc::clone(&five);
+///
+///     thread::spawn(move || {
+///         println!("{five:?}");
+///     });
+/// }
+/// ```
+///
+/// Sharing a mutable [`AtomicUsize`]:
+///
+/// [`AtomicUsize`]: core::sync::atomic::AtomicUsize "sync::atomic::AtomicUsize"
+///
+/// ```
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicUsize, Ordering};
+/// use std::thread;
+///
+/// let val = Arc::new(AtomicUsize::new(5));
+///
+/// for _ in 0..10 {
+///     let val = Arc::clone(&val);
+///
+///     thread::spawn(move || {
+///         let v = val.fetch_add(1, Ordering::Relaxed);
+///         println!("{v:?}");
+///     });
+/// }
+/// ```
+///
+/// See the [`rc` documentation][rc_examples] for more examples of reference
+/// counting in general.
+///
+/// [rc_examples]: crate::rc#examples
+export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
-struct ExtractIf {
-    using Item = T;
-    rusty::VecDeque<T, A>& vec;
-    /// The index of the item that will be inspected by the next call to `next`.
-    size_t idx;
-    /// Elements at and beyond this point will be retained. Must be equal or smaller than `old_len`.
-    size_t end;
-    /// The number of items that have been drained (removed) thus far.
-    size_t del;
-    /// The original length of `vec` prior to draining.
-    size_t old_len;
-    /// The filter test predicate.
-    F pred;
+struct Arc {
+    using Target = T;
+    using Error = Arc<std::span<const T>, A>;
+    rusty::ptr::NonNull<ArcInner<T>> ptr;
+    rusty::PhantomData<ArcInner<T>> phantom;
+    A alloc;
     mutable bool _rusty_forgotten = false;
-    ExtractIf(rusty::VecDeque<T, A>& vec_init, size_t idx_init, size_t end_init, size_t del_init, size_t old_len_init, F pred_init) : vec(vec_init), idx(std::move(idx_init)), end(std::move(end_init)), del(std::move(del_init)), old_len(std::move(old_len_init)), pred(std::move(pred_init)) {}
-    ExtractIf(const ExtractIf&) = default;
-    ExtractIf(ExtractIf&& other) noexcept : vec(other.vec), idx(std::move(other.idx)), end(std::move(other.end)), del(std::move(other.del)), old_len(std::move(other.old_len)), pred(std::move(other.pred)) {
+    Arc(rusty::ptr::NonNull<ArcInner<T>> ptr_init, rusty::PhantomData<ArcInner<T>> phantom_init, A alloc_init) : ptr(std::move(ptr_init)), phantom(std::move(phantom_init)), alloc(std::move(alloc_init)) {}
+    Arc(const Arc&) = default;
+    Arc(Arc&& other) noexcept : ptr(std::move(other.ptr)), phantom(std::move(other.phantom)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    ExtractIf& operator=(const ExtractIf&) = default;
-    ExtractIf& operator=(ExtractIf&& other) noexcept {
+    Arc& operator=(const Arc&) = default;
+    Arc& operator=(Arc&& other) noexcept {
         if (this == &other) {
             return *this;
         }
-        this->~ExtractIf();
-        new (this) ExtractIf(std::move(other));
+        this->~Arc();
+        new (this) Arc(std::move(other));
         return *this;
     }
     void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
 
 
-    template<typename R>
-    static ExtractIf<T, F, A> new_(rusty::VecDeque<T, A>& vec, F pred, R range) {
-        auto old_len = rusty::len(vec);
-        auto&& _let_pat = slice::range(std::move(range), rusty::range_to(old_len));
-        auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);
-        auto&& end = rusty::detail::deref_if_pointer(_let_pat.end);
-        vec.len = 0;
-        return ExtractIf<T, F, A>(vec, std::move(start), std::move(end), static_cast<size_t>(0), std::move(old_len), std::move(pred));
-    }
-    const A& allocator() const {
-        return this->vec.allocator();
-    }
-    rusty::Option<T> next() {
-        while (rusty::detail::deref_if_pointer_like(this->idx) < rusty::detail::deref_if_pointer_like(this->end)) {
-            const auto i = this->idx;
-            const auto idx = this->vec.to_physical_idx(std::move(i));
-            const auto cur = rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(this->vec.ptr().add(std::move(idx))));
-            const auto drained = (this->pred)(std::move(cur));
-            this->idx += 1;
-            if (drained) {
-                this->del += 1;
-                return rusty::Option<T>(rusty::ptr::read(std::move(cur)));
-            } else if (rusty::detail::deref_if_pointer_like(this->del) > 0) {
-                const auto hole_slot = this->vec.to_physical_idx(rusty::detail::deref_if_pointer_like(i) - rusty::detail::deref_if_pointer_like(this->del));
-                // @unsafe
-                {
-                    this->vec.wrap_copy(std::move(idx), std::move(hole_slot), 1);
-                }
-            }
+    static Arc<T, A> from_inner(rusty::ptr::NonNull<ArcInner<T>> ptr) {
+        // @unsafe
+        {
+            return Arc<T, A>::from_inner_in(std::move(ptr), rusty::alloc::Global);
         }
-        return rusty::Option<T>{rusty::None};
     }
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(this->end) - rusty::detail::deref_if_pointer_like(this->idx)));
+    static Arc<T, A> from_ptr(std::add_pointer_t<ArcInner<T>> ptr) {
+        // @unsafe
+        {
+            return Arc<T, A>::from_ptr_in(ptr, rusty::alloc::Global);
+        }
     }
-    ~ExtractIf() noexcept(false) {
-        if (_rusty_forgotten) { return; }
-        if (rusty::detail::deref_if_pointer_like(this->del) > 0) {
-            const auto src = this->vec.to_physical_idx(this->idx);
-            const auto dst = this->vec.to_physical_idx(rusty::detail::deref_if_pointer_like(this->idx) - rusty::detail::deref_if_pointer_like(this->del));
-            const auto len = rusty::detail::deref_if_pointer_like(this->old_len) - rusty::detail::deref_if_pointer_like(this->idx);
+    static std::tuple<rusty::ptr::NonNull<ArcInner<T>>, A> into_inner_with_allocator(Arc<T, A> this_) {
+        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        return std::make_tuple(std::move(this_shadow1.ptr), rusty::ptr::read(&this_shadow1.alloc));
+    }
+    static Arc<T, A> from_inner_in(rusty::ptr::NonNull<ArcInner<T>> ptr, A alloc) {
+        return Arc<T, A>(std::move(ptr), rusty::PhantomData<ArcInner<T>>{}, std::move(alloc));
+    }
+    static Arc<T, A> from_ptr_in(std::add_pointer_t<ArcInner<T>> ptr, A alloc) {
+        // @unsafe
+        {
+            return Arc<T, A>::from_inner_in(NonNull<ArcInner<T>>::new_unchecked(ptr), std::move(alloc));
+        }
+    }
+    static Arc<T> new_(T data) {
+        const auto x = rusty::Box<ArcInner<T>>::new_(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)});
+        // @unsafe
+        {
+            return Arc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>((std::move(x)).leak()));
+        }
+    }
+    template<typename F>
+    static Arc<T> new_cyclic(F data_fn) {
+        return Arc<T, A>::new_cyclic_in(std::move(data_fn), rusty::alloc::Global);
+    }
+    static Arc<mem::MaybeUninit<T>> new_uninit() {
+        // @unsafe
+        {
+            return Arc<mem::MaybeUninit<T>>::from_ptr(Arc<mem::MaybeUninit<T>>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global.allocate(std::move(layout)); }, ::cast));
+        }
+    }
+    static Arc<mem::MaybeUninit<T>> new_zeroed() {
+        // @unsafe
+        {
+            return Arc<mem::MaybeUninit<T>>::from_ptr(Arc<mem::MaybeUninit<T>>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global.allocate_zeroed(std::move(layout)); }, ::cast));
+        }
+    }
+    static rusty::pin::Pin<Arc<T>> pin(T data) {
+        // @unsafe
+        {
+            return rusty::pin::new_unchecked(Arc<std::remove_cvref_t<decltype((data))>>::new_(std::move(data)));
+        }
+    }
+    static rusty::Result<rusty::pin::Pin<Arc<T>>, rusty::alloc::AllocError> try_pin(T data) {
+        // @unsafe
+        {
+            return rusty::Result<rusty::pin::Pin<Arc<T>>, rusty::alloc::AllocError>::Ok(rusty::pin::new_unchecked(RUSTY_TRY_INTO((std::conditional_t<true, Arc<std::remove_cvref_t<decltype((data))>, rusty::alloc::Global>, T>::try_new(std::move(data))), rusty::Result<rusty::pin::Pin<Arc<T>>, rusty::alloc::AllocError>)));
+        }
+    }
+    static rusty::Result<Arc<T>, rusty::alloc::AllocError> try_new(T data) {
+        const auto x = RUSTY_TRY_INTO(rusty::Box<auto>::try_new(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}), rusty::Result<Arc<T>, rusty::alloc::AllocError>);
+        // @unsafe
+        {
+            return rusty::Result<Arc<T>, rusty::alloc::AllocError>::Ok(Arc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>((std::move(x)).leak())));
+        }
+    }
+    static rusty::Result<Arc<mem::MaybeUninit<T>>, rusty::alloc::AllocError> try_new_uninit() {
+        // @unsafe
+        {
+            return rusty::Result<Arc<mem::MaybeUninit<T>>, rusty::alloc::AllocError>::Ok(Arc<mem::MaybeUninit<T>>::from_ptr(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global.allocate(std::move(layout)); }, ::cast)), rusty::Result<Arc<mem::MaybeUninit<T>>, rusty::alloc::AllocError>)));
+        }
+    }
+    static rusty::Result<Arc<mem::MaybeUninit<T>>, rusty::alloc::AllocError> try_new_zeroed() {
+        // @unsafe
+        {
+            return rusty::Result<Arc<mem::MaybeUninit<T>>, rusty::alloc::AllocError>::Ok(Arc<mem::MaybeUninit<T>>::from_ptr(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global.allocate_zeroed(std::move(layout)); }, ::cast)), rusty::Result<Arc<mem::MaybeUninit<T>>, rusty::alloc::AllocError>)));
+        }
+    }
+    template<typename U>
+    static Arc<U> map(Arc<T, A> this_, const auto& f) {
+        if (((size_of<T>() == size_of<U>()) && (align_of<T>() == align_of<U>())) && Arc<U>::is_unique(this_)) {
             // @unsafe
             {
-                this->vec.wrap_copy(std::move(src), std::move(dst), std::move(len));
+                const auto ptr_shadow1 = Arc<U>::into_raw(std::move(this_));
+                const auto value = rusty::ptr::read(ptr_shadow1);
+                auto allocation = Arc<U>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<mem::MaybeUninit<U>>>>(ptr_shadow1));
+                Arc<U>::get_mut_unchecked(allocation).write(f(value));
+                return allocation.assume_init();
+            }
+        } else {
+            return Arc<U>::new_(f(this_));
+        }
+    }
+    template<typename R>
+    static auto try_map(Arc<T, A> this_, const auto& f) {
+        if (((size_of<T>() == size_of<typename R::Output>()) && (align_of<T>() == align_of<typename R::Output>())) && Arc<T, rusty::alloc::Global>::is_unique(this_)) {
+            // @unsafe
+            {
+                const auto ptr_shadow1 = Arc<T, rusty::alloc::Global>::into_raw(std::move(this_));
+                const auto value = rusty::ptr::read(ptr_shadow1);
+                auto allocation = Arc<T, rusty::alloc::Global>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<mem::MaybeUninit<typename R::Output>>>>(ptr_shadow1));
+                Arc<T, rusty::alloc::Global>::get_mut_unchecked(allocation).write(RUSTY_TRY(f(value)));
+                return rusty::intrinsics::unreachable();
+            }
+        } else {
+            return rusty::intrinsics::unreachable();
+        }
+    }
+    static Arc<T, A> new_in(T data, A alloc) {
+        auto x = rusty::Box<auto>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc));
+        auto [ptr_shadow1, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<auto>::into_unique(std::move(x)));
+        // @unsafe
+        {
+            return Arc<T, A>::from_inner_in(std::move(ptr_shadow1), std::move(alloc_shadow1));
+        }
+    }
+    static Arc<mem::MaybeUninit<T>, A> new_uninit_in(A alloc) {
+        // @unsafe
+        {
+            return Arc<mem::MaybeUninit<T>, A>::from_ptr_in(Arc<mem::MaybeUninit<T>, A>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc)); }, ::cast), std::move(alloc));
+        }
+    }
+    static Arc<mem::MaybeUninit<T>, A> new_zeroed_in(A alloc) {
+        // @unsafe
+        {
+            return Arc<mem::MaybeUninit<T>, A>::from_ptr_in(Arc<mem::MaybeUninit<T>, A>::allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate_zeroed(std::move(layout)); } }(alloc)); }, ::cast), std::move(alloc));
+        }
+    }
+    template<typename F>
+    static Arc<T, A> new_cyclic_in(F data_fn, A alloc) {
+        auto [uninit_raw_ptr, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<auto>::into_raw_with_allocator(rusty::Box<auto>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = mem::MaybeUninit<T>::uninit()}, std::move(alloc))));
+        const auto uninit_ptr = ((uninit_raw_ptr)).into();
+        rusty::ptr::NonNull<ArcInner<T>> init_ptr = uninit_ptr.cast();
+        auto weak = rusty::Weak<T, A>(std::move(init_ptr), std::move(alloc_shadow1));
+        auto data = data_fn(weak);
+        auto strong = [&]() { const auto inner = const_cast<std::add_pointer_t<ArcInner<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(rusty::as_ptr(init_ptr)));
+rusty::ptr::write(&(*inner).data, std::move(data));
+const auto prev_value = (*inner).strong.fetch_add(1, rusty::sync::atomic::Ordering::Release);
+assert((prev_value == 0));
+auto alloc_shadow2 = std::get<1>(weak.into_raw_with_allocator());
+return Arc<T, A>::from_inner_in(std::move(init_ptr), std::move(alloc_shadow2)); }();
+        return std::move(strong);
+    }
+    static rusty::pin::Pin<Arc<T, A>> pin_in(T data, A alloc) {
+        // @unsafe
+        {
+            return rusty::pin::new_unchecked(Arc<std::remove_cvref_t<decltype((data))>, std::remove_cvref_t<decltype((alloc))>>::new_in(std::move(data), std::move(alloc)));
+        }
+    }
+    static rusty::Result<rusty::pin::Pin<Arc<T, A>>, rusty::alloc::AllocError> try_pin_in(T data, A alloc) {
+        // @unsafe
+        {
+            return rusty::Result<rusty::pin::Pin<Arc<T, A>>, rusty::alloc::AllocError>::Ok(rusty::pin::new_unchecked(RUSTY_TRY_INTO((Arc<std::remove_cvref_t<decltype((data))>, std::remove_cvref_t<decltype((alloc))>>::try_new_in(std::move(data), std::move(alloc))), rusty::Result<rusty::pin::Pin<Arc<T, A>>, rusty::alloc::AllocError>)));
+        }
+    }
+    static rusty::Result<Arc<T, A>, rusty::alloc::AllocError> try_new_in(T data, A alloc) {
+        auto x = RUSTY_TRY_INTO(rusty::Box<auto>::try_new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc)), rusty::Result<Arc<T, A>, rusty::alloc::AllocError>);
+        auto [ptr_shadow1, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<auto>::into_unique(std::move(x)));
+        return rusty::Result<Arc<T, A>, rusty::alloc::AllocError>::Ok(Arc<T, A>::from_inner_in(std::move(ptr_shadow1), std::move(alloc_shadow1)));
+    }
+    static rusty::Result<Arc<mem::MaybeUninit<T>, A>, rusty::alloc::AllocError> try_new_uninit_in(A alloc) {
+        // @unsafe
+        {
+            return rusty::Result<Arc<mem::MaybeUninit<T>, A>, rusty::alloc::AllocError>::Ok(Arc<mem::MaybeUninit<T>, A>::from_ptr_in(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc)); }, ::cast)), rusty::Result<Arc<mem::MaybeUninit<T>, A>, rusty::alloc::AllocError>), std::move(alloc)));
+        }
+    }
+    static rusty::Result<Arc<mem::MaybeUninit<T>, A>, rusty::alloc::AllocError> try_new_zeroed_in(A alloc) {
+        // @unsafe
+        {
+            return rusty::Result<Arc<mem::MaybeUninit<T>, A>, rusty::alloc::AllocError>::Ok(Arc<mem::MaybeUninit<T>, A>::from_ptr_in(RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(Layout::new_<T>(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate_zeroed(std::move(layout)); } }(alloc)); }, ::cast)), rusty::Result<Arc<mem::MaybeUninit<T>, A>, rusty::alloc::AllocError>), std::move(alloc)));
+        }
+    }
+    static rusty::Result<T, Arc<T, A>> try_unwrap(Arc<T, A> this_) {
+        if (this_.inner().strong.compare_exchange(1, 0, rusty::sync::atomic::Ordering::Relaxed, rusty::sync::atomic::Ordering::Relaxed).is_err()) {
+            return rusty::Result<T, Arc<T, A>>::Err(std::move(this_));
+        }
+        // TODO: acquire!(...)
+        auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        T elem = rusty::ptr::read(rusty::addr_of_temp(this_shadow1.ptr.as_ref().data));
+        A alloc = rusty::ptr::read(&this_shadow1.alloc);
+        const auto _weak = rusty::Weak<T, A>(std::move(this_shadow1.ptr), std::move(alloc));
+        return rusty::Result<T, Arc<T, A>>::Ok(std::move(elem));
+    }
+    static rusty::Option<T> into_inner(Arc<T, A> this_) {
+        auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        if (this_shadow1.inner().strong.fetch_sub(1, rusty::sync::atomic::Ordering::Release) != 1) {
+            return rusty::Option<T>{rusty::None};
+        }
+        // TODO: acquire!(...)
+        auto inner = rusty::ptr::read(this_shadow1.get_mut_unchecked());
+        auto alloc = rusty::ptr::read(&this_shadow1.alloc);
+        rusty::mem::drop(rusty::Weak<T, A>(std::move(this_shadow1.ptr), std::move(alloc)));
+        return rusty::Option<T>(std::move(inner));
+    }
+    static Arc<std::span<const mem::MaybeUninit<T>>> new_uninit_slice(size_t len) {
+        // @unsafe
+        {
+            return Arc<std::span<const mem::MaybeUninit<T>>>::from_ptr(Arc<std::span<const mem::MaybeUninit<T>>>::allocate_for_slice(std::move(len)));
+        }
+    }
+    static Arc<std::span<const mem::MaybeUninit<T>>> new_zeroed_slice(size_t len) {
+        // @unsafe
+        {
+            return Arc<std::span<const mem::MaybeUninit<T>>>::from_ptr(Arc<std::span<const mem::MaybeUninit<T>>>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global.allocate_zeroed(std::move(layout)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> {
+return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const mem::MaybeUninit<T>>>>>(rusty::addr_of_temp(ptr::slice_from_raw_parts_mut(reinterpret_cast<std::add_pointer_t<T>>(static_cast<std::uintptr_t>(mem_shadow1)), std::move(len))));
+}));
+        }
+    }
+    template<size_t N>
+    rusty::Option<Arc<std::array<T, rusty::sanitize_array_capacity<N>()>>> into_array() {
+        if (rusty::len((*this)) == rusty::detail::deref_if_pointer_like(N)) {
+            const auto ptr_shadow1 = reinterpret_cast<std::add_pointer_t<std::add_const_t<std::array<T, rusty::sanitize_array_capacity<N>()>>>>(Arc<T, A>::into_raw((*this)));
+            auto me = Arc<T, rusty::alloc::Global>::from_raw(std::move(ptr_shadow1));
+            return rusty::Option<Arc<std::array<T, rusty::sanitize_array_capacity<N>()>>>(std::move(me));
+        } else {
+            return rusty::Option<Arc<std::array<T, rusty::sanitize_array_capacity<N>()>>>{rusty::None};
+        }
+    }
+    static Arc<std::span<const mem::MaybeUninit<T>>, A> new_uninit_slice_in(size_t len, A alloc) {
+        // @unsafe
+        {
+            return Arc<std::span<const mem::MaybeUninit<T>>, A>::from_ptr_in(Arc<std::span<const mem::MaybeUninit<T>>, std::remove_cvref_t<decltype((&alloc))>>::allocate_for_slice_in(std::move(len), alloc), std::move(alloc));
+        }
+    }
+    static Arc<std::span<const mem::MaybeUninit<T>>, A> new_zeroed_slice_in(size_t len, A alloc) {
+        // @unsafe
+        {
+            return Arc<std::span<const mem::MaybeUninit<T>>, A>::from_ptr_in(Arc<std::span<const mem::MaybeUninit<T>>, A>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate_zeroed(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate_zeroed(std::move(layout)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> {
+return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const mem::MaybeUninit<T>>>>>(rusty::addr_of_temp(ptr::slice_from_raw_parts_mut(mem_shadow1.template cast<T>(), std::move(len))));
+}), std::move(alloc));
+        }
+    }
+    Arc<typename __TemplateArgs<T>::arg_0, A> assume_init() {
+        auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(Arc<typename __TemplateArgs<T>::arg_0, A>::into_inner_with_allocator(std::move((*this))));
+        // @unsafe
+        {
+            return Arc<typename __TemplateArgs<T>::arg_0, A>::from_inner_in(ptr_shadow1.cast(), std::move(alloc));
+        }
+    }
+    static Arc<T> clone_from_ref(const T& value) {
+        return Arc<T>::clone_from_ref_in(value, rusty::alloc::Global);
+    }
+    static rusty::Result<Arc<T>, rusty::alloc::AllocError> try_clone_from_ref(const T& value) {
+        return std::conditional_t<true, Arc<std::remove_cvref_t<decltype((value))>, std::remove_cvref_t<decltype((rusty::alloc::Global))>>, T>::try_clone_from_ref_in(value, rusty::alloc::Global);
+    }
+    static Arc<T, A> clone_from_ref_in(const T& value, A alloc) {
+        UniqueArcUninit<T, A> in_progress = UniqueArcUninit<T, A>::new_(value, std::move(alloc));
+        auto initialized_clone = [&]() { ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).clone_to_uninit(in_progress.data_ptr()->cast()); }) { return std::forward<decltype(__recv)>(__recv).clone_to_uninit(in_progress.data_ptr()->cast()); } else { return std::forward<decltype(__recv)>(__recv)->clone_to_uninit(in_progress.data_ptr()->cast()); } }(value));
+return in_progress.into_arc(); }();
+        return std::move(initialized_clone);
+    }
+    static rusty::Result<Arc<T, A>, rusty::alloc::AllocError> try_clone_from_ref_in(const T& value, A alloc) {
+        UniqueArcUninit<T, A> in_progress = RUSTY_TRY_INTO((UniqueArcUninit<std::remove_cvref_t<decltype((value))>, std::remove_cvref_t<decltype((alloc))>>::try_new(value, std::move(alloc))), rusty::Result<Arc<T, A>, rusty::alloc::AllocError>);
+        auto initialized_clone = [&]() { ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).clone_to_uninit(in_progress.data_ptr()->cast()); }) { return std::forward<decltype(__recv)>(__recv).clone_to_uninit(in_progress.data_ptr()->cast()); } else { return std::forward<decltype(__recv)>(__recv)->clone_to_uninit(in_progress.data_ptr()->cast()); } }(value));
+return in_progress.into_arc(); }();
+        return rusty::Result<Arc<T, A>, rusty::alloc::AllocError>::Ok(std::move(initialized_clone));
+    }
+    static Arc<T, A> from_raw(std::add_pointer_t<std::add_const_t<T>> ptr) {
+        // @unsafe
+        {
+            return Arc<T, std::remove_cvref_t<decltype((rusty::alloc::Global))>>::from_raw_in(ptr, rusty::alloc::Global);
+        }
+    }
+    static std::add_pointer_t<std::add_const_t<T>> into_raw(Arc<T, A> this_) {
+        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        return this_shadow1.as_ptr();
+    }
+    static void increment_strong_count(std::add_pointer_t<std::add_const_t<T>> ptr) {
+        // @unsafe
+        {
+            Arc<T, std::remove_cvref_t<decltype((rusty::alloc::Global))>>::increment_strong_count_in(ptr, rusty::alloc::Global);
+        }
+    }
+    static void decrement_strong_count(std::add_pointer_t<std::add_const_t<T>> ptr) {
+        // @unsafe
+        {
+            Arc<T, std::remove_cvref_t<decltype((rusty::alloc::Global))>>::decrement_strong_count_in(ptr, rusty::alloc::Global);
+        }
+    }
+    static const A& allocator(const Arc<T, A>& this_) {
+        return this_.alloc;
+    }
+    static std::tuple<std::add_pointer_t<std::add_const_t<T>>, A> into_raw_with_allocator(Arc<T, A> this_) {
+        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        auto ptr_shadow1 = this_shadow1.as_ptr();
+        auto alloc = rusty::ptr::read(&this_shadow1.alloc);
+        return std::make_tuple(std::move(ptr_shadow1), std::move(alloc));
+    }
+    static std::add_pointer_t<std::add_const_t<T>> as_ptr(const Arc<T, A>& this_) {
+        const std::add_pointer_t<ArcInner<T>> ptr_shadow1 = NonNull<auto>::as_ptr(this_.ptr);
+        // @unsafe
+        {
+            return &(*ptr_shadow1).data;
+        }
+    }
+    static Arc<T, A> from_raw_in(std::add_pointer_t<std::add_const_t<T>> ptr, A alloc) {
+        // @unsafe
+        {
+            const auto offset = ::data_offset<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr))>>>(ptr);
+            const auto arc_ptr = reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintptr_t>(ptr->byte_sub(std::move(offset))));
+            return Arc<T, A>::from_ptr_in(std::move(arc_ptr), std::move(alloc));
+        }
+    }
+    static rusty::Weak<T, A> downgrade(const Arc<T, A>& this_) {
+        auto cur = this_.inner().weak.load(rusty::sync::atomic::Ordering::Relaxed);
+        while (true) {
+            if (rusty::detail::deref_if_pointer_like(cur) == rusty::detail::deref_if_pointer_like(std::numeric_limits<size_t>::max())) {
+                hint::spin_loop();
+                cur = this_.inner().weak.load(rusty::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            if (!(rusty::detail::deref_if_pointer_like(cur) <= rusty::detail::deref_if_pointer_like(MAX_REFCOUNT))) { throw std::logic_error(std::format("{}", INTERNAL_OVERFLOW_ERROR)); }
+            return ({ auto&& _m = this_.inner().weak.compare_exchange_weak(std::move(cur), rusty::detail::deref_if_pointer_like(cur) + 1, rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed); std::optional<rusty::Weak<T, A>> _match_value; if (_m.is_err()) { auto&& _mv = _m.unwrap_err();
+auto&& old = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
+_match_value.emplace(std::move(cur = old)); } else { if (!(_m.is_ok())) { rusty::intrinsics::unreachable(); } auto&& _mv = _m.unwrap();
+assert((!is_dangling(rusty::as_ptr(this_.ptr)))); return rusty::Weak<T, A>(this_.ptr, rusty::clone(this_.alloc)); } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); });
+        }
+    }
+    static size_t weak_count(const Arc<T, A>& this_) {
+        const auto cnt = this_.inner().weak.load(rusty::sync::atomic::Ordering::Relaxed);
+        if (rusty::detail::deref_if_pointer_like(cnt) == rusty::detail::deref_if_pointer_like(std::numeric_limits<size_t>::max())) {
+            return static_cast<size_t>(0);
+        } else {
+            return rusty::detail::deref_if_pointer_like(cnt) - static_cast<size_t>(1);
+        }
+    }
+    static size_t strong_count(const Arc<T, A>& this_) {
+        return this_.inner().strong.load(rusty::sync::atomic::Ordering::Relaxed);
+    }
+    static void increment_strong_count_in(std::add_pointer_t<std::add_const_t<T>> ptr, A alloc) {
+        const auto arc = rusty::mem::manually_drop_new(Arc<T, std::remove_cvref_t<decltype((alloc))>>::from_raw_in(ptr, std::move(alloc)));
+        const auto _arc_clone = rusty::clone(arc);
+    }
+    static void decrement_strong_count_in(std::add_pointer_t<std::add_const_t<T>> ptr, A alloc) {
+        // @unsafe
+        {
+            rusty::mem::drop(Arc<T, std::remove_cvref_t<decltype((alloc))>>::from_raw_in(ptr, std::move(alloc)));
+        }
+    }
+    const ArcInner<T>& inner() const {
+        // @unsafe
+        {
+            return this->ptr.as_ref();
+        }
+    }
+    void drop_slow() {
+        const auto _weak = rusty::Weak<T, A>(this->ptr, &this->alloc);
+        // @unsafe
+        {
+            rusty::ptr::drop_in_place(&(*rusty::as_ptr(this->ptr)).data);
+        }
+    }
+    static bool ptr_eq(const Arc<T, A>& this_, const Arc<T, A>& other) {
+        return ptr::addr_eq(rusty::as_ptr(this_.ptr), rusty::as_ptr(other.ptr));
+    }
+    static std::add_pointer_t<ArcInner<T>> allocate_for_layout(rusty::alloc::Layout value_layout, const auto& allocate, const auto& mem_to_arcinner) {
+        auto layout = ::arcinner_layout_for_value_layout(std::move(value_layout));
+        auto ptr_shadow1 = allocate(std::move(layout)).unwrap_or_else([&](auto _closure_wild0) { return handle_alloc_error(std::move(layout)); });
+        // @unsafe
+        {
+            return Arc<T, A>::initialize_arcinner(std::move(ptr_shadow1), std::move(layout), mem_to_arcinner);
+        }
+    }
+    static rusty::Result<std::add_pointer_t<ArcInner<T>>, rusty::alloc::AllocError> try_allocate_for_layout(rusty::alloc::Layout value_layout, const auto& allocate, const auto& mem_to_arcinner) {
+        auto layout = ::arcinner_layout_for_value_layout(std::move(value_layout));
+        auto ptr_shadow1 = RUSTY_TRY_INTO(allocate(std::move(layout)), rusty::Result<std::add_pointer_t<ArcInner<T>>, rusty::alloc::AllocError>);
+        auto inner = Arc<T, A>::initialize_arcinner(std::move(ptr_shadow1), std::move(layout), mem_to_arcinner);
+        return rusty::Result<std::add_pointer_t<ArcInner<T>>, rusty::alloc::AllocError>::Ok(std::move(inner));
+    }
+    static std::add_pointer_t<ArcInner<T>> initialize_arcinner(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout layout, const auto& mem_to_arcinner) {
+        auto inner = mem_to_arcinner(rusty::as_ptr(ptr.as_non_null_ptr()));
+        assert((unsafe { Layout :: for_value_raw (inner) } == layout));
+        // @unsafe
+        {
+            rusty::ptr::write((&(rusty::detail::deref_if_pointer_like(inner)).strong), std::move(rusty::sync::atomic::AtomicUsize::new_(1)));
+            rusty::ptr::write((&(rusty::detail::deref_if_pointer_like(inner)).weak), std::move(rusty::sync::atomic::AtomicUsize::new_(1)));
+        }
+        return std::move(inner);
+    }
+    static std::add_pointer_t<ArcInner<T>> allocate_for_ptr_in(std::add_pointer_t<std::add_const_t<T>> ptr, const A& alloc) {
+        // @unsafe
+        {
+            return Arc<T, rusty::alloc::Global>::allocate_for_layout(Layout::for_value_raw(ptr), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return mem_shadow1.with_metadata_of(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(ptr)); });
+        }
+    }
+    static Arc<T, A> from_box_in(rusty::Box<T, A> src) {
+        // @unsafe
+        {
+            auto value_size = size_of_val(rusty::detail::deref_if_pointer_like(src));
+            const auto ptr_shadow1 = rusty::detail::deref_if_pointer_like(src).allocate_for_ptr_in(rusty::Box<auto>::allocator(src));
+            rusty::ptr::copy_nonoverlapping(reinterpret_cast<const uint8_t*>((&rusty::detail::deref_if_pointer_like(src))), const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>((&(rusty::detail::deref_if_pointer_like(ptr_shadow1)).data))), std::move(value_size));
+            auto [bptr, alloc] = rusty::detail::deref_if_pointer_like(rusty::Box<auto>::into_raw_with_allocator(std::move(src)));
+            auto src_shadow1 = rusty::Box<auto>::from_raw_in(reinterpret_cast<std::add_pointer_t<mem::ManuallyDrop<T>>>(static_cast<std::uintptr_t>(bptr)), alloc.by_ref());
+            rusty::mem::drop(std::move(src_shadow1));
+            return Arc<T, A>::from_ptr_in(std::move(ptr_shadow1), std::move(alloc));
+        }
+    }
+    static std::add_pointer_t<ArcInner<std::span<const T>>> allocate_for_slice(size_t len) {
+        // @unsafe
+        {
+            return Arc<T, A>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return rusty::alloc::Global.allocate(std::move(layout)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const T>>>>(rusty::addr_of_temp(ptr::slice_from_raw_parts_mut(mem_shadow1.template cast<T>(), std::move(len)))); });
+        }
+    }
+    static Arc<std::span<const T>> copy_from_slice(std::span<const T> v) {
+        // @unsafe
+        {
+            const auto ptr_shadow1 = Arc<T, A>::allocate_for_slice(rusty::len(v));
+            rusty::ptr::copy_nonoverlapping(rusty::as_ptr(v), const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>((&(rusty::detail::deref_if_pointer_like(ptr_shadow1)).data))), rusty::len(v));
+            return Arc<T, A>::from_ptr(std::move(ptr_shadow1));
+        }
+    }
+    struct Guard {
+        rusty::ptr::NonNull<uint8_t> mem;
+        std::add_pointer_t<T> elems;
+        rusty::alloc::Layout layout;
+        size_t n_elems;
+        mutable bool _rusty_forgotten = false;
+        Guard(rusty::ptr::NonNull<uint8_t> mem_init, std::add_pointer_t<T> elems_init, rusty::alloc::Layout layout_init, size_t n_elems_init) : mem(std::move(mem_init)), elems(std::move(elems_init)), layout(std::move(layout_init)), n_elems(std::move(n_elems_init)) {}
+        Guard(const Guard&) = default;
+        Guard(Guard&& other) noexcept : mem(std::move(other.mem)), elems(std::move(other.elems)), layout(std::move(other.layout)), n_elems(std::move(other.n_elems)) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        Guard& operator=(const Guard&) = default;
+        Guard& operator=(Guard&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~Guard();
+            new (this) Guard(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~Guard() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            // @unsafe
+            {
+                auto slice = rusty::from_raw_parts_mut(this->elems, this->n_elems);
+                rusty::ptr::drop_in_place(std::move(slice));
+                rusty::alloc::Global.deallocate(this->mem, this->layout);
             }
         }
-        this->vec.len = rusty::detail::deref_if_pointer_like(this->old_len) - rusty::detail::deref_if_pointer_like(this->del);
+    };
+    static Arc<std::span<const T>> from_iter_exact(const auto& iter, size_t len) {
+        // @unsafe
+        {
+            const auto ptr_shadow1 = Arc<T, A>::allocate_for_slice(std::move(len));
+            const auto mem_shadow1 = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(ptr_shadow1));
+            auto layout = Layout::for_value_raw(std::move(ptr_shadow1));
+            auto elems = const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>((&(rusty::detail::deref_if_pointer_like(ptr_shadow1)).data)));
+            auto guard = Guard(rusty::ptr::NonNull<uint8_t>::new_unchecked(std::move(mem_shadow1)), std::move(elems), std::move(layout), static_cast<size_t>(0));
+            for (auto&& _for_item : rusty::for_in(rusty::enumerate(iter))) {
+                auto&& i = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));
+                auto&& item = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));
+                rusty::ptr::write(elems.add(std::move(i)), std::move(item));
+                guard.n_elems += 1;
+            }
+            rusty::mem::forget(std::move(guard));
+            return Arc<T, A>::from_ptr(std::move(ptr_shadow1));
+        }
+    }
+    static std::add_pointer_t<ArcInner<std::span<const T>>> allocate_for_slice_in(size_t len, const A& alloc) {
+        // @unsafe
+        {
+            return Arc<T, rusty::alloc::Global>::allocate_for_layout(Layout::array<T>(std::move(len)).unwrap(), [&](auto&& layout) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return reinterpret_cast<std::add_pointer_t<ArcInner<std::span<const T>>>>(rusty::addr_of_temp(ptr::slice_from_raw_parts_mut(mem_shadow1.template cast<T>(), std::move(len)))); });
+        }
+    }
+    static Arc<T, A> from_slice(std::span<const T> v) {
+        // @unsafe
+        {
+            return Arc<T, A>::from_iter_exact(rusty::iter(v).cloned(), rusty::len(v));
+        }
+    }
+    Arc<T, A> clone() const {
+        const auto old_size = this->inner().strong.fetch_add(1, rusty::sync::atomic::Ordering::Relaxed);
+        if (rusty::detail::deref_if_pointer_like(old_size) > rusty::detail::deref_if_pointer_like(MAX_REFCOUNT)) {
+            abort();
+        }
+        // @unsafe
+        {
+            return Arc<T, A>::from_inner_in(this->ptr, rusty::clone(this->alloc));
+        }
+    }
+    const T& operator*() const {
+        return this->inner().data;
+    }
+    static T& make_mut(Arc<T, A>& this_) {
+        auto size_of_val = size_of_val(rusty::detail::deref_if_pointer_like(this_));
+        if (this_.inner().strong.compare_exchange(1, 0, rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed).is_err()) {
+            this_ = Arc<std::remove_cvref_t<decltype((rusty::detail::deref_if_pointer_like(this_)))>, std::remove_cvref_t<decltype((rusty::clone(this_.alloc)))>>::clone_from_ref_in(rusty::detail::deref_if_pointer_like(this_), rusty::clone(this_.alloc));
+        } else if (this_.inner().weak.load(rusty::sync::atomic::Ordering::Relaxed) != 1) {
+            const auto _weak = rusty::Weak<T, A>(this_.ptr, rusty::clone(this_.alloc));
+            UniqueArcUninit<T, A> in_progress = UniqueArcUninit<T, A>::new_(rusty::detail::deref_if_pointer_like(this_), rusty::clone(this_.alloc));
+            // @unsafe
+            {
+                rusty::ptr::copy_nonoverlapping(ptr::from_ref(rusty::detail::deref_if_pointer_like(this_)).template cast<uint8_t>(), reinterpret_cast<uint8_t*>(in_progress.data_ptr()), std::move(size_of_val));
+                rusty::ptr::write(&this_, std::move(in_progress.into_arc()));
+            }
+        } else {
+            this_.inner().strong.store(1, rusty::sync::atomic::Ordering::Release);
+        }
+        // @unsafe
+        {
+            return Arc<T, A>::get_mut_unchecked(this_);
+        }
+    }
+    static T unwrap_or_clone(Arc<T, A> this_) {
+        return Arc<T, rusty::alloc::Global>::try_unwrap(std::move(this_)).unwrap_or_else([&](auto&& arc) { return rusty::clone(((rusty::deref_mut(arc)))); });
+    }
+    static rusty::Option<T&> get_mut(Arc<T, A>& this_) {
+        if (Arc<T, A>::is_unique(this_)) {
+            // @unsafe
+            {
+                return rusty::Option<T&>(Arc<T, rusty::alloc::Global>::get_mut_unchecked(this_));
+            }
+        } else {
+            return rusty::Option<T&>{rusty::None};
+        }
+    }
+    static T& get_mut_unchecked(Arc<T, A>& this_) {
+        // @unsafe
+        {
+            return (*rusty::as_ptr(this_.ptr)).data;
+        }
+    }
+    static bool is_unique(const Arc<T, A>& this_) {
+        if (this_.inner().weak.compare_exchange(1, std::numeric_limits<size_t>::max(), rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed).is_ok()) {
+            auto unique = this_.inner().strong.load(rusty::sync::atomic::Ordering::Acquire) == 1;
+            this_.inner().weak.store(1, rusty::sync::atomic::Ordering::Release);
+            return std::move(unique);
+        } else {
+            return false;
+        }
+    }
+    ~Arc() noexcept(false) {
+        if (_rusty_forgotten) { return; }
+        if (this->inner().strong.fetch_sub(1, rusty::sync::atomic::Ordering::Release) != 1) {
+            return;
+        }
+        // TODO: acquire!(...)
+        if (!(!ptr::addr_eq(rusty::as_ptr(this->ptr), STATIC_INNER_SLICE.inner))) { throw std::logic_error("Arcs backed by a static should never reach a strong count of 0. Likely decrement_strong_count or from_raw were called too many times."); }
+        // @unsafe
+        {
+            this->drop_slow();
+        }
+    }
+    rusty::Result<Arc<T, A>, Arc<T, A>> downcast() {
+        if (Arc<T, A>::template is<T>((((*this))))) {
+            // @unsafe
+            {
+                auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(Arc<T, rusty::alloc::Global>::into_inner_with_allocator(std::move((*this))));
+                return rusty::Result<Arc<T, A>, Arc<T, A>>::Ok(Arc<T, A>::from_inner_in(ptr_shadow1.cast(), std::move(alloc)));
+            }
+        } else {
+            return rusty::Result<Arc<T, A>, Arc<T, A>>::Err(std::move((*this)));
+        }
+    }
+    Arc<T, A> downcast_unchecked() {
+        // @unsafe
+        {
+            auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(Arc<T, A>::into_inner_with_allocator(std::move((*this))));
+            return Arc<T, A>::from_inner_in(ptr_shadow1.cast(), std::move(alloc));
+        }
+    }
+    bool eq(const Arc<T, A>& other) const {
+        return rusty::detail::deref_if_pointer_like((*this)) == rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other));
+    }
+    bool ne(const Arc<T, A>& other) const {
+        return rusty::detail::deref_if_pointer_like((*this)) != rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other));
+    }
+    std::partial_ordering operator<=>(const Arc<T, A>& other) const {
+        return rusty::to_partial_ordering([&]() -> rusty::Option<rusty::cmp::Ordering> {
+            return rusty::partial_cmp(((rusty::detail::deref_if_pointer_like((*this)))), rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other)));
+        }());
+    }
+    rusty::cmp::Ordering cmp(const Arc<T, A>& other) const {
+        return rusty::cmp::cmp(((rusty::detail::deref_if_pointer_like((*this)))), rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(other)));
     }
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        const auto peek = [&]() {
-if (rusty::detail::deref_if_pointer_like(this->idx) < rusty::detail::deref_if_pointer_like(this->end)) {
-const auto idx = this->vec.to_physical_idx(this->idx);
-return rusty::SomeRef([&]() -> const auto& { static const auto _some_ref_tmp = rusty::detail::deref_if_pointer_like(this->vec.ptr().add(std::move(idx))); return _some_ref_tmp; }());
-} else {
-return rusty::None;
-}
-}();
-        return f.debug_struct("ExtractIf").field("peek", peek).finish_non_exhaustive();
+        return rusty::write_fmt(f, rusty::to_string(rusty::detail::deref_if_pointer_like((*this))));
+    }
+    static Arc<T> default_() {
+        // @unsafe
+        {
+            return Arc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>((rusty::Box<auto>::write_(rusty::Box<auto>::new_uninit(), ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = T::default_()})).leak()));
+        }
+    }
+    template<typename H>
+    void hash(H& state) const {
+        rusty::hash::hash(((rusty::detail::deref_if_pointer_like((*this)))), state);
+    }
+    static Arc<T, A> from(T t) {
+        return Arc<std::remove_cvref_t<decltype((t))>>::new_(std::move(t));
+    }
+    template<size_t N>
+    static Arc<std::span<const T>> from(std::array<T, rusty::sanitize_array_capacity<N>()> v) {
+        return Arc<std::span<const T>>::from(v);
+    }
+    static Arc<std::span<const T>> from(std::span<const T> v) {
+        return std::conditional_t<true, Arc<T, T>, T>::from_slice(v);
+    }
+    static Arc<std::span<const T>> from(std::span<T> v) {
+        return Arc<std::span<const T>>::from(v);
+    }
+    static Arc<std::string_view> from(std::string_view v) {
+        auto arc = rusty::from_into<rusty::sync::Arc<std::span<const uint8_t>>>(rusty::as_bytes(v));
+        // @unsafe
+        {
+            return Arc<std::string_view>::from_raw(reinterpret_cast<const std::string_view*>(Arc<std::string_view>::into_raw(std::move(arc))));
+        }
+    }
+    static Arc<std::string_view> from(rusty::String v) {
+        return Arc<std::string_view>::from(rusty::to_string_view(v.as_str()));
+    }
+    static Arc<T, A> from(rusty::Box<T, A> v) {
+        return Arc<T, A>::from_box_in(std::move(v));
+    }
+    static Arc<std::span<const T>, A> from(rusty::Vec<T, A> v) {
+        // @unsafe
+        {
+            auto [vec_ptr, len, cap, alloc] = rusty::detail::deref_if_pointer_like(v.into_raw_parts_with_alloc());
+            const auto rc_ptr = Arc<T, A>::allocate_for_slice_in(std::move(len), rusty::detail::deref_if_pointer_like(alloc));
+            rusty::ptr::copy_nonoverlapping(std::move(vec_ptr), const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>((&(rusty::detail::deref_if_pointer_like(rc_ptr)).data))), std::move(len));
+            static_cast<void>(rusty::Vec<std::remove_pointer_t<std::remove_reference_t<decltype((vec_ptr))>>>::from_raw_parts_in(std::move(vec_ptr), 0, std::move(cap), alloc));
+            return Arc<T, A>::from_ptr_in(std::move(rc_ptr), std::move(alloc));
+        }
+    }
+    template<typename B>
+    static Arc<B> from(rusty::Cow cow) {
+        return [&]() -> Arc<B> { auto&& _m = cow; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& s = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return Arc<B>::from(s); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& s = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return Arc<B>::from(s); } return [&]() -> Arc<B> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    static Arc<T, A> from(Arc<std::string_view> rc) {
+        // @unsafe
+        {
+            return Arc<T, rusty::alloc::Global>::from_raw(reinterpret_cast<const std::span<const uint8_t>*>(Arc<T, rusty::alloc::Global>::into_raw(std::move(rc))));
+        }
+    }
+    template<size_t N>
+    static rusty::Result<Arc<T, A>, Error> try_from(Arc<std::span<const T>, A> boxed_slice) {
+        if (rusty::len(boxed_slice) == rusty::detail::deref_if_pointer_like(N)) {
+            auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(Arc<T, rusty::alloc::Global>::into_inner_with_allocator(std::move(boxed_slice)));
+            return rusty::Result<Arc<T, A>, Error>::Ok(Arc<T, std::remove_cvref_t<decltype((alloc))>>::from_inner_in(ptr_shadow1.cast(), std::move(alloc)));
+        } else {
+            return rusty::Result<Arc<T, A>, Error>::Err(std::move(boxed_slice));
+        }
+    }
+    template<typename I>
+    static Arc<T, A> from_iter(I iter) {
+        return rusty::iter(std::move(iter)).to_arc_slice();
+    }
+    const T& borrow() const {
+        return rusty::detail::deref_if_pointer_like((*this));
+    }
+    const T& as_ref() const {
+        return rusty::detail::deref_if_pointer_like((*this));
+    }
+    rusty::Option<const void*> cause() const {
+        return (rusty::detail::deref_if_pointer_like((*this))).cause();
+    }
+    rusty::Option<const void*&> source() const {
+        return (rusty::detail::deref_if_pointer_like((*this))).source();
+    }
+    void provide(rusty::error::Request& req) const {
+        (rusty::detail::deref_if_pointer_like((*this))).provide(req);
+    }
+    auto allocate(rusty::alloc::Layout layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+        return ((rusty::detail::deref_if_pointer_like((*this)))).allocate(std::move(layout));
+    }
+    auto allocate_zeroed(rusty::alloc::Layout layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+        return ((rusty::detail::deref_if_pointer_like((*this)))).allocate_zeroed(std::move(layout));
+    }
+    void deallocate(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout layout) const {
+        // @unsafe
+        {
+            ((rusty::detail::deref_if_pointer_like((*this)))).deallocate(std::move(ptr), std::move(layout));
+        }
+    }
+    auto grow(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout old_layout, rusty::alloc::Layout new_layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+        // @unsafe
+        {
+            return ((rusty::detail::deref_if_pointer_like((*this)))).grow(std::move(ptr), std::move(old_layout), std::move(new_layout));
+        }
+    }
+    auto grow_zeroed(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout old_layout, rusty::alloc::Layout new_layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+        // @unsafe
+        {
+            return ((rusty::detail::deref_if_pointer_like((*this)))).grow_zeroed(std::move(ptr), std::move(old_layout), std::move(new_layout));
+        }
+    }
+    auto shrink(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout old_layout, rusty::alloc::Layout new_layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> {
+        // @unsafe
+        {
+            return ((rusty::detail::deref_if_pointer_like((*this)))).shrink(std::move(ptr), std::move(old_layout), std::move(new_layout));
+        }
     }
 };
 
-} // namespace vec_deque_port::extract_if
+namespace {
+template <class T, class A>
+class ArcEqIdent {
+public:
+    virtual ~ArcEqIdent() noexcept(false) {}
+    virtual bool eq(const rusty::Arc<T, A>& other) const = 0;
+    virtual bool ne(const rusty::Arc<T, A>& other) const = 0;
+    ArcEqIdent(const ArcEqIdent&) = delete;
+    ArcEqIdent& operator=(const ArcEqIdent&) = delete;
+    ArcEqIdent(ArcEqIdent&&) = delete;
+    ArcEqIdent& operator=(ArcEqIdent&&) = delete;
+protected:
+    ArcEqIdent() = default;
+};
+}
+
+template <class T, class A, class U> class ArcEqIdentAdapter;
+template <class T, class A, class U> class ArcEqIdentAdapterRef;
+template <class T, class A, class U> class ArcEqIdentAdapterRefMut;
+
+/// `Weak` is a version of [`Arc`] that holds a non-owning reference to the
+/// managed allocation.
+///
+/// The allocation is accessed by calling [`upgrade`] on the `Weak`
+/// pointer, which returns an <code>[Option]<[Arc]\<T>></code>.
+///
+/// Since a `Weak` reference does not count towards ownership, it will not
+/// prevent the value stored in the allocation from being dropped, and `Weak` itself makes no
+/// guarantees about the value still being present. Thus it may return [`None`]
+/// when [`upgrade`]d. Note however that a `Weak` reference *does* prevent the allocation
+/// itself (the backing store) from being deallocated.
+///
+/// A `Weak` pointer is useful for keeping a temporary reference to the allocation
+/// managed by [`Arc`] without preventing its inner value from being dropped. It is also used to
+/// prevent circular references between [`Arc`] pointers, since mutual owning references
+/// would never allow either [`Arc`] to be dropped. For example, a tree could
+/// have strong [`Arc`] pointers from parent nodes to children, and `Weak`
+/// pointers from children back to their parents.
+///
+/// The typical way to obtain a `Weak` pointer is to call [`Arc::downgrade`].
+///
+/// [`upgrade`]: Weak::upgrade
+export template<typename T, typename A = rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+struct Weak {
+    rusty::ptr::NonNull<ArcInner<T>> ptr;
+    A alloc;
+    mutable bool _rusty_forgotten = false;
+    Weak(rusty::ptr::NonNull<ArcInner<T>> ptr_init, A alloc_init) : ptr(std::move(ptr_init)), alloc(std::move(alloc_init)) {}
+    Weak(const Weak&) = default;
+    Weak(Weak&& other) noexcept : ptr(std::move(other.ptr)), alloc(std::move(other.alloc)) {
+        this->_rusty_forgotten = other._rusty_forgotten;
+        other._rusty_forgotten = true;
+    }
+    Weak& operator=(const Weak&) = default;
+    Weak& operator=(Weak&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        this->~Weak();
+        new (this) Weak(std::move(other));
+        return *this;
+    }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return /* write!(f , "(Weak)") */;
+    }
+    static Weak<T> new_() {
+        return Weak<T>(rusty::ptr::NonNull<ArcInner<T>>::without_provenance(rusty::clone(rusty::clone(NonZeroUsize::MAX))), rusty::alloc::Global);
+    }
+    static Weak<T, A> new_in(A alloc) {
+        return Weak<T, A>(rusty::ptr::NonNull<ArcInner<T>>::without_provenance(rusty::clone(rusty::clone(NonZeroUsize::MAX))), std::move(alloc));
+    }
+    static Weak<T, A> from_raw(std::add_pointer_t<std::add_const_t<T>> ptr) {
+        // @unsafe
+        {
+            return Weak<T, std::remove_cvref_t<decltype((rusty::alloc::Global))>>::from_raw_in(ptr, rusty::alloc::Global);
+        }
+    }
+    std::add_pointer_t<std::add_const_t<T>> into_raw() {
+        return (*rusty::mem::manually_drop_new(std::move((*this)))).as_ptr();
+    }
+    const A& allocator() const {
+        return this->alloc;
+    }
+    std::add_pointer_t<std::add_const_t<T>> as_ptr() const {
+        const std::add_pointer_t<ArcInner<T>> ptr_shadow1 = NonNull<auto>::as_ptr(this->ptr);
+        if (is_dangling(ptr_shadow1)) {
+            return reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(ptr_shadow1);
+        } else {
+            // @unsafe
+            {
+                return &(*ptr_shadow1).data;
+            }
+        }
+    }
+    std::tuple<std::add_pointer_t<std::add_const_t<T>>, A> into_raw_with_allocator() {
+        const auto this_ = rusty::mem::manually_drop_new(std::move((*this)));
+        auto result = (*this_).as_ptr();
+        auto alloc = rusty::ptr::read(&this_.alloc);
+        return std::make_tuple(result, std::move(alloc));
+    }
+    static Weak<T, A> from_raw_in(std::add_pointer_t<std::add_const_t<T>> ptr, A alloc) {
+        const auto ptr_shadow1 = [&]() {
+if (is_dangling(ptr)) {
+return const_cast<std::add_pointer_t<ArcInner<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(ptr));
+} else {
+const auto offset = ::data_offset<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr))>>>(ptr);
+return reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintptr_t>(ptr->byte_sub(std::move(offset))));
+}
+}();
+        return Weak<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(std::move(ptr_shadow1)), std::move(alloc));
+    }
+    rusty::Option<rusty::Arc<T, A>> upgrade() const {
+        const rusty::SafeFn<rusty::Option<size_t>(size_t)> checked_increment = +[](size_t n) -> rusty::Option<size_t> {
+            if (rusty::detail::deref_if_pointer_like(n) == static_cast<size_t>(0)) {
+                return rusty::Option<size_t>{rusty::None};
+            }
+            if (!(rusty::detail::deref_if_pointer_like(n) <= rusty::detail::deref_if_pointer_like(MAX_REFCOUNT))) { throw std::logic_error(std::format("{}", INTERNAL_OVERFLOW_ERROR)); }
+            return rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(n) + static_cast<size_t>(1));
+        };
+        if (RUSTY_TRY_OPT(this->inner()).strong.try_update(rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed, std::move(checked_increment)).is_ok()) {
+            // @unsafe
+            {
+                return rusty::Option<rusty::Arc<T, A>>(rusty::Arc<T, A>::from_inner_in(this->ptr, rusty::clone(this->alloc)));
+            }
+        } else {
+            return rusty::Option<rusty::Arc<T, A>>{rusty::None};
+        }
+    }
+    size_t strong_count() const {
+        if (auto&& _iflet_scrutinee = this->inner(); _iflet_scrutinee.is_some()) {
+            decltype(auto) inner = _iflet_scrutinee.unwrap();
+            return inner.strong.load(rusty::sync::atomic::Ordering::Relaxed);
+        } else {
+            return static_cast<size_t>(0);
+        }
+    }
+    size_t weak_count() const {
+        if (auto&& _iflet_scrutinee = this->inner(); _iflet_scrutinee.is_some()) {
+            decltype(auto) inner = _iflet_scrutinee.unwrap();
+            const auto weak = inner.weak.load(rusty::sync::atomic::Ordering::Acquire);
+            const auto strong = inner.strong.load(rusty::sync::atomic::Ordering::Relaxed);
+            if (rusty::detail::deref_if_pointer_like(strong) == 0) {
+                return static_cast<size_t>(0);
+            } else {
+                return rusty::detail::deref_if_pointer_like(weak) - static_cast<size_t>(1);
+            }
+        } else {
+            return static_cast<size_t>(0);
+        }
+    }
+    rusty::Option<WeakInner> inner() const {
+        const auto ptr_shadow1 = const_cast<std::add_pointer_t<ArcInner<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(rusty::as_ptr(this->ptr)));
+        if (is_dangling(ptr_shadow1)) {
+            return rusty::Option<WeakInner>{rusty::None};
+        } else {
+            return rusty::Option<WeakInner>(WeakInner{.weak = (*ptr_shadow1).weak, .strong = (*ptr_shadow1).strong});
+        }
+    }
+    bool ptr_eq(const Weak<T, A>& other) const {
+        return ptr::addr_eq(rusty::as_ptr(this->ptr), rusty::as_ptr(other.ptr));
+    }
+    Weak<T, A> clone() const {
+        if (auto&& _iflet_scrutinee = this->inner(); _iflet_scrutinee.is_some()) {
+            decltype(auto) inner = _iflet_scrutinee.unwrap();
+            const auto old_size = inner.weak.fetch_add(1, rusty::sync::atomic::Ordering::Relaxed);
+            if (rusty::detail::deref_if_pointer_like(old_size) > rusty::detail::deref_if_pointer_like(MAX_REFCOUNT)) {
+                abort();
+            }
+        }
+        return Weak<T, A>(this->ptr, rusty::clone(this->alloc));
+    }
+    static Weak<T> default_() {
+        return Weak<T>::new_();
+    }
+    ~Weak() noexcept(false) {
+        if (_rusty_forgotten) { return; }
+        std::optional<std::remove_cvref_t<decltype((return))>> _iflet_value0;
+        {
+            auto&& _iflet_scrutinee = this->inner();
+            if (_iflet_scrutinee.is_some()) {
+                auto inner_shadow1 = _iflet_scrutinee.unwrap();
+                _iflet_value0.emplace(inner_shadow1);
+            } else { _iflet_value0.emplace(return); }
+        }
+        const auto inner = std::move(_iflet_value0).value();
+        if (inner.weak.fetch_sub(1, rusty::sync::atomic::Ordering::Release) == 1) {
+            // TODO: acquire!(...)
+            if (!(!ptr::addr_eq(rusty::as_ptr(this->ptr), STATIC_INNER_SLICE.inner))) { throw std::logic_error("Arc/Weaks backed by a static should never be deallocated. Likely decrement_strong_count or from_raw were called too many times."); }
+            // @unsafe
+            {
+                ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).deallocate(this->ptr.cast(), Layout::for_value_raw(rusty::as_ptr(this->ptr))); }) { return std::forward<decltype(__recv)>(__recv).deallocate(this->ptr.cast(), Layout::for_value_raw(rusty::as_ptr(this->ptr))); } else { return std::forward<decltype(__recv)>(__recv)->deallocate(this->ptr.cast(), Layout::for_value_raw(rusty::as_ptr(this->ptr))); } }(this->alloc));
+            }
+        }
+    }
+};
+
+
+inline SliceArcInnerForStatic STATIC_INNER_SLICE = SliceArcInnerForStatic{.inner = ArcInner<std::array<uint8_t, 1>>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::array<uint8_t, 1>{static_cast<uint8_t>(0)}}};
+
+namespace {
+class ArcFromSlice {
+public:
+    virtual ~ArcFromSlice() noexcept(false) {}
+    ArcFromSlice(const ArcFromSlice&) = delete;
+    ArcFromSlice& operator=(const ArcFromSlice&) = delete;
+    ArcFromSlice(ArcFromSlice&&) = delete;
+    ArcFromSlice& operator=(ArcFromSlice&&) = delete;
+protected:
+    ArcFromSlice() = default;
+};
+}
+
+
+/// A unique owning pointer to an [`ArcInner`] **that does not imply the contents are initialized,**
+/// but will deallocate it (without dropping the value) when dropped.
+///
+/// This is a helper for [`Arc::make_mut()`] to ensure correct cleanup on panic.
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+struct UniqueArcUninit {
+    rusty::ptr::NonNull<ArcInner<T>> ptr;
+    rusty::alloc::Layout layout_for_value;
+    rusty::Option<A> alloc;
+    mutable bool _rusty_forgotten = false;
+    UniqueArcUninit(rusty::ptr::NonNull<ArcInner<T>> ptr_init, rusty::alloc::Layout layout_for_value_init, rusty::Option<A> alloc_init) : ptr(std::move(ptr_init)), layout_for_value(std::move(layout_for_value_init)), alloc(std::move(alloc_init)) {}
+    UniqueArcUninit(const UniqueArcUninit&) = default;
+    UniqueArcUninit(UniqueArcUninit&& other) noexcept : ptr(std::move(other.ptr)), layout_for_value(std::move(other.layout_for_value)), alloc(std::move(other.alloc)) {
+        this->_rusty_forgotten = other._rusty_forgotten;
+        other._rusty_forgotten = true;
+    }
+    UniqueArcUninit& operator=(const UniqueArcUninit&) = default;
+    UniqueArcUninit& operator=(UniqueArcUninit&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        this->~UniqueArcUninit();
+        new (this) UniqueArcUninit(std::move(other));
+        return *this;
+    }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+    static UniqueArcUninit<T, A> new_(const T& for_value, A alloc) {
+        auto layout = Layout::for_value(for_value);
+        const auto ptr_shadow1 = Arc<T, rusty::alloc::Global>::allocate_for_layout(std::move(layout), [&](auto&& layout_for_arcinner) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout_for_arcinner)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout_for_arcinner)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout_for_arcinner)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return mem_shadow1.with_metadata_of(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(static_cast<std::uintptr_t>(ptr::from_ref(for_value)))); });
+        return UniqueArcUninit<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_(ptr_shadow1).unwrap(), std::move(layout), rusty::Option<A>(std::move(alloc)));
+    }
+    static rusty::Result<UniqueArcUninit<T, A>, rusty::alloc::AllocError> try_new(const T& for_value, A alloc) {
+        auto layout = Layout::for_value(for_value);
+        const auto ptr_shadow1 = RUSTY_TRY_INTO((Arc<T, rusty::alloc::Global>::try_allocate_for_layout(std::move(layout), [&](auto&& layout_for_arcinner) -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::alloc::AllocError> { return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).allocate(std::move(layout_for_arcinner)); }) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout_for_arcinner)); } else { return std::forward<decltype(__recv)>(__recv)->allocate(std::move(layout_for_arcinner)); } }(alloc)); }, [&](auto&& mem_shadow1) -> std::add_pointer_t<ArcInner<T>> { return mem_shadow1.with_metadata_of(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(static_cast<std::uintptr_t>(ptr::from_ref(for_value)))); })), rusty::Result<UniqueArcUninit<T, A>, rusty::alloc::AllocError>);
+        return rusty::Result<UniqueArcUninit<T, A>, rusty::alloc::AllocError>::Ok(UniqueArcUninit<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_(ptr_shadow1).unwrap(), std::move(layout), rusty::Option<A>(std::move(alloc))));
+    }
+    std::add_pointer_t<T> data_ptr() {
+        const auto offset = ::data_offset_alignment(this->layout_for_value.alignment());
+        // @unsafe
+        {
+            return reinterpret_cast<std::add_pointer_t<T>>(static_cast<std::uintptr_t>(rusty::as_ptr(this->ptr)->byte_add(std::move(offset))));
+        }
+    }
+    rusty::Arc<T, A> into_arc() {
+        auto this_ = rusty::mem::manually_drop_new(std::move((*this)));
+        const auto ptr_shadow1 = const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this_.ptr)));
+        auto alloc = this_.alloc.take().unwrap();
+        // @unsafe
+        {
+            return rusty::Arc<T, A>::from_ptr_in(ptr_shadow1, std::move(alloc));
+        }
+    }
+    ~UniqueArcUninit() noexcept(false) {
+        if (_rusty_forgotten) { return; }
+        // @unsafe
+        {
+            ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).deallocate(this->ptr.cast(), ::arcinner_layout_for_value_layout(this->layout_for_value)); }) { return std::forward<decltype(__recv)>(__recv).deallocate(this->ptr.cast(), ::arcinner_layout_for_value_layout(this->layout_for_value)); } else { return std::forward<decltype(__recv)>(__recv)->deallocate(this->ptr.cast(), ::arcinner_layout_for_value_layout(this->layout_for_value)); } }(this->alloc.take().unwrap()));
+        }
+    }
+};
+
+/// A uniquely owned [`Arc`].
+///
+/// This represents an `Arc` that is known to be uniquely owned -- that is, have exactly one strong
+/// reference. Multiple weak pointers can be created, but attempts to upgrade those to strong
+/// references will fail unless the `UniqueArc` they point to has been converted into a regular `Arc`.
+///
+/// Because it is uniquely owned, the contents of a `UniqueArc` can be freely mutated. A common
+/// use case is to have an object be mutable during its initialization phase but then have it become
+/// immutable and converted to a normal `Arc`.
+///
+/// This can be used as a flexible way to create cyclic data structures, as in the example below.
+///
+/// ```
+/// #![feature(unique_rc_arc)]
+/// use std::sync::{Arc, Weak, UniqueArc};
+///
+/// struct Gadget {
+///     me: Weak<Gadget>,
+/// }
+///
+/// fn create_gadget() -> Option<Arc<Gadget>> {
+///     let mut rc = UniqueArc::new(Gadget {
+///         me: Weak::new(),
+///     });
+///     rc.me = UniqueArc::downgrade(&rc);
+///     Some(UniqueArc::into_arc(rc))
+/// }
+///
+/// create_gadget().unwrap();
+/// ```
+///
+/// An advantage of using `UniqueArc` over [`Arc::new_cyclic`] to build cyclic data structures is that
+/// [`Arc::new_cyclic`]'s `data_fn` parameter cannot be async or return a [`Result`]. As shown in the
+/// previous example, `UniqueArc` allows for more flexibility in the construction of cyclic data,
+/// including fallible or async constructors.
+export template<typename T, typename A = rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+struct UniqueArc {
+    using Target = T;
+    rusty::ptr::NonNull<ArcInner<T>> ptr;
+    rusty::PhantomData<ArcInner<T>> _marker;
+    rusty::PhantomData<std::add_pointer_t<T>> _marker2;
+    A alloc;
+    mutable bool _rusty_forgotten = false;
+    UniqueArc(rusty::ptr::NonNull<ArcInner<T>> ptr_init, rusty::PhantomData<ArcInner<T>> _marker_init, rusty::PhantomData<std::add_pointer_t<T>> _marker2_init, A alloc_init) : ptr(std::move(ptr_init)), _marker(std::move(_marker_init)), _marker2(std::move(_marker2_init)), alloc(std::move(alloc_init)) {}
+    UniqueArc(const UniqueArc&) = default;
+    UniqueArc(UniqueArc&& other) noexcept : ptr(std::move(other.ptr)), _marker(std::move(other._marker)), _marker2(std::move(other._marker2)), alloc(std::move(other.alloc)) {
+        this->_rusty_forgotten = other._rusty_forgotten;
+        other._rusty_forgotten = true;
+    }
+    UniqueArc& operator=(const UniqueArc&) = default;
+    UniqueArc& operator=(UniqueArc&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        this->~UniqueArc();
+        new (this) UniqueArc(std::move(other));
+        return *this;
+    }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return rusty::write_fmt(f, rusty::to_string(rusty::detail::deref_if_pointer_like((*this))));
+    }
+    const T& borrow() const {
+        return rusty::detail::deref_if_pointer_like((*this));
+    }
+    T& borrow_mut() {
+        return rusty::detail::deref_if_pointer_like((*this));
+    }
+    const T& as_ref() const {
+        return rusty::detail::deref_if_pointer_like((*this));
+    }
+    T& as_mut() {
+        return rusty::detail::deref_if_pointer_like((*this));
+    }
+    bool operator==(const UniqueArc<T, A>& other) const {
+        return (rusty::detail::deref_if_pointer_like((*this))).eq(rusty::detail::deref_if_pointer_like(other));
+    }
+    std::partial_ordering operator<=>(const UniqueArc<T, A>& other) const {
+        return rusty::to_partial_ordering([&]() -> rusty::Option<rusty::cmp::Ordering> {
+            return rusty::partial_cmp(((rusty::detail::deref_if_pointer_like((*this)))), rusty::detail::deref_if_pointer_like(other));
+        }());
+    }
+    rusty::cmp::Ordering cmp(const UniqueArc<T, A>& other) const {
+        return rusty::cmp::cmp(((rusty::detail::deref_if_pointer_like((*this)))), rusty::detail::deref_if_pointer_like(other));
+    }
+    template<typename H>
+    void hash(H& state) const {
+        rusty::hash::hash(((rusty::detail::deref_if_pointer_like((*this)))), state);
+    }
+    static UniqueArc<T, A> new_(T value) {
+        return UniqueArc<T, A>::new_in(std::move(value), rusty::alloc::Global);
+    }
+    template<typename U>
+    static UniqueArc<U> map(UniqueArc<T, A> this_, const auto& f) {
+        if (((size_of<T>() == size_of<U>()) && (align_of<T>() == align_of<U>())) && (UniqueArc<U>::weak_count(this_) == static_cast<size_t>(0))) {
+            // @unsafe
+            {
+                const auto ptr_shadow1 = UniqueArc<U>::into_raw(std::move(this_));
+                const auto value = rusty::ptr::read(ptr_shadow1);
+                auto allocation = UniqueArc<U>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<mem::MaybeUninit<U>>>>(ptr_shadow1));
+                allocation.write(f(std::move(value)));
+                return allocation.assume_init();
+            }
+        } else {
+            return UniqueArc<U>::new_(f(UniqueArc<U>::unwrap(std::move(this_))));
+        }
+    }
+    template<typename R>
+    static auto try_map(UniqueArc<T, A> this_, const auto& f) {
+        if (((size_of<T>() == size_of<typename R::Output>()) && (align_of<T>() == align_of<typename R::Output>())) && (UniqueArc<T, rusty::alloc::Global>::weak_count(this_) == static_cast<size_t>(0))) {
+            // @unsafe
+            {
+                const auto ptr_shadow1 = UniqueArc<T, rusty::alloc::Global>::into_raw(std::move(this_));
+                const auto value = rusty::ptr::read(ptr_shadow1);
+                auto allocation = UniqueArc<T, rusty::alloc::Global>::from_raw(reinterpret_cast<std::add_pointer_t<std::add_const_t<mem::MaybeUninit<typename R::Output>>>>(ptr_shadow1));
+                allocation.write(RUSTY_TRY(f(std::move(value))));
+                return rusty::intrinsics::unreachable();
+            }
+        } else {
+            return rusty::intrinsics::unreachable();
+        }
+    }
+    static T unwrap(UniqueArc<T, A> this_) {
+        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        T val = rusty::ptr::read(rusty::detail::deref_if_pointer_like(this_shadow1));
+        const auto _weak = rusty::Weak<T, A>(std::move(this_shadow1.ptr), rusty::alloc::Global);
+        return std::move(val);
+    }
+    static UniqueArc<T, A> from_raw(std::add_pointer_t<std::add_const_t<T>> ptr) {
+        const auto offset = ::data_offset<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr))>>>(ptr);
+        const auto rc_ptr = reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintptr_t>(ptr->byte_sub(std::move(offset))));
+        return UniqueArc<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(std::move(rc_ptr)), rusty::PhantomData<ArcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, rusty::alloc::Global);
+    }
+    static std::add_pointer_t<std::add_const_t<T>> into_raw(UniqueArc<T, A> this_) {
+        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        return this_shadow1.as_ptr();
+    }
+    static UniqueArc<T, A> new_in(T data, A alloc) {
+        auto [ptr_shadow1, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<auto>::into_unique(rusty::Box<auto>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc))));
+        return UniqueArc<T, A>(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>(std::move(ptr_shadow1)), rusty::PhantomData<ArcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, std::move(alloc_shadow1));
+    }
+    static rusty::Arc<T, A> into_arc(UniqueArc<T, A> this_) {
+        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        A alloc = rusty::ptr::read(&this_shadow1.alloc);
+        // @unsafe
+        {
+            (*rusty::as_ptr(this_shadow1.ptr)).strong.store(1, rusty::sync::atomic::Ordering::Release);
+            return rusty::Arc<T, A>::from_inner_in(std::move(this_shadow1.ptr), std::move(alloc));
+        }
+    }
+    static size_t weak_count(const UniqueArc<T, A>& this_) {
+        return this_.inner().weak.load(rusty::sync::atomic::Ordering::Acquire) - static_cast<size_t>(1);
+    }
+    const ArcInner<T>& inner() const {
+        // @unsafe
+        {
+            return this->ptr.as_ref();
+        }
+    }
+    static std::add_pointer_t<std::add_const_t<T>> as_ptr(const UniqueArc<T, A>& this_) {
+        const std::add_pointer_t<ArcInner<T>> ptr_shadow1 = NonNull<auto>::as_ptr(this_.ptr);
+        // @unsafe
+        {
+            return &(*ptr_shadow1).data;
+        }
+    }
+    static std::tuple<rusty::ptr::NonNull<ArcInner<T>>, A> into_inner_with_allocator(UniqueArc<T, A> this_) {
+        const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
+        return std::make_tuple(std::move(this_shadow1.ptr), rusty::ptr::read(&this_shadow1.alloc));
+    }
+    static UniqueArc<T, A> from_inner_in(rusty::ptr::NonNull<ArcInner<T>> ptr, A alloc) {
+        return UniqueArc<T, A>(std::move(ptr), rusty::PhantomData<ArcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, std::move(alloc));
+    }
+    static rusty::Weak<T, A> downgrade(const UniqueArc<T, A>& this_) {
+        const auto old_size = (*rusty::as_ptr(this_.ptr)).weak.fetch_add(1, rusty::sync::atomic::Ordering::Relaxed);
+        if (rusty::detail::deref_if_pointer_like(old_size) > rusty::detail::deref_if_pointer_like(MAX_REFCOUNT)) {
+            abort();
+        }
+        return rusty::Weak<T, A>(this_.ptr, rusty::clone(this_.alloc));
+    }
+    UniqueArc<typename __TemplateArgs<T>::arg_0, A> assume_init() {
+        auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(UniqueArc<typename __TemplateArgs<T>::arg_0, A>::into_inner_with_allocator(std::move((*this))));
+        // @unsafe
+        {
+            return UniqueArc<typename __TemplateArgs<T>::arg_0, A>::from_inner_in(ptr_shadow1.cast(), std::move(alloc));
+        }
+    }
+    const T& operator*() const {
+        // @unsafe
+        {
+            return this->ptr.as_ref().data;
+        }
+    }
+    T& operator*() {
+        // @unsafe
+        {
+            return (rusty::deref_mut(rusty::as_ptr(this->ptr))).data;
+        }
+    }
+    ~UniqueArc() noexcept(false) {
+        if (_rusty_forgotten) { return; }
+        const auto _weak = rusty::Weak<T, A>(this->ptr, &this->alloc);
+        // @unsafe
+        {
+            rusty::ptr::drop_in_place(&(*rusty::as_ptr(this->ptr)).data);
+        }
+    }
+};
+
+/// Calculate layout for `ArcInner<T>` using the inner value's layout
+rusty::alloc::Layout arcinner_layout_for_value_layout(rusty::alloc::Layout layout) {
+    return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(Layout::new_<ArcInner<std::tuple<>>>().extend(std::move(layout)).unwrap()).pad_to_align();
+}
+
+// TODO orphan impl: methods for `Pin` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Pin
+static auto default_() {
+    // @unsafe
+    {
+        return rusty::pin::new_unchecked(Arc<T>::default_());
+    }
+}
+
+// TODO orphan impl: methods for `I` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for I
+rusty::Arc<std::span<const T>> to_arc_slice() {
+    return rusty::from_into<rusty::Arc<std::span<const T>>>(rusty::Vec<T>::from_iter((*this)));
+}
+
+// TODO orphan impl: methods for `I` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for I
+rusty::Arc<std::span<const T>> to_arc_slice() {
+    auto [low, high] = rusty::detail::deref_if_pointer_like(this->size_hint());
+    if (high.is_some()) {
+        auto&& _iflet_bound_scrutinee = high;
+        decltype(auto) high = _iflet_bound_scrutinee.unwrap();
+        assert((low == high));
+        // @unsafe
+        {
+            return rusty::Arc<std::span<const T>>::from_iter_exact((*this), std::move(low));
+        }
+    } else {
+        std::println(stderr, "capacity overflow");
+        std::abort();
+    }
+}
+
+/// Gets the offset within an `ArcInner` for the payload behind a pointer.
+///
+/// # Safety
+///
+/// The pointer must point to (and have valid metadata for) a previously
+/// valid instance of T, but the T is allowed to be dropped.
+// @unsafe
+template<typename T>
+size_t data_offset(std::add_pointer_t<std::add_const_t<T>> ptr) {
+    // @unsafe
+    {
+        return ::data_offset_alignment(std::ptr::Alignment::of_val_raw(ptr));
+    }
+}
+
+size_t data_offset_alignment(std::ptr::Alignment alignment) {
+    const auto layout = Layout::new_<ArcInner<std::tuple<>>>();
+    return layout.size() + layout.padding_needed_for(std::move(alignment));
+}
+
+// Extension trait ToArcSlice lowered to rusty_ext:: free functions
+namespace rusty_ext {
+    export template<typename T, typename I>
+    rusty::Arc<std::span<const T>> to_arc_slice(I self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        return rusty::from_into<rusty::Arc<std::span<const T>>>(rusty::Vec<T>::from_iter(self_));
+    }
+
+}
+
+
+
+// Cluster A completion: __TemplateArgs partial specializations
+// for inner structs that participated in structural decomposition
+// (so absorbed methods that referenced dropped impl-generics can
+// recover them via `typename __TemplateArgs<HostParam>::arg_<N>`).
+} // namespace arc_port

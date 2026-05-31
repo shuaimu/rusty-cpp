@@ -96,15 +96,7 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Clone: dispatches to .clone() if available, otherwise copy-constructs.
-template<typename T>
-auto clone(const T& value) {
-if constexpr (requires { value.clone(); }) {
-return value.clone();
-} else {
-return value;
-}
-}
+// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -333,8 +325,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
-return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
+rusty::Result<Value, E> visit_byte_buf(auto&& value) {
+(void)value; return rusty::Result<Value, E>::Err(E{});
 }
 
 template<typename E>
@@ -3642,6 +3634,8 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module vec_deque_port;
+import vec_port.vec;
+import vec_port.vec.into_iter;
 
 namespace vec_deque_port {
 
@@ -4174,7 +4168,7 @@ written += 1; }();
         const auto rj = this->to_physical_idx(std::move(j));
         // @unsafe
         {
-            ptr::swap(rusty::ptr::add(this->ptr(), std::move(ri)), rusty::ptr::add(this->ptr(), std::move(rj)));
+            std::swap(rusty::ptr::add(this->ptr(), std::move(ri)), rusty::ptr::add(this->ptr(), std::move(rj)));
         }
     }
     size_t capacity() const {
@@ -5092,7 +5086,7 @@ written += 1; }();
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.debug_list().entries(rusty::iter((*this))).finish();
     }
-    static VecDeque<T, A> from(rusty::Vec<T, A> other) {
+    static VecDeque<T, A> from(::Vec<T, A> other) {
         auto [ptr_shadow1, len, cap, alloc] = rusty::detail::deref_if_pointer_like(other.into_raw_parts_with_alloc());
         return VecDeque<T, A>(static_cast<size_t>(0), std::move(len), raw_vec::RawVec<T, A>::from_raw_parts_in(std::move(ptr_shadow1), std::move(cap), std::move(alloc)));
     }
@@ -5134,7 +5128,7 @@ written += 1; }();
     }
     template<typename A1, typename A2>
         requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
-    void spec_extend(vec::IntoIter<T, A2> iterator) {
+    void spec_extend(::IntoIter<T, A2> iterator) {
         auto slice = rusty::as_slice(iterator);
         this->reserve(rusty::len(slice));
         // @unsafe
@@ -5177,7 +5171,7 @@ written += 1; }();
     }
     template<typename A1, typename A2>
         requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
-    void spec_extend_front(vec::IntoIter<T, A2> iterator) {
+    void spec_extend_front(::IntoIter<T, A2> iterator) {
         const auto slice = rusty::as_slice(iterator);
         this->reserve(rusty::len(slice));
         // @unsafe
@@ -5188,7 +5182,7 @@ written += 1; }();
     }
     template<typename A1, typename A2>
         requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
-    void spec_extend_front(decltype(std::declval<vec::IntoIter<T, A2>>().rev()) iterator) {
+    void spec_extend_front(decltype(std::declval<::IntoIter<T, A2>>().rev()) iterator) {
         auto iterator_shadow1 = iterator.into_inner();
         const auto slice = rusty::as_slice(iterator_shadow1);
         this->reserve(rusty::len(slice));
@@ -5249,9 +5243,9 @@ written += 1; }();
     }
     template<typename I>
     static VecDeque<T, A> spec_from_iter(I iterator) {
-        return rusty::from_into<VecDeque<T, A>>(vec::rusty::Vec<auto>::from_iter(std::move(iterator)));
+        return rusty::from_into<VecDeque<T, A>>(vec::::Vec<auto>::from_iter(std::move(iterator)));
     }
-    static VecDeque<T, A> spec_from_iter(decltype(rusty::iter(std::declval<rusty::Vec<T>>())) iterator) {
+    static VecDeque<T, A> spec_from_iter(decltype(rusty::iter(std::declval<::Vec<T>>())) iterator) {
         return iterator.into_vecdeque();
     }
     static VecDeque<T, A> spec_from_iter(into_iter::IntoIter<T> iterator) {
@@ -5319,7 +5313,7 @@ static auto from(rusty::VecDeque<T, A> other) {
         if (rusty::detail::deref_if_pointer_like(other_shadow1.head) != 0) {
             rusty::ptr::copy(buf.add(std::move(other_shadow1.head)), std::move(buf), std::move(len));
         }
-        return rusty::Vec<std::remove_pointer_t<std::remove_reference_t<decltype((buf))>>>::from_raw_parts_in(std::move(buf), std::move(len), std::move(cap), std::move(alloc));
+        return ::Vec<std::remove_pointer_t<std::remove_reference_t<decltype((buf))>>>::from_raw_parts_in(std::move(buf), std::move(len), std::move(cap), std::move(alloc));
     }
 }
 

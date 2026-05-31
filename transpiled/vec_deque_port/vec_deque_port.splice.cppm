@@ -115,7 +115,7 @@ struct Splice {
                     return;
                 }
             }
-            auto collected = rusty::iter(rusty::Vec<rusty::detail::associated_item_t<I>>::from_iter(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).by_ref(); }) { return std::forward<decltype(__recv)>(__recv).by_ref(); } else { return std::forward<decltype(__recv)>(__recv)->by_ref(); } }(this->replace_with))));
+            auto collected = rusty::iter(::Vec<rusty::detail::associated_item_t<I>>::from_iter(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).by_ref(); }) { return std::forward<decltype(__recv)>(__recv).by_ref(); } else { return std::forward<decltype(__recv)>(__recv)->by_ref(); } }(this->replace_with))));
             if (rusty::len(collected) > 0) {
                 this->drain.move_tail(rusty::len(collected));
                 const auto filled = this->drain.fill(rusty::detail::deref_if_pointer_like(collected));
