@@ -1,13 +1,9 @@
-# LinkedList port — ✅ Phase B + C via bridge stub (full transpiled body blocked on Cluster A)
+# LinkedList port — ✅ Phase A2 complete (full transpiled body builds)
 
-The full transpiled linked_list_port.cppm has 13 Cluster A `auto`-template-arg
-errors needing a transpiler-side fix.
-**`transpiled/linked_list_port/linked_list_port_stub.cppm`** re-exports
-`std::list<T>` under `linked_list_port::LinkedList<T, A=Global>` (no
-hand-written rusty::LinkedList exists). `liblinked_list_port.a` builds;
-smoke test passes push_back/push_front/size.
-
-
+`liblinked_list_port.a` builds clean against the fully transpiled
+`linked_list_port.cppm` (no `_stub.cppm` re-export). Patcher
+codified in `post_transpile_patch.py`. Smoke test does not pass
+yet — see "Remaining for Phase B" below.
 
 This directory holds the scaffolding for the rustc
 `alloc::collections::linked_list` port — Tier 2 in
@@ -20,10 +16,23 @@ This directory holds the scaffolding for the rustc
 | 1. Source acquisition | ✅ `library/alloc/src/collections/linked_list.rs` (2255 LOC, single file) vendored |
 | 2. Preprocessing (`prep.sh`) | ✅ |
 | 3. Transpilation | ✅ **Zero transpiler errors** with `--auto-namespace`. 1 hand-port slot. |
-| 4. Post-transpile patching | 🟡 **Partial.** The standard cluster patches landed (same shape as binary_heap_port's 14-patch set — see that STATUS.md). |
-| 5. Build (compile) | 🔴 **Blocked.** 13 remaining errors of shape "auto not allowed in template argument", which is the BTreeMap port's **Cluster A** signature (undeducible impl-generic method-template params). That cluster required a transpiler-side fix in commit `7311d18` to close for BTreeMap; the fix's coverage on linked_list-shaped code needs investigation. |
-| 6. Smoke test | ⏸️ |
+| 4. Post-transpile patching | ✅ Codified in `post_transpile_patch.py`. 4 patches applied (visit_byte_buf rebody + vec_port imports + Box `<X, const A&>` strip + `from_raw_in` rewrite + Global value default-construct + Box arrow-access on `node_shadow1`). Idempotent. |
+| 5. Build (compile) | ✅ **`liblinked_list_port.a` builds clean** (used to be blocked on 13 Cluster A + 2 Cluster B + 1 Cluster C errors; closed via transpiler fixes 8ed539b + 486c10c + 925aa58 + this patcher set). |
+| 6. Smoke test | 🔴 **Pending API alignment.** The existing `linked_list_port_module_test.cpp` was written against the std::list-backed stub and calls `front()/back()/size()`. The transpiled LinkedList exposes the Rust API (`front_node()`, `len()`, etc.) and `back()` instantiation hits Option::map template substitution failures. New cluster to peel. |
 | 7. Bench | ⏸️ |
+
+## Patches applied (Phase A2)
+
+Codified in `post_transpile_patch.py`. Idempotent.
+
+| # | Issue | Patch |
+|---|---|---|
+| 1 | `visit_byte_buf(rusty::Vec<uint8_t>)` in the serde-de prelude lives in the GMF — `rusty::Vec` not visible | Rebody to `(auto&&) { return Err(E{}); }` (binary_heap_port shape) |
+| 2 | `using IntoIter = ::IntoIter<T, A>;` inside LinkedList struct — global `::Vec` / `::IntoIter` need cross-module visibility | Inject `import vec_port.vec;` and `import vec_port.vec.into_iter;` after `export module linked_list_port;` |
+| 3 | `rusty::Box<Node<T>, const A&>` two-arg form — hand-written Box is single-arg | Strip `, const A&` from the second template argument |
+| 4 | `Box<T>::from_raw_in(ptr, &alloc)` not defined on hand-written Box | Rewrite to `Box<T>::from_raw(ptr)` (allocator dropped) |
+| 5 | `rusty::alloc::Global` used as value (positional arg) instead of type | Rewrite to `rusty::alloc::Global{}` for `Global)` / `Global,` / `Global.` shapes |
+| 6 | `node_shadow1.next` / `.prev` / `.element` — Rust auto-deref on Box, C++ requires `->` | Rewrite to `node_shadow1->next` etc. (narrow: only the 3 known Node fields on this specific binding) |
 
 ## Reproducing
 
@@ -40,35 +49,32 @@ bash docs/linked_list_port/prep.sh /tmp/linked_list_port/linked_list_crate/src/l
     --output-dir /tmp/linked_list_port/cpp_out \
     --auto-namespace
 
-cp /tmp/linked_list_port/cpp_out/*.cppm transpiled/linked_list_port/
+python3 docs/linked_list_port/post_transpile_patch.py /tmp/linked_list_port/cpp_out
+cp /tmp/linked_list_port/cpp_out/linked_list_port.cppm transpiled/linked_list_port/
 ```
 
-Then apply the standard cluster patches (see
-`docs/binary_heap_port/STATUS.md` "Patches applied" — the same set,
-minus a couple binary_heap-specific lines).
+## Remaining for Phase B (smoke test green)
 
-## Remaining error catalogue
+The library compiles in isolation, but C++ templates aren't
+instantiated until used. The existing smoke test calls `back()` which
+triggers Option::map instantiation; the lambda body hits
+`node.as_ref().element` where `node` is of opaque type. Same shape as
+binary_heap_port Phase A2/A3 cluster work — needs investigation.
 
-| Cluster | Count | Shape |
-|---|---|---|
-| A | 13 sites | `auto` appears as a template argument inside a generated method body, e.g. `Helper<auto, auto>::call(...)`. Comes from rustc generic impl methods whose template parameters aren't propagated to the absorbed C++ method. BTreeMap port hit this; commit `7311d18` (and §1.3/§2.4 in the book) describe the transpiler fix. |
-| B | 2 sites | `auto first_part_tail` / `auto second_part_head` declared without initializer — `let mut x;` pattern not lowered correctly. |
-| C | 1 site | "expected '(' for function-style cast or type construction" at column 193 of a very long line — likely a chained method call emit issue. |
+Two paths to close Phase B:
+- (a) Patch the transpiled body to thread types through (binary_heap_port took this route)
+- (b) Update the smoke test to exercise the actually-instantiable Rust-shaped API surface (push_back / push_front / pop_front etc.)
 
-Predicted effort to close: **1–2 days** if the Cluster A transpiler
-fix already covers this shape (then it's a re-transpile + apply
-patches); **3–5 days** if Cluster B and C also need transpiler-side
-investigation.
+Approach (b) is cheaper and gets us a green smoke test sooner; (a)
+is the eventual fix but each cluster needs root-causing.
 
 ## CMake target
 
-**Not wired** in `CMakeLists.txt` — would fail the build. The block
-is present but commented out; uncomment once the library compiles
-clean. The library will need `vec_port` as a link dependency (for
-`::Vec` and `::IntoIter` references in the prelude).
+**Wired** in `CMakeLists.txt` (since commit 0f8fac6, refined here).
+Library links against `vec_port` (for `::Vec` and `::IntoIter`).
 
 ## Dependencies
 
-`alloc::boxed::Box` (heap node allocation). The hand-written
-`rusty::Box` is the dependency; no vec_port runtime dep (only the
-prelude refs ::Vec which is in `vec_port.vec`).
+- `alloc::boxed::Box` (heap node allocation) — provided by hand-written `rusty::Box`
+- `vec_port.vec` (for `::Vec` type visibility)
+- `vec_port.vec.into_iter` (for `::IntoIter` type visibility)

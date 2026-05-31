@@ -158,6 +158,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_include_directories(linked_list_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_features(linked_list_port PUBLIC cxx_std_23)
     target_compile_options(linked_list_port PRIVATE -O3 -DNDEBUG -march=native )
+    target_link_libraries(linked_list_port PUBLIC vec_port)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
