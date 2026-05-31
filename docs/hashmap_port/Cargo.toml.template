@@ -1,7 +1,0 @@
-[package]
-name = "hashmap_port"
-version = "0.0.1"
-edition = "2024"
-
-[lib]
-path = "src/lib.rs"

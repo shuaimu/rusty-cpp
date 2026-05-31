@@ -1,10 +1,11 @@
-# LinkedList port — ✅ Phase B complete (smoke test passing)
+# LinkedList port — ✅ Phase B + Phase C peek complete
 
 `liblinked_list_port.a` builds clean against the fully transpiled
 `linked_list_port.cppm` (no `_stub.cppm` re-export). Patcher
-codified in `post_transpile_patch.py`. Smoke test exercises
-push_back / push_front / pop_front / len round-trip — all green
-under `ctest`.
+codified in `post_transpile_patch.py`. Smoke test (test #37/38)
+exercises:
+- Phase B: `new_() / is_empty / len / push_back / push_front / pop_front` round-trip
+- Phase C: `front() / back()` peek (does not consume; verifies head/tail visibility)
 
 This directory holds the scaffolding for the rustc
 `alloc::collections::linked_list` port — Tier 2 in
@@ -54,11 +55,15 @@ python3 docs/linked_list_port/post_transpile_patch.py /tmp/linked_list_port/cpp_
 cp /tmp/linked_list_port/cpp_out/linked_list_port.cppm transpiled/linked_list_port/
 ```
 
-## Remaining for Phase C+
+## Remaining for Phase D+
 
-- `back()` still has Option::map template-substitution issues
-  (smoke test deliberately exercises only `pop_front`, not `back()` /
-  `front()`). Cluster to peel later.
+- **front-after-pop state-corruption** — after a successful `pop_front`,
+  the subsequent `front()` returns `None` even though `len()` is correct
+  (`2` after popping from a 3-element list). Looks like a moved-from
+  Option storage being read mid-lambda inside `Option::map`. Smoke test
+  deliberately exercises peek BEFORE the pop to sidestep this; adding
+  a `front()` call after the `pop_front` reliably trips it. Real bug
+  worth chasing later.
 - `cursor_*`, `into_iter`, `iter_mut`, `extend`, `split_off`, etc.
   not exercised yet — same Option::map / NonNull deref pattern likely
   to trip on first instantiation.

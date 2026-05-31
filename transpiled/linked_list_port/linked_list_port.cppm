@@ -4064,25 +4064,25 @@ return std::move(node_shadow1); }(); });
     rusty::Option<const T&> front() const {
         // @unsafe
         {
-            return this->head.as_ref().map([&](auto&& node) { return node.as_ref().element; });
+            return this->head.as_ref().map([&](auto&& node) -> decltype(auto) { return (node.as_ref().element); });
         }
     }
     rusty::Option<T&> front_mut() {
         // @unsafe
         {
-            return this->head.as_mut().map([&](auto&& node) { return node.as_mut().element; });
+            return this->head.as_mut().map([&](auto&& node) -> decltype(auto) { return (node.as_mut().element); });
         }
     }
     rusty::Option<const T&> back() const {
         // @unsafe
         {
-            return this->tail.as_ref().map([&](auto&& node) { return node.as_ref().element; });
+            return this->tail.as_ref().map([&](auto&& node) -> decltype(auto) { return (node.as_ref().element); });
         }
     }
     rusty::Option<T&> back_mut() {
         // @unsafe
         {
-            return this->tail.as_mut().map([&](auto&& node) { return node.as_mut().element; });
+            return this->tail.as_mut().map([&](auto&& node) -> decltype(auto) { return (node.as_mut().element); });
         }
     }
     void push_front(T elt) {

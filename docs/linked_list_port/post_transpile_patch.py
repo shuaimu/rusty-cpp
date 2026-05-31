@@ -94,6 +94,40 @@ def patch_box_two_arg_to_one_arg(text: str) -> str:
     return text
 
 
+def patch_front_back_lambda_return(text: str) -> str:
+    """`front() / front_mut() / back() / back_mut()` map their head/tail
+    `Option<NonNull<Node<T>>>` to `Option<const T&>` / `Option<T&>` via:
+
+        return this->head.as_ref().map([&](auto&& node) {
+            return node.as_ref().element;
+        });
+
+    The lambda has no trailing return type, so `auto` deduction
+    strips the reference and the body returns `T` (by value). The
+    enclosing method declares `Option<const T&>` (or `T&`), so the
+    Option::map return type doesn't convert. Inject `-> decltype(auto)`
+    on the lambda so the reference survives deduction.
+    """
+    for ref_method in ("as_ref", "as_mut"):
+        # Wrap return expression in parens so decltype(auto) applies the
+        # lvalue rule (yielding `const T&` / `T&`) instead of the
+        # unparenthesized id-expression rule (which strips to declared
+        # type `T` by value).
+        text = re.sub(
+            rf"\.map\(\[&\]\(auto&& node\) \{{ return node\.{ref_method}\(\)\.element; \}}\)",
+            rf".map([&](auto&& node) -> decltype(auto) {{ return (node.{ref_method}().element); }})",
+            text,
+        )
+        # Idempotent re-run guard: also catch already-`decltype(auto)`-but-
+        # unparenthesized form from earlier patcher versions.
+        text = re.sub(
+            rf"\.map\(\[&\]\(auto&& node\) -> decltype\(auto\) \{{ return node\.{ref_method}\(\)\.element; \}}\)",
+            rf".map([&](auto&& node) -> decltype(auto) {{ return (node.{ref_method}().element); }})",
+            text,
+        )
+    return text
+
+
 def patch_node_shadow1_double_move(text: str) -> str:
     """In push_front_node / push_back_node, `node_shadow1` is
     `Option<NonNull<Node<T>>>` — Copy in Rust, so multiple assignments
@@ -194,6 +228,7 @@ def patch_file(path: Path) -> bool:
     text = patch_global_value_default_construct(text)
     text = patch_node_into_element_undeducible_template(text)
     text = patch_node_shadow1_double_move(text)
+    text = patch_front_back_lambda_return(text)
 
     if text != original:
         path.write_text(text)

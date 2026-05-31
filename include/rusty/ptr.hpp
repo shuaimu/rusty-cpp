@@ -117,6 +117,13 @@ public:
         return *ptr_;
     }
 
+    // Rust NonNull::as_ref(&self) -> &T — borrow the pointee immutably.
+    // Mirrors `as_mut` but for const access.
+    // @unsafe — caller asserts the pointer is dereferenceable.
+    constexpr const T& as_ref() const noexcept {
+        return *ptr_;
+    }
+
     // Rust `NonNull::cast` supports contextual target inference in chains
     // like `NonNull::new(ptr).unwrap().cast()`. The proxy overload keeps
     // that usage valid while the template overload supports explicit targets.
