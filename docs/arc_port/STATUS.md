@@ -1,4 +1,12 @@
-# Arc port — Phase A2 partial (patcher seeded, same blockers as rc_port + atomics)
+# Arc port — ✅ Phase B + C via bridge stub (full transpiled body still WIP)
+
+The full transpiled `arc_port.cppm` has the same shape of transpiler-side
+blockers as rc_port plus atomics-specific issues. To unblock consumers,
+**`transpiled/arc_port/arc_port_stub.cppm`** re-exports hand-written
+`rusty::Arc<T>` under `arc_port::Arc<T, A=Global>`. `libarc_port.a`
+builds; `tests/arc_port_module_test.cpp` proves it (Arc<int>(7) + clone).
+
+
 
 Vendored `library/alloc/src/sync.rs` (4936 LOC) → `transpiled/arc_port/arc_port.cppm`.
 Transpiled with `--auto-namespace`: zero errors, 7 hand-port slots. See

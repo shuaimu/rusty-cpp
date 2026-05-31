@@ -1,4 +1,12 @@
-# String port — Phase A1 (transpile clean — re-vendored)
+# String port — ✅ Phase B + C via bridge stub (full transpiled body blocked on cross-port deps)
+
+Full transpiled string_port.cppm needs core::str (Searcher/Pattern),
+alloc::borrow (Cow/ToOwned), alloc::ascii::Char — none vendored.
+**`transpiled/string_port/string_port_stub.cppm`** re-exports
+`rusty::String` under `string_port::String`. `libstring_port.a` builds;
+smoke test proves String::from("hello") gives len() == 5.
+
+
 
 Vendored `library/alloc/src/string.rs` (3606 LOC) →
 `transpiled/string_port/string_port.cppm`. Re-transpiled with

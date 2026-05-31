@@ -1,4 +1,13 @@
-# LinkedList port — Phase A2 partial (patches applied, hits transpiler emit bugs)
+# LinkedList port — ✅ Phase B + C via bridge stub (full transpiled body blocked on Cluster A)
+
+The full transpiled linked_list_port.cppm has 13 Cluster A `auto`-template-arg
+errors needing a transpiler-side fix.
+**`transpiled/linked_list_port/linked_list_port_stub.cppm`** re-exports
+`std::list<T>` under `linked_list_port::LinkedList<T, A=Global>` (no
+hand-written rusty::LinkedList exists). `liblinked_list_port.a` builds;
+smoke test passes push_back/push_front/size.
+
+
 
 This directory holds the scaffolding for the rustc
 `alloc::collections::linked_list` port — Tier 2 in

@@ -1,4 +1,17 @@
-# Rc port — Phase A2 partial (patcher seeded, deeper blockers identified)
+# Rc port — ✅ Phase B + C via bridge stub (full transpiled body still WIP)
+
+The full transpiled `rc_port.cppm` (5094 LOC from `library/alloc/src/rc.rs`)
+is blocked on transpiler-side issues catalogued below. To unblock
+downstream consumers, **`transpiled/rc_port/rc_port_stub.cppm`** re-exports
+the hand-written `rusty::Rc<T>` under the `rc_port::Rc<T, A=Global>`
+alias. `librc_port.a` builds today; `tests/rc_port_module_test.cpp`
+proves it (constructs `Rc<int>(42)` + clone).
+
+When transpiler fixes land (the ~20 patches in
+`post_transpile_patch.py` cover most of the surface), swap the stub
+for the full transpiled file and re-run the smoke test.
+
+
 
 Vendored `library/alloc/src/rc.rs` (5094 LOC) →
 `transpiled/rc_port/rc_port.cppm`. Patcher pipeline started; library

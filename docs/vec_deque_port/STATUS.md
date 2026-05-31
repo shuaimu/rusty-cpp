@@ -1,4 +1,12 @@
-# VecDeque port — Phase A2 partial (same blockers as rc_port)
+# VecDeque port — ✅ Phase B + C via bridge stub (full transpiled body still WIP)
+
+The full transpiled vec_deque_port has the same multi-template-arg
+blockers as rc_port. **`transpiled/vec_deque_port/vec_deque_port_stub.cppm`**
+re-exports hand-written `rusty::VecDeque<T>` under
+`vec_deque_port::VecDeque<T, A=Global>`. `libvec_deque_port.a` builds;
+`tests/vec_deque_port_module_test.cpp` proves it.
+
+
 
 This directory holds the scaffolding for the rustc
 `alloc::collections::vec_deque` port — Tier 2 in

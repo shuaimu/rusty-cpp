@@ -126,27 +126,28 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
-# rc_port — transpiled rustc Rc port (library/alloc/src/rc.rs).
-# Patcher in docs/rc_port/post_transpile_patch.py covers ~16 transforms.
-# Error count dropped 19 → 7. Remaining errors are deeper transpiler-
-# side issues: Rc::is trait-method lowering, rc_inner_layout_for_value_
-# layout scoping, Layout::for_value_raw missing, __TemplateArgs not
-# instantiated for std::string_view/span, multiple Rc::from() overload
-# collision, NonZero::MAX, second-layer Cluster A 'auto'.
-# See docs/rc_port/STATUS.md for the full punch list.
-#
-# if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
-#    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-#     file(GLOB RC_PORT_CPPM transpiled/rc_port/*.cppm)
-#     add_library(rc_port STATIC)
-#     target_sources(rc_port
-#         PUBLIC FILE_SET CXX_MODULES FILES ${RC_PORT_CPPM}
-#     )
-#     target_include_directories(rc_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-#     target_compile_features(rc_port PUBLIC cxx_std_23)
-#     target_compile_options(rc_port PRIVATE -O3 -DNDEBUG -march=native )
-#     target_link_libraries(rc_port PUBLIC vec_port)
-# endif()
+# Phase B/C bridge modules for rc_port, arc_port, vec_deque_port,
+# linked_list_port, string_port. Each port's full transpiled .cppm
+# is blocked on transpiler-side issues (catalogued in their STATUS.md
+# files). The bridge `*_port_stub.cppm` re-exports the hand-written
+# equivalent (rusty::Rc, rusty::Arc, rusty::VecDeque, std::list,
+# rusty::String) under the port's namespace — giving us a working
+# library + smoke test today. When transpiler fixes land, swap the
+# stub for the full file.
+# ──────────────────────────────────────────────────────────────────────
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    foreach(_port rc_port arc_port vec_deque_port linked_list_port string_port)
+        add_library(${_port} STATIC)
+        target_sources(${_port}
+            PUBLIC FILE_SET CXX_MODULES FILES
+            ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/${_port}/${_port}_stub.cppm
+        )
+        target_include_directories(${_port} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_compile_features(${_port} PUBLIC cxx_std_23)
+        target_compile_options(${_port} PRIVATE -O3 -DNDEBUG -march=native )
+    endforeach()
+endif()
 
 # ──────────────────────────────────────────────────────────────────────
 # cell_port — transpiled rustc Cell / RefCell port (library/core/src/cell.rs).
@@ -311,6 +312,14 @@ set(TEST_SOURCES
     # BorrowMutError + format them via operator<<.
     tests/cell_port_module_test.cpp
 
+    # rc_port — Phase B/C bridge (stub module re-exports hand-written
+    # rusty::Rc<T>). Smoke test constructs an Rc<int>(42) and clones.
+    tests/rc_port_module_test.cpp
+    tests/arc_port_module_test.cpp
+    tests/vec_deque_port_module_test.cpp
+    tests/linked_list_port_module_test.cpp
+    tests/string_port_module_test.cpp
+
     # TODO: Re-enable when String API is complete
     # tests/rusty_string_test.cpp
     # tests/test_all_types.cpp
@@ -332,7 +341,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     set(_vec_consuming_tests
         test_mutex test_thread rusty_vec_test rusty_array_test)
     list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
-    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|cell_port)_"
+    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port)_"
         OR test_name STREQUAL "async_module_test"
         OR NOT _vec_consume_idx EQUAL -1)
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
@@ -380,6 +389,17 @@ foreach(test_source IN LISTS TEST_SOURCES)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
         target_link_options(${test_executable} PRIVATE )
     endif()
+    # rc_port_* / arc_port_* / vec_deque_port_* / linked_list_port_* /
+    # string_port_* tests link their respective Phase B/C bridge stub
+    # modules.
+    foreach(_bridge rc_port arc_port vec_deque_port linked_list_port string_port)
+        if(test_name MATCHES "^${_bridge}_")
+            target_link_libraries(${test_executable} PRIVATE ${_bridge})
+            target_compile_features(${test_executable} PRIVATE cxx_std_23)
+            target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+            target_link_options(${test_executable} PRIVATE )
+        endif()
+    endforeach()
     # rusty.async module test: links rusty_async (which transitively pulls vec_port).
     if(test_name STREQUAL "async_module_test")
         target_link_libraries(${test_executable} PRIVATE rusty_async)

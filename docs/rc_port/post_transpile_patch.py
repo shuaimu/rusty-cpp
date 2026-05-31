@@ -195,6 +195,38 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
         r"auto size_of_val = size_of_val\(([^)]+)\)",
         r"auto size_of_val = sizeof(decltype(\1))",
         text)
+
+    # `Rc<T,A>::template is<T>(...)` — Rust trait `.is::<U>()` for
+    # downcast checking on Any. We don't surface this method; the
+    # call is in a Rust-only `Any` downcast path. Stub with false so
+    # the surrounding branch becomes dead.
+    text = re.sub(
+        r"Rc<T, A>::template is<[^>]+>\([^)]+\)",
+        "false /* Rc::is::<U>() trait method stubbed */",
+        text)
+
+    # `::rc_inner_layout_for_value_layout(...)` — bare qualifier, the
+    # decl is inside Rc<T,A> as static member. Use Rc<T,A>::.
+    text = text.replace(
+        "::rc_inner_layout_for_value_layout(",
+        "Rc<T, A>::rc_inner_layout_for_value_layout(")
+
+    # `Layout::for_value_raw(ptr)` — our `rusty::alloc::Layout` only
+    # surfaces `for_value`. Rename: for_value_raw is the unsafe variant
+    # that takes a raw pointer; we approximate with for_value(*ptr).
+    text = re.sub(
+        r"Layout::for_value_raw\(([^)]+)\)",
+        r"Layout::for_value(*\1)",
+        text)
+
+    # `rusty::num::NonZero<size_t>::MAX` — missing static member.
+    # Substitute with the type's max value.
+    text = text.replace(
+        "rusty::num::NonZero<size_t>::MAX",
+        "rusty::num::NonZero<size_t>::new_(SIZE_MAX).unwrap()")
+    text = text.replace(
+        "rusty::num::NonZero<unsigned long>::MAX",
+        "rusty::num::NonZero<unsigned long>::new_(SIZE_MAX).unwrap()")
     # Then inject the helper lambda at the top of the module (just
     # after the namespace open). Idempotent.
     cast_stub = ("namespace { inline constexpr auto cast_identity_stub = "
