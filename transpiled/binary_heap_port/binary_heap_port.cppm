@@ -3728,14 +3728,16 @@ struct Hole {
 
     static Hole<T> new_(std::span<T> data, size_t pos) {
         assert((rusty::detail::deref_if_pointer_like(pos) < rusty::len(data)));
-        auto elt = rusty::ptr::read(data[std::move(pos)]);
+        // Phase C patch: rusty::ptr::read takes a pointer, not a reference.
+        auto elt = rusty::ptr::read(&data[std::move(pos)]);
         return Hole<T>(data, rusty::mem::manually_drop_new(std::move(elt)), std::move(pos));
     }
     size_t pos() const {
         return this->pos_field;
     }
     const T& element() const {
-        return this->elt;
+        // Phase C patch: dereference ManuallyDrop to get T&.
+        return *this->elt;
     }
     const T& get(size_t index) const {
         assert((rusty::detail::deref_if_pointer_like(index) != rusty::detail::deref_if_pointer_like(this->pos_field)));
@@ -3762,7 +3764,9 @@ struct Hole {
         // @unsafe
         {
             const auto pos = this->pos_field;
-            rusty::ptr::copy_nonoverlapping(rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(this->elt)), this->data[std::move(pos)], 1);
+            // Phase C patch: copy_nonoverlapping takes pointers, not refs;
+            // need &data[pos] for the destination.
+            rusty::ptr::copy_nonoverlapping(rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(this->elt)), &this->data[std::move(pos)], 1);
         }
     }
 };

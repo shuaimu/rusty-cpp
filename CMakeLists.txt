@@ -126,6 +126,27 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
+# rc_port — transpiled rustc Rc port (library/alloc/src/rc.rs).
+# CMake target intentionally not wired yet. Patcher in
+# docs/rc_port/post_transpile_patch.py is seeded with namespace
+# fixups; the library doesn't build clean due to: (a) hand-written
+# rusty::Rc<T> being single-template-arg while rc_port emits
+# Rc<T, Global>, (b) missing NonNull::cast<>(), (c) Cluster A regression.
+# See docs/rc_port/STATUS.md for the full punch list.
+#
+# if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+#    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+#     file(GLOB RC_PORT_CPPM transpiled/rc_port/*.cppm)
+#     add_library(rc_port STATIC)
+#     target_sources(rc_port
+#         PUBLIC FILE_SET CXX_MODULES FILES ${RC_PORT_CPPM}
+#     )
+#     target_include_directories(rc_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+#     target_compile_features(rc_port PUBLIC cxx_std_23)
+#     target_compile_options(rc_port PRIVATE -O3 -DNDEBUG -march=native )
+# endif()
+
+# ──────────────────────────────────────────────────────────────────────
 # cell_port — transpiled rustc Cell / RefCell port (library/core/src/cell.rs).
 # Single .cppm vendored from the transpiler+patcher pipeline
 # (docs/cell_port/). Phase A2 patches: namespace `using ::ns::` →
@@ -272,6 +293,10 @@ set(TEST_SOURCES
     # queue). Smoke test imports binary_heap_port, pushes scrambled ints,
     # asserts they come out in descending order.
     tests/binary_heap_port_module_test.cpp
+
+    # binary_heap_port Phase C: push() drive test, iterates on the 6
+    # instantiation clusters documented in docs/binary_heap_port/STATUS.md.
+    tests/binary_heap_port_push_test.cpp
 
     # cell_port — transpiled rustc Cell / RefCell (library/core/src/cell.rs).
     # Phase B/C smoke test: import cell_port, build BorrowError /

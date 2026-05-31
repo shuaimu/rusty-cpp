@@ -1,12 +1,9 @@
-# Rc port — Phase A1 (transpile clean)
+# Rc port — Phase A2 partial (patcher seeded, deeper blockers identified)
 
-Vendored `library/alloc/src/rc.rs` (4565 LOC) → `transpiled/rc_port/rc_port.cppm`.
-Transpiled with `--auto-namespace`: zero errors, 4 hand-port slots. See
-[`rusty-std-book.md`](../rusty-std-book.md) §3.4 (Tier 3) for the
-rationale — there's a working hand-written `rusty::Rc` in `rc.hpp`, so
-this port is *opportunistic*: validates the transpiler against
-single-threaded refcount + cycle-detection unsafe code rather than
-displacing the hand-written version on day 1.
+Vendored `library/alloc/src/rc.rs` (5094 LOC) →
+`transpiled/rc_port/rc_port.cppm`. Patcher pipeline started; library
+still does not build clean. Phase B requires either substantial
+transpiler-side fixes or extensive hand-port work.
 
 ## Pipeline summary
 
@@ -14,13 +11,51 @@ displacing the hand-written version on day 1.
 |---|---|
 | 1. Source acquisition | ✅ |
 | 2. Prep | ✅ |
-| 3. Transpile | ✅ Zero errors, 4 hand-slots |
-| 4. Patcher | ⏸️ Not started |
-| 5. Build | ⏸️ |
+| 3. Transpile | ✅ |
+| 4. Patcher | 🟡 **1 patch applied** — namespace prefix fixups (`std::borrow::` → comments out, `string::String` → `rusty::String`, `rusty::Vec<>` → `::Vec<>`, `rusty::mem::MaybeUninit` → `rusty::MaybeUninit`). |
+| 5. Build | 🔴 **Blocked** — see below |
+
+## Patcher patches (1 active)
+
+`post_transpile_patch.py` does namespace prefix fixups:
+- `using ::std::borrow::Cow/ToOwned;` → commented out (we don't vendor `core::borrow`).
+- `using ::string::String;` → `using rusty::String;`.
+- `using rusty::Vec;` → `using ::Vec;` (Vec is global after VecLegacy retirement).
+- `rusty::Vec<>` type refs → `::Vec<>`.
+- `std::ptr::Alignment` → `rusty::ptr::Alignment`.
+- `rusty::mem::MaybeUninit` and bare `mem::MaybeUninit` → `rusty::MaybeUninit`.
+
+## Remaining Phase B blockers
+
+1. **No `import vec_port.vec;` in rc_port** — the patcher now rewrites `rusty::Vec` to `::Vec` but `::Vec` isn't visible without the module import. Either:
+   - Patcher should also inject `import vec_port.vec;` into the module preamble, OR
+   - Re-transpile with a Cargo.toml that surfaces vec_port as a dependency so the transpiler emits the import.
+
+2. **`Rc<T, A>` template arg count mismatch** — hand-written `rusty::Rc<T>` takes one template arg, but transpiled `Rc<T, Global>` passes two. Same shape for `Weak<T, A>`. Either:
+   - Extend the hand-written `rusty::Rc<T>` to `rusty::Rc<T, A = Global>` (mirroring vec_port), OR
+   - Hand-port the rc_port to its own `rc_port::Rc<T, A>` and stop aliasing to `rusty::Rc`.
+
+3. **`.cast<>()` method not found on `NonNull<T>` etc.** — the transpiled code calls `.cast<U>()` to type-convert NonNull pointers. Our `rusty::ptr::NonNull<T>` doesn't surface a `cast<>()` method. Either:
+   - Add `NonNull::cast<U>()` to `rusty/ptr.hpp` (simple), OR
+   - Hand-rewrite the cast sites.
+
+4. **Cluster A regression** — `'auto' not allowed in template argument` errors at line 3948+ indicate the transpiler's __TemplateArgs heuristic isn't applied to rc_port's absorbed methods. This is the same shape as the BTreeMap Cluster A bug that was fixed for btree_port. Needs the fix extended to cover rc.rs's helper-call sites.
+
+5. **Cross-port dependencies** — rc_port references `rusty::Cell`, `rusty::UnsafeCell`, `rusty::Box`, all of which we have but with slightly different signatures than the rustc original expects. Each will surface as instantiation errors during full Phase B build.
+
+## Predicted Phase B effort
+
+The patcher fixes here are good for ~70% of the namespace issues. The
+remaining work is substantive: **5-8 days** to extend `rusty::Rc<T, A>`,
+add `NonNull::cast<>()`, wire the vec_port import, and chase the
+Cluster A residue. By contrast cell_port reached Phase B/C in one
+session because cell.rs is simpler (no allocator-generic + no
+multi-arg smart-pointer template).
 
 ## Reproducing
 
 ```bash
+# from .claude/worktrees/rusty-lib/
 RUSTSRC=$(ls -d ~/.rustup/toolchains/*/lib/rustlib/src/rust/library/alloc/src/ | head -1)
 mkdir -p /tmp/rc_port/rc_crate/src
 cp $RUSTSRC/rc.rs /tmp/rc_port/rc_crate/src/lib.rs
@@ -29,10 +64,5 @@ bash docs/rc_port/prep.sh /tmp/rc_port/rc_crate/src/lib.rs
 ./target/release/rusty-cpp-transpiler --crate /tmp/rc_port/rc_crate/Cargo.toml \
     --output-dir /tmp/rc_port/cpp_out --auto-namespace
 cp /tmp/rc_port/cpp_out/*.cppm transpiled/rc_port/
+python3 docs/rc_port/post_transpile_patch.py transpiled/rc_port/
 ```
-
-## Predicted Phase B effort
-
-Per §2.8: **2-3 days** — single file, lots of unsafe pointer-arith +
-drop-ordering work; Cluster A (impl-generic method-template params)
-is likely to apply.

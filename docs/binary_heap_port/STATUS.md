@@ -13,8 +13,8 @@ This directory holds the scaffolding for the rustc
 | 3. Transpilation | ✅ **Zero transpiler errors** with `--auto-namespace`. 5 hand-port slots. |
 | 4. Post-transpile patching | ✅ All six Phase A2 clusters fixed (see "Patches applied" below). Patches still inline in the vendored .cppm; a `post_transpile_patch.py` would codify these for re-transpile. |
 | 5. Build (compile) | ✅ **`libbinary_heap_port.a` builds clean.** |
-| 6. Smoke test | 🟡 **Partial.** `tests/binary_heap_port_module_test.cpp` proves `BinaryHeap<int32_t, Global>::new_in()` works + empty-heap invariants. push/pop/peek bodies hit instantiation-time issues — see "Remaining for Phase C". |
-| 7. Bench | ⏸️ Blocked on full Phase C. |
+| 6. Smoke test | ✅ **Two tests passing.** (a) `binary_heap_port_module_test.cpp` — empty-heap invariants. (b) `binary_heap_port_push_test.cpp` — five push() calls, `len() == 5`. C1–C3 cleared (Hole::new_, Hole::element, Hole::~Hole pointer-vs-reference fixes); C4–C6 remain dead code in our push-only path. |
+| 7. Bench | ⏸️ Pop/peek + bench still pending. |
 
 ## Patches applied (Phase A2)
 
@@ -43,14 +43,14 @@ be codified into `post_transpile_patch.py` before any re-transpile:
 Errors visible at smoke-test instantiation time (template body not
 evaluated until used with concrete types):
 
-| Cluster | Site | Issue |
+| Cluster | Site | Status |
 |---|---|---|
-| C1 | `Hole::on_drop` (around line 3731) | `rusty::ptr::read` overload doesn't match the `const T*` passed |
-| C2 | Hole-rebuild path (around line 3765) | `rusty::ptr::copy_nonoverlapping` doesn't accept the (T*, T*, size_t) signature the transpiled call uses |
-| C3 | `Hole::pos`'s return type | the transpiler emitted `const ManuallyDrop<int>` for a field that should decay to `const int&` |
-| C4 | Sift up/down (around line 4047) | `std::swap` not callable on `MaybeUninit<T>` slots; need `std::swap(*p, *q)` after manual deref |
-| C5 | `peek()` (around line 4138) | `Option<const Hole<int>&>` operator overload (binary expr) — likely a `&&` on Options that the transpiler emitted as if `Option` had it (it doesn't) |
-| C6 | `rusty::len` over `Hole<int>` | `rusty::len` SFINAE checks for `.len()` / `.size()` / `into_iter()` — `Hole` has neither; the call site is probably dead-code in our context |
+| C1 | `Hole::new_` (line 3731) | ✅ Patched — `rusty::ptr::read(data[pos])` → `rusty::ptr::read(&data[pos])`. |
+| C2 | `Hole::~Hole` (line 3765) | ✅ Patched — second arg of `copy_nonoverlapping` was `data[pos]` (ref); patched to `&data[pos]`. |
+| C3 | `Hole::element` (line 3738) | ✅ Patched — was `return this->elt;` (ManuallyDrop<T> → const T& conversion); patched to `return *this->elt;` (operator* on ManuallyDrop). |
+| C4 | Sift up/down (around line 4047) | ⏸️ Not hit by push() path. Pop()/sift-down would need `std::swap(*p, *q)` patch. |
+| C5 | `peek()` (around line 4138) | ⏸️ Not hit by push() path. |
+| C6 | `rusty::len` over `Hole<int>` | ⏸️ Not hit by push() path. |
 
 Predicted effort to close Phase C: **half to one day** — each cluster
 is small and BTreeMap-port-shaped. Most are `rusty::ptr::*` helper
