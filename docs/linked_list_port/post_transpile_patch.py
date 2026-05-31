@@ -85,7 +85,52 @@ def patch_box_two_arg_to_one_arg(text: str) -> str:
             f"node_shadow1->{field}",
             text,
         )
+    # Rust uses `&self.alloc: &A` everywhere; our hand-written Box,
+    # LinkedList ctor, etc. take `A` by value. For Global (stateless)
+    # copying is fine — globally drop the `&` on `&this->alloc`. The
+    # from_raw_in rewrite above ran first and stripped the alloc arg
+    # entirely for from_raw_in sites, so this leftover sweep is safe.
+    text = text.replace("&this->alloc", "this->alloc")
     return text
+
+
+def patch_node_shadow1_double_move(text: str) -> str:
+    """In push_front_node / push_back_node, `node_shadow1` is
+    `Option<NonNull<Node<T>>>` — Copy in Rust, so multiple assignments
+    are allowed. The transpiler emits `std::move(node_shadow1)` for
+    every use, which causes use-after-move (the list ends up holding
+    null Options and `is_empty()` returns true after pushes).
+
+    Rewrite the assignment shapes (NOT `return std::move(node_shadow1)`,
+    which is in pop_*_node where node_shadow1 IS a Box and the move
+    is correct). Specifically: `this->{head,tail} = std::move(...)`
+    and `(*x).{next,prev} = std::move(...)` get the `std::move` peeled.
+    """
+    text = re.sub(
+        r"(this->(?:head|tail)) = std::move\(node_shadow1\)",
+        r"\1 = node_shadow1",
+        text,
+    )
+    text = re.sub(
+        r"\.(next|prev) = std::move\(node_shadow1\)",
+        r".\1 = node_shadow1",
+        text,
+    )
+    return text
+
+
+def patch_node_into_element_undeducible_template(text: str) -> str:
+    """Node::into_element is emitted as a method template with an
+    undeducible `template<typename A>` (the Allocator type parameter
+    leaks from the rustc impl block but the method takes no `A` arg).
+    Strip the template + requires so the method is callable without
+    specifying A. Same Cluster A shape BTreeMap port hit.
+    """
+    return re.sub(
+        r"template<typename A>\s*requires \(rusty::alloc::Allocator<A>\)\s*T into_element\(\)",
+        "T into_element()",
+        text,
+    )
 
 
 def patch_global_value_default_construct(text: str) -> str:
@@ -147,6 +192,8 @@ def patch_file(path: Path) -> bool:
     text = patch_inject_vec_imports(text)
     text = patch_box_two_arg_to_one_arg(text)
     text = patch_global_value_default_construct(text)
+    text = patch_node_into_element_undeducible_template(text)
+    text = patch_node_shadow1_double_move(text)
 
     if text != original:
         path.write_text(text)

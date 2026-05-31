@@ -274,6 +274,25 @@ public:
         return temp;
     }
 
+    // Rust's Box::into_non_null_with_allocator(self) — consume the Box,
+    // return (NonNull<T>, A). Emitted by the transpiler as a UFCS-style
+    // static call `Box<DT>::into_non_null_with_allocator(box)` where DT
+    // is `decltype(box)`. Because DT may be `Box<U>` (the box itself),
+    // we make this method generic over the argument type rather than
+    // relying on the enclosing Box's T — the receiver Box<DT>'s T is
+    // ignored. Returns std::tuple to match Rust's tuple-destructuring
+    // emit.
+    // @unsafe
+    template<typename BoxT>
+    static auto into_non_null_with_allocator(BoxT&& box) {
+        using ValueT = std::remove_cv_t<std::remove_reference_t<decltype(*box)>>;
+        ValueT* raw = std::forward<BoxT>(box).into_raw();
+        return std::make_tuple(
+            rusty::ptr::NonNull<ValueT>(raw),
+            rusty::alloc::Global{}
+        );
+    }
+
     // C++-style alias for into_raw
     // @unsafe
     // @lifetime: owned

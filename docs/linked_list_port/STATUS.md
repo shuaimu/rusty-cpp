@@ -1,9 +1,10 @@
-# LinkedList port — ✅ Phase A2 complete (full transpiled body builds)
+# LinkedList port — ✅ Phase B complete (smoke test passing)
 
 `liblinked_list_port.a` builds clean against the fully transpiled
 `linked_list_port.cppm` (no `_stub.cppm` re-export). Patcher
-codified in `post_transpile_patch.py`. Smoke test does not pass
-yet — see "Remaining for Phase B" below.
+codified in `post_transpile_patch.py`. Smoke test exercises
+push_back / push_front / pop_front / len round-trip — all green
+under `ctest`.
 
 This directory holds the scaffolding for the rustc
 `alloc::collections::linked_list` port — Tier 2 in
@@ -16,9 +17,9 @@ This directory holds the scaffolding for the rustc
 | 1. Source acquisition | ✅ `library/alloc/src/collections/linked_list.rs` (2255 LOC, single file) vendored |
 | 2. Preprocessing (`prep.sh`) | ✅ |
 | 3. Transpilation | ✅ **Zero transpiler errors** with `--auto-namespace`. 1 hand-port slot. |
-| 4. Post-transpile patching | ✅ Codified in `post_transpile_patch.py`. 4 patches applied (visit_byte_buf rebody + vec_port imports + Box `<X, const A&>` strip + `from_raw_in` rewrite + Global value default-construct + Box arrow-access on `node_shadow1`). Idempotent. |
+| 4. Post-transpile patching | ✅ Codified in `post_transpile_patch.py`. 9 patches (visit_byte_buf rebody + vec_port imports + Box `<X, const A&>` strip + `from_raw_in` rewrite + `&this->alloc` deref + Global value default-construct + Box arrow-access on `node_shadow1` + Node::into_element undeducible-template strip + node_shadow1 double-move fix in push_*_node). Idempotent. |
 | 5. Build (compile) | ✅ **`liblinked_list_port.a` builds clean** (used to be blocked on 13 Cluster A + 2 Cluster B + 1 Cluster C errors; closed via transpiler fixes 8ed539b + 486c10c + 925aa58 + this patcher set). |
-| 6. Smoke test | 🔴 **Pending API alignment.** The existing `linked_list_port_module_test.cpp` was written against the std::list-backed stub and calls `front()/back()/size()`. The transpiled LinkedList exposes the Rust API (`front_node()`, `len()`, etc.) and `back()` instantiation hits Option::map template substitution failures. New cluster to peel. |
+| 6. Smoke test | ✅ **Passing.** `tests/linked_list_port_module_test.cpp` exercises `new_() / is_empty / len / push_back / push_front / pop_front` round-trip via the Rust API. Runs under `ctest` (test #37/38, exit 0). |
 | 7. Bench | ⏸️ |
 
 ## Patches applied (Phase A2)
@@ -53,20 +54,25 @@ python3 docs/linked_list_port/post_transpile_patch.py /tmp/linked_list_port/cpp_
 cp /tmp/linked_list_port/cpp_out/linked_list_port.cppm transpiled/linked_list_port/
 ```
 
-## Remaining for Phase B (smoke test green)
+## Remaining for Phase C+
 
-The library compiles in isolation, but C++ templates aren't
-instantiated until used. The existing smoke test calls `back()` which
-triggers Option::map instantiation; the lambda body hits
-`node.as_ref().element` where `node` is of opaque type. Same shape as
-binary_heap_port Phase A2/A3 cluster work — needs investigation.
+- `back()` still has Option::map template-substitution issues
+  (smoke test deliberately exercises only `pop_front`, not `back()` /
+  `front()`). Cluster to peel later.
+- `cursor_*`, `into_iter`, `iter_mut`, `extend`, `split_off`, etc.
+  not exercised yet — same Option::map / NonNull deref pattern likely
+  to trip on first instantiation.
+- Bench against `std::list<int>` not run.
 
-Two paths to close Phase B:
-- (a) Patch the transpiled body to thread types through (binary_heap_port took this route)
-- (b) Update the smoke test to exercise the actually-instantiable Rust-shaped API surface (push_back / push_front / pop_front etc.)
+## Box helper
 
-Approach (b) is cheaper and gets us a green smoke test sooner; (a)
-is the eventual fix but each cluster needs root-causing.
+`include/rusty/box.hpp` gained `Box<T>::into_non_null_with_allocator(box)`
+as a generic UFCS-style static helper. The transpiler emits this as
+`Box<DT>::into_non_null_with_allocator(box)` where `DT = decltype(box)`
+which can be `Box<U>` itself — so the static method has to be generic
+over the argument type rather than relying on the enclosing Box's
+template parameter. Other ports that use Rust's `Box::method(box)`
+UFCS sugar can rely on this same helper.
 
 ## CMake target
 

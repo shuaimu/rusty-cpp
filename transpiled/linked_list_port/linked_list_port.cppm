@@ -3700,8 +3700,6 @@ struct Node {
     static Node<T> new_(T element) {
         return Node<T>{.next = rusty::Option<rusty::ptr::NonNull<Node<T>>>{rusty::None}, .prev = rusty::Option<rusty::ptr::NonNull<Node<T>>>{rusty::None}, .element = std::move(element)};
     }
-    template<typename A>
-        requires (rusty::alloc::Allocator<A>)
     T into_element() {
         return std::move(this->element);
     }
@@ -3765,7 +3763,7 @@ struct LinkedList {
                 bool _m_matched = false;
                 if (!_m_matched) {
                     if (_m.is_none()) {
-                        this->tail = std::move(node_shadow1);
+                        this->tail = node_shadow1;
                         _m_matched = true;
                     }
                 }
@@ -3773,12 +3771,12 @@ struct LinkedList {
                     if (_m.is_some()) {
                         auto&& _mv1 = _m.unwrap();
                         auto&& head = rusty::detail::deref_if_pointer(_mv1);
-                        (*rusty::as_ptr(head)).prev = std::move(node_shadow1);
+                        (*rusty::as_ptr(head)).prev = node_shadow1;
                         _m_matched = true;
                     }
                 }
             }
-            this->head = std::move(node_shadow1);
+            this->head = node_shadow1;
             this->len_field += 1;
         }
     }
@@ -3817,7 +3815,7 @@ return std::move(node_shadow1); }(); });
                 bool _m_matched = false;
                 if (!_m_matched) {
                     if (_m.is_none()) {
-                        this->head = std::move(node_shadow1);
+                        this->head = node_shadow1;
                         _m_matched = true;
                     }
                 }
@@ -3825,12 +3823,12 @@ return std::move(node_shadow1); }(); });
                     if (_m.is_some()) {
                         auto&& _mv1 = _m.unwrap();
                         auto&& tail = rusty::detail::deref_if_pointer(_mv1);
-                        (*rusty::as_ptr(tail)).next = std::move(node_shadow1);
+                        (*rusty::as_ptr(tail)).next = node_shadow1;
                         _m_matched = true;
                     }
                 }
             }
-            this->tail = std::move(node_shadow1);
+            this->tail = node_shadow1;
             this->len_field += 1;
         }
     }
@@ -4058,7 +4056,7 @@ return std::move(node_shadow1); }(); });
         return this->len_field;
     }
     void clear() {
-        rusty::mem::drop(LinkedList<T, A>(this->head.take(), this->tail.take(), mem::take(this->len_field), &this->alloc, rusty::PhantomData<rusty::Box<Node<T>, A>>{}));
+        rusty::mem::drop(LinkedList<T, A>(this->head.take(), this->tail.take(), mem::take(this->len_field), this->alloc, rusty::PhantomData<rusty::Box<Node<T>, A>>{}));
     }
     bool contains(const T& x) const {
         return rusty::iter((*this)).any([&](auto&& e) { return rusty::detail::deref_if_pointer_like(e) == rusty::detail::deref_if_pointer_like(x); });
@@ -4091,7 +4089,7 @@ return std::move(node_shadow1); }(); });
         static_cast<void>(this->push_front_mut(std::move(elt)));
     }
     T& push_front_mut(T elt) {
-        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)));
+        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
         // @unsafe
         {
             this->push_front_node(std::move(node));
@@ -4105,7 +4103,7 @@ return std::move(node_shadow1); }(); });
         static_cast<void>(this->push_back_mut(std::move(elt)));
     }
     T& push_back_mut(T elt) {
-        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)));
+        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
         // @unsafe
         {
             this->push_back_node(std::move(node));
