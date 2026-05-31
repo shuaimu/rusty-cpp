@@ -153,38 +153,6 @@ def patch_node_shadow1_double_move(text: str) -> str:
     return text
 
 
-def patch_match_arm_unwrap_destructive(text: str) -> str:
-    """The transpiler emits Rust `match` arms as:
-
-        auto&& _m = this->head;
-        ...
-        if (_m.is_some()) {
-            auto&& _mv1 = _m.unwrap();
-            ...
-        }
-
-    But hand-written `Option<T>::unwrap()` (non-const lvalue overload)
-    is destructive — it moves the value out and sets `has_value = false`.
-    Since `_m` is bound by reference to `this->head`, this nukes the
-    real field. Result: `pop_front()` correctly extracts the head node
-    but leaves `this->head = None` even when there are more nodes, so
-    subsequent `front()` returns `None`.
-
-    Rust's `match` on a Copy type (like `Option<NonNull<T>>`) copies the
-    inner value into the arm binding rather than moving the scrutinee.
-    The C++ equivalent here is `_m.as_ref().unwrap()` which returns
-    `T&` via the `Option<T&>` specialization (non-destructive) — we
-    can then read through the ref without invalidating `_m`.
-
-    Rewrite all `_m.unwrap()` sites in match arms to `_m.as_ref().unwrap()`.
-    """
-    return re.sub(
-        r"(?<![A-Za-z0-9_])_m\.unwrap\(\)",
-        "_m.as_ref().unwrap()",
-        text,
-    )
-
-
 def patch_node_into_element_undeducible_template(text: str) -> str:
     """Node::into_element is emitted as a method template with an
     undeducible `template<typename A>` (the Allocator type parameter
@@ -261,7 +229,6 @@ def patch_file(path: Path) -> bool:
     text = patch_node_into_element_undeducible_template(text)
     text = patch_node_shadow1_double_move(text)
     text = patch_front_back_lambda_return(text)
-    text = patch_match_arm_unwrap_destructive(text)
 
     if text != original:
         path.write_text(text)

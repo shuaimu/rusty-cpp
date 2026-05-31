@@ -65,16 +65,28 @@ cp /tmp/linked_list_port/cpp_out/linked_list_port.cppm transpiled/linked_list_po
 ## Resolved bugs
 
 - **front-after-pop state-corruption** (fixed). Root cause: the
-  transpiler lowers Rust `match` arms as `auto&& _m = field; if
+  transpiler lowered Rust `match` arms as `auto&& _m = field; if
   (_m.is_some()) { auto&& _mv1 = _m.unwrap(); … }`. Hand-written
   `Option<T>::unwrap()` (non-const lvalue) is destructive — moves
   value out and sets `has_value = false` — so the match arm nuked
   the real field. Rust's match on a Copy-type Option (NonNull is
   Copy) copies the inner value into the arm binding rather than
-  consuming the scrutinee. Patcher now rewrites
-  `_m.unwrap()` → `_m.as_ref().unwrap()` which goes through the
-  `Option<T&>::unwrap()` specialization (returns `T&`,
-  non-destructive). 20 sites in linked_list_port.cppm.
+  consuming the scrutinee.
+
+  Fixed in the transpiler (commit `f91be68`): the
+  `runtime_match_scrutinee_borrows_payload` predicate now also
+  returns true for `match self.field` and `match local_ref.field`
+  shapes (where Rust provably can't move out, so the scrutinee
+  type is Copy). The materialized binding emit goes through
+  `std::as_const(_m).unwrap()`, which calls the const overload
+  (non-destructive, returns `const T&`).
+
+  The earlier patcher rule (rewriting `_m.unwrap()` →
+  `_m.as_ref().unwrap()` globally in linked_list_port.cppm) has
+  been retired since the transpiler now produces the correct
+  emit natively. 5 destructive `_m.unwrap()` sites remain in the
+  cppm — all `match foo.take()` / `match foo.method()` with
+  temporary scrutinees, where destructive consume is correct.
 
 ## Box helper
 
