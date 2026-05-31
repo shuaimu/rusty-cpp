@@ -2189,7 +2189,7 @@ or where the existing hand-written version is a thin wrapper.
 |---|---|---|---|---|---|
 | **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | ✅ **Phase B** — `libbinary_heap_port.a` builds clean, empty-heap smoke test passes. Phase C push/pop/peek still needs ~6 `rusty::ptr::*` helper-gap patches. See `docs/binary_heap_port/STATUS.md` and §6.1. | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
 | **`VecDeque<T, A>`** | `library/alloc/src/collections/vec_deque/` | ✅ `vecdeque.hpp` | Medium — ring buffer with separate head/tail; wraparound arithmetic; some unsafe but not exotic | 🟡 **Phase A1** — transpile clean. See `docs/vec_deque_port/STATUS.md` and §5.2. | Hand-written exists but transpiling locks in Rust's exact wraparound semantics + `drain` / `swap_remove_back`. Common in BFS / queue workloads. |
-| **`LinkedList<T>`** | `library/alloc/src/collections/linked_list.rs` | ❌ none | Medium — doubly-linked with raw-pointer plumbing; cursor API uses unsafe heavily | 🟡 **Phase A1** — transpile clean. See `docs/linked_list_port/STATUS.md` and §5.3. | Net-new functionality. Rarely used compared to `Vec`/`VecDeque`, but completes the collections family. Tests the transpiler against intrusive-list shapes. |
+| **`LinkedList<T>`** | `library/alloc/src/collections/linked_list.rs` | ❌ none | Medium — doubly-linked with raw-pointer plumbing; cursor API uses unsafe heavily | 🟡 **Phase A2 partial** — patches applied, hits 13 "auto not allowed in template arg" emit-bug sites (Cluster A signature). See `docs/linked_list_port/STATUS.md` and §6.3. | Net-new functionality. Rarely used compared to `Vec`/`VecDeque`, but completes the collections family. Tests the transpiler against intrusive-list shapes. |
 | **`HashSet<T, S>`** | `library/std/src/collections/hash/set.rs` | ✅ `hashset.hpp` | Low — ~free once `HashMap` is done (it's literally `HashMap<T, ()>` underneath) | ✅ **Done** as part of hashbrown_port. | Lands automatically with HashMap. |
 
 ### 3.4 Tier 3 — Worth porting opportunistically
@@ -3414,14 +3414,18 @@ single file). Net-new — no hand-written `rusty::LinkedList`. Brings
 the cursor API (`CursorMut::insert_before`, etc.) that `std::list`
 lacks.
 
-**Status**: Phase A1 done. Single `.cppm` file, 1 hand-port slot. See
-[`docs/linked_list_port/STATUS.md`](linked_list_port/STATUS.md).
+**Status**: 🟡 **Phase A2 partial.** Standard cluster patches landed
+(same shape as binary_heap_port). Remaining blockers are 13 "auto not
+allowed in template argument" sites — BTreeMap port's Cluster A
+signature — plus 2 "auto var without initializer" sites. CMake target
+left commented in CMakeLists.txt to keep the main build green; uncomment
+once Cluster A coverage is verified to handle linked_list shapes.
+See [`docs/linked_list_port/STATUS.md`](linked_list_port/STATUS.md).
 
-Predicted effort to Phase B: **2–3 days** — single-file but the
-intrusive raw-pointer plumbing inside the cursor API will need careful
-audit. Drop ordering for the head/tail/length triplet under
-`mem::take`-shaped operations is where the BTreeMap-style "ref-returning
-let bindings" issue could resurface.
+Predicted effort to Phase B: **1–2 days** if the Cluster A transpiler
+fix (commit `7311d18`) already covers linked_list's emit shape (then
+re-transpile + re-apply patches); **3–5 days** if Cluster B and C need
+fresh transpiler-side investigation.
 
 Dependencies: just `rusty::Box` (hand-written). No vec_port dep.
 

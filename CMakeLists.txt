@@ -126,6 +126,29 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
+# linked_list_port — transpiled rustc LinkedList (doubly-linked w/cursor).
+# Single .cppm vendored. Net-new functionality — no hand-written
+# rusty::LinkedList existed. CMake target intentionally not wired yet —
+# the .cppm builds past Phase A2 patches but hits 13 "auto not allowed
+# in template argument" emit-bug errors (same shape as BTreeMap port's
+# Cluster A, which required a transpiler-side fix in commit 7311d18).
+# To wire: uncomment when those clusters land via the transpiler patch
+# or hand-port catalogue. See docs/linked_list_port/STATUS.md.
+#
+# if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+#    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+#     file(GLOB LINKED_LIST_PORT_CPPM transpiled/linked_list_port/*.cppm)
+#     add_library(linked_list_port STATIC)
+#     target_sources(linked_list_port
+#         PUBLIC FILE_SET CXX_MODULES FILES ${LINKED_LIST_PORT_CPPM}
+#     )
+#     target_include_directories(linked_list_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+#     target_compile_features(linked_list_port PUBLIC cxx_std_23)
+#     target_compile_options(linked_list_port PRIVATE -O3 -DNDEBUG -march=native )
+#     target_link_libraries(linked_list_port PUBLIC vec_port)
+# endif()
+
+# ──────────────────────────────────────────────────────────────────────
 # rusty_async — first hand-written rusty header converted to a C++20
 # module (was include/rusty/async.hpp, now include/rusty/async.cppm).
 # Migration goal: replace the legacy VecLegacy-backed Executor task store
