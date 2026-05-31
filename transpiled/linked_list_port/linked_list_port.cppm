@@ -96,7 +96,15 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.
+template<typename T>
+auto clone(const T& value) {
+if constexpr (requires { value.clone(); }) {
+return value.clone();
+} else {
+return value;
+}
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -325,8 +333,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
+return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
 }
 
 template<typename E>
@@ -3634,8 +3642,6 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module linked_list_port;
-import vec_port.vec;
-import vec_port.vec.into_iter;
 
 namespace linked_list_port {
 
@@ -3958,7 +3964,7 @@ return std::move(node_shadow1); }(); });
             } else {
                 first_part_head.emplace(rusty::Option<rusty::ptr::NonNull<Node<T>>>{rusty::None});
             }
-            auto first_part = ::Vec<T, A>(std::move(first_part_head.value()), std::move(first_part_tail), std::move(at), rusty::clone(this->alloc), rusty::PhantomData<rusty::Box<Node<T>, A>>{});
+            auto first_part = rusty::Vec<T, A>(std::move(first_part_head.value()), std::move(first_part_tail), std::move(at), rusty::clone(this->alloc), rusty::PhantomData<rusty::Box<Node<T>, A>>{});
             this->head = rusty::Option<rusty::ptr::NonNull<Node<T>>>(std::move(split_node));
             this->len_field = rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(at);
             return std::move(first_part);
@@ -3986,7 +3992,7 @@ return std::move(node_shadow1); }(); });
             } else {
                 second_part_tail.emplace(rusty::Option<rusty::ptr::NonNull<Node<T>>>{rusty::None});
             }
-            auto second_part = ::Vec<T, A>(std::move(second_part_head), std::move(second_part_tail.value()), rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(at), rusty::clone(this->alloc), rusty::PhantomData<rusty::Box<Node<T>, A>>{});
+            auto second_part = rusty::Vec<T, A>(std::move(second_part_head), std::move(second_part_tail.value()), rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(at), rusty::clone(this->alloc), rusty::PhantomData<rusty::Box<Node<T>, A>>{});
             this->tail = rusty::Option<rusty::ptr::NonNull<Node<T>>>(std::move(split_node));
             this->len_field = std::move(at);
             return std::move(second_part);
@@ -4057,7 +4063,7 @@ return std::move(node_shadow1); }(); });
         return this->len_field;
     }
     void clear() {
-        rusty::mem::drop(::Vec<T, A>(this->head.take(), this->tail.take(), mem::take(this->len_field), &this->alloc, rusty::PhantomData<rusty::Box<Node<T>, A>>{}));
+        rusty::mem::drop(rusty::Vec<T, A>(this->head.take(), this->tail.take(), mem::take(this->len_field), &this->alloc, rusty::PhantomData<rusty::Box<Node<T>, A>>{}));
     }
     bool contains(const T& x) const {
         return rusty::iter((*this)).any([&](auto&& e) { return rusty::detail::deref_if_pointer_like(e) == rusty::detail::deref_if_pointer_like(x); });
@@ -4090,7 +4096,7 @@ return std::move(node_shadow1); }(); });
         static_cast<void>(this->push_front_mut(std::move(elt)));
     }
     T& push_front_mut(T elt) {
-        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<auto>::into_non_null_with_allocator(rusty::Box<auto>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)));
+        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)));
         // @unsafe
         {
             this->push_front_node(std::move(node));
@@ -4104,7 +4110,7 @@ return std::move(node_shadow1); }(); });
         static_cast<void>(this->push_back_mut(std::move(elt)));
     }
     T& push_back_mut(T elt) {
-        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<auto>::into_non_null_with_allocator(rusty::Box<auto>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)));
+        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), &this->alloc)));
         // @unsafe
         {
             this->push_back_node(std::move(node));
@@ -4177,7 +4183,7 @@ return iter.tail;
         return ExtractIf<T, F, A>((*this), std::move(it), std::move(filter), static_cast<size_t>(0), std::move(old_len));
     }
     struct DropGuard {
-        ::Vec<T, A>& _0;
+        rusty::Vec<T, A>& _0;
         mutable bool _rusty_forgotten = false;
         DropGuard(LinkedList<T, A>& _0_init) : _0(_0_init) {}
         DropGuard(const DropGuard&) = default;
@@ -4296,7 +4302,7 @@ struct Iter {
     rusty::PhantomData<const Node<T>&> marker;
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return f.debug_tuple("Iter").field(rusty::detail::deref_if_pointer_like(rusty::mem::manually_drop_new(::Vec<T, rusty::alloc::Global>(this->head, this->tail, this->len, rusty::alloc::Global{}, rusty::PhantomData<rusty::Box<Node<T>, rusty::alloc::Global>>{})))).field(&this->len).finish();
+        return f.debug_tuple("Iter").field(rusty::detail::deref_if_pointer_like(rusty::mem::manually_drop_new(rusty::Vec<T, rusty::alloc::Global>(this->head, this->tail, this->len, rusty::alloc::Global{}, rusty::PhantomData<rusty::Box<Node<T>, rusty::alloc::Global>>{})))).field(&this->len).finish();
     }
     Iter<T> clone() const {
         return Iter<T>{.head = std::move((*this).head), .tail = std::move((*this).tail), .len = std::move((*this).len), .marker = std::move((*this).marker)};
@@ -4345,7 +4351,7 @@ struct IterMut {
     rusty::PhantomData<Node<T>&> marker;
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return f.debug_tuple("IterMut").field(rusty::detail::deref_if_pointer_like(rusty::mem::manually_drop_new(::Vec<T, rusty::alloc::Global>(this->head, this->tail, this->len, rusty::alloc::Global{}, rusty::PhantomData<rusty::Box<Node<T>, rusty::alloc::Global>>{})))).field(&this->len).finish();
+        return f.debug_tuple("IterMut").field(rusty::detail::deref_if_pointer_like(rusty::mem::manually_drop_new(rusty::Vec<T, rusty::alloc::Global>(this->head, this->tail, this->len, rusty::alloc::Global{}, rusty::PhantomData<rusty::Box<Node<T>, rusty::alloc::Global>>{})))).field(&this->len).finish();
     }
     rusty::Option<T&> next() {
         if (rusty::detail::deref_if_pointer_like(this->len) == static_cast<size_t>(0)) {
@@ -4388,7 +4394,7 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct IntoIter {
     using Item = T;
-    ::Vec<T, A> list;
+    rusty::Vec<T, A> list;
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.debug_tuple("IntoIter").field(&this->list).finish();
@@ -4423,7 +4429,7 @@ export template<typename T, typename A = rusty::alloc::Global>
 struct Cursor {
     size_t index_field;
     rusty::Option<rusty::ptr::NonNull<Node<T>>> current_field;
-    const ::Vec<T, A>& list;
+    const rusty::Vec<T, A>& list;
 
     Cursor<T, A> clone() const {
         auto&& _let_pat = (*this);
@@ -4515,7 +4521,7 @@ struct Cursor {
     rusty::Option<const T&> back() const {
         return this->list.back();
     }
-    const ::Vec<T, A>& as_list() const {
+    const rusty::Vec<T, A>& as_list() const {
         return this->list;
     }
 };
@@ -4535,7 +4541,7 @@ export template<typename T, typename A = rusty::alloc::Global>
 struct CursorMut {
     size_t index_field;
     rusty::Option<rusty::ptr::NonNull<Node<T>>> current_field;
-    ::Vec<T, A>& list;
+    rusty::Vec<T, A>& list;
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.debug_tuple("CursorMut").field(&this->list).field(this->index()).finish();
@@ -4617,10 +4623,10 @@ struct CursorMut {
     Cursor<T, A> as_cursor() const {
         return Cursor<T, A>{.index_field = this->index_field, .current_field = this->current_field, .list = this->list};
     }
-    const ::Vec<T, A>& as_list() const {
+    const rusty::Vec<T, A>& as_list() const {
         return this->list;
     }
-    void splice_after(::Vec<T> list) {
+    void splice_after(rusty::Vec<T> list) {
         // @unsafe
         {
             auto&& _let_pat = list.detach_all_nodes();
@@ -4634,7 +4640,7 @@ struct CursorMut {
             }
         }
     }
-    void splice_before(::Vec<T> list) {
+    void splice_before(rusty::Vec<T> list) {
         // @unsafe
         {
             std::optional<std::tuple<rusty::ptr::NonNull<Node<T>>, rusty::ptr::NonNull<Node<T>>, size_t>> _tuple_match_value;
@@ -4666,7 +4672,7 @@ struct CursorMut {
     void insert_after(T item) {
         // @unsafe
         {
-            auto spliced_node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<auto>::into_non_null_with_allocator(rusty::Box<auto>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
+            auto spliced_node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
             auto node_next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().next; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(this->current_field, std::move(node_next), std::move(spliced_node), std::move(spliced_node), static_cast<size_t>(1));
             if (this->current_field.is_none()) {
@@ -4677,7 +4683,7 @@ struct CursorMut {
     void insert_before(T item) {
         // @unsafe
         {
-            auto spliced_node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<auto>::into_non_null_with_allocator(rusty::Box<auto>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
+            auto spliced_node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
             auto node_prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = _m.unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().prev; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(std::move(node_prev), this->current_field, std::move(spliced_node), std::move(spliced_node), static_cast<size_t>(1));
             this->index_field += 1;
@@ -4689,11 +4695,11 @@ struct CursorMut {
         {
             this->current_field = unlinked_node.as_ref().next;
             this->list.unlink_node(std::move(unlinked_node));
-            auto unlinked_node_shadow1 = rusty::Box<auto>::from_raw_in(rusty::as_ptr(unlinked_node), &this->list.alloc);
+            auto unlinked_node_shadow1 = rusty::Box<std::remove_cvref_t<decltype((rusty::as_ptr(unlinked_node)))>>::from_raw_in(rusty::as_ptr(unlinked_node), &this->list.alloc);
             return rusty::Option<T>(std::move(unlinked_node_shadow1.element));
         }
     }
-    rusty::Option<::Vec<T, A>> remove_current_as_list() {
+    rusty::Option<rusty::Vec<T, A>> remove_current_as_list() {
         auto unlinked_node = RUSTY_TRY_OPT(this->current_field);
         // @unsafe
         {
@@ -4701,10 +4707,10 @@ struct CursorMut {
             this->list.unlink_node(std::move(unlinked_node));
             unlinked_node.as_mut().prev = rusty::None;
             unlinked_node.as_mut().next = rusty::None;
-            return rusty::Option<::Vec<T, A>>(::Vec<T, A>(rusty::Option<rusty::ptr::NonNull<Node<T>>>(std::move(unlinked_node)), rusty::Option<rusty::ptr::NonNull<Node<T>>>(std::move(unlinked_node)), static_cast<size_t>(1), rusty::clone(this->list.alloc), rusty::PhantomData<rusty::Box<Node<T>, A>>{}));
+            return rusty::Option<rusty::Vec<T, A>>(rusty::Vec<T, A>(rusty::Option<rusty::ptr::NonNull<Node<T>>>(std::move(unlinked_node)), rusty::Option<rusty::ptr::NonNull<Node<T>>>(std::move(unlinked_node)), static_cast<size_t>(1), rusty::clone(this->list.alloc), rusty::PhantomData<rusty::Box<Node<T>, A>>{}));
         }
     }
-    ::Vec<T, A> split_after() {
+    rusty::Vec<T, A> split_after() {
         auto split_off_idx = (rusty::detail::deref_if_pointer_like(this->index_field) == rusty::detail::deref_if_pointer_like(this->list.len_field) ? 0 : rusty::detail::deref_if_pointer_like(this->index_field) + 1);
         if (rusty::detail::deref_if_pointer_like(this->index_field) == rusty::detail::deref_if_pointer_like(this->list.len_field)) {
             this->index_field = static_cast<size_t>(0);
@@ -4714,7 +4720,7 @@ struct CursorMut {
             return this->list.split_off_after_node(this->current_field, std::move(split_off_idx));
         }
     }
-    ::Vec<T, A> split_before() {
+    rusty::Vec<T, A> split_before() {
         auto split_off_idx = this->index_field;
         this->index_field = static_cast<size_t>(0);
         // @unsafe
@@ -4774,7 +4780,7 @@ export template<typename T, typename F, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct ExtractIf {
     using Item = T;
-    ::Vec<T, A>& list;
+    rusty::Vec<T, A>& list;
     rusty::Option<rusty::ptr::NonNull<Node<T>>> it;
     F pred;
     size_t idx;
@@ -4791,7 +4797,7 @@ struct ExtractIf {
                 this->idx += 1;
                 if ((this->pred)(rusty::addr_of_temp(node.as_mut().element))) {
                     this->list.unlink_node(std::move(node));
-                    return rusty::Option<T>(rusty::Box<auto>::from_raw_in(rusty::as_ptr(node), &this->list.alloc).element);
+                    return rusty::Option<T>(rusty::Box<std::remove_cvref_t<decltype((rusty::as_ptr(node)))>>::from_raw_in(rusty::as_ptr(node), &this->list.alloc).element);
                 }
             }
         }
@@ -4807,7 +4813,7 @@ struct ExtractIf {
 };
 
 void assert_covariance() {
-    const rusty::SafeFn<::Vec<std::string_view>(::Vec<std::string_view>)> a = +[](::Vec<std::string_view> x) -> ::Vec<std::string_view> {
+    const rusty::SafeFn<rusty::Vec<std::string_view>(rusty::Vec<std::string_view>)> a = +[](rusty::Vec<std::string_view> x) -> rusty::Vec<std::string_view> {
         return std::move(x);
     };
     const rusty::SafeFn<Iter<std::string_view>(Iter<std::string_view>)> b = +[](Iter<std::string_view> x) -> Iter<std::string_view> {

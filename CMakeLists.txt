@@ -137,7 +137,7 @@ endif()
 # ──────────────────────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-    foreach(_port rc_port arc_port vec_deque_port linked_list_port string_port)
+    foreach(_port rc_port arc_port vec_deque_port string_port)
         add_library(${_port} STATIC)
         target_sources(${_port}
             PUBLIC FILE_SET CXX_MODULES FILES
@@ -147,6 +147,17 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
         target_compile_features(${_port} PUBLIC cxx_std_23)
         target_compile_options(${_port} PRIVATE -O3 -DNDEBUG -march=native )
     endforeach()
+    # linked_list_port: full transpiled body (the transpiler fix landed
+    # for the Cluster A 'Box<auto>::new_in' regression — see
+    # transpiler/src/codegen.rs test_linked_list_box_new_in_with_typed_arg_*).
+    add_library(linked_list_port STATIC)
+    target_sources(linked_list_port
+        PUBLIC FILE_SET CXX_MODULES FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/linked_list_port/linked_list_port.cppm
+    )
+    target_include_directories(linked_list_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(linked_list_port PUBLIC cxx_std_23)
+    target_compile_options(linked_list_port PRIVATE -O3 -DNDEBUG -march=native )
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
