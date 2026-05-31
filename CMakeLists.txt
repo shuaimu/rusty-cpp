@@ -127,12 +127,13 @@ endif()
 
 # ──────────────────────────────────────────────────────────────────────
 # rc_port — transpiled rustc Rc port (library/alloc/src/rc.rs).
-# Patcher in docs/rc_port/post_transpile_patch.py covers ~12 transforms.
-# Box<auto>::* Cluster A closed, ::cast → identity-stub, namespace
-# fixups, visit_byte_buf stub. ~9 deeper errors remain (data_offset
-# scoping, rusty::ptr::addr_eq/from_ref missing, second-layer Cluster
-# A sites, Rc::is trait-method call). CMake target stays commented;
-# see docs/rc_port/STATUS.md for the full punch list.
+# Patcher in docs/rc_port/post_transpile_patch.py covers ~16 transforms.
+# Error count dropped 19 → 7. Remaining errors are deeper transpiler-
+# side issues: Rc::is trait-method lowering, rc_inner_layout_for_value_
+# layout scoping, Layout::for_value_raw missing, __TemplateArgs not
+# instantiated for std::string_view/span, multiple Rc::from() overload
+# collision, NonZero::MAX, second-layer Cluster A 'auto'.
+# See docs/rc_port/STATUS.md for the full punch list.
 #
 # if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 #    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")

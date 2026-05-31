@@ -162,6 +162,39 @@ def patch_namespace_using_prefix(cpp_out: Path) -> int:
     text = text.replace(
         ", ::cast)",
         ", cast_identity_stub)")
+
+    # `::data_offset<X>(...)` — qualified to global namespace, but the
+    # actual decl is in rc_port. Drop the `::` so unqualified lookup
+    # finds the in-namespace definition.
+    text = text.replace(
+        "::data_offset<",
+        "data_offset<")
+
+    # `NonNull<auto>::as_ptr(this_.ptr)` — Cluster A. `this_.ptr` is
+    # NonNull<RcInner<T>>, so NonNull<auto> should be NonNull<RcInner<T>>.
+    text = text.replace(
+        "NonNull<auto>::as_ptr(this_.ptr)",
+        "NonNull<RcInner<T>>::as_ptr(this_.ptr)")
+
+    # `rusty::ptr::addr_eq` and bare `ptr::addr_eq` — not surfaced;
+    # replace with rusty::ptr::eq which we just added.
+    text = re.sub(
+        r"(?<![A-Za-z0-9_:])(rusty::)?ptr::addr_eq\(",
+        "rusty::ptr::eq(", text)
+
+    # `rusty::ptr::from_ref` / `ptr::from_ref` — replace with
+    # addr_of_temp which gives `T*` for `const T&`.
+    text = re.sub(
+        r"(?<![A-Za-z0-9_:])(rusty::)?ptr::from_ref\(",
+        "rusty::addr_of_temp(", text)
+
+    # `size_of_val(x)` Rust intrinsic — auto-deduces type via decltype.
+    # The transpiled line `auto size_of_val = size_of_val(x)` is invalid
+    # (variable shadows the intrinsic). Inject a sizeof fallback.
+    text = re.sub(
+        r"auto size_of_val = size_of_val\(([^)]+)\)",
+        r"auto size_of_val = sizeof(decltype(\1))",
+        text)
     # Then inject the helper lambda at the top of the module (just
     # after the namespace open). Idempotent.
     cast_stub = ("namespace { inline constexpr auto cast_identity_stub = "
