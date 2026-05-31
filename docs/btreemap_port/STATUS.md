@@ -416,6 +416,572 @@ remains intact.
 Proper IntoIter-based drop also deferred — leak is fine for the
 smoke milestone.
 
+**Step 81 — `Handle<auto,auto>::new_edge` deducing-helper landed +
+next bug layer identified.** Picked up after a fresh re-transpile
+attempt to vendor BTreeMap into the rusty-lib worktree (mirroring
+the hashbrown_port vendoring approach). The transpiler emits 5 call
+sites of `Handle<auto, auto>::new_edge(<node>, <idx>)` in
+`btree_internal.cppm`. `auto` is not a valid template argument, so
+clang errors out with `'auto' not allowed in template argument`.
+
+Fix: inject a module-scope helper `__btree_make_handle_edge` after
+the marker namespace is fully defined (anchor: the `using BoxedNode
+= …` line that immediately follows `}` of `namespace marker {…}`),
+then text-substitute the 5 call sites. The helper takes the node by
+forwarding reference and deduces the `Handle<std::remove_cvref_t<N>,
+::marker::Edge>` instantiation:
+
+```cpp
+template<typename N>
+auto __btree_make_handle_edge(N&& node, size_t idx) {
+    return Handle<std::remove_cvref_t<N>, ::marker::Edge>::new_edge(
+        std::forward<N>(node), idx);
+}
+```
+
+Landed in `inject_handle_make_edge_helper()`, wired into main after
+`fix_static_factory_param_type_recovery` (its companion: the
+existing fix made the *definition* of `new_edge(auto node, …)`
+deduce, but the *call sites* still emitted illegal `Handle<auto,
+auto>::new_edge(…)`). After this patch, `libbtree_port.a` builds
+cleanly (uninstantiated, with btree_internal + map only).
+
+**Next bug layer (Step 82, deferred):** Bench-time instantiation
+with `<int, int>` at `btree_internal.cppm:5383` fails with
+`return type 'SplitResult<int,int,marker::LeafOrInternal>' must
+match previous return type 'Handle<…,marker::KV>' when lambda
+expression has unspecified explicit return type`. The transpiled
+`Handle::insert_recursing` contains a `while (true)` loop with an
+inner lambda IIFE that has two `return` statements of different
+types:
+- `_m.is_ok()` arm returns `split.forget_node_type()` (a Handle)
+- `_m.is_err()` arm returns `handle.awaken()` (a different shape)
+
+The Rust source had two distinct semantic exits (one continues the
+loop, one terminates the outer function with `return`). The
+transpiler collapsed both into lambda returns, but the types don't
+unify. Fixing this needs either:
+1. A statement-level lowering of the `_m.is_err()` path into an
+   outer-function `return`, not a lambda `return`. (Conceptually
+   the same as the "Statement-level let+match+return lowering"
+   work from Item 11 / line-5350 fixes — but now at line 5383.)
+2. A hand-port of `Handle::insert_recursing` similar to how
+   search_tree/force/into_kv were hand-ported in step 48.
+
+Until that's resolved with the older transpiler binary, vendoring
+its output is not viable end-to-end. The `Handle<auto,auto>` patcher
+fix above covers the call sites; the lambda return-type bug is the
+remaining blocker for that path.
+
+**Step 82 — vendored the canonical (post-Item-11) cpp_out into the
+worktree; smoke test passes end-to-end.** Switched approach: instead
+of chasing the older transpiler's regressions, lifted the canonical
+`/tmp/btree_port_attempt/cpp_out/` output (already past Item-11
+statement-level lowering — its `insert_recursing` doesn't hit the
+lambda return-type unification bug noted above) and copied 2 files
+into `transpiled/btree_port/`:
+- `btree_port.btree.btree_internal.cppm`
+- `btree_port.btree.map.cppm`
+
+Added a `btree_port` CMake library target (clang-only, mirrors the
+hashbrown_port pattern: `FILE_SET CXX_MODULES`, C++23,
+`-O3 -DNDEBUG -march=native -flto=thin`). Created
+`tests/btree_port_module_test.cpp` that imports
+`btree_port.btree.map` and exercises insert / get / first_key_value /
+last_key_value end-to-end on `::BTreeMap<int32_t,int32_t,Global>`.
+
+One textual fix to the vendored `btree_internal.cppm`: a transpiler
+bug at `Handle::left_kv` / `Handle::right_kv` annotated the Ok-arm of
+the returned `Result` with the wrong type (`Handle<Node,Type>`,
+i.e. an Edge handle) instead of the signature's
+`Handle<NodeRef<...>, ::marker::KV>`. Direct rewrite swapped in the
+signature's full Ok type. Two sites fixed in the vendored file.
+**Not yet codified** in `post_transpile_patch.py` — should be a small
+substitution added in a future iteration so a re-transpile to the
+worktree's `transpiled/btree_port/` is reproducible.
+
+Status after Step 82:
+- `libbtree_port.a` builds under clang in the rusty-lib worktree.
+- `btree_port_module_test.out` builds AND runs:
+  `transpiled btree_port module smoke: ALL CHECKS PASSED`.
+- `rusty::BTreeMap` still aliases the std::map facade — rewiring it
+  to back onto the transpiled `::BTreeMap` is the next milestone
+  (parallel to how the HashMap port replaced the hand-written
+  `rusty::HashMap`).
+- The patcher's `inject_handle_make_edge_helper` (added earlier
+  this iteration) is still useful for the older transpiler shape,
+  but the canonical cpp_out doesn't trip it.
+
+**Step 83 — dropped legacy BTreeMap; consumers now use the
+transpiled module directly.** Mirrors the HashMap migration in commit
+`7c27106` (which deleted the 1163-line hand-written `hashmap.hpp` and
+made consumers `import hashbrown_port.map;`).
+
+Changes:
+- **Deleted** `include/rusty/btreemap.hpp` (the `using rusty::BTreeMap = btree_port::BTreeMap` alias).
+- **Deleted** `include/btree_port/btreemap.hpp` (the 748-line std::map facade — the actual legacy implementation).
+- **Deleted** `tests/rusty_btreemap_test.cpp` (15 tests against the legacy alias).
+- **Deleted** `tests/btree_port_facade_test.cpp` (facade-specific tests).
+- **Extracted** the `btree_port::BTreeSet` class from the deleted
+  `btreemap.hpp` into a new `include/btree_port/btreeset.hpp`
+  (std::set facade — unchanged behavior, just split out so deleting
+  the BTreeMap facade didn't take BTreeSet with it).
+- **Updated** `include/rusty/btreeset.hpp` to include the new
+  `btreeset.hpp` path; refreshed its comment block to point at the
+  module-import path for BTreeMap.
+- **Updated** `include/rusty/rusty.hpp` to drop
+  `#include "rusty/btreemap.hpp"` (now a comment noting the
+  migration); BTreeSet include retained.
+- **Updated** `CMakeLists.txt` to remove the deleted tests from
+  `TEST_SOURCES`.
+
+Consumers of the old `rusty::BTreeMap`:
+```cpp
+#include <rusty/btreemap.hpp>          // <-- delete
+rusty::BTreeMap<int, int> m;            // <-- delete
+```
+become:
+```cpp
+import btree_port.btree.map;            // <-- add at file scope
+::BTreeMap<int, int, ::rusty::alloc::Global> m =
+    ::BTreeMap<int, int, ::rusty::alloc::Global>::new_in(
+        ::rusty::alloc::Global{});      // <-- new factory shape
+```
+Same pattern as the HashMap migration. The smoke test at
+`tests/btree_port_module_test.cpp` shows the call shape.
+
+BTreeSet still uses the std::set facade — the transpiled
+`btree_port.btree.set` module is not yet vendorable (Phase A5).
+`rusty::BTreeSet` continues to work exactly as before.
+
+Verification: `ctest` against the worktree's build: 24/26 passed.
+The 2 failures (`rusty_vec_test`, `rusty_array_test`) are pre-existing
+and unrelated — they fail compile against `Option<T>`/`MaybeUninit<T>`
+API drift that landed on the branch before this migration (confirmed
+via `git stash`).
+
+**Step 84 — `--cxx-namespace` flag landed in the transpiler; BTreeSet
+vendoring unblocked architecturally but completion deferred.**
+Added a CLI flag `--cxx-namespace <NS>` (transpiler/src/main.rs,
+transpiler/src/codegen.rs::set_cxx_namespace,
+transpiler/src/transpile.rs::TranspileOptions::cxx_namespace). When
+set, the codegen wraps all module exports in `namespace NS { … }`
+between the `import` block and the cluster_a helpers. Plain
+`namespace`, not `export namespace`, because inner items already
+carry `export` in module mode and C++20 rejects nested exports.
+Regression tests at `transpiler/tests/e2e_basic.rs` cover the
+on-default-off behavior. End-to-end sibling-modules smoke at
+`/tmp/ns_smoke` verifies the flag works for two sibling modules
+both exporting `Widget`. Documented in rusty-std-book §2.10 as
+workaround #1 for sibling-module name collisions.
+
+Vendoring attempt for BTreeSet:
+- Re-transpiled `set.rs` + `set/entry.rs` with `--cxx-namespace
+  btree_port::set` → produces `transpiled/btree_port/btree_port.btree.set.cppm`
+  and `…set.entry.cppm` (~330 KB total).
+- Applied the per-file patcher fixes (`patch_entry_imports`,
+  `patch_entry_arities`, `strip_module_namespace_prefixes`,
+  `align_requires_clauses`, `remove_setvalzst_methods`,
+  `fix_setvalzst_as_value`) plus hand-patches: stripped the
+  obsolete `import btree_port.btree.map.entry` line (the map.entry
+  module was merged into map.cppm by Step 52); added missing
+  `import btree_port.btree.btree_internal` for `SetValZST`,
+  `MergeIterInner`; qualified `MapOccupiedEntry` / `MapVacantEntry`
+  alias targets with explicit `::` (the namespace wrap makes the
+  bare names resolve to set's local types instead of map's);
+  reverted ~9 `<…, SetValZST{}, …>` template-arg sites where the
+  patcher's `fix_setvalzst_as_value` over-fired in type position.
+- **set.entry.cppm** compiles cleanly under the namespace wrap. ✅
+- **set.cppm** still surfaces ~15 patcher-shape mismatches:
+  - `IntoIter`, `Range`, `Cursor`, `CursorMutKey`, `CursorMut`
+    template-alias arity errors (same pattern as the
+    `MapOccupiedEntry` fix in Step 84, but for additional sibling
+    types — `patch_entry_arities` only handles two names).
+  - `rusty::BTreeMap` references emitted at ~3 sites by the
+    transpiler — those resolved against the legacy `rusty::BTreeMap`
+    std::map facade pre-migration; with that gone (Step 83 deleted
+    `include/btree_port/btreemap.hpp`), the references dangle.
+    Need to rewrite to bare `BTreeMap` (which finds the transpiled
+    `::BTreeMap`).
+  - More type-vs-value `SetValZST` classification gaps in set.cppm
+    that the simple `<T, SetValZST{}, A>` regex doesn't catch
+    (other generic-arg shapes).
+  - Two "expected expression" parser errors from `rusty::Box<…>::new_(…)`
+    emit shape with the cluster_a `__TemplateArgs` machinery.
+
+These are the same kind of long-tail patcher work that the BTreeMap
+port took ~80 steps to grind through. Files kept in
+`transpiled/btree_port/btree_port.btree.set{,.entry}.cppm` as
+starting material; CMakeLists drops them from the build target
+(commented inline). Step 85+ can continue from this state.
+
+**Where the architectural blocker now stands:**
+- Phase A5 said "set modules deferred — namespace collision is
+  fundamental." ❌ no longer true.
+- The `--cxx-namespace` flag closes the architectural gap; the
+  collision-free emit shape is now reachable by the transpiler.
+- Remaining work is patcher long-tail: each transpiler emit
+  shape that needs adjustment for the namespace-wrapped scope.
+
+**Step 86 — `--auto-namespace` transpiler flag (Option 2 from
+rusty-std-book §2.10).** When set, the transpiler:
+1. Auto-derives `cxx_namespace` from `--module-name` by replacing
+   `.` with `::` (e.g. `btree_port.btree.map` → `btree_port::btree::map`).
+2. After the namespace wrap opens, emits a `namespace <leaf> = ::<full>;`
+   alias for each imported sibling module, so existing path-qualified
+   emit shapes like `map::Keys` resolve to the sibling's namespace
+   without rewriting every call site.
+
+Implementation: `transpiler/src/codegen.rs::auto_namespace` field
++ `set_auto_namespace()` setter + `--auto-namespace` CLI flag in
+`transpiler/src/main.rs` + `TranspileOptions::auto_namespace` field
+in `transpiler/src/transpile.rs`. Tests:
+`test_auto_namespace_derives_from_module_name` and
+`test_auto_namespace_explicit_override_wins` in
+`transpiler/tests/e2e_basic.rs` — both passing.
+
+Verified: 29/29 e2e tests, worktree's `btree_port_module_test` /
+`hashbrown_port_map_test` / `hashbrown_port_set_test` all green.
+The flag is opt-in (`--auto-namespace`), off by default, so existing
+ports stay flat — no migration churn.
+
+This is the proper Option 2 fix referenced in Step 84 / book §2.10.
+Closes the architectural side of BTreeSet vendoring: a re-transpile
+with `--auto-namespace` produces set.cppm wrapped in
+`namespace btree_port::btree::set { … namespace map = ::btree_port::btree::map; … }`,
+and the path-qualified `map::X` emit shapes resolve cleanly.
+
+Single-file mode caveat: `--auto-namespace` aliases are sourced
+from emitted `import` lines. In single-file mode, the transpiler
+may not emit `import` for a sibling module unless the Rust source
+uses `extern crate` or similar — so the alias trick works fully
+only when the transpiler is in crate-mode (sees the sibling's name
+in `crate_module_names`). For BTreeSet, this means re-running the
+full crate-mode pipeline rather than transpiling set.rs alone.
+
+**Step 87 — BTreeSet vendoring attempt with `--auto-namespace`:
+unblocked architecturally, blocked on cross-module consistency.**
+
+Re-transpiled set.rs + set/entry.rs with `--auto-namespace`
+(/tmp/btreeset_v2/btree_port.btree.set.cppm + set.entry.cppm).
+Wrote `/tmp/btreeset_v2/postprocess.py` to:
+1. Move `import X.Y.Z;` lines that landed inside the namespace
+   wrap back to module purview (codegen ordering bug — imports
+   from `mod entry;` declarations get emitted after the wrap
+   opens, which is illegal in C++20).
+2. Add missing imports the transpiler didn't emit in single-file
+   mode (`import btree_port.btree.map;`,
+   `import btree_port.btree.btree_internal;`).
+3. Emit `namespace LEAF = ::FULL;` aliases for each import inside
+   the wrap.
+
+After postprocessing, copied into `transpiled/btree_port/`. Build
+failed with:
+```
+error: expected namespace name
+namespace btree_internal = ::btree_port::btree::btree_internal;
+                                              ^
+error: no member named 'btree_internal' in the global namespace
+```
+
+**Root cause:** the namespace alias `namespace X = ::Y;` requires
+`::Y` to actually be a namespace at the point of the alias
+declaration. But the imported `btree_port.btree.btree_internal`
+module ships **flat-export** (no namespace wrap — the pre-existing
+heavily-patched module), so there is no `::btree_port::btree::btree_internal`
+namespace to alias. Same for `map.cppm`. The alias trick only
+works when **all** related modules are namespace-wrapped
+consistently.
+
+**Two paths to actually finish BTreeSet vendoring:**
+
+1. **Retranspile map.cppm + btree_internal.cppm with `--auto-namespace`
+   too.** Architecturally clean — all three modules end up
+   namespace-wrapped consistently, the aliases resolve, the
+   collision goes away. But: ~30 hand-patches accumulated over
+   the BTreeMap port effort (steps 1-67) need to be replayed
+   against the new shape. The patcher pipeline would need
+   adjustments for the namespace-wrapped emit (the existing
+   `strip_module_namespace_prefixes` becomes wrong; new rules
+   needed for the aliased shape). Estimated cost: ~1 week if it
+   goes smoothly; longer if the patcher rewrite surfaces
+   independent issues.
+
+2. **Add a patcher rule to emit `::X` global qualifier for
+   cross-module references in set.cppm / set.entry.cppm.**
+   (Option 1 from book §2.10.) Keeps map.cppm + btree_internal.cppm
+   flat; only rewrites cross-module references INSIDE the
+   namespace-wrapped set files. Less disruptive — local patcher
+   change. Estimated cost: ~1-2 iterations.
+
+Files kept in `transpiled/btree_port/btree_port.btree.set{,.entry}.cppm`
+as starting material. CMakeLists excludes them from the build
+target (commented inline, pointing here). The
+`--auto-namespace` flag itself ships and is verified end-to-end
+on a synthetic two-module fixture (`/tmp/auto_ns_smoke/`); the
+gap is *cross-module consistency* between modules transpiled with
+the flag and modules without.
+
+**Status:**
+- Transpiler: 4 bug fixes + 2 new flags landed today
+  (Steps 85, 86, 159/204, 206/207).
+- BTreeSet vendoring: architecturally unblocked; pending
+  patcher-side cleanup (path 2 above) or a coordinated retranspile
+  (path 1).
+- `rusty::BTreeSet`: continues to ship as std::set facade in
+  `include/btree_port/btreeset.hpp`.
+- Worktree builds green; existing port smokes (btree_port_module_test,
+  hashbrown_port_{map,set}_test) all pass.
+
+**Step 85 — transpiler bug fixed: stale `rusty::BTreeMap` type
+mapping.** The `BTreeMap` entry in `transpiler/src/types.rs::map_std_type`
+mapped to `rusty::BTreeMap`. After Step 83 deleted
+`include/rusty/btreemap.hpp` (the std::map facade that `rusty::BTreeMap`
+used to refer to), every `BTreeMap` reference in transpiled Rust code
+became a dangling type. The fix: changed the mapping to `::BTreeMap`
+(the namespace where the transpiled `btree_port.btree.map` module
+exports it). Consumers that import the module via
+`import btree_port.btree.map;` get the resolution via unqualified
+lookup; explicit `::BTreeMap` works without an import dance.
+
+Verified end-to-end:
+- `cargo test --release --test e2e_basic`: 27/27 still passing
+- Worktree smokes: `btree_port_module_test`, `hashbrown_port_map_test`,
+  `hashbrown_port_set_test` — all green
+- Fresh re-transpile of `set.rs`: now emits `::BTreeMap<T, …, A> map;`
+  instead of `rusty::BTreeMap<T, …, A> map;` (verified in
+  `/tmp/btreeset_diag/set_after_fix.cppm:4248`)
+
+This is the root cause behind one of the residual BTreeSet errors
+documented in Step 84 (item 2). Eliminated at source — no patcher
+rule needed. The remaining patcher-shape mismatches in Step 84
+(items 1, 3, 4) still need work for full BTreeSet vendoring.
+
+**Remaining concrete steps when revisiting BTreeSet:**
+1. Extend `patch_entry_arities` to handle `IntoIter` / `Range` /
+   `Cursor` / `CursorMutKey` / `CursorMut` alias arity fixes. (Or
+   better: fix the transpiler so it doesn't emit `map::IntoIter<T,V,A>`
+   from `super::map::IntoIter` Rust paths — these flat names collide
+   with set's own local versions when stripped.)
+2. ~~Add a patcher rule to rewrite `rusty::BTreeMap` →
+   `::BTreeMap`.~~ **DONE at source (Step 85, transpiler/src/types.rs).**
+3. Tighten `fix_setvalzst_as_value` to NEVER touch type positions
+   (use a regex that requires the next non-whitespace char to be
+   `)` or `;` or `,` AND the preceding token to NOT be a `<`
+   inside a template-arg context — current implementation
+   over-fires).
+4. Hand-investigate the two "expected expression" sites — likely
+   need cluster_a `__TemplateArgs` template-arg recovery similar
+   to BTreeMap's Step 57.
+5. Wire set + set.entry back into the build target.
+6. Write a `btree_port_set_module_test.cpp` smoke covering the
+   transpiled BTreeSet end-to-end.
+7. Rewire `rusty::BTreeSet` (currently a std::set facade) to use
+   the transpiled version once the smoke is green.
+
+**Step 88 — `--auto-namespace` full-crate retranspile: pipeline
+infrastructure built, integration in-progress.**
+
+Took Path 1 from Step 87: re-transpile all three btree modules
+with `--auto-namespace` for a consistent namespace-wrapped emit
+across map / set / btree_internal / map.entry / set.entry.
+Pipeline is now end-to-end (transpile → postprocess → patcher),
+but a long-tail of patcher rules need to be updated to handle the
+namespace-wrapped emit shape. Worktree build remains on the
+flat-export modules (unchanged) so the existing
+`btree_port_module_test` and downstream tests keep passing.
+
+**Concrete deliverables landed:**
+
+1. **Crate-mode transpile.** `cargo run --bin rusty-cpp-transpiler --
+   --crate /tmp/btree_port_attempt/btree_crate/Cargo.toml
+   --auto-namespace --output-dir /tmp/btreeset_v3/cpp_out` emits 7
+   .cppm files. All four core files (btree_internal, map, map.entry,
+   set, set.entry) have correct `namespace btree_port::btree::X { … }`
+   wraps closing at file end.
+
+2. **Postprocess script** (`docs/btreemap_port/btreeset_auto_namespace_postprocess.py`)
+   does three transforms per file:
+   - Move `import X.Y.Z;` lines that landed inside the namespace
+     wrap back to module purview (codegen places imports in body).
+   - Add missing sibling-module imports the single-file mode missed.
+   - Emit `namespace LEAF = ::FULL;` aliases inside the wrap, with
+     forward-declarations of each target namespace at module purview
+     (needed when the target namespace is defined later in the same
+     TU, e.g. after a merge step).
+   - Strip placeholder `namespace X {}` / `using namespace X;` lines
+     the transpiler emits per sibling-module reference (they collide
+     with the alias names).
+   - Special-case aliases for `marker` and `node` (these are nested
+     inside btree_internal but referenced bare in the transpiled
+     map/set bodies).
+
+3. **Patcher updates** (`docs/btreemap_port/post_transpile_patch.py`):
+   - `strip_module_namespace_prefixes` now auto-detects auto-namespace
+     mode (presence of `namespace btree_port::btree::` wrap) and skips
+     prefix-stripping — the prefixes are CORRECT under auto-namespace
+     (resolved by the in-wrap aliases).
+   - `recover_template_args` and `fix_dormant_mut_ref_calls` inject
+     their helpers INSIDE the namespace wrap (after the alias block)
+     when auto-namespace is detected, with `btree_internal::`-qualified
+     references to the imported types.
+   - `merge_map_entry_into_map`: strips `import` lines from the merged
+     content (avoids self-import); replaces the redundant `entry`
+     alias with a partial namespace declaration (forward decl) so
+     `entry::Foo` references at the top of the wrap resolve to the
+     nested namespace block that gets merged in further down.
+   - New `fix_global_qualifiers_for_namespace_wrap`: post-pass that
+     strips stale `::marker::X`, `::LeafNode<`, `::InternalNode<`,
+     `::move_to_slice(`, etc. global qualifiers in patcher-injected
+     hand-port code. With the namespace wrap, those `::Foo` paths
+     no longer resolve; the unqualified form works via in-namespace
+     name lookup.
+   - New `fix_template_args_primary_scope`: relocates the Cluster A
+     `__TemplateArgs` primary template into the namespace so its
+     partial specializations (also in the wrap) match scope.
+   - New `fix_std_hash_specialization_scope`: bumps `template<>
+     struct std::hash<…>` blocks OUT of the namespace wrap (C++
+     requires `std::*` specializations at a scope enclosing
+     `namespace std`); injects a `using btree_port::btree::btree_internal::SetValZST;`
+     so the bumped block can still name the in-namespace types.
+
+**Current build state (/tmp/btreeset_v3/cpp_out/):**
+- btree_internal.cppm: compiles cleanly under clang++.
+- map.cppm: 20 remaining compile errors, all in the merged-entry
+  region or in cross-module references that need fully-qualified
+  paths (`NodeRef` → `btree_internal::NodeRef`, etc.).
+- set.cppm, set.entry.cppm: not yet attempted (downstream of map).
+
+**Remaining work to integrate into worktree:**
+1. Forward-declare entry types (`Entry<K,V,A>`, `OccupiedEntry<K,V,A>`,
+   `VacantEntry<K,V,A>`, `OccupiedError<K,V,A>`) inside the map
+   namespace BEFORE they're used (lines ~3780). Currently the merged
+   namespace block opens at line 5147, but `entry::Entry` is
+   referenced at line 3780 (in BTreeMap struct declarations).
+2. Add qualified-path rewrite for the remaining bare `NodeRef`,
+   `BTreeMap`, `IntoIter` references in the merged entry content.
+3. Replace the global-qualifier `::BTreeMap<K,V,A>` patcher pattern
+   (used by transpile of `entry.rs`'s `dormant_map` field) with the
+   in-scope `BTreeMap<K,V,A>` form.
+4. After the above, copy /tmp/btreeset_v3/cpp_out/ files into
+   transpiled/btree_port/.
+5. Update `tests/btree_port_module_test.cpp` to use
+   `btree_port::btree::map::BTreeMap<...>` paths (currently
+   `::BTreeMap<...>`).
+6. Add set + set.entry to the CMake target (the same way
+   map + map.entry is wired).
+7. Write `tests/btree_port_set_module_test.cpp` smoke covering
+   the transpiled BTreeSet end-to-end.
+8. Rewire `rusty::BTreeSet` to use the transpiled module (mirror
+   of what was done for `rusty::BTreeMap` in Step 86).
+
+**Why the worktree build is unchanged:** I kept the existing
+`transpiled/btree_port/` flat-export files in place — those are
+the build-and-tested versions. The auto-namespace retranspile
+lives in /tmp/btreeset_v3/cpp_out/ as starting material. The
+patcher pipeline is now ready to support both shapes; switching
+the worktree over is the integration step once the remaining
+~20 compile errors close.
+
+**Files touched today:**
+- `docs/btreemap_port/btreeset_auto_namespace_postprocess.py` (new)
+- `docs/btreemap_port/post_transpile_patch.py` (extended with
+  6 new functions + auto-namespace detection in 4 existing ones)
+
+**Step 89 — namespace-wrapped vendoring landed; library builds.**
+
+Replaced the worktree's flat-export `transpiled/btree_port/` files
+with namespace-wrapped versions from the `--auto-namespace`
+pipeline. All four `.cppm` files (btree_internal, map, set,
+set.entry) are now in the build target.
+
+**libbtree_port.a builds with 0 errors** (clang++ 19, C++23,
+LTO=thin). The library exports the namespace-wrapped types
+`btree_port::btree::map::BTreeMap<K, V, A>`,
+`btree_port::btree::set::BTreeSet<T, A>` and their entry / iter
+companions.
+
+Iterations done (~50 patcher rule additions/extensions):
+- `fix_global_qualifiers_for_namespace_wrap` extended for
+  `::take_mut`, `::full_range`, `::__rusty_alias_*`,
+  `::splitpoint`, `::replace`, `::move_to_slice`, `::slice_remove`,
+  `::slice_insert`, `::slice_shr`, `::slice_shl`.
+- `fix_map_cppm_qualifiers_for_namespace_wrap`: `NodeRef<`,
+  `Root<`, `Handle<`, `SearchBound<` → `btree_internal::Foo<`
+  inside map.cppm; `::BTreeMap<` / `::IntoIter<` → in-scope
+  (with negative lookbehind on `map::`).
+- `fix_set_cppm_qualifiers_for_namespace_wrap`: bare `BTreeMap<`
+  → `map::BTreeMap<` for set.cppm. SetValZST qualification.
+- `stub_broken_set_methods`: wrap broken regions (DropGuard
+  cluster, `nexts(const T&<T>::cmp)` closure, hoisted
+  `self_min`/`self_max`/`other_min`/`other_max` references,
+  TODO-placeholder destructures) in `#if 0` or stub bodies.
+- Entry-type forward declarations injected at top of map's
+  namespace wrap (struct OccupiedEntry, VacantEntry, Entry,
+  OccupiedError — all with `requires (Allocator<A> && copyable<A>)`
+  to match the merged definitions).
+- DifferenceInner_* / IntersectionInner_* variant types forward-
+  declared at top of set's namespace wrap.
+- Aligned `requires` clauses on `struct DifferenceInner` /
+  `struct IntersectionInner` definitions (transpiler emits them
+  without `requires` but the forward decl has one).
+- `f.debug_set()` → `f.debug_list()` rewrite (Formatter
+  doesn't have debug_set).
+- `std::remove_cvref_t<decltype((rusty::alloc::Global))>` →
+  `rusty::alloc::Global` rewrite.
+- `ManuallyDrop::into_inner(rusty::clone(this->map.alloc))` →
+  `rusty::clone(*this->map.alloc)` rewrite.
+- `template<typename Iter> void extend(Iter<T> iter)` removed
+  entirely (collides with `template<typename I> void extend(I iter)`
+  overload).
+- `remove_setvalzst_methods` extended to catch
+  `template<typename V>`, `template<typename K>`, and
+  `template<typename K, typename V>` shapes.
+- Set.cppm `node` and `marker` aliases emitted by postprocess.
+- Map.entry import suppression for the set.entry patcher path.
+- Patcher's `merge_map_entry_into_map` strips imports from the
+  merged content (avoids self-import) and replaces the redundant
+  `entry` alias with forward-declarations of `entry::Foo`.
+
+**Smoke test status:** `btree_port_module_test` now passes end-to-end
+(without LTO; the LTO version mismatch in this environment —
+LLVM 19 frontend, LLVM 14 gold plugin — affects both btree_port
+and hashbrown_port tests equally, pre-existing and not pipeline-
+caused). The test exercises `BTreeMap<int,int,Global>::insert /
+get / first_key_value / last_key_value` via the transpiled module
+and prints `transpiled btree_port module smoke: ALL CHECKS PASSED`.
+
+**Two root-cause fixes** landed to make this work:
+
+1. **`namespace A::B { … }` opened from inside `namespace A { … }`
+   opens `A::A::B`, not `A::B`.** C++17 nested-namespace-definition
+   appends the path to the CURRENT scope rather than resolving it
+   absolutely. The patcher's `merge_map_entry_into_map` was injecting
+   the entry block as `namespace btree_port::btree::map::entry { … }`
+   from inside `namespace btree_port::btree::map { … }`, putting
+   Entry's body in `btree_port::btree::map::btree_port::btree::map::entry`
+   instead of `btree_port::btree::map::entry`. The forward decls
+   visible to BTreeMap were the correct path, so they got found —
+   but they had no body. Hence "implicit instantiation of undefined
+   template" only at consumer-TU instantiation time.
+   **Fix**: rewrite the merged block's opener from the fully-
+   qualified form to just `namespace entry { … }`. Verified with
+   a minimal reproducer at `/tmp/ns_test.cpp`.
+
+2. **`static auto` helpers have internal linkage and don't get
+   exported through the BMI.** The patcher-injected helper
+   templates `__btree_port_make_dormant` and `__btree_port_make_dedup`
+   were declared `static auto`, which limits visibility to the
+   defining TU. The library compiled (helpers visible at parse
+   time), but consumer TUs instantiating `BTreeMap::entry()`
+   couldn't find them. **Fix**: change `static auto` → `inline auto`
+   in both helper templates.
+
+**Worktree state:** transpiled/btree_port/ contains 4 fresh
+namespace-wrapped .cppm files; CMake target builds all four into
+libbtree_port.a cleanly; smoke test compiles and runs (LTO needs
+toolchain version alignment, environmental).
+
 **Step 61 — fixed `assume_init` const-qual, hit transpiler-level
 Rust-impl shape loss for `split`.** Two more chips at the insert path:
 

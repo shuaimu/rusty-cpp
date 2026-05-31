@@ -54,6 +54,8 @@ Sibling docs:
   - [2.6 Bench discipline](#26-bench-discipline)
   - [2.7 When to stop](#27-when-to-stop)
   - [2.8 Estimating effort for the next port](#28-estimating-effort-for-the-next-port)
+  - [2.9 Aux-module merging (BTreeMap-style)](#29-aux-module-merging-btreemap-style)
+  - [2.10 Sibling-module name collisions in C++20 modules](#210-sibling-module-name-collisions-in-c20-modules)
 - [Chapter 3 — Port priority queue](#chapter-3--port-priority-queue)
   - [3.1 Ranking criteria](#31-ranking-criteria)
   - [3.2 Tier 1 — High-value transpiles](#32-tier-1--high-value-transpiles)
@@ -1689,6 +1691,442 @@ module-attachment cycle is blocking.
 list. To enable a new aux module, add it to the list and re-run.
 If it crashes with new emit errors, document them in the list's
 "deferred" section so the next attempt knows what to expect.
+
+### 2.10 Sibling-module name collisions in C++20 modules
+
+When a Rust crate has two sibling modules that declare same-named
+types (`btree::map::Entry` and `btree::set::Entry`,
+`hashbrown::raw_entry::OccupiedEntry` and
+`hashbrown::rustc_entry::OccupiedEntry`), naïve transpilation hits
+a fundamental C++20 module limitation that doesn't exist in Rust.
+This bites every multi-sibling-module port and the workaround is
+nontrivial. Worth understanding once.
+
+#### The mismatch
+
+Rust resolves same-named types by module path. C++ resolves them by
+namespace. C++20 named modules **don't** form namespaces — module
+names control *visibility* (`export` vs hidden) and *attachment*
+(which TU owns the symbol's linkage) but **not identifier scoping**.
+A name `export`ed from a module becomes a global-scope name in any
+TU that `import`s it.
+
+#### Worked example
+
+Rust — same-named types in two modules, no problem:
+```rust
+// src/foo.rs
+pub struct Widget { pub x: i32 }
+
+// src/bar.rs
+pub struct Widget { pub y: f64 }
+
+// src/main.rs
+fn main() {
+    let a = foo::Widget { x: 1 };    // path disambiguates
+    let b = bar::Widget { y: 1.0 };  // path disambiguates
+}
+```
+
+C++ headers with namespaces — same-named types in two namespaces,
+no problem:
+```cpp
+// foo.hpp
+namespace foo { struct Widget { int x; }; }
+
+// bar.hpp
+namespace bar { struct Widget { double y; }; }
+
+// main.cpp
+#include "foo.hpp"
+#include "bar.hpp"
+int main() {
+    foo::Widget a{1};    // namespace disambiguates
+    bar::Widget b{1.0};
+}
+```
+
+C++20 modules without namespace wrapper — **collision**:
+```cpp
+// foo.cppm
+export module foo;
+export struct Widget { int x; };       // attaches to global scope
+
+// bar.cppm
+export module bar;
+export struct Widget { double y; };    // also global scope → collides
+
+// main.cpp
+import foo;
+import bar;
+int main() {
+    Widget w;   // ERROR: redeclaration — two `Widget`s in same scope
+}
+```
+
+There's no `foo::Widget` syntax in C++ for `import foo;`. The module
+name `foo` controls visibility and linkage, **not** identifier
+scoping. As soon as both `foo` and `bar` export `Widget`, an
+importing TU sees two declarations of `Widget` at the same scope
+— identical to including two `.hpp` files that both declare a global
+`struct Widget`.
+
+#### The fix
+
+Wrap exports in a real C++ namespace inside the module:
+
+```cpp
+// foo.cppm
+export module foo;
+export namespace foo {              // <-- the disambiguator
+    struct Widget { int x; };
+}
+```
+
+Consumers then write either `foo::Widget` or pull names in via
+`using`:
+
+```cpp
+import foo;
+import bar;
+
+// Explicit:
+foo::Widget a{1};
+bar::Widget b{1.0};
+
+// Or pull in:
+using foo::Widget;
+Widget c{1};
+```
+
+#### Ergonomics: not worse than Rust
+
+A common worry is "but then users have to qualify everything." The
+ergonomics are **symmetric** with Rust — neither language gives you
+unqualified short names automatically:
+
+| To use short `Widget` | Rust | C++ (header or module-with-namespace) |
+|---|---|---|
+| Fully qualified | `foo::Widget` | `foo::Widget` |
+| Pull one name | `use foo::Widget;` | `using foo::Widget;` |
+| Pull all names | `use foo::*;` | `using namespace foo;` |
+| Automatic | (only the prelude: `Vec`, `Option`, …) | (only the GMF: no auto-import) |
+
+So the user-experience cost of "transpiler wraps each module's
+exports in `namespace X::Y::Z { … }`" is exactly the same cost
+Rust callers already pay — `use crate::X::Y::Z::*;` or full path
+qualification.
+
+#### Why the transpiler picks flat exports today
+
+For single-module ports, flat `export struct Foo { … }` lets
+consumers write `Foo` with zero ceremony. It's the path of least
+resistance for the 90%-case. The transpiler doesn't synthesize
+namespace wrappers because there's no clean 1-to-1 mapping from
+"Rust module path" to "C++ namespace path" — Rust's module tree
+is deep (`crate::collections::btree::set`) and the transpiler
+often merges sibling modules into one file (see §2.9 aux-module
+merging). Picking a namespace name per merged file would be
+arbitrary.
+
+#### Workarounds when collisions appear
+
+In order of cost:
+
+1. **`--cxx-namespace <NS>` transpiler flag** — opt-in, wraps the
+   whole module's exports in `namespace NS { … }`. Sibling
+   modules pick distinct `NS` values and stop colliding. Off by
+   default so existing ports keep working flat. New ports with
+   sibling-name conflicts should turn it on from day 1.
+
+   Use:
+   ```
+   rusty-cpp-transpiler input.rs --module-name foo \
+       --cxx-namespace ns_foo -o foo.cppm
+   rusty-cpp-transpiler other.rs --module-name bar \
+       --cxx-namespace ns_bar -o bar.cppm
+   ```
+
+   Generates:
+   ```cpp
+   // foo.cppm
+   export module foo;
+   namespace ns_foo {
+       export struct Widget { … };
+       …
+   } // namespace ns_foo
+   ```
+
+   Consumers then qualify as `ns_foo::Widget` or pull names in
+   with `using namespace ns_foo;` — same UX as Rust's
+   `use crate::foo::*;` (see ergonomics table above).
+
+   Note: the wrapper is plain `namespace`, not `export namespace`,
+   because inner items already carry their own `export` keyword
+   in module mode. C++20 rejects nested `export` declarations,
+   so the outer wrapper stays unexported and exports are attached
+   per-item to live under the namespace's qualifier.
+
+2. **Rename one side** — the hashbrown port does this for
+   `raw_entry` vs `rustc_entry`: the patcher rewrites all
+   references to one of the sibling's exports to a distinct name
+   (`RawOccupiedEntry` etc.). Works when the renamed type doesn't
+   need to be a stable public API. Older approach — option 1 is
+   strictly easier now.
+
+3. **Replace the colliding port with a shim over a sibling** —
+   the BTreeSet path. `BTreeSet<T>` is equivalent to
+   `BTreeMap<T, ()>`; instead of porting `set.rs` at all, ship a
+   ~30-line wrapper over the already-vendored `BTreeMap`. Throws
+   away the transpiled set code but eliminates the collision
+   entirely.
+
+4. **Universal fix: namespace-wrap every module's exports** by
+   default in the transpiler. The right long-term play. Costs
+   every consumer one `using namespace btree_port::btree::map;`
+   line. Same as Rust's `use` cost. Not done because pre-existing
+   ports rely on the flat-export shape and migrating them all is
+   a separate project. Option 1 (`--cxx-namespace`) is the
+   per-port-opt-in incremental version of this.
+
+#### Concrete instances in this repo
+
+- **`hashbrown::raw_entry` vs `hashbrown::rustc_entry`** — both
+  export `OccupiedEntry` / `VacantEntry`. Patcher renames the
+  rustc_entry side via text substitution (see Chapter 5 / Step
+  190 in `docs/btreemap_port/STATUS.md`). Predates the
+  `--cxx-namespace` flag; future re-transpiles could use the
+  flag instead.
+- **`btree::map` vs `btree::set`** — both export `Entry`,
+  `OccupiedEntry`, `VacantEntry`. BTreeSet currently stays as a
+  `std::set`-backed facade (`include/btree_port/btreeset.hpp`),
+  but with `--cxx-namespace` now landed, vendoring the set
+  module under its own namespace is the cleanest path forward.
+- **Future ports** (`VecDeque`, `BinaryHeap`, etc.) that don't
+  have sibling modules with same-named types won't hit this.
+  Multi-module ports with shared type names (the
+  `iter::adapters::*` family, if ever ported) should turn on
+  `--cxx-namespace` from the first transpile.
+
+#### Verifying the flag locally
+
+A minimal end-to-end check that the wrapper compiles and links:
+
+```rust
+// foo_src.rs
+pub struct Widget { pub x: i32 }
+```
+```rust
+// bar_src.rs (sibling module, same struct name)
+pub struct Widget { pub y: f64 }
+```
+```cpp
+// main.cpp
+import foo;
+import bar;
+int main() {
+    ns_foo::Widget a{1};
+    ns_bar::Widget b{1.5};
+    (void)a; (void)b;
+    return 0;
+}
+```
+```
+rusty-cpp-transpiler foo_src.rs --module-name foo \
+    --cxx-namespace ns_foo -o foo.cppm
+rusty-cpp-transpiler bar_src.rs --module-name bar \
+    --cxx-namespace ns_bar -o bar.cppm
+# Then build with clang++-19 + CMake 3.28+ + Ninja; consumer compiles
+# and runs cleanly. Without --cxx-namespace, the C++ compile errors
+# with "redeclaration of `struct Widget`".
+```
+
+Regression tests covering both the flat (off) and namespace-wrapped
+(on) shapes live in `transpiler/tests/e2e_basic.rs`
+(`test_cxx_namespace_off_by_default` and
+`test_cxx_namespace_wraps_exports`).
+
+#### Related: cross-module *type references* (not just exports)
+
+The export collision discussed above is one symptom of "C++20 module
+names don't form namespaces." A second symptom shows up when one
+transpiled module *uses* types from a sibling module — i.e.,
+references at call sites rather than declarations at export sites.
+
+Rust source in `set.rs`:
+```rust
+use super::map::{self, BTreeMap, Keys};
+
+pub struct BTreeSet<T, A: Allocator + Clone = Global> {
+    map: BTreeMap<T, SetValZST, A>,           // unqualified — via the `use`
+}
+
+pub struct IntoIter<T, A: Allocator + Clone = Global> {
+    iter: super::map::IntoIter<T, SetValZST, A>,   // path-qualified
+}
+```
+
+The `use super::map::{self, …};` brings *both* the `map` module
+itself (the `self` part) and the listed names into scope. Inside
+this file, all four spellings are valid Rust:
+- `Keys` (via `use`)
+- `map::Keys` (via the `self` import of the module)
+- `super::map::Keys` (full path)
+- `crate::btree::map::Keys` (absolute path)
+
+The transpiler picks the path-qualified form for emit:
+```cpp
+// set.cppm
+struct BTreeSet<T, A> {
+    ::BTreeMap<T, SetValZST, A> map;             // ← post Step 85 fix
+};
+struct IntoIter<T, A> {
+    map::IntoIter<T, SetValZST, A> iter;         // ← still emits `map::`
+};
+struct Range<T> {
+    map::Range<T, SetValZST> iter;
+};
+```
+
+`::BTreeMap` now resolves cleanly (Step 85 fixed the type-map). But
+`map::IntoIter`, `map::Range`, `map::Keys` etc. emit a stale `map::`
+prefix that **has no C++ meaning**: there is no `map` namespace —
+`import btree_port.btree.map;` makes those names available at *global
+scope*, not under any namespace.
+
+#### How the patcher masks it today
+
+`docs/btreemap_port/post_transpile_patch.py::strip_module_namespace_prefixes`
+does a textual `map::` → `` (empty) substitution. After the strip,
+the emit reads:
+```cpp
+IntoIter<T, SetValZST, A> iter;     // bare name
+```
+…which works when all of these hold:
+1. The current file is **not** namespace-wrapped (flat exports).
+2. The sibling module's exports are at **global scope**.
+3. The current file doesn't define its own type with the same bare
+   name (no shadow).
+
+For BTreeSet, condition 3 fails: set.cppm defines its *own* `IntoIter<T, A>`
+(a 2-param struct wrapping the map's iterator). After the strip, the
+bare `IntoIter<T, SetValZST, A>` lookup finds set's local 2-param
+`IntoIter` first → "too many template arguments" error. The `--cxx-namespace`
+wrap (which fixes the export-collision side) makes condition 3 worse
+because the local `IntoIter` is in a closer scope than the global one.
+
+#### Three ways to fix it
+
+In order of "fixedness":
+
+1. **Transpiler emits `::X` instead of `map::X`.** The `map::` was
+   never a valid C++ prefix; the only sound rendering of "the
+   sibling module's exported `X`" is the global qualifier (or the
+   namespace path, if both sides are namespace-wrapped). Fix at
+   codegen: when resolving a Rust path that crosses a sibling
+   C++20 module boundary, emit `::X`.
+
+2. **Transpiler emits the full C++ namespace path** when the
+   sibling was transpiled with `--cxx-namespace foo::bar`. This is
+   the spec-correct form (Rust paths map 1-to-1 to C++ namespace
+   paths). Requires crate-mode plumbing so each file knows the
+   namespace of its siblings.
+
+3. **Patcher rewrites `map::` → `::` instead of stripping.** A
+   one-file change in the post-transpile patcher. Doesn't help
+   other ports without their own patcher updates, and leaves the
+   transpiler still emitting invalid C++.
+
+#### Update: Option 2 implemented (`--auto-namespace` flag)
+
+After discussion, we went with **Option 2** as the spec-correct
+end-state. Landed in `transpiler/src/codegen.rs` +
+`transpiler/src/main.rs` (Step 207 in `docs/btreemap_port/STATUS.md`).
+
+Behavior when `--auto-namespace` is passed:
+
+1. **Auto-derive the C++ namespace from the module name.** Replace
+   `.` with `::`. So `--module-name btree_port.btree.map` →
+   `namespace btree_port::btree::map { … }`. No need to pass
+   `--cxx-namespace` separately.
+2. **Emit namespace aliases for each imported sibling.** After
+   the namespace wrap opens, for every `import X.Y.Z;` already
+   emitted, the transpiler adds `namespace Z = ::X::Y::Z;` (where
+   `Z` is the leaf segment of the imported module). Existing
+   path-qualified emit shapes like `map::Keys`, `btree_internal::SetValZST`
+   continue to compile because there's now a real `map` /
+   `btree_internal` namespace alias in scope, pointing at the
+   sibling's namespace.
+3. **`--cxx-namespace <override>` still wins** when both are
+   passed — the explicit value takes precedence over the
+   auto-derived one. Lets a port pick a non-default namespace if
+   needed.
+
+Worked example after the change:
+
+```cpp
+// map.cppm — transpiled with --module-name btree_port.btree.map --auto-namespace
+export module btree_port.btree.map;
+namespace btree_port::btree::map {
+    export struct Widget { int x; };
+    // …
+} // namespace btree_port::btree::map
+```
+
+```cpp
+// set.cppm — same flags
+export module btree_port.btree.set;
+import btree_port.btree.map;
+import btree_port.btree.btree_internal;
+namespace btree_port::btree::set {
+    namespace map = ::btree_port::btree::map;                    // <-- auto alias
+    namespace btree_internal = ::btree_port::btree::btree_internal;
+
+    export struct BTreeSet {
+        map::BTreeMap<T, btree_internal::SetValZST> inner;        // resolves via alias
+    };
+} // namespace btree_port::btree::set
+```
+
+```cpp
+// Consumer code
+import btree_port.btree.set;
+using namespace btree_port::btree::set;   // or full qualifier on each use
+BTreeSet<int> s;
+```
+
+Option 1 (emit `::X` global qualifier) was the smaller fix.
+Option 2 (the namespace tree above) is bigger but spec-correct —
+the resulting C++ structure mirrors Rust's module tree 1:1, with
+the C++ namespace path acting as the C++ analogue of Rust's
+module path.
+
+Tests covering the new behavior (`transpiler/tests/e2e_basic.rs`):
+- `test_auto_namespace_derives_from_module_name` — verifies the
+  auto-derived namespace wrap
+- `test_auto_namespace_explicit_override_wins` — verifies
+  `--cxx-namespace` precedence over `--auto-namespace`
+
+Status of options after this lands:
+
+- **Option 1** (`::X` global qualifier) — would no longer be
+  needed for ports that opt into `--auto-namespace`. May still be
+  worth as a follow-up codegen fix for the *flat-export* shape
+  (where the transpiler currently emits the broken `map::X`
+  unconditionally; the patcher strips it). Not blocking.
+- **Option 2** — implemented. Opt-in via `--auto-namespace`
+  flag. Existing ports keep flat-export shape; new ports
+  (or BTreeSet vendoring) opt in.
+- **Option 3** (patcher rewrite) — superseded by Option 2 for
+  ports that opt in. Strip-prefix patcher rule stays in place
+  for legacy flat-export ports.
+
+#### Takeaway
+
+When picking a port from Chapter 3's queue: check whether the
+rustc source has sibling modules that each declare types with
+the same name. If yes, plan for the workaround as part of the
+port's Phase A — not as a surprise during Phase D wiring.
 
 ---
 

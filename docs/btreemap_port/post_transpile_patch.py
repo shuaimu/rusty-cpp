@@ -225,7 +225,11 @@ def remove_setvalzst_methods(path: Path) -> None:
             i += 1
             continue
         # Look for `    template<typename T>` (4-space indent inside struct).
-        if line.rstrip() == "    template<typename T>" and i + 1 < n:
+        if (line.rstrip() == "    template<typename T>"
+            or line.rstrip() == "    template<typename V>"
+            or line.rstrip() == "    template<typename K>"
+            or line.rstrip() == "    template<typename K, typename V>"
+           ) and i + 1 < n:
             # Scan forward to find method-block end (closing `}` at indent 4).
             # Capture from i through the matching `    }` line.
             j = i
@@ -269,11 +273,11 @@ def remove_setvalzst_methods(path: Path) -> None:
                 cluster_end = block_end
                 k = block_end + 1
                 while k < n:
-                    if lines[k].rstrip() == "" and k + 1 < n and lines[k + 1].rstrip() == "    template<typename T>":
+                    if lines[k].rstrip() == "" and k + 1 < n and lines[k + 1].rstrip() in ("    template<typename T>", "    template<typename V>", "    template<typename K>", "    template<typename K, typename V>"):
                         # blank between methods
                         k += 1
                         continue
-                    if lines[k].rstrip() == "    template<typename T>":
+                    if lines[k].rstrip() in ("    template<typename T>", "    template<typename V>", "    template<typename K>", "    template<typename K, typename V>"):
                         # find this method's end too
                         m = k
                         d = 0
@@ -519,24 +523,51 @@ def recover_template_args(path: Path) -> None:
 
     if n_total:
         # If `__btree_port_make_dedup<` was substituted in, also
-        # inject the helper definition right after the imports.
+        # inject the helper definition. Under auto-namespace mode the
+        # injection goes INSIDE the namespace wrap (so unqualified
+        # `DedupSortedIter` resolves via the `btree_internal` alias);
+        # otherwise it goes at module purview after the last import.
         if "__btree_port_make_dedup<" in src:
+            auto_ns = "namespace btree_port::btree::" in src
+            type_ref = (
+                "btree_internal::DedupSortedIter" if auto_ns
+                else "DedupSortedIter"
+            )
             helper = (
                 "\n// btree_port port: DedupSortedIter deduction helper "
                 "injected by post_transpile_patch.py\n"
                 "template<typename __K, typename __V, typename __It>\n"
-                "static auto __btree_port_make_dedup(__It __it) {\n"
-                "    return DedupSortedIter<__K, __V, __It>"
+                "inline auto __btree_port_make_dedup(__It __it) {\n"
+                f"    return {type_ref}<__K, __V, __It>"
                 "::new_(std::move(__it));\n"
                 "}\n"
             )
             import re
-            last_import = None
-            for m in re.finditer(r"^import [A-Za-z0-9_.]+;\s*$", src, re.MULTILINE):
-                last_import = m
-            if last_import is not None:
-                ins = last_import.end()
-                src = src[:ins] + helper + src[ins:]
+            if auto_ns:
+                # Inject right after the namespace-open + alias block.
+                # Find the LAST `namespace X = ::Y::Z;` line in the
+                # contiguous alias block at the top of the namespace.
+                # `finditer` walks them all; we keep the last contiguous one.
+                alias_pattern = re.compile(
+                    r"^namespace [a-z_]+ = ::btree_port::btree::[a-z_.:]+;\n",
+                    re.MULTILINE,
+                )
+                last_alias = None
+                prev_end = -1
+                for m in alias_pattern.finditer(src):
+                    if prev_end != -1 and m.start() != prev_end:
+                        break  # gap — not contiguous with previous
+                    last_alias = m
+                    prev_end = m.end()
+                if last_alias:
+                    src = src[:last_alias.end()] + helper + src[last_alias.end():]
+            else:
+                last_import = None
+                for m in re.finditer(r"^import [A-Za-z0-9_.]+;\s*$", src, re.MULTILINE):
+                    last_import = m
+                if last_import is not None:
+                    ins = last_import.end()
+                    src = src[:ins] + helper + src[ins:]
         src = sentinel + "\n" + src
         path.write_text(src)
     else:
@@ -864,7 +895,14 @@ def fix_dormant_mut_ref_calls(path: Path) -> None:
         print(f"  no DormantMutRef::new_ sites in: {path.name}")
         return
 
-    # Inject the helper right after the last `import …;` line.
+    # Under auto-namespace mode, inject INSIDE the namespace wrap and
+    # use the alias-resolved unqualified `DormantMutRef`. Otherwise
+    # inject at module purview (the helper template is at file scope).
+    auto_ns = "namespace btree_port::btree::" in src
+    type_ref = (
+        "btree_internal::DormantMutRef" if auto_ns
+        else "DormantMutRef"
+    )
     helper = (
         f"\n{sentinel}\n"
         "// `DormantMutRef::new_(x)` is a static method on a class template\n"
@@ -872,20 +910,43 @@ def fix_dormant_mut_ref_calls(path: Path) -> None:
         "// The helper template-deduces T from its argument so call sites\n"
         "// don't have to spell `DormantMutRef<T>::new_(x)` themselves.\n"
         "template<typename __T>\n"
-        "static auto __btree_port_make_dormant(__T& __t) {\n"
-        "    return DormantMutRef<__T>::new_(__t);\n"
+        "inline auto __btree_port_make_dormant(__T& __t) {\n"
+        f"    return {type_ref}<__T>::new_(__t);\n"
         "}\n"
     )
 
-    # Find the position right after the last `import` directive.
     import re
-    last_import = None
-    for m in re.finditer(r"^import [A-Za-z0-9_.]+;\s*$", src, re.MULTILINE):
-        last_import = m
-    if last_import is None:
-        print(f"  [warn] no import directives in {path.name}; can't place helper", file=sys.stderr)
-        return
-    insertion_pos = last_import.end()
+    if auto_ns:
+        # Inject right after the alias block inside the namespace wrap.
+        # Find the LAST contiguous `namespace X = ::Y::Z;` line.
+        alias_pattern = re.compile(
+            r"^namespace [a-z_]+ = ::btree_port::btree::[a-z_.:]+;\n",
+            re.MULTILINE,
+        )
+        last_alias = None
+        prev_end = -1
+        for m in alias_pattern.finditer(src):
+            if prev_end != -1 and m.start() != prev_end:
+                break
+            last_alias = m
+            prev_end = m.end()
+        if last_alias is None:
+            print(
+                f"  [warn] no namespace-alias anchor in {path.name}; "
+                f"can't place helper",
+                file=sys.stderr,
+            )
+            return
+        insertion_pos = last_alias.end()
+    else:
+        # Find the position right after the last `import` directive.
+        last_import = None
+        for m in re.finditer(r"^import [A-Za-z0-9_.]+;\s*$", src, re.MULTILINE):
+            last_import = m
+        if last_import is None:
+            print(f"  [warn] no import directives in {path.name}; can't place helper", file=sys.stderr)
+            return
+        insertion_pos = last_import.end()
     src = src[:insertion_pos] + helper + src[insertion_pos:]
 
     # Now rewrite the call sites. Order matters: the more-specific
@@ -1846,9 +1907,44 @@ def merge_map_entry_into_map(map_mod: Path, map_entry: Path) -> None:
     while content_start < len(entry_src) and entry_src[content_start] == "\n":
         content_start += 1
     entry_content = entry_src[content_start:]
+    # Strip any remaining `import ...;` lines from the merged content.
+    # With the --auto-namespace crate-mode transpile, map.entry.cppm now
+    # has multiple imports (btree_internal AND map). Only the first one
+    # got consumed by the `import_anchor` skip above; the rest would
+    # land inside map.cppm's body, including a self-import of
+    # `btree_port.btree.map` which is a hard compile error.
+    entry_content = re.sub(
+        r"^import [a-z_.]+;\s*\n",
+        "",
+        entry_content,
+        flags=re.MULTILINE,
+    )
     # Substitute rusty::BTreeMap → BTreeMap so the merged content
     # references the local transpiled BTreeMap.
     entry_content = entry_content.replace("rusty::BTreeMap", "BTreeMap")
+    # CRITICAL: rewrite the namespace open from
+    #   `namespace btree_port::btree::map::entry { … }`
+    # to just `namespace entry { … }`. Why: when this content is
+    # injected INSIDE `namespace btree_port::btree::map { … }`, the
+    # fully-qualified `namespace btree_port::btree::map::entry { … }`
+    # is interpreted as opening
+    # `btree_port::btree::map::btree_port::btree::map::entry`
+    # (per C++17 nested-namespace-definition rules — the prefix
+    # nests INSIDE the current namespace). Using just `entry` opens
+    # the correct child namespace `btree_port::btree::map::entry`.
+    #
+    # This was the root cause of the "implicit instantiation of
+    # undefined template" error in consumer TUs: Entry's body lived
+    # in `…::map::…::map::entry::Entry`, but the forward decl visible
+    # to BTreeMap was `…::map::entry::Entry` — two different entities.
+    entry_content = entry_content.replace(
+        "namespace btree_port::btree::map::entry {",
+        "namespace entry {",
+    )
+    entry_content = entry_content.replace(
+        "} // namespace btree_port::btree::map::entry",
+        "} // namespace entry",
+    )
 
     # 4. Inject entry content right before the BTreeMap struct
     #    definition. Anchor on the comment line immediately above
@@ -1865,6 +1961,94 @@ def merge_map_entry_into_map(map_mod: Path, map_entry: Path) -> None:
     # 5. Substitute rusty::BTreeMap → BTreeMap in the rest of map.cppm
     #    too (a few internal uses inside BTreeMap's own body).
     map_src = map_src.replace("rusty::BTreeMap", "BTreeMap")
+
+    # 6. Under auto-namespace mode the postprocess added a
+    #    `namespace entry = ::btree_port::btree::map::entry;` alias
+    #    inside the map namespace wrap. After the merge, `map::entry`
+    #    is a real nested namespace defined in this same TU. That
+    #    nested namespace name COLLIDES with the alias name at the
+    #    `btree_port::btree::map` scope.
+    #
+    #    Resolution: drop the alias and replace it with a partial
+    #    namespace declaration that ALSO forward-declares each entry
+    #    type. The `export using entry::Foo;` re-exports a few lines
+    #    later need each `entry::Foo` to be a known declared name,
+    #    not just a namespace member to be looked up later. The
+    #    actual definitions in the merged block (further down) extend
+    #    the partial namespace and complete the forward decls.
+    # Forward decls must be `export` so the later `export using entry::Foo;`
+    # re-exports don't trigger "using declaration referring to Foo with
+    # module linkage cannot be exported".
+    entry_fwd_decls = (
+        "namespace entry {\n"
+        "    export template<typename K, typename V, typename A>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    struct OccupiedEntry;\n"
+        "    export template<typename K, typename V, typename A>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    struct VacantEntry;\n"
+        "    export template<typename K, typename V, typename A>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    struct Entry;\n"
+        "    export template<typename K, typename V, typename A>\n"
+        "        requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+        "    struct OccupiedError;\n"
+        "}\n"
+    )
+    # Path 1 (legacy): postprocess emitted an `entry` alias; replace
+    # it with the forward decls.
+    if re.search(
+        r"^namespace entry = ::btree_port::btree::map::entry;",
+        map_src,
+        flags=re.MULTILINE,
+    ):
+        map_src = re.sub(
+            r"^namespace entry = ::btree_port::btree::map::entry;\s*\n",
+            entry_fwd_decls,
+            map_src,
+            flags=re.MULTILINE,
+        )
+        # The `namespace btree_port::btree::map::entry {}` forward decl
+        # at module purview (added by the postprocess script) is no
+        # longer needed under the merged shape — the inner forward decl
+        # above does the same job.
+        map_src = re.sub(
+            r"^namespace btree_port::btree::map::entry \{\}\s*\n",
+            "",
+            map_src,
+            flags=re.MULTILINE,
+        )
+    else:
+        # Path 2 (current): postprocess skipped the alias because the
+        # child-namespace check fires for `entry`. Inject the forward
+        # decls AFTER the namespace-alias block inside the map wrap.
+        # Anchor on the LAST contiguous alias line; if there are none,
+        # fall back to the `namespace btree_port::btree::map {` open
+        # line itself.
+        alias_pattern = re.compile(
+            r"^namespace [a-z_]+ = ::btree_port::btree::[a-z_.:]+;\n",
+            re.MULTILINE,
+        )
+        last_alias = None
+        prev_end = -1
+        for m in alias_pattern.finditer(map_src):
+            if prev_end != -1 and m.start() != prev_end:
+                break
+            last_alias = m
+            prev_end = m.end()
+        if last_alias is not None:
+            map_src = (
+                map_src[:last_alias.end()]
+                + entry_fwd_decls
+                + map_src[last_alias.end():]
+            )
+        else:
+            # Fall back to anchoring on the namespace-open line.
+            anchor = "namespace btree_port::btree::map {\n"
+            ix = map_src.find(anchor)
+            if ix != -1:
+                ix_end = ix + len(anchor)
+                map_src = map_src[:ix_end] + entry_fwd_decls + map_src[ix_end:]
 
     map_mod.write_text(map_src)
     print(f"  merged map.entry into map.cppm (entry content + facade skip)")
@@ -2348,6 +2532,162 @@ def fix_static_factory_param_type_recovery(path: Path) -> None:
         print(f"  rewrote {landed} new_kv/new_edge param(s) to auto in: {path.name}")
     else:
         print(f"  no new_kv/new_edge static-factory param sites in: {path.name}")
+
+
+def inject_handle_make_edge_helper(path: Path) -> None:
+    """Companion to `fix_static_factory_param_type_recovery`. That fix makes
+    `Handle::new_edge(auto node, size_t idx)` deduce its `Handle<Node, Type>`
+    return type from the argument when the call site can supply concrete
+    template args. But several call sites in btree_internal emit
+    `Handle<auto, auto>::new_edge(<node>, <idx>)` — `auto` is not a valid
+    template argument and `clang++` rejects it with
+    `'auto' not allowed in template argument`.
+
+    Fix: inject a module-scope helper that deduces the Handle instantiation
+    from the node argument and forwards to `new_edge`, then rewrite the
+    `Handle<auto, auto>::new_edge(` call sites to use the helper.
+
+    Anchor: the `using BoxedNode = …` line that immediately follows the
+    closing brace of the `namespace marker {…}` block. Anchoring there
+    (rather than on the earlier `struct Handle;` forward-decl) ensures
+    `marker::Edge` is visible when the helper instantiates.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: __btree_make_handle_edge injected by post_transpile_patch.py"
+    if sentinel in src:
+        # On re-runs, only need to verify no `Handle<auto, auto>` call sites
+        # remain; the helper is already in place.
+        if "Handle<auto, auto>::new_edge(" in src:
+            n = src.count("Handle<auto, auto>::new_edge(")
+            src = src.replace(
+                "Handle<auto, auto>::new_edge(",
+                "__btree_make_handle_edge(",
+            )
+            path.write_text(src)
+            print(
+                f"  rewrote {n} stray Handle<auto,auto>::new_edge → helper in: {path.name}"
+            )
+        else:
+            print(f"  no changes to: {path.name} (handle edge helper already in place)")
+        return
+
+    # Skip work when this emit shape isn't present (e.g. the transpiler
+    # already produces the `std::conditional_t<true, Handle<…>, Q>::new_edge`
+    # shape from `recover_template_args` recovery — both shapes have been
+    # seen across versions).
+    n_sites = src.count("Handle<auto, auto>::new_edge(")
+    if n_sites == 0:
+        print(f"  no Handle<auto,auto>::new_edge call sites in: {path.name}")
+        return
+
+    anchor = (
+        "template<typename K, typename V>\n"
+        "using BoxedNode = rusty::ptr::NonNull<LeafNode<K, V>>;\n"
+    )
+    if anchor not in src:
+        print(
+            f"  [skip] handle-edge helper anchor (BoxedNode using-decl) not found in: {path.name}"
+        )
+        return
+
+    # Rewrite the call sites BEFORE injecting the helper, so the helper
+    # body (which contains the legal `Handle<…>::new_edge(…)` form) is
+    # not affected by the textual substitution.
+    src = src.replace(
+        "Handle<auto, auto>::new_edge(",
+        "__btree_make_handle_edge(",
+    )
+
+    helper = (
+        "\n"
+        f"{sentinel}\n"
+        "// At a handful of call sites the transpiler emits the static form\n"
+        "// `Handle<auto,auto>::new_edge(node, idx)` (without spaces in the\n"
+        "// template args). `auto` is not a valid template argument in C++,\n"
+        "// so this helper takes the node by forwarding ref and deduces the\n"
+        "// Handle instantiation from it.\n"
+        "template<typename N>\n"
+        "auto __btree_make_handle_edge(N&& node, size_t idx) {\n"
+        "    return Handle<std::remove_cvref_t<N>, ::marker::Edge>::new_edge(\n"
+        "        std::forward<N>(node), idx);\n"
+        "}\n"
+    )
+    src = src.replace(anchor, anchor + helper, 1)
+
+    path.write_text(src)
+    print(
+        f"  injected __btree_make_handle_edge helper + rewrote {n_sites} call site(s) in: {path.name}"
+    )
+
+
+def fix_left_kv_right_kv_ok_result_type(path: Path) -> None:
+    """The transpiler emits a bad explicit `Result<T,E>` type qualifier in the
+    Ok-arm of `Handle::left_kv` / `Handle::right_kv`. Both T and E come out
+    as `Handle<Node, Type>` (Self) when the signature's actual T is
+    `Handle<NodeRef<__TemplateArgs<Node>::arg_0..3>, ::marker::KV>`.
+
+    Function shape (from btree_internal.rs:1184):
+
+        impl<BorrowType, K, V, NodeType>
+            Handle<NodeRef<BorrowType, K, V, NodeType>, marker::Edge>
+        {
+            pub(super) fn left_kv(self)
+                -> Result<Handle<NodeRef<BorrowType,K,V,NodeType>, marker::KV>, Self>
+            {
+                if self.idx > 0 {
+                    Ok(unsafe { Handle::new_kv(self.node, self.idx - 1) })
+                } else {
+                    Err(self)
+                }
+            }
+        }
+
+    Buggy emit (Ok arm only — Err arm has the correct full Result type):
+
+        return rusty::Result<Handle<Node, Type>, Handle<Node, Type>>::Ok(
+            Handle<Node, Type>::new_kv(std::move(this->node), …));
+
+    The Err arm uses the correct signature qualifier; the Ok arm gets Self
+    for both T and E. Reproducible with a 4-impl-param / 2-struct-param
+    fixture (see /tmp/repro_left_kv/repro2.rs). Root cause lives in
+    transpiler/src/codegen.rs in the Ok-ctor expected-hint resolution
+    around `resolve_result_ctor_expected_type_from_ctor_arg` (line ~66645)
+    and `lookup_constructor_template_args` (line ~76270). The hint
+    recovered from a single-ctor expression at line ~51725 sets BOTH T
+    and E to the same `decltype((arg))`, which then propagates Self into
+    the Ok arm's qualifier when the function-level Result hint is bypassed.
+
+    Until that's fixed in the codegen, swap the broken qualifier for the
+    full signature shape. The Ok arg (`Handle<Node, Type>::new_kv(...)`)
+    is itself shape-wrong but typechecks because `new_kv` is defined on a
+    parallel impl that returns `Self` — leave that emit unchanged; the
+    Result-qualifier substitution is enough for the typechecker to accept
+    the surrounding `Result<...,...>::Ok(...)`.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: left_kv/right_kv Ok-arm Result qualifier fixed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (left_kv/right_kv Ok qualifier already fixed)")
+        return
+    bad = "return rusty::Result<Handle<Node, Type>, Handle<Node, Type>>::Ok("
+    good = (
+        "return rusty::Result<Handle<NodeRef<"
+        "typename __TemplateArgs<Node>::arg_0, "
+        "typename __TemplateArgs<Node>::arg_1, "
+        "typename __TemplateArgs<Node>::arg_2, "
+        "typename __TemplateArgs<Node>::arg_3>, ::marker::KV>, "
+        "Handle<Node, Type>>::Ok("
+    )
+    n = src.count(bad)
+    if n == 0:
+        print(f"  no left_kv/right_kv Ok-arm sites in: {path.name}")
+        return
+    src = src.replace(bad, good)
+    src = "// " + sentinel.lstrip("// ") + "\n" + src
+    path.write_text(src)
+    print(
+        f"  rewrote {n} left_kv/right_kv Ok-arm Result qualifier(s) in: {path.name}"
+    )
 
 
 def apply_step66_map_runtime_fixes(path: Path) -> None:
@@ -3530,13 +3870,27 @@ def strip_module_namespace_prefixes(path: Path, prefixes: list[str]) -> None:
       - `using namespace ::<module>;`
       - `namespace <module> {}` (and `namespace <module> = …;` aliases).
 
-    Idempotent: skipped if the sentinel is already present."""
+    Idempotent: skipped if the sentinel is already present.
+
+    Skipped entirely under --auto-namespace mode (detected by the
+    presence of `namespace btree_port::btree::` wraps): the qualifier
+    prefixes are CORRECT in that mode — the postprocessed file has
+    `namespace <prefix> = ::btree_port::btree::<prefix>;` aliases
+    inside the wrap that make `prefix::Symbol` resolve.
+    """
     import re
 
     src = path.read_text()
     sentinel = "// btree_port port: module prefixes stripped by post_transpile_patch.py"
     if sentinel in src:
         print(f"  no changes to: {path.name} (prefixes already stripped)")
+        return
+    # Auto-namespace detection: skip the strip entirely under this mode.
+    if "namespace btree_port::btree::" in src:
+        print(
+            f"  [auto-namespace] preserving prefixes in: {path.name}"
+            f" (aliases inside wrap resolve them)"
+        )
         return
     changed = 0
     dropped_lines = 0
@@ -3705,6 +4059,561 @@ int main() {
     return 0;
 }
 """
+
+
+def fix_template_args_primary_scope(path: Path) -> None:
+    """Move the `template<typename T> struct __TemplateArgs;` primary
+    declaration from module purview into the namespace wrap, matching
+    where the partial specializations land.
+
+    Background: the Cluster A completion injects the primary
+    `__TemplateArgs<T>` template at module purview (before the
+    `namespace btree_port::btree::X { … }` open) but emits the
+    partial specializations (`__TemplateArgs<NodeRef<…>>`) inside the
+    namespace wrap. C++ requires partial specializations to live in the
+    same namespace as the primary template — mismatch is an error.
+
+    Fix: relocate the primary declaration into the namespace by
+    moving it from line ~3663 into line ~3666 (right after the wrap
+    opens). Idempotent — detects the relocated form via the
+    presence-of-marker after the relocation point.
+    """
+    src = path.read_text()
+    primary = "template<typename T> struct __TemplateArgs;\n"
+    primary_with_comment = (
+        "// Cluster A completion: __TemplateArgs primary template "
+        "(specializations at file end)\n"
+        + primary
+    )
+    # Anchor: the namespace open immediately follows the primary.
+    ns_open = "namespace btree_port::btree::btree_internal {\n"
+    if primary_with_comment + "\n" + ns_open in src:
+        # Move the comment + primary to inside the namespace.
+        new_src = src.replace(
+            primary_with_comment + "\n" + ns_open,
+            ns_open + "\n" + primary_with_comment,
+            1,
+        )
+        path.write_text(new_src)
+        print(f"  relocated __TemplateArgs primary into namespace in: {path.name}")
+    elif primary in src and src.index(primary) < src.index(ns_open):
+        # Variant without preceding comment block — same handling.
+        new_src = src.replace(primary + "\n" + ns_open, ns_open + "\n" + primary, 1)
+        path.write_text(new_src)
+        print(f"  relocated __TemplateArgs primary (uncommented) into namespace in: {path.name}")
+    else:
+        print(f"  no __TemplateArgs primary relocation needed in: {path.name}")
+
+
+def fix_std_hash_specialization_scope(path: Path) -> None:
+    """Break out of the namespace wrap around `template<> struct std::hash<…>`
+    specializations and reopen after them.
+
+    Background: C++ requires that explicit specializations of standard-
+    library templates (`std::hash`, `std::less`, etc.) be defined either
+    inside `namespace std { }` or — via the `std::T` spelling — at a
+    scope that *encloses* `namespace std`. When the transpiled module is
+    wrapped in `namespace btree_port::btree::btree_internal { … }`, the
+    `std::hash<SetValZST>` specialization lands inside the wrap and
+    clang rejects it with: "class template specialization of 'hash' not
+    in a namespace enclosing 'std'".
+
+    Fix: scan for `^template<>\\nstruct std::hash<…> {…};` blocks inside
+    the namespace wrap and surround each with `}` (close) + reopen.
+    Idempotent.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: std::hash<...> moved to module purview"
+    if sentinel in src:
+        print(f"  no std::hash scope fix needed (already applied) in: {path.name}")
+        return
+    # Use brace matching to extract each `template<>\nstruct std::hash<…>
+    # { … };` block. The body has nested braces (the operator() body),
+    # so a simple regex won't terminate correctly.
+    n_bumped = 0
+    search_from = 0
+    anchor = "template<>\nstruct std::hash<"
+    while True:
+        pos = src.find(anchor, search_from)
+        if pos == -1:
+            break
+        brace_open = src.find("{", pos)
+        if brace_open == -1:
+            break
+        brace_close = find_matching_brace(src, brace_open)
+        if brace_close == -1:
+            break
+        # Followed by `;` immediately after the close brace.
+        if brace_close + 1 >= len(src) or src[brace_close + 1] != ";":
+            search_from = brace_close + 1
+            continue
+        block_end = brace_close + 2  # include the `;`
+        block = src[pos:block_end]
+        # Determine whether this block is inside a namespace wrap by
+        # counting unclosed `namespace btree_port::btree::… {` opens
+        # vs `} // namespace btree_port::btree::…` closes up to `pos`.
+        depth = (
+            src[:pos].count("namespace btree_port::btree::btree_internal {")
+            - src[:pos].count("} // namespace btree_port::btree::btree_internal")
+        )
+        if depth <= 0:
+            # Already at module purview, no need to bump.
+            search_from = block_end
+            continue
+        # When bumped to module purview, the block loses access to the
+        # in-namespace types it references (e.g. `SetValZST`). Inject a
+        # one-shot `using` declaration to bring them into scope.
+        using_decl = (
+            "using btree_port::btree::btree_internal::SetValZST;\n"
+        )
+        bumped = (
+            f"}} // namespace btree_port::btree::btree_internal (closed for std::hash)\n"
+            f"{sentinel}\n"
+            f"{using_decl}"
+            f"{block}\n"
+            f"namespace btree_port::btree::btree_internal {{\n"
+        )
+        src = src[:pos] + bumped + src[block_end:]
+        n_bumped += 1
+        # Advance past the bumped section so we don't re-find the same block.
+        search_from = pos + len(bumped)
+        if n_bumped > 10:
+            break
+    if n_bumped:
+        path.write_text(src)
+        print(f"  bumped {n_bumped} std::hash<...> spec(s) to module purview in: {path.name}")
+    else:
+        print(f"  no std::hash<...> specializations to fix in: {path.name}")
+
+
+def stub_broken_set_methods(path: Path) -> None:
+    """Stub specific known-broken methods in set.cppm:
+      - methods whose body has `this->_0.nexts(const T&<T>::cmp)` —
+        a transpile bug where `<T as Ord>::cmp` got mistranslated.
+      - nested `struct DropGuard { IntoIter<K, V, A>& _0; ... }` —
+        absorbed from map::IntoIter, refers to undefined K, V.
+      - `template<typename V>` methods (handled by `remove_setvalzst_methods`
+        once we add the matcher).
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: broken set.cppm regions stubbed by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (set stubs already applied)")
+        return
+
+    changed = 0
+
+    # -1. Forward-declare the variant types (DifferenceInner_Stitch etc.)
+    #     that are USED inside the Difference/Intersection clone methods
+    #     but DEFINED LATER in the file. Inject the forward decls at the
+    #     top of the namespace wrap, after the alias block.
+    variant_fwd_decls = (
+        "// btree_port port: variant-type forward decls injected by post_transpile_patch.py\n"
+        "template<typename T, typename A>\n"
+        "struct DifferenceInner_Stitch;\n"
+        "template<typename T, typename A>\n"
+        "struct DifferenceInner_Search;\n"
+        "template<typename T, typename A>\n"
+        "struct DifferenceInner_Iterate;\n"
+        "template<typename T, typename A>\n"
+        "struct IntersectionInner_Stitch;\n"
+        "template<typename T, typename A>\n"
+        "struct IntersectionInner_Search;\n"
+        "template<typename T, typename A>\n"
+        "struct IntersectionInner_Answer;\n"
+    )
+    # Anchor on the LAST contiguous alias line in the set namespace.
+    alias_pattern_anchor = re.compile(
+        r"^namespace [a-z_]+ = ::btree_port::btree::[a-z_.:]+;\n",
+        re.MULTILINE,
+    )
+    last_alias = None
+    prev_end = -1
+    for m in alias_pattern_anchor.finditer(src):
+        if prev_end != -1 and m.start() != prev_end:
+            break
+        last_alias = m
+        prev_end = m.end()
+    variant_sentinel = "// btree_port port: variant-type forward decls injected"
+    if last_alias and variant_sentinel not in src:
+        src = src[:last_alias.end()] + variant_fwd_decls + src[last_alias.end():]
+        changed += 1
+
+    # 0. Stub the entire `template<typename Iter> void extend(Iter<T> iter) { ... }`
+    #    method — its signature collides with the `template<typename I>
+    #    void extend(I iter)` overload (same shape after deduction,
+    #    different template-param name), so C++ flags it as
+    #    redeclaration. The transpiler emitted two `extend` impls
+    #    from two separate Rust impl blocks.
+    if "void extend(Iter<T> iter)" in src:
+        # Match the whole method block.
+        old_method = re.search(
+            r"^    template<typename Iter>\n"
+            r"    void extend\(Iter<T> iter\) \{\n"
+            r"        rusty::for_each\([^\n]*\n"
+            r"this->insert\(std::move\(elem\)\);\n"
+            r"\}\);\n"
+            r"    \}\n",
+            src,
+            re.MULTILINE,
+        )
+        if old_method:
+            src = src[:old_method.start()] + src[old_method.end():]
+            changed += 1
+        else:
+            # Fallback: at least drop the broken signature.
+            src = src.replace("void extend(Iter<T> iter)", "void extend(Iter iter)")
+            changed += 1
+    # Substitute `rusty::alloc::Global` in value-position with the
+    # default-constructed form. Patterns: `, rusty::alloc::Global)` and
+    # `, rusty::alloc::Global,`.
+    for old, new in [
+        (", rusty::alloc::Global)", ", rusty::alloc::Global{})"),
+        (", rusty::alloc::Global,", ", rusty::alloc::Global{},"),
+    ]:
+        n = src.count(old)
+        if n > 0:
+            src = src.replace(old, new)
+            changed += n
+    # `BTreeMap::bulk_build_from_sorted_iter` — bare BTreeMap as
+    # call target needs `map::BTreeMap`:
+    if "BTreeMap::bulk_build_from_sorted_iter" in src:
+        src = src.replace("BTreeMap::bulk_build_from_sorted_iter",
+                          "map::BTreeMap<T, btree_internal::SetValZST, A>::bulk_build_from_sorted_iter")
+        changed += 1
+    # `ManuallyDrop::into_inner` requires explicit template arg in
+    # call-target form, but inside an expression that's hard to recover.
+    # Stub with a workaround — copy the alloc directly without the
+    # ManuallyDrop unwrap.
+    src = src.replace(
+        "ManuallyDrop::into_inner(rusty::clone(this->map.alloc))",
+        "rusty::clone(*this->map.alloc)",
+    )
+    # Align requires-clause on `struct DifferenceInner : std::variant<…>`
+    # / `struct IntersectionInner : std::variant<…>` with the forward
+    # decl (which has the requires clause from the original Rust impl).
+    for name in ("DifferenceInner", "IntersectionInner"):
+        anchor = f"template<typename T, typename A>\nstruct {name} : std::variant<"
+        repl = (
+            f"template<typename T, typename A>\n"
+            f"    requires (rusty::alloc::Allocator<A> && std::copyable<A>)\n"
+            f"struct {name} : std::variant<"
+        )
+        if anchor in src and repl not in src:
+            src = src.replace(anchor, repl, 1)
+            changed += 1
+    # `f.debug_set()` → `f.debug_list()` — Formatter doesn't have debug_set.
+    if "f.debug_set()" in src:
+        src = src.replace("f.debug_set()", "f.debug_list()")
+        changed += 1
+    # `decltype((rusty::alloc::Global))` — type-as-value-then-decltype
+    # gnarliness; rewrite to just `rusty::alloc::Global`.
+    if "decltype((rusty::alloc::Global))" in src:
+        src = src.replace(
+            "std::remove_cvref_t<decltype((rusty::alloc::Global))>",
+            "rusty::alloc::Global",
+        )
+        changed += 1
+
+    # 1. Wrap each `struct DropGuard { … };` cluster that references
+    #    undefined K, V in #if 0.
+    lines = src.split("\n")
+    n = len(lines)
+    out: list[str] = []
+    i = 0
+    while i < n:
+        line = lines[i]
+        # Look for `    struct DropGuard {` at 4-space indent.
+        if line.rstrip() == "    struct DropGuard {":
+            # Find matching close brace.
+            depth = 1
+            j = i + 1
+            while j < n and depth > 0:
+                for c in lines[j]:
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                j += 1
+            # j now points one past the close brace line.
+            cluster_end = j - 1
+            # Check the body references K or V as undefined identifiers.
+            body = "\n".join(lines[i : cluster_end + 1])
+            if "IntoIter<K, V, A>" in body:
+                out.append(f"#if 0  // {sentinel}")
+                out.extend(lines[i : cluster_end + 1])
+                out.append("#endif")
+                changed += 1
+                i = cluster_end + 1
+                continue
+        out.append(line)
+        i += 1
+    src = "\n".join(out)
+
+    # 2. Stub method bodies containing any of these broken patterns:
+    #    - `this->_0.nexts(const T&<T>::cmp)` — closure call where
+    #      `<T as Ord>::cmp` got mistranslated.
+    #    - `rusty::cmp::cmp(self_min, other_max)` — references to
+    #      hoisted let bindings (`self_min`, `self_max`, `other_min`,
+    #      `other_max`, `DifferenceInner_Iterate`) that didn't survive
+    #      the IIFE-result handle binding pass.
+    broken_patterns = [
+        "this->_0.nexts(const T&<T>::cmp)",
+        "rusty::cmp::cmp(self_min, other_max)",
+        "rusty::cmp::cmp(self_min, other_min)",
+        "rusty::cmp::cmp(self_max, other_max)",
+        # `auto [/* TODO: pattern */, ...] = ...` — tuple destructure
+        # where transpiler emitted TODO placeholders instead of bindings.
+        "auto [/* TODO: pattern */",
+    ]
+    # Safety cap to prevent runaway loop if a fix doesn't actually
+    # consume the pattern from src.
+    max_iters = 50
+    iters = 0
+    while iters < max_iters:
+        iters += 1
+        broken_cmp = None
+        for pat in broken_patterns:
+            if pat in src:
+                broken_cmp = pat
+                break
+        if broken_cmp is None:
+            break
+        lines2 = src.split("\n")
+        # Find the first line containing the broken pattern.
+        target = None
+        for idx, ln in enumerate(lines2):
+            if broken_cmp in ln:
+                target = idx
+                break
+        if target is None:
+            break
+        # Walk back to find the method-open `{` at indent 4. The line
+        # ends with `{` and is exactly 4-space indented.
+        k = target
+        while k >= 0:
+            if lines2[k].rstrip().endswith("{") and (
+                lines2[k].startswith("    ") and not lines2[k].startswith("     ")
+            ):
+                break
+            k -= 1
+        if k < 0:
+            break
+        method_open = k
+        # Walk forward from method_open + 1, tracking brace depth from 1.
+        depth = 1
+        m = method_open + 1
+        method_close = None
+        while m < len(lines2):
+            for c in lines2[m]:
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        method_close = m
+                        break
+            if method_close is not None:
+                break
+            m += 1
+        if method_close is None:
+            break
+        stub_body = (
+            "        throw ::std::runtime_error(\""
+            "rusty-cpp-transpiler: set.cppm method stub "
+            "(broken <T as Ord>::cmp emit); "
+            "see docs/btreemap_port/STATUS.md\");"
+        )
+        new_lines = (
+            lines2[: method_open + 1]
+            + [stub_body]
+            + lines2[method_close:]  # this is the closing `    }`
+        )
+        src = "\n".join(new_lines)
+        changed += 1
+
+    if changed:
+        path.write_text(sentinel + "\n" + src)
+        print(f"  stubbed {changed} broken set.cppm region(s) in: {path.name}")
+    else:
+        print(f"  no broken set.cppm regions found in: {path.name}")
+
+
+def fix_set_cppm_qualifiers_for_namespace_wrap(path: Path) -> None:
+    """In set.cppm under --auto-namespace, references to map's
+    `BTreeMap` are emitted bare (because the prep.sh + transpiler
+    treats `super::map::BTreeMap` as just `BTreeMap` after the
+    prefix-strip). Under flat-export that worked; under
+    auto-namespace, `BTreeMap` is `map::BTreeMap`, not in scope at
+    set's namespace level. Qualify it with `map::`.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: set.cppm qualifier fix-up by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (set qualifiers already fixed)")
+        return
+    patterns = [
+        # Bare `BTreeMap<` in set.cppm → `map::BTreeMap<`. Use negative
+        # lookbehind to avoid mangling `map::BTreeMap<` (already
+        # qualified) or `inner::BTreeMap<` etc.
+        (r"(?<![a-zA-Z0-9_:.])BTreeMap<", "map::BTreeMap<"),
+    ]
+    total = 0
+    for pat, repl in patterns:
+        new, n = re.subn(pat, repl, src)
+        if n:
+            src = new
+            total += n
+    if total:
+        path.write_text(sentinel + "\n" + src)
+        print(f"  applied {total} set-qualifier fix-up(s) in: {path.name}")
+    else:
+        print(f"  no set-qualifier fix-ups needed in: {path.name}")
+
+
+def fix_map_cppm_qualifiers_for_namespace_wrap(path: Path) -> None:
+    """In map.cppm / set.cppm / set.entry.cppm under --auto-namespace
+    mode, patcher-injected hand-port code references types/templates
+    without a qualifier that worked under flat-export mode but doesn't
+    under the namespace wrap.
+
+    Specifically:
+      - `NodeRef<…>` → `btree_internal::NodeRef<…>` (NodeRef lives
+        in btree_internal::, not in map::).
+      - `Root<…>` / `Handle<…>` / `SearchBound<…>` — same fix.
+      - `SetValZST{` / `SetValZST,` — qualified to btree_internal::SetValZST.
+      - `::BTreeMap<…>` → `BTreeMap<…>` (the global qualifier
+        from merge content; BTreeMap is in-scope at map::).
+      - `::IntoIter<…>` → `IntoIter<…>` (same).
+
+    These rewrites are only safe in files where `btree_internal`
+    alias is present (auto-namespace-wrapped map / set / set.entry).
+    Not safe in btree_internal.cppm itself.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: map.cppm qualifier fix-up by post_transpile_patch.py"
+    if sentinel in src:
+        print(f"  no changes to: {path.name} (qualifiers already fixed)")
+        return
+    # Determine which file we're patching to pick the right
+    # `::BTreeMap` / `::BTreeSet` replacement: this function is shared
+    # between map.cppm, set.cppm, and set.entry.cppm.
+    is_set_file = path.name in (
+        "btree_port.btree.set.cppm",
+        "btree_port.btree.set.entry.cppm",
+    )
+    btreemap_repl = "map::BTreeMap<" if is_set_file else "BTreeMap<"
+    btreeset_repl = "BTreeSet<" if is_set_file else "set::BTreeSet<"
+    patterns = [
+        # `::BTreeMap<` / `::IntoIter<` came from the merged entry
+        # content where `rusty::BTreeMap → BTreeMap` substitution
+        # turned implicit-rooted references into global-qualified
+        # ones. Strip them — but only when at the start of a name
+        # path (negative lookbehind on identifier chars so we don't
+        # mangle `map::IntoIter` → `mapIntoIter`).
+        (r"(?<![a-zA-Z0-9_]):: ?BTreeMap<", btreemap_repl),
+        (r"(?<![a-zA-Z0-9_])::IntoIter<", "IntoIter<"),
+        # `::BTreeSet<` (from transpiler's `BTreeSet → ::BTreeSet`
+        # type-map). In map.cppm, BTreeSet lives in the sibling `set`
+        # namespace; in set.cppm itself, BTreeSet is in-scope (bare).
+        (r"(?<![a-zA-Z0-9_]):: ?BTreeSet<", btreeset_repl),
+        # Bare `NodeRef<` / `Root<` / `Handle<` / `SearchBound<` in
+        # patcher hand-port code (or merged content) needs to be
+        # `btree_internal::Foo<` since these types live there.
+        # Use a negative lookbehind on identifier chars so we don't
+        # mangle already-qualified forms or template-args meta-calls.
+        (r"(?<![a-zA-Z0-9_:.])NodeRef<", "btree_internal::NodeRef<"),
+        (r"(?<![a-zA-Z0-9_:.])Root<", "btree_internal::Root<"),
+        (r"(?<![a-zA-Z0-9_:.])Handle<", "btree_internal::Handle<"),
+        (r"(?<![a-zA-Z0-9_:.])SearchBound<", "btree_internal::SearchBound<"),
+        # SetValZST referenced as a value (e.g. `SetValZST{}`):
+        (r"(?<![a-zA-Z0-9_:.])SetValZST\{", "btree_internal::SetValZST{"),
+        # SetValZST::default_() — static method call:
+        (r"(?<![a-zA-Z0-9_:.])SetValZST::", "btree_internal::SetValZST::"),
+        # `entry(value).insert_entry(SetValZST)` — bare SetValZST as
+        # value where {} is missing. Just qualify and add construction.
+        (r"\.insert_entry\(SetValZST\)", ".insert_entry(btree_internal::SetValZST{})"),
+    ]
+    total = 0
+    for pat, repl in patterns:
+        new, n = re.subn(pat, repl, src)
+        if n:
+            src = new
+            total += n
+    if total:
+        path.write_text(sentinel + "\n" + src)
+        print(f"  applied {total} map-qualifier fix-up(s) in: {path.name}")
+    else:
+        print(f"  no map-qualifier fix-ups needed in: {path.name}")
+
+
+def fix_global_qualifiers_for_namespace_wrap(path: Path) -> None:
+    """Convert the patcher's hand-port `::marker::X` / `::LeafNode<…>` /
+    `::InternalNode<…>` references to unqualified form.
+
+    Background: when the transpiler emits flat exports (no namespace
+    wrap), the patcher's hand-port templates use `::marker::Owned`,
+    `::LeafNode<K, V>*`, etc. — explicit global qualifiers — because the
+    symbols live at global scope. With `--auto-namespace`, the symbols
+    are inside `namespace btree_port::btree::btree_internal { … }`, and
+    the global-qualifier paths break: no `::marker`, no `::LeafNode` at
+    file scope.
+
+    Fix: strip the leading `::` from these references. Inside a method
+    body that is itself nested in `namespace btree_port::btree::btree_internal`,
+    unqualified `marker::X` / `LeafNode<…>` lookup finds the sibling
+    namespace / nested struct via the normal C++ name-lookup rules.
+    Idempotent — running on already-stripped source is a no-op.
+    """
+    src = path.read_text()
+    patterns = [
+        # marker:: family — all 11 marker symbols + KV/Edge enums.
+        (r"::marker::Owned\b", "marker::Owned"),
+        (r"::marker::Mut\b", "marker::Mut"),
+        (r"::marker::Immut\b", "marker::Immut"),
+        (r"::marker::Internal\b", "marker::Internal"),
+        (r"::marker::Leaf\b", "marker::Leaf"),
+        (r"::marker::LeafOrInternal\b", "marker::LeafOrInternal"),
+        (r"::marker::Dying\b", "marker::Dying"),
+        (r"::marker::DormantMut\b", "marker::DormantMut"),
+        (r"::marker::ValMut\b", "marker::ValMut"),
+        (r"::marker::KV\b", "marker::KV"),
+        (r"::marker::Edge\b", "marker::Edge"),
+        # Bare types defined inside btree_internal — referenced from
+        # hand-port code with `::Foo` (global) qualifier that no longer
+        # resolves under the namespace wrap.
+        (r"::LeafNode<", "LeafNode<"),
+        (r"::InternalNode<", "InternalNode<"),
+        # Free functions defined inside btree_internal:
+        (r"::move_to_slice\(", "move_to_slice("),
+        (r"::slice_remove\(", "slice_remove("),
+        (r"::slice_insert\(", "slice_insert("),
+        (r"::slice_shr\(", "slice_shr("),
+        (r"::slice_shl\(", "slice_shl("),
+        (r"::take_mut\(", "take_mut("),
+        (r"::full_range\(", "full_range("),
+        (r"::splitpoint\(", "splitpoint("),
+        # Alias-rewriter helpers (Cluster A / orphan-method recovery):
+        (r"::(__rusty_alias_[A-Za-z_]+)\(", r"\1("),
+        # `replace(` is a method on rusty::Option etc; the bare `::replace`
+        # qualifier came from hand-port code paths. Use a negative
+        # lookbehind to avoid mangling `rusty::mem::replace(` →
+        # `rusty::memreplace(`.
+        (r"(?<![a-zA-Z_:])::replace\(", "replace("),
+    ]
+    total = 0
+    for pat, repl in patterns:
+        new, n = re.subn(pat, repl, src)
+        if n:
+            src = new
+            total += n
+    if total:
+        path.write_text(src)
+        print(f"  stripped {total} global-qualifier prefix(es) in: {path.name}")
+    else:
+        print(f"  no global-qualifier strip needed in: {path.name}")
 
 
 def write_link_smoke(cpp_out_dir: Path) -> None:
@@ -3940,6 +4849,13 @@ def main() -> int:
     # identifiers — at signature scope, before the body's `using` aliases
     # take effect. Convert the param to `auto` so it's deduced from the arg.
     fix_static_factory_param_type_recovery(internal)
+    # Companion to the previous fix: the 5 remaining
+    # `Handle<auto, auto>::new_edge(...)` call sites can't be expressed
+    # in C++ template syntax. Route them through a deducing helper.
+    inject_handle_make_edge_helper(internal)
+    # Fix the Ok-arm Result qualifier mis-emit in Handle::left_kv /
+    # Handle::right_kv (Self leaked into the T position).
+    fix_left_kv_right_kv_ok_result_type(internal)
     # search_tree is hand-ported; the older stub_broken_search_tree
     # is left in the source for reference but not invoked.
     implement_search_tree(internal)
@@ -3959,7 +4875,9 @@ def main() -> int:
             set_entry,
             extra_imports=[
                 "btree_port.btree.map",
-                "btree_port.btree.map.entry",
+                # map.entry has been merged into map.cppm by
+                # `merge_map_entry_into_map`; the module no longer
+                # ships independently. Drop the import here.
             ],
         )
         patch_entry_arities(set_entry)
@@ -4098,6 +5016,44 @@ def main() -> int:
         fix_boxed_box_path(set_mod)
     else:
         print(f"  [skip] {set_mod.name} not present")
+    # Final pass: under --auto-namespace, the transpiled exports are
+    # wrapped in `namespace btree_port::btree::X { … }`. The patcher's
+    # hand-port code paths still use `::marker::X` / `::LeafNode<…>`
+    # global qualifiers from the flat-export era. Strip those so name
+    # lookup finds the in-namespace sibling.
+    print(f"[*] stripping stale global qualifiers (auto-namespace mode)")
+    fix_global_qualifiers_for_namespace_wrap(internal)
+    if map_mod.exists():
+        fix_global_qualifiers_for_namespace_wrap(map_mod)
+    if set_mod.exists():
+        fix_global_qualifiers_for_namespace_wrap(set_mod)
+    if set_entry.exists():
+        fix_global_qualifiers_for_namespace_wrap(set_entry)
+    # Move the __TemplateArgs primary into the namespace wrap so the
+    # partial specializations (also in the wrap) match its scope.
+    fix_template_args_primary_scope(internal)
+    # Move std::hash<...> specializations OUT of the namespace wrap
+    # (they must be at a scope enclosing `namespace std`).
+    fix_std_hash_specialization_scope(internal)
+    if map_mod.exists():
+        fix_std_hash_specialization_scope(map_mod)
+    # Map-specific qualifier fix-ups: under auto-namespace mode,
+    # patcher hand-port code references unqualified `NodeRef` (which
+    # lives in btree_internal::) and the merged entry content has
+    # `::BTreeMap` / `::IntoIter` global qualifiers that need to be
+    # in-scope names.
+    if map_mod.exists():
+        fix_map_cppm_qualifiers_for_namespace_wrap(map_mod)
+    if set_mod.exists():
+        # Set-specific rules MUST run before the shared map-qualifier
+        # pass — the shared pass turns `::BTreeSet<` into `set::BTreeSet<`
+        # (correct for map.cppm, wrong for set.cppm where BTreeSet is
+        # in-scope and should be bare).
+        fix_set_cppm_qualifiers_for_namespace_wrap(set_mod)
+        fix_map_cppm_qualifiers_for_namespace_wrap(set_mod)
+        stub_broken_set_methods(set_mod)
+    if set_entry.exists():
+        fix_map_cppm_qualifiers_for_namespace_wrap(set_entry)
     return 0
 
 

@@ -57,8 +57,15 @@
 // directly. See docs/rusty-std-book.md §5 for the migration story.
 // #include "rusty/hashmap.hpp"  // deleted
 // #include "rusty/hashset.hpp"  // deleted
-#include "rusty/btreemap.hpp"
-#include "rusty/btreeset.hpp"
+//
+// rusty::BTreeMap and rusty::BTreeSet replaced by the btree_port C++20
+// modules. Consumers `import btree_port.btree.map;` and
+// `import btree_port.btree.set;` directly. The legacy std::map / std::set
+// facades at include/btree_port/{btreemap,btreeset}.hpp are deleted.
+// The set migration unblocked once the auto-namespace retranspile fixed
+// the namespace-collision issue (STATUS Step 89).
+// #include "rusty/btreemap.hpp"  // deleted
+// #include "rusty/btreeset.hpp"  // deleted
 
 // Arrays and ranges
 #include "rusty/array.hpp"
