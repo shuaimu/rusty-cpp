@@ -1,4 +1,4 @@
-# VecDeque port — Phase A1 (transpile clean)
+# VecDeque port — Phase A2 partial (same blockers as rc_port)
 
 This directory holds the scaffolding for the rustc
 `alloc::collections::vec_deque` port — Tier 2 in
@@ -11,8 +11,8 @@ This directory holds the scaffolding for the rustc
 | 1. Source acquisition | ✅ `library/alloc/src/collections/vec_deque/` (10 .rs files, 5527 LOC excluding `tests.rs`) vendored to `/tmp/vec_deque_port/vec_deque_crate/src/` |
 | 2. Preprocessing (`prep.sh`) | ✅ Same idempotent rewrites as the BTreeMap port |
 | 3. Transpilation | ✅ **Zero transpiler errors.** Run with `--auto-namespace`. 14 hand-port slots across 3 files. Outputs 10 `.cppm` files (per-rust-module). |
-| 4. Post-transpile patching | ⏸️ Not yet attempted. Same pattern as binary_heap_port — will need: `rusty::Vec` → `::Vec` bulk rename, `visit_byte_buf` prelude stub, duplicate `clone` template strip, `using rusty::Vec;` deletion, `import vec_port.vec; import vec_port.vec.into_iter;` additions, `vec::IntoIter` / `vec::Drain` → `::IntoIter` / `::Drain` fixups. |
-| 5. Build | ⏸️ Not wired into `CMakeLists.txt` yet. |
+| 4. Post-transpile patching | 🟡 **Seeded.** `docs/vec_deque_port/post_transpile_patch.py` applies the binary_heap-style 14-patch set (`rusty::Vec<>` → `::Vec<>`, `usize` → `size_t`, `ptr::swap` → `std::swap`, `rusty::mem::MaybeUninit` → `rusty::MaybeUninit`, `std::Allocator`/`std::Global` → `rusty::alloc::*`). Idempotent. |
+| 5. Build | 🔴 **Blocked** — `rusty::VecDeque<T>` only takes one template arg but the transpiled code emits `VecDeque<T, A>` (same shape as rc_port's blocker). |
 | 6. Smoke test | ⏸️ |
 | 7. Bench | ⏸️ |
 
@@ -57,11 +57,18 @@ All under `namespace vec_deque_port { … }` thanks to `--auto-namespace`.
 Internal types (`IntoIter`, `Drain`, etc.) are namespaced — no collision
 with vec_port's globals.
 
-## Predicted effort to Phase B (compile clean)
+## Remaining Phase B blockers
 
-Per §2.8: medium port, multi-file but acyclic-ish. The post-transpile
-patcher will be the lift, similar in complexity to vec_port's patcher.
-Likely **3–5 days** of patcher iteration + hand-ports.
+1. **Hand-written `rusty::VecDeque<T>` is single-arg**; transpiled uses `VecDeque<T, A>`. Either extend hand-written to `<T, A = Global>` (mirror vec_port's path), or hand-port to `vec_deque_port::VecDeque<T, A>` and stop aliasing.
+2. **`std::Allocator` / `std::Global` references** — the transpiler emits Rust's `alloc::Allocator` / `alloc::Global` as if in C++ `std::`. Patcher handles top-level cases; some embedded in template params (e.g. `extend<…, std::Allocator A2>`) need template-aware rewrite.
+3. **Cross-port import injection** — vec_deque references `::Vec` / `::IntoIter` but the umbrella doesn't `import vec_port.vec;`. Same pattern binary_heap solved manually; vec_deque needs it codified in the patcher.
+4. **Cluster A residue** — `expected unqualified-id` at line 48/57/60 in `spec_extend.cppm` likely auto-template-arg leakage from absorbed methods.
+
+## Predicted Phase B effort
+
+Same shape as rc_port: **5–8 days** to extend `rusty::VecDeque<T, A>`,
+inject cross-port imports correctly, fix template-aware Allocator
+rewrites, and chase the Cluster A residue.
 
 ## Dependencies
 

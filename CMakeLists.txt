@@ -168,9 +168,11 @@ endif()
 
 # ──────────────────────────────────────────────────────────────────────
 # vec_deque_port — transpiled rustc VecDeque (ring buffer).
-# Multi-file (10 .cppm files). CMake target intentionally not wired
-# yet — vendored sources are in transpiled/vec_deque_port/ but the
-# library doesn't build clean yet. See docs/vec_deque_port/STATUS.md.
+# Multi-file (10 .cppm files). CMake target intentionally not wired —
+# the hand-written rusty::VecDeque<T> takes one template arg but
+# transpiled code emits VecDeque<T, A>; same shape as rc_port's
+# blocker. Patcher seeded in docs/vec_deque_port/post_transpile_patch.py;
+# see docs/vec_deque_port/STATUS.md for the full punch list.
 #
 # if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 #    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
