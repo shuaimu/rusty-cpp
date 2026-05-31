@@ -3689,7 +3689,7 @@ namespace ptr = rusty::ptr;
 
 using rusty::alloc::Global;
 
-// Rust-only: using std::collections::TryReserveError;
+// Rust-only: using rusty::collections::TryReserveError;
 
 // Rust-only namespace re-export: using slice;
 
@@ -3843,8 +3843,8 @@ struct IntoIter {
     Source& as_inner() {
         return (*this);
     }
-    static constexpr rusty::Option<rusty::num::NonZero<size_t>> EXPAND_BY = NonZero::new_(1);
-    static constexpr rusty::Option<rusty::num::NonZero<size_t>> MERGE_BY = NonZero::new_(1);
+    inline static const rusty::Option<rusty::num::NonZero<size_t>> EXPAND_BY = rusty::num::NonZero<size_t>::new_(1);
+    inline static const rusty::Option<rusty::num::NonZero<size_t>> MERGE_BY = rusty::num::NonZero<size_t>::new_(1);
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
     template<typename I>
     decltype(rusty::iter(std::declval<::Vec<Item>>()))& as_into_iter() {
@@ -4020,7 +4020,7 @@ struct BinaryHeap {
         return f.debug_list().entries(rusty::iter((*this))).finish();
     }
     static BinaryHeap<T> new_() {
-        return BinaryHeap<T>{.data = rusty::Vec{}};
+        return BinaryHeap<T>{.data = ::Vec<T>{}};
     }
     static BinaryHeap<T> with_capacity(size_t capacity) {
         return BinaryHeap<T>{.data = ::Vec<T, A>::with_capacity(std::move(capacity))};
@@ -4077,7 +4077,7 @@ return std::move(item);
             // @unsafe
             {
                 const auto ptr_shadow1 = reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->data));
-                ptr::swap(ptr_shadow1, rusty::ptr::add(ptr_shadow1, std::move(end)));
+                std::swap(ptr_shadow1, rusty::ptr::add(ptr_shadow1, std::move(end)));
             }
             // @unsafe
             {
@@ -4157,7 +4157,7 @@ return std::move(item);
     }
     void rebuild_tail(size_t start) {
         const rusty::SafeFn<size_t(size_t)> log2_fast = +[](size_t x) -> size_t {
-            return static_cast<size_t>(((rusty::detail::deref_if_pointer_like(usize::BITS) - rusty::leading_zeros(x)) - 1));
+            return static_cast<size_t>(((rusty::detail::deref_if_pointer_like(std::numeric_limits<size_t>::digits) - rusty::leading_zeros(x)) - 1));
         };
         if (rusty::detail::deref_if_pointer_like(start) == rusty::len((*this))) {
             return;
@@ -4227,10 +4227,10 @@ return std::move(keep);
     void reserve(size_t additional) {
         this->data.reserve(std::move(additional));
     }
-    auto try_reserve_exact(size_t additional) -> rusty::Result<std::tuple<>, std::collections::TryReserveError> {
+    auto try_reserve_exact(size_t additional) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
         return this->data.try_reserve_exact(std::move(additional));
     }
-    auto try_reserve(size_t additional) -> rusty::Result<std::tuple<>, std::collections::TryReserveError> {
+    auto try_reserve(size_t additional) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
         return this->data.try_reserve(std::move(additional));
     }
     void shrink_to_fit() {
@@ -4535,8 +4535,7 @@ struct DrainSorted {
 // host type's struct body, or rewrite `this`/`(*this)` to an explicit
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for Vec
-static ::Vec<T, A> from(::Vec<T, A> heap) {
-    return std::move(heap.data);
-}
+// Orphan impl block "Methods for Vec" deleted — transpiler emitted method
+// bodies outside any class. Vec already has its own factories in vec_port.
 
 } // namespace binary_heap_port

@@ -2187,7 +2187,7 @@ or where the existing hand-written version is a thin wrapper.
 
 | Type | rustc source | Hand-written? | Difficulty | Status | Why port |
 |---|---|---|---|---|---|
-| **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | 🟡 **Phase A1** — transpile clean, partial compile. See `docs/binary_heap_port/STATUS.md` and §5.1. | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
+| **`BinaryHeap<T>`** | `library/alloc/src/collections/binary_heap/` | ❌ none | Medium — single struct, mostly `Vec` operations + heap invariant maintenance | ✅ **Phase B** — `libbinary_heap_port.a` builds clean, empty-heap smoke test passes. Phase C push/pop/peek still needs ~6 `rusty::ptr::*` helper-gap patches. See `docs/binary_heap_port/STATUS.md` and §6.1. | Common in path-finding, scheduling, priority queues. Falls naturally out of `Vec` work. Net-new functionality. |
 | **`VecDeque<T, A>`** | `library/alloc/src/collections/vec_deque/` | ✅ `vecdeque.hpp` | Medium — ring buffer with separate head/tail; wraparound arithmetic; some unsafe but not exotic | 🟡 **Phase A1** — transpile clean. See `docs/vec_deque_port/STATUS.md` and §5.2. | Hand-written exists but transpiling locks in Rust's exact wraparound semantics + `drain` / `swap_remove_back`. Common in BFS / queue workloads. |
 | **`LinkedList<T>`** | `library/alloc/src/collections/linked_list.rs` | ❌ none | Medium — doubly-linked with raw-pointer plumbing; cursor API uses unsafe heavily | 🟡 **Phase A1** — transpile clean. See `docs/linked_list_port/STATUS.md` and §5.3. | Net-new functionality. Rarely used compared to `Vec`/`VecDeque`, but completes the collections family. Tests the transpiler against intrusive-list shapes. |
 | **`HashSet<T, S>`** | `library/std/src/collections/hash/set.rs` | ✅ `hashset.hpp` | Low — ~free once `HashMap` is done (it's literally `HashMap<T, ()>` underneath) | ✅ **Done** as part of hashbrown_port. | Lands automatically with HashMap. |
@@ -3359,9 +3359,18 @@ following Chapter 2's playbook.
 (2038 LOC, single file). Net-new — no hand-written `rusty::BinaryHeap`
 existed before.
 
-**Status**: Phase A1 done (`transpile clean, 0 errors, 5 hand-port
-slots`). Partial Phase A2 — first compile produces ~6 error clusters
-documented in [`docs/binary_heap_port/STATUS.md`](binary_heap_port/STATUS.md):
+**Status**: ✅ **Phase B reached — library + empty-heap smoke test green.**
+The Phase A2 patcher work landed (14 sed/perl patches enumerated in
+[`docs/binary_heap_port/STATUS.md`](binary_heap_port/STATUS.md));
+`libbinary_heap_port.a` builds clean and
+`tests/binary_heap_port_module_test.cpp` proves `BinaryHeap::new_in()`
++ `len()` / `is_empty()` / `capacity()` work end-to-end.
+
+Phase C (full push/pop/peek) still needs ~6 instantiation-time
+clusters resolved (mostly `rusty::ptr::*` helper gaps that the
+BTreeMap port also hit — see STATUS.md "Remaining for Phase C").
+
+The original phase-A2 cluster catalogue, now all resolved:
 
 | Cluster | Shape | Patcher rule needed |
 |---|---|---|

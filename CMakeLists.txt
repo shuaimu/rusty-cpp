@@ -206,6 +206,11 @@ set(TEST_SOURCES
     # and verifies they all run.
     tests/async_module_test.cpp
 
+    # binary_heap_port — transpiled rustc BinaryHeap (max-heap priority
+    # queue). Smoke test imports binary_heap_port, pushes scrambled ints,
+    # asserts they come out in descending order.
+    tests/binary_heap_port_module_test.cpp
+
     # TODO: Re-enable when String API is complete
     # tests/rusty_string_test.cpp
     # tests/test_all_types.cpp
@@ -227,7 +232,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     set(_vec_consuming_tests
         test_mutex test_thread rusty_vec_test rusty_array_test)
     list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
-    if((test_name MATCHES "^(btree_port|vec_port)_"
+    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port)_"
         OR test_name STREQUAL "async_module_test"
         OR NOT _vec_consume_idx EQUAL -1)
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
@@ -257,6 +262,13 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # Same wiring for vec_port_* tests.
     if(test_name MATCHES "^vec_port_")
         target_link_libraries(${test_executable} PRIVATE vec_port)
+        target_compile_features(${test_executable} PRIVATE cxx_std_23)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+        target_link_options(${test_executable} PRIVATE )
+    endif()
+    # binary_heap_port_* tests link binary_heap_port (which pulls vec_port).
+    if(test_name MATCHES "^binary_heap_port_")
+        target_link_libraries(${test_executable} PRIVATE binary_heap_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
         target_link_options(${test_executable} PRIVATE )
