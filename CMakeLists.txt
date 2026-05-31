@@ -31,6 +31,41 @@ target_compile_features(hashbrown_port PUBLIC cxx_std_23)
 target_compile_options(hashbrown_port PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
 
 # ──────────────────────────────────────────────────────────────────────
+# vec_port — transpiled rustc-stdlib Vec port, exposed as C++20 modules.
+# Sources live in transpiled/vec_port/*.cppm and are vendored from the
+# transpiler+patcher pipeline (docs/vec_port/).
+#
+# This is the FLAT-EXPORT vendoring (no auto-namespace wrap) — exports
+# `Vec<T, A>` at global scope, mirroring the original transpile output
+# the 4-way bench in docs/vec_port/ was validated against. The
+# auto-namespace retranspile is a possible follow-up; see
+# rusty-std-book §4 and docs/vec_port/STATUS.md.
+#
+# Reduced-scope build: 6 modules (vec_port + raw_vec + set_len_on_drop
+# + into_iter + drain + vec). Auxiliary modules (cow, extract_if,
+# in_place_*, peek_mut, splice, spec_*, partial_eq, is_zero) need their
+# cluster-specific issues addressed before they can ship.
+# ──────────────────────────────────────────────────────────────────────
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    set(VEC_PORT_CPPM
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.raw_vec.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.vec.set_len_on_drop.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.vec.into_iter.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.vec.drain.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_port/vec_port.vec.cppm
+    )
+    add_library(vec_port STATIC)
+    target_sources(vec_port
+        PUBLIC FILE_SET CXX_MODULES FILES ${VEC_PORT_CPPM}
+    )
+    target_include_directories(vec_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(vec_port PUBLIC cxx_std_23)
+    target_compile_options(vec_port PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
+endif()
+
+# ──────────────────────────────────────────────────────────────────────
 # btree_port — transpiled rustc-stdlib BTreeMap port, exposed as C++20
 # modules. Sources live in transpiled/btree_port/*.cppm and are vendored
 # from the transpiler+patcher pipeline (docs/btreemap_port/).
@@ -116,6 +151,10 @@ set(TEST_SOURCES
     tests/btree_port_module_test.cpp
     tests/btree_port_set_module_test.cpp
 
+    # vec_port — transpiled rustc-stdlib Vec exposed as C++20 modules.
+    # Smoke test imports vec_port.vec and exercises new_/push/pop/len.
+    tests/vec_port_module_test.cpp
+
     # TODO: Re-enable when String API is complete
     # tests/rusty_string_test.cpp
     # tests/test_all_types.cpp
@@ -130,9 +169,9 @@ set(TEST_TARGETS)
 foreach(test_source IN LISTS TEST_SOURCES)
     get_filename_component(test_name "${test_source}" NAME_WE)
     set(test_executable "${test_name}.out")
-    # btree_port_* tests depend on the clang-only btree_port module
-    # library; skip them entirely under gcc.
-    if(test_name MATCHES "^btree_port_"
+    # btree_port_* / vec_port_* tests depend on the clang-only module
+    # libraries; skip them entirely under gcc.
+    if(test_name MATCHES "^(btree_port|vec_port)_"
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
                 OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"))
         continue()
@@ -153,6 +192,13 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # library. Same release-flag matching as hashbrown_port.
     if(test_name MATCHES "^btree_port_")
         target_link_libraries(${test_executable} PRIVATE btree_port)
+        target_compile_features(${test_executable} PRIVATE cxx_std_23)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
+        target_link_options(${test_executable} PRIVATE -flto=thin)
+    endif()
+    # Same wiring for vec_port_* tests.
+    if(test_name MATCHES "^vec_port_")
+        target_link_libraries(${test_executable} PRIVATE vec_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native -flto=thin)
         target_link_options(${test_executable} PRIVATE -flto=thin)
