@@ -1,4 +1,4 @@
-# Arc port — Phase A1 (transpile clean)
+# Arc port — Phase A2 partial (patcher seeded, same blockers as rc_port + atomics)
 
 Vendored `library/alloc/src/sync.rs` (4936 LOC) → `transpiled/arc_port/arc_port.cppm`.
 Transpiled with `--auto-namespace`: zero errors, 7 hand-port slots. See
@@ -12,8 +12,8 @@ rationale.
 | 1. Source acquisition | ✅ |
 | 2. Prep | ✅ |
 | 3. Transpile | ✅ Zero errors, 7 hand-slots |
-| 4. Patcher | ⏸️ |
-| 5. Build | ⏸️ |
+| 4. Patcher | 🟡 **Seeded.** `docs/arc_port/post_transpile_patch.py` mirrors rc_port's namespace fixups (borrow/string/Vec/ptr::Alignment/mem::MaybeUninit). |
+| 5. Build | 🔴 **Blocked.** Same shape as rc_port (single- vs two-template-arg Arc, missing NonNull::cast<>, Cluster A regression) PLUS atomics-specific issues: memory ordering helpers (`rusty::atomic::*`), `compare_exchange_weak` overload resolution. |
 
 ## Reproducing
 
@@ -28,10 +28,17 @@ bash docs/arc_port/prep.sh /tmp/arc_port/arc_crate/src/lib.rs
 cp /tmp/arc_port/cpp_out/*.cppm transpiled/arc_port/
 ```
 
+## Remaining Phase B blockers
+
+Same set as rc_port (single- vs two-template-arg Arc<T>, missing
+`NonNull::cast<>()`, Cluster A regression, cross-port Cell/UnsafeCell
+signature drift) PLUS arc-specific:
+
+- **Memory ordering helpers** — rustc uses `core::sync::atomic::Ordering::{Acquire,Release,SeqCst,Relaxed}`; our `rusty::atomic` either doesn't surface these or surfaces them as different names.
+- **`compare_exchange_weak` overload mismatch** — rustc's `AtomicUsize::compare_exchange_weak(curr, new, succ, fail)` takes two orderings; need to verify our binding.
+- **`AtomicPtr::store/load` argument forwarding** — refcount-bump paths need careful ordering preservation.
+
 ## Predicted Phase B effort
 
-Per §2.8: **3-5 days** — single file but atomics-everywhere; memory
-ordering matters; ABA-style concerns on `upgrade()`. Hand-written
-`rusty::Arc` has known rough edges (see commit `ddee375`); transpiling
-could nail down the exact ordering rustc uses, which is the main
-value-add over the existing header.
+**8–12 days** — single file but atomics-heavy. Beyond rc_port's
+5-8 days because each ordering site needs hand-audit.
