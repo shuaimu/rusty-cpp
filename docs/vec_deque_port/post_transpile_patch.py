@@ -83,6 +83,24 @@ def patch_all_files(cpp_out: Path) -> int:
         text = re.sub(r"(?<![A-Za-z0-9_])std::Global",
                       "rusty::alloc::Global", text)
 
+        # Drop imports of submodules we exclude from the reduced-scope
+        # build (see CMakeLists.txt vec_deque_port note). The dropped
+        # submodules pull in iterator-adapter types we don't vendor yet.
+        # Only applies to the main `vec_deque_port.cppm` file.
+        if path.name == "vec_deque_port.cppm":
+            for dropped in (
+                "spec_extend",
+                "spec_from_iter",
+                "splice",
+                "extract_if",
+            ):
+                text = re.sub(
+                    rf"^import vec_deque_port\.{dropped};\s*$",
+                    f"// import vec_deque_port.{dropped}; — excluded from reduced-scope build",
+                    text,
+                    flags=re.MULTILINE,
+                )
+
         # Hand-written `rusty::VecDeque<T>` (single arg) was retired
         # alongside this port; the transpiled emit uses
         # `rusty::VecDeque<T, A>` because the type-map says

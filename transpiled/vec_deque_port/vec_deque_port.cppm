@@ -3693,8 +3693,7 @@ import vec_deque_port.drain;
 
 export using extract_if::ExtractIf;
 
-import vec_deque_port.extract_if;
-
+// import vec_deque_port.extract_if; — excluded from reduced-scope build
 export using iter_mut::IterMut;
 
 import vec_deque_port.iter_mut;
@@ -3710,16 +3709,13 @@ import vec_deque_port.iter;
 using spec_extend::SpecExtend;
 using spec_extend::SpecExtendFront;
 
-import vec_deque_port.spec_extend;
-
+// import vec_deque_port.spec_extend; — excluded from reduced-scope build
 using spec_from_iter::SpecFromIter;
 
-import vec_deque_port.spec_from_iter;
-
+// import vec_deque_port.spec_from_iter; — excluded from reduced-scope build
 export using splice::Splice;
 
-import vec_deque_port.splice;
-
+// import vec_deque_port.splice; — excluded from reduced-scope build
 // #[cfg(test)] module omitted
 
 /// A double-ended queue implemented with a growable ring buffer.

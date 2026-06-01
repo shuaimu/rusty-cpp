@@ -184,12 +184,27 @@ endif()
 # ──────────────────────────────────────────────────────────────────────
 # vec_deque_port — transpiled rustc VecDeque (ring buffer). Multi-file
 # (10 .cppm files). Patcher in docs/vec_deque_port/post_transpile_patch.py.
+#
+# Reduced-scope build (mirrors vec_port pattern): keep just the modules
+# needed for the basic surface (push/pop/len/front/back/peek/iter).
+# Auxiliary modules — `spec_extend`, `spec_from_iter`, `splice`,
+# `extract_if` — depend on Rust iterator-adapter types (`std::iter::Copied`,
+# `array::IntoIter`) that don't have C++ equivalents in our headers
+# yet, and on cross-port shapes the patcher doesn't fully cover.
+# The patcher rewrites their `import vec_deque_port.{spec_*,splice,
+# extract_if};` lines out of the main module so the build doesn't
+# require them.
 # ──────────────────────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-    file(GLOB VEC_DEQUE_PORT_CPPM
-         "${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/*.cppm")
-    list(FILTER VEC_DEQUE_PORT_CPPM EXCLUDE REGEX "_stub\\.cppm$")
+    set(VEC_DEQUE_PORT_CPPM
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.macros.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.iter.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.iter_mut.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.into_iter.cppm
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.drain.cppm
+    )
     add_library(vec_deque_port STATIC)
     target_sources(vec_deque_port
         PUBLIC FILE_SET CXX_MODULES FILES ${VEC_DEQUE_PORT_CPPM}
