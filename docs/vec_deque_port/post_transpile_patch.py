@@ -242,6 +242,15 @@ def patch_all_files(cpp_out: Path) -> int:
         if path.name == "vec_deque_port.into_iter.cppm" and "next_chunk" in text:
             text = _strip_next_chunk_method(text)
 
+        # C++20 modules require all `import` declarations to appear
+        # at the very top of the module purview (right after
+        # `export module foo;`), before any other declarations. The
+        # transpiler interleaves submodule imports with `using` /
+        # `export using` declarations, which clang rejects with
+        # "unknown type name 'import'". Lift all imports to the top.
+        if "export module vec_deque_port" in text:
+            text = _lift_imports_to_top(text)
+
         # Two `struct Guard { … }` definitions at IntoIter class scope —
         # one used by try_fold, one used by try_rfold. The Rust source has
         # them as method-local types; the transpiler hoisted both to
@@ -256,6 +265,52 @@ def patch_all_files(cpp_out: Path) -> int:
             path.write_text(text)
             total_changes += 1
     return total_changes
+
+
+def _lift_imports_to_top(text: str) -> str:
+    """Move all `import …;` lines to immediately after the
+    `export module …;` line. Required by C++20: imports must precede
+    every other declaration in the module purview. Transpiler emits
+    them interleaved with `using` / `export using`.
+
+    Leaves the file's structure otherwise intact: the original lines
+    that contained imports are blanked out (so line numbers in
+    diagnostics shift only slightly).
+    """
+    lines = text.split("\n")
+    out = []
+    imports_to_lift = []
+    module_line_idx = None
+
+    for idx, line in enumerate(lines):
+        if line.startswith("export module ") and module_line_idx is None:
+            module_line_idx = idx
+
+    if module_line_idx is None:
+        return text
+
+    for idx, line in enumerate(lines):
+        stripped = line.lstrip()
+        # Only lift bare `import X.Y;` lines past the module declaration.
+        # Leave commented-out imports alone — they're our reduced-scope
+        # markers.
+        if (idx > module_line_idx
+                and stripped.startswith("import ")
+                and stripped.endswith(";")):
+            imports_to_lift.append(line)
+            out.append("")  # blank line in original position
+        else:
+            out.append(line)
+
+    # Insert collected imports right after the module declaration.
+    if imports_to_lift:
+        insert_at = module_line_idx + 1
+        # Inject a leading blank line if there isn't one already.
+        if (insert_at < len(out)
+                and out[insert_at].strip() != ""):
+            imports_to_lift = imports_to_lift + [""]
+        out = out[:insert_at] + imports_to_lift + out[insert_at:]
+    return "\n".join(out)
 
 
 def _strip_second_guard_and_try_rfold(text: str) -> str:

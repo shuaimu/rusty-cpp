@@ -137,7 +137,7 @@ endif()
 # ──────────────────────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-    foreach(_port rc_port arc_port string_port)
+    foreach(_port rc_port arc_port vec_deque_port string_port)
         add_library(${_port} STATIC)
         target_sources(${_port}
             PUBLIC FILE_SET CXX_MODULES FILES
@@ -182,38 +182,24 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
-# vec_deque_port — transpiled rustc VecDeque (ring buffer). Multi-file
-# (10 .cppm files). Patcher in docs/vec_deque_port/post_transpile_patch.py.
+# vec_deque_port — full transpiled rustc VecDeque (ring buffer) attempt
+# reverted to bridge-stub for now. The body needs C++20 module-ownership
+# work: submodules reference vec_deque_port::VecDeque<T,A> but importing
+# the main module from submodules creates a cycle, and forward-declaring
+# in submodules fails C++20's "declaration attached to other modules"
+# rule. Either the type needs to live at global namespace (like vec_port's
+# ::Vec) or all code needs to merge into a single module unit.
 #
-# Reduced-scope build (mirrors vec_port pattern): keep just the modules
-# needed for the basic surface (push/pop/len/front/back/peek/iter).
-# Auxiliary modules — `spec_extend`, `spec_from_iter`, `splice`,
-# `extract_if` — depend on Rust iterator-adapter types (`std::iter::Copied`,
-# `array::IntoIter`) that don't have C++ equivalents in our headers
-# yet, and on cross-port shapes the patcher doesn't fully cover.
-# The patcher rewrites their `import vec_deque_port.{spec_*,splice,
-# extract_if};` lines out of the main module so the build doesn't
-# require them.
+# Patcher in docs/vec_deque_port/post_transpile_patch.py holds the
+# ~15 rewrites we've accumulated — keep it ready for the next attempt.
+# Infrastructure changes already landed:
+#   - include/rusty/vecdeque.hpp emptied (stub)
+#   - include/rusty/rusty.cppm: `using VecDeque = vec_deque_port::VecDeque<…>;`
+#   - include/rusty/mem.hpp: `mem::needs_drop<T>()` template
+#   - transpiled/vec_port/vec_port.vec.into_iter.cppm: stale
+#     `using rusty::VecDeque;` commented out
+# These don't break anything and prep for the eventual promotion.
 # ──────────────────────────────────────────────────────────────────────
-if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
-   OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-    set(VEC_DEQUE_PORT_CPPM
-        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.cppm
-        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.macros.cppm
-        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.iter.cppm
-        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.iter_mut.cppm
-        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.into_iter.cppm
-        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.drain.cppm
-    )
-    add_library(vec_deque_port STATIC)
-    target_sources(vec_deque_port
-        PUBLIC FILE_SET CXX_MODULES FILES ${VEC_DEQUE_PORT_CPPM}
-    )
-    target_include_directories(vec_deque_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    target_compile_features(vec_deque_port PUBLIC cxx_std_23)
-    target_compile_options(vec_deque_port PRIVATE -O3 -DNDEBUG -march=native )
-    target_link_libraries(vec_deque_port PUBLIC vec_port)
-endif()
 
 # ──────────────────────────────────────────────────────────────────────
 # linked_list_port — transpiled rustc LinkedList (doubly-linked w/cursor).

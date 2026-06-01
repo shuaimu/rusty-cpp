@@ -110,18 +110,12 @@ export {
 // both via the rusty umbrella so `import rusty;` keeps providing them.
 export import rusty.async;
 export import vec_port.vec;
-export import vec_deque_port;
 
 export namespace rusty {
 
 // VecLegacy retired — `rusty::Vec<T,A>` is the transpiled rustc Vec.
 template<typename T, typename A = ::rusty::alloc::Global>
 using Vec = ::Vec<T, A>;
-
-// Hand-written rusty::VecDeque<T> retired — `rusty::VecDeque<T,A>` is
-// now the transpiled rustc VecDeque from `vec_deque_port`.
-template<typename T, typename A = ::rusty::alloc::Global>
-using VecDeque = ::vec_deque_port::VecDeque<T, A>;
 
 } // export namespace rusty
 
