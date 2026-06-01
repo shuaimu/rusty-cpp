@@ -1,22 +1,22 @@
-// Smoke test for rc_port (Phase B/C bridge — see transpiled/rc_port/
-// rc_port_stub.cppm). The transpiled body isn't reachable yet, so this
-// only exercises the bridge surface (constructing an Rc, basic ref
-// counting via the hand-written rusty::Rc).
-
+// Smoke test for rc_port (full transpiled body from
+// library/alloc/src/rc.rs via the docs/rc_port/ pipeline).
+// Exercises Rc<int>::new_(42), strong_count, and clone.
 import rc_port;
 
-#include <rusty/rc.hpp>
+#include <rusty/rusty.hpp>
 #include <cassert>
 #include <cstdio>
 
 int main() {
-    rc_port::Rc<int> p = rc_port::Rc<int>::make(42);
-    assert(*p == 42);
-
-    rc_port::Rc<int> p2 = p;  // clone
-    assert(*p2 == 42);
-    assert(*p == 42);
-
-    std::printf("rc_port (stub bridge) smoke OK: Rc<int>(42) + clone\n");
+    auto p = rc_port::Rc<int>::new_(42);
+    assert(rc_port::Rc<int>::strong_count(p) == 1);
+    {
+        auto p2 = p.clone();
+        assert(rc_port::Rc<int>::strong_count(p) == 2);
+        assert(rc_port::Rc<int>::strong_count(p2) == 2);
+        (void)p2;
+    }
+    assert(rc_port::Rc<int>::strong_count(p) == 1);
+    std::printf("rc_port (transpiled) smoke OK: Rc<int>::new_(42) + clone\n");
     return 0;
 }

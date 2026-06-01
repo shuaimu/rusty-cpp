@@ -137,7 +137,7 @@ endif()
 # ──────────────────────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-    foreach(_port rc_port arc_port string_port)
+    foreach(_port arc_port string_port)
         add_library(${_port} STATIC)
         target_sources(${_port}
             PUBLIC FILE_SET CXX_MODULES FILES
@@ -147,6 +147,19 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
         target_compile_features(${_port} PUBLIC cxx_std_23)
         target_compile_options(${_port} PRIVATE -O3 -DNDEBUG -march=native )
     endforeach()
+
+    # rc_port: full transpiled body from library/alloc/src/rc.rs
+    # (4565 LOC Rust → ~5100 LOC C++). Pipeline:
+    #   docs/rc_port/{prep.sh, post_transpile_patch.py} → transpiled/rc_port/rc_port.cppm
+    add_library(rc_port STATIC)
+    target_sources(rc_port
+        PUBLIC FILE_SET CXX_MODULES FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/rc_port/rc_port.cppm
+    )
+    target_include_directories(rc_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(rc_port PUBLIC cxx_std_23)
+    target_compile_options(rc_port PRIVATE -O3 -DNDEBUG -march=native )
+    target_link_libraries(rc_port PUBLIC vec_port)
     # linked_list_port: full transpiled body (the transpiler fix landed
     # for the Cluster A 'Box<auto>::new_in' regression — see
     # transpiler/src/codegen.rs test_linked_list_box_new_in_with_typed_arg_*).
