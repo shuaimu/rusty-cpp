@@ -3633,6 +3633,10 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module vec_deque_port;
 
+import vec_port.vec;  // patcher-injected for ::Vec
+import vec_port.raw_vec;  // patcher-injected for ::raw_vec::RawVec
+import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter / ::Drain
+
 namespace vec_deque_port {
 
 export template<typename T, typename A>

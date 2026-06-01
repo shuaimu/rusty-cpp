@@ -129,6 +129,20 @@ def patch_all_files(cpp_out: Path) -> int:
         # build (see CMakeLists.txt vec_deque_port note). The dropped
         # submodules pull in iterator-adapter types we don't vendor yet.
         # Only applies to the main `vec_deque_port.cppm` file.
+        # Main module needs `vec_port.raw_vec` for `::raw_vec::RawVec`
+        # references — inject right after `export module vec_deque_port;`.
+        if (path.name == "vec_deque_port.cppm"
+                and "import vec_port.raw_vec;" not in text):
+            text = text.replace(
+                "export module vec_deque_port;",
+                ("export module vec_deque_port;\n"
+                 "\n"
+                 "import vec_port.vec;  // patcher-injected for ::Vec\n"
+                 "import vec_port.raw_vec;  // patcher-injected for ::raw_vec::RawVec\n"
+                 "import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter / ::Drain"),
+                1,
+            )
+
         if path.name == "vec_deque_port.cppm":
             for dropped in (
                 "spec_extend",
@@ -228,10 +242,78 @@ def patch_all_files(cpp_out: Path) -> int:
         if path.name == "vec_deque_port.into_iter.cppm" and "next_chunk" in text:
             text = _strip_next_chunk_method(text)
 
+        # Two `struct Guard { … }` definitions at IntoIter class scope —
+        # one used by try_fold, one used by try_rfold. The Rust source has
+        # them as method-local types; the transpiler hoisted both to
+        # class scope, producing a redefinition error. Strip the second
+        # Guard + try_rfold method (we don't need it for the basic
+        # smoke test path).
+        if (path.name == "vec_deque_port.into_iter.cppm"
+                and text.count("    struct Guard {") >= 2):
+            text = _strip_second_guard_and_try_rfold(text)
+
         if text != original:
             path.write_text(text)
             total_changes += 1
     return total_changes
+
+
+def _strip_second_guard_and_try_rfold(text: str) -> str:
+    """Strip the second `struct Guard { … }` and the `try_rfold` method
+    that follows it from the IntoIter class scope. Rust source has
+    method-local Guard structs; the transpiler hoisted both to class
+    scope which produces a redefinition. We don't need try_rfold for
+    the basic smoke test path.
+
+    Strategy: line-walk; on the SECOND `    struct Guard {` line,
+    eat until depth-balanced. Then continue eating any following
+    method whose name starts with `try_rfold` (depth-balanced).
+    """
+    lines = text.split("\n")
+    out = []
+    seen_guard = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith("struct Guard {"):
+            seen_guard += 1
+            if seen_guard == 2:
+                # Eat this struct, then keep eating until we exit the
+                # subsequent try_rfold method's body.
+                out.append("    // patcher: second `struct Guard` + try_rfold stripped")
+                # Eat the struct
+                i = _eat_balanced_block(lines, i)
+                # Skip blank lines
+                while i < len(lines) and lines[i].strip() == "":
+                    i += 1
+                # If next non-blank is try_rfold, eat it too.
+                if i < len(lines) and "try_rfold" in lines[i]:
+                    i = _eat_balanced_block(lines, i)
+                continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
+def _eat_balanced_block(lines, start_idx: int) -> int:
+    """Starting at lines[start_idx] which contains an opening `{`,
+    advance until the matching `}` closes the block. Returns the
+    index AFTER the closing line."""
+    depth = 0
+    in_body = False
+    i = start_idx
+    while i < len(lines):
+        line = lines[i]
+        for ch in line:
+            if ch == "{":
+                depth += 1
+                in_body = True
+            elif ch == "}":
+                depth -= 1
+        i += 1
+        if in_body and depth == 0:
+            return i
+    return i
 
 
 def _strip_next_chunk_method(text: str) -> str:

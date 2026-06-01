@@ -3783,33 +3783,7 @@ return 0;
 }();
         return rusty::num::NonZero<size_t>::new_(std::move(rem)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
     }
-    struct Guard {
-        vec_deque_port::VecDeque<T, A>& deque;
-        size_t consumed;
-        mutable bool _rusty_forgotten = false;
-        Guard(vec_deque_port::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
-        Guard(const Guard&) = default;
-        Guard(Guard&& other) noexcept : deque(other.deque), consumed(std::move(other.consumed)) {
-            this->_rusty_forgotten = other._rusty_forgotten;
-            other._rusty_forgotten = true;
-        }
-        Guard& operator=(const Guard&) = default;
-        Guard& operator=(Guard&& other) noexcept {
-            if (this == &other) {
-                return *this;
-            }
-            this->~Guard();
-            new (this) Guard(std::move(other));
-            return *this;
-        }
-        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
-
-
-        ~Guard() noexcept(false) {
-            if (_rusty_forgotten) { return; }
-            rusty::detail::deref_if_pointer_like(this->deque.len) -= this->consumed;
-        }
-    };
+    // patcher: second `struct Guard` + try_rfold stripped
     template<typename B, typename F>
     auto try_rfold(B init, F f) {
         using R = std::remove_cvref_t<std::invoke_result_t<F&, B, Item>>;
