@@ -261,6 +261,87 @@ def patch_all_files(cpp_out: Path) -> int:
                 and text.count("    struct Guard {") >= 2):
             text = _strip_second_guard_and_try_rfold(text)
 
+        # ----- single-cppm (collapsed-Rust-source) patches -----
+        # Below this line: rules that only apply to the collapsed
+        # single-file emit. See docs/vec_deque_port/collapse.py.
+        if path.name == "vec_deque_port.cppm":
+            # `using ::raw_vec::RawVec;` — there is no `raw_vec` sub-
+            # namespace; vec_port exports `RawVec` at global scope.
+            text = re.sub(
+                r"using ::raw_vec::RawVec;",
+                "using ::RawVec;",
+                text,
+            )
+
+            # Bare `raw_vec::RawVec<T, A>` field/parameter references —
+            # vec_port exports RawVec at global, so drop the namespace.
+            text = re.sub(
+                r"(?<![A-Za-z0-9_:])raw_vec::RawVec<",
+                "::RawVec<",
+                text,
+            )
+
+            # `::wrap_index(…)` — the free function lives in the
+            # `vec_deque_port` namespace, but the transpiler emits the
+            # call site with a leading `::` (global) qualifier. Drop
+            # the qualifier; the call is inside `vec_deque_port`.
+            text = re.sub(
+                r"(?<![A-Za-z0-9_]):{2}wrap_index\b",
+                "wrap_index",
+                text,
+            )
+
+            # `ptr::slice_from_raw_parts_mut` doesn't exist in rusty;
+            # `rusty::from_raw_parts_mut` does. Rewrite the call site.
+            text = re.sub(
+                r"(?<![A-Za-z0-9_])ptr::slice_from_raw_parts_mut\b",
+                "rusty::from_raw_parts_mut",
+                text,
+            )
+
+            # `ptr::null()` — qualify with `rusty::` (we already have
+            # `rusty::ptr::null_mut()` working at the same site).
+            text = re.sub(
+                r"(?<![A-Za-z0-9_:])ptr::null\(\)",
+                "rusty::ptr::null<const T>()",
+                text,
+            )
+
+            # `src.abs_diff(std::move(dst))` on `size_t` — Rust's
+            # integer method, no C++ equivalent. Rewrite as a branch.
+            # Match only inside assertion guards (the only place this
+            # appears) so we don't accidentally rewrite real method
+            # invocations.
+            text = re.sub(
+                r"\bsrc\.abs_diff\(std::move\(dst\)\)",
+                "(src > dst ? src - dst : dst - src)",
+                text,
+            )
+
+            # `self . capacity ()` — the transpiler emitted a Rust
+            # source fragment `self.capacity()` into `std::format`
+            # argument lists verbatim. Rewrite to `this->capacity()`.
+            # The whitespace around `.` and around `(` is what the
+            # transpiler emits (it pretty-prints Rust expressions).
+            text = re.sub(
+                r"\bself\s*\.\s*capacity\s*\(\s*\)",
+                "this->capacity()",
+                text,
+            )
+
+            # `std::iter::Copied<rusty::slice_iter::Iter<const T>>` —
+            # used by the `spec_extend_front` specialization for
+            # `slice::Iter::copied()`. We don't have a C++ analog
+            # for `core::iter::Copied`; stub the two specializations
+            # (the generic spec_extend_front handles correctness).
+            text = _stub_copied_spec_extend_front(text)
+
+            # Disambiguate duplicate hoisted helper structs (`Guard` /
+            # `Dropper`) at class scope. The transpiler hoists method-
+            # local helpers without disambiguating the names; identical-
+            # field copies get a unique suffix.
+            text = _disambiguate_hoisted_helpers(text)
+
         if text != original:
             path.write_text(text)
             total_changes += 1
@@ -413,6 +494,119 @@ def _strip_next_chunk_method(text: str) -> str:
             out.append(line)
             i += 1
     return "\n".join(out)
+
+
+def _stub_copied_spec_extend_front(text: str) -> str:
+    """Replace the two `spec_extend_front(Copied<...> | Rev<Copied<...>>)`
+    method bodies with `std::abort()` stubs.
+
+    The Rust source has these as specializations for the generic
+    `spec_extend_front` impl: when the iterator is `slice::Iter::copied()`
+    or its reverse, take a faster code path. We don't have a C++ analog
+    for `core::iter::Copied`, so the signature can't even be parsed.
+    Stub: take an `auto` parameter, abort. Generic `spec_extend_front`
+    handles correctness for any iterator including these.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if (
+            ("std::iter::Copied" in ln or "::iter::Copied" in ln)
+            and "spec_extend_front" in ln
+        ):
+            # Emit a stub replacing the signature + body
+            indent_match = re.match(r"^(\s*)", ln)
+            indent = indent_match.group(1) if indent_match else "    "
+            out.append(
+                f"{indent}// patcher: spec_extend_front<Copied<...>> stubbed "
+                "(no core::iter::Copied analog)\n"
+            )
+            out.append(f"{indent}void spec_extend_front(auto) {{ std::abort(); }}\n")
+            i = _eat_balanced_block(lines, i)
+            continue
+        out.append(ln)
+        i += 1
+    return "".join(out)
+
+
+def _disambiguate_hoisted_helpers(text: str) -> str:
+    """Rename duplicate `struct Guard` / `struct Dropper` hoisted to
+    class scope by the transpiler.
+
+    The transpiler lifts method-local types to class scope without
+    disambiguating the names — distinct types end up with the same
+    name and produce a redefinition error. For each name, the first
+    occurrence stays as-is; subsequent occurrences get suffixed
+    (`_2`, `_3`, …) and all uses *within the immediately-following
+    method body* are renamed to match.
+
+    Heuristic for "immediately-following method body":
+      - Start at the line after the struct's closing `};`.
+      - Read until brace depth at class-scope returns to 0 (the
+        method's body ends), OR we hit the next `    struct \w+ {`
+        at the same indent.
+    """
+    lines = text.splitlines(keepends=True)
+    counts: dict[str, int] = {"Guard": 0, "Dropper": 0}
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        m = re.match(r"^(\s{4})struct (Guard|Dropper) \{\s*$", ln)
+        if not m:
+            i += 1
+            continue
+        name = m.group(2)
+        counts[name] += 1
+        if counts[name] == 1:
+            i += 1
+            continue
+        new_name = f"{name}_{counts[name]}"
+
+        # Find struct end (matching `};` at the same indent).
+        struct_start = i
+        depth = 0
+        in_body = False
+        j = i
+        while j < len(lines):
+            for ch in lines[j]:
+                if ch == "{":
+                    depth += 1
+                    in_body = True
+                elif ch == "}":
+                    depth -= 1
+            j += 1
+            if in_body and depth == 0:
+                break
+        struct_end = j  # one past the `};`
+
+        # Find end of the method body that uses this struct.
+        method_end = struct_end
+        depth = 0
+        in_body = False
+        for k in range(struct_end, len(lines)):
+            kl = lines[k]
+            # Stop early if we run into the next hoisted struct.
+            if re.match(r"^\s{4}struct \w+ \{\s*$", kl):
+                method_end = k
+                break
+            for ch in kl:
+                if ch == "{":
+                    depth += 1
+                    in_body = True
+                elif ch == "}":
+                    depth -= 1
+            if in_body and depth == 0:
+                method_end = k + 1
+                break
+
+        # Rename `name` → `new_name` in struct + method body.
+        pattern = re.compile(r"\b" + name + r"\b")
+        for k in range(struct_start, method_end):
+            lines[k] = pattern.sub(new_name, lines[k])
+        i = method_end
+    return "".join(lines)
 
 
 def main() -> int:

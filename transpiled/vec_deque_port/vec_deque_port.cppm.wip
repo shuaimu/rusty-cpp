@@ -3631,44 +3631,1820 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 }
 
-export module vec_deque_port.drain;
+export module vec_deque_port;
 
 import vec_port.vec;  // patcher-injected for ::Vec
+import vec_port.raw_vec;  // patcher-injected for ::raw_vec::RawVec
 import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter / ::Drain
 
-// patcher-injected fwd decl for VecDeque (avoids import cycle with main module)
 namespace vec_deque_port {
-  template<typename T, typename A> struct VecDeque;
-}
 
-namespace vec_deque_port::drain {
-
+export template<typename T>
+struct Iter;
+export template<typename T>
+struct IterMut;
+export template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+struct VecDeque;
 export template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
 struct Drain;
+export template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+struct IntoIter;
+export template<typename T, typename F, typename A>
+    requires (rusty::alloc::Allocator<A>)
+struct ExtractIf;
+export template<typename I, typename A>
+    requires (rusty::alloc::Allocator<A>)
+struct Splice;
+size_t wrap_index(size_t logical_index, size_t capacity);
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+void prepend(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice);
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+void prepend_reversed(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice);
 
-// Rust-only: using std::iter::FusedIterator;
+// Extension trait free-function forward declarations
+namespace rusty_ext {
+}
+using ::RawVec;
 
-using rusty::PhantomData;
+// Rust-only namespace re-export: using vec;
 
-namespace mem = rusty::mem;
-// Rust-only: using std::mem::SizedTypeProperties;
+using rusty::alloc::Allocator;
 
-using rusty::ptr::NonNull;
-
-namespace ptr = rusty::ptr;
-
-// Rust-only unresolved import: using VecDeque;
+using rusty::alloc::Global;
 
 using rusty::alloc::Allocator;
 using rusty::alloc::Global;
 
-/// A draining iterator over the elements of a `VecDeque`.
-///
-/// This `struct` is created by the [`drain`] method on [`VecDeque`]. See its
-/// documentation for more.
-///
-/// [`drain`]: VecDeque::drain
+// Rust-only: using std::clone::TrivialClone;
+
+namespace cmp = rusty::cmp;
+using rusty::cmp::Ordering;
+
+// Rust-only: using rusty::collections::TryReserveError;
+// Rust-only: using rusty::collections::TryReserveErrorKind;
+
+// Rust-only: using std::hash::Hash;
+// Rust-only: using std::hash::Hasher;
+
+// Rust-only: using std::iter::FusedIterator;
+
+// Rust-only: using std::iter::ByRefSized;
+// Rust-only: using std::iter::repeat_n;
+// Rust-only: using std::iter::repeat_with;
+
+// Rust-only: using std::iter::Copied;
+// Rust-only: using std::iter::Rev;
+// Rust-only: using std::iter::TrustedLen;
+
+// Rust-only: using std::iter::FusedIterator;
+// Rust-only: using std::iter::TrustedLen;
+// Rust-only: using std::iter::TrustedRandomAccess;
+// Rust-only: using std::iter::TrustedRandomAccessNoCoerce;
+
+// Rust-only: using std::iter::FusedIterator;
+// Rust-only: using std::iter::TrustedLen;
+
+using rusty::PhantomData;
+
+using rusty::MaybeUninit;
+
+using rusty::mem::ManuallyDrop;
+// Rust-only: using std::mem::SizedTypeProperties;
+
+namespace mem = rusty::mem;
+// Rust-only: using std::mem::SizedTypeProperties;
+
+
+using rusty::num::NonZero;
+
+// Rust-only: using std::ops::Try;
+
+// Rust-only: using std::ops::Index;
+// Rust-only: using std::ops::IndexMut;
+// Rust-only: using std::ops::Range;
+// Rust-only: using std::ops::RangeBounds;
+
+// Rust-only: using std::ops::Range;
+// Rust-only: using std::ops::RangeBounds;
+
+using rusty::ptr::NonNull;
+
+// Rust-only: using std::slice;
+
+// using rusty::Vec; — Vec at global ::Vec now
+using std::array;
+namespace ptr = rusty::ptr;
+
+// Rust-only: using std::slice;
+
+// Rust-only: using std::slice;
+
+
+// macro_rules! __impl_slice_eq1 { ... }
+
+export template<typename T>
+struct Iter {
+    using Item = const T&;
+    static constexpr bool MAY_HAVE_SIDE_EFFECT = false;
+    rusty::slice_iter::Iter<const T> i1;
+    rusty::slice_iter::Iter<const T> i2;
+
+    static Iter<T> new_(rusty::slice_iter::Iter<const T> i1, rusty::slice_iter::Iter<const T> i2) {
+        return Iter<T>{.i1 = std::move(i1), .i2 = std::move(i2)};
+    }
+    std::tuple<std::span<const T>, std::span<const T>> as_slices() const {
+        return std::tuple<std::span<const T>, std::span<const T>>{rusty::as_slice(this->i1), rusty::as_slice(this->i2)};
+    }
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_tuple("Iter").field(rusty::as_slice(this->i1)).field(rusty::as_slice(this->i2)).finish();
+    }
+    static Iter<T> default_() {
+        return Iter<T>{.i1 = rusty::default_value<rusty::slice_iter::Iter<const T>>(), .i2 = rusty::default_value<rusty::slice_iter::Iter<const T>>()};
+    }
+    Iter<T> clone() const {
+        return Iter<T>{.i1 = rusty::clone(this->i1), .i2 = rusty::clone(this->i2)};
+    }
+    rusty::Option<const T&> next() {
+        return [&]() -> rusty::Option<const T&> { auto&& _m = this->i1.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& val = rusty::detail::deref_if_pointer(_mv0); return rusty::Option<const T&>(val); } if (_m.is_none()) { return [&]() -> rusty::Option<const T&> { rusty::mem::swap(this->i1, this->i2);
+return this->i1.next(); }(); } return [&]() -> rusty::Option<const T&> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    auto advance_by(size_t n) -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> {
+        const auto remaining = this->i1.advance_by(std::move(n));
+        return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { auto&& _m = remaining; if (_m.is_ok()) { return rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& n = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { rusty::mem::swap(this->i1, this->i2);
+return this->i1.advance_by(n.get()); }(); } return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        auto len = rusty::len((*this));
+        return std::make_tuple(std::move(len), rusty::Option<size_t>(std::move(len)));
+    }
+    template<typename Acc, typename F>
+    Acc fold(Acc accum, F f) {
+        Acc accum_shadow1 = rusty::fold(this->i1, std::move(accum), &f);
+        return rusty::fold(this->i2, std::move(accum_shadow1), &f);
+    }
+    template<typename B, typename F>
+    auto try_fold(B init, F f) {
+        using R = std::remove_cvref_t<std::invoke_result_t<F&, B, Item>>;
+        auto acc = RUSTY_TRY(rusty::try_fold(this->i1, std::move(init), &f));
+        return rusty::try_fold(this->i2, std::move(acc), &f);
+    }
+    rusty::Option<const T&> last() {
+        return this->next_back();
+    }
+    Item __iterator_get_unchecked(size_t idx) {
+        // @unsafe
+        {
+            const auto i1_len = rusty::len(this->i1);
+            if (rusty::detail::deref_if_pointer_like(idx) < rusty::detail::deref_if_pointer_like(i1_len)) {
+                return this->i1.__iterator_get_unchecked(std::move(idx));
+            } else {
+                return this->i2.__iterator_get_unchecked(rusty::detail::deref_if_pointer_like(idx) - rusty::detail::deref_if_pointer_like(i1_len));
+            }
+        }
+    }
+    rusty::Option<const T&> next_back() {
+        return [&]() -> rusty::Option<const T&> { auto&& _m = this->i2.next_back(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& val = rusty::detail::deref_if_pointer(_mv0); return rusty::Option<const T&>(val); } if (_m.is_none()) { return [&]() -> rusty::Option<const T&> { rusty::mem::swap(this->i1, this->i2);
+return this->i2.next_back(); }(); } return [&]() -> rusty::Option<const T&> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    auto advance_back_by(size_t n) -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> {
+        return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { auto&& _m = this->i2.advance_back_by(std::move(n)); if (_m.is_ok()) { return rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& n = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { rusty::mem::swap(this->i1, this->i2);
+return this->i2.advance_back_by(n.get()); }(); } return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename Acc, typename F>
+    Acc rfold(Acc accum, F f) {
+        Acc accum_shadow1 = this->i2.rfold(std::move(accum), &f);
+        return this->i1.rfold(std::move(accum_shadow1), &f);
+    }
+    template<typename B, typename F>
+    auto try_rfold(B init, F f) {
+        using R = std::remove_cvref_t<std::invoke_result_t<F&, B, Item>>;
+        auto acc = RUSTY_TRY(this->i2.try_rfold(std::move(init), &f));
+        return this->i1.try_rfold(std::move(acc), &f);
+    }
+    size_t len() const {
+        return rusty::len(this->i1) + rusty::len(this->i2);
+    }
+    bool is_empty() const {
+        return rusty::is_empty(this->i1) && rusty::is_empty(this->i2);
+    }
+};
+
+namespace {
+class SpecFromIter {
+public:
+    virtual ~SpecFromIter() noexcept(false) {}
+    SpecFromIter(const SpecFromIter&) = delete;
+    SpecFromIter& operator=(const SpecFromIter&) = delete;
+    SpecFromIter(SpecFromIter&&) = delete;
+    SpecFromIter& operator=(SpecFromIter&&) = delete;
+protected:
+    SpecFromIter() = default;
+};
+}
+
+
+// TODO: __impl_slice_eq1!(...)
+
+// TODO: __impl_slice_eq1!(...)
+
+// TODO: __impl_slice_eq1!(...)
+
+// TODO: __impl_slice_eq1!(...)
+
+// TODO: __impl_slice_eq1!(...)
+
+// TODO: __impl_slice_eq1!(...)
+
+export template<typename T>
+struct IterMut {
+    using Item = T&;
+    static constexpr bool MAY_HAVE_SIDE_EFFECT = false;
+    rusty::slice_iter::Iter<T> i1;
+    rusty::slice_iter::Iter<T> i2;
+
+    static IterMut<T> new_(rusty::slice_iter::Iter<T> i1, rusty::slice_iter::Iter<T> i2) {
+        return IterMut<T>{.i1 = std::move(i1), .i2 = std::move(i2)};
+    }
+    std::tuple<std::span<T>, std::span<T>> into_slices() {
+        return std::tuple<std::span<T>, std::span<T>>{this->i1.into_slice(), this->i2.into_slice()};
+    }
+    std::tuple<std::span<const T>, std::span<const T>> as_slices() const {
+        return std::tuple<std::span<const T>, std::span<const T>>{rusty::as_slice(this->i1), rusty::as_slice(this->i2)};
+    }
+    std::tuple<std::span<T>, std::span<T>> as_mut_slices() {
+        return std::tuple<std::span<T>, std::span<T>>{rusty::as_mut_slice(this->i1), rusty::as_mut_slice(this->i2)};
+    }
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_tuple("IterMut").field(rusty::as_slice(this->i1)).field(rusty::as_slice(this->i2)).finish();
+    }
+    static IterMut<T> default_() {
+        return IterMut<T>{.i1 = rusty::default_value<rusty::slice_iter::Iter<T>>(), .i2 = rusty::default_value<rusty::slice_iter::Iter<T>>()};
+    }
+    rusty::Option<T&> next() {
+        return [&]() -> rusty::Option<T&> { auto&& _m = this->i1.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& val = rusty::detail::deref_if_pointer(_mv0); return rusty::Option<T&>(val); } if (_m.is_none()) { return [&]() -> rusty::Option<T&> { rusty::mem::swap(this->i1, this->i2);
+return this->i1.next(); }(); } return [&]() -> rusty::Option<T&> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    auto advance_by(size_t n) -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> {
+        return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { auto&& _m = this->i1.advance_by(std::move(n)); if (_m.is_ok()) { return rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& remaining = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { rusty::mem::swap(this->i1, this->i2);
+return this->i1.advance_by(remaining.get()); }(); } return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        auto len = rusty::len((*this));
+        return std::make_tuple(std::move(len), rusty::Option<size_t>(std::move(len)));
+    }
+    template<typename Acc, typename F>
+    Acc fold(Acc accum, F f) {
+        Acc accum_shadow1 = rusty::fold(this->i1, std::move(accum), &f);
+        return rusty::fold(this->i2, std::move(accum_shadow1), &f);
+    }
+    template<typename B, typename F>
+    auto try_fold(B init, F f) {
+        using R = std::remove_cvref_t<std::invoke_result_t<F&, B, Item>>;
+        auto acc = RUSTY_TRY(rusty::try_fold(this->i1, std::move(init), &f));
+        return rusty::try_fold(this->i2, std::move(acc), &f);
+    }
+    rusty::Option<T&> last() {
+        return this->next_back();
+    }
+    Item __iterator_get_unchecked(size_t idx) {
+        // @unsafe
+        {
+            const auto i1_len = rusty::len(this->i1);
+            if (rusty::detail::deref_if_pointer_like(idx) < rusty::detail::deref_if_pointer_like(i1_len)) {
+                return this->i1.__iterator_get_unchecked(std::move(idx));
+            } else {
+                return this->i2.__iterator_get_unchecked(rusty::detail::deref_if_pointer_like(idx) - rusty::detail::deref_if_pointer_like(i1_len));
+            }
+        }
+    }
+    rusty::Option<T&> next_back() {
+        return [&]() -> rusty::Option<T&> { auto&& _m = this->i2.next_back(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& val = rusty::detail::deref_if_pointer(_mv0); return rusty::Option<T&>(val); } if (_m.is_none()) { return [&]() -> rusty::Option<T&> { rusty::mem::swap(this->i1, this->i2);
+return this->i2.next_back(); }(); } return [&]() -> rusty::Option<T&> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    auto advance_back_by(size_t n) -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> {
+        return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { auto&& _m = this->i2.advance_back_by(std::move(n)); if (_m.is_ok()) { return rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& remaining = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { rusty::mem::swap(this->i1, this->i2);
+return this->i2.advance_back_by(remaining.get()); }(); } return [&]() -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> { rusty::intrinsics::unreachable(); }(); }();
+    }
+    template<typename Acc, typename F>
+    Acc rfold(Acc accum, F f) {
+        Acc accum_shadow1 = this->i2.rfold(std::move(accum), &f);
+        return this->i1.rfold(std::move(accum_shadow1), &f);
+    }
+    template<typename B, typename F>
+    auto try_rfold(B init, F f) {
+        using R = std::remove_cvref_t<std::invoke_result_t<F&, B, Item>>;
+        auto acc = RUSTY_TRY(this->i2.try_rfold(std::move(init), &f));
+        return this->i1.try_rfold(std::move(acc), &f);
+    }
+    size_t len() const {
+        return rusty::len(this->i1) + rusty::len(this->i2);
+    }
+    bool is_empty() const {
+        return rusty::is_empty(this->i1) && rusty::is_empty(this->i2);
+    }
+};
+
+export template<typename T, typename A = rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+struct VecDeque {
+    using Item = T;
+    using IntoIter = ::IntoIter<T, A>;
+    size_t head;
+    size_t len_field;
+    ::RawVec<T, A> buf;
+    mutable bool _rusty_forgotten = false;
+    VecDeque(size_t head_init, size_t len_init, ::RawVec<T, A> buf_init) : head(std::move(head_init)), len_field(std::move(len_init)), buf(std::move(buf_init)) {}
+    VecDeque(const VecDeque&) = default;
+    VecDeque(VecDeque&& other) noexcept : head(std::move(other.head)), len_field(std::move(other.len_field)), buf(std::move(other.buf)) {
+        this->_rusty_forgotten = other._rusty_forgotten;
+        other._rusty_forgotten = true;
+    }
+    VecDeque& operator=(const VecDeque&) = default;
+    VecDeque& operator=(VecDeque&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        this->~VecDeque();
+        new (this) VecDeque(std::move(other));
+        return *this;
+    }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+    VecDeque<T, A> clone() const {
+        auto deq = VecDeque<T, A>::with_capacity_in(rusty::len((*this)), rusty::clone(this->allocator()));
+        deq.extend(rusty::iter((*this)).cloned());
+        return std::move(deq);
+    }
+    void clone_from(const VecDeque<T, A>& source) {
+        this->clear();
+        this->extend(rusty::iter(source).cloned());
+    }
+    /// Runs the destructor for all items in the slice when it gets dropped (normally or
+    /// during unwinding).
+    struct Dropper {
+        std::span<T> _0;
+        mutable bool _rusty_forgotten = false;
+        Dropper(std::span<T> _0_init) : _0(_0_init) {}
+        Dropper(const Dropper&) = default;
+        Dropper(Dropper&& other) noexcept : _0(other._0) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        Dropper& operator=(const Dropper&) = default;
+        Dropper& operator=(Dropper&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~Dropper();
+            new (this) Dropper(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~Dropper() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            // @unsafe
+            {
+                rusty::ptr::drop_in_place(this->_0);
+            }
+        }
+    };
+    ~VecDeque() noexcept(false) {
+        if (_rusty_forgotten) { return; }
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_mut_slices());
+        auto&& front = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& back = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        // @unsafe
+        {
+            const auto _back_dropper = Dropper(back);
+            rusty::ptr::drop_in_place(front);
+        }
+    }
+    static VecDeque<T> default_() {
+        return VecDeque<T>::new_();
+    }
+    std::add_pointer_t<T> ptr() const {
+        return this->buf.ptr();
+    }
+    void push_unchecked(T element) {
+        // @unsafe
+        {
+            this->buffer_write(this->to_physical_idx(this->len_field), std::move(element));
+        }
+        this->len_field += 1;
+    }
+    void push_front_unchecked(T element) {
+        this->head = this->wrap_sub(this->head, static_cast<size_t>(1));
+        // @unsafe
+        {
+            this->buffer_write(this->head, std::move(element));
+        }
+        this->len_field += 1;
+    }
+    T buffer_read(size_t off) {
+        // @unsafe
+        {
+            return rusty::ptr::read(rusty::ptr::add(this->ptr(), std::move(off)));
+        }
+    }
+    T& buffer_write(size_t off, T value) {
+        // @unsafe
+        {
+            const auto ptr_shadow1 = rusty::ptr::add(this->ptr(), std::move(off));
+            rusty::ptr::write(ptr_shadow1, std::move(value));
+            return *ptr_shadow1;
+        }
+    }
+    std::add_pointer_t<std::span<T>> buffer_range(rusty::range<size_t> range) const {
+        // @unsafe
+        {
+            return rusty::from_raw_parts_mut(rusty::ptr::add(this->ptr(), std::move(rusty::field_start(range))), rusty::detail::deref_if_pointer_like(rusty::field_end(range)) - rusty::detail::deref_if_pointer_like(rusty::field_start(range)));
+        }
+    }
+    bool is_full() const {
+        return rusty::detail::deref_if_pointer_like(this->len_field) == this->capacity();
+    }
+    size_t wrap_add(size_t idx, size_t addend) const {
+        return wrap_index((static_cast<size_t>(idx) + static_cast<size_t>(std::move(addend))), this->capacity());
+    }
+    size_t to_physical_idx(size_t idx) const {
+        return this->wrap_add(this->head, std::move(idx));
+    }
+    size_t wrap_sub(size_t idx, size_t subtrahend) const {
+        return wrap_index((static_cast<size_t>((static_cast<size_t>(idx) - static_cast<size_t>(std::move(subtrahend)))) + static_cast<size_t>(this->capacity())), this->capacity());
+    }
+    std::array<std::tuple<std::add_pointer_t<std::add_const_t<T>>, std::add_pointer_t<T>, size_t>, 2> nonoverlapping_ranges(size_t src, size_t dst, size_t count, size_t head) {
+        if (!((src > dst ? src - dst : dst - src) >= rusty::detail::deref_if_pointer_like(count))) { throw std::logic_error("`src` and `dst` must not overlap. src={src} dst={dst} count={count}"); }
+        if (!((rusty::max(src, std::move(dst)) + rusty::detail::deref_if_pointer_like(count)) <= this->capacity())) { throw std::logic_error(std::format("ranges must be in bounds. src={src} dst={dst} count={count} cap={}", this->capacity())); }
+        const auto wrapped_src = this->wrap_add(std::move(head), std::move(src));
+        const auto wrapped_dst = this->wrap_add(std::move(head), std::move(dst));
+        auto room_after_src = this->capacity() - rusty::detail::deref_if_pointer_like(wrapped_src);
+        auto room_after_dst = this->capacity() - rusty::detail::deref_if_pointer_like(wrapped_dst);
+        const auto src_wraps = rusty::detail::deref_if_pointer_like(room_after_src) < rusty::detail::deref_if_pointer_like(count);
+        const auto dst_wraps = rusty::detail::deref_if_pointer_like(room_after_dst) < rusty::detail::deref_if_pointer_like(count);
+        if (!(!(rusty::detail::deref_if_pointer_like(src_wraps) && rusty::detail::deref_if_pointer_like(dst_wraps)))) { throw std::logic_error(std::format("BUG: at most one of src and dst can wrap. src={src} dst={dst} count={count} cap={}", this->capacity())); }
+        // @unsafe
+        {
+            auto ptr_shadow1 = this->ptr();
+            auto src_ptr = rusty::ptr::add(ptr_shadow1, std::move(wrapped_src));
+            auto dst_ptr = rusty::ptr::add(ptr_shadow1, std::move(wrapped_dst));
+            if (src_wraps) {
+                return std::array<std::tuple<std::add_pointer_t<std::add_const_t<T>>, std::add_pointer_t<T>, size_t>, 2>{std::make_tuple(src_ptr, dst_ptr, std::move(room_after_src)), std::make_tuple(ptr_shadow1, rusty::ptr::add(dst_ptr, std::move(room_after_src)), rusty::detail::deref_if_pointer_like(count) - rusty::detail::deref_if_pointer_like(room_after_src))};
+            } else if (dst_wraps) {
+                return std::array<std::tuple<std::add_pointer_t<std::add_const_t<T>>, std::add_pointer_t<T>, size_t>, 2>{std::make_tuple(src_ptr, dst_ptr, std::move(room_after_dst)), std::make_tuple(rusty::ptr::add(src_ptr, std::move(room_after_dst)), ptr_shadow1, rusty::detail::deref_if_pointer_like(count) - rusty::detail::deref_if_pointer_like(room_after_dst))};
+            } else {
+                return std::array<std::tuple<std::add_pointer_t<std::add_const_t<T>>, std::add_pointer_t<T>, size_t>, 2>{std::make_tuple(src_ptr, dst_ptr, std::move(count)), std::make_tuple(rusty::ptr::null<const T>(), rusty::ptr::null_mut(), static_cast<size_t>(0))};
+            }
+        }
+    }
+    void copy(size_t src, size_t dst, size_t len) {
+        if (!((rusty::detail::deref_if_pointer_like(dst) + rusty::detail::deref_if_pointer_like(len)) <= this->capacity())) { throw std::logic_error(std::format("cpy dst={} src={} len={} cap={}", dst, src, len, this->capacity())); }
+        if (!((rusty::detail::deref_if_pointer_like(src) + rusty::detail::deref_if_pointer_like(len)) <= this->capacity())) { throw std::logic_error(std::format("cpy dst={} src={} len={} cap={}", dst, src, len, this->capacity())); }
+        // @unsafe
+        {
+            rusty::ptr::copy(rusty::ptr::add(this->ptr(), std::move(src)), rusty::ptr::add(this->ptr(), std::move(dst)), std::move(len));
+        }
+    }
+    void copy_nonoverlapping(size_t src, size_t dst, size_t len) {
+        if (!((rusty::detail::deref_if_pointer_like(dst) + rusty::detail::deref_if_pointer_like(len)) <= this->capacity())) { throw std::logic_error(std::format("cno dst={} src={} len={} cap={}", dst, src, len, this->capacity())); }
+        if (!((rusty::detail::deref_if_pointer_like(src) + rusty::detail::deref_if_pointer_like(len)) <= this->capacity())) { throw std::logic_error(std::format("cno dst={} src={} len={} cap={}", dst, src, len, this->capacity())); }
+        // @unsafe
+        {
+            rusty::ptr::copy_nonoverlapping(rusty::ptr::add(this->ptr(), std::move(src)), rusty::ptr::add(this->ptr(), std::move(dst)), std::move(len));
+        }
+    }
+    void wrap_copy(size_t src, size_t dst, size_t len) {
+        if (!((rusty::cmp::min((src > dst ? src - dst : dst - src), this->capacity() - (src > dst ? src - dst : dst - src)) + rusty::detail::deref_if_pointer_like(len)) <= this->capacity())) { throw std::logic_error(std::format("wrc dst={} src={} len={} cap={}", dst, src, len, this->capacity())); }
+        if ((T::IS_ZST || (rusty::detail::deref_if_pointer_like(src) == rusty::detail::deref_if_pointer_like(dst))) || (rusty::detail::deref_if_pointer_like(len) == static_cast<size_t>(0))) {
+            return;
+        }
+        auto dst_after_src = this->wrap_sub(std::move(dst), std::move(src)) < rusty::detail::deref_if_pointer_like(len);
+        auto src_pre_wrap_len = this->capacity() - rusty::detail::deref_if_pointer_like(src);
+        auto dst_pre_wrap_len = this->capacity() - rusty::detail::deref_if_pointer_like(dst);
+        auto src_wraps = rusty::detail::deref_if_pointer_like(src_pre_wrap_len) < rusty::detail::deref_if_pointer_like(len);
+        auto dst_wraps = rusty::detail::deref_if_pointer_like(dst_pre_wrap_len) < rusty::detail::deref_if_pointer_like(len);
+        {
+            auto&& _m0 = dst_after_src;
+            auto&& _m1 = src_wraps;
+            auto&& _m2 = dst_wraps;
+            auto _m_tuple = std::forward_as_tuple(_m0, _m1, _m2);
+            bool _m_matched = false;
+            if (!_m_matched && ((std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)) == false && std::get<2>(rusty::detail::deref_if_pointer(_m_tuple)) == false))) {
+                // @unsafe
+                {
+                    this->copy(std::move(src), std::move(dst), std::move(len));
+                }
+                _m_matched = true;
+            }
+            if (!_m_matched && ((std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)) == false && std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)) == false && std::get<2>(rusty::detail::deref_if_pointer(_m_tuple)) == true))) {
+                // @unsafe
+                {
+                    this->copy(std::move(src), std::move(dst), std::move(dst_pre_wrap_len));
+                    this->copy(rusty::detail::deref_if_pointer_like(src) + rusty::detail::deref_if_pointer_like(dst_pre_wrap_len), static_cast<size_t>(0), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(dst_pre_wrap_len));
+                }
+                _m_matched = true;
+            }
+            if (!_m_matched && ((std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)) == true && std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)) == false && std::get<2>(rusty::detail::deref_if_pointer(_m_tuple)) == true))) {
+                // @unsafe
+                {
+                    this->copy(rusty::detail::deref_if_pointer_like(src) + rusty::detail::deref_if_pointer_like(dst_pre_wrap_len), static_cast<size_t>(0), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(dst_pre_wrap_len));
+                    this->copy(std::move(src), std::move(dst), std::move(dst_pre_wrap_len));
+                }
+                _m_matched = true;
+            }
+            if (!_m_matched && ((std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)) == false && std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)) == true && std::get<2>(rusty::detail::deref_if_pointer(_m_tuple)) == false))) {
+                // @unsafe
+                {
+                    this->copy(std::move(src), std::move(dst), std::move(src_pre_wrap_len));
+                    this->copy(static_cast<size_t>(0), rusty::detail::deref_if_pointer_like(dst) + rusty::detail::deref_if_pointer_like(src_pre_wrap_len), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(src_pre_wrap_len));
+                }
+                _m_matched = true;
+            }
+            if (!_m_matched && ((std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)) == true && std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)) == true && std::get<2>(rusty::detail::deref_if_pointer(_m_tuple)) == false))) {
+                // @unsafe
+                {
+                    this->copy(static_cast<size_t>(0), rusty::detail::deref_if_pointer_like(dst) + rusty::detail::deref_if_pointer_like(src_pre_wrap_len), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(src_pre_wrap_len));
+                    this->copy(std::move(src), std::move(dst), std::move(src_pre_wrap_len));
+                }
+                _m_matched = true;
+            }
+            if (!_m_matched && ((std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)) == false && std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)) == true && std::get<2>(rusty::detail::deref_if_pointer(_m_tuple)) == true))) {
+                assert((rusty::detail::deref_if_pointer_like(dst_pre_wrap_len) > rusty::detail::deref_if_pointer_like(src_pre_wrap_len)));
+                auto delta = rusty::detail::deref_if_pointer_like(dst_pre_wrap_len) - rusty::detail::deref_if_pointer_like(src_pre_wrap_len);
+                // @unsafe
+                {
+                    this->copy(std::move(src), std::move(dst), std::move(src_pre_wrap_len));
+                    this->copy(static_cast<size_t>(0), rusty::detail::deref_if_pointer_like(dst) + rusty::detail::deref_if_pointer_like(src_pre_wrap_len), std::move(delta));
+                    this->copy(std::move(delta), static_cast<size_t>(0), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(dst_pre_wrap_len));
+                }
+                _m_matched = true;
+            }
+            if (!_m_matched && ((std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)) == true && std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)) == true && std::get<2>(rusty::detail::deref_if_pointer(_m_tuple)) == true))) {
+                assert((rusty::detail::deref_if_pointer_like(src_pre_wrap_len) > rusty::detail::deref_if_pointer_like(dst_pre_wrap_len)));
+                auto delta = rusty::detail::deref_if_pointer_like(src_pre_wrap_len) - rusty::detail::deref_if_pointer_like(dst_pre_wrap_len);
+                // @unsafe
+                {
+                    this->copy(static_cast<size_t>(0), std::move(delta), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(src_pre_wrap_len));
+                    this->copy(this->capacity() - rusty::detail::deref_if_pointer_like(delta), static_cast<size_t>(0), std::move(delta));
+                    this->copy(std::move(src), std::move(dst), std::move(dst_pre_wrap_len));
+                }
+                _m_matched = true;
+            }
+        }
+    }
+    void copy_slice(size_t dst, std::span<const T> src) {
+        assert((rusty::len(src) <= this->capacity()));
+        const auto head_room = this->capacity() - rusty::detail::deref_if_pointer_like(dst);
+        if (rusty::len(src) <= rusty::detail::deref_if_pointer_like(head_room)) {
+            // @unsafe
+            {
+                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(src), rusty::ptr::add(this->ptr(), std::move(dst)), rusty::len(src));
+            }
+        } else {
+            auto [left, right] = rusty::detail::deref_if_pointer_like(rusty::split_at(src, std::move(head_room)));
+            // @unsafe
+            {
+                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(left), rusty::ptr::add(this->ptr(), std::move(dst)), rusty::len(left));
+                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(right), this->ptr(), rusty::len(right));
+            }
+        }
+    }
+    void copy_slice_reversed(size_t dst, std::span<const T> src) {
+        const auto copy_nonoverlapping_reversed = [](const auto* src, auto* dst, size_t count) {
+            for (auto&& i : rusty::for_in(rusty::range(0, count))) {
+                // @unsafe
+                {
+                    rusty::ptr::copy_nonoverlapping(rusty::ptr::add(src, (rusty::detail::deref_if_pointer_like(count) - 1) - rusty::detail::deref_if_pointer_like(i)), rusty::ptr::add(dst, std::move(i)), 1);
+                }
+            }
+        };
+        assert((rusty::len(src) <= this->capacity()));
+        const auto head_room = this->capacity() - rusty::detail::deref_if_pointer_like(dst);
+        if (rusty::len(src) <= rusty::detail::deref_if_pointer_like(head_room)) {
+            // @unsafe
+            {
+                copy_nonoverlapping_reversed(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(src))), rusty::ptr::add(this->ptr(), std::move(dst)), rusty::len(src));
+            }
+        } else {
+            auto [left, right] = rusty::detail::deref_if_pointer_like(rusty::split_at(src, rusty::len(src) - rusty::detail::deref_if_pointer_like(head_room)));
+            // @unsafe
+            {
+                copy_nonoverlapping_reversed(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(right))), rusty::ptr::add(this->ptr(), std::move(dst)), rusty::len(right));
+                copy_nonoverlapping_reversed(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(left))), this->ptr(), rusty::len(left));
+            }
+        }
+    }
+    void write_iter(size_t dst, const auto& iter, size_t& written) {
+        rusty::for_each(rusty::enumerate(iter), [&](auto&& _destruct_param0) {
+auto&& i = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+auto&& element = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_destruct_param0)));
+return [&]() { this->buffer_write(rusty::detail::deref_if_pointer_like(dst) + rusty::detail::deref_if_pointer_like(i), std::move(element));
+written += 1; }();
+});
+    }
+    struct Guard {
+        vec_deque_port::VecDeque<T, A>& deque;
+        size_t written;
+        mutable bool _rusty_forgotten = false;
+        Guard(VecDeque<T, A>& deque_init, size_t written_init) : deque(deque_init), written(std::move(written_init)) {}
+        Guard(const Guard&) = default;
+        Guard(Guard&& other) noexcept : deque(other.deque), written(std::move(other.written)) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        Guard& operator=(const Guard&) = default;
+        Guard& operator=(Guard&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~Guard();
+            new (this) Guard(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~Guard() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            this->deque.len_field += this->written;
+        }
+    };
+    size_t write_iter_wrapping(size_t dst, const auto& iter, size_t len) {
+        const auto head_room = this->capacity() - rusty::detail::deref_if_pointer_like(dst);
+        auto guard = Guard((*this), static_cast<size_t>(0));
+        if (rusty::detail::deref_if_pointer_like(head_room) >= rusty::detail::deref_if_pointer_like(len)) {
+            // @unsafe
+            {
+                guard.deque.write_iter(std::move(dst), iter, guard.written);
+            }
+        } else {
+            // @unsafe
+            {
+                guard.deque.write_iter(std::move(dst), size_t::ByRefSized(&iter).take(std::move(head_room)), guard.written);
+                guard.deque.write_iter(static_cast<size_t>(0), iter, guard.written);
+            }
+        }
+        return std::move(guard.written);
+    }
+    void handle_capacity_increase(size_t old_capacity) {
+        const auto new_capacity = this->capacity();
+        assert((rusty::detail::deref_if_pointer_like(new_capacity) >= rusty::detail::deref_if_pointer_like(old_capacity)));
+        if (rusty::detail::deref_if_pointer_like(this->head) <= (rusty::detail::deref_if_pointer_like(old_capacity) - rusty::detail::deref_if_pointer_like(this->len_field))) {
+        } else {
+            auto head_len = rusty::detail::deref_if_pointer_like(old_capacity) - rusty::detail::deref_if_pointer_like(this->head);
+            auto tail_len = rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(head_len);
+            if ((rusty::detail::deref_if_pointer_like(head_len) > rusty::detail::deref_if_pointer_like(tail_len)) && ((rusty::detail::deref_if_pointer_like(new_capacity) - rusty::detail::deref_if_pointer_like(old_capacity)) >= rusty::detail::deref_if_pointer_like(tail_len))) {
+                // @unsafe
+                {
+                    this->copy_nonoverlapping(static_cast<size_t>(0), std::move(old_capacity), std::move(tail_len));
+                }
+            } else {
+                auto new_head = rusty::detail::deref_if_pointer_like(new_capacity) - rusty::detail::deref_if_pointer_like(head_len);
+                // @unsafe
+                {
+                    this->copy(this->head, std::move(new_head), std::move(head_len));
+                }
+                this->head = std::move(new_head);
+            }
+        }
+        assert(((rusty::detail::deref_if_pointer_like(this->head) < this->capacity()) || (this->capacity() == static_cast<size_t>(0))));
+    }
+    template<typename F, typename R>
+    ExtractIf<T, F, A> extract_if(R range, F filter) {
+        return ExtractIf<T, F, A>::new_((*this), std::move(filter), std::move(range));
+    }
+    static VecDeque<T> new_() {
+        return VecDeque<T>(static_cast<size_t>(0), static_cast<size_t>(0), ::RawVec<T, A>::new_());
+    }
+    static VecDeque<T> with_capacity(size_t capacity) {
+        return VecDeque<T, A>::with_capacity_in(std::move(capacity), rusty::alloc::Global);
+    }
+    static rusty::Result<VecDeque<T>, rusty::collections::TryReserveError> try_with_capacity(size_t capacity) {
+        return rusty::Result<VecDeque<T>, rusty::collections::TryReserveError>::Ok(VecDeque<T>(static_cast<size_t>(0), static_cast<size_t>(0), RUSTY_TRY_INTO(RawVec::try_with_capacity_in(std::move(capacity), rusty::alloc::Global), rusty::Result<VecDeque<T>, rusty::collections::TryReserveError>)));
+    }
+    static VecDeque<T, A> new_in(A alloc) {
+        return VecDeque<T, A>(static_cast<size_t>(0), static_cast<size_t>(0), ::RawVec<T, A>::new_in(std::move(alloc)));
+    }
+    static VecDeque<T, A> with_capacity_in(size_t capacity, A alloc) {
+        return VecDeque<T, A>(static_cast<size_t>(0), static_cast<size_t>(0), ::RawVec<T, A>::with_capacity_in(std::move(capacity), std::move(alloc)));
+    }
+    static VecDeque<T, A> from_contiguous_raw_parts_in(std::add_pointer_t<T> ptr, rusty::range<size_t> initialized, size_t capacity, A alloc) {
+        assert((rusty::detail::deref_if_pointer_like(rusty::field_start(initialized)) <= rusty::detail::deref_if_pointer_like(rusty::field_end(initialized))));
+        assert((rusty::detail::deref_if_pointer_like(rusty::field_end(initialized)) <= rusty::detail::deref_if_pointer_like(capacity)));
+        // @unsafe
+        {
+            return VecDeque<T, A>(std::move(rusty::field_start(initialized)), rusty::field_end(initialized).unchecked_sub(std::move(rusty::field_start(initialized))), ::RawVec<T, A>::from_raw_parts_in(ptr, std::move(capacity), std::move(alloc)));
+        }
+    }
+    rusty::Option<const T&> get(size_t index) const {
+        if (rusty::detail::deref_if_pointer_like(index) < rusty::detail::deref_if_pointer_like(this->len_field)) {
+            const auto idx = this->to_physical_idx(std::move(index));
+            // @unsafe
+            {
+                return rusty::Option<const T&>(*rusty::ptr::add(this->ptr(), std::move(idx)));
+            }
+        } else {
+            return rusty::Option<const T&>{rusty::None};
+        }
+    }
+    rusty::Option<T&> get_mut(size_t index) {
+        if (rusty::detail::deref_if_pointer_like(index) < rusty::detail::deref_if_pointer_like(this->len_field)) {
+            const auto idx = this->to_physical_idx(std::move(index));
+            // @unsafe
+            {
+                return rusty::Option<T&>(*rusty::ptr::add(this->ptr(), std::move(idx)));
+            }
+        } else {
+            return rusty::Option<T&>{rusty::None};
+        }
+    }
+    void swap(size_t i, size_t j) {
+        assert((rusty::detail::deref_if_pointer_like(i) < rusty::len((*this))));
+        assert((rusty::detail::deref_if_pointer_like(j) < rusty::len((*this))));
+        const auto ri = this->to_physical_idx(std::move(i));
+        const auto rj = this->to_physical_idx(std::move(j));
+        // @unsafe
+        {
+            std::swap(rusty::ptr::add(this->ptr(), std::move(ri)), rusty::ptr::add(this->ptr(), std::move(rj)));
+        }
+    }
+    size_t capacity() const {
+        if (T::IS_ZST) {
+            return std::numeric_limits<size_t>::max();
+        } else {
+            return this->buf.capacity();
+        }
+    }
+    void reserve_exact(size_t additional) {
+        const auto new_cap = [&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }().expect("capacity overflow");
+        auto old_cap = this->capacity();
+        if (rusty::detail::deref_if_pointer_like(new_cap) > rusty::detail::deref_if_pointer_like(old_cap)) {
+            this->buf.reserve_exact(this->len_field, std::move(additional));
+            // @unsafe
+            {
+                this->handle_capacity_increase(std::move(old_cap));
+            }
+        }
+    }
+    void reserve(size_t additional) {
+        const auto new_cap = [&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }().expect("capacity overflow");
+        auto old_cap = this->capacity();
+        if (rusty::detail::deref_if_pointer_like(new_cap) > rusty::detail::deref_if_pointer_like(old_cap)) {
+            this->buf.reserve(this->len_field, std::move(additional));
+            // @unsafe
+            {
+                this->handle_capacity_increase(std::move(old_cap));
+            }
+        }
+    }
+    auto try_reserve_exact(size_t additional) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+        const auto new_cap = RUSTY_TRY_INTO([&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }().ok_or(rusty::collections::TryReserveErrorKind::CapacityOverflow), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
+        auto old_cap = this->capacity();
+        if (rusty::detail::deref_if_pointer_like(new_cap) > rusty::detail::deref_if_pointer_like(old_cap)) {
+            RUSTY_TRY_INTO(this->buf.try_reserve_exact(this->len_field, std::move(additional)), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
+            // @unsafe
+            {
+                this->handle_capacity_increase(std::move(old_cap));
+            }
+        }
+        return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Ok(std::make_tuple());
+    }
+    auto try_reserve(size_t additional) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+        const auto new_cap = RUSTY_TRY_INTO([&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }().ok_or(rusty::collections::TryReserveErrorKind::CapacityOverflow), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
+        auto old_cap = this->capacity();
+        if (rusty::detail::deref_if_pointer_like(new_cap) > rusty::detail::deref_if_pointer_like(old_cap)) {
+            RUSTY_TRY_INTO(this->buf.try_reserve(this->len_field, std::move(additional)), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
+            // @unsafe
+            {
+                this->handle_capacity_increase(std::move(old_cap));
+            }
+        }
+        return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Ok(std::make_tuple());
+    }
+    void shrink_to_fit() {
+        this->shrink_to(static_cast<size_t>(0));
+    }
+    struct Guard_2 {
+        vec_deque_port::VecDeque<T, A>& deque;
+        size_t old_head;
+        size_t target_cap;
+        mutable bool _rusty_forgotten = false;
+        Guard_2(VecDeque<T, A>& deque_init, size_t old_head_init, size_t target_cap_init) : deque(deque_init), old_head(std::move(old_head_init)), target_cap(std::move(target_cap_init)) {}
+        Guard_2(const Guard_2&) = default;
+        Guard_2(Guard_2&& other) noexcept : deque(other.deque), old_head(std::move(other.old_head)), target_cap(std::move(other.target_cap)) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        Guard_2& operator=(const Guard_2&) = default;
+        Guard_2& operator=(Guard_2&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~Guard_2();
+            new (this) Guard_2(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~Guard_2() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            // @unsafe
+            {
+                this->deque.abort_shrink(this->old_head, this->target_cap);
+            }
+        }
+    };
+    void shrink_to(size_t min_capacity) {
+        auto target_cap = rusty::max(min_capacity, this->len_field);
+        if (T::IS_ZST || (this->capacity() <= rusty::detail::deref_if_pointer_like(target_cap))) {
+            return;
+        }
+        const auto tail_outside = rusty::contains((rusty::range_inclusive(rusty::detail::deref_if_pointer_like(target_cap) + 1, this->capacity())), rusty::addr_of_temp((rusty::detail::deref_if_pointer_like(this->head) + rusty::detail::deref_if_pointer_like(this->len_field))));
+        auto old_head = this->head;
+        if (rusty::detail::deref_if_pointer_like(this->len_field) == static_cast<size_t>(0)) {
+            this->head = static_cast<size_t>(0);
+        } else if ((rusty::detail::deref_if_pointer_like(this->head) >= rusty::detail::deref_if_pointer_like(target_cap)) && rusty::detail::deref_if_pointer_like(tail_outside)) {
+            // @unsafe
+            {
+                this->copy_nonoverlapping(this->head, static_cast<size_t>(0), this->len_field);
+            }
+            this->head = static_cast<size_t>(0);
+        } else if ((rusty::detail::deref_if_pointer_like(this->head) < rusty::detail::deref_if_pointer_like(target_cap)) && rusty::detail::deref_if_pointer_like(tail_outside)) {
+            auto len = (rusty::detail::deref_if_pointer_like(this->head) + rusty::detail::deref_if_pointer_like(this->len_field)) - rusty::detail::deref_if_pointer_like(target_cap);
+            // @unsafe
+            {
+                this->copy_nonoverlapping(std::move(target_cap), static_cast<size_t>(0), std::move(len));
+            }
+        } else if (!this->is_contiguous()) {
+            auto head_len = this->capacity() - rusty::detail::deref_if_pointer_like(this->head);
+            auto new_head = rusty::detail::deref_if_pointer_like(target_cap) - rusty::detail::deref_if_pointer_like(head_len);
+            // @unsafe
+            {
+                this->copy(this->head, std::move(new_head), std::move(head_len));
+            }
+            this->head = std::move(new_head);
+        }
+        const auto guard = Guard_2((*this), std::move(old_head), std::move(target_cap));
+        guard.deque.buf.shrink_to_fit(std::move(target_cap));
+        rusty::mem::forget(std::move(guard));
+        assert(((rusty::detail::deref_if_pointer_like(this->head) < this->capacity()) || (this->capacity() == static_cast<size_t>(0))));
+        assert((rusty::detail::deref_if_pointer_like(this->len_field) <= this->capacity()));
+    }
+    void abort_shrink(size_t old_head, size_t target_cap) {
+        if (rusty::detail::deref_if_pointer_like(this->head) <= (rusty::detail::deref_if_pointer_like(target_cap) - rusty::detail::deref_if_pointer_like(this->len_field))) {
+            return;
+        }
+        auto head_len = rusty::detail::deref_if_pointer_like(target_cap) - rusty::detail::deref_if_pointer_like(this->head);
+        auto tail_len = rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(head_len);
+        if (rusty::detail::deref_if_pointer_like(tail_len) <= rusty::cmp::min(std::move(head_len), this->capacity() - rusty::detail::deref_if_pointer_like(target_cap))) {
+            // @unsafe
+            {
+                this->copy_nonoverlapping(static_cast<size_t>(0), std::move(target_cap), std::move(tail_len));
+            }
+        } else {
+            // @unsafe
+            {
+                this->copy(this->head, std::move(old_head), std::move(head_len));
+                this->head = std::move(old_head);
+            }
+        }
+    }
+    /// Runs the destructor for all items in the slice when it gets dropped (normally or
+    /// during unwinding).
+    struct Dropper_2 {
+        std::span<T> _0;
+        mutable bool _rusty_forgotten = false;
+        Dropper_2(std::span<T> _0_init) : _0(_0_init) {}
+        Dropper_2(const Dropper_2&) = default;
+        Dropper_2(Dropper_2&& other) noexcept : _0(other._0) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        Dropper_2& operator=(const Dropper_2&) = default;
+        Dropper_2& operator=(Dropper_2&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~Dropper_2();
+            new (this) Dropper_2(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~Dropper_2() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            // @unsafe
+            {
+                rusty::ptr::drop_in_place(this->_0);
+            }
+        }
+    };
+    void truncate(size_t len) {
+        // @unsafe
+        {
+            if (rusty::detail::deref_if_pointer_like(len) >= rusty::detail::deref_if_pointer_like(this->len_field)) {
+                return;
+            }
+            auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_mut_slices());
+            auto&& front = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+            auto&& back = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+            if (rusty::detail::deref_if_pointer_like(len) > rusty::len(front)) {
+                const auto begin = rusty::detail::deref_if_pointer_like(len) - rusty::len(front);
+                const auto drop_back = rusty::slice_from(back, begin);
+                this->len_field = std::move(len);
+                rusty::ptr::drop_in_place(std::move(drop_back));
+            } else {
+                const auto drop_back = &back;
+                const auto drop_front = rusty::slice_from(front, len);
+                this->len_field = std::move(len);
+                const auto _back_dropper = Dropper_2([&]() -> std::span<T> { static auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(drop_back); return std::span<T>(_slice_ref_tmp); }());
+                rusty::ptr::drop_in_place(std::move(drop_front));
+            }
+        }
+    }
+    /// Runs the destructor for all items in the slice when it gets dropped (normally or
+    /// during unwinding).
+    struct Dropper_3 {
+        std::span<T> _0;
+        mutable bool _rusty_forgotten = false;
+        Dropper_3(std::span<T> _0_init) : _0(_0_init) {}
+        Dropper_3(const Dropper_3&) = default;
+        Dropper_3(Dropper_3&& other) noexcept : _0(other._0) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        Dropper_3& operator=(const Dropper_3&) = default;
+        Dropper_3& operator=(Dropper_3&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~Dropper_3();
+            new (this) Dropper_3(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~Dropper_3() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            // @unsafe
+            {
+                rusty::ptr::drop_in_place(this->_0);
+            }
+        }
+    };
+    void truncate_front(size_t len) {
+        // @unsafe
+        {
+            if (rusty::detail::deref_if_pointer_like(len) >= rusty::detail::deref_if_pointer_like(this->len_field)) {
+                return;
+            }
+            auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_mut_slices());
+            auto&& front = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+            auto&& back = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+            if (rusty::detail::deref_if_pointer_like(len) > rusty::len(back)) {
+                const auto end = rusty::len(front) - ((rusty::detail::deref_if_pointer_like(len) - rusty::len(back)));
+                const auto drop_front = rusty::slice_to(front, end);
+                this->head += end;
+                this->len_field = std::move(len);
+                rusty::ptr::drop_in_place(std::move(drop_front));
+            } else {
+                const auto drop_front = &front;
+                const auto end = rusty::len(back) - rusty::detail::deref_if_pointer_like(len);
+                const auto drop_back = rusty::slice_to(back, end);
+                this->head = this->to_physical_idx(rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(len));
+                this->len_field = std::move(len);
+                const auto _back_dropper = Dropper_3([&]() -> std::span<T> { static auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(drop_back); return std::span<T>(_slice_ref_tmp); }());
+                rusty::ptr::drop_in_place(std::move(drop_front));
+            }
+        }
+    }
+    const A& allocator() const {
+        return this->buf.allocator();
+    }
+    Iter<T> iter() const {
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_slices());
+        auto&& a = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& b = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        return Iter<T>::new_(rusty::iter(a), rusty::iter(b));
+    }
+    IterMut<T> iter_mut() {
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_mut_slices());
+        auto&& a = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& b = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        return IterMut<T>::new_(rusty::iter_mut(a), rusty::iter_mut(b));
+    }
+    std::tuple<std::span<const T>, std::span<const T>> as_slices() const {
+        auto [a_range, b_range] = rusty::detail::deref_if_pointer_like(this->slice_ranges(rusty::range_full(), this->len_field));
+        // @unsafe
+        {
+            return std::tuple<std::span<const T>, std::span<const T>>{*this->buffer_range(std::move(a_range)), *this->buffer_range(std::move(b_range))};
+        }
+    }
+    std::tuple<std::span<T>, std::span<T>> as_mut_slices() {
+        auto [a_range, b_range] = rusty::detail::deref_if_pointer_like(this->slice_ranges(rusty::range_full(), this->len_field));
+        // @unsafe
+        {
+            return std::tuple<std::span<T>, std::span<T>>{*this->buffer_range(std::move(a_range)), *this->buffer_range(std::move(b_range))};
+        }
+    }
+    size_t len() const {
+        return this->len_field;
+    }
+    bool is_empty() const {
+        return rusty::detail::deref_if_pointer_like(this->len_field) == static_cast<size_t>(0);
+    }
+    template<typename R>
+    std::tuple<rusty::range<size_t>, rusty::range<size_t>> slice_ranges(R range, size_t len) const {
+        auto&& _let_pat = slice::range(std::move(range), rusty::range_to(len));
+        auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);
+        auto&& end = rusty::detail::deref_if_pointer(_let_pat.end);
+        const auto len_shadow1 = rusty::detail::deref_if_pointer_like(end) - rusty::detail::deref_if_pointer_like(start);
+        if (rusty::detail::deref_if_pointer_like(len_shadow1) == 0) {
+            return std::make_tuple(rusty::range(0, 0), rusty::range(0, 0));
+        } else {
+            const auto wrapped_start = this->to_physical_idx(std::move(start));
+            const auto head_len = this->capacity() - rusty::detail::deref_if_pointer_like(wrapped_start);
+            if (rusty::detail::deref_if_pointer_like(head_len) >= rusty::detail::deref_if_pointer_like(len_shadow1)) {
+                return std::make_tuple(rusty::range(wrapped_start, rusty::detail::deref_if_pointer_like(wrapped_start) + rusty::detail::deref_if_pointer_like(len_shadow1)), rusty::range(0, 0));
+            } else {
+                const auto tail_len = rusty::detail::deref_if_pointer_like(len_shadow1) - rusty::detail::deref_if_pointer_like(head_len);
+                return std::make_tuple(rusty::range(wrapped_start, this->capacity()), rusty::range(0, tail_len));
+            }
+        }
+    }
+    template<typename R>
+    Iter<T> range(R range) const {
+        auto [a_range, b_range] = rusty::detail::deref_if_pointer_like(this->slice_ranges(std::move(range), this->len_field));
+        const auto a = *this->buffer_range(std::move(a_range));
+        const auto b = *this->buffer_range(std::move(b_range));
+        return Iter<T>::new_(rusty::iter(a), rusty::iter(b));
+    }
+    template<typename R>
+    IterMut<T> range_mut(R range) {
+        auto [a_range, b_range] = rusty::detail::deref_if_pointer_like(this->slice_ranges(std::move(range), this->len_field));
+        std::span<T> a = *this->buffer_range(std::move(a_range));
+        std::span<T> b = *this->buffer_range(std::move(b_range));
+        return IterMut<T>::new_(rusty::iter_mut(a), rusty::iter_mut(b));
+    }
+    template<typename R>
+    Drain<T, A> drain(R range) {
+        auto&& _let_pat = slice::range(std::move(range), rusty::range_to(this->len_field));
+        auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);
+        auto&& end = rusty::detail::deref_if_pointer(_let_pat.end);
+        auto drain_start = std::move(start);
+        auto drain_len = rusty::detail::deref_if_pointer_like(end) - rusty::detail::deref_if_pointer_like(start);
+        // @unsafe
+        {
+            return Drain<T, A>::new_((*this), std::move(drain_start), std::move(drain_len));
+        }
+    }
+    template<typename R, typename I>
+    auto splice(R range, I replace_with) {
+        return Splice<I, A>(this->drain(std::move(range)), rusty::iter(std::move(replace_with)));
+    }
+    void clear() {
+        this->truncate(static_cast<size_t>(0));
+        this->head = static_cast<size_t>(0);
+    }
+    bool contains(const T& x) const {
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_slices());
+        auto&& a = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& b = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        return [&]() { auto&& _haystack = a; auto&& _needle = x; for (const auto& _item : _haystack) { if constexpr (requires { _item == _needle; }) { if (_item == _needle) return true; } else if constexpr (requires { _needle == _item; }) { if (_needle == _item) return true; } } return false; }() || [&]() { auto&& _haystack = b; auto&& _needle = x; for (const auto& _item : _haystack) { if constexpr (requires { _item == _needle; }) { if (_item == _needle) return true; } else if constexpr (requires { _needle == _item; }) { if (_needle == _item) return true; } } return false; }();
+    }
+    rusty::Option<const T&> front() const {
+        return rusty::get((*this), static_cast<size_t>(0));
+    }
+    rusty::Option<T&> front_mut() {
+        return rusty::get_mut((*this), static_cast<size_t>(0));
+    }
+    rusty::Option<const T&> back() const {
+        return rusty::get((*this), (static_cast<size_t>(this->len_field) - static_cast<size_t>(1)));
+    }
+    rusty::Option<T&> back_mut() {
+        return rusty::get_mut((*this), (static_cast<size_t>(this->len_field) - static_cast<size_t>(1)));
+    }
+    rusty::Option<T> pop_front() {
+        if (rusty::is_empty((*this))) {
+            return rusty::Option<T>{rusty::None};
+        } else {
+            auto old_head = this->head;
+            this->head = this->to_physical_idx(static_cast<size_t>(1));
+            this->len_field -= 1;
+            // @unsafe
+            {
+                rusty::hint::assert_unchecked(rusty::detail::deref_if_pointer_like(this->len_field) < this->capacity());
+                return rusty::Option<T>(this->buffer_read(std::move(old_head)));
+            }
+        }
+    }
+    rusty::Option<T> pop_back() {
+        if (rusty::is_empty((*this))) {
+            return rusty::Option<T>{rusty::None};
+        } else {
+            this->len_field -= 1;
+            // @unsafe
+            {
+                rusty::hint::assert_unchecked(rusty::detail::deref_if_pointer_like(this->len_field) < this->capacity());
+                return rusty::Option<T>(this->buffer_read(this->to_physical_idx(this->len_field)));
+            }
+        }
+    }
+    rusty::Option<T> pop_front_if(const auto& predicate) {
+        auto* first_try_ref_ptr = ({ auto _rusty_try_result = (this->front_mut()); if (_rusty_try_result.is_none()) { return rusty::Option<decltype(_rusty_try_result.unwrap())>::none(); } &(_rusty_try_result.unwrap()); });
+        T& first = *first_try_ref_ptr;
+        if (predicate(first)) {
+            return this->pop_front();
+        } else {
+            return rusty::Option<T>{rusty::None};
+        }
+    }
+    rusty::Option<T> pop_back_if(const auto& predicate) {
+        auto* last_try_ref_ptr = ({ auto _rusty_try_result = (this->back_mut()); if (_rusty_try_result.is_none()) { return rusty::Option<decltype(_rusty_try_result.unwrap())>::none(); } &(_rusty_try_result.unwrap()); });
+        T& last = *last_try_ref_ptr;
+        if (predicate(last)) {
+            return this->pop_back();
+        } else {
+            return rusty::Option<T>{rusty::None};
+        }
+    }
+    void push_front(T value) {
+        static_cast<void>(this->push_front_mut(std::move(value)));
+    }
+    T& push_front_mut(T value) {
+        if (this->is_full()) {
+            this->grow();
+        }
+        this->head = this->wrap_sub(this->head, static_cast<size_t>(1));
+        this->len_field += 1;
+        // @unsafe
+        {
+            return this->buffer_write(this->head, std::move(value));
+        }
+    }
+    void push_back(T value) {
+        static_cast<void>(this->push_back_mut(std::move(value)));
+    }
+    T& push_back_mut(T value) {
+        if (this->is_full()) {
+            this->grow();
+        }
+        auto len = this->len_field;
+        this->len_field += 1;
+        // @unsafe
+        {
+            return this->buffer_write(this->to_physical_idx(std::move(len)), std::move(value));
+        }
+    }
+    template<typename I>
+    void prepend(I other) {
+        this->extend_front(rusty::rev(rusty::iter(std::move(other))));
+    }
+    template<typename I>
+    void extend_front(I iter) {
+        (*this).spec_extend_front(rusty::iter(std::move(iter)));
+    }
+    bool is_contiguous() const {
+        return rusty::detail::deref_if_pointer_like(this->head) <= (this->capacity() - rusty::detail::deref_if_pointer_like(this->len_field));
+    }
+    rusty::Option<T> swap_remove_front(size_t index) {
+        const auto length = this->len_field;
+        if ((rusty::detail::deref_if_pointer_like(index) < rusty::detail::deref_if_pointer_like(length)) && (rusty::detail::deref_if_pointer_like(index) != static_cast<size_t>(0))) {
+            [&]() { auto&& _swap_recv = (*this); auto&& _swap_view = _swap_recv; const auto _swap_i = index; const auto _swap_j = 0; const auto _swap_len = rusty::len(_swap_view); if (!(_swap_i < _swap_len && _swap_j < _swap_len)) { rusty::panicking::panic("index out of bounds"); } rusty::mem::swap(_swap_view[_swap_i], _swap_view[_swap_j]); }();
+        } else if (rusty::detail::deref_if_pointer_like(index) >= rusty::detail::deref_if_pointer_like(length)) {
+            return rusty::Option<T>{rusty::None};
+        }
+        return this->pop_front();
+    }
+    rusty::Option<T> swap_remove_back(size_t index) {
+        const auto length = this->len_field;
+        if ((rusty::detail::deref_if_pointer_like(length) > 0) && (rusty::detail::deref_if_pointer_like(index) < (rusty::detail::deref_if_pointer_like(length) - 1))) {
+            [&]() { auto&& _swap_recv = (*this); auto&& _swap_view = _swap_recv; const auto _swap_i = index; const auto _swap_j = rusty::detail::deref_if_pointer_like(length) - 1; const auto _swap_len = rusty::len(_swap_view); if (!(_swap_i < _swap_len && _swap_j < _swap_len)) { rusty::panicking::panic("index out of bounds"); } rusty::mem::swap(_swap_view[_swap_i], _swap_view[_swap_j]); }();
+        } else if (rusty::detail::deref_if_pointer_like(index) >= rusty::detail::deref_if_pointer_like(length)) {
+            return rusty::Option<T>{rusty::None};
+        }
+        return this->pop_back();
+    }
+    void insert(size_t index, T value) {
+        static_cast<void>(this->insert_mut(std::move(index), std::move(value)));
+    }
+    T& insert_mut(size_t index, T value) {
+        if (!(rusty::detail::deref_if_pointer_like(index) <= rusty::len((*this)))) { throw std::logic_error("index out of bounds"); }
+        if (this->is_full()) {
+            this->grow();
+        }
+        auto k = rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(index);
+        if (rusty::detail::deref_if_pointer_like(k) < rusty::detail::deref_if_pointer_like(index)) {
+            // @unsafe
+            {
+                this->wrap_copy(this->to_physical_idx(std::move(index)), this->to_physical_idx(rusty::detail::deref_if_pointer_like(index) + static_cast<size_t>(1)), std::move(k));
+                this->len_field += 1;
+                return this->buffer_write(this->to_physical_idx(std::move(index)), std::move(value));
+            }
+        } else {
+            auto old_head = this->head;
+            this->head = this->wrap_sub(this->head, static_cast<size_t>(1));
+            // @unsafe
+            {
+                this->wrap_copy(std::move(old_head), this->head, std::move(index));
+                this->len_field += 1;
+                return this->buffer_write(this->to_physical_idx(std::move(index)), std::move(value));
+            }
+        }
+    }
+    rusty::Option<T> remove(size_t index) {
+        if (rusty::detail::deref_if_pointer_like(this->len_field) <= rusty::detail::deref_if_pointer_like(index)) {
+            return rusty::Option<T>{rusty::None};
+        }
+        auto wrapped_idx = this->to_physical_idx(std::move(index));
+        auto elem = rusty::Option<T>(this->buffer_read(std::move(wrapped_idx)));
+        auto k = (rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(index)) - 1;
+        if (rusty::detail::deref_if_pointer_like(k) < rusty::detail::deref_if_pointer_like(index)) {
+            // @unsafe
+            {
+                this->wrap_copy(this->wrap_add(std::move(wrapped_idx), static_cast<size_t>(1)), std::move(wrapped_idx), std::move(k));
+            }
+            this->len_field -= 1;
+        } else {
+            auto old_head = this->head;
+            this->head = this->to_physical_idx(static_cast<size_t>(1));
+            // @unsafe
+            {
+                this->wrap_copy(std::move(old_head), this->head, std::move(index));
+            }
+            this->len_field -= 1;
+        }
+        return std::move(elem);
+    }
+    VecDeque<T, A> split_off(size_t at) {
+        const auto len = this->len_field;
+        if (!(rusty::detail::deref_if_pointer_like(at) <= rusty::detail::deref_if_pointer_like(len))) { throw std::logic_error("`at` out of bounds"); }
+        auto other_len = rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(at);
+        auto other = VecDeque<T, A>::with_capacity_in(std::move(other_len), rusty::clone(this->allocator()));
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_slices());
+        auto&& first_half = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& second_half = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        const auto first_len = rusty::len(first_half);
+        auto second_len = rusty::len(second_half);
+        // @unsafe
+        {
+            if (rusty::detail::deref_if_pointer_like(at) < rusty::detail::deref_if_pointer_like(first_len)) {
+                auto amount_in_first = rusty::detail::deref_if_pointer_like(first_len) - rusty::detail::deref_if_pointer_like(at);
+                rusty::ptr::copy_nonoverlapping(rusty::ptr::add(rusty::as_ptr(first_half), std::move(at)), other.ptr(), std::move(amount_in_first));
+                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(second_half), rusty::ptr::add(other.ptr(), std::move(amount_in_first)), std::move(second_len));
+            } else {
+                const auto offset = rusty::detail::deref_if_pointer_like(at) - rusty::detail::deref_if_pointer_like(first_len);
+                auto amount_in_second = rusty::detail::deref_if_pointer_like(second_len) - rusty::detail::deref_if_pointer_like(offset);
+                rusty::ptr::copy_nonoverlapping(rusty::ptr::add(rusty::as_ptr(second_half), std::move(offset)), other.ptr(), std::move(amount_in_second));
+            }
+        }
+        this->len_field = std::move(at);
+        other.len_field = std::move(other_len);
+        return std::move(other);
+    }
+    void append(VecDeque<T, A>& other) {
+        if (T::IS_ZST) {
+            this->len_field = [&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(other.len_field)); }().expect("capacity overflow");
+            other.len_field = static_cast<size_t>(0);
+            other.head = static_cast<size_t>(0);
+            return;
+        }
+        this->reserve(other.len_field);
+        // @unsafe
+        {
+            auto [left, right] = rusty::detail::deref_if_pointer_like(other.as_slices());
+            this->copy_slice(this->to_physical_idx(this->len_field), left);
+            this->copy_slice(this->to_physical_idx(rusty::detail::deref_if_pointer_like(this->len_field) + rusty::len(left)), right);
+        }
+        this->len_field += other.len_field;
+        other.len_field = static_cast<size_t>(0);
+        other.head = static_cast<size_t>(0);
+    }
+    template<typename F>
+    void retain(F f) {
+        this->retain_mut([&](auto&& elem) { return f(std::move(elem)); });
+    }
+    template<typename F>
+    void retain_mut(F f) {
+        const auto len = this->len_field;
+        auto idx = static_cast<size_t>(0);
+        auto cur = static_cast<size_t>(0);
+        while (rusty::detail::deref_if_pointer_like(cur) < rusty::detail::deref_if_pointer_like(len)) {
+            if (!f(&(*this)[cur])) {
+                cur += 1;
+                break;
+            }
+            cur += 1;
+            idx += 1;
+        }
+        while (rusty::detail::deref_if_pointer_like(cur) < rusty::detail::deref_if_pointer_like(len)) {
+            if (!f(&(*this)[cur])) {
+                cur += 1;
+                continue;
+            }
+            [&]() { auto&& _swap_recv = (*this); auto&& _swap_view = _swap_recv; const auto _swap_i = idx; const auto _swap_j = cur; const auto _swap_len = rusty::len(_swap_view); if (!(_swap_i < _swap_len && _swap_j < _swap_len)) { rusty::panicking::panic("index out of bounds"); } rusty::mem::swap(_swap_view[_swap_i], _swap_view[_swap_j]); }();
+            cur += 1;
+            idx += 1;
+        }
+        if (rusty::detail::deref_if_pointer_like(cur) != rusty::detail::deref_if_pointer_like(idx)) {
+            this->truncate(std::move(idx));
+        }
+    }
+    void grow() {
+        assert((this->is_full()));
+        auto old_cap = this->capacity();
+        this->buf.grow_one();
+        // @unsafe
+        {
+            this->handle_capacity_increase(std::move(old_cap));
+        }
+        assert((!this->is_full()));
+    }
+    void resize_with(size_t new_len, const auto& generator) {
+        const auto len = this->len_field;
+        if (rusty::detail::deref_if_pointer_like(new_len) > rusty::detail::deref_if_pointer_like(len)) {
+            this->extend(rusty::repeat_with(generator).take(rusty::detail::deref_if_pointer_like(new_len) - rusty::detail::deref_if_pointer_like(len)));
+        } else {
+            this->truncate(std::move(new_len));
+        }
+    }
+    std::span<T> make_contiguous() {
+        if (T::IS_ZST) {
+            this->head = static_cast<size_t>(0);
+        }
+        if (this->is_contiguous()) {
+            // @unsafe
+            {
+                return rusty::from_raw_parts_mut(rusty::ptr::add(this->ptr(), this->head), this->len_field);
+            }
+        }
+        auto&& _let_pat = (*this);
+        auto&& head = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_pat).head);
+        auto&& len = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_let_pat).len_field);
+        const auto ptr_shadow1 = this->ptr();
+        const auto cap = this->capacity();
+        auto free = rusty::detail::deref_if_pointer_like(cap) - rusty::detail::deref_if_pointer_like(len);
+        auto head_len = rusty::detail::deref_if_pointer_like(cap) - rusty::detail::deref_if_pointer_like(head);
+        auto tail = rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(head_len);
+        auto tail_len = std::move(tail);
+        if (rusty::detail::deref_if_pointer_like(free) >= rusty::detail::deref_if_pointer_like(head_len)) {
+            // @unsafe
+            {
+                this->copy(static_cast<size_t>(0), std::move(head_len), std::move(tail_len));
+                this->copy_nonoverlapping(std::move(head), static_cast<size_t>(0), std::move(head_len));
+            }
+            this->head = static_cast<size_t>(0);
+        } else if (rusty::detail::deref_if_pointer_like(free) >= rusty::detail::deref_if_pointer_like(tail_len)) {
+            // @unsafe
+            {
+                this->copy(std::move(head), std::move(tail), std::move(head_len));
+                this->copy_nonoverlapping(static_cast<size_t>(0), rusty::detail::deref_if_pointer_like(tail) + rusty::detail::deref_if_pointer_like(head_len), std::move(tail_len));
+            }
+            this->head = std::move(tail);
+        } else {
+            if (rusty::detail::deref_if_pointer_like(head_len) > rusty::detail::deref_if_pointer_like(tail_len)) {
+                // @unsafe
+                {
+                    if (rusty::detail::deref_if_pointer_like(free) != 0) {
+                        this->copy(static_cast<size_t>(0), std::move(free), std::move(tail_len));
+                    }
+                    std::span<T> slice = *this->buffer_range(rusty::range(free, this->capacity()));
+                    rusty::rotate_left(slice, std::move(tail_len));
+                    this->head = std::move(free);
+                }
+            } else {
+                // @unsafe
+                {
+                    if (rusty::detail::deref_if_pointer_like(free) != 0) {
+                        this->copy(this->head, std::move(tail_len), std::move(head_len));
+                    }
+                    std::span<T> slice = *this->buffer_range(rusty::range(0, this->len_field));
+                    rusty::rotate_right(slice, std::move(head_len));
+                    this->head = static_cast<size_t>(0);
+                }
+            }
+        }
+        // @unsafe
+        {
+            return rusty::from_raw_parts_mut(rusty::ptr::add(ptr_shadow1, this->head), this->len_field);
+        }
+    }
+    void rotate_left(size_t n) {
+        assert((rusty::detail::deref_if_pointer_like(n) <= rusty::len((*this))));
+        auto k = rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(n);
+        if (rusty::detail::deref_if_pointer_like(n) <= rusty::detail::deref_if_pointer_like(k)) {
+            // @unsafe
+            {
+                this->rotate_left_inner(std::move(n));
+            }
+        } else {
+            // @unsafe
+            {
+                this->rotate_right_inner(std::move(k));
+            }
+        }
+    }
+    void rotate_right(size_t n) {
+        assert((rusty::detail::deref_if_pointer_like(n) <= rusty::len((*this))));
+        auto k = rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(n);
+        if (rusty::detail::deref_if_pointer_like(n) <= rusty::detail::deref_if_pointer_like(k)) {
+            // @unsafe
+            {
+                this->rotate_right_inner(std::move(n));
+            }
+        } else {
+            // @unsafe
+            {
+                this->rotate_left_inner(std::move(k));
+            }
+        }
+    }
+    void rotate_left_inner(size_t mid) {
+        assert(((rusty::detail::deref_if_pointer_like(mid) * 2) <= rusty::len((*this))));
+        // @unsafe
+        {
+            this->wrap_copy(this->head, this->to_physical_idx(this->len_field), std::move(mid));
+        }
+        this->head = this->to_physical_idx(std::move(mid));
+    }
+    void rotate_right_inner(size_t k) {
+        assert(((rusty::detail::deref_if_pointer_like(k) * 2) <= rusty::len((*this))));
+        this->head = this->wrap_sub(this->head, std::move(k));
+        // @unsafe
+        {
+            this->wrap_copy(this->to_physical_idx(this->len_field), this->head, std::move(k));
+        }
+    }
+    auto binary_search(const T& x) const -> rusty::Result<size_t, size_t> {
+        return this->binary_search_by([&](auto&& e) { return rusty::cmp::cmp(e, x); });
+    }
+    template<typename F>
+    auto binary_search_by(F f) const -> rusty::Result<size_t, size_t> {
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_slices());
+        auto&& front = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& back = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        const auto cmp_back = rusty::map(rusty::first(back), [&](auto&& elem) { return f(std::move(elem)); });
+        if (cmp_back.is_some()) {
+            auto&& _iflet_payload = cmp_back.unwrap();
+            if (_iflet_payload == Ordering::Equal) {
+                return rusty::Result<size_t, size_t>::Ok(rusty::len(front));
+            }
+        } else if (cmp_back.is_some()) {
+            auto&& _iflet_payload = cmp_back.unwrap();
+            if (_iflet_payload == Ordering::Less) {
+                return rusty::map(back.binary_search_by(std::move(f)), [&](auto&& idx) { return rusty::detail::deref_if_pointer_like(idx) + rusty::len(front); }).map_err([&](auto&& _err) -> size_t { return ([&](auto&& idx) { return rusty::detail::deref_if_pointer_like(idx) + rusty::len(front); }) (std::forward<decltype(_err)>(_err)); });
+            }
+        } else {
+            return front.binary_search_by(std::move(f));
+        }
+    }
+    template<typename B, typename F>
+    auto binary_search_by_key(const B& b, F f) const -> rusty::Result<size_t, size_t> {
+        return this->binary_search_by([&](auto&& k) { return rusty::cmp::cmp(f(std::move(k)), b); });
+    }
+    template<typename P>
+    size_t partition_point(P pred) const {
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_slices());
+        auto&& front = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& back = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        if (auto&& _iflet_scrutinee = rusty::map(rusty::first(back), [&](auto&& v) { return pred(std::move(v)); }); _iflet_scrutinee.is_some()) {
+            auto&& _iflet_payload = _iflet_scrutinee.unwrap();
+            if (_iflet_payload == true) {
+                return back.partition_point(std::move(pred)) + rusty::len(front);
+            }
+        } else {
+            return front.partition_point(std::move(pred));
+        }
+    }
+    void resize(size_t new_len, T value) {
+        if (rusty::detail::deref_if_pointer_like(new_len) > rusty::len((*this))) {
+            const auto extra = rusty::detail::deref_if_pointer_like(new_len) - rusty::len((*this));
+            this->extend(std::iter::repeat_n(std::move(value), std::move(extra)));
+        } else {
+            this->truncate(std::move(new_len));
+        }
+    }
+    template<typename R>
+    void extend_from_within(R src) {
+        auto range = slice::range(std::move(src), rusty::range_to(rusty::len((*this))));
+        this->reserve(rusty::len(range));
+        // @unsafe
+        {
+            this->spec_extend_from_within(std::move(range));
+        }
+    }
+    template<typename R>
+    void prepend_from_within(R src) {
+        auto range = slice::range(std::move(src), rusty::range_to(rusty::len((*this))));
+        this->reserve(rusty::len(range));
+        // @unsafe
+        {
+            this->spec_prepend_from_within(std::move(range));
+        }
+    }
+    void spec_extend_from_within(rusty::range<size_t> src) {
+        auto dst = rusty::len((*this));
+        auto count = rusty::detail::deref_if_pointer_like(rusty::field_end(src)) - rusty::detail::deref_if_pointer_like(rusty::field_start(src));
+        auto src_shadow1 = std::move(rusty::field_start(src));
+        // @unsafe
+        {
+            const auto ranges = this->nonoverlapping_ranges(std::move(src_shadow1), std::move(dst), std::move(count), this->head);
+            for (auto&& _for_item : rusty::for_in(ranges)) {
+                auto&& src = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));
+                auto&& dst = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));
+                auto&& count = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_for_item)));
+                for (auto&& offset : rusty::for_in(rusty::range(0, count))) {
+                    dst.add(std::move(offset)).write(rusty::clone(((rusty::detail::deref_if_pointer_like(src.add(std::move(offset)))))));
+                    this->len_field += 1;
+                }
+            }
+        }
+    }
+    void spec_prepend_from_within(rusty::range<size_t> src) {
+        auto dst = 0;
+        auto count = rusty::detail::deref_if_pointer_like(rusty::field_end(src)) - rusty::detail::deref_if_pointer_like(rusty::field_start(src));
+        auto src_shadow1 = rusty::detail::deref_if_pointer_like(rusty::field_start(src)) + rusty::detail::deref_if_pointer_like(count);
+        auto new_head = this->wrap_sub(this->head, std::move(count));
+        const auto cap = this->capacity();
+        // @unsafe
+        {
+            const auto ranges = this->nonoverlapping_ranges(std::move(src_shadow1), std::move(dst), std::move(count), std::move(new_head));
+            auto [src_shadow2, dst_shadow1, count_shadow1] = rusty::detail::deref_if_pointer_like(ranges.at(1));
+            for (auto&& offset : rusty::for_in(rusty::rev((rusty::range(0, count_shadow1))))) {
+                dst_shadow1.add(std::move(offset)).write(rusty::clone(((rusty::detail::deref_if_pointer_like(src_shadow2.add(std::move(offset)))))));
+                this->head -= 1;
+                this->len_field += 1;
+            }
+            auto [src_shadow3, dst_shadow2, count_shadow2] = rusty::detail::deref_if_pointer_like(ranges.at(0));
+            auto iter = rusty::rev((rusty::range(0, count_shadow2)));
+            if (auto&& _iflet_scrutinee = iter.next(); rusty::detail::option_has_value(_iflet_scrutinee)) {
+                auto&& _iflet_take = _iflet_scrutinee;
+                auto offset = rusty::detail::option_take_value(_iflet_take);
+                dst_shadow2.add(std::move(offset)).write(rusty::clone(((rusty::detail::deref_if_pointer_like(src_shadow3.add(std::move(offset)))))));
+                if (rusty::detail::deref_if_pointer_like(this->head) == static_cast<size_t>(0)) {
+                    this->head = std::move(cap);
+                }
+                this->head -= 1;
+                this->len_field += 1;
+                for (auto&& offset : rusty::for_in(iter)) {
+                    dst_shadow2.add(std::move(offset)).write(rusty::clone(((rusty::detail::deref_if_pointer_like(src_shadow3.add(std::move(offset)))))));
+                    this->head -= 1;
+                    this->len_field += 1;
+                }
+            }
+        }
+    }
+    bool operator==(const VecDeque<T, A>& other) const {
+        if (rusty::detail::deref_if_pointer_like(this->len_field) != rusty::len(other)) {
+            return false;
+        }
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->as_slices());
+        auto&& sa = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& sb = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto [oa, ob] = rusty::detail::deref_if_pointer_like(other.as_slices());
+        if (rusty::len(sa) == rusty::len(oa)) {
+            return (rusty::detail::deref_if_pointer_like(sa) == rusty::detail::deref_if_pointer_like(oa)) && (rusty::detail::deref_if_pointer_like(sb) == rusty::detail::deref_if_pointer_like(ob));
+        } else if (rusty::len(sa) < rusty::len(oa)) {
+            const auto front = rusty::len(sa);
+            const auto mid = rusty::len(oa) - rusty::detail::deref_if_pointer_like(front);
+            auto [oa_front, oa_mid] = rusty::detail::deref_if_pointer_like(oa.split_at(std::move(front)));
+            auto [sb_mid, sb_back] = rusty::detail::deref_if_pointer_like(rusty::split_at(sb, std::move(mid)));
+            assert((sa . len () == oa_front . len ()));
+            assert((sb_mid . len () == oa_mid . len ()));
+            assert((sb_back . len () == ob . len ()));
+            return ((rusty::detail::deref_if_pointer_like(sa) == rusty::detail::deref_if_pointer_like(oa_front)) && (rusty::detail::deref_if_pointer_like(sb_mid) == rusty::detail::deref_if_pointer_like(oa_mid))) && (rusty::detail::deref_if_pointer_like(sb_back) == rusty::detail::deref_if_pointer_like(ob));
+        } else {
+            const auto front = rusty::len(oa);
+            const auto mid = rusty::len(sa) - rusty::detail::deref_if_pointer_like(front);
+            auto [sa_front, sa_mid] = rusty::detail::deref_if_pointer_like(rusty::split_at(sa, std::move(front)));
+            auto [ob_mid, ob_back] = rusty::detail::deref_if_pointer_like(ob.split_at(std::move(mid)));
+            assert((sa_front . len () == oa . len ()));
+            assert((sa_mid . len () == ob_mid . len ()));
+            assert((sb . len () == ob_back . len ()));
+            return ((rusty::detail::deref_if_pointer_like(sa_front) == rusty::detail::deref_if_pointer_like(oa)) && (rusty::detail::deref_if_pointer_like(sa_mid) == rusty::detail::deref_if_pointer_like(ob_mid))) && (rusty::detail::deref_if_pointer_like(sb) == rusty::detail::deref_if_pointer_like(ob_back));
+        }
+    }
+    std::partial_ordering operator<=>(const VecDeque<T, A>& other) const {
+        return rusty::to_partial_ordering([&]() -> rusty::Option<rusty::cmp::Ordering> {
+            return rusty::partial_cmp(rusty::iter((*this)), rusty::iter(other));
+        }());
+    }
+    rusty::cmp::Ordering cmp(const VecDeque<T, A>& other) const {
+        return rusty::cmp::cmp(rusty::iter((*this)), rusty::iter(other));
+    }
+    template<typename H>
+    void hash(H& state) const {
+        ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).write_length_prefix(this->len_field); }) { return std::forward<decltype(__recv)>(__recv).write_length_prefix(this->len_field); } else { return std::forward<decltype(__recv)>(__recv)->write_length_prefix(this->len_field); } }(state));
+        rusty::for_each(rusty::iter((*this)), [&](auto&& elem) { return rusty::hash::hash(elem, state); });
+    }
+    const T& operator[](size_t index) const {
+        return rusty::get((*this), std::move(index)).expect("Out of bounds access");
+    }
+    T& index_mut(size_t index) {
+        return rusty::get_mut((*this), std::move(index)).expect("Out of bounds access");
+    }
+    template<typename I>
+    static VecDeque<T> from_iter(I iter) {
+        return VecDeque::spec_from_iter(rusty::iter(std::move(iter)));
+    }
+    IntoIter into_iter() {
+        return IntoIter<T, A>::new_(std::move((*this)));
+    }
+    template<typename I>
+    void extend(I iter) {
+        (*this).spec_extend(rusty::iter(std::move(iter)));
+    }
+    void extend_one(T elem) {
+        this->push_back(std::move(elem));
+    }
+    void extend_reserve(size_t additional) {
+        this->reserve(std::move(additional));
+    }
+    void extend_one_unchecked(T item) {
+        // @unsafe
+        {
+            this->push_unchecked(std::move(item));
+        }
+    }
+    void extend_one(const T& _arg1) {
+        auto&& elem = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_arg1));
+        this->push_back(std::move(elem));
+    }
+    void extend_one_unchecked(const T& _arg1) {
+        auto&& item = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_arg1));
+        // @unsafe
+        {
+            this->push_unchecked(std::move(item));
+        }
+    }
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_list().entries(rusty::iter((*this))).finish();
+    }
+    static VecDeque<T, A> from(::Vec<T, A> other) {
+        auto [ptr_shadow1, len, cap, alloc] = rusty::detail::deref_if_pointer_like(other.into_raw_parts_with_alloc());
+        return VecDeque<T, A>(static_cast<size_t>(0), std::move(len), ::RawVec<T, A>::from_raw_parts_in(std::move(ptr_shadow1), std::move(cap), std::move(alloc)));
+    }
+    template<size_t N>
+    static VecDeque<T, A> from(std::array<T, rusty::sanitize_array_capacity<N>()> arr) {
+        auto deq = VecDeque<N>::with_capacity(N);
+        const auto arr_shadow1 = rusty::mem::manually_drop_new(arr);
+        if (!::IS_ZST) {
+            // @unsafe
+            {
+                rusty::ptr::copy_nonoverlapping((*arr_shadow1).as_ptr(), deq.ptr(), N);
+            }
+        }
+        deq.head = static_cast<size_t>(0);
+        deq.len_field = N;
+        return std::move(deq);
+    }
+    template<typename I>
+    void spec_extend(I iter) {
+        while (true) {
+            auto&& _whilelet = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).next(); }) { return std::forward<decltype(__recv)>(__recv).next(); } else { return std::forward<decltype(__recv)>(__recv)->next(); } }(iter));
+            if (!(_whilelet.is_some())) { break; }
+            auto element = _whilelet.unwrap();
+            auto [lower, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).size_hint(); }) { return std::forward<decltype(__recv)>(__recv).size_hint(); } else { return std::forward<decltype(__recv)>(__recv)->size_hint(); } }(iter)));
+            this->reserve(rusty::saturating_add(lower, rusty::detail::deref_if_pointer(1)));
+            // @unsafe
+            {
+                this->push_unchecked(std::move(element));
+            }
+            while (rusty::detail::deref_if_pointer_like(this->len_field) < this->capacity()) {
+                auto&& _let_pat = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).next(); }) { return std::forward<decltype(__recv)>(__recv).next(); } else { return std::forward<decltype(__recv)>(__recv)->next(); } }(iter));
+                auto&& element_shadow1 = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
+                // @unsafe
+                {
+                    this->push_unchecked(std::move(element_shadow1));
+                }
+            }
+        }
+    }
+    template<typename A1, typename A2>
+        requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
+    void spec_extend(::IntoIter<T, A2> iterator) {
+        auto slice = rusty::as_slice(iterator);
+        this->reserve(rusty::len(slice));
+        // @unsafe
+        {
+            this->copy_slice(this->to_physical_idx(this->len_field), slice);
+            this->len_field += rusty::len(slice);
+        }
+        iterator.forget_remaining_elements();
+    }
+    void spec_extend(rusty::slice_iter::Iter<const T> iterator) {
+        auto slice = rusty::as_slice(iterator);
+        this->reserve(rusty::len(slice));
+        // @unsafe
+        {
+            this->copy_slice(this->to_physical_idx(this->len_field), slice);
+            this->len_field += rusty::len(slice);
+        }
+    }
+    template<typename I>
+    void spec_extend_front(I iter) {
+        while (true) {
+            auto&& _whilelet = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).next(); }) { return std::forward<decltype(__recv)>(__recv).next(); } else { return std::forward<decltype(__recv)>(__recv)->next(); } }(iter));
+            if (!(_whilelet.is_some())) { break; }
+            auto element = _whilelet.unwrap();
+            auto [lower, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).size_hint(); }) { return std::forward<decltype(__recv)>(__recv).size_hint(); } else { return std::forward<decltype(__recv)>(__recv)->size_hint(); } }(iter)));
+            this->reserve(rusty::saturating_add(lower, rusty::detail::deref_if_pointer(1)));
+            // @unsafe
+            {
+                this->push_front_unchecked(std::move(element));
+            }
+            while (rusty::detail::deref_if_pointer_like(this->len_field) < this->capacity()) {
+                auto&& _let_pat = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).next(); }) { return std::forward<decltype(__recv)>(__recv).next(); } else { return std::forward<decltype(__recv)>(__recv)->next(); } }(iter));
+                auto&& element_shadow1 = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
+                // @unsafe
+                {
+                    this->push_front_unchecked(std::move(element_shadow1));
+                }
+            }
+        }
+    }
+    template<typename A1, typename A2>
+        requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
+    void spec_extend_front(::IntoIter<T, A2> iterator) {
+        auto slice = rusty::as_slice(iterator);
+        this->reserve(rusty::len(slice));
+        // @unsafe
+        {
+            ::prepend_reversed((*this), std::move(slice));
+        }
+        iterator.forget_remaining_elements();
+    }
+    template<typename A1, typename A2>
+        requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
+    void spec_extend_front(decltype(std::declval<::IntoIter<T, A2>>().rev()) iterator) {
+        auto iterator_shadow1 = iterator.into_inner();
+        auto slice = rusty::as_slice(iterator_shadow1);
+        this->reserve(rusty::len(slice));
+        // @unsafe
+        {
+            ::prepend((*this), std::move(slice));
+        }
+        iterator_shadow1.forget_remaining_elements();
+    }
+    // patcher: spec_extend_front<Copied<...>> stubbed (no core::iter::Copied analog)
+    void spec_extend_front(auto) { std::abort(); }
+    // patcher: spec_extend_front<Copied<...>> stubbed (no core::iter::Copied analog)
+    void spec_extend_front(auto) { std::abort(); }
+    template<typename A1, typename A2>
+        requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
+    void spec_extend_front(Drain<T, A2> iter) {
+        if (rusty::detail::deref_if_pointer_like(iter.remaining) == static_cast<size_t>(0)) {
+            return;
+        }
+        this->reserve(std::move(iter.remaining));
+        // @unsafe
+        {
+            auto [left, right] = rusty::detail::deref_if_pointer_like(iter.as_slices());
+            ::prepend_reversed((*this), *left);
+            ::prepend_reversed((*this), *right);
+        }
+        iter.idx += iter.remaining;
+        iter.remaining = static_cast<size_t>(0);
+    }
+    template<typename A1, typename A2>
+        requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
+    void spec_extend_front(decltype(std::declval<Drain<T, A2>>().rev()) iter) {
+        auto iter_shadow1 = iter.into_inner();
+        if (rusty::detail::deref_if_pointer_like(iter_shadow1.remaining) == 0) {
+            return;
+        }
+        this->reserve(std::move(iter_shadow1.remaining));
+        // @unsafe
+        {
+            auto [left, right] = rusty::detail::deref_if_pointer_like(iter_shadow1.as_slices());
+            ::prepend((*this), [&]() -> std::span<const T> { static const auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(right); return std::span<const T>(_slice_ref_tmp); }());
+            ::prepend((*this), [&]() -> std::span<const T> { static const auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(left); return std::span<const T>(_slice_ref_tmp); }());
+        }
+        rusty::detail::deref_if_pointer_like(iter_shadow1.idx) += iter_shadow1.remaining;
+        iter_shadow1.remaining = 0;
+    }
+    template<typename I>
+    static VecDeque<T, A> spec_from_iter(I iterator) {
+        return rusty::from_into<VecDeque<T, A>>(rusty::collect_range(std::move(iterator)));
+    }
+    static VecDeque<T, A> spec_from_iter(decltype(rusty::iter(std::declval<::Vec<T>>())) iterator) {
+        return iterator.into_vecdeque();
+    }
+    static VecDeque<T, A> spec_from_iter(IntoIter iterator) {
+        return iterator.into_vecdeque();
+    }
+};
+
 export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct Drain {
@@ -3699,7 +5475,7 @@ struct Drain {
 
 
     static Drain<T, A> new_(vec_deque_port::VecDeque<T, A>& deque, size_t drain_start, size_t drain_len) {
-        const auto orig_len = rusty::mem::replace(deque.len, std::move(drain_start));
+        const auto orig_len = rusty::mem::replace(deque.len_field, std::move(drain_start));
         auto tail_len = (rusty::detail::deref_if_pointer_like(orig_len) - rusty::detail::deref_if_pointer_like(drain_start)) - rusty::detail::deref_if_pointer_like(drain_len);
         return Drain<T, A>(rusty::ptr::NonNull<vec_deque_port::VecDeque<T, A>>::from(deque), std::move(drain_len), std::move(drain_start), std::move(tail_len), std::move(drain_len), rusty::PhantomData<const T&>{});
     }
@@ -3747,7 +5523,7 @@ struct Drain {
                 }
             }
             auto& source_deque = this->_0.deque.as_mut();
-            const auto drain_len = this->_0.drain_len;
+            auto drain_len = this->_0.drain_len;
             const auto head_len = source_deque.len;
             const auto tail_len = this->_0.tail_len;
             const auto new_len = rusty::detail::deref_if_pointer_like(head_len) + rusty::detail::deref_if_pointer_like(tail_len);
@@ -3801,7 +5577,7 @@ struct Drain {
         if (rusty::detail::deref_if_pointer_like(this->remaining) == static_cast<size_t>(0)) {
             return rusty::Option<T>{rusty::None};
         }
-        const auto wrapped_idx = this->deque.as_ref().to_physical_idx(this->idx);
+        auto wrapped_idx = this->deque.as_ref().to_physical_idx(this->idx);
         this->idx += 1;
         this->remaining -= 1;
         return rusty::Option<T>(this->deque.as_mut().buffer_read(std::move(wrapped_idx)));
@@ -3815,7 +5591,7 @@ struct Drain {
             return rusty::Option<T>{rusty::None};
         }
         this->remaining -= 1;
-        const auto wrapped_idx = this->deque.as_ref().to_physical_idx(rusty::detail::deref_if_pointer_like(this->idx) + rusty::detail::deref_if_pointer_like(this->remaining));
+        auto wrapped_idx = this->deque.as_ref().to_physical_idx(rusty::detail::deref_if_pointer_like(this->idx) + rusty::detail::deref_if_pointer_like(this->remaining));
         return rusty::Option<T>(this->deque.as_mut().buffer_read(std::move(wrapped_idx)));
     }
     template<typename I>
@@ -3826,7 +5602,7 @@ struct Drain {
         for (auto&& idx : rusty::for_in(rusty::range(range_start, range_end))) {
             if (auto&& _iflet_scrutinee = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).next(); }) { return std::forward<decltype(__recv)>(__recv).next(); } else { return std::forward<decltype(__recv)>(__recv)->next(); } }(replace_with)); _iflet_scrutinee.is_some()) {
                 decltype(auto) new_item = _iflet_scrutinee.unwrap();
-                const auto index = deque.to_physical_idx(std::move(idx));
+                auto index = deque.to_physical_idx(std::move(idx));
                 // @unsafe
                 {
                     deque.buffer_write(std::move(index), std::move(new_item));
@@ -3841,9 +5617,9 @@ struct Drain {
     }
     void move_tail(size_t additional) {
         vec_deque_port::VecDeque<T, A>& deque = this->deque.as_mut();
-        const auto tail_start = rusty::detail::deref_if_pointer_like(deque.len) + rusty::detail::deref_if_pointer_like(this->drain_len);
+        auto tail_start = rusty::detail::deref_if_pointer_like(deque.len) + rusty::detail::deref_if_pointer_like(this->drain_len);
         deque.buf.reserve(rusty::detail::deref_if_pointer_like(tail_start) + rusty::detail::deref_if_pointer_like(this->tail_len), std::move(additional));
-        const auto new_tail_start = rusty::detail::deref_if_pointer_like(tail_start) + rusty::detail::deref_if_pointer_like(additional);
+        auto new_tail_start = rusty::detail::deref_if_pointer_like(tail_start) + rusty::detail::deref_if_pointer_like(additional);
         // @unsafe
         {
             deque.wrap_copy(deque.to_physical_idx(std::move(tail_start)), deque.to_physical_idx(std::move(new_tail_start)), this->tail_len);
@@ -3852,4 +5628,508 @@ struct Drain {
     }
 };
 
-} // namespace vec_deque_port::drain
+export template<typename T, typename A = rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+struct IntoIter {
+    using Item = T;
+    vec_deque_port::VecDeque<T, A> inner;
+
+    static IntoIter<T, A> new_(vec_deque_port::VecDeque<T, A> inner) {
+        return IntoIter<T, A>{.inner = std::move(inner)};
+    }
+    vec_deque_port::VecDeque<T, A> into_vecdeque() {
+        return std::move(this->inner);
+    }
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        return f.debug_tuple("IntoIter").field(&this->inner).finish();
+    }
+    rusty::Option<T> next() {
+        return this->inner.pop_front();
+    }
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        auto len = rusty::len(this->inner);
+        return std::make_tuple(std::move(len), rusty::Option<size_t>(std::move(len)));
+    }
+    auto advance_by(size_t n) -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> {
+        const auto len = this->inner.len_field;
+        const auto rem = [&]() {
+if (rusty::detail::deref_if_pointer_like(len) < rusty::detail::deref_if_pointer_like(n)) {
+this->inner.clear();
+return rusty::detail::deref_if_pointer_like(n) - rusty::detail::deref_if_pointer_like(len);
+} else {
+this->inner.drain(rusty::range_to(n));
+return 0;
+}
+}();
+        return rusty::num::NonZero<size_t>::new_(std::move(rem)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
+    }
+    size_t count() {
+        return std::move(this->inner.len_field);
+    }
+    struct Guard_3 {
+        vec_deque_port::VecDeque<T, A>& deque;
+        size_t consumed;
+        mutable bool _rusty_forgotten = false;
+        Guard_3(vec_deque_port::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
+        Guard_3(const Guard_3&) = default;
+        Guard_3(Guard_3&& other) noexcept : deque(other.deque), consumed(std::move(other.consumed)) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        Guard_3& operator=(const Guard_3&) = default;
+        Guard_3& operator=(Guard_3&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~Guard_3();
+            new (this) Guard_3(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~Guard_3() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            this->deque.len_field -= this->consumed;
+            this->deque.head = this->deque.to_physical_idx(this->consumed);
+        }
+    };
+    template<typename B, typename F>
+    auto try_fold(B init, F f) {
+        using R = std::remove_cvref_t<std::invoke_result_t<F&, B, Item>>;
+        auto guard = Guard_3(this->inner, static_cast<size_t>(0));
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(guard.deque.as_slices());
+        auto&& head = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& tail = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        init = RUSTY_TRY(rusty::try_fold(rusty::map(rusty::iter(head), [&](auto&& elem) {
+guard.consumed += 1;
+// @unsafe
+{
+    return rusty::ptr::read(std::move(elem));
+}
+}), std::move(init), &f));
+        return rusty::try_fold(rusty::map(rusty::iter(tail), [&](auto&& elem) {
+guard.consumed += 1;
+// @unsafe
+{
+    return rusty::ptr::read(std::move(elem));
+}
+}), std::move(init), &f);
+    }
+    template<typename B, typename F>
+    B fold(B init, F f) {
+        return [&]() -> B { auto&& _m = rusty::try_fold((*this), std::move(init), [&](auto&& b, auto&& item) { return rusty::Result<B, void>::Ok(f(std::move(b), std::move(item))); }); if (_m.is_ok()) { return _m.unwrap(); } return [&]() -> B { rusty::intrinsics::unreachable(); }(); }();
+    }
+    rusty::Option<Item> last() {
+        return this->inner.pop_back();
+    }
+    template<size_t N>
+    rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, array::IntoIter<Item, N>> next_chunk() {
+        auto raw_arr = rusty::array_repeat(/* const-block elided (Rust 2024 compile-time fence) */ (void)0, N);
+        auto raw_arr_ptr = rusty::as_mut_ptr(raw_arr)->cast();
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(this->inner.as_slices());
+        auto&& head = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& tail = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        if (rusty::len(head) >= rusty::detail::deref_if_pointer_like(N)) {
+            // @unsafe
+            {
+                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(head), std::move(raw_arr_ptr), N);
+            }
+            this->inner.head = this->inner.to_physical_idx(N);
+            this->inner.len_field -= N;
+            return rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, array::IntoIter<Item, N>>::Ok(raw_arr.transpose().assume_init());
+        }
+        // @unsafe
+        {
+            rusty::ptr::copy_nonoverlapping(rusty::as_ptr(head), std::move(raw_arr_ptr), rusty::len(head));
+        }
+        auto remaining = rusty::detail::deref_if_pointer_like(N) - rusty::len(head);
+        if (rusty::len(tail) >= rusty::detail::deref_if_pointer_like(remaining)) {
+            // @unsafe
+            {
+                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(tail), raw_arr_ptr.add(rusty::len(head)), std::move(remaining));
+            }
+            this->inner.head = this->inner.to_physical_idx(N);
+            this->inner.len_field -= N;
+            return rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, array::IntoIter<Item, N>>::Ok(raw_arr.transpose().assume_init());
+        } else {
+            // @unsafe
+            {
+                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(tail), raw_arr_ptr.add(rusty::len(head)), rusty::len(tail));
+            }
+            const auto init = rusty::len(head) + rusty::len(tail);
+            this->inner.head = static_cast<size_t>(0);
+            this->inner.len_field = static_cast<size_t>(0);
+            return rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, array::IntoIter<Item, N>>::Err(array::IntoIter<T, N>::new_unchecked(std::move(raw_arr), rusty::range(0, init)));
+        }
+    }
+    rusty::Option<T> next_back() {
+        return this->inner.pop_back();
+    }
+    auto advance_back_by(size_t n) -> rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>> {
+        const auto len = this->inner.len_field;
+        const auto rem = [&]() {
+if (rusty::detail::deref_if_pointer_like(len) < rusty::detail::deref_if_pointer_like(n)) {
+this->inner.clear();
+return rusty::detail::deref_if_pointer_like(n) - rusty::detail::deref_if_pointer_like(len);
+} else {
+this->inner.truncate(rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(n));
+return 0;
+}
+}();
+        return rusty::num::NonZero<size_t>::new_(std::move(rem)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
+    }
+    struct Guard_4 {
+        vec_deque_port::VecDeque<T, A>& deque;
+        size_t consumed;
+        mutable bool _rusty_forgotten = false;
+        Guard_4(vec_deque_port::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
+        Guard_4(const Guard_4&) = default;
+        Guard_4(Guard_4&& other) noexcept : deque(other.deque), consumed(std::move(other.consumed)) {
+            this->_rusty_forgotten = other._rusty_forgotten;
+            other._rusty_forgotten = true;
+        }
+        Guard_4& operator=(const Guard_4&) = default;
+        Guard_4& operator=(Guard_4&& other) noexcept {
+            if (this == &other) {
+                return *this;
+            }
+            this->~Guard_4();
+            new (this) Guard_4(std::move(other));
+            return *this;
+        }
+        void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+        ~Guard_4() noexcept(false) {
+            if (_rusty_forgotten) { return; }
+            this->deque.len_field -= this->consumed;
+        }
+    };
+    template<typename B, typename F>
+    auto try_rfold(B init, F f) {
+        using R = std::remove_cvref_t<std::invoke_result_t<F&, B, Item>>;
+        auto guard = Guard_4(this->inner, static_cast<size_t>(0));
+        auto _tuple_destructure = rusty::detail::deref_if_pointer_like(guard.deque.as_slices());
+        auto&& head = std::get<0>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        auto&& tail = std::get<1>(rusty::detail::deref_if_pointer(_tuple_destructure));
+        init = RUSTY_TRY(rusty::map(rusty::iter(tail), [&](auto&& elem) {
+guard.consumed += 1;
+// @unsafe
+{
+    return rusty::ptr::read(std::move(elem));
+}
+}).try_rfold(std::move(init), &f));
+        return rusty::map(rusty::iter(head), [&](auto&& elem) {
+guard.consumed += 1;
+// @unsafe
+{
+    return rusty::ptr::read(std::move(elem));
+}
+}).try_rfold(std::move(init), &f);
+    }
+    template<typename B, typename F>
+    B rfold(B init, F f) {
+        return [&]() -> B { auto&& _m = this->try_rfold(std::move(init), [&](auto&& b, auto&& item) { return rusty::Result<B, void>::Ok(f(std::move(b), std::move(item))); }); if (_m.is_ok()) { return _m.unwrap(); } return [&]() -> B { rusty::intrinsics::unreachable(); }(); }();
+    }
+    bool is_empty() const {
+        return rusty::is_empty(this->inner);
+    }
+
+    IntoIter clone() const { return IntoIter{.inner = rusty::clone(this->inner)}; }
+};
+
+export template<typename T, typename F, typename A = rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+struct ExtractIf {
+    using Item = T;
+    vec_deque_port::VecDeque<T, A>& vec;
+    /// The index of the item that will be inspected by the next call to `next`.
+    size_t idx;
+    /// Elements at and beyond this point will be retained. Must be equal or smaller than `old_len`.
+    size_t end;
+    /// The number of items that have been drained (removed) thus far.
+    size_t del;
+    /// The original length of `vec` prior to draining.
+    size_t old_len;
+    /// The filter test predicate.
+    F pred;
+    mutable bool _rusty_forgotten = false;
+    ExtractIf(vec_deque_port::VecDeque<T, A>& vec_init, size_t idx_init, size_t end_init, size_t del_init, size_t old_len_init, F pred_init) : vec(vec_init), idx(std::move(idx_init)), end(std::move(end_init)), del(std::move(del_init)), old_len(std::move(old_len_init)), pred(std::move(pred_init)) {}
+    ExtractIf(const ExtractIf&) = default;
+    ExtractIf(ExtractIf&& other) noexcept : vec(other.vec), idx(std::move(other.idx)), end(std::move(other.end)), del(std::move(other.del)), old_len(std::move(other.old_len)), pred(std::move(other.pred)) {
+        this->_rusty_forgotten = other._rusty_forgotten;
+        other._rusty_forgotten = true;
+    }
+    ExtractIf& operator=(const ExtractIf&) = default;
+    ExtractIf& operator=(ExtractIf&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        this->~ExtractIf();
+        new (this) ExtractIf(std::move(other));
+        return *this;
+    }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+    template<typename R>
+    static ExtractIf<T, F, A> new_(vec_deque_port::VecDeque<T, A>& vec, F pred, R range) {
+        auto old_len = rusty::len(vec);
+        auto&& _let_pat = slice::range(std::move(range), rusty::range_to(old_len));
+        auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);
+        auto&& end = rusty::detail::deref_if_pointer(_let_pat.end);
+        vec.len_field = static_cast<size_t>(0);
+        return ExtractIf<T, F, A>(vec, std::move(start), std::move(end), static_cast<size_t>(0), std::move(old_len), std::move(pred));
+    }
+    const A& allocator() const {
+        return this->vec.allocator();
+    }
+    rusty::Option<T> next() {
+        while (rusty::detail::deref_if_pointer_like(this->idx) < rusty::detail::deref_if_pointer_like(this->end)) {
+            auto i = this->idx;
+            auto idx = this->vec.to_physical_idx(std::move(i));
+            T& cur = *rusty::ptr::add(this->vec.ptr(), std::move(idx));
+            const auto drained = (this->pred)(cur);
+            this->idx += 1;
+            if (drained) {
+                this->del += 1;
+                return rusty::Option<T>(rusty::ptr::read(&cur));
+            } else if (rusty::detail::deref_if_pointer_like(this->del) > 0) {
+                auto hole_slot = this->vec.to_physical_idx(rusty::detail::deref_if_pointer_like(i) - rusty::detail::deref_if_pointer_like(this->del));
+                // @unsafe
+                {
+                    this->vec.wrap_copy(std::move(idx), std::move(hole_slot), static_cast<size_t>(1));
+                }
+            }
+        }
+        return rusty::Option<T>{rusty::None};
+    }
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(this->end) - rusty::detail::deref_if_pointer_like(this->idx)));
+    }
+    ~ExtractIf() noexcept(false) {
+        if (_rusty_forgotten) { return; }
+        if (rusty::detail::deref_if_pointer_like(this->del) > 0) {
+            auto src = this->vec.to_physical_idx(this->idx);
+            auto dst = this->vec.to_physical_idx(rusty::detail::deref_if_pointer_like(this->idx) - rusty::detail::deref_if_pointer_like(this->del));
+            auto len = rusty::detail::deref_if_pointer_like(this->old_len) - rusty::detail::deref_if_pointer_like(this->idx);
+            // @unsafe
+            {
+                this->vec.wrap_copy(std::move(src), std::move(dst), std::move(len));
+            }
+        }
+        this->vec.len_field = rusty::detail::deref_if_pointer_like(this->old_len) - rusty::detail::deref_if_pointer_like(this->del);
+    }
+    rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
+        const auto peek = [&]() {
+if (rusty::detail::deref_if_pointer_like(this->idx) < rusty::detail::deref_if_pointer_like(this->end)) {
+const auto idx = this->vec.to_physical_idx(this->idx);
+return rusty::Option<const T&>(*rusty::ptr::add(this->vec.ptr(), std::move(idx)));
+} else {
+return rusty::Option<const T&>{rusty::None};
+}
+}();
+        return f.debug_struct("ExtractIf").field("peek", peek).finish_non_exhaustive();
+    }
+};
+
+namespace {
+template <class T, class I>
+class SpecExtendFront {
+public:
+    virtual ~SpecExtendFront() noexcept(false) {}
+    virtual void spec_extend_front(I iter) = 0;
+    SpecExtendFront(const SpecExtendFront&) = delete;
+    SpecExtendFront& operator=(const SpecExtendFront&) = delete;
+    SpecExtendFront(SpecExtendFront&&) = delete;
+    SpecExtendFront& operator=(SpecExtendFront&&) = delete;
+protected:
+    SpecExtendFront() = default;
+};
+}
+
+template <class T, class I, class U> class SpecExtendFrontAdapter;
+template <class T, class I, class U> class SpecExtendFrontAdapterRef;
+template <class T, class I, class U> class SpecExtendFrontAdapterRefMut;
+
+namespace {
+template <class T, class I>
+class SpecExtend {
+public:
+    virtual ~SpecExtend() noexcept(false) {}
+    virtual void spec_extend(I iter) = 0;
+    SpecExtend(const SpecExtend&) = delete;
+    SpecExtend& operator=(const SpecExtend&) = delete;
+    SpecExtend(SpecExtend&&) = delete;
+    SpecExtend& operator=(SpecExtend&&) = delete;
+protected:
+    SpecExtend() = default;
+};
+}
+
+template <class T, class I, class U> class SpecExtendAdapter;
+template <class T, class I, class U> class SpecExtendAdapterRef;
+template <class T, class I, class U> class SpecExtendAdapterRefMut;
+
+namespace {
+class SpecExtendFromWithin {
+public:
+    virtual ~SpecExtendFromWithin() noexcept(false) {}
+    virtual void spec_extend_from_within(rusty::range<size_t> src) = 0;
+    virtual void spec_prepend_from_within(rusty::range<size_t> src) = 0;
+    SpecExtendFromWithin(const SpecExtendFromWithin&) = delete;
+    SpecExtendFromWithin& operator=(const SpecExtendFromWithin&) = delete;
+    SpecExtendFromWithin(SpecExtendFromWithin&&) = delete;
+    SpecExtendFromWithin& operator=(SpecExtendFromWithin&&) = delete;
+protected:
+    SpecExtendFromWithin() = default;
+};
+}
+
+template <class U> class SpecExtendFromWithinAdapter;
+template <class U> class SpecExtendFromWithinAdapterRef;
+template <class U> class SpecExtendFromWithinAdapterRefMut;
+
+export template<typename I, typename A = rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+struct Splice {
+    // Rust-only dependent associated type alias skipped in constrained mode: Item
+    // Rust-only dependent associated type alias skipped in constrained mode: Item
+    Drain<rusty::detail::associated_item_t<I>, A> drain;
+    I replace_with;
+    mutable bool _rusty_forgotten = false;
+    Splice(Drain<rusty::detail::associated_item_t<I>, A> drain_init, I replace_with_init) : drain(std::move(drain_init)), replace_with(std::move(replace_with_init)) {}
+    Splice(const Splice&) = default;
+    Splice(Splice&& other) noexcept : drain(std::move(other.drain)), replace_with(std::move(other.replace_with)) {
+        this->_rusty_forgotten = other._rusty_forgotten;
+        other._rusty_forgotten = true;
+    }
+    Splice& operator=(const Splice&) = default;
+    Splice& operator=(Splice&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        this->~Splice();
+        new (this) Splice(std::move(other));
+        return *this;
+    }
+    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+
+
+    // Rust-only dependent associated type alias skipped in constrained mode: Item
+    auto next() {
+        return this->drain.next();
+    }
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return this->drain.size_hint();
+    }
+    auto next_back() {
+        return this->drain.next_back();
+    }
+    ~Splice() noexcept(false) {
+        if (_rusty_forgotten) { return; }
+        this->drain.by_ref().for_each([&](auto&&... _args) -> decltype(auto) { return rusty::mem::drop(std::forward<decltype(_args)>(_args)...); });
+        // @unsafe
+        {
+            const auto tail_len = this->drain.tail_len;
+            if (rusty::detail::deref_if_pointer_like(tail_len) == 0) {
+                this->drain.deque.as_mut().extend(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).by_ref(); }) { return std::forward<decltype(__recv)>(__recv).by_ref(); } else { return std::forward<decltype(__recv)>(__recv)->by_ref(); } }(this->replace_with)));
+                return;
+            }
+            if (!this->drain.fill(this->replace_with)) {
+                return;
+            }
+            auto [lower_bound, _upper_bound] = rusty::detail::deref_if_pointer_like(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).size_hint(); }) { return std::forward<decltype(__recv)>(__recv).size_hint(); } else { return std::forward<decltype(__recv)>(__recv)->size_hint(); } }(this->replace_with)));
+            if (rusty::detail::deref_if_pointer_like(lower_bound) > 0) {
+                this->drain.move_tail(std::move(lower_bound));
+                if (!this->drain.fill(this->replace_with)) {
+                    return;
+                }
+            }
+            auto collected = rusty::iter(::Vec<rusty::detail::associated_item_t<I>>::from_iter(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).by_ref(); }) { return std::forward<decltype(__recv)>(__recv).by_ref(); } else { return std::forward<decltype(__recv)>(__recv)->by_ref(); } }(this->replace_with))));
+            if (rusty::len(collected) > 0) {
+                this->drain.move_tail(rusty::len(collected));
+                const auto filled = this->drain.fill(rusty::detail::deref_if_pointer_like(collected));
+                assert((filled));
+                assert((collected . len () == 0));
+            }
+        }
+    }
+    // Rust-only dependent associated type alias skipped in constrained mode: Item
+
+    friend std::ostream& operator<<(std::ostream& os, const Splice& v) {
+        return os << "Splice { ... }";
+    }
+};
+
+/// Returns the index in the underlying buffer for a given logical element index.
+size_t wrap_index(size_t logical_index, size_t capacity) {
+    assert((((((rusty::detail::deref_if_pointer_like(logical_index) == static_cast<size_t>(0)) && (rusty::detail::deref_if_pointer_like(capacity) == static_cast<size_t>(0)))) || (rusty::detail::deref_if_pointer_like(logical_index) < rusty::detail::deref_if_pointer_like(capacity))) || (((rusty::detail::deref_if_pointer_like(logical_index) - rusty::detail::deref_if_pointer_like(capacity))) < rusty::detail::deref_if_pointer_like(capacity))));
+    if (rusty::detail::deref_if_pointer_like(logical_index) >= rusty::detail::deref_if_pointer_like(capacity)) {
+        return rusty::detail::deref_if_pointer_like(logical_index) - rusty::detail::deref_if_pointer_like(capacity);
+    } else {
+        return std::move(logical_index);
+    }
+}
+
+// TODO orphan impl: methods for `Vec` were declared in this file but the
+// host type lives in another module / TU. These methods are emitted as
+// free-standing template functions that reference `this`/`(*this)`,
+// which is not valid C++ outside a member function. Move them into the
+// host type's struct body, or rewrite `this`/`(*this)` to an explicit
+// `self_` parameter and qualify all call sites accordingly.
+// Methods for Vec
+static auto from(vec_deque_port::VecDeque<T, A> other) {
+    other.make_contiguous();
+    // @unsafe
+    {
+        const auto other_shadow1 = rusty::mem::manually_drop_new(std::move(other));
+        auto buf = other_shadow1.buf.ptr();
+        auto len = rusty::len(other_shadow1);
+        const auto cap = other_shadow1.capacity();
+        auto alloc = rusty::ptr::read(other_shadow1.allocator());
+        if (rusty::detail::deref_if_pointer_like(other_shadow1.head) != 0) {
+            rusty::ptr::copy(buf.add(std::move(other_shadow1.head)), std::move(buf), std::move(len));
+        }
+        return ::Vec<std::remove_pointer_t<std::remove_reference_t<decltype((buf))>>>::from_raw_parts_in(std::move(buf), std::move(len), std::move(cap), std::move(alloc));
+    }
+}
+
+/// Prepends elements of `slice` to `deque` using a copy.
+///
+/// # Safety
+///
+/// - `deque` must have space for `slice.len()` new elements.
+/// - Elements of `slice` will be copied into the deque, make sure to forget the elements if `T` is not `Copy`.
+// @unsafe
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+void prepend(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice) {
+    // @unsafe
+    {
+        deque.head = deque.wrap_sub(deque.head, rusty::len(slice));
+        deque.copy_slice(deque.head, slice);
+        deque.len_field += rusty::len(slice);
+    }
+}
+
+/// Prepends elements of `slice` to `deque` in reverse order using a copy.
+///
+/// # Safety
+///
+/// - `deque` must have space for `slice.len()` new elements.
+/// - Elements of `slice` will be copied into the deque, make sure to forget the elements if `T` is not `Copy`.
+// @unsafe
+template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+void prepend_reversed(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice) {
+    // @unsafe
+    {
+        deque.head = deque.wrap_sub(deque.head, rusty::len(slice));
+        deque.copy_slice_reversed(deque.head, slice);
+        deque.len_field += rusty::len(slice);
+    }
+}
+
+} // namespace vec_deque_port
