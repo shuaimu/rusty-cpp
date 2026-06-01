@@ -130,8 +130,11 @@ using Vec = ::Vec<T, A>;
 template<typename T, typename A = ::rusty::alloc::Global>
 using Rc = ::rc_port::Rc<T, A>;
 
-template<typename T, typename A = ::rusty::alloc::Global>
-using Weak = ::rc_port::Weak<T, A>;
+// Note: no top-level `rusty::Weak` alias — that would collapse the
+// distinct Rust types `std::rc::Weak<T>` and `std::sync::Weak<T>`
+// under one ambiguous name. Use `rusty::rc::Weak<T, A>` (declared
+// in `namespace rusty::rc` below) or `rusty::sync::Weak<T>` (in
+// include/rusty/sync/weak.hpp) explicitly.
 
 // rusty::BTreeMap / rusty::BTreeSet alias the transpiled rustc port.
 // Note: no Compare parameter — Rust's BTreeMap uses the Ord trait
@@ -142,6 +145,13 @@ using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
 
 template<typename T, typename A = ::rusty::alloc::Global>
 using BTreeSet = ::btree_port::btree::set::BTreeSet<T, A>;
+
+namespace rc {
+// `rusty::rc::Weak<T, A>` — the single-threaded weak reference,
+// companion to `rusty::Rc`. Mirrors Rust's `std::rc::Weak`.
+template<typename T, typename A = ::rusty::alloc::Global>
+using Weak = ::rc_port::Weak<T, A>;
+} // namespace rc
 
 } // export namespace rusty
 
