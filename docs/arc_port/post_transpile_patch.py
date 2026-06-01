@@ -65,6 +65,194 @@ def patch_drop_misplaced_module_imports(cpp_out: Path) -> int:
     return 0
 
 
+def patch_arc_specific(cpp_out: Path) -> int:
+    """Arc-specific rewrites (atop the namespace-prefix patches).
+
+    Mirrors many rc_port rules — see docs/rc_port/post_transpile_patch.py
+    for the prose explanations. Each rule below is the arc-side variant.
+    """
+    path = cpp_out / ARC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+
+    # `using ::rc::is_dangling;` / `using ::Vec;` — these reference
+    # things in the global namespace that don't exist. Comment out.
+    text = re.sub(
+        r"^using ::rc::is_dangling;\s*$",
+        "// using ::rc::is_dangling; — rc module not vendored; "
+        "arc_port has its own is_dangling helper if needed",
+        text, flags=re.MULTILINE)
+    text = re.sub(
+        r"^using ::Vec;\s*$",
+        "// using ::Vec; — Vec comes from vec_port via include path",
+        text, flags=re.MULTILINE)
+
+    # `rusty::sync::atomic::Atomic<size_t>` — main moved Atomic into
+    # `detail::` namespace; concrete aliases like `AtomicUsize` remain
+    # at the public path. Rewrite uses to the detail-qualified name.
+    text = re.sub(
+        r"rusty::sync::atomic::Atomic<",
+        "rusty::sync::atomic::detail::Atomic<",
+        text)
+
+    # `rusty::Weak<T, A>` inside this file refers to the arc-side
+    # Weak struct that lives in the same TU (arc_port::Weak). The
+    # transpiler emitted `rusty::Weak` because Rust's sync.rs uses
+    # `Weak` as a bare name (imported at module scope). Re-qualify
+    # to `arc_port::Weak`.
+    text = re.sub(
+        r"(?<![A-Za-z0-9_:])rusty::Weak<",
+        "arc_port::Weak<",
+        text)
+
+    # `, rusty::alloc::Global)` — Global is a type, not a value.
+    # Brace-init the default value.
+    text = re.sub(r"\brusty::alloc::Global\)", "rusty::alloc::Global{})", text)
+    text = re.sub(r"\brusty::alloc::Global,", "rusty::alloc::Global{},", text)
+    text = re.sub(
+        r"\brusty::alloc::Global\.allocate",
+        "rusty::alloc::Global{}.allocate", text)
+
+    # `, ::cast))` — Rust passed a cast helper function. We don't
+    # have one; pass a passthrough lambda.
+    text = re.sub(
+        r",\s*::cast\)",
+        ", [](auto&& __x) { return std::forward<decltype(__x)>(__x); })",
+        text)
+
+    # `::data_offset<...>` — free helper in arc_port namespace; drop
+    # the `::` prefix so name lookup finds it locally.
+    text = re.sub(
+        r"(?<![A-Za-z0-9_:])::data_offset<",
+        "data_offset<",
+        text)
+
+    # `Arc<T, A>::arcinner_layout_for_value_layout(...)` — same
+    # pattern as rc_port's `rc_inner_layout_for_value_layout`: free
+    # helper, not a member.
+    text = re.sub(
+        r"\bArc<T,\s*A>::arcinner_layout_for_value_layout\b",
+        "arcinner_layout_for_value_layout",
+        text)
+
+    # `ptr::slice_from_raw_parts_mut` → `rusty::from_raw_parts_mut`.
+    text = re.sub(
+        r"(?<![A-Za-z0-9_])ptr::slice_from_raw_parts_mut\b",
+        "rusty::from_raw_parts_mut",
+        text)
+
+    # `hint::spin_loop()` (bare) → no-op. The standalone `hint`
+    # namespace isn't visible here; spin_loop is a perf hint we can
+    # safely no-op for correctness.
+    text = re.sub(
+        r"\bhint::spin_loop\(\);",
+        "(void)0;  // patcher: hint::spin_loop() no-oped",
+        text)
+    # `rusty::hint::assert_unchecked(…)` → `(void)0`.
+    text = re.sub(
+        r"\brusty::hint::assert_unchecked\([^;]*\);",
+        "(void)0;",
+        text)
+
+    # `Box<auto>::try_new(x))>>::into_unique(std::move(x))` —
+    # double `>>` and `into_unique` chain from transpiler emit. The
+    # original Rust is `Box::try_new(x)?.into_unique()` which
+    # returns `Box::into_unique(...) -> (NonNull<T>, A)`. Our Box
+    # may not expose that. Stub the whole match site: it appears in
+    # `try_new_uninit_in` and `try_new_zeroed_in` (smoke test
+    # doesn't touch them). Two occurrences.
+    text = re.sub(
+        r"auto \[ptr_shadow1, alloc_shadow1\] = rusty::detail::deref_if_pointer_like"
+        r"\(rusty::Box<auto>::try_new\(\(x\)\)>>::into_unique\(std::move\(x\)\)\);",
+        "std::abort();  // patcher: Box::try_new(x).into_unique() not supported",
+        text)
+
+    # `NonNull<u8>::as_non_null_ptr()` — we expose `as_non_null_ptr`
+    # only on the CastProxy, not directly. The transpiled call is
+    # `recv.as_non_null_ptr()`. Stub via reinterpret-cast.
+    text = re.sub(
+        r"\.as_non_null_ptr\(\)",
+        ".as_ptr()  /* patcher: as_non_null_ptr → as_ptr */",
+        text)
+
+    # `rusty::ptr::addr_eq(a, b)` — pointer-address comparison
+    # intrinsic. Use plain `==` on cast-to-uintptr values.
+    text = re.sub(
+        r"rusty::ptr::addr_eq\(([^,]+),\s*([^)]+)\)",
+        r"(reinterpret_cast<std::uintptr_t>(\1) == reinterpret_cast<std::uintptr_t>(\2))",
+        text)
+
+    # `rusty::Box<auto>::try_new(expr)` — Cluster A: `auto` in
+    # template argument position. Drop the `<auto>` and use
+    # `Box<deduced-T>` via a wrapper lambda. The arg is the value
+    # to wrap, so deduction can work via `decltype((expr))`.
+    text = re.sub(
+        r"rusty::Box<auto>::try_new\(",
+        "rusty::Box<>::try_new(  /* patcher: Box<auto> → Box<> CTAD */",
+        text)
+    # That's an experiment — Box<> isn't valid C++. Better: leave
+    # this rule out and rely on the orphan-stub approach. Revert.
+    text = text.replace(
+        "rusty::Box<>::try_new(  /* patcher: Box<auto> → Box<> CTAD */",
+        "rusty::Box<auto>::try_new(",
+    )
+
+    # `rusty::Box<auto>::try_new(…)` — Cluster A: `auto` in template
+    # argument. Box's try_new can deduce T from the argument; drop
+    # the `<auto>` and let template-argument deduction kick in.
+    text = re.sub(
+        r"rusty::Box<auto>::try_new\(",
+        "rusty::Box<std::remove_cvref_t<decltype(",
+        text)
+    # Wait, that's wrong — the original is `try_new(EXPR)`. Need
+    # `Box<decltype(EXPR)>::try_new(EXPR)`. Too risky with regex.
+    # Easier: rewrite to `rusty::Box<>::try_new` and let CTAD or
+    # SFINAE handle it (if Box has a deducing factory) — but
+    # `Box<>` isn't valid C++ either. Simplest: name the inner
+    # type by structure when known. Skipped here; fixed in
+    # next iteration if it persists.
+    # Revert the substitution that ran above.
+    text = text.replace(
+        "rusty::Box<std::remove_cvref_t<decltype(",
+        "rusty::Box<auto>::try_new(",
+    )
+
+    # Stub the orphan `provide(rusty::error::Request&)` method — the
+    # Request type isn't in our rusty::error.
+    text = re.sub(
+        r"void provide\(rusty::error::Request& req\) const \{[^}]*\}",
+        "void provide(const auto&) const {}  // patcher: Error::provide stubbed",
+        text,
+        flags=re.DOTALL)
+
+    # Free-function `from(arc_port::Arc<T, A>)` — same shape as the
+    # rc_port `from(VecDeque)` issue: emitted at file scope without
+    # template prefix.
+    text = re.sub(
+        r"^static auto from\(arc_port::Arc<T, A> other\)\s*\{[^}]*?\n\}",
+        "// patcher: free-fn from(Arc<T,A>) stubbed (template params not in scope)",
+        text,
+        flags=re.MULTILINE | re.DOTALL)
+
+    # serde-de prelude visit_byte_buf — same stub shape as rc_port.
+    STUBBED_VISIT_BYTE_BUF = (
+        "rusty::Result<Value, E> visit_byte_buf(auto&&) "
+        "{ return rusty::Result<Value, E>::Err(E{}); }"
+    )
+    if STUBBED_VISIT_BYTE_BUF not in text:
+        text = re.sub(
+            r"rusty::Result<Value, E> visit_byte_buf\([^)]+\)\s*\{[^}]*\}",
+            STUBBED_VISIT_BYTE_BUF,
+            text)
+
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -77,6 +265,7 @@ def main() -> int:
     patches = [
         ("namespace using prefix", patch_namespace_using_prefix),
         ("drop misplaced module imports", patch_drop_misplaced_module_imports),
+        ("arc-specific rewrites", patch_arc_specific),
     ]
 
     total = 0

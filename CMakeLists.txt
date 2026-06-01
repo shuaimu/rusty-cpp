@@ -160,6 +160,13 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_compile_features(rc_port PUBLIC cxx_std_23)
     target_compile_options(rc_port PRIVATE -O3 -DNDEBUG -march=native )
     target_link_libraries(rc_port PUBLIC vec_port)
+
+    # arc_port: PROMOTION ATTEMPTED — patcher has rules added (see
+    # docs/arc_port/post_transpile_patch.py) but ~10 `Box<auto>::try_new(x)>>::into_unique(...)`
+    # sites remain that look like Cluster A transpiler-emit issues.
+    # Reverted to bridge stub until that's addressed (transpiler fix
+    # or per-site stub). The full-body file lives at
+    # transpiled/arc_port/arc_port.cppm.wip for the next attempt.
     # linked_list_port: full transpiled body (the transpiler fix landed
     # for the Cluster A 'Box<auto>::new_in' regression — see
     # transpiler/src/codegen.rs test_linked_list_box_new_in_with_typed_arg_*).
