@@ -96,7 +96,15 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.
+template<typename T>
+auto clone(const T& value) {
+if constexpr (requires { value.clone(); }) {
+return value.clone();
+} else {
+return value;
+}
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -325,9 +333,7 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
-}
+rusty::Result<Value, E> visit_byte_buf(auto&&) { return rusty::Result<Value, E>::Err(E{}); }
 
 template<typename E>
 rusty::Result<Value, E> visit_str(std::string_view value) {
@@ -3634,8 +3640,6 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module vec_deque_port;
-import vec_port.vec;
-import vec_port.vec.into_iter;
 
 namespace vec_deque_port {
 
@@ -3672,16 +3676,15 @@ using rusty::mem::ManuallyDrop;
 namespace ptr = rusty::ptr;
 // Rust-only: using std::slice;
 
-using std::Allocator;
-using std::Global;
+using rusty::alloc::Allocator;
+using rusty::alloc::Global;
 
-using ::collections::TryReserveError;
-using ::collections::TryReserveErrorKind;
+// Rust-only: using rusty::collections::TryReserveError;
+// Rust-only: using rusty::collections::TryReserveErrorKind;
 
 using ::raw_vec::RawVec;
 
-using ::vec::Vec;
-
+// using rusty::Vec; — Vec at global ::Vec now
 import vec_deque_port.macros;
 
 export using drain::Drain;
@@ -3729,7 +3732,7 @@ import vec_deque_port.splice;
 /// A `VecDeque` with a known list of items can be initialized from an array:
 ///
 /// ```
-/// use std::collections::VecDeque;
+/// use rusty::collections::VecDeque;
 ///
 /// let deq = VecDeque::from([-1, 0, 1]);
 /// ```
@@ -4046,7 +4049,7 @@ written += 1; }();
 });
     }
     struct Guard {
-        rusty::VecDeque<T, A>& deque;
+        vec_deque_port::VecDeque<T, A>& deque;
         size_t written;
         mutable bool _rusty_forgotten = false;
         Guard(VecDeque<T, A>& deque_init, size_t written_init) : deque(deque_init), written(std::move(written_init)) {}
@@ -4122,8 +4125,8 @@ written += 1; }();
     static VecDeque<T> with_capacity(size_t capacity) {
         return VecDeque<T, A>::with_capacity_in(std::move(capacity), rusty::alloc::Global);
     }
-    static rusty::Result<VecDeque<T>, collections::TryReserveError> try_with_capacity(size_t capacity) {
-        return rusty::Result<VecDeque<T>, collections::TryReserveError>::Ok(VecDeque<T>(static_cast<size_t>(0), static_cast<size_t>(0), RUSTY_TRY_INTO(RawVec::try_with_capacity_in(std::move(capacity), rusty::alloc::Global), rusty::Result<VecDeque<T>, collections::TryReserveError>)));
+    static rusty::Result<VecDeque<T>, rusty::collections::TryReserveError> try_with_capacity(size_t capacity) {
+        return rusty::Result<VecDeque<T>, rusty::collections::TryReserveError>::Ok(VecDeque<T>(static_cast<size_t>(0), static_cast<size_t>(0), RUSTY_TRY_INTO(RawVec::try_with_capacity_in(std::move(capacity), rusty::alloc::Global), rusty::Result<VecDeque<T>, rusty::collections::TryReserveError>)));
     }
     static VecDeque<T, A> new_in(A alloc) {
         return VecDeque<T, A>(static_cast<size_t>(0), static_cast<size_t>(0), raw_vec::RawVec<T, A>::new_in(std::move(alloc)));
@@ -4200,35 +4203,35 @@ written += 1; }();
             }
         }
     }
-    auto try_reserve_exact(size_t additional) -> rusty::Result<std::tuple<>, collections::TryReserveError> {
-        const auto new_cap = RUSTY_TRY_INTO([&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }().ok_or(TryReserveErrorKind::CapacityOverflow), rusty::Result<std::tuple<>, collections::TryReserveError>);
+    auto try_reserve_exact(size_t additional) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+        const auto new_cap = RUSTY_TRY_INTO([&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }().ok_or(rusty::collections::TryReserveErrorKind::CapacityOverflow), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
         auto old_cap = this->capacity();
         if (rusty::detail::deref_if_pointer_like(new_cap) > rusty::detail::deref_if_pointer_like(old_cap)) {
-            RUSTY_TRY_INTO(this->buf.try_reserve_exact(this->len_field, std::move(additional)), rusty::Result<std::tuple<>, collections::TryReserveError>);
+            RUSTY_TRY_INTO(this->buf.try_reserve_exact(this->len_field, std::move(additional)), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
             // @unsafe
             {
                 this->handle_capacity_increase(std::move(old_cap));
             }
         }
-        return rusty::Result<std::tuple<>, collections::TryReserveError>::Ok(std::make_tuple());
+        return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Ok(std::make_tuple());
     }
-    auto try_reserve(size_t additional) -> rusty::Result<std::tuple<>, collections::TryReserveError> {
-        const auto new_cap = RUSTY_TRY_INTO([&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }().ok_or(TryReserveErrorKind::CapacityOverflow), rusty::Result<std::tuple<>, collections::TryReserveError>);
+    auto try_reserve(size_t additional) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+        const auto new_cap = RUSTY_TRY_INTO([&]() { auto&& _checked_lhs = this->len_field; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }().ok_or(rusty::collections::TryReserveErrorKind::CapacityOverflow), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
         auto old_cap = this->capacity();
         if (rusty::detail::deref_if_pointer_like(new_cap) > rusty::detail::deref_if_pointer_like(old_cap)) {
-            RUSTY_TRY_INTO(this->buf.try_reserve(this->len_field, std::move(additional)), rusty::Result<std::tuple<>, collections::TryReserveError>);
+            RUSTY_TRY_INTO(this->buf.try_reserve(this->len_field, std::move(additional)), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
             // @unsafe
             {
                 this->handle_capacity_increase(std::move(old_cap));
             }
         }
-        return rusty::Result<std::tuple<>, collections::TryReserveError>::Ok(std::make_tuple());
+        return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Ok(std::make_tuple());
     }
     void shrink_to_fit() {
         this->shrink_to(static_cast<size_t>(0));
     }
     struct Guard {
-        rusty::VecDeque<T, A>& deque;
+        vec_deque_port::VecDeque<T, A>& deque;
         size_t old_head;
         size_t target_cap;
         mutable bool _rusty_forgotten = false;
@@ -5243,7 +5246,7 @@ written += 1; }();
     }
     template<typename I>
     static VecDeque<T, A> spec_from_iter(I iterator) {
-        return rusty::from_into<VecDeque<T, A>>(vec::::Vec<auto>::from_iter(std::move(iterator)));
+        return rusty::from_into<VecDeque<T, A>>(rusty::collect_range(std::move(iterator)));
     }
     static VecDeque<T, A> spec_from_iter(decltype(rusty::iter(std::declval<::Vec<T>>())) iterator) {
         return iterator.into_vecdeque();
@@ -5301,7 +5304,7 @@ size_t wrap_index(size_t logical_index, size_t capacity) {
 // host type's struct body, or rewrite `this`/`(*this)` to an explicit
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for Vec
-static auto from(rusty::VecDeque<T, A> other) {
+static auto from(vec_deque_port::VecDeque<T, A> other) {
     other.make_contiguous();
     // @unsafe
     {

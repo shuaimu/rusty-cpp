@@ -96,7 +96,15 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.
+template<typename T>
+auto clone(const T& value) {
+if constexpr (requires { value.clone(); }) {
+return value.clone();
+} else {
+return value;
+}
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -325,9 +333,7 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
-}
+rusty::Result<Value, E> visit_byte_buf(auto&&) { return rusty::Result<Value, E>::Err(E{}); }
 
 template<typename E>
 rusty::Result<Value, E> visit_str(std::string_view value) {
@@ -3635,6 +3641,14 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module vec_deque_port.drain;
 
+import vec_port.vec;  // patcher-injected for ::Vec
+import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter / ::Drain
+
+// patcher-injected fwd decl for VecDeque (avoids import cycle with main module)
+namespace vec_deque_port {
+  template<typename T, typename A> struct VecDeque;
+}
+
 namespace vec_deque_port::drain {
 
 export template<typename T, typename A>
@@ -3654,8 +3668,8 @@ namespace ptr = rusty::ptr;
 
 // Rust-only unresolved import: using VecDeque;
 
-using std::Allocator;
-using std::Global;
+using rusty::alloc::Allocator;
+using rusty::alloc::Global;
 
 /// A draining iterator over the elements of a `VecDeque`.
 ///
@@ -3667,14 +3681,14 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct Drain {
     using Item = T;
-    rusty::ptr::NonNull<rusty::VecDeque<T, A>> deque;
+    rusty::ptr::NonNull<vec_deque_port::VecDeque<T, A>> deque;
     size_t drain_len;
     size_t idx;
     size_t tail_len;
     size_t remaining;
     rusty::PhantomData<const T&> _marker;
     mutable bool _rusty_forgotten = false;
-    Drain(rusty::ptr::NonNull<rusty::VecDeque<T, A>> deque_init, size_t drain_len_init, size_t idx_init, size_t tail_len_init, size_t remaining_init, rusty::PhantomData<const T&> _marker_init) : deque(std::move(deque_init)), drain_len(std::move(drain_len_init)), idx(std::move(idx_init)), tail_len(std::move(tail_len_init)), remaining(std::move(remaining_init)), _marker(std::move(_marker_init)) {}
+    Drain(rusty::ptr::NonNull<vec_deque_port::VecDeque<T, A>> deque_init, size_t drain_len_init, size_t idx_init, size_t tail_len_init, size_t remaining_init, rusty::PhantomData<const T&> _marker_init) : deque(std::move(deque_init)), drain_len(std::move(drain_len_init)), idx(std::move(idx_init)), tail_len(std::move(tail_len_init)), remaining(std::move(remaining_init)), _marker(std::move(_marker_init)) {}
     Drain(const Drain&) = default;
     Drain(Drain&& other) noexcept : deque(std::move(other.deque)), drain_len(std::move(other.drain_len)), idx(std::move(other.idx)), tail_len(std::move(other.tail_len)), remaining(std::move(other.remaining)), _marker(std::move(other._marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -3692,10 +3706,10 @@ struct Drain {
     void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
 
 
-    static Drain<T, A> new_(rusty::VecDeque<T, A>& deque, size_t drain_start, size_t drain_len) {
+    static Drain<T, A> new_(vec_deque_port::VecDeque<T, A>& deque, size_t drain_start, size_t drain_len) {
         const auto orig_len = rusty::mem::replace(deque.len, std::move(drain_start));
         auto tail_len = (rusty::detail::deref_if_pointer_like(orig_len) - rusty::detail::deref_if_pointer_like(drain_start)) - rusty::detail::deref_if_pointer_like(drain_len);
-        return Drain<T, A>(rusty::ptr::NonNull<rusty::VecDeque<T, A>>::from(deque), std::move(drain_len), std::move(drain_start), std::move(tail_len), std::move(drain_len), rusty::PhantomData<const T&>{});
+        return Drain<T, A>(rusty::ptr::NonNull<vec_deque_port::VecDeque<T, A>>::from(deque), std::move(drain_len), std::move(drain_start), std::move(tail_len), std::move(drain_len), rusty::PhantomData<const T&>{});
     }
     std::tuple<std::add_pointer_t<std::span<T>>, std::add_pointer_t<std::span<T>>> as_slices() const {
         // @unsafe
@@ -3813,7 +3827,7 @@ struct Drain {
     }
     template<typename I>
     bool fill(I& replace_with) {
-        rusty::VecDeque<T, A>& deque = this->deque.as_mut();
+        vec_deque_port::VecDeque<T, A>& deque = this->deque.as_mut();
         const auto range_start = deque.len;
         const auto range_end = rusty::detail::deref_if_pointer_like(range_start) + rusty::detail::deref_if_pointer_like(this->drain_len);
         for (auto&& idx : rusty::for_in(rusty::range(range_start, range_end))) {
@@ -3833,7 +3847,7 @@ struct Drain {
         return true;
     }
     void move_tail(size_t additional) {
-        rusty::VecDeque<T, A>& deque = this->deque.as_mut();
+        vec_deque_port::VecDeque<T, A>& deque = this->deque.as_mut();
         const auto tail_start = rusty::detail::deref_if_pointer_like(deque.len) + rusty::detail::deref_if_pointer_like(this->drain_len);
         deque.buf.reserve(rusty::detail::deref_if_pointer_like(tail_start) + rusty::detail::deref_if_pointer_like(this->tail_len), std::move(additional));
         const auto new_tail_start = rusty::detail::deref_if_pointer_like(tail_start) + rusty::detail::deref_if_pointer_like(additional);

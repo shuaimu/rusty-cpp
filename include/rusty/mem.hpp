@@ -354,6 +354,14 @@ inline void forget(T&& value) noexcept {
     }
 }
 
+// Rust's std::mem::needs_drop::<T>() — returns true if dropping T has
+// any side effect (non-trivial destructor). Used by vec_deque_port's
+// Drain::drop and other paths to skip destructor loops over POD types.
+template<typename T>
+inline constexpr bool needs_drop() noexcept {
+    return !std::is_trivially_destructible_v<T>;
+}
+
 } // namespace mem
 } // namespace rusty
 

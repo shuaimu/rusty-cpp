@@ -96,7 +96,15 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.
+template<typename T>
+auto clone(const T& value) {
+if constexpr (requires { value.clone(); }) {
+return value.clone();
+} else {
+return value;
+}
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -325,9 +333,7 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
-}
+rusty::Result<Value, E> visit_byte_buf(auto&&) { return rusty::Result<Value, E>::Err(E{}); }
 
 template<typename E>
 rusty::Result<Value, E> visit_str(std::string_view value) {
@@ -3635,6 +3641,14 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module vec_deque_port.into_iter;
 
+import vec_port.vec;  // patcher-injected for ::Vec
+import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter / ::Drain
+
+// patcher-injected fwd decl for VecDeque (avoids import cycle with main module)
+namespace vec_deque_port {
+  template<typename T, typename A> struct VecDeque;
+}
+
 namespace vec_deque_port::into_iter {
 
 export template<typename T, typename A>
@@ -3655,8 +3669,8 @@ namespace ptr = rusty::ptr;
 
 // Rust-only unresolved import: using VecDeque;
 
-using std::Allocator;
-using std::Global;
+using rusty::alloc::Allocator;
+using rusty::alloc::Global;
 
 /// An owning iterator over the elements of a `VecDeque`.
 ///
@@ -3668,12 +3682,12 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct IntoIter {
     using Item = T;
-    rusty::VecDeque<T, A> inner;
+    vec_deque_port::VecDeque<T, A> inner;
 
-    static IntoIter<T, A> new_(rusty::VecDeque<T, A> inner) {
+    static IntoIter<T, A> new_(vec_deque_port::VecDeque<T, A> inner) {
         return IntoIter<T, A>{.inner = std::move(inner)};
     }
-    rusty::VecDeque<T, A> into_vecdeque() {
+    vec_deque_port::VecDeque<T, A> into_vecdeque() {
         return std::move(this->inner);
     }
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
@@ -3703,10 +3717,10 @@ return 0;
         return std::move(this->inner.len);
     }
     struct Guard {
-        rusty::VecDeque<T, A>& deque;
+        vec_deque_port::VecDeque<T, A>& deque;
         size_t consumed;
         mutable bool _rusty_forgotten = false;
-        Guard(rusty::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
+        Guard(vec_deque_port::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
         Guard(const Guard&) = default;
         Guard(Guard&& other) noexcept : deque(other.deque), consumed(std::move(other.consumed)) {
             this->_rusty_forgotten = other._rusty_forgotten;
@@ -3812,10 +3826,10 @@ return 0;
         return NonZero::new_(std::move(rem)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
     }
     struct Guard {
-        rusty::VecDeque<T, A>& deque;
+        vec_deque_port::VecDeque<T, A>& deque;
         size_t consumed;
         mutable bool _rusty_forgotten = false;
-        Guard(rusty::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
+        Guard(vec_deque_port::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
         Guard(const Guard&) = default;
         Guard(Guard&& other) noexcept : deque(other.deque), consumed(std::move(other.consumed)) {
             this->_rusty_forgotten = other._rusty_forgotten;

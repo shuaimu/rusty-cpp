@@ -30,6 +30,14 @@ module;
 
 export module vec_deque_port.splice;
 
+import vec_port.vec;  // patcher-injected for ::Vec
+import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter / ::Drain
+
+// patcher-injected fwd decl for VecDeque (avoids import cycle with main module)
+namespace vec_deque_port {
+  template<typename T, typename A> struct VecDeque;
+}
+
 namespace vec_deque_port::splice {
 
 export template<typename I, typename A>
@@ -38,12 +46,11 @@ struct Splice;
 
 using rusty::alloc::Allocator;
 
-using std::Global;
+using rusty::alloc::Global;
 
-using ::collections::vec_deque::Drain;
+// Rust-only: using rusty::collections::vec_deque::Drain;
 
-using ::vec::Vec;
-
+// using rusty::Vec; — Vec at global ::Vec now
 /// A splicing iterator for `VecDeque`.
 ///
 /// This struct is created by [`VecDeque::splice()`][super::VecDeque::splice].
@@ -53,21 +60,21 @@ using ::vec::Vec;
 ///
 /// ```
 /// # #![feature(deque_extend_front)]
-/// # use std::collections::VecDeque;
+/// # use rusty::collections::VecDeque;
 ///
 /// let mut v = VecDeque::from(vec![0, 1, 2]);
 /// let new = [7, 8];
-/// let iter: std::collections::vec_deque::Splice<'_, _> = v.splice(1.., new);
+/// let iter: rusty::collections::vec_deque::Splice<'_, _> = v.splice(1.., new);
 /// ```
 export template<typename I, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct Splice {
     // Rust-only dependent associated type alias skipped in constrained mode: Item
     // Rust-only dependent associated type alias skipped in constrained mode: Item
-    collections::vec_deque::Drain<rusty::detail::associated_item_t<I>, A> drain;
+    rusty::collections::vec_deque::Drain<rusty::detail::associated_item_t<I>, A> drain;
     I replace_with;
     mutable bool _rusty_forgotten = false;
-    Splice(collections::vec_deque::Drain<rusty::detail::associated_item_t<I>, A> drain_init, I replace_with_init) : drain(std::move(drain_init)), replace_with(std::move(replace_with_init)) {}
+    Splice(rusty::collections::vec_deque::Drain<rusty::detail::associated_item_t<I>, A> drain_init, I replace_with_init) : drain(std::move(drain_init)), replace_with(std::move(replace_with_init)) {}
     Splice(const Splice&) = default;
     Splice(Splice&& other) noexcept : drain(std::move(other.drain)), replace_with(std::move(other.replace_with)) {
         this->_rusty_forgotten = other._rusty_forgotten;

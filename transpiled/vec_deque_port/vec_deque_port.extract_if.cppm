@@ -96,7 +96,15 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.
+template<typename T>
+auto clone(const T& value) {
+if constexpr (requires { value.clone(); }) {
+return value.clone();
+} else {
+return value;
+}
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -325,9 +333,7 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
-}
+rusty::Result<Value, E> visit_byte_buf(auto&&) { return rusty::Result<Value, E>::Err(E{}); }
 
 template<typename E>
 rusty::Result<Value, E> visit_str(std::string_view value) {
@@ -3635,6 +3641,14 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module vec_deque_port.extract_if;
 
+import vec_port.vec;  // patcher-injected for ::Vec
+import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter / ::Drain
+
+// patcher-injected fwd decl for VecDeque (avoids import cycle with main module)
+namespace vec_deque_port {
+  template<typename T, typename A> struct VecDeque;
+}
+
 namespace vec_deque_port::extract_if {
 
 export template<typename T, typename F, typename A>
@@ -3649,8 +3663,8 @@ namespace ptr = rusty::ptr;
 
 // Rust-only unresolved import: using VecDeque;
 
-using std::Allocator;
-using std::Global;
+using rusty::alloc::Allocator;
+using rusty::alloc::Global;
 
 /// An iterator which uses a closure to determine if an element should be removed.
 ///
@@ -3662,8 +3676,8 @@ using std::Global;
 /// ```
 /// #![feature(vec_deque_extract_if)]
 ///
-/// use std::collections::vec_deque::ExtractIf;
-/// use std::collections::vec_deque::VecDeque;
+/// use rusty::collections::vec_deque::ExtractIf;
+/// use rusty::collections::vec_deque::VecDeque;
 ///
 /// let mut v = VecDeque::from([0, 1, 2]);
 /// let iter: ExtractIf<'_, _, _> = v.extract_if(.., |x| *x % 2 == 0);
@@ -3672,7 +3686,7 @@ export template<typename T, typename F, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct ExtractIf {
     using Item = T;
-    rusty::VecDeque<T, A>& vec;
+    vec_deque_port::VecDeque<T, A>& vec;
     /// The index of the item that will be inspected by the next call to `next`.
     size_t idx;
     /// Elements at and beyond this point will be retained. Must be equal or smaller than `old_len`.
@@ -3684,7 +3698,7 @@ struct ExtractIf {
     /// The filter test predicate.
     F pred;
     mutable bool _rusty_forgotten = false;
-    ExtractIf(rusty::VecDeque<T, A>& vec_init, size_t idx_init, size_t end_init, size_t del_init, size_t old_len_init, F pred_init) : vec(vec_init), idx(std::move(idx_init)), end(std::move(end_init)), del(std::move(del_init)), old_len(std::move(old_len_init)), pred(std::move(pred_init)) {}
+    ExtractIf(vec_deque_port::VecDeque<T, A>& vec_init, size_t idx_init, size_t end_init, size_t del_init, size_t old_len_init, F pred_init) : vec(vec_init), idx(std::move(idx_init)), end(std::move(end_init)), del(std::move(del_init)), old_len(std::move(old_len_init)), pred(std::move(pred_init)) {}
     ExtractIf(const ExtractIf&) = default;
     ExtractIf(ExtractIf&& other) noexcept : vec(other.vec), idx(std::move(other.idx)), end(std::move(other.end)), del(std::move(other.del)), old_len(std::move(other.old_len)), pred(std::move(other.pred)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -3703,7 +3717,7 @@ struct ExtractIf {
 
 
     template<typename R>
-    static ExtractIf<T, F, A> new_(rusty::VecDeque<T, A>& vec, F pred, R range) {
+    static ExtractIf<T, F, A> new_(vec_deque_port::VecDeque<T, A>& vec, F pred, R range) {
         auto old_len = rusty::len(vec);
         auto&& _let_pat = slice::range(std::move(range), rusty::range_to(old_len));
         auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);

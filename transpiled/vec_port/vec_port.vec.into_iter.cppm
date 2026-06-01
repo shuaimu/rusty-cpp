@@ -3674,7 +3674,7 @@ using std::array;
 using rusty::alloc::Allocator;
 using rusty::alloc::Global;
 
-using rusty::VecDeque;
+// using rusty::VecDeque; — hand-written rusty::VecDeque retired in favor of vec_deque_port; only consumer (into_vecdeque) is stubbed to std::abort().
 
 // TODO: unhandled item kind
 

@@ -96,7 +96,15 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available, otherwise copy-constructs.
+template<typename T>
+auto clone(const T& value) {
+if constexpr (requires { value.clone(); }) {
+return value.clone();
+} else {
+return value;
+}
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -325,9 +333,7 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
-}
+rusty::Result<Value, E> visit_byte_buf(auto&&) { return rusty::Result<Value, E>::Err(E{}); }
 
 template<typename E>
 rusty::Result<Value, E> visit_str(std::string_view value) {
@@ -3634,6 +3640,14 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module vec_deque_port.iter_mut;
+
+import vec_port.vec;  // patcher-injected for ::Vec
+import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter / ::Drain
+
+// patcher-injected fwd decl for VecDeque (avoids import cycle with main module)
+namespace vec_deque_port {
+  template<typename T, typename A> struct VecDeque;
+}
 
 namespace vec_deque_port::iter_mut {
 

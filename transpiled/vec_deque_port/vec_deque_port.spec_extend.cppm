@@ -30,46 +30,54 @@ module;
 
 export module vec_deque_port.spec_extend;
 
+import vec_port.vec;  // patcher-injected for ::Vec
+import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter / ::Drain
+
+// patcher-injected fwd decl for VecDeque (avoids import cycle with main module)
+namespace vec_deque_port {
+  template<typename T, typename A> struct VecDeque;
+}
+
 namespace vec_deque_port::spec_extend {
 
 template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
-void prepend(rusty::VecDeque<T, A>& deque, std::span<const T> slice);
+void prepend(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice);
 template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
-void prepend_reversed(rusty::VecDeque<T, A>& deque, std::span<const T> slice);
+void prepend_reversed(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice);
 
 // Extension trait free-function forward declarations
 namespace rusty_ext {
     export template<typename T, typename I, typename A>
-    void spec_extend(rusty::VecDeque<T, A>& self_, I iter);
+    void spec_extend(vec_deque_port::VecDeque<T, A>& self_, I iter);
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend(rusty::VecDeque<T, A1>& self_, ::::IntoIter<T, A2> iterator);
+    void spec_extend(vec_deque_port::VecDeque<T, A1>& self_, ::IntoIter<T, A2> iterator);
 
     export template<typename T, typename A>
-    void spec_extend(rusty::VecDeque<T, A>& self_, rusty::slice_iter::Iter<const T> iterator);
+    void spec_extend(vec_deque_port::VecDeque<T, A>& self_, rusty::slice_iter::Iter<const T> iterator);
 
     export template<typename T, typename I, typename A>
-    void spec_extend_front(rusty::VecDeque<T, A>& self_, I iter);
+    void spec_extend_front(vec_deque_port::VecDeque<T, A>& self_, I iter);
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend_front(rusty::VecDeque<T, A1>& self_, ::::IntoIter<T, A2> iterator);
+    void spec_extend_front(vec_deque_port::VecDeque<T, A1>& self_, ::IntoIter<T, A2> iterator);
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend_front(rusty::VecDeque<T, A1>& self_, decltype(std::declval<::::IntoIter<T, A2>>().rev()) iterator);
+    void spec_extend_front(vec_deque_port::VecDeque<T, A1>& self_, decltype(std::declval<::IntoIter<T, A2>>().rev()) iterator);
 
     export template<typename T, typename A>
-    void spec_extend_front(rusty::VecDeque<T, A>& self_, std::iter::Copied<rusty::slice_iter::Iter<const T>> iter);
+    void spec_extend_front(vec_deque_port::VecDeque<T, A>& self_, std::iter::Copied<rusty::slice_iter::Iter<const T>> iter);
 
     export template<typename T, typename A>
-    void spec_extend_front(rusty::VecDeque<T, A>& self_, decltype(std::declval<std::iter::Copied<rusty::slice_iter::Iter<const T>>>().rev()) iter);
+    void spec_extend_front(vec_deque_port::VecDeque<T, A>& self_, decltype(std::declval<std::iter::Copied<rusty::slice_iter::Iter<const T>>>().rev()) iter);
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend_front(rusty::VecDeque<T, A1>& self_, Drain<T, A2> iter);
+    void spec_extend_front(vec_deque_port::VecDeque<T, A1>& self_, Drain<T, A2> iter);
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend_front(rusty::VecDeque<T, A1>& self_, decltype(std::declval<Drain<T, A2>>().rev()) iter);
+    void spec_extend_front(vec_deque_port::VecDeque<T, A1>& self_, decltype(std::declval<Drain<T, A2>>().rev()) iter);
 
 }
 
@@ -83,7 +91,7 @@ namespace rusty_ext {
 // Rust-only unresolved import: using Drain;
 // Rust-only unresolved import: using VecDeque;
 
-using std::Allocator;
+using rusty::alloc::Allocator;
 
 // Rust-only namespace re-export: using vec;
 
@@ -158,7 +166,7 @@ template <class T, class I, class U> class SpecExtendAdapterRefMut;
 // @unsafe
 template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
-void prepend(rusty::VecDeque<T, A>& deque, std::span<const T> slice) {
+void prepend(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice) {
     // @unsafe
     {
         deque.head = deque.wrap_sub(deque.head, rusty::len(slice));
@@ -176,7 +184,7 @@ void prepend(rusty::VecDeque<T, A>& deque, std::span<const T> slice) {
 // @unsafe
 template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
-void prepend_reversed(rusty::VecDeque<T, A>& deque, std::span<const T> slice) {
+void prepend_reversed(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice) {
     // @unsafe
     {
         deque.head = deque.wrap_sub(deque.head, rusty::len(slice));
@@ -188,7 +196,7 @@ void prepend_reversed(rusty::VecDeque<T, A>& deque, std::span<const T> slice) {
 // Extension trait SpecExtend lowered to rusty_ext:: free functions
 namespace rusty_ext {
     export template<typename T, typename I, typename A>
-    void spec_extend(rusty::VecDeque<T, A>& self_, I iter) {
+    void spec_extend(vec_deque_port::VecDeque<T, A>& self_, I iter) {
         using Self = std::remove_reference_t<decltype(self_)>;
         while (true) {
             auto&& _whilelet = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).next(); }) { return std::forward<decltype(__recv)>(__recv).next(); } else { return std::forward<decltype(__recv)>(__recv)->next(); } }(iter));
@@ -212,7 +220,7 @@ namespace rusty_ext {
     }
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend(rusty::VecDeque<T, A1>& self_, ::::IntoIter<T, A2> iterator) {
+    void spec_extend(vec_deque_port::VecDeque<T, A1>& self_, ::IntoIter<T, A2> iterator) {
         using Self = std::remove_reference_t<decltype(self_)>;
         const auto slice = rusty::as_slice(iterator);
         self_.reserve(rusty::len(slice));
@@ -225,7 +233,7 @@ namespace rusty_ext {
     }
 
     export template<typename T, typename A>
-    void spec_extend(rusty::VecDeque<T, A>& self_, rusty::slice_iter::Iter<const T> iterator) {
+    void spec_extend(vec_deque_port::VecDeque<T, A>& self_, rusty::slice_iter::Iter<const T> iterator) {
         using Self = std::remove_reference_t<decltype(self_)>;
         const auto slice = rusty::as_slice(iterator);
         self_.reserve(rusty::len(slice));
@@ -242,7 +250,7 @@ namespace rusty_ext {
 // Extension trait SpecExtendFront lowered to rusty_ext:: free functions
 namespace rusty_ext {
     export template<typename T, typename I, typename A>
-    void spec_extend_front(rusty::VecDeque<T, A>& self_, I iter) {
+    void spec_extend_front(vec_deque_port::VecDeque<T, A>& self_, I iter) {
         using Self = std::remove_reference_t<decltype(self_)>;
         while (true) {
             auto&& _whilelet = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).next(); }) { return std::forward<decltype(__recv)>(__recv).next(); } else { return std::forward<decltype(__recv)>(__recv)->next(); } }(iter));
@@ -266,7 +274,7 @@ namespace rusty_ext {
     }
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend_front(rusty::VecDeque<T, A1>& self_, ::::IntoIter<T, A2> iterator) {
+    void spec_extend_front(vec_deque_port::VecDeque<T, A1>& self_, ::IntoIter<T, A2> iterator) {
         using Self = std::remove_reference_t<decltype(self_)>;
         auto slice = rusty::as_slice(iterator);
         self_.reserve(rusty::len(slice));
@@ -278,7 +286,7 @@ namespace rusty_ext {
     }
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend_front(rusty::VecDeque<T, A1>& self_, decltype(std::declval<::::IntoIter<T, A2>>().rev()) iterator) {
+    void spec_extend_front(vec_deque_port::VecDeque<T, A1>& self_, decltype(std::declval<::IntoIter<T, A2>>().rev()) iterator) {
         using Self = std::remove_reference_t<decltype(self_)>;
         auto iterator_shadow1 = iterator.into_inner();
         auto slice = rusty::as_slice(iterator_shadow1);
@@ -291,7 +299,7 @@ namespace rusty_ext {
     }
 
     export template<typename T, typename A>
-    void spec_extend_front(rusty::VecDeque<T, A>& self_, std::iter::Copied<rusty::slice_iter::Iter<const T>> iter) {
+    void spec_extend_front(vec_deque_port::VecDeque<T, A>& self_, std::iter::Copied<rusty::slice_iter::Iter<const T>> iter) {
         using Self = std::remove_reference_t<decltype(self_)>;
         auto slice = rusty::as_slice(iter.into_inner());
         self_.reserve(rusty::len(slice));
@@ -302,7 +310,7 @@ namespace rusty_ext {
     }
 
     export template<typename T, typename A>
-    void spec_extend_front(rusty::VecDeque<T, A>& self_, decltype(std::declval<std::iter::Copied<rusty::slice_iter::Iter<const T>>>().rev()) iter) {
+    void spec_extend_front(vec_deque_port::VecDeque<T, A>& self_, decltype(std::declval<std::iter::Copied<rusty::slice_iter::Iter<const T>>>().rev()) iter) {
         using Self = std::remove_reference_t<decltype(self_)>;
         auto slice = rusty::as_slice(iter.into_inner().into_inner());
         self_.reserve(rusty::len(slice));
@@ -313,7 +321,7 @@ namespace rusty_ext {
     }
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend_front(rusty::VecDeque<T, A1>& self_, Drain<T, A2> iter) {
+    void spec_extend_front(vec_deque_port::VecDeque<T, A1>& self_, Drain<T, A2> iter) {
         using Self = std::remove_reference_t<decltype(self_)>;
         if (rusty::detail::deref_if_pointer_like(iter.remaining) == 0) {
             return;
@@ -330,7 +338,7 @@ namespace rusty_ext {
     }
 
     export template<typename T, typename A1, typename A2>
-    void spec_extend_front(rusty::VecDeque<T, A1>& self_, decltype(std::declval<Drain<T, A2>>().rev()) iter) {
+    void spec_extend_front(vec_deque_port::VecDeque<T, A1>& self_, decltype(std::declval<Drain<T, A2>>().rev()) iter) {
         using Self = std::remove_reference_t<decltype(self_)>;
         auto iter_shadow1 = iter.into_inner();
         if (rusty::detail::deref_if_pointer_like(iter_shadow1.remaining) == 0) {
