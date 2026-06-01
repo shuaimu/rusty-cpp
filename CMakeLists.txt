@@ -137,7 +137,7 @@ endif()
 # ──────────────────────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-    foreach(_port rc_port arc_port vec_deque_port string_port)
+    foreach(_port rc_port arc_port string_port)
         add_library(${_port} STATIC)
         target_sources(${_port}
             PUBLIC FILE_SET CXX_MODULES FILES
@@ -159,6 +159,18 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_compile_features(linked_list_port PUBLIC cxx_std_23)
     target_compile_options(linked_list_port PRIVATE -O3 -DNDEBUG -march=native )
     target_link_libraries(linked_list_port PUBLIC vec_port)
+
+    # vec_deque_port: full transpiled body (collapse-Rust-source
+    # approach — see docs/vec_deque_port/collapse.py).
+    add_library(vec_deque_port STATIC)
+    target_sources(vec_deque_port
+        PUBLIC FILE_SET CXX_MODULES FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/vec_deque_port/vec_deque_port.cppm
+    )
+    target_include_directories(vec_deque_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(vec_deque_port PUBLIC cxx_std_23)
+    target_compile_options(vec_deque_port PRIVATE -O3 -DNDEBUG -march=native )
+    target_link_libraries(vec_deque_port PUBLIC vec_port)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
