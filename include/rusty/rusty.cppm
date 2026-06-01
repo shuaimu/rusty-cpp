@@ -130,6 +130,9 @@ using Vec = ::Vec<T, A>;
 template<typename T, typename A = ::rusty::alloc::Global>
 using Rc = ::rc_port::Rc<T, A>;
 
+template<typename T, typename A = ::rusty::alloc::Global>
+using Weak = ::rc_port::Weak<T, A>;
+
 // rusty::BTreeMap / rusty::BTreeSet alias the transpiled rustc port.
 // Note: no Compare parameter — Rust's BTreeMap uses the Ord trait
 // directly, mirrored in C++ via operator<. Consumers that need a

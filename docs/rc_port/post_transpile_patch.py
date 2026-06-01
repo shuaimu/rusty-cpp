@@ -685,20 +685,39 @@ def patch_rcinner_methods(cpp_out: Path) -> int:
             i += 1
         text = "".join(out)
 
-    # 2. Rewrite call-site `.strong()` → `.strong.get()`. Be careful
-    # not to match `inc_strong()` / `dec_strong()` / `strong_ref()`.
-    # Use a negative lookbehind for the prefixes.
-    text = re.sub(
-        r"(?<![a-z_])\.strong\(\)",
-        ".strong.get()",
-        text,
-    )
-    text = re.sub(
-        r"(?<![a-z_])\.weak\(\)",
-        ".weak.get()",
-        text,
-    )
+    # 2. Rewrite call-site `.strong()` → `.strong.get()` and
+    # `.weak()` → `.weak.get()`. We can use a bare `\.strong\(\)` /
+    # `\.weak\(\)` regex because the dot-prefix guarantees we're not
+    # matching `inc_strong()` / `dec_strong()` / `strong_ref()` /
+    # similar — those have an underscore (or `_ref`) between `.` and
+    # `strong`/`weak`, not a literal `.strong(` / `.weak(`.
+    text = re.sub(r"\.strong\(\)", ".strong.get()", text)
+    text = re.sub(r"\.weak\(\)",   ".weak.get()",   text)
 
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_nonnull_auto_static_calls(cpp_out: Path) -> int:
+    """`NonNull<auto>::as_ptr(this->ptr)` — transpiler emit of a Rust
+    `NonNull::as_ptr(self.ptr)` static-method call left `auto` as a
+    template argument, which C++ doesn't allow in template-argument
+    position. NonNull also exposes `as_ptr` as a member method, so
+    rewrite the call to `<recv>.as_ptr()` shape.
+    """
+    path = cpp_out / RC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # Match `NonNull<auto>::method(arg)` → `arg.method()`.
+    text = re.sub(
+        r"NonNull<auto>::as_ptr\(([^)]+)\)",
+        r"\1.as_ptr()",
+        text,
+    )
     if text != original:
         path.write_text(text)
         return 1
@@ -728,6 +747,18 @@ def patch_drop_slow_weak_ctor(cpp_out: Path) -> int:
     )
     text = re.sub(
         r"rusty::clone\(this->alloc\)",
+        "A{}",
+        text,
+    )
+    # Same pattern with `this_.alloc` (Rust `&self` lowered to a
+    # `this_` parameter on static methods) and `other.alloc`.
+    text = re.sub(
+        r"rusty::clone\(this_\.alloc\)",
+        "A{}",
+        text,
+    )
+    text = re.sub(
+        r"rusty::clone\(other\.alloc\)",
         "A{}",
         text,
     )
@@ -855,6 +886,7 @@ def main() -> int:
         ("data_offset<T> Alignment::of_val_raw", patch_data_offset_stub),
         ("RcInner inc_/dec_/strong/weak methods", patch_rcinner_methods),
         ("drop_slow + clone alloc-ctor", patch_drop_slow_weak_ctor),
+        ("NonNull<auto>::as_ptr", patch_nonnull_auto_static_calls),
     ]
 
     total = 0

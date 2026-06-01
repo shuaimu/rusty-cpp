@@ -4171,7 +4171,7 @@ return in_progress.into_rc(); }();
         return std::make_tuple(std::move(ptr_shadow1), std::move(alloc));
     }
     static std::add_pointer_t<std::add_const_t<T>> as_ptr(const Rc<T, A>& this_) {
-        const std::add_pointer_t<RcInner<T>> ptr_shadow1 = NonNull<std::remove_cvref_t<decltype((this_.ptr))>>::as_ptr(this_.ptr);
+        const std::add_pointer_t<RcInner<T>> ptr_shadow1 = NonNull<RcInner<T>>::as_ptr(this_.ptr);
         // @unsafe
         {
             return &(*ptr_shadow1).value;
@@ -4188,7 +4188,7 @@ return in_progress.into_rc(); }();
     static Weak<T, A> downgrade(const Rc<T, A>& this_) {
         this_.inner().inc_weak();
         assert((!is_dangling<std::remove_pointer_t<std::remove_cvref_t<decltype((const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this_.ptr)))))>>>(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this_.ptr))))));
-        return Weak<T, A>(this_.ptr, rusty::clone(this_.alloc));
+        return Weak<T, A>(this_.ptr, A{});
     }
     static size_t weak_count(const Rc<T, A>& this_) {
         return this_.inner().weak.get() - static_cast<size_t>(1);
@@ -4231,9 +4231,9 @@ return in_progress.into_rc(); }();
     static T& make_mut(Rc<T, A>& this_) {
         auto size_of_val = sizeof(decltype(rusty::detail::deref_if_pointer_like(this_)));
         if (Rc<T, rusty::alloc::Global>::strong_count(this_) != static_cast<size_t>(1)) {
-            this_ = Rc<std::remove_cvref_t<decltype((rusty::detail::deref_if_pointer_like(this_)))>, std::remove_cvref_t<decltype((rusty::clone(this_.alloc)))>>::clone_from_ref_in(rusty::detail::deref_if_pointer_like(this_), rusty::clone(this_.alloc));
+            this_ = Rc<std::remove_cvref_t<decltype((rusty::detail::deref_if_pointer_like(this_)))>, std::remove_cvref_t<decltype((A{}))>>::clone_from_ref_in(rusty::detail::deref_if_pointer_like(this_), A{});
         } else if (Rc<T, rusty::alloc::Global>::weak_count(this_) != static_cast<size_t>(0)) {
-            UniqueRcUninit<T, A> in_progress = UniqueRcUninit<T, A>::new_(rusty::detail::deref_if_pointer_like(this_), rusty::clone(this_.alloc));
+            UniqueRcUninit<T, A> in_progress = UniqueRcUninit<T, A>::new_(rusty::detail::deref_if_pointer_like(this_), A{});
             // @unsafe
             {
                 rusty::ptr::copy_nonoverlapping(rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(this_)).template cast<uint8_t>(), reinterpret_cast<uint8_t*>(in_progress.data_ptr()), std::move(size_of_val));
@@ -4297,10 +4297,10 @@ return in_progress.into_rc(); }();
         // @unsafe
         {
             auto value_size = size_of_val(rusty::detail::deref_if_pointer_like(src));
-            const auto ptr_shadow1 = rusty::detail::deref_if_pointer_like(src).allocate_for_ptr_in(rusty::Box<std::remove_cvref_t<decltype((&src))>>::allocator(src));
+            const auto ptr_shadow1 = rusty::detail::deref_if_pointer_like(src).allocate_for_ptr_in(rusty::Box<RcInner<T>>::allocator(src));
             rusty::ptr::copy_nonoverlapping(reinterpret_cast<const uint8_t*>((&rusty::detail::deref_if_pointer_like(src))), const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>((&(rusty::detail::deref_if_pointer_like(ptr_shadow1)).value))), std::move(value_size));
-            auto [bptr, alloc] = rusty::detail::deref_if_pointer_like(rusty::Box<std::remove_cvref_t<decltype((src))>>::into_raw_with_allocator(std::move(src)));
-            auto src_shadow1 = rusty::Box<std::remove_cvref_t<decltype((reinterpret_cast<std::add_pointer_t<mem::ManuallyDrop<T>>>(static_cast<std::uintptr_t>(bptr))))>>::from_raw_in(reinterpret_cast<std::add_pointer_t<mem::ManuallyDrop<T>>>(static_cast<std::uintptr_t>(bptr)), alloc.by_ref());
+            auto [bptr, alloc] = rusty::detail::deref_if_pointer_like(rusty::Box<RcInner<T>>::into_raw_with_allocator(std::move(src)));
+            auto src_shadow1 = rusty::Box<RcInner<T>>::from_raw_in(reinterpret_cast<std::add_pointer_t<mem::ManuallyDrop<T>>>(static_cast<std::uintptr_t>(bptr)), alloc.by_ref());
             rusty::mem::drop(std::move(src_shadow1));
             return Rc<T, A>::from_ptr_in(std::move(ptr_shadow1), std::move(alloc));
         }
@@ -4406,7 +4406,7 @@ return in_progress.into_rc(); }();
     static Rc<T, A> default_() {
         // @unsafe
         {
-            return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<std::remove_cvref_t<decltype((rusty::Box<rusty::MaybeUninit<RcInner<T>>>::new_uninit()))>>::write_(rusty::Box<rusty::MaybeUninit<RcInner<T>>>::new_uninit(), RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = T::default_()})).leak()));
+            return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<rusty::MaybeUninit<RcInner<T>>>::write_(rusty::Box<rusty::MaybeUninit<RcInner<T>>>::new_uninit(), RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = T::default_()})).leak()));
         }
     }
     bool eq(const Rc<T, A>& other) const {
@@ -4586,7 +4586,7 @@ struct Weak {
         return this->alloc;
     }
     std::add_pointer_t<std::add_const_t<T>> as_ptr() const {
-        const std::add_pointer_t<RcInner<T>> ptr_shadow1 = NonNull<std::remove_cvref_t<decltype((this->ptr))>>::as_ptr(this->ptr);
+        const std::add_pointer_t<RcInner<T>> ptr_shadow1 = this->ptr.as_ptr();
         if (is_dangling<std::remove_pointer_t<std::remove_cvref_t<decltype((ptr_shadow1))>>>(ptr_shadow1)) {
             return reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(ptr_shadow1);
         } else {
@@ -4615,7 +4615,7 @@ return reinterpret_cast<std::add_pointer_t<RcInner<T>>>(static_cast<std::uintptr
     }
     rusty::Option<Rc<T, A>> upgrade() const {
         const auto inner = RUSTY_TRY_OPT(this->inner());
-        if (inner.strong() == 0) {
+        if (inner.strong.get() == 0) {
             return rusty::Option<Rc<T, A>>{rusty::None};
         } else {
             // @unsafe
@@ -4628,7 +4628,7 @@ return reinterpret_cast<std::add_pointer_t<RcInner<T>>>(static_cast<std::uintptr
     size_t strong_count() const {
         if (auto&& _iflet_scrutinee = this->inner(); _iflet_scrutinee.is_some()) {
             decltype(auto) inner = _iflet_scrutinee.unwrap();
-            return inner.strong();
+            return inner.strong.get();
         } else {
             return static_cast<size_t>(0);
         }
@@ -4636,8 +4636,8 @@ return reinterpret_cast<std::add_pointer_t<RcInner<T>>>(static_cast<std::uintptr
     size_t weak_count() const {
         if (auto&& _iflet_scrutinee = this->inner(); _iflet_scrutinee.is_some()) {
             decltype(auto) inner = _iflet_scrutinee.unwrap();
-            if (inner.strong() > 0) {
-                return inner.weak() - static_cast<size_t>(1);
+            if (inner.strong.get() > 0) {
+                return inner.weak.get() - static_cast<size_t>(1);
             } else {
                 return static_cast<size_t>(0);
             }
@@ -4856,7 +4856,7 @@ struct UniqueRc {
         }
     }
     static std::add_pointer_t<std::add_const_t<T>> as_ptr(const UniqueRc<T, A>& this_) {
-        const std::add_pointer_t<RcInner<T>> ptr_shadow1 = NonNull<std::remove_cvref_t<decltype((this_.ptr))>>::as_ptr(this_.ptr);
+        const std::add_pointer_t<RcInner<T>> ptr_shadow1 = NonNull<RcInner<T>>::as_ptr(this_.ptr);
         // @unsafe
         {
             return &(*ptr_shadow1).value;
@@ -4874,7 +4874,7 @@ struct UniqueRc {
         {
             this_.ptr.as_ref().inc_weak();
         }
-        return Weak<T, A>(this_.ptr, rusty::clone(this_.alloc));
+        return Weak<T, A>(this_.ptr, A{});
     }
     auto assume_init() {
         auto [ptr_shadow1, alloc] = rusty::detail::deref_if_pointer_like(UniqueRc<typename __TemplateArgs<T>::arg_0, A>::into_inner_with_allocator(std::move((*this))));
