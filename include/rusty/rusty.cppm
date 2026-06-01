@@ -79,8 +79,11 @@ export {
 #include <rusty/string.hpp>
 #include <rusty/fn.hpp>
 #include <rusty/function.hpp>
-#include <rusty/btreemap.hpp>
-#include <rusty/btreeset.hpp>
+// rusty::BTreeMap / rusty::BTreeSet come from the transpiled btree_port
+// C++20 module. Consumers `import btree_port.btree.map;` (or import the
+// rusty umbrella, which re-exports). The legacy std::map/std::set facades
+// at include/rusty/btreemap.hpp / btreeset.hpp are deleted along with
+// the hand-written VecLegacy they depended on.
 #include <rusty/array.hpp>
 #include <rusty/slice.hpp>
 #include <rusty/io.hpp>
