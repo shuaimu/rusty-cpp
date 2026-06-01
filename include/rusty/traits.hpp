@@ -13,7 +13,9 @@ template<typename T, typename A> class Box;
 template<typename T> class Cell;
 template<typename T> class RefCell;
 template<typename T> class Mutex;
+namespace sync::atomic::detail {
 template<typename T> class Atomic;
+} // namespace sync::atomic::detail
 
 // Forward declare is_sync for circular dependency with is_send
 template<typename T>
@@ -149,9 +151,10 @@ struct is_sync<Cell<T>> : std::false_type {};
 template<typename T>
 struct is_sync<RefCell<T>> : std::false_type {};
 
-// Atomic<T> is Sync
+// Atomic<T> is Sync (private detail template behind the public
+// concrete aliases like `AtomicBool`/`AtomicU64`).
 template<typename T>
-struct is_sync<Atomic<T>> : std::true_type {};
+struct is_sync<sync::atomic::detail::Atomic<T>> : std::true_type {};
 
 // Raw pointers are not Sync
 template<typename T>
