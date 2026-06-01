@@ -1,6 +1,6 @@
 // Tests for rusty::Arc<T>
 #include "../include/rusty/arc.hpp"
-#include "../include/rusty/weak.hpp"
+#include "../include/rusty/sync/weak.hpp"
 #include <cassert>
 #include <cstdio>
 #include <thread>

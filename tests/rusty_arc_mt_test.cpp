@@ -9,7 +9,7 @@
 // - Exclusive access via get_mut()
 
 #include "../include/rusty/arc.hpp"
-#include "../include/rusty/weak.hpp"
+#include "../include/rusty/sync/weak.hpp"
 #include "../include/rusty/mutex.hpp"
 #include "../include/rusty/vec.hpp"
 #include <cassert>

@@ -1,6 +1,5 @@
 #include <rusty/traits.hpp>
 #include <rusty/arc.hpp>
-#include <rusty/rc.hpp>
 #include <rusty/box.hpp>
 #include <rusty/cell.hpp>
 #include <rusty/refcell.hpp>

@@ -1,6 +1,5 @@
 #include <rusty/thread.hpp>
 #include <rusty/arc.hpp>
-#include <rusty/rc.hpp>
 #include <rusty/mutex.hpp>
 #include <rusty/vec.hpp>     // stub — see import below for the real Vec
 #include <iostream>

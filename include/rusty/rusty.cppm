@@ -116,12 +116,19 @@ export import rusty.async;
 export import vec_port.vec;
 export import btree_port.btree.map;
 export import btree_port.btree.set;
+export import rc_port;
 
 export namespace rusty {
 
 // VecLegacy retired — `rusty::Vec<T,A>` is the transpiled rustc Vec.
 template<typename T, typename A = ::rusty::alloc::Global>
 using Vec = ::Vec<T, A>;
+
+// Legacy hand-written rusty::Rc retired — `rusty::Rc<T,A>` is now the
+// transpiled rustc Rc from `library/alloc/src/rc.rs`. API change:
+// use `Rc<T>::new_(value)` instead of constructor / `make(value)`.
+template<typename T, typename A = ::rusty::alloc::Global>
+using Rc = ::rc_port::Rc<T, A>;
 
 // rusty::BTreeMap / rusty::BTreeSet alias the transpiled rustc port.
 // Note: no Compare parameter — Rust's BTreeMap uses the Ord trait

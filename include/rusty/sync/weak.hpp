@@ -176,6 +176,15 @@ Weak<T> downgrade(const rusty::Arc<T>& arc) {
 }
 
 } // namespace sync
+
+// rusty::downgrade(Arc) — root-namespace convenience that forwards to
+// `sync::downgrade`. Used to live in the deleted `include/rusty/weak.hpp`;
+// inlined here so tests that say `rusty::downgrade(arc)` keep compiling.
+template<typename T>
+sync::Weak<T> downgrade(const rusty::Arc<T>& arc) {
+    return sync::downgrade(arc);
+}
+
 } // namespace rusty
 
 #endif // RUSTY_SYNC_WEAK_HPP

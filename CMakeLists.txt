@@ -281,7 +281,8 @@ set(TEST_SOURCES
     tests/rusty_net_tcp_test.cpp
     tests/rusty_cell_test.cpp
     tests/rusty_option_test.cpp
-    tests/rusty_rc_test.cpp
+    # rusty_rc_test.cpp deleted — legacy rusty::Rc retired; rc_port::Rc
+    # exercised via tests/rc_port_module_test.cpp instead.
     tests/rusty_refcell_test.cpp
     tests/rusty_result_test.cpp
     tests/rusty_mem_test.cpp

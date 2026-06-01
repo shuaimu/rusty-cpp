@@ -30,10 +30,13 @@
 // #include "rusty/std_minimal.hpp"  // Not needed with standard library
 #include "rusty/box.hpp"
 #include "rusty/arc.hpp"  // Unified Arc with polymorphism (like std::shared_ptr)
-#include "rusty/rc.hpp"   // Unified Rc with polymorphism (like std::shared_ptr)
-#include "rusty/weak.hpp"  // Compatibility aliases (Weak<T> for Rc, ArcWeak<T> for Arc)
+// rusty::Rc retired — `rusty::Rc<T, A>` is the transpiled rustc Rc
+// exported from `rc_port`. The alias lives in rusty.cppm; consumers
+// that need it must `import rusty;` (or `import rc_port;` directly).
+// #include "rusty/rc.hpp" — deleted
+// #include "rusty/weak.hpp" — deleted (rusty::Weak unused; rc_port::Weak<T,A> is the transpiled one)
 // TODO: Enable once namespace conflicts are resolved
-// #include "rusty/rc/weak.hpp"  // Namespace-organized: rusty::rc_impl::Weak<T>
+// #include "rusty/rc/weak.hpp"  — deleted alongside rc.hpp
 // #include "rusty/sync/weak.hpp"  // Namespace-organized: rusty::sync_impl::Weak<T>
 #include "rusty/vec.hpp"
 #include "rusty/vecdeque.hpp"
