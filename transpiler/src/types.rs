@@ -112,10 +112,21 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "BTreeSet" | "std::collections::BTreeSet" => Some(("::BTreeSet", true)),
         "VecDeque" | "std::collections::VecDeque" => Some(("rusty::VecDeque", true)),
         "std::collections::hash_map::DefaultHasher" => Some(("DefaultHasher", false)),
-        // Fallback aliases for collection families not yet modeled separately.
-        // Keep a deterministic compile surface in expanded serde-style targets.
-        "BinaryHeap" | "std::collections::BinaryHeap" => Some(("rusty::Vec", true)),
-        "LinkedList" | "std::collections::LinkedList" => Some(("rusty::Vec", true)),
+        // BinaryHeap and LinkedList previously fell back to rusty::Vec as a
+        // "deterministic compile surface in expanded serde-style targets"
+        // before either had a dedicated transpiled port. Both now have one:
+        // `binary_heap_port` (Phase C — see docs/binary_heap_port/STATUS.md)
+        // and `linked_list_port` (Phase A2 with transpiler+patcher in
+        // progress — see docs/linked_list_port/STATUS.md). When transpiling
+        // either of these crates, the LinkedList/BinaryHeap names refer to
+        // the locally-declared struct in the same module; emitting
+        // `rusty::Vec` shadows the local definition (or in the case of
+        // `LinkedList { …field-init… }` literals, mis-types the literal
+        // entirely). Leave both unmapped so the local struct wins; consumers
+        // outside these ports can `import binary_heap_port;` or
+        // `import linked_list_port;`.
+        // Empty `BinaryHeap` / `LinkedList` arms intentionally omitted —
+        // unmapped names fall through to local-scope name resolution.
 
         // Strings
         "String" | "std::string::String" | "alloc::string::String" => {

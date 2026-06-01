@@ -71,9 +71,20 @@ struct Cli {
     #[arg(long)]
     by_value_cycle_breaking_prototype: bool,
 
-    /// Prefer `rusty::Unit` alias for Rust `()` in generated type positions.
+    /// Prefer `rusty::Unit` alias for Rust `()` in generated type
+    /// positions. Default-on as of the unit-alias migration; accepted
+    /// for backwards-compatibility with older scripts and parity-matrix
+    /// pass-throughs. Pass `--prefer-std-tuple-alias` to opt out and
+    /// keep the legacy `std::tuple<>` spelling.
     #[arg(long)]
     prefer_rusty_unit_alias: bool,
+
+    /// Opt out of the default `rusty::Unit` spelling and keep the
+    /// legacy `std::tuple<>` rendering of Rust `()`. The two C++ types
+    /// are identical (`using Unit = std::tuple<>;`); this flag only
+    /// flips the textual surface in generated output.
+    #[arg(long)]
+    prefer_std_tuple_alias: bool,
 
     /// Prefer `rusty::StrView` / `rusty::Span<...>` alias spellings in generated output.
     #[arg(long)]
@@ -185,9 +196,20 @@ struct ParityTestArgs {
     #[arg(long)]
     import_std: bool,
 
-    /// Prefer `rusty::Unit` alias for Rust `()` in generated type positions.
+    /// Prefer `rusty::Unit` alias for Rust `()` in generated type
+    /// positions. Default-on as of the unit-alias migration; accepted
+    /// for backwards-compatibility with older scripts and parity-matrix
+    /// pass-throughs. Pass `--prefer-std-tuple-alias` to opt out and
+    /// keep the legacy `std::tuple<>` spelling.
     #[arg(long)]
     prefer_rusty_unit_alias: bool,
+
+    /// Opt out of the default `rusty::Unit` spelling and keep the
+    /// legacy `std::tuple<>` rendering of Rust `()`. The two C++ types
+    /// are identical (`using Unit = std::tuple<>;`); this flag only
+    /// flips the textual surface in generated output.
+    #[arg(long)]
+    prefer_std_tuple_alias: bool,
 
     /// Prefer `rusty::StrView` / `rusty::Span<...>` alias spellings in generated output.
     #[arg(long)]
@@ -3427,7 +3449,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
         use_import_std_in_modules: args.import_std,
-        prefer_rusty_unit_alias: args.prefer_rusty_unit_alias,
+        // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
+        // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
+        // for backwards-compatibility with existing scripts.
+        prefer_rusty_unit_alias: !args.prefer_std_tuple_alias,
         prefer_rusty_view_aliases: args.prefer_rusty_view_aliases,
         interface_traits: args.interface_traits,
         cross_file_enums: Vec::new(),
@@ -3867,7 +3892,10 @@ fn main() {
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
         use_import_std_in_modules: false,
-        prefer_rusty_unit_alias: cli.prefer_rusty_unit_alias,
+        // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
+        // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
+        // for backwards-compatibility with existing scripts.
+        prefer_rusty_unit_alias: !cli.prefer_std_tuple_alias,
         prefer_rusty_view_aliases: cli.prefer_rusty_view_aliases,
         interface_traits: cli.interface_traits,
         cross_file_enums: Vec::new(),

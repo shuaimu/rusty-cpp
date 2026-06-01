@@ -280,6 +280,7 @@ set(TEST_SOURCES
     tests/test_mutex.cpp
     tests/test_thread.cpp
     tests/test_channel.cpp
+    tests/rusty_condvar_test.cpp
 
     # Annotation system tests - WORKING (fixed missing includes)
     tests/test_external_annotations.cpp
