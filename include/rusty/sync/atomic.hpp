@@ -10,6 +10,14 @@
 // @safe - thread-safe primitives that wrap std::atomic<T>. Each
 // method's body funnels into a `// @unsafe { ... }` block around the
 // underlying `std::atomic<T>::*` call (STL, not borrow-checked).
+//
+// Rust std exposes only the concrete typed aliases (`AtomicBool`,
+// `AtomicI32`, `AtomicU64`, …) — there is no generic `std::atomic<T>`
+// equivalent. To keep the rusty surface parallel, the underlying
+// generic template lives in `detail::` and is **not** part of the
+// public API. New user code MUST use one of the concrete aliases
+// below; the templated form is only an implementation detail kept to
+// avoid duplicating the same method bodies thirteen times.
 namespace rusty::sync::atomic {
 
 enum class Ordering {
@@ -35,6 +43,8 @@ inline constexpr std::memory_order to_std_memory_order(Ordering order) noexcept 
             return std::memory_order_seq_cst;
     }
 }
+
+namespace detail {
 
 template<typename T>
 class Atomic {
@@ -183,20 +193,22 @@ private:
     mutable std::atomic<T> inner_;
 };
 
-using AtomicBool = Atomic<bool>;
-using AtomicI8 = Atomic<std::int8_t>;
-using AtomicI16 = Atomic<std::int16_t>;
-using AtomicI32 = Atomic<std::int32_t>;
-using AtomicI64 = Atomic<std::int64_t>;
-using AtomicIsize = Atomic<std::ptrdiff_t>;
-using AtomicU8 = Atomic<std::uint8_t>;
-using AtomicU16 = Atomic<std::uint16_t>;
-using AtomicU32 = Atomic<std::uint32_t>;
-using AtomicU64 = Atomic<std::uint64_t>;
-using AtomicUsize = Atomic<std::size_t>;
+} // namespace detail
+
+using AtomicBool = detail::Atomic<bool>;
+using AtomicI8 = detail::Atomic<std::int8_t>;
+using AtomicI16 = detail::Atomic<std::int16_t>;
+using AtomicI32 = detail::Atomic<std::int32_t>;
+using AtomicI64 = detail::Atomic<std::int64_t>;
+using AtomicIsize = detail::Atomic<std::ptrdiff_t>;
+using AtomicU8 = detail::Atomic<std::uint8_t>;
+using AtomicU16 = detail::Atomic<std::uint16_t>;
+using AtomicU32 = detail::Atomic<std::uint32_t>;
+using AtomicU64 = detail::Atomic<std::uint64_t>;
+using AtomicUsize = detail::Atomic<std::size_t>;
 
 template<typename T>
-using AtomicPtr = Atomic<T*>;
+using AtomicPtr = detail::Atomic<T*>;
 
 inline void fence(Ordering order = Ordering::SeqCst) noexcept {
     // @unsafe { std::atomic_thread_fence is STL, not borrow-checked }
