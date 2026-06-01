@@ -83,6 +83,48 @@ def patch_all_files(cpp_out: Path) -> int:
         text = re.sub(r"(?<![A-Za-z0-9_])std::Global",
                       "rusty::alloc::Global", text)
 
+        # Duplicate `template<typename T> auto clone(...)` in the
+        # transpiler-emitted GMF prelude collides with `rusty::clone`
+        # (include/rusty/move.hpp). Both have the same signature, so
+        # calls to `rusty::clone(...)` are ambiguous. Strip the prelude
+        # definition. Same patch binary_heap_port applies (its #3).
+        text = re.sub(
+            r"// Clone: dispatches to \.clone\(\) if available, otherwise copy-constructs\.\n"
+            r"template<typename T>\n"
+            r"auto clone\(const T& value\) \{\n"
+            r"if constexpr \(requires \{ value\.clone\(\); \}\) \{\n"
+            r"return value\.clone\(\);\n"
+            r"\} else \{\n"
+            r"return value;\n"
+            r"\}\n"
+            r"\}\n",
+            "// clone() prelude removed by patcher — rusty::clone in <rusty/move.hpp> covers this\n",
+            text,
+        )
+
+        # `NonZero::new_(...)` Cluster A — unqualified Rust path infers
+        # `NonZero<usize>`. Inject the explicit `<size_t>` template arg.
+        text = re.sub(
+            r"(?<![A-Za-z0-9_:])NonZero::new_\(",
+            "rusty::num::NonZero<size_t>::new_(", text)
+
+        # `Result<B, [[noreturn]] void>` — Rust `Result<B, !>` (never)
+        # gets emitted with `[[noreturn]]` attribute inside template
+        # args, which is invalid C++. Strip the attribute (`void` alone
+        # is the correct C++ stand-in for `!`).
+        text = re.sub(r"\[\[noreturn\]\]\s+void", "void", text)
+
+        #`join_head_and_tail_wrapping` lambda assigns `src`/`dst`/`len`
+        # without declaring them (Rust source uses tuple pattern
+        # destructuring `let (src, dst, len) = if ...`). Inject the
+        # declarations at the top of the lambda body so the assignments
+        # parse.
+        text = re.sub(
+            r"(const auto join_head_and_tail_wrapping = \[\]\([^)]+\) \{)\n",
+            r"\1\n                    size_t src, dst, len;\n",
+            text,
+        )
+
         # Drop imports of submodules we exclude from the reduced-scope
         # build (see CMakeLists.txt vec_deque_port note). The dropped
         # submodules pull in iterator-adapter types we don't vendor yet.
@@ -179,10 +221,61 @@ def patch_all_files(cpp_out: Path) -> int:
                 count=1,
             )
 
+        # `IntoIter::next_chunk()` returns `Result<[T;N], array::IntoIter<T,N>>`
+        # — we don't vendor `core::array::IntoIter`. Replace the whole
+        # method (template + signature + body) with a stub via brace
+        # tracking; nested braces defeat a regex-only rewrite.
+        if path.name == "vec_deque_port.into_iter.cppm" and "next_chunk" in text:
+            text = _strip_next_chunk_method(text)
+
         if text != original:
             path.write_text(text)
             total_changes += 1
     return total_changes
+
+
+def _strip_next_chunk_method(text: str) -> str:
+    """Replace the `template<size_t N> ... next_chunk() { ... }` block
+    with a stub. Tracks `{`/`}` depth from the opening brace of the
+    function body, so nested braces don't confuse the boundary.
+    """
+    lines = text.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if (i + 1 < len(lines)
+                and "template<size_t N>" in line
+                and "next_chunk()" in lines[i + 1]
+                and "array::IntoIter" in lines[i + 1]):
+            # Found the start of next_chunk. Replace lines i..end_of_body
+            # with a stub.
+            out.append("    // patcher: next_chunk() stubbed — array::IntoIter not vendored")
+            out.append("    template<size_t N>")
+            out.append("    rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, void>")
+            out.append("    next_chunk() { std::abort(); }")
+            # Skip the original template + signature line. The body
+            # starts on the same line as the signature ("{ auto raw_arr = …").
+            # Find the matching close brace via depth tracking.
+            i += 1
+            depth = 0
+            in_body = False
+            while i < len(lines):
+                line = lines[i]
+                for ch in line:
+                    if ch == "{":
+                        depth += 1
+                        in_body = True
+                    elif ch == "}":
+                        depth -= 1
+                if in_body and depth == 0:
+                    i += 1
+                    break
+                i += 1
+        else:
+            out.append(line)
+            i += 1
+    return "\n".join(out)
 
 
 def main() -> int:

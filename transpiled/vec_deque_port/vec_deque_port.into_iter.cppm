@@ -96,15 +96,7 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Clone: dispatches to .clone() if available, otherwise copy-constructs.
-template<typename T>
-auto clone(const T& value) {
-if constexpr (requires { value.clone(); }) {
-return value.clone();
-} else {
-return value;
-}
-}
+// clone() prelude removed by patcher — rusty::clone in <rusty/move.hpp> covers this
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -3711,7 +3703,7 @@ this->inner.drain(rusty::range_to(n));
 return 0;
 }
 }();
-        return NonZero::new_(std::move(rem)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
+        return rusty::num::NonZero<size_t>::new_(std::move(rem)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
     }
     size_t count() {
         return std::move(this->inner.len);
@@ -3766,49 +3758,15 @@ guard.consumed += 1;
     }
     template<typename B, typename F>
     B fold(B init, F f) {
-        return [&]() -> B { auto&& _m = rusty::try_fold((*this), std::move(init), [&](auto&& b, auto&& item) { return rusty::Result<B, [[noreturn]] void>::Ok(f(std::move(b), std::move(item))); }); if (_m.is_ok()) { return _m.unwrap(); } return [&]() -> B { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> B { auto&& _m = rusty::try_fold((*this), std::move(init), [&](auto&& b, auto&& item) { return rusty::Result<B, void>::Ok(f(std::move(b), std::move(item))); }); if (_m.is_ok()) { return _m.unwrap(); } return [&]() -> B { rusty::intrinsics::unreachable(); }(); }();
     }
     rusty::Option<Item> last() {
         return this->inner.pop_back();
     }
+    // patcher: next_chunk() stubbed — array::IntoIter not vendored
     template<size_t N>
-    rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, array::IntoIter<Item, N>> next_chunk() {
-        auto raw_arr = rusty::array_repeat(/* const-block elided (Rust 2024 compile-time fence) */ (void)0, N);
-        const auto raw_arr_ptr = rusty::as_mut_ptr(raw_arr)->cast();
-        auto [head, tail] = rusty::detail::deref_if_pointer_like(this->inner.as_slices());
-        if (rusty::len(head) >= rusty::detail::deref_if_pointer_like(N)) {
-            // @unsafe
-            {
-                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(head), std::move(raw_arr_ptr), N);
-            }
-            this->inner.head = this->inner.to_physical_idx(N);
-            rusty::detail::deref_if_pointer_like(this->inner.len) -= N;
-            return rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, array::IntoIter<Item, N>>::Ok(raw_arr.transpose().assume_init());
-        }
-        // @unsafe
-        {
-            rusty::ptr::copy_nonoverlapping(rusty::as_ptr(head), std::move(raw_arr_ptr), rusty::len(head));
-        }
-        auto remaining = rusty::detail::deref_if_pointer_like(N) - rusty::len(head);
-        if (rusty::len(tail) >= rusty::detail::deref_if_pointer_like(remaining)) {
-            // @unsafe
-            {
-                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(tail), raw_arr_ptr.add(rusty::len(head)), std::move(remaining));
-            }
-            this->inner.head = this->inner.to_physical_idx(N);
-            rusty::detail::deref_if_pointer_like(this->inner.len) -= N;
-            return rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, array::IntoIter<Item, N>>::Ok(raw_arr.transpose().assume_init());
-        } else {
-            // @unsafe
-            {
-                rusty::ptr::copy_nonoverlapping(rusty::as_ptr(tail), raw_arr_ptr.add(rusty::len(head)), rusty::len(tail));
-            }
-            const auto init = rusty::len(head) + rusty::len(tail);
-            this->inner.head = 0;
-            this->inner.len = 0;
-            return rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, array::IntoIter<Item, N>>::Err(array::IntoIter<T, N>::new_unchecked(std::move(raw_arr), rusty::range(0, init)));
-        }
-    }
+    rusty::Result<std::array<Item, rusty::sanitize_array_capacity<N>()>, void>
+    next_chunk() { std::abort(); }
     rusty::Option<T> next_back() {
         return this->inner.pop_back();
     }
@@ -3823,7 +3781,7 @@ this->inner.truncate(rusty::detail::deref_if_pointer_like(len) - rusty::detail::
 return 0;
 }
 }();
-        return NonZero::new_(std::move(rem)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
+        return rusty::num::NonZero<size_t>::new_(std::move(rem)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
     }
     struct Guard {
         vec_deque_port::VecDeque<T, A>& deque;
@@ -3874,7 +3832,7 @@ guard.consumed += 1;
     }
     template<typename B, typename F>
     B rfold(B init, F f) {
-        return [&]() -> B { auto&& _m = this->try_rfold(std::move(init), [&](auto&& b, auto&& item) { return rusty::Result<B, [[noreturn]] void>::Ok(f(std::move(b), std::move(item))); }); if (_m.is_ok()) { return _m.unwrap(); } return [&]() -> B { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> B { auto&& _m = this->try_rfold(std::move(init), [&](auto&& b, auto&& item) { return rusty::Result<B, void>::Ok(f(std::move(b), std::move(item))); }); if (_m.is_ok()) { return _m.unwrap(); } return [&]() -> B { rusty::intrinsics::unreachable(); }(); }();
     }
     bool is_empty() const {
         return rusty::is_empty(this->inner);

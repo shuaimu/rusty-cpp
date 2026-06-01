@@ -96,15 +96,7 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Clone: dispatches to .clone() if available, otherwise copy-constructs.
-template<typename T>
-auto clone(const T& value) {
-if constexpr (requires { value.clone(); }) {
-return value.clone();
-} else {
-return value;
-}
-}
+// clone() prelude removed by patcher — rusty::clone in <rusty/move.hpp> covers this
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -3765,6 +3757,7 @@ struct Drain {
             }
             if ((rusty::detail::deref_if_pointer_like(head_len) != 0) && (rusty::detail::deref_if_pointer_like(tail_len) != 0)) {
                 const auto join_head_and_tail_wrapping = [](auto& source_deque, size_t drain_len, size_t head_len, size_t tail_len) {
+                    size_t src, dst, len;
                     if (rusty::detail::deref_if_pointer_like(head_len) < rusty::detail::deref_if_pointer_like(tail_len)) {
                         src = source_deque.head;
                         dst = source_deque.to_physical_idx(std::move(drain_len));
