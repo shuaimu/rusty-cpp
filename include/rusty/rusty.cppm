@@ -109,16 +109,29 @@ export {
 #include <rusty/async.hpp>
 } // export
 
-// `rusty::Executor` and `rusty::Vec` live in C++20 modules now. Re-export
-// both via the rusty umbrella so `import rusty;` keeps providing them.
+// `rusty::Executor`, `rusty::Vec`, `rusty::BTreeMap`, `rusty::BTreeSet`
+// live in C++20 modules now. Re-export the underlying modules via the
+// rusty umbrella so `import rusty;` continues to provide them.
 export import rusty.async;
 export import vec_port.vec;
+export import btree_port.btree.map;
+export import btree_port.btree.set;
 
 export namespace rusty {
 
 // VecLegacy retired — `rusty::Vec<T,A>` is the transpiled rustc Vec.
 template<typename T, typename A = ::rusty::alloc::Global>
 using Vec = ::Vec<T, A>;
+
+// rusty::BTreeMap / rusty::BTreeSet alias the transpiled rustc port.
+// Note: no Compare parameter — Rust's BTreeMap uses the Ord trait
+// directly, mirrored in C++ via operator<. Consumers that need a
+// custom comparator should use the deep path explicitly.
+template<typename K, typename V, typename A = ::rusty::alloc::Global>
+using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
+
+template<typename T, typename A = ::rusty::alloc::Global>
+using BTreeSet = ::btree_port::btree::set::BTreeSet<T, A>;
 
 } // export namespace rusty
 
