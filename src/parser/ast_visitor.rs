@@ -90,20 +90,24 @@ fn is_forward_function(name: &str) -> bool {
     name == "forward" || name == "std::forward" || name.ends_with("::forward")
 }
 
-/// Safely tokenize a source range, returning empty Vec if the range is invalid
+/// Safely extract token spellings for a source range, returning empty Vec if
+/// the range is invalid.
 ///
 /// The clang-rust bindings can crash when tokenizing ranges from built-in
 /// locations or certain system headers. This function checks that the range
-/// has a valid file location before attempting to tokenize.
-fn safe_tokenize<'a>(range: &clang::source::SourceRange<'a>) -> Vec<clang::token::Token<'a>> {
+/// has a valid file location, then reads and tokenizes the source slice
+/// directly. The checker only needs spellings at current call sites; avoiding
+/// `SourceRange::tokenize()` also avoids libclang returning invalid token
+/// buffers for some generated module ranges.
+fn safe_tokenize(range: &clang::source::SourceRange<'_>) -> Vec<String> {
     // Check if the range has a valid file - if not, it's from a built-in
     // location and tokenizing it will crash
     let start_loc = range.get_start().get_file_location();
     let end_loc = range.get_end().get_file_location();
 
-    if start_loc.file.is_none() || end_loc.file.is_none() {
+    let (Some(start_file), Some(end_file)) = (start_loc.file, end_loc.file) else {
         return Vec::new();
-    }
+    };
 
     // Also check that the locations are valid (non-zero line/column)
     // Invalid ranges from system headers can have file but 0 offsets
@@ -119,7 +123,95 @@ fn safe_tokenize<'a>(range: &clang::source::SourceRange<'a>) -> Vec<clang::token
         return Vec::new();
     }
 
-    range.tokenize()
+    let start_path = start_file.get_path();
+    let end_path = end_file.get_path();
+    if start_path != end_path {
+        return Vec::new();
+    }
+
+    let start = start_loc.offset as usize;
+    let end = end_loc.offset as usize;
+    if start >= end {
+        return Vec::new();
+    }
+
+    let Ok(contents) = std::fs::read_to_string(&start_path) else {
+        return Vec::new();
+    };
+    let Some(source) = contents.get(start..end) else {
+        return Vec::new();
+    };
+
+    lex_cpp_token_spellings(source)
+}
+
+fn lex_cpp_token_spellings(source: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    let bytes = source.as_bytes();
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && is_ident_byte(bytes[i]) {
+                i += 1;
+            }
+            tokens.push(source[start..i].to_string());
+            continue;
+        }
+
+        if b.is_ascii_digit() {
+            let start = i;
+            i += 1;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'.' | b'_' | b'\''))
+            {
+                i += 1;
+            }
+            tokens.push(source[start..i].to_string());
+            continue;
+        }
+
+        if b == b'"' || b == b'\'' {
+            let quote = b;
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i = (i + 2).min(bytes.len()),
+                    c if c == quote => {
+                        i += 1;
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+            tokens.push(source[start..i].to_string());
+            continue;
+        }
+
+        if let Some(op) = BINARY_OPERATORS
+            .iter()
+            .filter(|op| op.len() > 1)
+            .find(|op| source[i..].starts_with(**op))
+        {
+            tokens.push((*op).to_string());
+            i += op.len();
+            continue;
+        }
+
+        tokens.push((b as char).to_string());
+        i += 1;
+    }
+
+    tokens
 }
 
 /// Check if an entity represents a call to an overloaded operator->
@@ -219,8 +311,7 @@ fn check_for_unsafe_annotation(entity: &Entity) -> bool {
             return false;
         }
         let is_line_comment = trimmed.starts_with("//");
-        let is_block_comment_single_line =
-            trimmed.contains("/*") && trimmed.contains("*/");
+        let is_block_comment_single_line = trimmed.contains("/*") && trimmed.contains("*/");
         let is_block_comment_open = trimmed.starts_with("/*") || trimmed.starts_with("*");
         if !is_line_comment && !is_block_comment_single_line && !is_block_comment_open {
             return false;
@@ -343,9 +434,7 @@ pub fn get_qualified_name(entity: &Entity) -> String {
                     }
                 }
             }
-            EntityKind::ClassDecl
-            | EntityKind::StructDecl
-            | EntityKind::ClassTemplate => {
+            EntityKind::ClassDecl | EntityKind::StructDecl | EntityKind::ClassTemplate => {
                 if crossed_function_body {
                     // Local-method-body type — skip the enclosing class.
                 } else if let Some(parent_name) = parent.get_name() {
@@ -766,7 +855,7 @@ fn extract_expression_from_entity(entity: &Entity) -> Expression {
                 if let Some(range) = entity.get_range() {
                     let tokens = safe_tokenize(&range);
                     if let Some(first_token) = tokens.first() {
-                        if first_token.get_spelling() == "&" {
+                        if first_token == "&" {
                             return Expression::AddressOf(Box::new(inner));
                         }
                     }
@@ -789,11 +878,10 @@ fn extract_expression_from_entity(entity: &Entity) -> Expression {
             if let Some(range) = entity.get_range() {
                 let tokens: Vec<_> = safe_tokenize(&range);
                 if let Some(token) = tokens.first() {
-                    let spelling = token.get_spelling();
-                    if spelling == "0" {
+                    if token == "0" {
                         return Expression::Literal("0".to_string());
                     }
-                    return Expression::Literal(spelling);
+                    return Expression::Literal(token.clone());
                 }
             }
             Expression::Literal("0".to_string())
@@ -1424,20 +1512,19 @@ fn var_decl_has_initializer(entity: &Entity) -> bool {
     false
 }
 
-/// Walk a token list (from libclang's safe_tokenize) and return true
+/// Walk a token spelling list and return true
 /// if there is an initializer-introducing token (`=`, `{`, or `(`)
 /// after the variable name and before the next `;` or `,`.
-fn scan_tokens_for_initializer(tokens: &[clang::token::Token], name: &str) -> bool {
+fn scan_tokens_for_initializer(tokens: &[String], name: &str) -> bool {
     let mut seen_name = false;
     for token in tokens {
-        let s = token.get_spelling();
         if !seen_name {
-            if s == name {
+            if token == name {
                 seen_name = true;
             }
             continue;
         }
-        match s.as_str() {
+        match token.as_str() {
             "=" | "{" | "(" => return true,
             ";" | "," => return false,
             _ => continue,
@@ -1459,8 +1546,7 @@ fn source_line_has_initializer(line: &str, name: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = line[start..].find(name) {
         let abs = start + pos;
-        let before_ok = abs == 0
-            || !is_ident_byte(bytes[abs - 1]);
+        let before_ok = abs == 0 || !is_ident_byte(bytes[abs - 1]);
         let after = abs + name_bytes.len();
         let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
         if before_ok && after_ok {
@@ -2953,14 +3039,10 @@ fn extract_expression(entity: &Entity) -> Option<Expression> {
                             // Only tokenize if not in a system header (avoids crashes)
                             if !range.is_in_system_header() {
                                 let tokens = safe_tokenize(&range);
-                                debug_println!(
-                                    "DEBUG: BinaryOperator tokens: {:?}",
-                                    tokens.iter().map(|t| t.get_spelling()).collect::<Vec<_>>()
-                                );
+                                debug_println!("DEBUG: BinaryOperator tokens: {:?}", tokens);
                                 for token in tokens {
-                                    let spelling = token.get_spelling();
-                                    if is_binary_operator(&spelling) {
-                                        found_op = Some(spelling);
+                                    if is_binary_operator(&token) {
+                                        found_op = Some(token);
                                         break;
                                     }
                                 }
