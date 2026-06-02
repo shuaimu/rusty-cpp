@@ -592,6 +592,28 @@ public:
           && std::is_convertible_v<decltype(*std::declval<U&>()), T&>
     Option(U& ref_like) : ptr(&static_cast<T&>(*ref_like)) {}
 
+    // Converting ctor from `Option<U*>` (pointer-valued Option) to
+    // `Option<T&>` (reference Option). The transpiler maps Rust's
+    // `Iterator::Item = &T` to C++ `Option<T&>`, but several
+    // hand-written iterators (notably `rusty::slice_iter::Iter`)
+    // return `Option<T*>` for storage reasons. Without this ctor the
+    // pointer/reference shapes don't bridge.
+    //
+    // SAFETY: We assume the source `Option<U*>` was either None or
+    // held a valid (non-null) pointer. None propagates; Some(p)
+    // becomes a reference to *p. Some(null) is already a misuse of
+    // the Option<T*> contract.
+    template<typename U>
+    requires std::is_convertible_v<U*, T*>
+    Option(Option<U*> opt) {
+        if (opt.is_some()) {
+            U* raw = std::move(opt).unwrap();
+            ptr = static_cast<T*>(raw);
+        } else {
+            ptr = nullptr;
+        }
+    }
+
     // Copy constructor - pointer/reference options are always copyable
     Option(const Option& other) = default;
 
@@ -851,6 +873,40 @@ public:
     requires std::is_convertible_v<const U&, const T&>
     Option(const Option<const U&>& other)
         : ptr(other.is_some() ? &static_cast<const T&>(other.unwrap()) : nullptr) {}
+
+    // Converting ctor from `Option<U*>` (pointer-valued Option) to
+    // `Option<const T&>` (const-reference Option). The transpiler
+    // maps Rust's `Iterator::Item = &T` to C++ `Option<const T&>`,
+    // but several hand-written iterators (notably
+    // `rusty::slice_iter::Iter`) return `Option<T*>` for storage
+    // reasons. Without this ctor the pointer/reference shapes
+    // don't bridge. See rusty-std-book §6.4 for the writeup.
+    //
+    // SAFETY: We assume the source `Option<U*>` was either None or
+    // held a valid (non-null) pointer. None propagates; Some(p)
+    // becomes a reference to *p. Some(null) is already a misuse of
+    // the Option<T*> contract.
+    template<typename U>
+    requires std::is_convertible_v<const U*, const T*>
+    Option(Option<U*> opt) {
+        if (opt.is_some()) {
+            U* raw = std::move(opt).unwrap();
+            ptr = static_cast<const T*>(raw);
+        } else {
+            ptr = nullptr;
+        }
+    }
+
+    template<typename U>
+    requires std::is_convertible_v<const U*, const T*>
+    Option(Option<const U*> opt) {
+        if (opt.is_some()) {
+            const U* raw = std::move(opt).unwrap();
+            ptr = static_cast<const T*>(raw);
+        } else {
+            ptr = nullptr;
+        }
+    }
 
     // Copy constructor - pointer/reference options are always copyable
     Option(const Option& other) = default;

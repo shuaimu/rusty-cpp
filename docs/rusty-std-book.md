@@ -85,6 +85,7 @@ Sibling docs:
   - [6.3 `collections::LinkedList`](#63-collectionslinkedlist--intrusive-doubly-linked)
   - [6.4 What's still on deck (Tier 2 → Tier 1 follow-up)](#64-whats-still-on-deck-tier-2--tier-1-follow-up)
   - [6.5 Recipe used across all three Tier-2 ports](#65-recipe-used-across-all-three-tier-2-ports)
+  - [6.10 Iterator Rust → C++ impedance (case study)](#610-iterator-rust--c-impedance-case-study)
 
 Each completed port will graduate into its own chapter (parallel to
 Chapter 1 for BTreeMap). Chapter 3's tables stay as the live
@@ -3443,6 +3444,13 @@ Dependencies: just `rusty::Box` (hand-written). No vec_port dep.
   next-largest user-value ports per §3.2.
 - `Rc<T>` / `Arc<T>` — **Phase A1 done** as of this session (see §6.7).
 - Tier 4 items (`OnceCell`, `CString`, `Path`, etc.) — defer per §3.5.
+- **Iterator surfaces** — extending tests beyond `push`/`pop`/`as_slice`
+  hits a Rust↔C++ impedance cluster. One half is now fixed in the
+  library (`Option<T&>` ↔ `Option<T*>` converting ctor); two more
+  follow-ups (`rusty::iter` dispatcher gap on Vec; transpiler's
+  transparent-newtype unwrap leaking into struct field types) are
+  documented in §6.10. Affects every transpiled port that walks
+  iterators (binary_heap, vec_deque, linked_list, hashbrown, btree).
 
 ### 6.5 Recipe used across all Tier-2 / Tier-3 ports — see §6.9 below for the canonical block
 
@@ -3561,3 +3569,199 @@ cp /tmp/<PORT>_port/cpp_out/*.cppm transpiled/<PORT>_port/
 
 Once a port reaches "library builds clean," a single smoke test
 exercising the most-used public methods is enough to call Phase C done.
+
+### 6.10 Iterator Rust → C++ impedance (case study)
+
+This section grew out of a push to extend the binary_heap_port test
+surface. The smoke tests we already had covered `push`, `pop`, `peek`,
+`clear`, `len`, `as_slice`. Adding a test that called `h.iter()` —
+the most innocuous-looking method on the type — surfaced six
+instantiation-time errors that all trace back to **two structural
+mismatches** between Rust's iterator semantics and our hand-written
+runtime.
+
+The errors looked like a Cluster — they all fire when `BinaryHeap<int,
+Global>::iter()` is instantiated:
+
+```
+binary_heap_port.cppm:4218: error: no viable conversion from 'const Vec<int>'
+                            to 'rusty::slice_iter::Iter<const int>'
+binary_heap_port.cppm:3795: error: no viable conversion from returned value
+                            of type 'Option<pointer>' to function return
+                            type 'Option<const int &>'
+binary_heap_port.cppm:4221: error: no matching conversion for functional-
+                            style cast from BinaryHeap<int> to
+                            IntoIterSorted<int, Global>
+binary_heap_port.cppm:4085: error: no matching function for call to 'swap'
+slice.hpp:1111:              error: static assertion failed — rusty::iter
+                            requires iter()/data()/size()/...
+vec_port.vec.cppm:5305:      error: no matching function for call to
+                            'from_iter'
+```
+
+The transpiler isn't generating bad code in any single place — each
+error sits where Rust's type system would have papered over an
+impedance our C++ runtime expresses differently. There are three
+underlying issues:
+
+#### (A) `Option<&T>` ↔ `Option<T*>` (library, fixed)
+
+The transpiled `binary_heap_port::Iter<T>` is a thin wrapper:
+
+```cpp
+struct Iter {
+    rusty::slice_iter::Iter<const T> iter;     // underlying
+    rusty::Option<const T&> next() {            // declared as Option<&T>
+        return this->iter.next();               // inner returns Option<T*>
+    }
+};
+```
+
+The transpiler maps Rust's `Iterator::Item = &T` to C++
+`Option<const T&>`. But our hand-written `rusty::slice_iter::Iter`
+stores `T*` internally and returns `Option<pointer>` (i.e.
+`Option<const T*>`) for storage reasons — `Option<T&>` is awkward
+in the generic template, so the Iter implementor split its
+specialization to use pointer storage. The wrapper inherits the
+shape mismatch.
+
+**Fix** (`include/rusty/option.hpp`): add a converting ctor on the
+`Option<T&>` and `Option<const T&>` specializations that takes
+`Option<U*>` (pointer Option), unwraps it to a raw pointer, and
+stores in the reference Option's internal `T*`. None propagates,
+`Some(p)` becomes `Some(*p)` semantically.
+
+```cpp
+template<typename U>
+requires std::is_convertible_v<const U*, const T*>
+Option(Option<U*> opt) {
+    if (opt.is_some()) {
+        ptr = static_cast<const T*>(std::move(opt).unwrap());
+    } else {
+        ptr = nullptr;
+    }
+}
+```
+
+This fix is generic — every port that wraps a hand-written
+`slice_iter::Iter` and re-declares the Rust-shape `Option<&T>` signature
+benefits without further change.
+
+#### (B) `rusty::iter(Vec<T>)` dispatcher gap (library, still open)
+
+After fix (A) lands, one error remains:
+
+```
+binary_heap_port.cppm:4218: no viable conversion from 'const Vec<int>'
+                            to 'rusty::slice_iter::Iter<const int>'
+```
+
+The `iter()` body is:
+
+```cpp
+Iter<T> iter() const {
+    return Iter<T>{.iter = rusty::iter(this->data)};
+}
+```
+
+`rusty::iter(Range&&)` (in `include/rusty/slice.hpp:1091`) is a dispatch
+helper with five `if constexpr` arms — `.iter()`, option-like `next()`,
+`.data()` + `.size()`, `std::begin`/`std::end`, dereferenceable.
+`vec_port::Vec<T>` exposes `size()`, `begin()`, `end()`, and `as_ptr()` /
+`as_mut_ptr()` — but **not `data()`**. So arm 3 (the one that builds a
+`slice_iter::Iter` from `data()` + `size()`) falls through, arm 4
+(`std::begin`/`std::end`) fires, and the function returns the Vec
+itself. The aggregate init then tries `Iter<T>{.iter = const Vec<int>}`,
+which fails.
+
+**Possible fixes**:
+- Add `data()` to `vec_port::Vec` as an alias for `as_ptr()` (Rust's
+  `Vec::as_ptr` is the closest match, and slices/spans expose
+  `data()`). A few-line patcher rule.
+- Or rework `rusty::iter`'s dispatch to detect `as_ptr`/`as_mut_ptr` +
+  `size()` in addition to `data()`. Library-only change, no Vec
+  edit needed.
+
+Either path unblocks `BinaryHeap::iter()`, and the same gap is
+likely lurking in any port that calls `rusty::iter(Vec<...>)` rather
+than going through the iterator structurally.
+
+#### (C) `IntoIterSorted::inner` field type (transpiler, still open)
+
+The Rust source is:
+
+```rust
+pub struct IntoIterSorted<T, A: Allocator = Global> {
+    inner: BinaryHeap<T, A>,
+}
+
+impl<T, A: Allocator> BinaryHeap<T, A> {
+    pub fn into_iter_sorted(self) -> IntoIterSorted<T, A> {
+        IntoIterSorted { inner: self }
+    }
+}
+```
+
+The transpiled C++ has:
+
+```cpp
+struct IntoIterSorted {
+    using Item = T;
+    ::Vec<T, A> inner;   // ← should be BinaryHeap<T, A>
+    ...
+};
+
+IntoIterSorted<T, A> into_iter_sorted() {
+    return IntoIterSorted<T, A>(std::move((*this)));   // tries to pass BinaryHeap
+}                                                       // to ctor wanting Vec
+```
+
+The field type was incorrectly unwrapped from `BinaryHeap<T, A>` (the
+Rust source) to `Vec<T, A>` (BinaryHeap's only internal field). This
+looks like the transpiler's "transparent newtype" handling overreaching
+— it normally helps when a struct is a single-field wrapper, but here
+a *different* struct refers to the wrapper by name, and the unwrap
+shouldn't propagate across that boundary.
+
+**Investigation hook**: search `codegen.rs` for the rule that
+substitutes a struct name with its first field's type. The fix should
+be: only apply the unwrap on call sites where the wrapper itself is
+being passed (e.g. `Vec::from(BinaryHeap)`), not on field-type emits
+inside *other* structs that name `BinaryHeap`.
+
+**Workaround**: a per-port patcher rule that flips `::Vec<T, A> inner;`
+back to `arc_port::BinaryHeap<T, A> inner;` (or the right name in each
+port's namespace).
+
+#### Why these surface as a cluster
+
+Errors (A), (B), and (C) all live inside the `iter()` / `into_iter()` /
+`into_iter_sorted()` body and feed each other in the compiler's
+diagnostic output. A single failed conversion at the `Iter<T>{...}` aggregate
+init produces follow-on errors when the compiler tries to verify
+`Iter::next()` and `IntoIterSorted`'s ctor as part of the same
+overload-resolution attempt. The earlier triage in this session
+counted six errors; (A) handles three of them outright, (B) handles
+two more, and (C) is the remaining one (`IntoIterSorted` ctor).
+
+#### Generic lesson
+
+Iterator-adjacent code is where Rust→C++ impedance is densest because
+Rust's iterator protocol leans on **three** features C++ lacks
+directly: `&T` as a value-like type (we fake it with pointer storage),
+returning `!` from `panic!()` for unreachable arms (we patch as
+`statement; unreachable();`), and the trait-impl emit shape for things
+like `From<X> for Y` (we want a conversion ctor, but the transpiler
+sometimes emits a `Y::from(X)` static method instead).
+
+If you hit a cascade of "no viable conversion" errors inside a
+transpiled iterator wrapper, walk the chain in this order:
+1. Is the inner library type using `T*` storage while the wrapper
+   says `&T`? → fix (A) above.
+2. Is the wrapper's `iter()` body calling `rusty::iter(some_vec)`
+   when the Vec doesn't satisfy any arm of the dispatcher? → fix
+   (B) above.
+3. Is the wrapper's `into_*` body trying to construct a successor
+   type whose Rust field type was a wrapper itself? → fix (C) above
+   (or the per-port-patcher workaround).
+
