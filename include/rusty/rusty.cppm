@@ -91,6 +91,7 @@ export {
 #include <rusty/process.hpp>
 #include <rusty/error.hpp>
 #include <rusty/move.hpp>
+#include <rusty/dispatch.hpp>
 #include <rusty/sync/atomic.hpp>
 #include <rusty/sync/mpsc.hpp>
 #include <rusty/sys/fs.hpp>

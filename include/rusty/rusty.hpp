@@ -88,6 +88,9 @@
 // Move semantics (Rust-like reference handling)
 #include "rusty/move.hpp"
 
+// Universal auto-deref method dispatcher (rusty::deref_call)
+#include "rusty/dispatch.hpp"
+
 // Synchronization primitives (std::sync equivalent)
 #include "rusty/sync/atomic.hpp"
 #include "rusty/sync/mpsc.hpp"
