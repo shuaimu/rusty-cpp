@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Post-transpile patches for the binary_heap_port C++20 module.
+
+`library/alloc/src/collections/binary_heap/mod.rs` →
+`transpiled/binary_heap_port/binary_heap_port.cppm`.
+
+Codifies the 14 inline patches that previously lived embedded in the
+vendored .cppm. Mirrors docs/rc_port/post_transpile_patch.py shape.
+
+Usage:
+    python3 post_transpile_patch.py <cpp_out_dir>
+"""
+
+import re
+import sys
+from pathlib import Path
+
+
+BH_FILE = "binary_heap_port.cppm"
+
+
+def patch_vec_namespace(cpp_out: Path) -> int:
+    """Pre-VecLegacy: `rusty::Vec<...>` references resolved through
+    `rusty/vec.hpp`. Post-retirement, `rusty::Vec` is only in
+    `rusty/rusty.cppm` (the module); the `<rusty/rusty.hpp>` umbrella
+    that binary_heap_port.cppm `#include`s doesn't surface it. Rewrite
+    to global `::Vec` (which becomes visible once we inject
+    `import vec_port.vec;`).
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # `rusty::Vec<T, A>` / `rusty::Vec<T>` → `::Vec<...>`.
+    text = re.sub(r"(?<![A-Za-z0-9_])rusty::Vec<", "::Vec<", text)
+    # `using rusty::Vec;` — drop entirely.
+    text = re.sub(
+        r"^using rusty::Vec;\s*$",
+        "// using rusty::Vec; — Vec resolves via vec_port import",
+        text, flags=re.MULTILINE)
+    # `rusty::Vec{}` (bare default-init — bulk Vec rewrite misses it)
+    text = re.sub(r"rusty::Vec\{\}", "::Vec<T>{}", text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_inject_vec_imports(cpp_out: Path) -> int:
+    """Add `import vec_port.vec;` and `import vec_port.vec.into_iter;`
+    right after the module declaration so `::Vec` and `::IntoIter`
+    resolve.
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    if "import vec_port.vec;" in text:
+        return 0
+    text = text.replace(
+        "export module binary_heap_port;\n",
+        "export module binary_heap_port;\n"
+        "\n"
+        "import vec_port.vec;  // patcher-injected for ::Vec\n"
+        "import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter\n",
+        1)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_vec_into_iter_drain(cpp_out: Path) -> int:
+    """Transpiler emits `vec::IntoIter<T,A>` / `vec::Drain<T,A>` for
+    references to vec_port types. The `vec::` namespace alias isn't
+    set up here; the types live at global scope after the import.
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = re.sub(r"(?<![A-Za-z0-9_])vec::IntoIter", "::IntoIter", text)
+    text = re.sub(r"(?<![A-Za-z0-9_])vec::Drain", "::Drain", text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_stub_visit_byte_buf(cpp_out: Path) -> int:
+    """`visit_byte_buf(rusty::Vec<uint8_t>)` in the serde-de prelude
+    lives in the global module fragment (before the export module
+    line), so the vec_port import hasn't kicked in. Stub the body —
+    binary_heap_port doesn't use serde paths.
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    stub = (
+        "rusty::Result<Value, E> visit_byte_buf(auto&& value) "
+        "{ (void)value; return rusty::Result<Value, E>::Err(E{}); }"
+    )
+    if stub in text:
+        return 0
+    text = re.sub(
+        r"rusty::Result<Value, E> visit_byte_buf\([^)]+\)\s*\{[^}]*\}",
+        stub, text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_drop_local_clone(cpp_out: Path) -> int:
+    """Transpiler emits a `template<typename T> auto clone(const T&)`
+    in the prelude that collides with `rusty::clone`. Drop it.
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = re.sub(
+        r"// Clone: dispatches to \.clone\(\) if available, otherwise copy-constructs\.\n"
+        r"template<typename T>\n"
+        r"auto clone\(const T& value\) \{\n"
+        r"if constexpr \(requires \{ value\.clone\(\); \}\) \{\n"
+        r"return value\.clone\(\);\n"
+        r"\} else \{\n"
+        r"return value;\n"
+        r"\}\n"
+        r"\}\n",
+        "// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.\n",
+        text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_collections_namespace(cpp_out: Path) -> int:
+    """`std::collections::TryReserveError` → `rusty::collections::TryReserveError`.
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = re.sub(
+        r"(?<![A-Za-z0-9_])std::collections::TryReserveError",
+        "rusty::collections::TryReserveError", text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_usize_alias(cpp_out: Path) -> int:
+    """Bare `usize` identifier (Rust type name) → `size_t`. But
+    `usize::BITS` is the bit-width constant — preserve as
+    `std::numeric_limits<size_t>::digits`.
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = re.sub(r"\busize\b", "size_t", text)
+    text = re.sub(
+        r"size_t::BITS",
+        "std::numeric_limits<size_t>::digits", text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_nonzero(cpp_out: Path) -> int:
+    """`Option<NonZero<size_t>>` at constexpr non-literal type —
+    drop constexpr, add inline for ODR. Bare `NonZero::new_(1)` needs
+    `rusty::num::NonZero<size_t>::new_(1)`.
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # Drop constexpr on Option<NonZero<size_t>> singletons. Two
+    # shapes: `static constexpr ...` and `constexpr const ...`.
+    text = re.sub(
+        r"static constexpr (rusty::Option<rusty::num::NonZero<size_t>>)",
+        r"static inline \1", text)
+    text = re.sub(
+        r"constexpr (const rusty::Option<rusty::num::NonZero<size_t>>)",
+        r"inline \1", text)
+    # `NonZero::new_(1)` → `rusty::num::NonZero<size_t>::new_(1)`.
+    text = re.sub(
+        r"(?<![A-Za-z0-9_:])NonZero::new_\(",
+        "rusty::num::NonZero<size_t>::new_(", text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_ptr_swap(cpp_out: Path) -> int:
+    """`rusty::ptr::swap` / `ptr::swap` not in our ptr API. Use
+    `std::swap` (semantically equivalent for our purposes).
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = re.sub(r"\b(?:rusty::)?ptr::swap\b", "std::swap", text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_hole_ptr_helpers(cpp_out: Path) -> int:
+    """The `Hole<T>` helper in the sift-up/sift-down path uses Rust's
+    `ptr::read(&T)` (takes ref-as-pointer) and
+    `ptr::copy_nonoverlapping(src, &dst, 1)`. Our `rusty::ptr::read`
+    and `copy_nonoverlapping` want `T*` not `T&`. Also, the cached
+    `elt: ManuallyDrop<T>` needs an explicit `*` to project to `T&`.
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # `rusty::ptr::read(data[pos])` → `rusty::ptr::read(&data[pos])`.
+    text = re.sub(
+        r"rusty::ptr::read\(data\[std::move\(pos\)\]\)",
+        "rusty::ptr::read(&data[std::move(pos)])",
+        text)
+    # `return this->elt` inside `element() const` for Hole — return
+    # `*this->elt`.
+    text = re.sub(
+        r"(const T& element\(\) const \{\n)\s*return this->elt;",
+        r"\1        return *this->elt;",
+        text)
+    # `copy_nonoverlapping(..., this->data[std::move(pos)], 1)` —
+    # the dst arg needs an `&`.
+    text = re.sub(
+        r"copy_nonoverlapping\(([^,]+),\s*this->data\[std::move\(pos\)\],\s*1\)",
+        r"copy_nonoverlapping(\1, &this->data[std::move(pos)], 1)",
+        text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_stub_orphan_for_vec(cpp_out: Path) -> int:
+    """Wrap the `// TODO orphan impl: methods for `Vec`` block in
+    `#if 0`. Same approach as arc_port / rc_port.
+    """
+    path = cpp_out / BH_FILE
+    if not path.exists():
+        return 0
+    lines = path.read_text().splitlines(keepends=True)
+    n = len(lines)
+    out: list[str] = []
+    i = 0
+    changed = False
+    while i < n:
+        if lines[i].startswith("// TODO orphan impl:"):
+            j = i + 1
+            while j < n:
+                line = lines[j]
+                if (
+                    line.startswith("// TODO orphan impl:")
+                    or line.startswith("export ")
+                    or line.startswith("} // namespace")
+                    or line.startswith("namespace ")
+                ):
+                    break
+                j += 1
+            out.append("#if 0  // patcher: orphan-impl block stubbed\n")
+            out.extend(lines[i:j])
+            out.append("#endif  // patcher: orphan-impl block end\n")
+            i = j
+            changed = True
+            continue
+        out.append(lines[i])
+        i += 1
+    if changed:
+        path.write_text("".join(out))
+        return 1
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print(__doc__)
+        return 1
+    cpp_out = Path(sys.argv[1])
+    if not cpp_out.exists():
+        print(f"error: {cpp_out} does not exist")
+        return 1
+
+    patches = [
+        ("vec namespace rewrites", patch_vec_namespace),
+        ("inject vec_port imports", patch_inject_vec_imports),
+        ("vec::IntoIter / vec::Drain → ::", patch_vec_into_iter_drain),
+        ("stub visit_byte_buf", patch_stub_visit_byte_buf),
+        ("drop local clone template", patch_drop_local_clone),
+        ("std::collections → rusty::collections", patch_collections_namespace),
+        ("usize → size_t (+ ::BITS)", patch_usize_alias),
+        ("NonZero literal + type args", patch_nonzero),
+        ("ptr::swap → std::swap", patch_ptr_swap),
+        ("Hole ptr-arg shims (ptr::read, copy_nonoverlapping, *elt)",
+         patch_hole_ptr_helpers),
+        ("stub orphan impl blocks", patch_stub_orphan_for_vec),
+    ]
+    total = 0
+    for name, fn in patches:
+        n = fn(cpp_out)
+        if n:
+            print(f"  applied: {name}")
+        total += n
+    print(f"binary_heap_port patches applied: {total}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

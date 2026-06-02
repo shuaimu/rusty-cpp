@@ -363,6 +363,11 @@ set(TEST_SOURCES
     # clear + push-after-pop preserves heap.
     tests/binary_heap_port_comprehensive_test.cpp
 
+    # binary_heap_port iter + bulk: iter, into_iter_sorted, as_slice,
+    # into_sorted_vec, append. Hits the iterator and rebuild paths
+    # the other tests don't touch (Cluster C6 in STATUS.md).
+    tests/binary_heap_port_iter_test.cpp
+
     # cell_port — transpiled rustc Cell / RefCell (library/core/src/cell.rs).
     # Phase B/C smoke test: import cell_port, build BorrowError /
     # BorrowMutError + format them via operator<<.
