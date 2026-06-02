@@ -137,7 +137,7 @@ endif()
 # ──────────────────────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-    foreach(_port arc_port string_port)
+    foreach(_port string_port)
         add_library(${_port} STATIC)
         target_sources(${_port}
             PUBLIC FILE_SET CXX_MODULES FILES
@@ -161,14 +161,18 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_compile_options(rc_port PRIVATE -O3 -DNDEBUG -march=native )
     target_link_libraries(rc_port PUBLIC vec_port)
 
-    # arc_port: Cluster A `Box<auto>` regression resolved transpiler-side
-    # (try_new / try_new_in / new_in / new_uninit_in now follow the same
-    # arg-inference path as new / new_ / make — see transpiler/src/
-    # codegen.rs). Remaining Phase B blockers are arc-specific API gaps
-    # (rusty::ptr::addr_eq, rusty::Layout::for_value_raw, Vec::from_raw_parts_in,
-    # Arc<T,A> two-template-arg vs hand-written rusty::Arc<T>) — see
-    # docs/arc_port/STATUS.md. Still on bridge stub until those land.
-    # The full transpiled `arc_port.cppm` lives next to the stub.
+    # arc_port: full transpiled body from library/alloc/src/sync.rs.
+    # Pipeline mirrors rc_port — see docs/arc_port/{prep.sh,
+    # post_transpile_patch.py}.
+    add_library(arc_port STATIC)
+    target_sources(arc_port
+        PUBLIC FILE_SET CXX_MODULES FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/arc_port/arc_port.cppm
+    )
+    target_include_directories(arc_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(arc_port PUBLIC cxx_std_23)
+    target_compile_options(arc_port PRIVATE -O3 -DNDEBUG -march=native )
+    target_link_libraries(arc_port PUBLIC vec_port)
 
     # linked_list_port: full transpiled body (the transpiler fix landed
     # for the Cluster A 'Box<auto>::new_in' regression — see

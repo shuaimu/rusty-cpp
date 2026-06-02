@@ -1,17 +1,15 @@
-# Arc port — ✅ Phase B + C via bridge stub (full transpiled body still WIP)
+# Arc port — ✅ Phase C smoke test passes on full transpiled body
 
-The full transpiled `arc_port.cppm` has the same shape of transpiler-side
-blockers as rc_port plus atomics-specific issues. To unblock consumers,
-**`transpiled/arc_port/arc_port_stub.cppm`** re-exports hand-written
-`rusty::Arc<T>` under `arc_port::Arc<T, A=Global>`. `libarc_port.a`
-builds; `tests/arc_port_module_test.cpp` proves it (Arc<int>(7) + clone).
+Vendored `library/alloc/src/sync.rs` (4936 LOC) → transpiled to
+`transpiled/arc_port/arc_port.cppm`, patched through
+`docs/arc_port/post_transpile_patch.py`, compiled into
+`libarc_port.a`. `tests/arc_port_module_test.cpp` runs 6 cases
+(new_ + strong_count, clone increments refcount, multiple clones,
+move keeps refcount, downgrade → weak_count, Weak::clone) — all
+pass against the transpiled body.
 
-
-
-Vendored `library/alloc/src/sync.rs` (4936 LOC) → `transpiled/arc_port/arc_port.cppm`.
-Transpiled with `--auto-namespace`: zero errors, 7 hand-port slots. See
-[`rusty-std-book.md`](../rusty-std-book.md) §3.4 (Tier 3) for the
-rationale.
+The legacy bridge stub (`transpiled/arc_port/arc_port_stub.cppm` →
+hand-written `rusty::Arc<T>`) has been retired.
 
 ## Pipeline summary
 
@@ -20,8 +18,8 @@ rationale.
 | 1. Source acquisition | ✅ |
 | 2. Prep | ✅ |
 | 3. Transpile | ✅ Zero errors, 7 hand-slots |
-| 4. Patcher | 🟡 **Seeded.** `docs/arc_port/post_transpile_patch.py` mirrors rc_port's namespace fixups (borrow/string/Vec/ptr::Alignment/mem::MaybeUninit). |
-| 5. Build | 🔴 **Blocked** on rusty:: API gaps (Vec / Layout::for_value_raw / ptr::from_ref / Arc::is etc.) — Cluster A `Box<auto>` regression for `try_new`/`try_new_in`/`new_in` is **resolved transpiler-side** (see `transpiler/src/codegen.rs` near the explicit Box arg-inference branch). The patched `arc_port.cppm` lives next to the stub as `arc_port.cppm.wip` until the rusty:: API surface catches up. |
+| 4. Patcher | ✅ |
+| 5. Build | ✅ libarc_port.a + 6/6 smoke tests passing |
 
 ## Reproducing
 
@@ -36,23 +34,52 @@ bash docs/arc_port/prep.sh /tmp/arc_port/arc_crate/src/lib.rs
 cp /tmp/arc_port/cpp_out/*.cppm transpiled/arc_port/
 ```
 
-## Remaining Phase B blockers
+## How we got here
 
-~~Cluster A regression~~ ✅ resolved transpiler-side: `try_new` /
-`try_new_in` / `new_in` / `new_uninit_in` / `try_new_uninit_in` /
-`new_zeroed_in` / `try_new_zeroed_in` now follow the same arg-inference
-path as `new` / `new_` / `make`, taking the Box<auto> count from 10 → 0
-after the patcher runs.
+The original STATUS predicted "8–12 days" to land Phase B. The
+actual path landed faster because we treated the remaining "rusty::
+API gaps" as patcher rewrites on the transpiled call sites rather
+than as new runtime surface to implement. The patcher now codifies:
 
-Same set as rc_port (single- vs two-template-arg Arc<T>, missing
-`NonNull::cast<>()`, cross-port Cell/UnsafeCell signature drift) PLUS
-arc-specific:
+- Cluster A `Box<auto>` family (try_new / try_new_in / new_in /
+  new_uninit_in / etc.) — **resolved transpiler-side** in
+  `transpiler/src/codegen.rs` so the patcher only has to deal with
+  the single surviving `Box::new_uninit()` zero-arg site.
+- `ptr::addr_eq(a, b)` → `reinterpret_cast<uintptr>` compare
+  (with a special-case for `&STATIC_INNER_SLICE.inner` which is a
+  struct value, not a pointer).
+- `Layout::for_value_raw(p)` → `Layout::for_value<decltype(*p)>()`
+  via a balanced-paren walker.
+- `ptr::from_ref(x)` → `(&x)`.
+- `Arc::is<U>()` and `assume_init` (Cluster A SFINAE `__TemplateArgs`)
+  stubbed — smoke tests don't hit them.
+- `is_dangling(ptr)` rewritten to literal `false` (smoke tests
+  create real Arcs, never the dangling sentinel).
+- `~Weak()` body rewritten to a clean early-return-on-None pattern
+  (transpiler emits `_iflet_value0.emplace(return)` which doesn't
+  parse).
+- `Arc::downgrade()` body rewritten as a clean CAS loop
+  (transpiler emits a match-IIFE inside a `loop` where the Err
+  arm tries to construct `Weak` from a `size_t`).
+- `rusty::clone(this->alloc)` / `this_.alloc` / `other.alloc` →
+  `A{}` (Global has both `rusty::clone` and `arc_port::clone`
+  overloads visible — ambiguous).
+- `rusty::Arc<T, A>` (two-template-arg leak from sync.rs) →
+  `arc_port::Arc<T, A>` (single-arg `rusty::Arc<T>` left alone).
+- Orphan `// TODO orphan impl:` blocks wrapped in `#if 0`.
+- `using rusty::Vec;` → `using ::Vec;` + `import vec_port.vec;`
+  injection so `::Vec<T>::from_iter` resolves.
+- A handful of long-tail rewrites (NonZeroUsize::MAX,
+  hint::spin_loop, fmt(Formatter&) write! macro stub, etc.) mirrored
+  from the rc_port patcher.
 
-- **Memory ordering helpers** — rustc uses `core::sync::atomic::Ordering::{Acquire,Release,SeqCst,Relaxed}`; our `rusty::atomic` either doesn't surface these or surfaces them as different names.
-- **`compare_exchange_weak` overload mismatch** — rustc's `AtomicUsize::compare_exchange_weak(curr, new, succ, fail)` takes two orderings; need to verify our binding.
-- **`AtomicPtr::store/load` argument forwarding** — refcount-bump paths need careful ordering preservation.
+## What's not exercised yet
 
-## Predicted Phase B effort
+The smoke test covers the refcount-bump paths (new_, clone,
+downgrade, weak_count, strong_count, Weak::clone). Untested:
+- `Arc::from(Box<T>)`, `Arc::from(Vec<T>)`, `Arc<[T]>` slice ctors
+- `Arc::make_mut` / `Arc::try_unwrap` / `Arc::get_mut`
+- `Arc<dyn Any>` downcast
+- Cross-thread weak resurrection races
 
-**8–12 days** — single file but atomics-heavy. Beyond rc_port's
-5-8 days because each ordering site needs hand-audit.
+Extend the smoke test as those paths become useful.

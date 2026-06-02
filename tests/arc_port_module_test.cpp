@@ -1,15 +1,81 @@
-// Smoke test for arc_port (Phase B/C bridge module).
+// End-to-end smoke test for the transpiled arc_port
+// (rustc library/alloc/src/sync.rs → arc_port::Arc / arc_port::Weak).
+//
+// Replaces the legacy bridge-stub test that exercised the
+// hand-written `rusty::Arc<T>::make()` API.
 import arc_port;
 
-#include <rusty/arc.hpp>
+#include <rusty/rusty.hpp>
 #include <cassert>
 #include <cstdio>
 
+using arc_port::Arc;
+using arc_port::Weak;
+
+static void test_new_and_strong_count() {
+    auto p = Arc<int>::new_(42);
+    assert(Arc<int>::strong_count(p) == 1);
+    assert(Arc<int>::weak_count(p) == 0);
+}
+
+static void test_clone_increments_refcount() {
+    auto p = Arc<int>::new_(7);
+    assert(Arc<int>::strong_count(p) == 1);
+    {
+        auto p2 = p.clone();
+        assert(Arc<int>::strong_count(p) == 2);
+        assert(Arc<int>::strong_count(p2) == 2);
+    }
+    assert(Arc<int>::strong_count(p) == 1);
+}
+
+static void test_multiple_clones() {
+    auto p = Arc<int>::new_(99);
+    auto p2 = p.clone();
+    auto p3 = p.clone();
+    auto p4 = p2.clone();
+    assert(Arc<int>::strong_count(p) == 4);
+}
+
+static void test_move_does_not_change_refcount() {
+    auto p = Arc<int>::new_(123);
+    assert(Arc<int>::strong_count(p) == 1);
+    auto moved = std::move(p);
+    assert(Arc<int>::strong_count(moved) == 1);
+}
+
+static void test_downgrade_increments_weak_count() {
+    auto p = Arc<int>::new_(55);
+    assert(Arc<int>::weak_count(p) == 0);
+    auto w = Arc<int>::downgrade(p);
+    assert(Arc<int>::strong_count(p) == 1);
+    assert(Arc<int>::weak_count(p) == 1);
+    auto w2 = Arc<int>::downgrade(p);
+    assert(Arc<int>::weak_count(p) == 2);
+}
+
+static void test_weak_clone() {
+    auto p = Arc<int>::new_(88);
+    auto w = Arc<int>::downgrade(p);
+    auto w2 = w.clone();
+    assert(Arc<int>::weak_count(p) == 2);
+}
+
+static void run(const char* name, void (*fn)()) {
+    std::printf("  %s ... ", name);
+    std::fflush(stdout);
+    fn();
+    std::printf("ok\n");
+}
+
 int main() {
-    arc_port::Arc<int> p = arc_port::Arc<int>::make(7);
-    assert(*p == 7);
-    arc_port::Arc<int> p2 = p;
-    assert(*p2 == 7);
-    std::printf("arc_port (stub bridge) smoke OK: Arc<int>(7) + clone\n");
+    std::printf("arc_port (transpiled) tests:\n");
+    run("new_ + strong_count",         test_new_and_strong_count);
+    run("clone increments refcount",   test_clone_increments_refcount);
+    run("multiple clones",             test_multiple_clones);
+    run("move keeps refcount",         test_move_does_not_change_refcount);
+    run("downgrade -> weak_count",     test_downgrade_increments_weak_count);
+    run("Weak::clone",                 test_weak_clone);
+    std::printf("arc_port: all tests passed\n");
     return 0;
 }
