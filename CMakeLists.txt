@@ -310,6 +310,9 @@ set(TEST_SOURCES
     tests/test_channel.cpp
     tests/rusty_condvar_test.cpp
 
+    # Universal auto-deref dispatcher (rusty::deref_call).
+    tests/dispatch_test.cpp
+
     # Annotation system tests - WORKING (fixed missing includes)
     tests/test_external_annotations.cpp
     tests/test_simplified_external.cpp
