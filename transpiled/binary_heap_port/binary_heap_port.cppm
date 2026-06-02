@@ -4309,10 +4309,10 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct PeekMut {
     using Target = T;
-    ::Vec<T, A>& heap;
+    BinaryHeap<T, A>& heap;
     rusty::Option<rusty::num::NonZero<size_t>> original_len;
     mutable bool _rusty_forgotten = false;
-    PeekMut(::Vec<T, A>& heap_init, rusty::Option<rusty::num::NonZero<size_t>> original_len_init) : heap(heap_init), original_len(std::move(original_len_init)) {}
+    PeekMut(BinaryHeap<T, A>& heap_init, rusty::Option<rusty::num::NonZero<size_t>> original_len_init) : heap(heap_init), original_len(std::move(original_len_init)) {}
     PeekMut(const PeekMut&) = default;
     PeekMut(PeekMut&& other) noexcept : heap(other.heap), original_len(std::move(other.original_len)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -4430,7 +4430,7 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct IntoIterSorted {
     using Item = T;
-    ::Vec<T, A> inner;
+    BinaryHeap<T, A> inner;
 
     const A& allocator() const {
         return this->inner.allocator();
@@ -4459,9 +4459,9 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct DrainSorted {
     using Item = T;
-    ::Vec<T, A>& inner;
+    BinaryHeap<T, A>& inner;
     mutable bool _rusty_forgotten = false;
-    DrainSorted(::Vec<T, A>& inner_init) : inner(inner_init) {}
+    DrainSorted(BinaryHeap<T, A>& inner_init) : inner(inner_init) {}
     DrainSorted(const DrainSorted&) = default;
     DrainSorted(DrainSorted&& other) noexcept : inner(other.inner) {
         this->_rusty_forgotten = other._rusty_forgotten;

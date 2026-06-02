@@ -3445,13 +3445,13 @@ Dependencies: just `rusty::Box` (hand-written). No vec_port dep.
 - `Rc<T>` / `Arc<T>` — **Phase A1 done** as of this session (see §6.7).
 - Tier 4 items (`OnceCell`, `CString`, `Path`, etc.) — defer per §3.5.
 - **Iterator surfaces** — extending tests beyond `push`/`pop`/`as_slice`
-  hit a Rust↔C++ impedance cluster. Two of the three issues are now
-  fixed in the library — `Option<T&>` ↔ `Option<T*>` converting ctor
-  (option.hpp) and the `begin()`-returning-pointer dispatcher arm in
-  `rusty::iter` (slice.hpp). One follow-up remains: transpiler's
-  transparent-newtype unwrap leaking into struct field types
-  (`IntoIterSorted::inner` typed as `Vec<T,A>` when Rust says
-  `BinaryHeap<T,A>`). See §6.10 for the writeup.
+  hit a Rust↔C++ impedance cluster. All three issues are now fixed:
+  `Option<T&>` ↔ `Option<T*>` converting ctor (option.hpp), the
+  `begin()`-returning-pointer dispatcher arm in `rusty::iter`
+  (slice.hpp), and the wrapper-struct field types restored to
+  `BinaryHeap<T,A>` (the earlier `BinaryHeap → Vec` inline patch
+  turned out to be an over-rewrite — fresh transpile was correct).
+  See §6.10 for the full writeup.
 
 ### 6.5 Recipe used across all Tier-2 / Tier-3 ports — see §6.9 below for the canonical block
 
@@ -3690,52 +3690,62 @@ arm so pointer-returning ranges land here first:
 This is generic: every transpiled port whose vector-like type
 exposes `begin()`-as-pointer benefits. Vec doesn't grow new methods.
 
-#### (C) `IntoIterSorted::inner` field type (transpiler, still open)
+#### (C) Wrapper-struct field types rewritten by an old inline patch (fixed)
 
-The Rust source is:
+This was originally hypothesized as a transpiler "transparent newtype
+unwrap" bug. The investigation found something different — and
+simpler.
 
-```rust
-pub struct IntoIterSorted<T, A: Allocator = Global> {
-    inner: BinaryHeap<T, A>,
-}
-
-impl<T, A: Allocator> BinaryHeap<T, A> {
-    pub fn into_iter_sorted(self) -> IntoIterSorted<T, A> {
-        IntoIterSorted { inner: self }
-    }
-}
-```
-
-The transpiled C++ has:
+Diffing the *fresh* transpile against the vendored .cppm showed the
+transpiler emits the field type correctly:
 
 ```cpp
+// /tmp/binary_heap_port/cpp_out/binary_heap_port.cppm (fresh):
 struct IntoIterSorted {
-    using Item = T;
-    ::Vec<T, A> inner;   // ← should be BinaryHeap<T, A>
-    ...
+    BinaryHeap<T, A> inner;   // CORRECT — matches Rust source
 };
 
-IntoIterSorted<T, A> into_iter_sorted() {
-    return IntoIterSorted<T, A>(std::move((*this)));   // tries to pass BinaryHeap
-}                                                       // to ctor wanting Vec
+// transpiled/binary_heap_port/binary_heap_port.cppm (vendored):
+struct IntoIterSorted {
+    ::Vec<T, A> inner;        // WRONG — was rewritten in-place
+};
 ```
 
-The field type was incorrectly unwrapped from `BinaryHeap<T, A>` (the
-Rust source) to `Vec<T, A>` (BinaryHeap's only internal field). This
-looks like the transpiler's "transparent newtype" handling overreaching
-— it normally helps when a struct is a single-field wrapper, but here
-a *different* struct refers to the wrapper by name, and the unwrap
-shouldn't propagate across that boundary.
+The same shape applies to `DrainSorted::inner`, `PeekMut::heap`, and
+similar wrapper structs that name `BinaryHeap<T, A>` in their
+fields. **An earlier Phase A2 inline patch had bulk-rewritten
+`BinaryHeap<T, A>` → `::Vec<T, A>`** everywhere in the file — probably
+to fix a forward-declaration ordering issue at the time. The rewrite
+broke the call sites that constructed the wrappers by passing a
+`BinaryHeap` (e.g. `IntoIterSorted<T,A>(std::move(*this))` from inside
+`BinaryHeap::into_iter_sorted`), because now those constructors
+needed a `Vec`, not a `BinaryHeap`.
 
-**Investigation hook**: search `codegen.rs` for the rule that
-substitutes a struct name with its first field's type. The fix should
-be: only apply the unwrap on call sites where the wrapper itself is
-being passed (e.g. `Vec::from(BinaryHeap)`), not on field-type emits
-inside *other* structs that name `BinaryHeap`.
+**Fix** (in the vendored file, ~10 LOC of targeted re-rewrite):
 
-**Workaround**: a per-port patcher rule that flips `::Vec<T, A> inner;`
-back to `arc_port::BinaryHeap<T, A> inner;` (or the right name in each
-port's namespace).
+Restore the correct field types in the four wrapper structs:
+- `IntoIterSorted::inner: BinaryHeap<T, A>`
+- `DrainSorted::inner: BinaryHeap<T, A>&`
+- `DrainSorted` ctor param: `BinaryHeap<T, A>&`
+- `PeekMut::heap: BinaryHeap<T, A>&`
+- `PeekMut` ctor param: `BinaryHeap<T, A>&`
+
+(Leave `RebuildOnDrop::heap: ::Vec<T, A>&` as-is — that internal helper
+genuinely operates on the inner Vec, not BinaryHeap.)
+
+This unblocks `BinaryHeap::into_iter_sorted()` and the related
+`peek_mut` / `drain_sorted` paths. The `into_iter_sorted_descending`
+test exercises the full drain-in-sorted-order flow.
+
+**Lesson learned**: bulk-substitution inline patches without a
+codified patcher script are easy to over-apply and hard to audit
+later. The new `post_transpile_patch.py.partial` is the right
+direction — every patch as a named, scope-limited rule that can be
+read and reasoned about. The 14 inline patches called out in
+STATUS.md grew silently to ~17 over time; this case is one of the
+extra three that did real damage. When codifying the partial patcher
+to fully reproduce the build, the `BinaryHeap → Vec` rewrite should
+**not** be included.
 
 #### Why these surface as a cluster
 
@@ -3744,12 +3754,13 @@ Errors (A), (B), and (C) all live inside the `iter()` / `into_iter()` /
 diagnostic output. A single failed conversion at the `Iter<T>{...}` aggregate
 init produces follow-on errors when the compiler tries to verify
 `Iter::next()` and `IntoIterSorted`'s ctor as part of the same
-overload-resolution attempt. The earlier triage in this session
-counted six errors; (A) handles three of them outright, (B) handles
-two more, and (C) is the remaining one (`IntoIterSorted` ctor).
-After (A)+(B), `BinaryHeap::iter()` instantiates cleanly and
-`binary_heap_port_iter_test.cpp::test_iter_visits_all_elements`
-passes.
+overload-resolution attempt. The earlier triage counted six errors;
+(A) handles three of them outright, (B) handles two more, and (C)
+fixes the `IntoIterSorted` ctor. After all three,
+`BinaryHeap::iter()` and `BinaryHeap::into_iter_sorted()` both
+instantiate cleanly. The three `binary_heap_port_iter_test.cpp`
+cases (as_slice view, iter visits all elements, into_iter_sorted
+descending) all pass.
 
 #### Generic lesson
 
