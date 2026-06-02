@@ -3783,3 +3783,107 @@ transpiled iterator wrapper, walk the chain in this order:
    type whose Rust field type was a wrapper itself? → fix (C) above
    (or the per-port-patcher workaround).
 
+### 6.11 Universal auto-deref dispatcher (`rusty::deref_call`)
+
+§6.10 (B) added a new arm to `rusty::iter` so the dispatcher could
+find `iter()` after walking through a wrapper. Every time we hit this
+shape — receiver doesn't have the method directly, but a step of its
+deref chain does — we paid for it with a per-method CPO. `rusty::iter`,
+`rusty::len`, `rusty::next`, ... — N methods, N CPOs.
+
+The structural fix is to recognize that this is **Rust's auto-deref
+method resolution** showing through. Rust's `vec.iter()` doesn't
+require `Vec::iter` to exist; the compiler walks `&Vec → &[T]` and
+calls `[T]::iter`. C++ has no equivalent at method-call sites — `.`
+binds to the static type only, and `operator->` only chains for raw
+pointers / smart-pointer-like types invoked via the `->` syntax.
+
+`include/rusty/dispatch.hpp` provides the universal form:
+
+```cpp
+template<typename R, typename F>
+constexpr decltype(auto) deref_call(R&& r, F&& f) {
+    if constexpr (requires { f(r); }) {
+        return f(std::forward<R>(r));
+    } else if constexpr (requires { *r; }) {
+        return deref_call(*std::forward<R>(r), std::forward<F>(f));
+    } else {
+        static_assert(sizeof(R) == 0, "method not found ...");
+    }
+}
+```
+
+Caller shape (one method, no CPO needed):
+
+```cpp
+auto it = rusty::deref_call(vec, [&](auto&& r) -> decltype(r.iter()) {
+    return r.iter();
+});
+```
+
+The lambda's explicit trailing return type `-> decltype(r.iter())` is
+load-bearing: a generic lambda's body is *not* SFINAE-friendly on its
+own, but `decltype(r.iter())` in the trailing-return slot is — the
+substitution failure makes `requires { f(r); }` cleanly fail and the
+dispatcher recurses on `*r`. `-> decltype(auto)` would compile a body
+that calls a non-existent method into a hard error instead. **Use the
+explicit form.**
+
+`decltype(auto)` return on `deref_call` itself preserves value
+category — methods that return `T&` stay `T&`, methods that return
+`T` stay `T`. Verified by `dispatch_test.cpp::test_reference_return`.
+
+Chained calls (`a.b().c()`) compose by nesting:
+
+```cpp
+// Rust: c.add(5).finalize()
+rusty::deref_call(
+    rusty::deref_call(c, [&](auto&& r) -> decltype(r.add(5)) {
+                              return r.add(5); }),
+    [&](auto&& r) -> decltype(r.finalize()) { return r.finalize(); });
+```
+
+#### Three-tier emit strategy
+
+`deref_call` is the **fallback**, not the default. Templated wrappers
+explode compile time; a hand-written method-call site doesn't need any
+of this machinery. The transpiler should pick the cheapest form that
+is provably correct:
+
+1. **Direct call** (cheapest): when the transpiler knows the receiver
+   type and that type has the method, emit `r.method(args)`. No
+   dispatcher.
+
+2. **Known one-level deref** (medium): when the receiver is a known
+   wrapper (`Box<T>`, `Rc<T>`, `&T`, ...) and the method lives on `T`,
+   emit `(*r).method(args)`. Still no dispatcher, but one explicit
+   step through `operator*`.
+
+3. **Uncertain receiver** (fallback): when the receiver type is a
+   template parameter, an associated-type projection, or a cross-port
+   deref chain whose end the transpiler can't see — emit
+   `rusty::deref_call(r, [&](auto&& r) -> decltype(r.method(args)) { return r.method(args); })`.
+   Pays template-instantiation cost but is *correct* regardless of
+   what `r`'s actual type and deref chain turn out to be after
+   monomorphization.
+
+The transpiler's existing per-method CPOs (`rusty::iter`,
+`rusty::len`, ...) can be migrated incrementally — they remain
+correct, just less general than what `deref_call` would do.
+
+#### Safety-checker interaction
+
+`deref_call` itself reads as an unsafe-shaped function from the
+checker's point of view: it takes a generic callable and invokes it.
+But conceptually it is a **bridge** — like `operator->()`, like
+`std::invoke`. Its own safety should propagate from the callee
+lambda's body, not be asserted on the dispatcher template. This is
+the same shape that motivates the (proposed) `@bridge` annotation:
+mark functions whose safety is "@safe if all callees are @safe" so
+the checker doesn't have to special-case the universal dispatcher
+template.
+
+For now `deref_call` is `@unsafe` by default. Phase 2 of the
+auto-deref work (the transpiler emit strategy above) lands first;
+the safety-checker `@bridge` story can follow.
+
