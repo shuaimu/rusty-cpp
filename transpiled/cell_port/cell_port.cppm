@@ -4021,15 +4021,15 @@ struct Cell {
     }
     void swap(const Cell<T>& other) const {
         const auto is_nonoverlapping = [](const auto* src, const auto* dst) -> bool {
-            const auto src_usize = src->addr();
-            const auto dst_usize = dst->addr();
-            const auto diff = src_usize.abs_diff(std::move(dst_usize));
-            return rusty::detail::deref_if_pointer_like(diff) >= size_of<T>();
+            const auto src_usize = reinterpret_cast<std::uintptr_t>(src);
+            const auto dst_usize = reinterpret_cast<std::uintptr_t>(dst);
+            const auto diff = (src_usize > dst_usize) ? (src_usize - dst_usize) : (dst_usize - src_usize);
+            return rusty::detail::deref_if_pointer_like(diff) >= sizeof(T);
         };
-        if (rusty::ptr::eq((*this), other)) {
+        if (this == &other) {
             return;
         }
-        if (!is_nonoverlapping((*this), other)) {
+        if (!is_nonoverlapping(this, &other)) {
             std::println(stderr, "`Cell::swap` on overlapping non-identical `Cell`s");
             std::abort();
         }
@@ -4235,7 +4235,7 @@ struct RefCell {
         rusty::mem::swap(rusty::detail::deref_if_pointer_like(this->borrow_mut()), other.borrow_mut());
     }
     Ref<T> borrow() const {
-        return [&]() -> Ref<T> { auto&& _m = this->try_borrow(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); return panic_already_mutably_borrowed(std::move(err)); } return [&]() -> Ref<T> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> Ref<T> { auto&& _m = this->try_borrow(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); panic_already_mutably_borrowed(std::move(err)); rusty::intrinsics::unreachable(); } return [&]() -> Ref<T> { rusty::intrinsics::unreachable(); }(); }();
     }
     rusty::Result<Ref<T>, BorrowError> try_borrow() const {
         return [&]() -> rusty::Result<Ref<T>, BorrowError> { auto&& _m = BorrowRef::new_(this->borrow_field); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& b = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Result<Ref<T>, BorrowError> { {
@@ -4247,7 +4247,7 @@ auto value = NonNull<std::remove_pointer_t<std::remove_reference_t<decltype((thi
 return rusty::Result<Ref<T>, BorrowError>::Ok(Ref<T>{.value = std::move(value), .borrow = std::move(b)}); }(); } if (_m.is_none()) { return rusty::Result<Ref<T>, BorrowError>::Err(BorrowError{.location = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).unwrap(); }) { return std::forward<decltype(__recv)>(__recv).unwrap(); } else { return std::forward<decltype(__recv)>(__recv)->unwrap(); } }(this->borrowed_at.get()))}); } return [&]() -> rusty::Result<Ref<T>, BorrowError> { rusty::intrinsics::unreachable(); }(); }();
     }
     RefMut<T> borrow_mut() const {
-        return [&]() -> RefMut<T> { auto&& _m = this->try_borrow_mut(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); return panic_already_borrowed(std::move(err)); } return [&]() -> RefMut<T> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> RefMut<T> { auto&& _m = this->try_borrow_mut(); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); panic_already_borrowed(std::move(err)); rusty::intrinsics::unreachable(); } return [&]() -> RefMut<T> { rusty::intrinsics::unreachable(); }(); }();
     }
     rusty::Result<RefMut<T>, BorrowMutError> try_borrow_mut() const {
         return [&]() -> rusty::Result<RefMut<T>, BorrowMutError> { auto&& _m = BorrowRefMut::new_(this->borrow_field); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& b = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Result<RefMut<T>, BorrowMutError> { {

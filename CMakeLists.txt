@@ -359,6 +359,10 @@ set(TEST_SOURCES
     # (hits clusters C4/C5/C6).
     tests/binary_heap_port_pop_test.cpp
 
+    # binary_heap_port comprehensive: peek + full drain ordering +
+    # clear + push-after-pop preserves heap.
+    tests/binary_heap_port_comprehensive_test.cpp
+
     # cell_port — transpiled rustc Cell / RefCell (library/core/src/cell.rs).
     # Phase B/C smoke test: import cell_port, build BorrowError /
     # BorrowMutError + format them via operator<<.

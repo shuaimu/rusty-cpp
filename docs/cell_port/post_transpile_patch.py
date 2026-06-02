@@ -261,6 +261,76 @@ def patch_drop_misplaced_module_imports(cpp_out: Path) -> int:
     return 0
 
 
+def patch_return_void_noreturn(cpp_out: Path) -> int:
+    """`return panic_already_borrowed(err)` etc.: the panic helpers are
+    `[[noreturn]] void`, so `return void_call()` is ill-formed in a
+    function returning `Ref<T>` / `RefMut<T>`. Rust's `!` type makes
+    this valid; C++ doesn't. Split into `panic_xxx(err); /* unreachable */`.
+    """
+    path = cpp_out / CELL_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    for fn in ("panic_already_borrowed", "panic_already_mutably_borrowed"):
+        text = re.sub(
+            rf"return {fn}\(([^()]*(?:\([^()]*\)[^()]*)*)\);",
+            rf"{fn}(\1); rusty::intrinsics::unreachable();",
+            text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+def patch_cell_swap_helpers(cpp_out: Path) -> int:
+    """`Cell::swap` uses bare `size_of<T>()` (Rust intrinsic) and
+    `rusty::ptr::eq(*this, other)` (Rust intrinsic that compares
+    addresses). Rewrite to `sizeof(T)` and a manual address compare.
+    """
+    path = cpp_out / CELL_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = re.sub(
+        r"return rusty::detail::deref_if_pointer_like\(diff\) >= size_of<T>\(\);",
+        "return rusty::detail::deref_if_pointer_like(diff) >= sizeof(T);",
+        text)
+    text = re.sub(
+        r"if \(rusty::ptr::eq\(\(\*this\),\s*other\)\) \{",
+        "if (this == &other) {",
+        text)
+    # `if (!is_nonoverlapping((*this), other))` — the lambda takes
+    # `(const auto*, const auto*)`. Pass `this, &other` directly.
+    text = re.sub(
+        r"if \(!is_nonoverlapping\(\(\*this\),\s*other\)\) \{",
+        "if (!is_nonoverlapping(this, &other)) {",
+        text)
+    # `src->addr()` / `dst->addr()` — Rust pointer intrinsic that
+    # returns the numeric address. Use `reinterpret_cast<uintptr_t>`.
+    text = re.sub(
+        r"const auto src_usize = src->addr\(\);",
+        "const auto src_usize = reinterpret_cast<std::uintptr_t>(src);",
+        text)
+    text = re.sub(
+        r"const auto dst_usize = dst->addr\(\);",
+        "const auto dst_usize = reinterpret_cast<std::uintptr_t>(dst);",
+        text)
+    # `diff.abs_diff(...)` and `src_usize.abs_diff(...)` — these are
+    # method-style intrinsics on integer types. Switch to free-form
+    # subtraction (already absolute since we cast to uintptr).
+    text = re.sub(
+        r"const auto diff = src_usize\.abs_diff\(std::move\(dst_usize\)\);",
+        "const auto diff = (src_usize > dst_usize) ? "
+        "(src_usize - dst_usize) : (dst_usize - src_usize);",
+        text)
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -285,6 +355,10 @@ def main() -> int:
         ("Option<&Location> → Option<Location>",
          patch_unref_option_location),
         ("drop misplaced module imports", patch_drop_misplaced_module_imports),
+        ("rewrite `return [[noreturn]] panic_xxx(...)`",
+         patch_return_void_noreturn),
+        ("Cell::swap helpers (size_of, ptr::eq)",
+         patch_cell_swap_helpers),
     ]
 
     total = 0
