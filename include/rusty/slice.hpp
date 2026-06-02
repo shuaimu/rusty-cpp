@@ -1102,6 +1102,19 @@ decltype(auto) iter(Range&& range) {
             std::conditional_t<std::is_const_v<view_type>, std::add_const_t<raw_elem_type>, raw_elem_type>;
         auto* data = view.data();
         return slice_iter::Iter<elem_type>(data, data + view.size());
+    } else if constexpr (
+        requires { std::forward<Range>(range).begin(); std::forward<Range>(range).size(); }
+        && std::is_pointer_v<decltype(std::forward<Range>(range).begin())>
+    ) {
+        // Rust-style containers (notably vec_port::Vec) expose
+        // `begin()` returning a `T*` plus `size()`, but not `data()`.
+        // Treat them as contiguous ranges so callers get a
+        // `slice_iter::Iter` rather than the container itself —
+        // matches the `data()`/`size()` arm above.
+        auto&& view = std::forward<Range>(range);
+        auto* data = view.begin();
+        using elem_type = std::remove_pointer_t<decltype(data)>;
+        return slice_iter::Iter<elem_type>(data, data + view.size());
     } else if constexpr (requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }) {
         return std::forward<Range>(range);
     } else if constexpr (requires { *std::forward<Range>(range); }) {

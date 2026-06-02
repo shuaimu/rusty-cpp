@@ -3445,12 +3445,13 @@ Dependencies: just `rusty::Box` (hand-written). No vec_port dep.
 - `Rc<T>` / `Arc<T>` — **Phase A1 done** as of this session (see §6.7).
 - Tier 4 items (`OnceCell`, `CString`, `Path`, etc.) — defer per §3.5.
 - **Iterator surfaces** — extending tests beyond `push`/`pop`/`as_slice`
-  hits a Rust↔C++ impedance cluster. One half is now fixed in the
-  library (`Option<T&>` ↔ `Option<T*>` converting ctor); two more
-  follow-ups (`rusty::iter` dispatcher gap on Vec; transpiler's
-  transparent-newtype unwrap leaking into struct field types) are
-  documented in §6.10. Affects every transpiled port that walks
-  iterators (binary_heap, vec_deque, linked_list, hashbrown, btree).
+  hit a Rust↔C++ impedance cluster. Two of the three issues are now
+  fixed in the library — `Option<T&>` ↔ `Option<T*>` converting ctor
+  (option.hpp) and the `begin()`-returning-pointer dispatcher arm in
+  `rusty::iter` (slice.hpp). One follow-up remains: transpiler's
+  transparent-newtype unwrap leaking into struct field types
+  (`IntoIterSorted::inner` typed as `Vec<T,A>` when Rust says
+  `BinaryHeap<T,A>`). See §6.10 for the writeup.
 
 ### 6.5 Recipe used across all Tier-2 / Tier-3 ports — see §6.9 below for the canonical block
 
@@ -3647,14 +3648,10 @@ This fix is generic — every port that wraps a hand-written
 `slice_iter::Iter` and re-declares the Rust-shape `Option<&T>` signature
 benefits without further change.
 
-#### (B) `rusty::iter(Vec<T>)` dispatcher gap (library, still open)
+#### (B) `rusty::iter(Vec<T>)` dispatcher gap (library, fixed)
 
-After fix (A) lands, one error remains:
-
-```
-binary_heap_port.cppm:4218: no viable conversion from 'const Vec<int>'
-                            to 'rusty::slice_iter::Iter<const int>'
-```
+After fix (A) landed, one error remained at `binary_heap_port.cppm:4218`:
+"no viable conversion from `const Vec<int>` to `rusty::slice_iter::Iter<const int>`".
 
 The `iter()` body is:
 
@@ -3667,24 +3664,31 @@ Iter<T> iter() const {
 `rusty::iter(Range&&)` (in `include/rusty/slice.hpp:1091`) is a dispatch
 helper with five `if constexpr` arms — `.iter()`, option-like `next()`,
 `.data()` + `.size()`, `std::begin`/`std::end`, dereferenceable.
-`vec_port::Vec<T>` exposes `size()`, `begin()`, `end()`, and `as_ptr()` /
-`as_mut_ptr()` — but **not `data()`**. So arm 3 (the one that builds a
-`slice_iter::Iter` from `data()` + `size()`) falls through, arm 4
-(`std::begin`/`std::end`) fires, and the function returns the Vec
-itself. The aggregate init then tries `Iter<T>{.iter = const Vec<int>}`,
-which fails.
+`vec_port::Vec<T>` exposes `size()`, `begin()`, `end()` — but **not
+`data()`**. So arm 3 (the one that builds a `slice_iter::Iter` from
+`data() + size()`) fell through, arm 4 (`std::begin`/`std::end`) fired,
+and the function returned the Vec itself. The aggregate init then
+tried `Iter<T>{.iter = const Vec<int>}`, which fails.
 
-**Possible fixes**:
-- Add `data()` to `vec_port::Vec` as an alias for `as_ptr()` (Rust's
-  `Vec::as_ptr` is the closest match, and slices/spans expose
-  `data()`). A few-line patcher rule.
-- Or rework `rusty::iter`'s dispatch to detect `as_ptr`/`as_mut_ptr` +
-  `size()` in addition to `data()`. Library-only change, no Vec
-  edit needed.
+**Fix** (`include/rusty/slice.hpp`): add a new arm to the dispatcher
+that fires when `begin()` returns a pointer + `size()` is available.
+Vec's `begin()` returns `T*` (Rust-style container shape), so this
+matches without touching Vec. Insert before the existing `std::begin/end`
+arm so pointer-returning ranges land here first:
 
-Either path unblocks `BinaryHeap::iter()`, and the same gap is
-likely lurking in any port that calls `rusty::iter(Vec<...>)` rather
-than going through the iterator structurally.
+```cpp
+} else if constexpr (
+    requires { range.begin(); range.size(); }
+    && std::is_pointer_v<decltype(range.begin())>
+) {
+    auto* data = view.begin();
+    using elem_type = std::remove_pointer_t<decltype(data)>;
+    return slice_iter::Iter<elem_type>(data, data + view.size());
+}
+```
+
+This is generic: every transpiled port whose vector-like type
+exposes `begin()`-as-pointer benefits. Vec doesn't grow new methods.
 
 #### (C) `IntoIterSorted::inner` field type (transpiler, still open)
 
@@ -3743,6 +3747,9 @@ init produces follow-on errors when the compiler tries to verify
 overload-resolution attempt. The earlier triage in this session
 counted six errors; (A) handles three of them outright, (B) handles
 two more, and (C) is the remaining one (`IntoIterSorted` ctor).
+After (A)+(B), `BinaryHeap::iter()` instantiates cleanly and
+`binary_heap_port_iter_test.cpp::test_iter_visits_all_elements`
+passes.
 
 #### Generic lesson
 

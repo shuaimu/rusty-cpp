@@ -1,13 +1,12 @@
 // Iterator + bulk-construction coverage for binary_heap_port.
-// `iter()` previously failed at instantiation time because the
-// transpiled `Iter<T>::next()` returns `Option<const T&>` while the
-// underlying `rusty::slice_iter::Iter::next()` yields
-// `Option<const T*>`. Unblocked by the converting ctor in
-// include/rusty/option.hpp (`Option<T&>(Option<U*>)`). See
-// rusty-std-book §6.4 for the deeper writeup.
+// Two impedance fixes unblock iter(): the `Option<T&>(Option<U*>)`
+// converting ctor in include/rusty/option.hpp and the new
+// `begin()`-returning-pointer + `size()` arm in `rusty::iter`
+// (include/rusty/slice.hpp). See rusty-std-book §6.10 for the
+// full writeup.
 //
-// IntoIterSorted is still broken (different bug: transpiler emits
-// `inner: Vec<T,A>` for what Rust declares as `inner: BinaryHeap<T,A>`).
+// IntoIterSorted is still broken (separate transpiler bug:
+// `inner: BinaryHeap<T,A>` emitted as `inner: Vec<T,A>`).
 
 import binary_heap_port;
 
@@ -29,13 +28,25 @@ static void test_as_slice_view() {
     assert(s[0] == 9);  // max-heap: max at index 0
 }
 
-// `test_iter_visits_all_elements` removed for now — the Option<T&>
-// ↔ Option<T*> converting ctor in include/rusty/option.hpp unblocks
-// Iter::next, but a third issue surfaces: `rusty::iter(Vec<int>)`
-// returns the Vec itself rather than a slice_iter::Iter because
-// vec_port::Vec exposes begin()/end() but not data() (the iter
-// dispatcher in rusty/slice.hpp's data-only branch never matches).
-// See rusty-std-book §6.4 for the writeup.
+static void test_iter_visits_all_elements() {
+    auto h = BinaryHeap<int32_t, ::rusty::alloc::Global>::new_in(
+        ::rusty::alloc::Global{});
+    for (int v : {3, 1, 4, 1, 5}) h.push(v);
+
+    auto it = h.iter();
+    int count = 0;
+    int sum = 0;
+    while (true) {
+        auto next = it.next();
+        if (next.is_none()) break;
+        sum += next.unwrap();
+        ++count;
+    }
+    assert(count == 5);
+    assert(sum == 3 + 1 + 4 + 1 + 5);
+    // iter() is non-destructive
+    assert(h.len() == 5);
+}
 
 static void run(const char* name, void (*fn)()) {
     std::printf("  %s ... ", name);
@@ -47,6 +58,7 @@ static void run(const char* name, void (*fn)()) {
 int main() {
     std::printf("binary_heap_port (iter + bulk) tests:\n");
     run("as_slice view",                    test_as_slice_view);
-    std::printf("binary_heap_port: as_slice test passed\n");
+    run("iter visits all elements",         test_iter_visits_all_elements);
+    std::printf("binary_heap_port: iter tests passed\n");
     return 0;
 }
