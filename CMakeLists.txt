@@ -161,12 +161,15 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_compile_options(rc_port PRIVATE -O3 -DNDEBUG -march=native )
     target_link_libraries(rc_port PUBLIC vec_port)
 
-    # arc_port: PROMOTION ATTEMPTED — patcher has rules added (see
-    # docs/arc_port/post_transpile_patch.py) but ~10 `Box<auto>::try_new(x)>>::into_unique(...)`
-    # sites remain that look like Cluster A transpiler-emit issues.
-    # Reverted to bridge stub until that's addressed (transpiler fix
-    # or per-site stub). The full-body file lives at
-    # transpiled/arc_port/arc_port.cppm.wip for the next attempt.
+    # arc_port: Cluster A `Box<auto>` regression resolved transpiler-side
+    # (try_new / try_new_in / new_in / new_uninit_in now follow the same
+    # arg-inference path as new / new_ / make — see transpiler/src/
+    # codegen.rs). Remaining Phase B blockers are arc-specific API gaps
+    # (rusty::ptr::addr_eq, rusty::Layout::for_value_raw, Vec::from_raw_parts_in,
+    # Arc<T,A> two-template-arg vs hand-written rusty::Arc<T>) — see
+    # docs/arc_port/STATUS.md. Still on bridge stub until those land.
+    # The full transpiled `arc_port.cppm` lives next to the stub.
+
     # linked_list_port: full transpiled body (the transpiler fix landed
     # for the Cluster A 'Box<auto>::new_in' regression — see
     # transpiler/src/codegen.rs test_linked_list_box_new_in_with_typed_arg_*).

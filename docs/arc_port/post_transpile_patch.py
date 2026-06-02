@@ -156,19 +156,6 @@ def patch_arc_specific(cpp_out: Path) -> int:
         "(void)0;",
         text)
 
-    # `Box<auto>::try_new(x))>>::into_unique(std::move(x))` —
-    # double `>>` and `into_unique` chain from transpiler emit. The
-    # original Rust is `Box::try_new(x)?.into_unique()` which
-    # returns `Box::into_unique(...) -> (NonNull<T>, A)`. Our Box
-    # may not expose that. Stub the whole match site: it appears in
-    # `try_new_uninit_in` and `try_new_zeroed_in` (smoke test
-    # doesn't touch them). Two occurrences.
-    text = re.sub(
-        r"auto \[ptr_shadow1, alloc_shadow1\] = rusty::detail::deref_if_pointer_like"
-        r"\(rusty::Box<auto>::try_new\(\(x\)\)>>::into_unique\(std::move\(x\)\)\);",
-        "std::abort();  // patcher: Box::try_new(x).into_unique() not supported",
-        text)
-
     # `NonNull<u8>::as_non_null_ptr()` — we expose `as_non_null_ptr`
     # only on the CastProxy, not directly. The transpiled call is
     # `recv.as_non_null_ptr()`. Stub via reinterpret-cast.
@@ -177,47 +164,36 @@ def patch_arc_specific(cpp_out: Path) -> int:
         ".as_ptr()  /* patcher: as_non_null_ptr → as_ptr */",
         text)
 
-    # `rusty::ptr::addr_eq(a, b)` — pointer-address comparison
-    # intrinsic. Use plain `==` on cast-to-uintptr values.
+    # `(rusty::)?ptr::addr_eq(a, b)` — pointer-address comparison
+    # intrinsic. Use plain `==` on cast-to-uintptr values. The emit
+    # appears both fully-qualified and via the file-scope
+    # `using rusty::ptr` brought into scope.
     text = re.sub(
-        r"rusty::ptr::addr_eq\(([^,]+),\s*([^)]+)\)",
+        r"(?:rusty::)?ptr::addr_eq\(([^,]+),\s*([^)]+)\)",
         r"(reinterpret_cast<std::uintptr_t>(\1) == reinterpret_cast<std::uintptr_t>(\2))",
         text)
 
-    # `rusty::Box<auto>::try_new(expr)` — Cluster A: `auto` in
-    # template argument position. Drop the `<auto>` and use
-    # `Box<deduced-T>` via a wrapper lambda. The arg is the value
-    # to wrap, so deduction can work via `decltype((expr))`.
+    # NOTE: earlier patcher iterations had a self-destructive
+    # `Box<auto>::try_new(` ↔ `Box<std::remove_cvref_t<decltype(`
+    # rewrite + "revert" pair that corrupted the transpiler's
+    # already-correct `Box<decltype(...)>::into_unique(...)` emit.
+    # Removed once codegen.rs learned `try_new` / `try_new_in` /
+    # `new_in` etc. in the explicit Box arg-inference branch
+    # (alongside `new` / `new_` / `make`).
+    #
+    # `Box<auto>::new_uninit()` (zero-arg) inside `Default::default()` —
+    # only one site survives codegen.rs. The surrounding shape is
+    # `Box<decltype(Box<auto>::new_uninit())>::write_(Box<auto>::new_uninit(),
+    # ArcInner<T>{...})`. Rust deduces T from the second arg; we can
+    # do the same by replacing both `Box<auto>` with the concrete
+    # `Box<MaybeUninit<ArcInner<T>>>` here.
     text = re.sub(
-        r"rusty::Box<auto>::try_new\(",
-        "rusty::Box<>::try_new(  /* patcher: Box<auto> → Box<> CTAD */",
+        r"rusty::Box<std::remove_cvref_t<decltype\(\(rusty::Box<auto>::new_uninit\(\)\)\)>>::write_"
+        r"\(rusty::Box<auto>::new_uninit\(\),\s*ArcInner<T>\{",
+        "rusty::Box<rusty::MaybeUninit<ArcInner<T>>>::write_("
+        "rusty::Box<rusty::MaybeUninit<ArcInner<T>>>::new_uninit(), "
+        "ArcInner<T>{",
         text)
-    # That's an experiment — Box<> isn't valid C++. Better: leave
-    # this rule out and rely on the orphan-stub approach. Revert.
-    text = text.replace(
-        "rusty::Box<>::try_new(  /* patcher: Box<auto> → Box<> CTAD */",
-        "rusty::Box<auto>::try_new(",
-    )
-
-    # `rusty::Box<auto>::try_new(…)` — Cluster A: `auto` in template
-    # argument. Box's try_new can deduce T from the argument; drop
-    # the `<auto>` and let template-argument deduction kick in.
-    text = re.sub(
-        r"rusty::Box<auto>::try_new\(",
-        "rusty::Box<std::remove_cvref_t<decltype(",
-        text)
-    # Wait, that's wrong — the original is `try_new(EXPR)`. Need
-    # `Box<decltype(EXPR)>::try_new(EXPR)`. Too risky with regex.
-    # Easier: rewrite to `rusty::Box<>::try_new` and let CTAD or
-    # SFINAE handle it (if Box has a deducing factory) — but
-    # `Box<>` isn't valid C++ either. Simplest: name the inner
-    # type by structure when known. Skipped here; fixed in
-    # next iteration if it persists.
-    # Revert the substitution that ran above.
-    text = text.replace(
-        "rusty::Box<std::remove_cvref_t<decltype(",
-        "rusty::Box<auto>::try_new(",
-    )
 
     # Stub the orphan `provide(rusty::error::Request&)` method — the
     # Request type isn't in our rusty::error.

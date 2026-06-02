@@ -21,7 +21,7 @@ rationale.
 | 2. Prep | ✅ |
 | 3. Transpile | ✅ Zero errors, 7 hand-slots |
 | 4. Patcher | 🟡 **Seeded.** `docs/arc_port/post_transpile_patch.py` mirrors rc_port's namespace fixups (borrow/string/Vec/ptr::Alignment/mem::MaybeUninit). |
-| 5. Build | 🔴 **Blocked.** Same shape as rc_port (single- vs two-template-arg Arc, missing NonNull::cast<>, Cluster A regression) PLUS atomics-specific issues: memory ordering helpers (`rusty::atomic::*`), `compare_exchange_weak` overload resolution. |
+| 5. Build | 🔴 **Blocked** on rusty:: API gaps (Vec / Layout::for_value_raw / ptr::from_ref / Arc::is etc.) — Cluster A `Box<auto>` regression for `try_new`/`try_new_in`/`new_in` is **resolved transpiler-side** (see `transpiler/src/codegen.rs` near the explicit Box arg-inference branch). The patched `arc_port.cppm` lives next to the stub as `arc_port.cppm.wip` until the rusty:: API surface catches up. |
 
 ## Reproducing
 
@@ -38,9 +38,15 @@ cp /tmp/arc_port/cpp_out/*.cppm transpiled/arc_port/
 
 ## Remaining Phase B blockers
 
+~~Cluster A regression~~ ✅ resolved transpiler-side: `try_new` /
+`try_new_in` / `new_in` / `new_uninit_in` / `try_new_uninit_in` /
+`new_zeroed_in` / `try_new_zeroed_in` now follow the same arg-inference
+path as `new` / `new_` / `make`, taking the Box<auto> count from 10 → 0
+after the patcher runs.
+
 Same set as rc_port (single- vs two-template-arg Arc<T>, missing
-`NonNull::cast<>()`, Cluster A regression, cross-port Cell/UnsafeCell
-signature drift) PLUS arc-specific:
+`NonNull::cast<>()`, cross-port Cell/UnsafeCell signature drift) PLUS
+arc-specific:
 
 - **Memory ordering helpers** — rustc uses `core::sync::atomic::Ordering::{Acquire,Release,SeqCst,Relaxed}`; our `rusty::atomic` either doesn't surface these or surfaces them as different names.
 - **`compare_exchange_weak` overload mismatch** — rustc's `AtomicUsize::compare_exchange_weak(curr, new, succ, fail)` takes two orderings; need to verify our binding.
