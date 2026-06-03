@@ -15,6 +15,17 @@ import arc_port;
 using rusty::port::sync::Arc;
 using rusty::port::sync::Weak;
 
+// Verify the patcher-injected is_send/is_sync specializations:
+// Arc<int, Global> is Send + Sync because int is Send + Sync.
+static_assert(rusty::is_send<Arc<int, rusty::alloc::Global>>::value,
+              "Arc<int> must be Send (T is Send+Sync)");
+static_assert(rusty::is_sync<Arc<int, rusty::alloc::Global>>::value,
+              "Arc<int> must be Sync (T is Send+Sync)");
+static_assert(rusty::is_send<Weak<int, rusty::alloc::Global>>::value,
+              "Weak<int> must be Send (T is Send+Sync)");
+static_assert(rusty::is_sync<Weak<int, rusty::alloc::Global>>::value,
+              "Weak<int> must be Sync (T is Send+Sync)");
+
 static void test_new_and_strong_count() {
     auto p = Arc<int>::new_(42);
     assert(Arc<int>::strong_count(p) == 1);

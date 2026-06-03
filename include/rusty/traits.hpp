@@ -16,6 +16,13 @@ template<typename T> class Mutex;
 namespace sync::atomic::detail {
 template<typename T> class Atomic;
 } // namespace sync::atomic::detail
+// Note: the transpiled `rusty::port::sync::Arc<T, A>` / `Weak<T, A>`
+// live inside the `arc_port` module purview, so we cannot forward-
+// declare them here (C++20 modules forbid declaring the same name in
+// the global module and inside a named module). Their `is_send` /
+// `is_sync` specializations are injected at the tail of arc_port.cppm
+// by the patcher (see docs/arc_port/post_transpile_patch.py
+// `patch_arc_traits_specializations`).
 
 // Forward declare is_sync for circular dependency with is_send
 template<typename T>
@@ -57,7 +64,10 @@ struct is_send<T&> : is_send<T> {};
 template<typename T>
 struct is_send<T&&> : is_send<T> {};
 
-// Arc<T> is Send if T is Send + Sync
+// Arc<T> is Send if T is Send + Sync (hand-written rusty::Arc<T>).
+// Specializations for the transpiled `port::sync::Arc<T, A>` /
+// `Weak<T, A>` are injected at the tail of arc_port.cppm by the
+// patcher — see the note above the forward-decl block.
 template<typename T>
 struct is_send<Arc<T>> : std::bool_constant<
     is_send<T>::value && is_sync<T>::value
@@ -121,7 +131,9 @@ struct is_sync<T&> : std::false_type {};
 template<typename T>
 struct is_sync<T&&> : std::false_type {};
 
-// Arc<T> is Sync if T is Send + Sync
+// Arc<T> is Sync if T is Send + Sync (hand-written rusty::Arc<T>).
+// `port::sync::Arc<T, A>` / `Weak<T, A>` specializations are injected
+// at the tail of arc_port.cppm by the patcher.
 template<typename T>
 struct is_sync<Arc<T>> : std::bool_constant<
     is_send<T>::value && is_sync<T>::value

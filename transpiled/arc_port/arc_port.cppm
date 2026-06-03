@@ -5179,6 +5179,7 @@ rusty::alloc::Layout arcinner_layout_for_value_layout(rusty::alloc::Layout layou
 
 #if 0  // patcher: orphan-impl block stubbed
 #if 0  // patcher: orphan-impl block stubbed
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `Pin` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -5197,6 +5198,8 @@ static auto default_() {
 #if 0  // patcher: orphan-impl block stubbed
 #endif  // patcher: orphan-impl block end
 #if 0  // patcher: orphan-impl block stubbed
+#endif  // patcher: orphan-impl block end
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `I` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -5208,6 +5211,8 @@ rusty::Arc<std::span<const T>> to_arc_slice() {
     return rusty::from_into<rusty::Arc<std::span<const T>>>(::Vec<T>::from_iter((*this)));
 }
 
+#endif  // patcher: orphan-impl block end
+#if 0  // patcher: orphan-impl block stubbed
 #endif  // patcher: orphan-impl block end
 #if 0  // patcher: orphan-impl block stubbed
 #endif  // patcher: orphan-impl block end
@@ -5258,6 +5263,7 @@ size_t data_offset_alignment(rusty::ptr::Alignment alignment) {
 // Extension trait ToArcSlice lowered to rusty_ext:: free functions
 #endif  // patcher: orphan-impl block end
 #endif  // patcher: orphan-impl block end
+#endif  // patcher: orphan-impl block end
 namespace rusty_ext {
     export template<typename T, typename I>
     rusty::Arc<std::span<const T>> to_arc_slice(I self_) {
@@ -5274,6 +5280,22 @@ namespace rusty_ext {
 // (so absorbed methods that referenced dropped impl-generics can
 // recover them via `typename __TemplateArgs<HostParam>::arg_<N>`).
 } // namespace rusty::port::sync
+// patcher: is_send/is_sync specializations for Arc<T, A> / Weak<T, A>
+namespace rusty {
+    template<typename T, typename A>
+    struct is_send<::rusty::port::sync::Arc<T, A>>
+        : std::bool_constant<is_send<T>::value && is_sync<T>::value> {};
+    template<typename T, typename A>
+    struct is_sync<::rusty::port::sync::Arc<T, A>>
+        : std::bool_constant<is_send<T>::value && is_sync<T>::value> {};
+    template<typename T, typename A>
+    struct is_send<::rusty::port::sync::Weak<T, A>>
+        : std::bool_constant<is_send<T>::value && is_sync<T>::value> {};
+    template<typename T, typename A>
+    struct is_sync<::rusty::port::sync::Weak<T, A>>
+        : std::bool_constant<is_send<T>::value && is_sync<T>::value> {};
+} // namespace rusty
+
 
 // User-facing alias deferred. `rusty::Arc<T>` and `rusty::sync::Weak<T>`
 // are currently taken by the hand-written `include/rusty/arc.hpp`,

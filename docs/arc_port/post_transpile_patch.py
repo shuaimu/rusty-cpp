@@ -631,6 +631,50 @@ def patch_arc_ergonomic_shims(cpp_out: Path) -> int:
     return 1
 
 
+def patch_arc_traits_specializations(cpp_out: Path) -> int:
+    """Inject `is_send` / `is_sync` template specializations for the
+    transpiled `Arc<T, A>` / `Weak<T, A>` at the tail of arc_port.cppm,
+    in `namespace rusty`. Mirrors the rules in `include/rusty/traits.hpp`
+    for the hand-written `rusty::Arc<T>`: both Send and Sync iff
+    `T : Send + Sync`. Idempotent via sentinel comment.
+
+    These have to live here (not in traits.hpp) because the transpiled
+    types are owned by the arc_port module purview, and C++20 forbids
+    forward-declaring those names from the global module fragment."""
+    path = cpp_out / ARC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    sentinel = "// patcher: is_send/is_sync specializations for Arc<T, A> / Weak<T, A>"
+    if sentinel in text:
+        return 0
+    # Anchor on the closing of `namespace rusty::port::sync`. Append
+    # after it so we're at module-purview scope but outside the wrap.
+    anchor = "} // namespace rusty::port::sync"
+    if anchor not in text:
+        return 0
+    block = (
+        "\n"
+        + sentinel + "\n"
+        "namespace rusty {\n"
+        "    template<typename T, typename A>\n"
+        "    struct is_send<::rusty::port::sync::Arc<T, A>>\n"
+        "        : std::bool_constant<is_send<T>::value && is_sync<T>::value> {};\n"
+        "    template<typename T, typename A>\n"
+        "    struct is_sync<::rusty::port::sync::Arc<T, A>>\n"
+        "        : std::bool_constant<is_send<T>::value && is_sync<T>::value> {};\n"
+        "    template<typename T, typename A>\n"
+        "    struct is_send<::rusty::port::sync::Weak<T, A>>\n"
+        "        : std::bool_constant<is_send<T>::value && is_sync<T>::value> {};\n"
+        "    template<typename T, typename A>\n"
+        "    struct is_sync<::rusty::port::sync::Weak<T, A>>\n"
+        "        : std::bool_constant<is_send<T>::value && is_sync<T>::value> {};\n"
+        "} // namespace rusty\n"
+    )
+    path.write_text(text.replace(anchor, anchor + block, 1))
+    return 1
+
+
 def patch_stub_orphan_impls(cpp_out: Path) -> int:
     """The transpiler emits "orphan impl" free functions for impls
     whose host type lives outside this TU (Pin, T, I, etc.). They
@@ -687,6 +731,7 @@ def main() -> int:
         ("drop misplaced module imports", patch_drop_misplaced_module_imports),
         ("arc-specific rewrites", patch_arc_specific),
         ("arc ergonomic shims (make / operator->)", patch_arc_ergonomic_shims),
+        ("arc is_send / is_sync specializations (Arc<T,A>, Weak<T,A>)", patch_arc_traits_specializations),
         ("stub orphan impls", patch_stub_orphan_impls),
     ]
 
