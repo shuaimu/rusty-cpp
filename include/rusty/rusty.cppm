@@ -152,7 +152,7 @@ template<typename K, typename V, typename A = ::rusty::alloc::Global>
 using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
 
 template<typename T, typename A = ::rusty::alloc::Global>
-using BTreeSet = ::btree_port::btree::set::BTreeSet<T, A>;
+using BTreeSet = ::rusty::port::collections::btree::set::BTreeSet<T, A>;
 
 // rusty::port — namespace hierarchy mirroring Rust std's layout
 // (port = transpiled-from-rustc). Each transpiled module lives under
@@ -186,6 +186,10 @@ namespace collections {
     using HashMap = ::HashMap<K, V, S>;
     template<typename T, typename S = ::DefaultHasher>
     using HashSet = ::HashSet<T, S>;
+    template<typename K, typename V, typename A = ::rusty::alloc::Global>
+    using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using BTreeSet = ::rusty::port::collections::btree::set::BTreeSet<T, A>;
 }
 
 } // export namespace rusty
