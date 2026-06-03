@@ -2747,6 +2747,588 @@ def patch_raw_std_alloc_namespace(cpp_out: Path) -> int:
     return 0
 
 
+# ── deep-namespace patches (`--cxx-namespace rusty::port::collections::hashbrown`) ──
+#
+# When the transpiler is invoked with `--cxx-namespace
+# rusty::port::collections::hashbrown`, all post-`export module` content
+# is wrapped in that namespace. This shifts every symbol off global
+# scope and into `rusty::port::collections::hashbrown::*`, which breaks
+# a fresh long-tail of references that assumed flat emit. The patches
+# below address that long-tail. They are idempotent and only fire
+# against wrapped emit (presence of `namespace rusty::port::collections
+# ::hashbrown {` is the sentinel).
+
+_HB_DEEP_NS = "rusty::port::collections::hashbrown"
+_HB_DEEP_NS_OPEN = f"namespace {_HB_DEEP_NS} {{"
+
+
+def _has_deep_ns_wrap(text: str) -> bool:
+    return _HB_DEEP_NS_OPEN in text
+
+
+def patch_deep_prelude_clone_constrain(cpp_out: Path) -> int:
+    """The GMF prelude redeclares `rusty::clone` as an unconstrained
+    template. With the deep-namespace wrap, every `rusty::clone(x)` call
+    inside the wrap sees both this prelude clone AND `<rusty/move.hpp>`'s
+    Copy-only `rusty::clone` — both at `rusty::clone`, both viable for
+    `T = unsigned char` etc., ambiguous.
+
+    Fix: constrain the prelude to only fire when `value.clone()` exists.
+    Copy types fall through to move.hpp's clone (which static-asserts on
+    copy-constructibility but is the only candidate for Copy-only types
+    once the constraint excludes the prelude version)."""
+    files = ["hashbrown_port.alloc.cppm",
+             "hashbrown_port.control.tag.cppm",
+             "hashbrown_port.map.cppm",
+             "hashbrown_port.raw.cppm",
+             "hashbrown_port.table.cppm"]
+    old = (
+        "// Clone: dispatches to .clone() if available, otherwise copy-constructs.\n"
+        "template<typename T>\n"
+        "auto clone(const T& value) {\n"
+        "if constexpr (requires { value.clone(); }) {\n"
+        "return value.clone();\n"
+        "} else {\n"
+        "return value;\n"
+        "}\n"
+        "}"
+    )
+    new = (
+        "// Clone: dispatches to .clone() if available; Copy types fall through to ::rusty::clone (move.hpp).\n"
+        "template<typename T>\n"
+        "requires requires(const T& v) { v.clone(); }\n"
+        "auto clone(const T& value) {\n"
+        "return value.clone();\n"
+        "}"
+    )
+    total = 0
+    for fn in files:
+        path = cpp_out / fn
+        if not path.exists():
+            continue
+        text = path.read_text()
+        if not _has_deep_ns_wrap(text):
+            continue
+        if old not in text:
+            continue
+        path.write_text(text.replace(old, new))
+        total += 1
+    return total
+
+
+def patch_deep_control_group_reexport(cpp_out: Path) -> int:
+    """`control.group.cppm` imports `.generic` but doesn't re-export. With
+    the deep wrap, BitMaskWord / BITMASK_* etc. live in
+    `rusty::port::collections::hashbrown::*` and aren't visible to
+    `control.bitmask` (which imports `control.group`). Three issues:
+    1. The transpiler emits the `import` INSIDE the namespace wrap, but
+       C++20 modules require imports at module purview. Hoist it out.
+    2. Plain `import` doesn't re-export. Promote to `export import` so
+       `control.group` acts as a public facade for `.generic`.
+    3. Strip the broken `export using ::Foo;` lines (Group/BITMASK_*) —
+       with the wrap, those names live in the deep namespace, not at
+       global scope. The `export import` above handles re-export."""
+    path = cpp_out / "hashbrown_port.control.group.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    pre_wrap, _, _ = text.partition(_HB_DEEP_NS_OPEN)
+    already_hoisted = "export import hashbrown_port.control.group.generic;" in pre_wrap
+    has_export_using = re.search(r"^\s*(?:export\s+)?using ::\w+;", text, re.MULTILINE)
+    if already_hoisted and not has_export_using:
+        return 0
+    original = text
+    # Step 1: remove any `(export )?import hashbrown_port.control.group.generic;` line.
+    text = re.sub(
+        r"^(?:export\s+)?import hashbrown_port\.control\.group\.generic;\s*\n",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+    # Step 2: insert `export import` before the namespace open.
+    text = text.replace(
+        _HB_DEEP_NS_OPEN,
+        "export import hashbrown_port.control.group.generic;\n\n" + _HB_DEEP_NS_OPEN,
+        1,
+    )
+    # Step 3: strip `(export )?using ::Foo;` lines.
+    text = re.sub(
+        r"^\s*(?:export\s+)?using ::\w+;\s*\n",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+    if text == original:
+        return 0
+    path.write_text(text)
+    return 1
+
+
+def patch_deep_control_cppm_reexport(cpp_out: Path) -> int:
+    """`control.cppm` (parent module) was emitted with imports INSIDE
+    the namespace wrap and broken `export using ::Foo;` lines (assumes
+    flat emit; with the wrap, `Foo` isn't at global scope). Fix:
+    1. Hoist `import hashbrown_port.control.{bitmask,group,tag};` out
+       of the wrap and promote them to `export import` (this is the
+       re-export contract for the parent module).
+    2. Strip the broken `using/export using ::Foo;` lines from the wrap
+       body — the `export import` above handles re-export."""
+    path = cpp_out / "hashbrown_port.control.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    sentinel = "// deep-ns: child modules re-exported via export import; using-decls stripped"
+    if sentinel in text:
+        return 0
+    original = text
+    # Step 1: remove any existing `(export )?import hashbrown_port.control.X;`
+    # lines wherever they appear.
+    for child in ["bitmask", "group", "tag"]:
+        text = re.sub(
+            rf"^(?:export\s+)?import hashbrown_port\.control\.{child};\s*\n",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+    # Step 2: insert export imports immediately before the namespace open.
+    inserts = (
+        "export import hashbrown_port.control.bitmask;\n"
+        "export import hashbrown_port.control.group;\n"
+        "export import hashbrown_port.control.tag;\n"
+        f"{sentinel}\n"
+        "\n"
+    )
+    text = text.replace(
+        _HB_DEEP_NS_OPEN,
+        inserts + _HB_DEEP_NS_OPEN,
+        1,
+    )
+    # Step 3: strip every `using/export using ::Foo;` line.
+    text = re.sub(
+        r"^\s*(?:export\s+)?using ::\w+;\s*\n",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+    if text == original:
+        return 0
+    path.write_text(text)
+    return 1
+
+
+def patch_deep_raw_helper_inside_wrap(cpp_out: Path) -> int:
+    """`raw.cppm`'s `__raw_into_inner` helper (emitted by an earlier
+    flat-shape patch) references `::ScopeGuard<T, F>` (global scope).
+    With the wrap, `ScopeGuard` lives in the deep namespace, not global.
+    Two fixes:
+    1. Move the helper inside the namespace wrap.
+    2. Strip the `::` prefix on `ScopeGuard` so unqualified lookup
+       finds it via the enclosing namespace."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    # The helper block in the flat-emit-shape patcher output. Note that
+    # patch_raw_misc_fixups emits `::ScopeGuard` (global), which is the
+    # form we need to strip and hoist.
+    helper_block = (
+        "// raw: into_inner-deduction helper — avoid `__raw_into_inner(x)`\n"
+        "// which can't deduce ScopeGuard<T, F> template args.\n"
+        "template<typename T, typename F>\n"
+        "static inline T __raw_into_inner(::ScopeGuard<T, F> g) {\n"
+        "    return ::ScopeGuard<T, F>::into_inner(std::move(g));\n"
+        "}"
+    )
+    if helper_block not in text:
+        return 0
+    # Remove the helper from its current (global) location and re-insert
+    # immediately after the namespace open with `::` stripped.
+    fixed_helper = (
+        "// raw: into_inner-deduction helper — avoid `__raw_into_inner(x)`\n"
+        "// which can't deduce ScopeGuard<T, F> template args.\n"
+        "template<typename T, typename F>\n"
+        "static inline T __raw_into_inner(ScopeGuard<T, F> g) {\n"
+        "    return ScopeGuard<T, F>::into_inner(std::move(g));\n"
+        "}"
+    )
+    text = text.replace(helper_block, "")
+    text = text.replace(
+        _HB_DEEP_NS_OPEN,
+        _HB_DEEP_NS_OPEN + "\n\n" + fixed_helper + "\n",
+        1,
+    )
+    path.write_text(text)
+    return 1
+
+
+def patch_deep_visit_byte_buf_stub(cpp_out: Path) -> int:
+    """The serde-de prelude refers to `rusty::Vec<uint8_t>` in
+    `visit_byte_buf`, but `rusty::Vec` isn't visible inside the wrap
+    (the alias lives in the rusty umbrella module, not pulled in here).
+    Stub the body to return Err; serde-de byte-buf is not exercised by
+    HashMap/HashSet. Matching the binary_heap_port stub shape exactly."""
+    files = ["hashbrown_port.alloc.cppm",
+             "hashbrown_port.control.tag.cppm",
+             "hashbrown_port.raw.cppm",
+             "hashbrown_port.map.cppm",
+             "hashbrown_port.table.cppm"]
+    old = (
+        "template<typename E>\n"
+        "rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {\n"
+        "return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));\n"
+        "}"
+    )
+    new = (
+        "template<typename E>\n"
+        "rusty::Result<Value, E> visit_byte_buf(auto&& value) {\n"
+        "(void)value; return rusty::Result<Value, E>::Err(E{});\n"
+        "}"
+    )
+    total = 0
+    for fn in files:
+        path = cpp_out / fn
+        if not path.exists():
+            continue
+        text = path.read_text()
+        if not _has_deep_ns_wrap(text):
+            continue
+        if old not in text:
+            continue
+        path.write_text(text.replace(old, new))
+        total += 1
+    return total
+
+
+def patch_deep_raw_strip_intra_module(cpp_out: Path) -> int:
+    """Several intra-module references in `raw.cppm` use `::Name` (assumes
+    flat emit). With the wrap they live in the deep namespace, not at
+    global scope. Strip the `::` prefix on these names so unqualified
+    lookup finds them via the enclosing namespace."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    original = text
+    syms = [
+        "ScopeGuard",
+        "capacity_to_buckets",
+        "ensure_bucket_bytes_at_least_ctrl_align",
+        "prev_pow2",
+        "bucket_mask_to_capacity",
+        "maximum_buckets_in",
+        "h1",
+        "h2",
+        "cold_path",
+        "Group",
+        "BitMask",
+        "BitMaskIter",
+        "BitMaskWord",
+        "NonZeroBitMaskWord",
+        "BITMASK_ITER_MASK",
+        "BITMASK_STRIDE",
+        "BITMASK_MASK",
+    ]
+    for sym in syms:
+        text = text.replace(f"::{sym}<", f"{sym}<")
+        text = text.replace(f"::{sym}(", f"{sym}(")
+        # Bare `::Name;` / `::Name::` qualifier (member access)
+        text = re.sub(rf"::{sym}::", f"{sym}::", text)
+    if text == original:
+        return 0
+    path.write_text(text)
+    return 1
+
+
+def patch_deep_raw_offset_from(cpp_out: Path) -> int:
+    """`raw.cppm` has two `offset_from` issues with the wrap:
+    1. `::offset_from<T>(...)` call sites — local helper lives in the
+       deep namespace, not global. Strip the `::` prefix.
+    2. The local helper's body calls `rusty::ptr::offset_from(to, from)`,
+       which doesn't exist in `<rusty/ptr.hpp>`. Inline as pointer-diff."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    original = text
+    text = text.replace("::offset_from<", "offset_from<")
+    # Repair greedy-sed artifact if present.
+    text = text.replace("rustyoffset_from(", "rusty::ptr::offset_from(")
+    text = text.replace(
+        "return static_cast<size_t>(rusty::ptr::offset_from(to, from));",
+        "return static_cast<size_t>(to - from);",
+    )
+    if text == original:
+        return 0
+    path.write_text(text)
+    return 1
+
+
+def patch_deep_raw_guard_rename(cpp_out: Path) -> int:
+    """In `raw.cppm`, the transpiler emits two shapes that conflict:
+    - `auto guard = ::guard(...)` — both variable name AND `::guard`
+      function call. With the deep wrap, `::guard` doesn't exist
+      (function is in deep namespace); the variable name shadows the
+      function.
+    - Variable references later: `(guard)`, `(*guard)`,
+      `std::move(guard)`, `_pointer_like(guard, ...)`.
+
+    Fix: rename the variable to `_guard` and strip the `::` from the
+    function call so unqualified lookup finds it via enclosing namespace."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    sentinel = "// deep-ns: guard-rename completed"
+    if sentinel in text:
+        return 0
+    original = text
+    # Rename declaration: `auto guard = ::guard(` → `auto _guard = guard(`
+    text = text.replace("auto guard = ::guard(", "auto _guard = guard(")
+    # Rename variable references (these don't conflict with `guard(...)` calls
+    # since the call shape is `guard(` whereas these are `(guard)` etc.).
+    text = re.sub(r"\(guard\)", "(_guard)", text)
+    text = re.sub(r"\(\*guard\)", "(*_guard)", text)
+    text = re.sub(r"std::move\(guard\)", "std::move(_guard)", text)
+    text = re.sub(r"_pointer_like\(guard\b", "_pointer_like(_guard", text)
+    if text == original:
+        return 0
+    text = text.replace(
+        f"namespace {_HB_DEEP_NS} {{",
+        f"namespace {_HB_DEEP_NS} {{\n{sentinel}",
+        1,
+    )
+    path.write_text(text)
+    return 1
+
+
+def patch_deep_strip_intra_module_global_refs(cpp_out: Path) -> int:
+    """The wrap moves these helpers/types from global scope into the deep
+    namespace. References emitted as `::Name<...>` / `::Name(...)` fail
+    name lookup. Strip the `::` prefix on intra-module references."""
+    files = ["hashbrown_port.map.cppm",
+             "hashbrown_port.table.cppm",
+             "hashbrown_port.set.cppm"]
+    syms = ["IntoIter", "make_hash", "make_hasher", "equivalent_key",
+            "__rusty_ext_equivalent"]
+    total = 0
+    for fn in files:
+        path = cpp_out / fn
+        if not path.exists():
+            continue
+        text = path.read_text()
+        # set.cppm is hand-written and may not have a wrap initially; the
+        # wrap is added by patch_deep_set_facade_wrap below. Still safe
+        # to strip these prefixes either way.
+        original = text
+        for sym in syms:
+            text = text.replace(f"::{sym}<", f"{sym}<")
+            text = text.replace(f"::{sym}(", f"{sym}(")
+        if text != original:
+            path.write_text(text)
+            total += 1
+    return total
+
+
+def patch_deep_map_rusty_hashmap(cpp_out: Path) -> int:
+    """`map.cppm` references `rusty::HashMap<K, V, S, A>` but with the
+    deep wrap `HashMap` lives at `rusty::port::collections::hashbrown::
+    HashMap`. Since `map.cppm` is itself in that deep namespace, the
+    unqualified `HashMap<...>` resolves correctly. Strip the
+    `rusty::` prefix (likewise for `HashSet`)."""
+    path = cpp_out / "hashbrown_port.map.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    original = text
+    text = text.replace("rusty::HashMap<", "HashMap<")
+    text = text.replace("rusty::HashSet<", "HashSet<")
+    if text == original:
+        return 0
+    path.write_text(text)
+    return 1
+
+
+def patch_deep_set_facade_wrap(cpp_out: Path) -> int:
+    """`set.cppm` is the hand-written `HashSet` facade; it wasn't emitted
+    by the transpiler so it doesn't pick up the `--cxx-namespace` wrap
+    automatically. Wrap it in the deep namespace so its `HashMap`/
+    `DefaultHasher` references resolve to the deep types."""
+    path = cpp_out / "hashbrown_port.set.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if f"namespace {_HB_DEEP_NS} {{" in text:
+        return 0
+    # Need at least one of the imports to anchor the wrap.
+    open_anchor = "import hashbrown_port.hasher;\n\n"
+    close_anchor = "    HashSet<T, S> clone() const { return HashSet<T, S>(this->map.clone()); }\n};\n"
+    if open_anchor not in text or close_anchor not in text:
+        return 0
+    text = text.replace(
+        open_anchor,
+        open_anchor + f"namespace {_HB_DEEP_NS} {{\n\n",
+        1,
+    )
+    text = text.replace(
+        close_anchor,
+        close_anchor + f"\n}} // namespace {_HB_DEEP_NS}\n",
+        1,
+    )
+    path.write_text(text)
+    return 1
+
+
+def patch_deep_hasher_facade_wrap(cpp_out: Path) -> int:
+    """`hasher.cppm` was patched earlier (`patch_hasher_replace_with_stub`)
+    with a flat-emit body. With deep namespace, `DefaultHasher`/
+    `DefaultHashBuilder` need to live under the deep namespace so map/set
+    references resolve. Wrap the post-stub body."""
+    path = cpp_out / "hashbrown_port.hasher.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if f"namespace {_HB_DEEP_NS} {{" in text:
+        return 0
+    open_anchor = "export module hashbrown_port.hasher;\n"
+    close_anchor = "    bool operator==(const DefaultHashBuilder&) const = default;\n};\n"
+    if open_anchor not in text or close_anchor not in text:
+        return 0
+    text = text.replace(
+        open_anchor,
+        open_anchor + f"\nnamespace {_HB_DEEP_NS} {{\n",
+        1,
+    )
+    text = text.replace(
+        close_anchor,
+        close_anchor + f"\n}} // namespace {_HB_DEEP_NS}\n",
+        1,
+    )
+    path.write_text(text)
+    return 1
+
+
+def patch_deep_util_cold_path(cpp_out: Path) -> int:
+    """`util.cppm` calls `::cold_path()` (assumes flat emit). With the
+    wrap, `cold_path` lives in the deep namespace. Strip the `::`
+    prefix so unqualified lookup finds it via the enclosing namespace."""
+    path = cpp_out / "hashbrown_port.util.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    if "::cold_path(" not in text:
+        return 0
+    path.write_text(text.replace("::cold_path(", "cold_path("))
+    return 1
+
+
+def patch_deep_alloc_adapter_rusty_unit_convert(cpp_out: Path) -> int:
+    """Like `patch_alloc_adapter_error_convert` but for the deep-emit
+    error type. `AllocatorAdapter::allocate` returns `Result<_,
+    rusty::Unit>` (deep-emit shape — flat-emit uses `std::tuple<>`).
+    The delegation to `value_.allocate(layout)` returns `Result<_,
+    AllocError>`. Convert."""
+    path = cpp_out / "hashbrown_port.alloc.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    sentinel = "// deep-ns: adapter rusty::Unit error convert"
+    if sentinel in text:
+        return 0
+    pattern = re.compile(
+        r"(rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> allocate\(rusty::alloc::Layout layout\) const override \{)\s*\n"
+        r"\s*return value_\.allocate\(layout\);\s*\n"
+        r"(\s*\})",
+    )
+    replacement = (
+        r"\1\n"
+        + "        " + sentinel + "\n"
+        + "        auto r = value_.allocate(layout);\n"
+        + "        if (r.is_ok()) return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Ok(std::move(r).unwrap());\n"
+        + "        return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Err(rusty::Unit{});\n"
+        + r"\2"
+    )
+    new_text = pattern.sub(replacement, text)
+    if new_text == text:
+        return 0
+    path.write_text(new_text)
+    return 1
+
+
+def patch_deep_alloc_slice_from_raw_parts_mut(cpp_out: Path) -> int:
+    """`alloc.cppm` calls `rusty::ptr::slice_from_raw_parts_mut(data,
+    size)` to build a fat slice pointer, but `<rusty/ptr.hpp>` doesn't
+    export that symbol (Rust-only API). Drop the slice length and pass
+    the raw `data` pointer directly — `NonNull<uint8_t>::new_unchecked`
+    expects a single pointer, not a slice."""
+    path = cpp_out / "hashbrown_port.alloc.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    old = "rusty::ptr::slice_from_raw_parts_mut(rusty::as_ptr(data), layout.size)"
+    new = "rusty::as_ptr(data)"
+    if old not in text:
+        return 0
+    path.write_text(text.replace(old, new))
+    return 1
+
+
+def patch_deep_alloc_do_alloc_result_convert(cpp_out: Path) -> int:
+    """In the deep-wrap emit, `do_alloc` returns
+    `rusty::Result<NonNull<u8>, rusty::Unit>` and delegates to
+    `rusty::deref_call(alloc, [&](auto&& __recv) { return __recv.allocate(...); })`
+    which returns `Result<_, AllocError>`. Convert the error type.
+    (Distinct from `patch_alloc_inner_do_alloc_convert` which matches the
+    flat-emit signature with `std::tuple<>`.)"""
+    path = cpp_out / "hashbrown_port.alloc.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    sentinel = "// deep-ns: do_alloc rusty::Unit error convert"
+    if sentinel in text:
+        return 0
+    # The deep-emit body is a single line returning the deref_call result
+    # directly. Wrap it with the same convert-Err shape.
+    old = (
+        "    rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> do_alloc(const A& alloc, rusty::alloc::Layout layout) {\n"
+        "        return rusty::deref_call(alloc, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).allocate(std::move(layout))) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); });\n"
+        "    }"
+    )
+    new = (
+        "    rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> do_alloc(const A& alloc, rusty::alloc::Layout layout) {\n"
+        "        " + sentinel + "\n"
+        "        auto r = rusty::deref_call(alloc, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).allocate(std::move(layout))) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); });\n"
+        "        if (r.is_ok()) return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Ok(std::move(r).unwrap());\n"
+        "        return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Err(rusty::Unit{});\n"
+        "    }"
+    )
+    if old not in text:
+        return 0
+    path.write_text(text.replace(old, new))
+    return 1
+
+
 # ── orchestration ───────────────────────────────────────────────────
 
 def main(cpp_out: Path):
@@ -2782,6 +3364,25 @@ def main(cpp_out: Path):
         # CMakeLists: append smoke-test target.
         ("CMakeLists: append smoke_test target", patch_cmakelists_smoke_test),
         ("strip debug-assert macros across all cppm files", patch_strip_debug_asserts_global),
+        # ── deep-namespace migration (--cxx-namespace) ──
+        # These fire only when the cppm files have the deep wrap (see
+        # _has_deep_ns_wrap guard). On flat-emit input they are no-ops.
+        ("deep-ns: constrain prelude clone (resolves rusty::clone ambiguity)", patch_deep_prelude_clone_constrain),
+        ("deep-ns: control.group re-exports .generic", patch_deep_control_group_reexport),
+        ("deep-ns: control.cppm export-imports children + drops broken using-decls", patch_deep_control_cppm_reexport),
+        ("deep-ns: raw.cppm __raw_into_inner helper inside wrap", patch_deep_raw_helper_inside_wrap),
+        ("deep-ns: raw.cppm — strip :: on intra-module names (ScopeGuard, Group, etc.)", patch_deep_raw_strip_intra_module),
+        ("deep-ns: stub visit_byte_buf (rusty::Vec not in wrap scope)", patch_deep_visit_byte_buf_stub),
+        ("deep-ns: raw.cppm offset_from — strip :: + inline ptr-diff", patch_deep_raw_offset_from),
+        ("deep-ns: raw.cppm complete _guard variable rename", patch_deep_raw_guard_rename),
+        ("deep-ns: strip :: on intra-module names (IntoIter / make_hash / etc)", patch_deep_strip_intra_module_global_refs),
+        ("deep-ns: map.cppm rusty::HashMap → HashMap (same namespace)", patch_deep_map_rusty_hashmap),
+        ("deep-ns: set.cppm hand-written facade — wrap in deep namespace", patch_deep_set_facade_wrap),
+        ("deep-ns: hasher.cppm hand-written facade — wrap in deep namespace", patch_deep_hasher_facade_wrap),
+        ("deep-ns: util.cppm — strip :: prefix on cold_path", patch_deep_util_cold_path),
+        ("deep-ns: alloc.cppm — drop rusty::ptr::slice_from_raw_parts_mut (not in rusty/ptr.hpp)", patch_deep_alloc_slice_from_raw_parts_mut),
+        ("deep-ns: alloc.cppm AllocatorAdapter — convert AllocError → rusty::Unit", patch_deep_alloc_adapter_rusty_unit_convert),
+        ("deep-ns: alloc.cppm do_alloc — convert AllocError → rusty::Unit (deep-emit shape)", patch_deep_alloc_do_alloc_result_convert),
     ]
     total = 0
     for name, fn in patches:
