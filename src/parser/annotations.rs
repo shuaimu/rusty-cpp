@@ -27,6 +27,8 @@ impl LifetimeAnnotation {
 pub enum SafetyAnnotation {
     Safe,   // @safe - enforce borrow checking
     Unsafe, // @unsafe - skip borrow checking
+    Bridge, // @bridge - safety propagates from callees; bridge body is not
+            //           checked, callers may invoke it from @safe code
 }
 
 #[derive(Debug, Clone)]
@@ -117,11 +119,14 @@ fn read_lifetime_from_source(entity: &Entity, name: &str) -> Option<FunctionSign
 // @lifetime: ('a, 'b) -> &'a T where 'a: 'b
 // @lifetime: owned
 fn parse_lifetime_annotations(comment: &str, func_name: String) -> Option<FunctionSignature> {
-    // Look for @safe or @unsafe annotation first
+    // Look for @safe / @unsafe / @bridge annotation first
     let safe_re = Regex::new(r"@safe\b").ok()?;
     let unsafe_re = Regex::new(r"@unsafe\b").ok()?;
+    let bridge_re = Regex::new(r"@bridge\b").ok()?;
 
-    let safety = if safe_re.is_match(comment) {
+    let safety = if bridge_re.is_match(comment) {
+        Some(SafetyAnnotation::Bridge)
+    } else if safe_re.is_match(comment) {
         Some(SafetyAnnotation::Safe)
     } else if unsafe_re.is_match(comment) {
         Some(SafetyAnnotation::Unsafe)

@@ -35,6 +35,16 @@ fn contains_annotation(text: &str, annotation: &str) -> bool {
 pub enum SafetyMode {
     Safe,   // Enforce borrow checking, can only call other @safe functions
     Unsafe, // Skip borrow checking, default for unannotated code
+    /// `@bridge` — a function whose own body is not subject to @safe body
+    /// checks, but whose calls from @safe callers are nonetheless allowed.
+    /// The contract is: the bridge propagates safety from its callees —
+    /// e.g. `rusty::deref_call(receiver, lambda)` is a bridge because the
+    /// only call it actually makes is to the caller-provided lambda. The
+    /// checker trusts the bridge author and catches safety violations at
+    /// the *callers'* lambda bodies via the existing @safe body walk.
+    /// For `match` exhaustiveness, `Bridge` is "not Safe" — bridges'
+    /// bodies are excluded from body-level analyses.
+    Bridge,
 }
 
 /// Class annotation types for inheritance safety
@@ -339,9 +349,14 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             if trimmed.contains("*/") {
                 in_comment_block = false;
             }
-            // Check for annotations in multi-line comments (must be on their own)
+            // Check for annotations in multi-line comments (must be on their own).
+            // `@bridge` must be checked before `@safe` because `contains_annotation`
+            // requires `starts_with` of the literal — they don't actually collide
+            // (different prefixes), but ordering keeps intent explicit.
             let cleaned = trimmed.trim_start_matches('*').trim();
-            if contains_annotation(cleaned, "@safe") {
+            if contains_annotation(cleaned, "@bridge") {
+                pending_annotation = Some(SafetyMode::Bridge);
+            } else if contains_annotation(cleaned, "@safe") {
                 pending_annotation = Some(SafetyMode::Safe);
             } else if contains_annotation(cleaned, "@unsafe") {
                 pending_annotation = Some(SafetyMode::Unsafe);
@@ -352,10 +367,12 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
         // Check for comment start
         if trimmed.starts_with("/*") {
             in_comment_block = true;
-            // Check if it's a single-line /* @safe */ or /* @unsafe */ comment
+            // Check if it's a single-line /* @safe */ / /* @unsafe */ / /* @bridge */ comment.
             if let Some(end_pos) = trimmed.find("*/") {
                 let comment_content = trimmed[2..end_pos].trim();
-                if contains_annotation(comment_content, "@safe") {
+                if contains_annotation(comment_content, "@bridge") {
+                    pending_annotation = Some(SafetyMode::Bridge);
+                } else if contains_annotation(comment_content, "@safe") {
                     pending_annotation = Some(SafetyMode::Safe);
                 } else if contains_annotation(comment_content, "@unsafe") {
                     pending_annotation = Some(SafetyMode::Unsafe);
@@ -369,7 +386,9 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
         if trimmed.starts_with("//") {
             // Only look for annotations that are word boundaries (not part of other text)
             let comment_text = trimmed[2..].trim();
-            if contains_annotation(comment_text, "@safe") {
+            if contains_annotation(comment_text, "@bridge") {
+                pending_annotation = Some(SafetyMode::Bridge);
+            } else if contains_annotation(comment_text, "@safe") {
                 pending_annotation = Some(SafetyMode::Safe);
             } else if contains_annotation(comment_text, "@unsafe") {
                 pending_annotation = Some(SafetyMode::Unsafe);
@@ -978,7 +997,9 @@ pub fn parse_entity_safety(entity: &Entity) -> Option<SafetyMode> {
             };
 
             // Use contains_annotation to properly check for annotations at start of line
-            if contains_annotation(content, "@safe") {
+            if contains_annotation(content, "@bridge") {
+                return Some(SafetyMode::Bridge);
+            } else if contains_annotation(content, "@safe") {
                 return Some(SafetyMode::Safe);
             } else if contains_annotation(content, "@unsafe") {
                 return Some(SafetyMode::Unsafe);
@@ -1124,7 +1145,9 @@ pub fn check_method_safety_annotation(entity: &Entity) -> Option<SafetyMode> {
             } else {
                 trimmed
             };
-            if contains_annotation(content, "@safe") {
+            if contains_annotation(content, "@bridge") {
+                return Some(SafetyMode::Bridge);
+            } else if contains_annotation(content, "@safe") {
                 return Some(SafetyMode::Safe);
             } else if contains_annotation(content, "@unsafe") {
                 return Some(SafetyMode::Unsafe);
@@ -1164,11 +1187,13 @@ pub fn check_method_safety_annotation(entity: &Entity) -> Option<SafetyMode> {
         };
 
         if current_line == entity_line {
-            // Check if previous line has @safe or @unsafe
+            // Check if previous line has @safe / @unsafe / @bridge
             let trimmed = prev_line.trim();
             if trimmed.starts_with("//") {
                 let content = trimmed[2..].trim();
-                if contains_annotation(content, "@safe") {
+                if contains_annotation(content, "@bridge") {
+                    return Some(SafetyMode::Bridge);
+                } else if contains_annotation(content, "@safe") {
                     return Some(SafetyMode::Safe);
                 } else if contains_annotation(content, "@unsafe") {
                     return Some(SafetyMode::Unsafe);
@@ -1431,6 +1456,41 @@ bool parse_inet4_addr() {
             "annotation must be recorded under the outer named namespace's \
              qualified name, even after multiple nested classes and an \
              intervening anonymous namespace"
+        );
+    }
+
+    #[test]
+    fn test_bridge_annotation_on_function() {
+        // `@bridge` is a function-level annotation parallel to @safe/@unsafe.
+        // It marks the function as a safety-propagating bridge: its body is
+        // not subject to @safe body checks, and callers may invoke it from
+        // @safe code without an @unsafe block.
+        let code = r#"
+// @bridge
+int my_bridge_fn() {
+    return 0;
+}
+
+void other_fn() {
+    int x = 0;
+}
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        assert_eq!(
+            context.get_function_safety("my_bridge_fn"),
+            SafetyMode::Bridge,
+            "@bridge annotation must be recorded on the next function"
+        );
+        // Verify the annotation didn't carry over to the next function.
+        assert_eq!(
+            context.get_function_safety("other_fn"),
+            SafetyMode::Unsafe,
+            "@bridge on one function must not affect subsequent declarations"
         );
     }
 
