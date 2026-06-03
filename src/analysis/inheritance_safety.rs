@@ -275,6 +275,7 @@ fn safety_mode_str(mode: SafetyMode) -> &'static str {
     match mode {
         SafetyMode::Safe => "safe",
         SafetyMode::Unsafe => "unsafe",
+        SafetyMode::Bridge => "bridge",
     }
 }
 

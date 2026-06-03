@@ -265,6 +265,16 @@ fn check_statement_for_unsafe_calls_with_external(
                 SafetyMode::Safe => {
                     // OK: safe can call safe
                 }
+                SafetyMode::Bridge => {
+                    // OK: @bridge functions propagate safety from their
+                    // callees rather than gating on their own body. If the
+                    // caller is @safe, any actual unsafety triggered through
+                    // the bridge (e.g. an @unsafe call inside a lambda the
+                    // caller hands to `rusty::deref_call`) shows up
+                    // separately in the caller's body walk — the lambda body
+                    // is visited in the same @safe context as the rest of
+                    // the caller. The bridge itself is trusted.
+                }
                 SafetyMode::Unsafe => {
                     // ERROR: safe cannot call unsafe/unannotated functions directly
                     // Must wrap in @unsafe { } block
@@ -490,6 +500,12 @@ fn find_unsafe_function_call_with_external(
             match called_safety {
                 SafetyMode::Safe => {
                     // OK: safe can call safe
+                }
+                SafetyMode::Bridge => {
+                    // OK: @bridge propagates safety from its callees, not
+                    // from its own body. The caller's body walk catches any
+                    // unsafety triggered through the bridge (e.g. unsafe
+                    // calls inside a lambda passed to `rusty::deref_call`).
                 }
                 SafetyMode::Unsafe => {
                     // Error: safe function cannot call unsafe function directly
