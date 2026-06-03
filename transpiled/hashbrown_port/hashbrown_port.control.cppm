@@ -30,14 +30,9 @@ module;
 
 export module hashbrown_port.control;
 
-import hashbrown_port.control.bitmask;
+export import hashbrown_port.control.bitmask;
+export import hashbrown_port.control.group;
+export import hashbrown_port.control.tag;
 
-import hashbrown_port.control.group;
-
-import hashbrown_port.control.tag;
-
-export using ::BitMask;
-
-export using ::BitMaskIter;
-export using ::Group;
-export using ::Tag;
+namespace rusty::port::collections::hashbrown {
+} // namespace rusty::port::collections::hashbrown

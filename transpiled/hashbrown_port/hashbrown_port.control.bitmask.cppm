@@ -30,6 +30,9 @@ module;
 
 export module hashbrown_port.control.bitmask;
 import hashbrown_port.control.group;
+
+namespace rusty::port::collections::hashbrown {
+
 export struct BitMask;
 export struct BitMaskIter;
 
@@ -141,3 +144,4 @@ rusty::Option<size_t> BitMaskIter::next() {
     return rusty::Option<size_t>(std::move(bit));
 }
 
+} // namespace rusty::port::collections::hashbrown

@@ -177,15 +177,14 @@ using Weak = ::rusty::port::rc::Weak<T, A>;
 
 // User-facing `rusty::collections::*` aliases. End users write
 // `rusty::collections::HashMap<K,V>` / `HashSet<T>` to match Rust's
-// `std::collections::*`. HashMap/HashSet come from hashbrown_port —
-// the underlying types are still emitted at the global namespace (full
-// namespace migration of all 16 hashbrown_port files deferred); the
-// aliases here are the user-observable contract.
+// `std::collections::*`. HashMap/HashSet come from hashbrown_port,
+// now deep-migrated to `rusty::port::collections::hashbrown::*` via
+// the `--cxx-namespace` transpiler flag.
 namespace collections {
-    template<typename K, typename V, typename S = ::DefaultHasher>
-    using HashMap = ::HashMap<K, V, S>;
-    template<typename T, typename S = ::DefaultHasher>
-    using HashSet = ::HashSet<T, S>;
+    template<typename K, typename V, typename S = ::rusty::port::collections::hashbrown::DefaultHasher>
+    using HashMap = ::rusty::port::collections::hashbrown::HashMap<K, V, S>;
+    template<typename T, typename S = ::rusty::port::collections::hashbrown::DefaultHasher>
+    using HashSet = ::rusty::port::collections::hashbrown::HashSet<T, S>;
     template<typename K, typename V, typename A = ::rusty::alloc::Global>
     using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
     template<typename T, typename A = ::rusty::alloc::Global>

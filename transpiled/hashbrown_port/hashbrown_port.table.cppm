@@ -96,7 +96,12 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available; Copy types fall through to ::rusty::clone (move.hpp).
+template<typename T>
+requires requires(const T& v) { v.clone(); }
+auto clone(const T& value) {
+return value.clone();
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -326,7 +331,7 @@ return rusty::Result<Value, E>::Ok(value);
 
 template<typename E>
 rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+return rusty::Result<Value, E>::Err(rusty::String("visit_byte_buf stubbed"));
 }
 
 template<typename E>
@@ -428,7 +433,7 @@ return accept<E>(value);
 };
 
 struct unit_visitor {
-using Value = std::tuple<>;
+using Value = rusty::Unit;
 
 template<typename E>
 rusty::Result<Value, E> visit_unit() const {
@@ -549,7 +554,7 @@ return Ret::Ok(static_cast<Target>(*__bound));
 return Ret::Err(Err::custom("unsupported non-const reference target"));
 }
 } else if constexpr (
-std::is_same_v<Target, std::tuple<>>
+std::is_same_v<Target, rusty::Unit>
 && requires {
 rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer))
@@ -559,7 +564,7 @@ return rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer))
 .deserialize_unit(detail::unit_visitor{});
 } else if constexpr (
-std::is_same_v<Target, std::tuple<>>
+std::is_same_v<Target, rusty::Unit>
 && requires {
 rusty::next_token(rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer)));
@@ -569,22 +574,22 @@ std::forward<Deserializer>(deserializer)));
 using Err = std::remove_cv_t<std::remove_reference_t<
 decltype(__tok_res.unwrap_err())>>;
 if (__tok_res.is_err()) {
-return rusty::Result<std::tuple<>, Err>::Err(__tok_res.unwrap_err());
+return rusty::Result<rusty::Unit, Err>::Err(__tok_res.unwrap_err());
 }
 auto __tok = __tok_res.unwrap();
 if constexpr (requires { rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok); }) {
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok)) {
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
 rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok);
 }) {
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok)) {
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
 }
-return rusty::Result<std::tuple<>, Err>::Err(
+return rusty::Result<rusty::Unit, Err>::Err(
 Err::custom("expected unit token"));
 } else if constexpr (
 (std::is_arithmetic_v<Target> || std::is_enum_v<Target> || std::is_same_v<Target, bool>)
@@ -1545,9 +1550,9 @@ if (__res.is_ok()) {
 static_cast<void>(rusty::mem::replace(
 rusty::detail::deref_if_pointer_like(std::forward<Place>(place)),
 __res.unwrap()));
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
-return rusty::Result<std::tuple<>, Err>::Err(__res.unwrap_err());
+return rusty::Result<rusty::Unit, Err>::Err(__res.unwrap_err());
 } else {
 return Target::deserialize_in_place(
 std::forward<Deserializer>(deserializer), std::forward<Place>(place));
@@ -2038,7 +2043,7 @@ return std::forward<Serializer>(serializer).serialize_f64(std::forward<Value>(va
 std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
 }) {
 return std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
-} else if constexpr (std::is_same_v<ValueType, std::tuple<>> && requires {
+} else if constexpr (std::is_same_v<ValueType, rusty::Unit> && requires {
 std::forward<Serializer>(serializer).serialize_unit();
 }) {
 return std::forward<Serializer>(serializer).serialize_unit();
@@ -2120,7 +2125,7 @@ return true;
 };
 auto token_opt = __serializer_recv.next_token();
 if (token_opt.is_none()) {
-return rusty::Result<std::tuple<>, SerializerError>::Err(
+return rusty::Result<rusty::Unit, SerializerError>::Err(
 SerializerError::custom("expected Token::Bytes, Token::BorrowedBytes, or Token::ByteBuf"));
 }
 auto token = token_opt.unwrap();
@@ -2131,7 +2136,7 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0;
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
@@ -2141,7 +2146,7 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
@@ -2151,10 +2156,10 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0;
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
-return rusty::Result<std::tuple<>, SerializerError>::Err(
+return rusty::Result<rusty::Unit, SerializerError>::Err(
 SerializerError::custom(std::format(
 "serialized bytes did not match expected token (expected_len={0}, token={1})",
 expected.size(), rusty::to_string(token))));
@@ -2651,12 +2656,12 @@ return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - ear
 struct SystemTime {
 std::chrono::system_clock::time_point inner;
 static SystemTime now() { return SystemTime{std::chrono::system_clock::now()}; }
-rusty::Result<Duration, std::tuple<>> duration_since(SystemTime earlier) const {
+rusty::Result<Duration, rusty::Unit> duration_since(SystemTime earlier) const {
 if (inner >= earlier.inner) {
-return rusty::Result<Duration, std::tuple<>>::Ok(
+return rusty::Result<Duration, rusty::Unit>::Ok(
 Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)});
 }
-return rusty::Result<Duration, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<Duration, rusty::Unit>::Err(std::make_tuple());
 }
 };
 inline const SystemTime UNIX_EPOCH{std::chrono::system_clock::time_point{}};
@@ -2680,19 +2685,19 @@ Ready<std::decay_t<T>> ready(T&& value) {
 return Ready<std::decay_t<T>>{std::forward<T>(value), false};
 }
 struct Delay {
-using Output = std::tuple<>;
+using Output = rusty::Unit;
 std::chrono::nanoseconds duration{};
 bool done = false;
 static Delay new_(rusty::time::Duration duration) { return Delay{duration.inner, false}; }
 Delay into_future() { return std::move(*this); }
 Delay new_unchecked() { return std::move(*this); }
 Delay& as_mut() { return *this; }
-rusty::Poll<std::tuple<>> poll(rusty::Context&) {
+rusty::Poll<rusty::Unit> poll(rusty::Context&) {
 if (!done) {
 std::this_thread::sleep_for(duration);
 done = true;
 }
-return rusty::Poll<std::tuple<>>::ready_with(std::tuple<>{});
+return rusty::Poll<rusty::Unit>::ready_with(rusty::Unit{});
 }
 };
 }
@@ -2993,17 +2998,17 @@ return rusty::fmt::Result::Err(rusty::fmt::Error{});
 }
 }
 template<typename T, typename Input>
-rusty::Result<T, std::tuple<>> parse_hex(const Input& input) {
+rusty::Result<T, rusty::Unit> parse_hex(const Input& input) {
 std::string_view text;
 if constexpr (std::is_convertible_v<Input, std::string_view>) {
 text = std::string_view(input);
 } else if constexpr (requires { input.as_str(); }) {
 text = std::string_view(input.as_str());
 } else {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (text.empty()) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 bool negative = false;
 std::size_t start = 0;
@@ -3012,11 +3017,11 @@ negative = text[0] == '-';
 start = 1;
 }
 if (start >= text.size()) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 using RawT = std::remove_cv_t<std::remove_reference_t<T>>;
 if constexpr (!std::is_integral_v<RawT> || std::is_same_v<RawT, bool>) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 } else {
 using Unsigned = std::make_unsigned_t<RawT>;
 Unsigned value = 0;
@@ -3030,11 +3035,11 @@ digit = static_cast<unsigned>(10 + (ch - 'a'));
 } else if (ch >= 'A' && ch <= 'F') {
 digit = static_cast<unsigned>(10 + (ch - 'A'));
 } else {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (value > (std::numeric_limits<Unsigned>::max() - static_cast<Unsigned>(digit))
 / static_cast<Unsigned>(16)) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 value = static_cast<Unsigned>(value * static_cast<Unsigned>(16)
 + static_cast<Unsigned>(digit));
@@ -3044,23 +3049,23 @@ if (negative) {
 const auto max_mag = static_cast<Unsigned>(std::numeric_limits<RawT>::max())
 + static_cast<Unsigned>(1);
 if (value > max_mag) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (value == max_mag) {
-return rusty::Result<T, std::tuple<>>::Ok(std::numeric_limits<RawT>::min());
+return rusty::Result<T, rusty::Unit>::Ok(std::numeric_limits<RawT>::min());
 }
 const auto signed_value = static_cast<RawT>(value);
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(-signed_value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(-signed_value));
 }
 if (value > static_cast<Unsigned>(std::numeric_limits<RawT>::max())) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 } else {
 if (negative) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 }
 }
 }
@@ -3633,6 +3638,8 @@ import hashbrown_port.control;
 import hashbrown_port.raw;
 import hashbrown_port.hasher;
 
+namespace rusty::port::collections::hashbrown {
+
 export template<typename T>
 struct Iter;
 export template<typename T>
@@ -3680,9 +3687,9 @@ struct AbsentEntry;
 using rusty::PhantomData;
 
 // auto-stub: __rusty_ext_equivalent
-// ::__rusty_ext_equivalent fallback (just `operator==`).
+// rusty_ext::equivalent fallback (just `operator==`).
 template<typename A, typename B>
-inline constexpr bool __rusty_ext_equivalent(const A& a, const B& b)
+constexpr bool __rusty_ext_equivalent(const A& a, const B& b)
 { return a == b; }
 using rusty::ptr::NonNull;
 
@@ -3825,13 +3832,13 @@ export template<typename T>
 struct UnsafeIter {
     using Item = rusty::ptr::NonNull<T>;
     RawIter<T> inner;
-    rusty::PhantomData<const std::tuple<>&> marker;
+    rusty::PhantomData<const rusty::Unit&> marker;
 
     Iter<T> iter() const {
         return Iter<T>{.inner = rusty::clone(this->inner), .marker = rusty::PhantomData<const T&>{}};
     }
     static UnsafeIter<T> default_() {
-        return UnsafeIter<T>{.inner = rusty::default_value<RawIter<T>>(), .marker = rusty::PhantomData<const std::tuple<>&>{}};
+        return UnsafeIter<T>{.inner = rusty::default_value<RawIter<T>>(), .marker = rusty::PhantomData<const rusty::Unit&>{}};
     }
     rusty::Option<Item> next() {
         return [&]() -> rusty::Option<Item> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& bucket = rusty::detail::deref_if_pointer(_mv0); return rusty::Option<rusty::ptr::NonNull<T>>(NonNull<std::remove_pointer_t<std::remove_reference_t<decltype((rusty::as_ptr(bucket)))>>>::new_unchecked(rusty::as_ptr(bucket))); } if (_m.is_none()) { return rusty::Option<rusty::ptr::NonNull<T>>{rusty::None}; } return [&]() -> rusty::Option<Item> { rusty::intrinsics::unreachable(); }(); }();
@@ -4110,7 +4117,7 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct HashTable {
     using Item = T;
-    using IntoIter = ::IntoIter<T, A>;
+    using IntoIter = IntoIter<T, A>;
     RawTable<T, A> raw;
 
     static HashTable<T, A> new_() {
@@ -4183,7 +4190,7 @@ struct HashTable {
     void reserve(size_t additional, const auto& hasher) {
         this->raw.reserve(std::move(additional), hasher);
     }
-    auto try_reserve(size_t additional, const auto& hasher) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+    auto try_reserve(size_t additional, const auto& hasher) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError> {
         return this->raw.try_reserve(std::move(additional), hasher);
     }
     size_t num_buckets() const {
@@ -4205,7 +4212,7 @@ struct HashTable {
         return IterMut<T>{.inner = rusty::iter(this->raw), .marker = rusty::PhantomData<T&>{}};
     }
     UnsafeIter<T> unsafe_iter() {
-        return UnsafeIter<T>{.inner = rusty::iter(this->raw), .marker = rusty::PhantomData<const std::tuple<>&>{}};
+        return UnsafeIter<T>{.inner = rusty::iter(this->raw), .marker = rusty::PhantomData<const rusty::Unit&>{}};
     }
     IterBuckets<T> iter_buckets() const {
         return IterBuckets<T>{.inner = this->raw.full_buckets_indices(), .marker = rusty::PhantomData<const T&>{}};
@@ -4541,3 +4548,4 @@ struct AbsentEntry {
 
 // #[cfg(test)] module omitted
 
+} // namespace rusty::port::collections::hashbrown

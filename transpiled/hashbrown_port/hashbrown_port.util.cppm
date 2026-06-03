@@ -30,6 +30,8 @@ module;
 
 export module hashbrown_port.util;
 
+namespace rusty::port::collections::hashbrown {
+
 void cold_path();
 export bool likely(bool b);
 export bool unlikely(bool b);
@@ -43,14 +45,14 @@ export bool likely(bool b) {
     if (b) {
         return true;
     } else {
-        ::cold_path();
+        cold_path();
         return false;
     }
 }
 
 export bool unlikely(bool b) {
     if (b) {
-        ::cold_path();
+        cold_path();
         return true;
     } else {
         return false;
@@ -65,3 +67,4 @@ std::add_pointer_t<T> invalid_mut(size_t addr) {
     }
 }
 
+} // namespace rusty::port::collections::hashbrown

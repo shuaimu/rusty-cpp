@@ -67,17 +67,19 @@ struct BitMask {
     // semantics mirror the real `control::BitMask` in
     // hashbrown's control/bitmask.rs.
     //
-    // The word stores 1 bit per *byte* (the high bit of each byte
-    // is the "match" flag). Methods that return a byte index
-    // must divide ctz/clz by 8 (BITMASK_STRIDE for the generic
-    // path) to convert bit index → byte index.
+    // The word stores 1 *match* bit per *byte* (the high bit of each
+    // byte is the match flag). Methods that return a byte index must
+    // divide ctz/clz by 8 (BITMASK_STRIDE for the generic path) to
+    // convert bit-position → byte-position; otherwise callers walk
+    // off into wrong slots (see hashbrown/control/bitmask.rs).
     bool any_bit_set() const { return _0 != 0; }
     BitMask remove_lowest_bit() const { return BitMask{_0 & (_0 - 1)}; }
     size_t trailing_zeros() const { return _0 == 0 ? 8 : __builtin_ctzll(_0) / 8; }
     size_t leading_zeros() const { return _0 == 0 ? 8 : __builtin_clzll(_0) / 8; }
-    // `lowest_set_bit() -> Option<size_t>`. Rust returns Some(idx) if
-    // any bit set, None if all zero. `idx` is the *byte* index
-    // (0..WIDTH-1), not the raw ctz bit position.
+    // `lowest_set_bit() -> Option<size_t>`. Returns Some(byte_idx) if
+    // any byte's match bit is set, None if all zero. `byte_idx` is
+    // a slot offset within the group (0..WIDTH-1), NOT the raw
+    // ctz bit position.
     rusty::Option<size_t> lowest_set_bit() const {
         if (_0 == 0) return rusty::Option<size_t>(rusty::None);
         return rusty::Option<size_t>(static_cast<size_t>(__builtin_ctzll(_0)) / 8);

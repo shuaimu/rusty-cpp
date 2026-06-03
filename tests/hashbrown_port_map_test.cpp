@@ -15,6 +15,10 @@ import hashbrown_port.raw;
 import hashbrown_port.map;
 import hashbrown_port.hasher;
 
+using rusty::port::collections::hashbrown::HashMap;
+using rusty::port::collections::hashbrown::DefaultHasher;
+using rusty::port::collections::hashbrown::make_hash;
+
 namespace {
 
 void test_default_ctor_and_len() {
@@ -47,7 +51,7 @@ void test_find_via_raw_table() {
     auto m = HashMap<int, int>::with_capacity(16);
     m.insert(42, 1000);
     m.insert(99, 2000);
-    auto h42 = ::make_hash<int, DefaultHasher>(m.hash_builder, 42);
+    auto h42 = make_hash<int, DefaultHasher>(m.hash_builder, 42);
     auto b = m.table.find(h42, [](const auto& kv) {
         return std::get<0>(kv) == 42;
     });
@@ -62,7 +66,7 @@ void test_growth_via_new_() {
     assert(rusty::len(m) == 1000);
     int misses = 0;
     for (int i = 0; i < 1000; ++i) {
-        auto h = ::make_hash<int, DefaultHasher>(m.hash_builder, i);
+        auto h = make_hash<int, DefaultHasher>(m.hash_builder, i);
         auto b = m.table.find(h, [i](const auto& kv) {
             return std::get<0>(kv) == i;
         });
@@ -77,7 +81,7 @@ void test_move_semantics() {
     m1.insert(2, 20);
     auto m2 = std::move(m1);
     assert(rusty::len(m2) == 2);
-    auto h2 = ::make_hash<int, DefaultHasher>(m2.hash_builder, 2);
+    auto h2 = make_hash<int, DefaultHasher>(m2.hash_builder, 2);
     auto b = m2.table.find(h2, [](const auto& kv) {
         return std::get<0>(kv) == 2;
     });

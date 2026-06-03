@@ -13,6 +13,10 @@ import hashbrown_port.set;
 import hashbrown_port.map;
 import hashbrown_port.hasher;
 
+using rusty::port::collections::hashbrown::HashSet;
+using rusty::port::collections::hashbrown::HashMap;
+using rusty::port::collections::hashbrown::DefaultHasher;
+
 namespace {
 
 void test_default_ctor() {

@@ -30,6 +30,8 @@ module;
 
 export module hashbrown_port.scopeguard;
 
+namespace rusty::port::collections::hashbrown {
+
 export template<typename T, typename F>
 struct ScopeGuard;
 export template<typename T, typename F>
@@ -90,3 +92,4 @@ ScopeGuard<T, F> guard(T value, F dropfn) {
     return ScopeGuard<T, F>(std::move(dropfn), std::move(value));
 }
 
+} // namespace rusty::port::collections::hashbrown

@@ -30,6 +30,8 @@ module;
 
 export module hashbrown_port.hasher;
 
+namespace rusty::port::collections::hashbrown {
+
 // vec_port-style stub: foldhash replaced with xorshift mix
 //
 // DefaultHasher: 64-bit state, xorshift mix on `write` / `finish`.
@@ -88,3 +90,5 @@ export struct DefaultHashBuilder {
     static DefaultHashBuilder default_() { return {}; }
     bool operator==(const DefaultHashBuilder&) const = default;
 };
+
+} // namespace rusty::port::collections::hashbrown

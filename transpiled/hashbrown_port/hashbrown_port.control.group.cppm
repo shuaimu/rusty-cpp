@@ -30,13 +30,12 @@ module;
 
 export module hashbrown_port.control.group;
 
-import hashbrown_port.control.group.generic;
+export import hashbrown_port.control.group.generic;
+
+namespace rusty::port::collections::hashbrown {
 
 
-export using ::Group;
 
-export using ::BITMASK_ITER_MASK;
-export using ::BITMASK_STRIDE;
-export using ::BitMaskWord;
-export using ::NonZeroBitMaskWord;
 
+
+} // namespace rusty::port::collections::hashbrown

@@ -30,7 +30,10 @@ module;
 
 export module hashbrown_port.macros;
 
+namespace rusty::port::collections::hashbrown {
+
 // macro_rules! cfg_if { ... }
 
 // macro_rules! default_fn { ... }
 
+} // namespace rusty::port::collections::hashbrown

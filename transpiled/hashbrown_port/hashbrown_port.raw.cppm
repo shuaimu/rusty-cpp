@@ -96,7 +96,12 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Local clone() template removed — rusty::clone in <rusty/move.hpp> handles this.
+// Clone: dispatches to .clone() if available; Copy types fall through to ::rusty::clone (move.hpp).
+template<typename T>
+requires requires(const T& v) { v.clone(); }
+auto clone(const T& value) {
+return value.clone();
+}
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -326,7 +331,7 @@ return rusty::Result<Value, E>::Ok(value);
 
 template<typename E>
 rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+return rusty::Result<Value, E>::Err(rusty::String("visit_byte_buf stubbed"));
 }
 
 template<typename E>
@@ -428,7 +433,7 @@ return accept<E>(value);
 };
 
 struct unit_visitor {
-using Value = std::tuple<>;
+using Value = rusty::Unit;
 
 template<typename E>
 rusty::Result<Value, E> visit_unit() const {
@@ -549,7 +554,7 @@ return Ret::Ok(static_cast<Target>(*__bound));
 return Ret::Err(Err::custom("unsupported non-const reference target"));
 }
 } else if constexpr (
-std::is_same_v<Target, std::tuple<>>
+std::is_same_v<Target, rusty::Unit>
 && requires {
 rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer))
@@ -559,7 +564,7 @@ return rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer))
 .deserialize_unit(detail::unit_visitor{});
 } else if constexpr (
-std::is_same_v<Target, std::tuple<>>
+std::is_same_v<Target, rusty::Unit>
 && requires {
 rusty::next_token(rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer)));
@@ -569,22 +574,22 @@ std::forward<Deserializer>(deserializer)));
 using Err = std::remove_cv_t<std::remove_reference_t<
 decltype(__tok_res.unwrap_err())>>;
 if (__tok_res.is_err()) {
-return rusty::Result<std::tuple<>, Err>::Err(__tok_res.unwrap_err());
+return rusty::Result<rusty::Unit, Err>::Err(__tok_res.unwrap_err());
 }
 auto __tok = __tok_res.unwrap();
 if constexpr (requires { rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok); }) {
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok)) {
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
 rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok);
 }) {
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok)) {
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
 }
-return rusty::Result<std::tuple<>, Err>::Err(
+return rusty::Result<rusty::Unit, Err>::Err(
 Err::custom("expected unit token"));
 } else if constexpr (
 (std::is_arithmetic_v<Target> || std::is_enum_v<Target> || std::is_same_v<Target, bool>)
@@ -1545,9 +1550,9 @@ if (__res.is_ok()) {
 static_cast<void>(rusty::mem::replace(
 rusty::detail::deref_if_pointer_like(std::forward<Place>(place)),
 __res.unwrap()));
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
-return rusty::Result<std::tuple<>, Err>::Err(__res.unwrap_err());
+return rusty::Result<rusty::Unit, Err>::Err(__res.unwrap_err());
 } else {
 return Target::deserialize_in_place(
 std::forward<Deserializer>(deserializer), std::forward<Place>(place));
@@ -2038,7 +2043,7 @@ return std::forward<Serializer>(serializer).serialize_f64(std::forward<Value>(va
 std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
 }) {
 return std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
-} else if constexpr (std::is_same_v<ValueType, std::tuple<>> && requires {
+} else if constexpr (std::is_same_v<ValueType, rusty::Unit> && requires {
 std::forward<Serializer>(serializer).serialize_unit();
 }) {
 return std::forward<Serializer>(serializer).serialize_unit();
@@ -2120,7 +2125,7 @@ return true;
 };
 auto token_opt = __serializer_recv.next_token();
 if (token_opt.is_none()) {
-return rusty::Result<std::tuple<>, SerializerError>::Err(
+return rusty::Result<rusty::Unit, SerializerError>::Err(
 SerializerError::custom("expected Token::Bytes, Token::BorrowedBytes, or Token::ByteBuf"));
 }
 auto token = token_opt.unwrap();
@@ -2131,7 +2136,7 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0;
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
@@ -2141,7 +2146,7 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
@@ -2151,10 +2156,10 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0;
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
-return rusty::Result<std::tuple<>, SerializerError>::Err(
+return rusty::Result<rusty::Unit, SerializerError>::Err(
 SerializerError::custom(std::format(
 "serialized bytes did not match expected token (expected_len={0}, token={1})",
 expected.size(), rusty::to_string(token))));
@@ -2651,12 +2656,12 @@ return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - ear
 struct SystemTime {
 std::chrono::system_clock::time_point inner;
 static SystemTime now() { return SystemTime{std::chrono::system_clock::now()}; }
-rusty::Result<Duration, std::tuple<>> duration_since(SystemTime earlier) const {
+rusty::Result<Duration, rusty::Unit> duration_since(SystemTime earlier) const {
 if (inner >= earlier.inner) {
-return rusty::Result<Duration, std::tuple<>>::Ok(
+return rusty::Result<Duration, rusty::Unit>::Ok(
 Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)});
 }
-return rusty::Result<Duration, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<Duration, rusty::Unit>::Err(std::make_tuple());
 }
 };
 inline const SystemTime UNIX_EPOCH{std::chrono::system_clock::time_point{}};
@@ -2680,19 +2685,19 @@ Ready<std::decay_t<T>> ready(T&& value) {
 return Ready<std::decay_t<T>>{std::forward<T>(value), false};
 }
 struct Delay {
-using Output = std::tuple<>;
+using Output = rusty::Unit;
 std::chrono::nanoseconds duration{};
 bool done = false;
 static Delay new_(rusty::time::Duration duration) { return Delay{duration.inner, false}; }
 Delay into_future() { return std::move(*this); }
 Delay new_unchecked() { return std::move(*this); }
 Delay& as_mut() { return *this; }
-rusty::Poll<std::tuple<>> poll(rusty::Context&) {
+rusty::Poll<rusty::Unit> poll(rusty::Context&) {
 if (!done) {
 std::this_thread::sleep_for(duration);
 done = true;
 }
-return rusty::Poll<std::tuple<>>::ready_with(std::tuple<>{});
+return rusty::Poll<rusty::Unit>::ready_with(rusty::Unit{});
 }
 };
 }
@@ -2993,17 +2998,17 @@ return rusty::fmt::Result::Err(rusty::fmt::Error{});
 }
 }
 template<typename T, typename Input>
-rusty::Result<T, std::tuple<>> parse_hex(const Input& input) {
+rusty::Result<T, rusty::Unit> parse_hex(const Input& input) {
 std::string_view text;
 if constexpr (std::is_convertible_v<Input, std::string_view>) {
 text = std::string_view(input);
 } else if constexpr (requires { input.as_str(); }) {
 text = std::string_view(input.as_str());
 } else {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (text.empty()) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 bool negative = false;
 std::size_t start = 0;
@@ -3012,11 +3017,11 @@ negative = text[0] == '-';
 start = 1;
 }
 if (start >= text.size()) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 using RawT = std::remove_cv_t<std::remove_reference_t<T>>;
 if constexpr (!std::is_integral_v<RawT> || std::is_same_v<RawT, bool>) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 } else {
 using Unsigned = std::make_unsigned_t<RawT>;
 Unsigned value = 0;
@@ -3030,11 +3035,11 @@ digit = static_cast<unsigned>(10 + (ch - 'a'));
 } else if (ch >= 'A' && ch <= 'F') {
 digit = static_cast<unsigned>(10 + (ch - 'A'));
 } else {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (value > (std::numeric_limits<Unsigned>::max() - static_cast<Unsigned>(digit))
 / static_cast<Unsigned>(16)) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 value = static_cast<Unsigned>(value * static_cast<Unsigned>(16)
 + static_cast<Unsigned>(digit));
@@ -3044,23 +3049,23 @@ if (negative) {
 const auto max_mag = static_cast<Unsigned>(std::numeric_limits<RawT>::max())
 + static_cast<Unsigned>(1);
 if (value > max_mag) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (value == max_mag) {
-return rusty::Result<T, std::tuple<>>::Ok(std::numeric_limits<RawT>::min());
+return rusty::Result<T, rusty::Unit>::Ok(std::numeric_limits<RawT>::min());
 }
 const auto signed_value = static_cast<RawT>(value);
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(-signed_value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(-signed_value));
 }
 if (value > static_cast<Unsigned>(std::numeric_limits<RawT>::max())) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 } else {
 if (negative) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 }
 }
 }
@@ -3638,14 +3643,14 @@ import hashbrown_port.scopeguard;
 
 import hashbrown_port.util;
 
+namespace rusty::port::collections::hashbrown {
+
 // raw: into_inner-deduction helper — avoid `__raw_into_inner(x)`
 // which can't deduce ScopeGuard<T, F> template args.
 template<typename T, typename F>
-static inline T __raw_into_inner(::ScopeGuard<T, F> g) {
-    return ::ScopeGuard<T, F>::into_inner(std::move(g));
+static inline T __raw_into_inner(ScopeGuard<T, F> g) {
+    return ScopeGuard<T, F>::into_inner(std::move(g));
 }
-
-
 
 enum class Fallibility;
 constexpr Fallibility Fallibility_Fallible();
@@ -3693,7 +3698,7 @@ enum class Fallibility {
 inline constexpr Fallibility Fallibility_Fallible() { return Fallibility::Fallible; }
 inline constexpr Fallibility Fallibility_Infallible() { return Fallibility::Infallible; }
 inline rusty::collections::TryReserveError capacity_overflow(Fallibility self_) {
-    // raw: rusty::collections::TryReserveError variant constructors → tagged struct
+    // raw: TryReserveError variant constructors → tagged struct
     (void)self_;
     return rusty::collections::TryReserveError(
         rusty::collections::TryReserveError::Kind::CapacityOverflow);
@@ -3728,7 +3733,7 @@ using rusty::alloc::AllocError;
 
 // using rusty::alloc::Allocator; — alloc module imports it
 // using rusty::alloc::Global; — alloc module imports it
-// // using std::do_alloc; — already imported from hashbrown_port.alloc — already imported from hashbrown_port.alloc
+// using std::do_alloc; — already imported from hashbrown_port.alloc
 
 namespace {
 class RawTableClone {
@@ -3802,7 +3807,7 @@ struct Bucket {
         } else {
             // @unsafe
             {
-                return ::offset_from<std::remove_pointer_t<std::remove_cvref_t<decltype((const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(base)))))>>>(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(base))), const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->ptr))));
+                return offset_from<std::remove_pointer_t<std::remove_cvref_t<decltype((const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(base)))))>>>(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(base))), const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->ptr))));
             }
         }
     }
@@ -3881,7 +3886,7 @@ struct RawIterRange {
             if (this->end <= this->next_ctrl) {
                 return std::make_tuple(std::move((*this)), rusty::Option<RawIterRange<T>>{rusty::None});
             } else {
-                const auto len = ::offset_from<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(this->end)))>>>(std::move(this->end), std::move(this->next_ctrl));
+                const auto len = offset_from<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(this->end)))>>>(std::move(this->end), std::move(this->next_ctrl));
         assert(true);  // assert((len % Group :: WIDTH == 0));...
                 auto mid = ((rusty::detail::deref_if_pointer_like(len) / 2)) & ~(Group::WIDTH - static_cast<int32_t>(1));
                 auto tail = RawIterRange<T>::new_(rusty::ptr::add(this->next_ctrl, std::move(mid)), this->data.next_n(Group::WIDTH).next_n(std::move(mid)), rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(mid));
@@ -3944,7 +3949,7 @@ struct RawIterRange {
         }
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        const auto remaining_buckets = (this->end > this->next_ctrl ? ::offset_from<std::remove_pointer_t<std::remove_cvref_t<decltype((this->end))>>>(this->end, this->next_ctrl) : 0);
+        const auto remaining_buckets = (this->end > this->next_ctrl ? offset_from<std::remove_pointer_t<std::remove_cvref_t<decltype((this->end))>>>(this->end, this->next_ctrl) : 0);
         return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(Group::WIDTH + rusty::detail::deref_if_pointer_like(remaining_buckets)));
     }
 };
@@ -4094,14 +4099,14 @@ struct RawTableInner {
     bool is_empty_singleton() const;
     template<typename A>
         requires (rusty::alloc::Allocator<A>)
-    auto prepare_resize(const A& alloc, const auto& table_layout, size_t capacity, const auto& fallibility) const -> rusty::Result<::ScopeGuard<RawTableInner, std::function<void(RawTableInner&)>>, rusty::collections::TryReserveError>;
+    auto prepare_resize(const A& alloc, const auto& table_layout, size_t capacity, const auto& fallibility) const -> rusty::Result<ScopeGuard<RawTableInner, std::function<void(RawTableInner&)>>, rusty::collections::TryReserveError>;
     template<typename A>
         requires (rusty::alloc::Allocator<A>)
-    auto reserve_rehash_inner(const A& alloc, size_t additional, const std::function<uint64_t(RawTableInner&, size_t)>& hasher, const auto& fallibility, const auto& layout, rusty::Option<rusty::UnsafeFn<void(uint8_t*)>> drop) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError>;
+    auto reserve_rehash_inner(const A& alloc, size_t additional, const std::function<uint64_t(RawTableInner&, size_t)>& hasher, const auto& fallibility, const auto& layout, rusty::Option<rusty::UnsafeFn<void(uint8_t*)>> drop) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError>;
     FullBucketsIndices full_buckets_indices() const;
     template<typename A>
         requires (rusty::alloc::Allocator<A>)
-    auto resize_inner(const A& alloc, size_t capacity, const std::function<uint64_t(RawTableInner&, size_t)>& hasher, const auto& fallibility, const auto& layout) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError>;
+    auto resize_inner(const A& alloc, size_t capacity, const std::function<uint64_t(RawTableInner&, size_t)>& hasher, const auto& fallibility, const auto& layout) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError>;
     void rehash_in_place(const std::function<uint64_t(RawTableInner&, size_t)>& hasher, size_t size_of, rusty::Option<rusty::UnsafeFn<void(uint8_t*)>> drop);
     template<typename A>
         requires (rusty::alloc::Allocator<A>)
@@ -4320,7 +4325,7 @@ struct RawTable {
             }
             return;
         }
-        auto&& _let_pat = ::capacity_to_buckets(std::move(min_size_shadow1), rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)));
+        auto&& _let_pat = capacity_to_buckets(std::move(min_size_shadow1), rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)));
         auto&& min_buckets = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
         if (rusty::detail::deref_if_pointer_like(min_buckets) < this->num_buckets()) {
             if (rusty::detail::deref_if_pointer_like(this->table.items) == static_cast<size_t>(0)) {
@@ -4348,23 +4353,23 @@ struct RawTable {
             }
         }
     }
-    auto try_reserve(size_t additional, const auto& hasher) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+    auto try_reserve(size_t additional, const auto& hasher) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError> {
         if (rusty::detail::deref_if_pointer_like(additional) > rusty::detail::deref_if_pointer_like(this->table.growth_left)) {
             // @unsafe
             {
                 return this->reserve_rehash(std::move(additional), hasher, Fallibility_Fallible());
             }
         } else {
-            return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Ok(std::make_tuple());
+            return rusty::Result<rusty::Unit, rusty::collections::TryReserveError>::Ok(std::make_tuple());
         }
     }
-    auto reserve_rehash(size_t additional, const auto& hasher, const auto& fallibility) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+    auto reserve_rehash(size_t additional, const auto& hasher, const auto& fallibility) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError> {
         // @unsafe
         {
             return this->table.reserve_rehash_inner(this->alloc, std::move(additional), [&](auto&& table, auto&& index) -> uint64_t { return hasher(table.template bucket<T>(std::move(index)).as_ref()); }, std::move(fallibility), rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)), ((!std::is_trivially_destructible_v<T>) ? rusty::Option<rusty::UnsafeFn<void(uint8_t*)>>(rusty::UnsafeFn<void(uint8_t*)>(+[](uint8_t* __p) { std::destroy_at(reinterpret_cast<T*>(__p)); })) : rusty::Option<rusty::UnsafeFn<void(uint8_t*)>>{rusty::None}));
         }
     }
-    auto resize(size_t capacity, const auto& hasher, const auto& fallibility) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+    auto resize(size_t capacity, const auto& hasher, const auto& fallibility) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError> {
         // @unsafe
         {
             return this->table.resize_inner(this->alloc, std::move(capacity), [&](auto&& table, auto&& index) -> uint64_t { return hasher(table.template bucket<T>(std::move(index)).as_ref()); }, std::move(fallibility), rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)));
@@ -4434,10 +4439,11 @@ struct RawTable {
         }
     }
     Bucket<T> insert_tagged_at_index(Tag tag, size_t index, T value) {
+        // @unsafe
         {
-            auto old_ctrl = *this->table.ctrl(index);
-            this->table.record_item_insert_at(index, old_ctrl, tag);
-            auto bucket = this->bucket(index);
+            auto old_ctrl = *this->table.ctrl(std::move(index));
+            this->table.record_item_insert_at(std::move(index), std::move(old_ctrl), std::move(tag));
+            auto bucket = this->bucket(std::move(index));
             std::construct_at(rusty::as_ptr(bucket), std::move(value));
             return std::move(bucket);
         }
@@ -4637,7 +4643,7 @@ return result.unwrap(); }();
         {
             rusty::ptr::copy_nonoverlapping(source.table.ctrl(static_cast<size_t>(0)), this->table.ctrl(static_cast<size_t>(0)), this->table.num_ctrl_bytes());
         }
-        auto guard = ::guard(std::make_tuple(0, (*this)), [&](auto&& _destruct_param0) {
+        auto _guard = guard(std::make_tuple(0, (*this)), [&](auto&& _destruct_param0) {
 auto&& index = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
 auto&& self_ = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_destruct_param0)));
 if ((!std::is_trivially_destructible_v<T>)) {
@@ -4655,12 +4661,12 @@ if ((!std::is_trivially_destructible_v<T>)) {
         {
             for (auto&& from : rusty::for_in(rusty::iter(source))) {
                 auto index = source.bucket_index(rusty::detail::deref_if_pointer_like(from));
-                const auto to = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(guard).bucket(std::move(index));
+                const auto to = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(_guard).bucket(std::move(index));
                 to.write(rusty::clone(from.as_ref()));
-                ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard) = rusty::detail::deref_if_pointer_like(index) + 1;
+                ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(_guard) = rusty::detail::deref_if_pointer_like(index) + 1;
             }
         }
-        rusty::mem::forget(std::move(guard));
+        rusty::mem::forget(std::move(_guard));
         this->table.items = source.table.items;
         this->table.growth_left = source.table.growth_left;
     }
@@ -4805,7 +4811,7 @@ template<typename T>
 size_t offset_from(std::add_pointer_t<std::add_const_t<T>> to, std::add_pointer_t<std::add_const_t<T>> from) {
     // @unsafe
     {
-        return static_cast<size_t>(rusty::offset_from(to, from));
+        return static_cast<size_t>(to - from);
     }
 }
 
@@ -4834,12 +4840,12 @@ rusty::Option<size_t> capacity_to_buckets(size_t cap, const auto& table_layout) 
         const auto min_cap = [&]() -> int32_t { auto&& _m0 = Group::WIDTH; auto&& _m1 = table_layout.size; if (_m0 == 16 && (_m1 >= 0 && _m1 <= 1)) { return static_cast<int32_t>(14); } if (_m0 == 16 && (_m1 >= 2 && _m1 <= 3)) { return static_cast<int32_t>(7); } if (_m0 == 8 && (_m1 >= 0 && _m1 <= 1)) { return static_cast<int32_t>(7); } if (true) { return static_cast<int32_t>(3); } return [&]() -> int32_t { rusty::intrinsics::unreachable(); }(); }();
         const auto cap_shadow1 = rusty::max(min_cap, std::move(cap));
         auto buckets = (rusty::detail::deref_if_pointer_like(cap_shadow1) < 4 ? static_cast<int32_t>(4) : (rusty::detail::deref_if_pointer_like(cap_shadow1) < 8 ? static_cast<int32_t>(8) : static_cast<int32_t>(16)));
-        ::ensure_bucket_bytes_at_least_ctrl_align(std::move(table_layout), std::move(buckets));
+        ensure_bucket_bytes_at_least_ctrl_align(std::move(table_layout), std::move(buckets));
         return rusty::Option<size_t>(std::move(buckets));
     }
     const auto adjusted_cap = RUSTY_TRY_OPT([&]() { auto&& _checked_lhs = cap; return rusty::checked_mul(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(8)); }()) / 7;
     auto buckets = (static_cast<size_t>(1) << (64 - __builtin_clzll((adjusted_cap) - 1)));
-    ::ensure_bucket_bytes_at_least_ctrl_align(std::move(table_layout), std::move(buckets));
+    ensure_bucket_bytes_at_least_ctrl_align(std::move(table_layout), std::move(buckets));
     return rusty::Option<size_t>(std::move(buckets));
 }
 
@@ -4874,7 +4880,7 @@ export size_t prev_pow2(size_t z) {
 /// an `allocation_size` calculated from `capacity_to_buckets`.
 size_t maximum_buckets_in(size_t allocation_size, const auto& table_layout, size_t group_width) {
     auto x = ((rusty::detail::deref_if_pointer_like(allocation_size) - rusty::detail::deref_if_pointer_like(group_width))) / ((rusty::detail::deref_if_pointer_like(table_layout.size) + 1));
-    return ::prev_pow2(std::move(x));
+    return prev_pow2(std::move(x));
 }
 
 
@@ -4967,7 +4973,7 @@ auto RawTableInner::new_uninitialized(const A& alloc, const auto& table_layout, 
     const rusty::ptr::NonNull<uint8_t> ptr_shadow1 = ({ auto&& _m = do_alloc(alloc, std::move(layout)); std::optional<rusty::ptr::NonNull<uint8_t>> _match_value; if (_m.is_ok()) { auto&& _mv = _m.unwrap();
 auto&& block = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
 _match_value.emplace(std::move([&]() -> rusty::ptr::NonNull<uint8_t> { if (layout.size  /* substituted: allocator returns exactly layout.size bytes */ != layout.size) {
-    auto x = ::maximum_buckets_in(layout.size  /* substituted: allocator returns exactly layout.size bytes */, std::move(table_layout), Group::WIDTH);
+    auto x = maximum_buckets_in(layout.size  /* substituted: allocator returns exactly layout.size bytes */, std::move(table_layout), Group::WIDTH);
     // debug_assert: rusty::detail::deref_if_pointer_like(x) >= rusty::detail::deref_if_pointer_like(buckets)
     auto [oversized_layout, oversized_ctrl_offset] = rusty::detail::deref_if_pointer_like([&]() { const auto option = table_layout.calculate_layout_for(std::move(x));
 // @unsafe
@@ -4982,7 +4988,7 @@ _match_value.emplace(std::move([&]() -> rusty::ptr::NonNull<uint8_t> { if (layou
 return block.cast(); }())); } else { if (!(_m.is_err())) { rusty::intrinsics::unreachable(); } auto&& _mv = _m.unwrap_err();
 return rusty::Result<RawTableInner, rusty::collections::TryReserveError>::Err(alloc_err(fallibility, std::move(layout))); } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); });
     auto ctrl = std::conditional_t<true, NonNull<uint8_t>, A>::new_unchecked(rusty::ptr::add(rusty::as_ptr(ptr_shadow1), std::move(ctrl_offset)));
-    return rusty::Result<RawTableInner, rusty::collections::TryReserveError>::Ok(RawTableInner{.bucket_mask = rusty::detail::deref_if_pointer_like(buckets) - static_cast<size_t>(1), .ctrl_field = std::move(ctrl), .growth_left = ::bucket_mask_to_capacity(rusty::detail::deref_if_pointer_like(buckets) - static_cast<size_t>(1)), .items = static_cast<size_t>(0)});
+    return rusty::Result<RawTableInner, rusty::collections::TryReserveError>::Ok(RawTableInner{.bucket_mask = rusty::detail::deref_if_pointer_like(buckets) - static_cast<size_t>(1), .ctrl_field = std::move(ctrl), .growth_left = bucket_mask_to_capacity(rusty::detail::deref_if_pointer_like(buckets) - static_cast<size_t>(1)), .items = static_cast<size_t>(0)});
 }
 
 template<typename A>
@@ -4993,7 +4999,7 @@ auto RawTableInner::fallible_with_capacity(const A& alloc, const auto& table_lay
     } else {
         // @unsafe
         {
-            auto buckets = RUSTY_TRY_INTO(::capacity_to_buckets(std::move(capacity), std::move(table_layout)).ok_or_else([&]() { return capacity_overflow(fallibility); }), rusty::Result<RawTableInner, rusty::collections::TryReserveError>);
+            auto buckets = RUSTY_TRY_INTO(capacity_to_buckets(std::move(capacity), std::move(table_layout)).ok_or_else([&]() { return capacity_overflow(fallibility); }), rusty::Result<RawTableInner, rusty::collections::TryReserveError>);
             auto result = RUSTY_TRY_INTO(RawTableInner::new_uninitialized(alloc, std::move(table_layout), std::move(buckets), std::move(fallibility)), rusty::Result<RawTableInner, rusty::collections::TryReserveError>);
             ([&](auto&& __s) { for (auto& __c : __s) { __c.write(Tag::EMPTY); } }(result.ctrl_slice()));
             return rusty::Result<RawTableInner, rusty::collections::TryReserveError>::Ok(std::move(result));
@@ -5022,7 +5028,7 @@ size_t RawTableInner::fix_insert_index(size_t index) const {
 rusty::Option<size_t> RawTableInner::find_insert_index_in_group(const Group& group, const ProbeSeq& probe_seq) const {
     auto bit = group.match_empty_or_deleted().lowest_set_bit();
     if (likely(bit.is_some())) {
-        return rusty::Option<size_t>((probe_seq.pos + bit.unwrap()) & this->bucket_mask);
+        return rusty::Option<size_t>(((rusty::detail::deref_if_pointer_like(probe_seq.pos) + bit.unwrap())) & rusty::detail::deref_if_pointer_like(this->bucket_mask));
     } else {
         return rusty::Option<size_t>{rusty::None};
     }
@@ -5031,23 +5037,27 @@ rusty::Option<size_t> RawTableInner::find_insert_index_in_group(const Group& gro
 template<typename Eq>
 rusty::Result<size_t, size_t> RawTableInner::find_or_find_insert_index_inner(uint64_t hash, const Eq& eq) const {
     rusty::Option<size_t> insert_index = rusty::Option<size_t>{rusty::None};
-    const auto tag_hash = Tag::full(hash);
-    auto probe_seq = this->probe_seq(hash);
+    const auto tag_hash = Tag::full(std::move(hash));
+    auto probe_seq = this->probe_seq(std::move(hash));
     while (true) {
-        const auto group = Group::load(reinterpret_cast<const uint8_t*>(this->ctrl(probe_seq.pos)));
-        for (auto&& bit : rusty::for_in(BitMask{group.match_tag(tag_hash)._0})) {
-            auto index = (probe_seq.pos + bit) & this->bucket_mask;
-            if (likely(eq(index))) {
+        const auto group = Group::load(reinterpret_cast<const uint8_t*>(this->ctrl(std::move(probe_seq.pos))));
+        for (auto&& bit : rusty::for_in(BitMask{group.match_tag(std::move(tag_hash))._0})) {
+            auto index = ((rusty::detail::deref_if_pointer_like(probe_seq.pos) + rusty::detail::deref_if_pointer_like(bit))) & rusty::detail::deref_if_pointer_like(this->bucket_mask);
+            if (likely(eq(std::move(index)))) {
                 return rusty::Result<size_t, size_t>::Ok(std::move(index));
             }
         }
         if (likely(insert_index.is_none())) {
-            insert_index = this->find_insert_index_in_group(group, probe_seq);
+            insert_index = this->find_insert_index_in_group(rusty::detail::deref_if_pointer_like(group), probe_seq);
         }
         if (insert_index.is_some()) {
-            decltype(auto) insert_index_inner = insert_index.unwrap();
+            auto&& _iflet_bound_scrutinee = insert_index;
+            decltype(auto) insert_index = _iflet_bound_scrutinee.unwrap();
             if (likely(group.match_empty().any_bit_set())) {
-                return rusty::Result<size_t, size_t>::Err(this->fix_insert_index(insert_index_inner));
+                // @unsafe
+                {
+                    return rusty::Result<size_t, size_t>::Err(this->fix_insert_index(std::move(insert_index)));
+                }
             }
         }
         probe_seq.move_next(this->bucket_mask);
@@ -5064,7 +5074,7 @@ std::tuple<size_t, Tag> RawTableInner::prepare_insert_index(uint64_t hash) {
     }
 }
 
-inline inline size_t RawTableInner::find_insert_index(uint64_t hash) const {
+inline size_t RawTableInner::find_insert_index(uint64_t hash) const {
     auto probe_seq = this->probe_seq(std::move(hash));
     while (true) {
         const auto group = Group::load(reinterpret_cast<const uint8_t*>(this->ctrl(std::move(probe_seq.pos))));
@@ -5170,7 +5180,7 @@ Bucket<T> RawTableInner::bucket(size_t index) const {
     }
 }
 
-inline inline uint8_t* RawTableInner::bucket_ptr(size_t index, size_t size_of) const {
+inline uint8_t* RawTableInner::bucket_ptr(size_t index, size_t size_of) const {
         assert(true);  // assert((self . bucket_mask != 0));...
     // debug_assert: rusty::detail::deref_if_pointer_like(index) < this->num_buckets()
     // @unsafe
@@ -5185,11 +5195,11 @@ rusty::ptr::NonNull<T> RawTableInner::data_end() const {
     return this->ctrl_field.cast();
 }
 
-inline inline ProbeSeq RawTableInner::probe_seq(uint64_t hash) const {
-    return ProbeSeq{.pos = ::h1(std::move(hash)) & rusty::detail::deref_if_pointer_like(this->bucket_mask), .stride = static_cast<size_t>(0)};
+inline ProbeSeq RawTableInner::probe_seq(uint64_t hash) const {
+    return ProbeSeq{.pos = h1(std::move(hash)) & rusty::detail::deref_if_pointer_like(this->bucket_mask), .stride = static_cast<size_t>(0)};
 }
 
-inline inline void RawTableInner::record_item_insert_at(size_t index, Tag old_ctrl, Tag new_ctrl) {
+inline void RawTableInner::record_item_insert_at(size_t index, Tag old_ctrl, Tag new_ctrl) {
     this->growth_left -= static_cast<size_t>(old_ctrl.special_is_empty());
     // @unsafe
     {
@@ -5204,14 +5214,14 @@ bool RawTableInner::is_in_same_group(size_t i, size_t new_i, uint64_t hash) cons
     return probe_index(std::move(i)) == probe_index(std::move(new_i));
 }
 
-inline inline void RawTableInner::set_ctrl_hash(size_t index, uint64_t hash) {
+inline void RawTableInner::set_ctrl_hash(size_t index, uint64_t hash) {
     // @unsafe
     {
         this->set_ctrl(std::move(index), Tag::full(std::move(hash)));
     }
 }
 
-inline inline Tag RawTableInner::replace_ctrl_hash(size_t index, uint64_t hash) {
+inline Tag RawTableInner::replace_ctrl_hash(size_t index, uint64_t hash) {
     // @unsafe
     {
         auto prev_ctrl = *this->ctrl(std::move(index));
@@ -5220,7 +5230,7 @@ inline inline Tag RawTableInner::replace_ctrl_hash(size_t index, uint64_t hash) 
     }
 }
 
-inline inline void RawTableInner::set_ctrl(size_t index, Tag ctrl) {
+inline void RawTableInner::set_ctrl(size_t index, Tag ctrl) {
     auto index2 = ((((static_cast<size_t>(index) - static_cast<size_t>(rusty::clone(rusty::clone(Group::WIDTH))))) & rusty::detail::deref_if_pointer_like(this->bucket_mask))) + rusty::clone(Group::WIDTH);
     // @unsafe
     {
@@ -5229,7 +5239,7 @@ inline inline void RawTableInner::set_ctrl(size_t index, Tag ctrl) {
     }
 }
 
-inline inline Tag* RawTableInner::ctrl(size_t index) const {
+inline Tag* RawTableInner::ctrl(size_t index) const {
     // debug_assert: rusty::detail::deref_if_pointer_like(index) < this->num_ctrl_bytes()
     // @unsafe
     {
@@ -5244,11 +5254,11 @@ std::span<rusty::MaybeUninit<Tag>> RawTableInner::ctrl_slice() {
     }
 }
 
-inline inline size_t RawTableInner::num_buckets() const {
+inline size_t RawTableInner::num_buckets() const {
     return rusty::detail::deref_if_pointer_like(this->bucket_mask) + static_cast<size_t>(1);
 }
 
-inline inline bool RawTableInner::is_bucket_full(size_t index) const {
+inline bool RawTableInner::is_bucket_full(size_t index) const {
     // debug_assert: rusty::detail::deref_if_pointer_like(index) < this->num_buckets()
     // @unsafe
     {
@@ -5256,7 +5266,7 @@ inline inline bool RawTableInner::is_bucket_full(size_t index) const {
     }
 }
 
-inline inline size_t RawTableInner::num_ctrl_bytes() const {
+inline size_t RawTableInner::num_ctrl_bytes() const {
     return (rusty::detail::deref_if_pointer_like(this->bucket_mask) + static_cast<size_t>(1)) + Group::WIDTH;
 }
 
@@ -5266,10 +5276,10 @@ bool RawTableInner::is_empty_singleton() const {
 
 template<typename A>
     requires (rusty::alloc::Allocator<A>)
-auto RawTableInner::prepare_resize(const A& alloc, const auto& table_layout, size_t capacity, const auto& fallibility) const -> rusty::Result<::ScopeGuard<RawTableInner, std::function<void(RawTableInner&)>>, rusty::collections::TryReserveError> {
+auto RawTableInner::prepare_resize(const A& alloc, const auto& table_layout, size_t capacity, const auto& fallibility) const -> rusty::Result<ScopeGuard<RawTableInner, std::function<void(RawTableInner&)>>, rusty::collections::TryReserveError> {
     // debug_assert: rusty::detail::deref_if_pointer_like(this->items) <= rusty::detail::deref_if_pointer_like(capacity)
-    const auto new_table = RUSTY_TRY_INTO(RawTableInner::fallible_with_capacity(alloc, std::move(table_layout), std::move(capacity), std::move(fallibility)), rusty::Result<::ScopeGuard<RawTableInner, std::function<void(RawTableInner&)>>, rusty::collections::TryReserveError>);
-    return rusty::Result<::ScopeGuard<RawTableInner, std::function<void(RawTableInner&)>>, rusty::collections::TryReserveError>::Ok(guard(std::move(new_table), std::function<void(RawTableInner&)>([=, alloc = std::move(alloc), table_layout = std::move(table_layout)](auto&& self_) mutable {
+    const auto new_table = RUSTY_TRY_INTO(RawTableInner::fallible_with_capacity(alloc, std::move(table_layout), std::move(capacity), std::move(fallibility)), rusty::Result<ScopeGuard<RawTableInner, std::function<void(RawTableInner&)>>, rusty::collections::TryReserveError>);
+    return rusty::Result<ScopeGuard<RawTableInner, std::function<void(RawTableInner&)>>, rusty::collections::TryReserveError>::Ok(guard(std::move(new_table), std::function<void(RawTableInner&)>([=, alloc = std::move(alloc), table_layout = std::move(table_layout)](auto&& self_) mutable {
 if (!self_.is_empty_singleton()) {
     // @unsafe
     {
@@ -5281,16 +5291,16 @@ if (!self_.is_empty_singleton()) {
 
 template<typename A>
     requires (rusty::alloc::Allocator<A>)
-auto RawTableInner::reserve_rehash_inner(const A& alloc, size_t additional, const std::function<uint64_t(RawTableInner&, size_t)>& hasher, const auto& fallibility, const auto& layout, rusty::Option<rusty::UnsafeFn<void(uint8_t*)>> drop) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+auto RawTableInner::reserve_rehash_inner(const A& alloc, size_t additional, const std::function<uint64_t(RawTableInner&, size_t)>& hasher, const auto& fallibility, const auto& layout, rusty::Option<rusty::UnsafeFn<void(uint8_t*)>> drop) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError> {
     auto&& _let_pat = [&]() { auto&& _checked_lhs = this->items; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }();
     auto&& new_items = rusty::detail::deref_if_pointer((rusty::detail::deref_if_pointer(_let_pat)).unwrap());
-    const auto full_capacity = ::bucket_mask_to_capacity(this->bucket_mask);
+    const auto full_capacity = bucket_mask_to_capacity(this->bucket_mask);
     if (rusty::detail::deref_if_pointer_like(new_items) <= (rusty::detail::deref_if_pointer_like(full_capacity) / 2)) {
         // @unsafe
         {
             this->rehash_in_place(hasher, std::move(layout.size), std::move(drop));
         }
-        return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Ok(std::make_tuple());
+        return rusty::Result<rusty::Unit, rusty::collections::TryReserveError>::Ok(std::make_tuple());
     } else {
         // @unsafe
         {
@@ -5309,8 +5319,8 @@ FullBucketsIndices RawTableInner::full_buckets_indices() const {
 
 template<typename A>
     requires (rusty::alloc::Allocator<A>)
-auto RawTableInner::resize_inner(const A& alloc, size_t capacity, const std::function<uint64_t(RawTableInner&, size_t)>& hasher, const auto& fallibility, const auto& layout) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
-    auto new_table = RUSTY_TRY_INTO(this->prepare_resize(alloc, std::move(layout), std::move(capacity), std::move(fallibility)), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
+auto RawTableInner::resize_inner(const A& alloc, size_t capacity, const std::function<uint64_t(RawTableInner&, size_t)>& hasher, const auto& fallibility, const auto& layout) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError> {
+    auto new_table = RUSTY_TRY_INTO(this->prepare_resize(alloc, std::move(layout), std::move(capacity), std::move(fallibility)), rusty::Result<rusty::Unit, rusty::collections::TryReserveError>);
     // @unsafe
     {
         for (auto&& full_byte_index : rusty::for_in(this->full_buckets_indices())) {
@@ -5322,7 +5332,7 @@ auto RawTableInner::resize_inner(const A& alloc, size_t capacity, const std::fun
     rusty::detail::deref_if_pointer_like((*new_table).growth_left) -= this->items;
     (*new_table).items = this->items;
     rusty::mem::swap(*this, *new_table);
-    return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Ok(std::make_tuple());
+    return rusty::Result<rusty::Unit, rusty::collections::TryReserveError>::Ok(std::make_tuple());
 }
 
 void RawTableInner::rehash_in_place(const std::function<uint64_t(RawTableInner&, size_t)>& hasher, size_t size_of, rusty::Option<rusty::UnsafeFn<void(uint8_t*)>> drop) {
@@ -5330,7 +5340,7 @@ void RawTableInner::rehash_in_place(const std::function<uint64_t(RawTableInner&,
     {
         this->prepare_rehash_in_place();
     }
-    auto guard = ::guard((*this), [=, drop = std::move(drop), size_of = std::move(size_of)](auto&& self_) mutable {
+    auto _guard = guard((*this), [=, drop = std::move(drop), size_of = std::move(size_of)](auto&& self_) mutable {
 for (auto&& i : rusty::for_in(rusty::range(0, self_.num_buckets()))) {
     // @unsafe
     {
@@ -5345,32 +5355,32 @@ for (auto&& i : rusty::for_in(rusty::range(0, self_.num_buckets()))) {
         }
     }
 }
-self_.growth_left = ::bucket_mask_to_capacity(std::move(self_.bucket_mask)) - rusty::detail::deref_if_pointer_like(self_.items);
+self_.growth_left = bucket_mask_to_capacity(std::move(self_.bucket_mask)) - rusty::detail::deref_if_pointer_like(self_.items);
 });
-    for (auto&& i : rusty::for_in(rusty::range(0, (*guard).num_buckets()))) {
+    for (auto&& i : rusty::for_in(rusty::range(0, (*_guard).num_buckets()))) {
         // @unsafe
         {
-            if (rusty::detail::deref_if_pointer_like((*guard).ctrl(std::move(i))) != rusty::clone(Tag::DELETED)) {
+            if (rusty::detail::deref_if_pointer_like((*_guard).ctrl(std::move(i))) != rusty::clone(Tag::DELETED)) {
                 continue;
             }
         }
-        const auto i_p = (*guard).bucket_ptr(std::move(i), std::move(size_of));
+        const auto i_p = (*_guard).bucket_ptr(std::move(i), std::move(size_of));
         while (true) {
-            auto hash = hasher(rusty::detail::deref_if_pointer_like(guard), std::move(i));
-            auto new_i = (*guard).find_insert_index(std::move(hash));
-            if (likely((*guard).is_in_same_group(std::move(i), std::move(new_i), std::move(hash)))) {
+            auto hash = hasher(rusty::detail::deref_if_pointer_like(_guard), std::move(i));
+            auto new_i = (*_guard).find_insert_index(std::move(hash));
+            if (likely((*_guard).is_in_same_group(std::move(i), std::move(new_i), std::move(hash)))) {
                 // @unsafe
                 {
-                    (*guard).set_ctrl_hash(std::move(i), std::move(hash));
+                    (*_guard).set_ctrl_hash(std::move(i), std::move(hash));
                 }
                 continue;
             }
-            const auto new_i_p = (*guard).bucket_ptr(std::move(new_i), std::move(size_of));
-            const auto prev_ctrl = (*guard).replace_ctrl_hash(std::move(new_i), std::move(hash));
+            const auto new_i_p = (*_guard).bucket_ptr(std::move(new_i), std::move(size_of));
+            const auto prev_ctrl = (*_guard).replace_ctrl_hash(std::move(new_i), std::move(hash));
             if (rusty::detail::deref_if_pointer_like(prev_ctrl) == rusty::clone(Tag::EMPTY)) {
                 // @unsafe
                 {
-                    (*guard).set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY)));
+                    (*_guard).set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY)));
                 }
                 // @unsafe
                 {
@@ -5385,8 +5395,8 @@ self_.growth_left = ::bucket_mask_to_capacity(std::move(self_.bucket_mask)) - ru
             }
         }
     }
-    (*guard).growth_left = ::bucket_mask_to_capacity(std::move((*guard).bucket_mask)) - rusty::detail::deref_if_pointer_like((*guard).items);
-    rusty::mem::forget(std::move(guard));
+    (*_guard).growth_left = bucket_mask_to_capacity(std::move((*_guard).bucket_mask)) - rusty::detail::deref_if_pointer_like((*_guard).items);
+    rusty::mem::forget(std::move(_guard));
 }
 
 template<typename A>
@@ -5395,7 +5405,7 @@ void RawTableInner::free_buckets(const A& alloc, const auto& table_layout) {
     // @unsafe
     {
         auto [ptr_shadow1, layout] = rusty::detail::deref_if_pointer_like(this->allocation_info(std::move(table_layout)));
-        ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).deallocate(std::move(ptr_shadow1), std::move(layout)); }) { return std::forward<decltype(__recv)>(__recv).deallocate(std::move(ptr_shadow1), std::move(layout)); } else { return std::forward<decltype(__recv)>(__recv)->deallocate(std::move(ptr_shadow1), std::move(layout)); } }(alloc));
+        rusty::deref_call(alloc, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).deallocate(std::move(ptr_shadow1), std::move(layout))) { return std::forward<decltype(__recv)>(__recv).deallocate(std::move(ptr_shadow1), std::move(layout)); });
     }
 }
 
@@ -5425,7 +5435,7 @@ void RawTableInner::clear_no_drop() {
         ([&](auto&& __s) { for (auto& __c : __s) { __c.write(Tag::EMPTY); } }(this->ctrl_slice()));
     }
     this->items = static_cast<size_t>(0);
-    this->growth_left = ::bucket_mask_to_capacity(this->bucket_mask);
+    this->growth_left = bucket_mask_to_capacity(this->bucket_mask);
 }
 
 void RawTableInner::erase(size_t index) {
@@ -5490,3 +5500,4 @@ rusty::Option<size_t> RawIterHashIndices::next() {
     }
 }
 
+} // namespace rusty::port::collections::hashbrown
