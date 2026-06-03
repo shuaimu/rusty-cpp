@@ -72,7 +72,11 @@ static void test_drain_yields_all_elements() {
 
 // -- Blocked tests (turn ON once the impedance lands) --
 
-#if defined(BHP_ADV_D1)  // into_vec() Vec designated-init
+// D1 fixed: transpiler emit bug at line 4269 — outer wrapper was
+// `::Vec<T,A>` instead of `BinaryHeap<T,A>`. Patched inline in the
+// vendored cppm. (Tests `from(Vec)`-using surface; `into_vec` does not
+// itself trip this — D1 is misnamed but the patch unblocks several
+// tests anyway.)
 static void test_into_vec_consumes() {
     auto h = make_heap({7, 3, 5});
     auto v = std::move(h).into_vec();
@@ -81,9 +85,11 @@ static void test_into_vec_consumes() {
     for (size_t i = 0; i < v.len(); ++i) sum += v[i];
     assert(sum == 15);
 }
-#endif
 
-#if defined(BHP_ADV_D2) && defined(BHP_ADV_D3)  // sift-down + cross-module from_iter
+// D2/D3 fixed: ptr::swap restored in rusty/ptr.hpp + cppm call site
+// patched (D2); SpecFromIter::from_iter out-of-line definition added
+// in vec_port.vec.cppm (D3). Unblocks from(Vec), into_sorted_vec, and
+// drain_sorted.
 static void test_from_vec_bulk_builds() {
     auto v = ::Vec<int32_t, ::rusty::alloc::Global>::new_in(
         ::rusty::alloc::Global{});
@@ -120,9 +126,10 @@ static void test_drain_sorted_descending() {
     assert(count == 7);
     assert(h.is_empty());
 }
-#endif
 
-#if defined(BHP_ADV_D4)  // RebuildOnDrop ctor mismatch
+// D4 fixed: RebuildOnDrop field was `Vec<T,A>&` but the dtor body
+// calls heap.rebuild_tail() — a BinaryHeap method. Field + ctor
+// patched to `BinaryHeap<T,A>&`.
 static void test_append_merges_heaps() {
     auto a = make_heap({1, 5, 3});
     auto b = make_heap({10, 2, 7});
@@ -138,7 +145,6 @@ static void test_retain_filters_in_place() {
     assert(h.len() == 5);
     assert(h.peek().unwrap() == 10);
 }
-#endif
 
 static void run(const char* name, void (*fn)()) {
     std::printf("  %s ... ", name);
@@ -152,18 +158,12 @@ int main() {
     run("with_capacity_in preallocates",  test_with_capacity_in_preallocates);
     run("drain yields all",               test_drain_yields_all_elements);
 
-#if defined(BHP_ADV_D1)
     run("into_vec consumes",              test_into_vec_consumes);
-#endif
-#if defined(BHP_ADV_D2) && defined(BHP_ADV_D3)
     run("from(Vec) bulk-builds heap",     test_from_vec_bulk_builds);
     run("into_sorted_vec ascending",      test_into_sorted_vec_ascending);
     run("drain_sorted descending",        test_drain_sorted_descending);
-#endif
-#if defined(BHP_ADV_D4)
     run("append merges heaps",            test_append_merges_heaps);
     run("retain filters in place",        test_retain_filters_in_place);
-#endif
 
     std::printf("binary_heap_port: advanced tests passed\n");
     return 0;

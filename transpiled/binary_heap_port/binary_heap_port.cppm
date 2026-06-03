@@ -4082,7 +4082,13 @@ return std::move(item);
             // @unsafe
             {
                 const auto ptr_shadow1 = reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->data));
-                std::swap(ptr_shadow1, rusty::ptr::add(ptr_shadow1, std::move(end)));
+                // Rust source: `ptr::swap(ptr, ptr.add(end))` — swaps the
+                // VALUES at the two pointers. Prior patcher item 13
+                // converted `ptr::swap` → `std::swap` which has the
+                // wrong semantics (it'd swap the pointer values
+                // themselves) and also fails because the 2nd arg is
+                // an rvalue. Restored via `rusty::ptr::swap`.
+                rusty::ptr::swap(ptr_shadow1, rusty::ptr::add(ptr_shadow1, std::move(end)));
             }
             // @unsafe
             {
@@ -4266,7 +4272,17 @@ return std::move(keep);
         this->drain();
     }
     static BinaryHeap<T, A> from(::Vec<T, A> vec) {
-        auto heap = ::Vec<T, A>{.data = std::move(vec)};
+        // Transpiler emit bug: the outer wrapper type was `::Vec<T, A>`
+        // (the arg type) when it should be `BinaryHeap<T, A>` (the
+        // return type). Mirrors `from_raw_vec` at line 4039 which is
+        // correct. Patched inline; codify if/when a patcher script
+        // lands. Sibling Rust source:
+        //     fn from(vec: Vec<T, A>) -> BinaryHeap<T, A> {
+        //         let mut heap = BinaryHeap { data: vec };
+        //         heap.rebuild();
+        //         heap
+        //     }
+        auto heap = BinaryHeap<T, A>{.data = std::move(vec)};
         heap.rebuild();
         return std::move(heap);
     }
@@ -4399,10 +4415,17 @@ struct PeekMut {
 template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct RebuildOnDrop {
-    ::Vec<T, A>& heap;
+    // Transpiler emit bug: field type was `::Vec<T, A>&` (probably
+    // recovered from the inner `BinaryHeap::data` field type) but the
+    // Rust source has `heap: &mut BinaryHeap<T, A>`. Confirmed by the
+    // destructor body which calls `heap.rebuild_tail(...)` — a method
+    // that lives on BinaryHeap, not Vec. Used by `append` and
+    // `retain` (call sites at lines 4212 and 4302). Patched the field
+    // and ctor accordingly.
+    BinaryHeap<T, A>& heap;
     size_t rebuild_from;
     mutable bool _rusty_forgotten = false;
-    RebuildOnDrop(::Vec<T, A>& heap_init, size_t rebuild_from_init) : heap(heap_init), rebuild_from(std::move(rebuild_from_init)) {}
+    RebuildOnDrop(BinaryHeap<T, A>& heap_init, size_t rebuild_from_init) : heap(heap_init), rebuild_from(std::move(rebuild_from_init)) {}
     RebuildOnDrop(const RebuildOnDrop&) = default;
     RebuildOnDrop(RebuildOnDrop&& other) noexcept : heap(other.heap), rebuild_from(std::move(other.rebuild_from)) {
         this->_rusty_forgotten = other._rusty_forgotten;

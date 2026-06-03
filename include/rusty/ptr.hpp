@@ -378,6 +378,17 @@ requires (!std::is_same_v<std::remove_cv_t<Src>, std::remove_cv_t<Dst>>)
     std::memcpy(static_cast<void*>(dst), static_cast<const void*>(src), byte_count);
 }
 
+/// Rust's `core::ptr::swap(a, b)` — swaps the VALUES `*a` and `*b`.
+/// NOT the same as `std::swap(a, b)` (which swaps the pointer values
+/// themselves). A previous binary_heap_port patcher rule conflated
+/// the two; this overload provides the correct shape so the cppm can
+/// be patched back to `rusty::ptr::swap(a, b)`.
+template<typename T>
+inline void swap(T* a, T* b) {
+    using std::swap;
+    swap(*a, *b);
+}
+
 template<typename T, typename Count>
 inline void swap_nonoverlapping(T* x, T* y, Count count) {
     const auto element_count = static_cast<std::size_t>(count);

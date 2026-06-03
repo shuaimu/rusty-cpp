@@ -3686,11 +3686,27 @@ struct SpecFromElem {
     static auto from_elem(T elem, std::size_t n, A alloc);
 };
 
-// SpecFromIter stub — used in from_iter dispatch.
+// Forward declaration of Vec — moved up from its original position
+// (line ~3734) so SpecFromIter below can name `::Vec<T>` in its
+// return type. Matches the export shape of the original line.
+export template<typename T, typename A = rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+struct Vec;
+
+// SpecFromIter — used in from_iter dispatch. The Rust source uses
+// trait specialization to pick fast paths for slice/vec iterators;
+// the transpiler can't express the specialization, so the body is
+// declared here with an explicit return type and *defined* out-of-line
+// after Vec is fully visible (further down in this file). The original
+// shape was `static auto from_iter(I);` (deduced return, no body) —
+// any use site referencing the deduced auto without a definition is a
+// hard error (vec.cppm:5305 used to trip on this when reached from
+// `BinaryHeap<int>::into_vec()` → `rusty::from_into<Vec<int>>` →
+// `Vec<int>::from_iter<BinaryHeap<int>>` → SpecFromIter).
 template<typename T, typename Iter>
 struct SpecFromIter {
     template<typename I>
-    static auto from_iter(I);
+    static ::Vec<T> from_iter(I iter);
 };
 
 // SpecExtend stub.
@@ -3711,9 +3727,7 @@ struct SpecCloneIntoVec {
 };
 
 
-export template<typename T, typename A = rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A>)
-struct Vec;
+// (Original `struct Vec;` forward decl moved up — see line ~3688.)
 export template<typename T>
     requires (std::copyable<T>)
 ::Vec<T> from_elem(T elem, size_t n);
@@ -4925,7 +4939,12 @@ struct Vec {
                 g.read += 1;
                 // @unsafe
                 {
-                    rusty::ptr::drop_in_place(cur);
+                    // Transpiler emit bug: Rust `ptr::drop_in_place(cur)`
+                    // where `cur: &mut T` auto-refs to pointer. C++ needs
+                    // explicit `&cur`. Sister site at line 4934 has it
+                    // right. Surfaced when BinaryHeap::retain is
+                    // instantiated (it forwards into Vec::retain_mut).
+                    rusty::ptr::drop_in_place(&cur);
                 }
             } else {
                 // @unsafe
@@ -5494,6 +5513,22 @@ local_len.increment_len(1);
         return std::move(vec);
     }
 };
+
+// Out-of-line definition for SpecFromIter::from_iter (declaration is
+// up around line 3690). Generic fallback: iterate the input and push
+// each item into a fresh Vec<T>. Specializations (e.g. for slice
+// iterators) can override per Iter type if perf matters later.
+template<typename T, typename Iter>
+template<typename I>
+::Vec<T> SpecFromIter<T, Iter>::from_iter(I iter) {
+    auto vec = ::Vec<T>::new_();
+    while (true) {
+        auto next = iter.next();
+        if (next.is_none()) break;
+        vec.push(next.unwrap());
+    }
+    return vec;
+}
 
 namespace {
 class ExtendFromWithinSpec {

@@ -57,25 +57,29 @@ is small and BTreeMap-port-shaped. Most are `rusty::ptr::*` helper
 gaps that the BTreeMap port also hit (and which are already addressed
 in btree_port's patcher).
 
-## Advanced API impedances (surfaced 2026-06)
+## Advanced API impedances (surfaced 2026-06 — ✅ all four fixed)
 
 A push to extend the test surface beyond push/pop/peek/iter into the
 consume / bulk-build / mutation APIs surfaced four fresh instantiation
-errors in the vendored `.cppm`. Tests in
-`tests/binary_heap_port_advanced_test.cpp` are guarded by
-`BHP_ADV_*` macros — they flip on once the respective fix lands.
+errors. All four landed inline in the vendored cppm + one runtime
+helper added. `tests/binary_heap_port_advanced_test.cpp` now drives
+all 8 advanced tests green.
 
-| Tag | Site | Symptom | Test that triggers |
-|---|---|---|---|
-| D1 | `into_vec()` body (line 4269) | `auto heap = ::Vec<T, A>{.data = std::move(vec)};` — designated init of non-aggregate `Vec`. | `test_into_vec_consumes` |
-| D2 | Sift-down (line 4085) | `std::swap(ptr_shadow1, rusty::ptr::add(ptr_shadow1, end))` — `std::swap` rejects the 2nd-arg rvalue. Likely needs `rusty::ptr::swap` shim or local lvalue capture. | `test_from_vec_bulk_builds`, `test_into_sorted_vec_ascending`, `test_drain_sorted_descending` |
-| D3 | Cross-module `from_iter` (vec.cppm:5305) | `from_iter<binary_heap_port::Iter<int>>` referenced before its deduced-return-type definition is visible across the module boundary. Probably a forward-declaration / definition-ordering issue between vec_port and binary_heap_port. | `test_from_vec_bulk_builds` (via collect), `test_into_sorted_vec_ascending` |
-| D4 | `RebuildOnDrop` ctor (line 4206) | `auto guard = RebuildOnDrop<T, A>((*this), rusty::len((*this)));` — the constructor signature doesn't match. Used internally by `append` and `retain`. | `test_append_merges_heaps`, `test_retain_filters_in_place` |
+| Tag | Site | Root cause + fix |
+|---|---|---|
+| D1 | `BinaryHeap::from(Vec)` body (line 4269) | Transpiler emitted `::Vec<T, A>{.data = …}` as the outer wrapper when it should be `BinaryHeap<T, A>{.data = …}` — the arg type leaked into the return-type slot. Sibling `from_raw_vec` at line 4039 is correct. Fix: patched the wrapper type inline. |
+| D2 | Sift-down in `into_sorted_vec()` (line 4085) | Original Rust is `ptr::swap(ptr_a, ptr_b)` — swaps the *values* at the two pointers. Patcher item #13 (STATUS.md above) had rewritten `rusty::ptr::swap` → `std::swap`, conflating the two (std::swap swaps pointer *values themselves*) and also tripping on the rvalue 2nd arg. Fix: (a) added `rusty::ptr::swap(T*, T*)` to `include/rusty/ptr.hpp` with the right semantics, (b) reverted the call site to use `rusty::ptr::swap`. |
+| D3 | Cross-module `Vec::from_iter` (vec.cppm:5305) | `SpecFromIter<T, Iter>::from_iter` was declaration-only with deduced `auto` return — any use site instantiating it past the declaration hit "function with deduced return type cannot be used before it is defined." Fix: (a) added an out-of-line generic fallback definition (push-loop over `iter.next()`) after Vec is fully visible, (b) moved Vec's forward declaration earlier so SpecFromIter could name `::Vec<T>` as its return type. |
+| D4 | `RebuildOnDrop` ctor (line 4206) | The `heap` field was emitted as `::Vec<T, A>&` but the destructor body calls `heap.rebuild_tail(…)` — a BinaryHeap method. Confirms the field should be `BinaryHeap<T, A>&`. The transpiler likely recovered the type from the inner `BinaryHeap::data: Vec` field, missing that the Rust source's RebuildOnDrop holds `&mut BinaryHeap<T, A>`. Fix: patched both the field type and the ctor signature inline. |
 
-**Covered by `_advanced_test.cpp` today** (compile + run green):
-`with_capacity_in`, `drain()`. Both surface paths the previous test
-files didn't touch (capacity-preallocating ctor; unsorted-clearing
-iterator).
+A fifth latent bug (D5) surfaced *after* D4 landed: `Vec::retain_mut`
+(vec.cppm:4942) emitted `rusty::ptr::drop_in_place(cur)` where `cur:
+T&`. The sister site at line 4934 has `&cur` correctly. Patched
+inline as `&cur`.
+
+**Coverage**: `tests/binary_heap_port_advanced_test.cpp` now drives 8
+APIs end-to-end: `with_capacity_in`, `drain()`, `into_vec`,
+`from(Vec)`, `into_sorted_vec`, `drain_sorted`, `append`, `retain`.
 
 ## Reproducing
 
