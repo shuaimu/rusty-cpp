@@ -3644,7 +3644,7 @@ export module linked_list_port;
 import vec_port.vec;  // patcher-injected for ::Vec
 import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter
 
-namespace linked_list_port {
+namespace rusty::port::collections::linked_list {
 
 template<typename T>
 struct Node;
@@ -4817,4 +4817,13 @@ void assert_covariance() {
     };
 }
 
-} // namespace linked_list_port
+} // namespace rusty::port::collections::linked_list
+
+// User-facing alias mirroring Rust's `std::collections::LinkedList`.
+// End users write `rusty::collections::LinkedList<T>` and don't observe
+// the underlying `rusty::port::*` transpilation scaffolding.
+export namespace rusty::collections {
+    template<typename T, typename A = ::rusty::alloc::Global>
+        requires (::rusty::alloc::Allocator<A>)
+    using LinkedList = ::rusty::port::collections::linked_list::LinkedList<T, A>;
+}

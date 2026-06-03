@@ -14,7 +14,7 @@ import linked_list_port;
 
 int main() {
     // ── Phase B: push / pop / len round-trip ────────────────────────
-    auto ll = linked_list_port::LinkedList<int>::new_();
+    auto ll = rusty::collections::LinkedList<int>::new_();
     CHECK(ll.is_empty(), "new_() not empty");
     CHECK(ll.len() == 0, "new_().len() = %zu", ll.len());
 
