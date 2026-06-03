@@ -64,6 +64,23 @@ static void test_weak_clone() {
     assert(Arc<int>::weak_count(p) == 2);
 }
 
+struct Point { int x; int y; int sum() const { return x + y; } };
+
+static void test_make_variadic() {
+    // patcher-injected ergonomic shim: variadic construct.
+    auto p = Arc<Point>::make(3, 4);
+    assert(p->x == 3);
+    assert(p->y == 4);
+    assert(p->sum() == 7);
+}
+
+static void test_operator_arrow_and_star() {
+    // patcher-injected `operator->` (and existing `operator*`).
+    auto p = Arc<Point>::make(10, 20);
+    assert((*p).x == 10);
+    assert(p->y == 20);
+}
+
 static void run(const char* name, void (*fn)()) {
     std::printf("  %s ... ", name);
     std::fflush(stdout);
@@ -79,6 +96,8 @@ int main() {
     run("move keeps refcount",         test_move_does_not_change_refcount);
     run("downgrade -> weak_count",     test_downgrade_increments_weak_count);
     run("Weak::clone",                 test_weak_clone);
+    run("make(args...) variadic",      test_make_variadic);
+    run("operator-> and operator*",    test_operator_arrow_and_star);
     std::printf("arc_port: all tests passed\n");
     return 0;
 }

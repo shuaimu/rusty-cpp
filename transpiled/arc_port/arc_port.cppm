@@ -4033,6 +4033,13 @@ struct Arc {
             return Arc<T, A>::from_inner_in(NonNull<ArcInner<T>>::new_unchecked(ptr), std::move(alloc));
         }
     }
+    // patcher: ergonomic shims (make / operator->)
+    template<typename... Args>
+    static Arc<T, A> make(Args&&... args) {
+        return Arc<T, A>::new_(T(std::forward<Args>(args)...));
+    }
+    const T* operator->() const { return &this->inner().data; }
+
     static Arc<T> new_(T data) {
         auto x = rusty::Box<ArcInner<T>>::new_(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(1), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)});
         // @unsafe
@@ -5171,6 +5178,7 @@ rusty::alloc::Layout arcinner_layout_for_value_layout(rusty::alloc::Layout layou
 }
 
 #if 0  // patcher: orphan-impl block stubbed
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `Pin` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -5187,6 +5195,8 @@ static auto default_() {
 
 #endif  // patcher: orphan-impl block end
 #if 0  // patcher: orphan-impl block stubbed
+#endif  // patcher: orphan-impl block end
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `I` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -5198,6 +5208,8 @@ rusty::Arc<std::span<const T>> to_arc_slice() {
     return rusty::from_into<rusty::Arc<std::span<const T>>>(::Vec<T>::from_iter((*this)));
 }
 
+#endif  // patcher: orphan-impl block end
+#if 0  // patcher: orphan-impl block stubbed
 #endif  // patcher: orphan-impl block end
 #if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `I` were declared in this file but the
@@ -5244,6 +5256,7 @@ size_t data_offset_alignment(rusty::ptr::Alignment alignment) {
 }
 
 // Extension trait ToArcSlice lowered to rusty_ext:: free functions
+#endif  // patcher: orphan-impl block end
 #endif  // patcher: orphan-impl block end
 namespace rusty_ext {
     export template<typename T, typename I>

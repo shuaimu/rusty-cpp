@@ -595,6 +595,42 @@ def patch_arc_specific(cpp_out: Path) -> int:
     return 0
 
 
+def patch_arc_ergonomic_shims(cpp_out: Path) -> int:
+    """Inject `make(args...)` factory + `operator->` into the transpiled
+    `Arc<T, A>` struct body so user-facing API matches the hand-written
+    `include/rusty/arc.hpp` shape:
+      - `Arc<T>::make(args...)` — variadic in-place construct (wraps `new_`)
+      - `arc->method()` — shared access via Deref (matches existing `*arc`)
+
+    Note: `const T& operator*() const` already exists in the transpiled
+    body (via `this->inner().data`), so we only add `operator->()` and
+    use the same access path for consistency.
+
+    Anchor: `    static Arc<T> new_(T data) {` — first user-facing
+    factory. Insert shims immediately before. Idempotent via sentinel."""
+    path = cpp_out / ARC_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    sentinel = "// patcher: ergonomic shims (make / operator->)"
+    if sentinel in text:
+        return 0
+    anchor = "    static Arc<T> new_(T data) {"
+    if anchor not in text:
+        return 0
+    shims = (
+        "    " + sentinel + "\n"
+        "    template<typename... Args>\n"
+        "    static Arc<T, A> make(Args&&... args) {\n"
+        "        return Arc<T, A>::new_(T(std::forward<Args>(args)...));\n"
+        "    }\n"
+        "    const T* operator->() const { return &this->inner().data; }\n"
+        "\n"
+    )
+    path.write_text(text.replace(anchor, shims + anchor, 1))
+    return 1
+
+
 def patch_stub_orphan_impls(cpp_out: Path) -> int:
     """The transpiler emits "orphan impl" free functions for impls
     whose host type lives outside this TU (Pin, T, I, etc.). They
@@ -650,6 +686,7 @@ def main() -> int:
         ("namespace using prefix", patch_namespace_using_prefix),
         ("drop misplaced module imports", patch_drop_misplaced_module_imports),
         ("arc-specific rewrites", patch_arc_specific),
+        ("arc ergonomic shims (make / operator->)", patch_arc_ergonomic_shims),
         ("stub orphan impls", patch_stub_orphan_impls),
     ]
 
