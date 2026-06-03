@@ -14,8 +14,8 @@ import cell_port;
 #include <sstream>
 #include <string>
 
-using cell_port::Cell;
-using cell_port::RefCell;
+using rusty::cell::Cell;
+using rusty::cell::RefCell;
 
 static void test_cell_new_get_set() {
     auto c = Cell<int>::new_(42);
@@ -63,12 +63,12 @@ static void test_refcell_borrow_mut_writes() {
 }
 
 static void test_borrow_error_formattable() {
-    cell_port::BorrowError be{.location = rusty::panic::Location::caller()};
+    rusty::cell::BorrowError be{.location = rusty::panic::Location::caller()};
     std::ostringstream os;
     os << be;
     assert(os.str().find("BorrowError") != std::string::npos);
 
-    cell_port::BorrowMutError bme{.location = rusty::panic::Location::caller()};
+    rusty::cell::BorrowMutError bme{.location = rusty::panic::Location::caller()};
     std::ostringstream os2;
     os2 << bme;
     assert(os2.str().find("BorrowMutError") != std::string::npos);

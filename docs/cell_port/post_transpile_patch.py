@@ -331,6 +331,76 @@ def patch_cell_swap_helpers(cpp_out: Path) -> int:
     return 0
 
 
+def patch_rewrite_to_port_namespace(cpp_out: Path) -> int:
+    """Rewrite the post-module namespace from the flat `cell_port` to
+    `rusty::port::cell` so it mirrors Rust's `std::cell::*` layout and
+    end users can observe a clean `rusty::cell::*` (via the flat alias
+    injected by `patch_inject_flat_alias`) without seeing the
+    transpiled `xxx_port` scaffolding."""
+    path = cpp_out / CELL_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    text = text.replace(
+        "namespace cell_port {",
+        "namespace rusty::port::cell {",
+        1,
+    )
+    text = text.replace(
+        "} // namespace cell_port",
+        "} // namespace rusty::port::cell",
+        1,
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
+FLAT_ALIAS_BLOCK = """
+// Patcher-injected user-facing aliases: `rusty::cell::*` re-exports
+// the deep `rusty::port::cell::*`. End users write `rusty::cell::Cell`
+// — matching Rust's `std::cell::Cell` — and don't observe the
+// underlying `rusty::port::*` transpilation scaffolding.
+export namespace rusty::cell {
+    using BorrowError = ::rusty::port::cell::BorrowError;
+    using BorrowMutError = ::rusty::port::cell::BorrowMutError;
+    template<typename T>
+    using UnsafeCell = ::rusty::port::cell::UnsafeCell<T>;
+    template<typename T>
+    using Cell = ::rusty::port::cell::Cell<T>;
+    template<typename T>
+    using Ref = ::rusty::port::cell::Ref<T>;
+    template<typename T>
+    using RefMut = ::rusty::port::cell::RefMut<T>;
+    template<typename T>
+    using RefCell = ::rusty::port::cell::RefCell<T>;
+    template<typename T>
+    using SyncUnsafeCell = ::rusty::port::cell::SyncUnsafeCell<T>;
+}
+"""
+
+
+def patch_inject_flat_alias(cpp_out: Path) -> int:
+    """Append the user-facing `rusty::cell::*` alias block at the end
+    of the module. Idempotent via substring guard."""
+    path = cpp_out / CELL_FILE
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if "namespace rusty::cell" in text and "using Cell = " in text:
+        return 0
+    original = text
+    if not text.endswith("\n"):
+        text += "\n"
+    text = text + FLAT_ALIAS_BLOCK
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -359,6 +429,9 @@ def main() -> int:
          patch_return_void_noreturn),
         ("Cell::swap helpers (size_of, ptr::eq)",
          patch_cell_swap_helpers),
+        ("rewrite namespace to rusty::port::cell",
+         patch_rewrite_to_port_namespace),
+        ("inject rusty::cell flat alias", patch_inject_flat_alias),
     ]
 
     total = 0

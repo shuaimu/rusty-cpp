@@ -3635,7 +3635,7 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module cell_port;
 
-namespace cell_port {
+namespace rusty::port::cell {
 
 export struct BorrowError;
 export struct BorrowMutError;
@@ -4439,4 +4439,25 @@ BorrowRefMut BorrowRefMut::clone() const {
     return BorrowRefMut{.borrow = this->borrow};
 }
 
-} // namespace cell_port
+} // namespace rusty::port::cell
+
+// Patcher-injected user-facing aliases: `rusty::cell::*` re-exports
+// the deep `rusty::port::cell::*`. End users write `rusty::cell::Cell`
+// — matching Rust's `std::cell::Cell` — and don't observe the
+// underlying `rusty::port::*` transpilation scaffolding.
+export namespace rusty::cell {
+    using BorrowError = ::rusty::port::cell::BorrowError;
+    using BorrowMutError = ::rusty::port::cell::BorrowMutError;
+    template<typename T>
+    using UnsafeCell = ::rusty::port::cell::UnsafeCell<T>;
+    template<typename T>
+    using Cell = ::rusty::port::cell::Cell<T>;
+    template<typename T>
+    using Ref = ::rusty::port::cell::Ref<T>;
+    template<typename T>
+    using RefMut = ::rusty::port::cell::RefMut<T>;
+    template<typename T>
+    using RefCell = ::rusty::port::cell::RefCell<T>;
+    template<typename T>
+    using SyncUnsafeCell = ::rusty::port::cell::SyncUnsafeCell<T>;
+}
