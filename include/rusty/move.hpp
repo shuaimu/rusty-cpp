@@ -105,7 +105,14 @@ constexpr T copy(const T& t) noexcept(std::is_nothrow_copy_constructible_v<T>) {
 /// This is a thin alias for `rusty::copy` — same semantics, same codegen.
 /// Kept as a distinct name so generated code reads closer to the Rust source.
 ///
-/// @note Only works for types that are Copy / copy-constructible.
+/// @note Only works for types that are Copy / copy-constructible. For types
+///       like `Vec<T>` that have a defaulted shallow copy ctor, callers
+///       must call `t.clone()` directly to get a deep copy — see
+///       `binary_heap_port::BinaryHeap::clone()` for an example. Several
+///       transpiled ports (arc_port, rc_port, linked_list_port) emit
+///       their own `clone` template that dispatches to `.clone()` when
+///       available, so the safer rule is "prefer t.clone() at call
+///       sites that need it; reserve `rusty::clone(...)` for Copy types."
 // @safe
 template<typename T>
 constexpr T clone(const T& t) noexcept(std::is_nothrow_copy_constructible_v<T>) {

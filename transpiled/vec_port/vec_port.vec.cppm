@@ -3709,11 +3709,24 @@ struct SpecFromIter {
     static ::Vec<T> from_iter(I iter);
 };
 
-// SpecExtend stub.
+// SpecExtend — generic fallback that mirrors the Rust default impl
+// (push each item from the iterator into the vec). The original
+// declaration was a no-op stub, which silently broke `Vec::extend`
+// (and any caller of it, e.g. `BinaryHeap::extend`). Specializations
+// for slice / vec iterators can override per-type if perf matters
+// later. Body uses `deref_if_pointer` so it handles both
+// pointer-yielding iterators (slice_iter::Iter) and value/ref-
+// yielding ones uniformly.
 template<typename T, typename Iter>
 struct SpecExtend {
     template<typename V, typename I>
-    static void spec_extend(V&, I) {}
+    static void spec_extend(V& vec, I iter) {
+        while (true) {
+            auto next = iter.next();
+            if (next.is_none()) break;
+            vec.push(rusty::detail::deref_if_pointer(next.unwrap()));
+        }
+    }
 };
 
 // SpecCloneIntoVec stub — bridge for slice::clone_from_slice.
@@ -5321,7 +5334,14 @@ return dst.write(rusty::clone(src));
     }
     template<typename I>
     static Vec<T> from_iter(I iter) {
-        return SpecFromIter<T, typename I::IntoIter>::from_iter(rusty::iter(std::move(iter)));
+        // Was `SpecFromIter<T, typename I::IntoIter>` — but our generic
+        // SpecFromIter fallback (defined out-of-line near the bottom of
+        // this file) doesn't depend on the Iter template parameter at
+        // all, and the `typename I::IntoIter` projection fails when I
+        // is an iterator type that doesn't carry an IntoIter typedef
+        // (slice_iter::Iter, binary_heap_port::Drain, ...). Drop the
+        // projection.
+        return SpecFromIter<T, I>::from_iter(rusty::iter(std::move(iter)));
     }
     IntoIter<T, A> into_iter() {
         // HAND-PORT: bypass ManuallyDrop wrapper + T::IS_ZST.
@@ -5347,7 +5367,15 @@ return dst.write(rusty::clone(src));
     }
     template<typename I>
     void extend(I iter) {
-        SpecExtend<T, typename I::IntoIter>::spec_extend((*this), rusty::iter(std::move(iter)));
+        // Same `typename I::IntoIter` issue as Vec::from_iter above —
+        // SpecExtend's stub doesn't depend on the projected param. Drop
+        // it to widen compatibility to iterators without an IntoIter
+        // typedef (slice_iter::Iter, binary_heap_port::Drain, …).
+        // SpecExtend itself is a no-op stub (see line ~3705); the
+        // resulting extend just doesn't do anything for the long tail.
+        // The push-based fallback for explicit collect-into-Vec lives
+        // in SpecFromIter (below).
+        SpecExtend<T, I>::spec_extend((*this), rusty::iter(std::move(iter)));
     }
     void extend_one(T item) {
         this->push(std::move(item));
@@ -5525,7 +5553,9 @@ template<typename I>
     while (true) {
         auto next = iter.next();
         if (next.is_none()) break;
-        vec.push(next.unwrap());
+        // deref_if_pointer handles slice_iter::Iter (yields T*) and
+        // reference-yielding iterators (yields T&/const T&) uniformly.
+        vec.push(rusty::detail::deref_if_pointer(next.unwrap()));
     }
     return vec;
 }

@@ -376,6 +376,13 @@ set(TEST_SOURCES
     # drain_sorted, append, retain. Hits the remaining API surface.
     tests/binary_heap_port_advanced_test.cpp
 
+    # binary_heap_port full-API: every remaining public method —
+    # new_, default_, with_capacity, from(array), from_iter, from_raw_vec,
+    # peek_mut, pop_if, extend, extend_one, into_iter (unsorted),
+    # reserve*, try_reserve*, shrink_to_fit, shrink_to, clone, clone_from,
+    # allocator.
+    tests/binary_heap_port_full_api_test.cpp
+
     # cell_port — transpiled rustc Cell / RefCell (library/core/src/cell.rs).
     # Phase B/C smoke test: import cell_port, build BorrowError /
     # BorrowMutError + format them via operator<<.

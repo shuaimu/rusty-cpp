@@ -4008,11 +4008,23 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct BinaryHeap {
     using Item = T;
-    using IntoIter = ::IntoIter<T, A>;
+    // Transpiler emitted `using IntoIter = ::IntoIter<T, A>;` (Vec's
+    // IntoIter from the global namespace) but the Rust source has
+    // `type IntoIter = IntoIter<T, A>` (local — the binary_heap_port::
+    // IntoIter struct with a `.iter` field wrapping Vec's IntoIter).
+    // Without the namespace qualifier, the alias shadows the local
+    // namespace type and `into_iter()`'s emit `IntoIter{.iter = …}`
+    // fails because Vec's IntoIter isn't an aggregate.
+    using IntoIter = ::binary_heap_port::IntoIter<T, A>;
     ::Vec<T, A> data;
 
     BinaryHeap<T, A> clone() const {
-        return BinaryHeap<T, A>{.data = rusty::clone(this->data)};
+        // `rusty::clone(t)` in `include/rusty/move.hpp` is a thin alias
+        // for the copy ctor — for `Vec<T>` (which has a defaulted shallow
+        // copy ctor) that yields a buffer-pointer alias and double-free
+        // on destruction. Call Vec's own `.clone()` directly for the
+        // Rust-faithful deep copy.
+        return BinaryHeap<T, A>{.data = this->data.clone()};
     }
     void clone_from(const BinaryHeap<T, A>& source) {
         this->data.clone_from(source.data);
@@ -4295,7 +4307,13 @@ return std::move(keep);
         return BinaryHeap<T>::from(::Vec<T, A>::from_iter(rusty::iter(std::move(iter))));
     }
     IntoIter into_iter() {
-        return IntoIter{.iter = rusty::iter(std::move(this->data))};
+        // Transpiler emitted `rusty::iter(std::move(this->data))` —
+        // but `rusty::iter` is the borrowing CPO and yields a
+        // slice_iter::Iter (or similar) view, not Vec's consuming
+        // IntoIter. The Rust source is `IntoIter { iter:
+        // self.data.into_iter() }` — explicitly the consuming
+        // `into_iter()`. Patched to call Vec::into_iter() directly.
+        return IntoIter{.iter = std::move(this->data).into_iter()};
     }
     template<typename I>
     void extend(I iter) {
@@ -4308,10 +4326,11 @@ return std::move(keep);
     void extend_reserve(size_t additional) {
         this->reserve(std::move(additional));
     }
-    void extend_one(const T& _arg1) {
-        auto&& item = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_arg1));
-        this->push(std::move(item));
-    }
+    // Transpiler emitted a second `extend_one(const T&)` overload that
+    // is identical-by-call-site to `extend_one(T)` — for any rvalue arg
+    // both are equally viable → ambiguous. Removed; the by-value
+    // version handles both rvalue and lvalue callers via the implicit
+    // copy/move.
 };
 
 /// Structure wrapping a mutable reference to the greatest item on a
