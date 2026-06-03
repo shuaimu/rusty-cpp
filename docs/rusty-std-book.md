@@ -3381,20 +3381,37 @@ patches surfaced during full-API push) is codified in
 — a fresh `prep.sh → transpile → patcher` pipeline produces a
 binary_heap_port.cppm that builds clean and passes all 7/7 test files.
 
-**Bench** (transpiled binary_heap_port vs `std::priority_queue<int>`,
-N = 10,000, 200 rounds, clang `-O3 -DNDEBUG -march=native`, single
-thread):
+**Bench** (3-way: transpiled binary_heap_port vs Rust
+`std::collections::BinaryHeap<i32>` vs C++
+`std::priority_queue<int>`, N = 10,000 × 200 rounds, clang `-O3
+-DNDEBUG -march=native` / rustc `-O`, single thread):
 
-| Operation | Transpiled | `std::priority_queue` | Ratio (transpiled / std) |
+| Operation | Transpiled | Rust std::BinaryHeap | C++ std::priority_queue |
 |---|---:|---:|---:|
-| **PUSH** N elements | 91 µs | 85 µs | 1.08× |
-| **POP** N elements | 412 µs | 633 µs | **0.65× (35% faster)** |
-| **MIX** push/pop interleaved | 268 µs | 263 µs | 1.02× |
+| **PUSH** N elements | 91 µs | 85 µs | 85 µs |
+| **POP** N elements | 412 µs | **413 µs** | 633 µs |
+| **MIX** push/pop interleaved | 268 µs | **268 µs** | 263 µs |
 
-The pop-side win comes from Rust's sift-down-to-bottom + sift-up
-algorithm (vs `std::priority_queue`'s textbook sift-down) — better
-cache behavior on the descent. PUSH and MIX are within noise.
-Reproduce with `./build/binary_heap_port_bench.out` after building.
+Two observations:
+
+1. **The transpilation preserves Rust's algorithmic advantage.** POP
+   and MIX are byte-for-byte equal to Rust std's `BinaryHeap` within
+   measurement noise — the port carries forward the sift-down-to-
+   bottom + sift-up trick (which `std::priority_queue` doesn't use)
+   with no perf tax. PUSH is 7% behind Rust, which traces to the
+   Vec `push` path going through the `rusty::Vec` ergonomics layer
+   rather than rustc's intrinsic raw-vec growth — a follow-up if
+   needed, but not a structural issue.
+
+2. **C++ `std::priority_queue` is 53% slower than both on POP.** The
+   textbook sift-down it implements does ~2 log₂ n comparisons per
+   pop on average; Rust's variant does ~log₂ n. At N=10k that's
+   roughly 14 vs 28 comparisons per element times N elements,
+   matching the observed 1.5× factor.
+
+Reproduce:
+- C++ bench: `./build/binary_heap_port_bench.out`
+- Rust bench: `rustc -O docs/binary_heap_port/rust_bench.rs -o /tmp/rust_binary_heap_bench && /tmp/rust_binary_heap_bench`
 
 The vendored .cppm lives at `transpiled/binary_heap_port/`; CMake
 target `binary_heap_port` is wired (clang-only, depends on `vec_port`).

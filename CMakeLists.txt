@@ -497,7 +497,13 @@ foreach(test_source IN LISTS TEST_SOURCES)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
         target_link_options(${test_executable} PRIVATE )
     endif()
-    add_test(NAME ${test_name} COMMAND ${test_executable})
+    # Benches build like tests (same module/link wiring) but stay out of
+    # ctest — they print timings rather than asserting, and we don't want
+    # them to gate `ctest --output-on-failure`. Invoke directly:
+    # `./build/<bench>.out`.
+    if(NOT test_name MATCHES "_bench$")
+        add_test(NAME ${test_name} COMMAND ${test_executable})
+    endif()
     list(APPEND TEST_TARGETS ${test_executable})
 endforeach()
 
