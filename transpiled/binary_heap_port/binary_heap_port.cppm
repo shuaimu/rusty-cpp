@@ -4530,12 +4530,12 @@ struct DrainSorted {
 // `self_` parameter and qualify all call sites accordingly.
 } // namespace rusty::port::collections::binary_heap
 
-// Patcher-injected flat alias: `rusty::port::collections::BinaryHeap`
-// re-exports the deep `rusty::port::collections::binary_heap::BinaryHeap`
-// so users can write either path. Mirrors how Rust std exposes
-// `std::collections::BinaryHeap` while the implementation lives in
-// `std::collections::binary_heap`.
-export namespace rusty::port::collections {
+// Patcher-injected user-facing alias: `rusty::collections::BinaryHeap`
+// re-exports the deep `rusty::port::collections::binary_heap::BinaryHeap`.
+// End users write `rusty::collections::BinaryHeap` — matching Rust's
+// `std::collections::BinaryHeap` — and don't observe the underlying
+// `rusty::port::*` transpilation scaffolding.
+export namespace rusty::collections {
     template<typename T, typename A = ::rusty::alloc::Global>
     using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap<T, A>;
 }

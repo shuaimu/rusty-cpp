@@ -27,7 +27,7 @@ import vec_port.vec;
 #include <cstdio>
 #include <vector>
 
-using rusty::port::collections::BinaryHeap;
+using rusty::collections::BinaryHeap;
 
 using HeapI32 = BinaryHeap<int32_t, ::rusty::alloc::Global>;
 

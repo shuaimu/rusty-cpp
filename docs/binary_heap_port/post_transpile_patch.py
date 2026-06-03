@@ -441,12 +441,12 @@ def patch_strip_orphan_vec_methods(text: str) -> str:
 
 
 FLAT_ALIAS_BLOCK = """
-// Patcher-injected flat alias: `rusty::port::collections::BinaryHeap`
-// re-exports the deep `rusty::port::collections::binary_heap::BinaryHeap`
-// so users can write either path. Mirrors how Rust std exposes
-// `std::collections::BinaryHeap` while the implementation lives in
-// `std::collections::binary_heap`.
-export namespace rusty::port::collections {
+// Patcher-injected user-facing alias: `rusty::collections::BinaryHeap`
+// re-exports the deep `rusty::port::collections::binary_heap::BinaryHeap`.
+// End users write `rusty::collections::BinaryHeap` — matching Rust's
+// `std::collections::BinaryHeap` — and don't observe the underlying
+// `rusty::port::*` transpilation scaffolding.
+export namespace rusty::collections {
     template<typename T, typename A = ::rusty::alloc::Global>
     using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap<T, A>;
 }
@@ -454,9 +454,9 @@ export namespace rusty::port::collections {
 
 
 def patch_inject_flat_alias(text: str) -> str:
-    """Append the flat `rusty::port::collections::BinaryHeap` alias at
-    the end of the module so importers see both paths. Idempotent."""
-    if "using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap" in text:
+    """Append the user-facing `rusty::collections::BinaryHeap` alias at
+    the end of the module. Idempotent via substring guard."""
+    if "namespace rusty::collections" in text and "using BinaryHeap" in text:
         return text
     if not text.endswith("\n"):
         text += "\n"
