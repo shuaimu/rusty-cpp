@@ -46,6 +46,12 @@ namespace rusty {
 ///       resolvable, prefer a direct call (`receiver.method(args)`) over
 ///       this dispatcher to save template-instantiation cost. Use
 ///       `deref_call` only for the "don't know if a deref is needed" case.
+// @bridge - This is a safety-propagating bridge function. Its body is
+// template plumbing that only exists to invoke the caller-supplied
+// lambda. The actual semantic content (and any safety burden) lives in
+// the lambda the caller passes, which is analyzed in the caller's own
+// @safe context. Marking it @bridge lets @safe callers invoke it
+// without an @unsafe block.
 template<typename R, typename F>
 constexpr decltype(auto) deref_call(R&& r, F&& f) {
     if constexpr (requires { f(r); }) {

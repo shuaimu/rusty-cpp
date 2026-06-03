@@ -3877,13 +3877,31 @@ correct, just less general than what `deref_call` would do.
 checker's point of view: it takes a generic callable and invokes it.
 But conceptually it is a **bridge** — like `operator->()`, like
 `std::invoke`. Its own safety should propagate from the callee
-lambda's body, not be asserted on the dispatcher template. This is
-the same shape that motivates the (proposed) `@bridge` annotation:
-mark functions whose safety is "@safe if all callees are @safe" so
-the checker doesn't have to special-case the universal dispatcher
-template.
+lambda's body, not be asserted on the dispatcher template.
 
-For now `deref_call` is `@unsafe` by default. Phase 2 of the
-auto-deref work (the transpiler emit strategy above) lands first;
-the safety-checker `@bridge` story can follow.
+This is the `@bridge` annotation. `// @bridge` marks a function whose
+own body is *not* subject to `@safe` body checks, but which `@safe`
+callers may nonetheless invoke without wrapping the call in an
+`@unsafe { }` block. The checker trusts the bridge author and catches
+real safety violations in the caller's body walk — the lambda body
+the caller hands to the bridge is part of the caller's source and is
+analyzed in the caller's `@safe` context.
+
+`rusty::deref_call` carries the `// @bridge` annotation in
+`include/rusty/dispatch.hpp`. End-user code calling it from `@safe`
+contexts compiles cleanly:
+
+```cpp
+// @safe
+int sum(rusty::Vec<int> const& v) {
+    return rusty::deref_call(v, [&](auto&& r) -> decltype(r.sum()) {
+        return r.sum();
+    });
+}
+```
+
+(Other natural bridge candidates: smart-pointer `operator->`
+overloads, `std::invoke`-shaped helpers, and the existing
+`rusty::iter` / `rusty::len` CPOs if they're migrated to a
+lambda-based shape.)
 
