@@ -19,13 +19,14 @@
 // @safe
 namespace rusty {
 
-// Forward declarations for weak references
+// Forward declarations
 template<typename T> class Arc;
-namespace sync {
-    template<typename T> class Weak;
-    template<typename T> Weak<T> downgrade(const Arc<T>&);
-}
-template<typename T> sync::Weak<T> downgrade(const Arc<T>&);
+// Note: `sync::Weak` / `sync::downgrade` were retired. `Weak` is now a
+// template alias for the transpiled `rusty::port::sync::Weak<T, A>`
+// (see include/rusty/sync/weak.hpp). The free function `downgrade(arc)`
+// is GONE — use the Rust idiom `Arc<T>::downgrade(arc)` on the
+// transpiled Arc; the hand-written `rusty::Arc<T>` no longer supports
+// downgrade (different ControlBlock layout from the transpiled Weak).
 
 // @unsafe - Raw pointer operations and atomic reference counting
 template<typename T>
@@ -34,12 +35,6 @@ private:
     // Allow other Arc instantiations to access private members for conversion
     template<typename U>
     friend class Arc;
-    template<typename U>
-    friend class sync::Weak;
-    template<typename U>
-    friend sync::Weak<U> sync::downgrade(const Arc<U>&);
-    template<typename U>
-    friend sync::Weak<U> downgrade(const Arc<U>&);
 
     struct ControlBlock {
         T* value;

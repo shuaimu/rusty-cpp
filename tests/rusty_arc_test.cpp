@@ -1,6 +1,12 @@
-// Tests for rusty::Arc<T>
+// Tests for rusty::Arc<T> (hand-written).
+//
+// Note: weak-reference test coverage was removed when the hand-written
+// `rusty::sync::Weak` was replaced with an alias to the transpiled
+// `rusty::port::sync::Weak`. The hand-written Arc no longer supports
+// `downgrade` (its ControlBlock layout is incompatible with the
+// transpiled Weak). Weak coverage lives in tests/arc_port_module_test.cpp.
+
 #include "../include/rusty/arc.hpp"
-#include "../include/rusty/sync/weak.hpp"
 #include <cassert>
 #include <cstdio>
 #include <thread>
@@ -154,47 +160,8 @@ void test_arc_thread_safety() {
     printf("PASS\n");
 }
 
-// Test Weak references
-void test_arc_weak() {
-    printf("test_arc_weak: ");
-    {
-        auto arc1 = Arc<int>::make(42);
-        auto weak = downgrade(arc1);
-
-        assert(arc1.strong_count() == 1);
-        assert(!weak.expired());
-
-        auto upgraded = weak.upgrade();
-        assert(upgraded.is_some());
-        auto arc2 = upgraded.unwrap();
-        assert(arc1.strong_count() == 2);
-        assert(*arc2 == 42);
-    }
-
-    {
-        sync::Weak<int> weak;
-        {
-            auto arc = Arc<int>::make(99);
-            weak = downgrade(arc);
-            assert(!weak.expired());
-        }
-        assert(weak.expired());
-        auto upgraded = weak.upgrade();
-        assert(upgraded.is_none());
-    }
-
-    {
-        auto arc = Arc<int>::make(7);
-        auto weak = downgrade(arc);
-        std::thread t([weak]() mutable {
-            auto upgraded = weak.upgrade();
-            assert(upgraded.is_some());
-        });
-        t.join();
-    }
-
-    printf("PASS\n");
-}
+// (test_arc_weak removed — hand-written Arc no longer supports downgrade.
+//  Weak coverage moved to tests/arc_port_module_test.cpp.)
 
 // Test assignment operators
 void test_arc_assignment() {
@@ -224,7 +191,6 @@ int main() {
     test_arc_get_mut();
     test_arc_destructor();
     test_arc_thread_safety();
-    test_arc_weak();
     test_arc_assignment();
     
     printf("\nAll Arc tests passed!\n");

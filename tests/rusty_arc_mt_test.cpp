@@ -9,7 +9,9 @@
 // - Exclusive access via get_mut()
 
 #include "../include/rusty/arc.hpp"
-#include "../include/rusty/sync/weak.hpp"
+// Weak alias is provided via sync/weak.hpp but not needed here; weak-
+// reference MT coverage moved out of this file when hand-written Arc
+// retired its downgrade support.
 #include "../include/rusty/mutex.hpp"
 #include "../include/rusty/vec.hpp"
 #include <cassert>
@@ -197,41 +199,12 @@ void test_get_mut_exclusivity() {
 }
 
 // ============================================================================
-// Test 6: Weak Reference Concurrent Upgrades
+// Test 6: Weak Reference Concurrent Upgrades — REMOVED
 // ============================================================================
-void test_weak_concurrent_upgrades() {
-    printf("test_weak_concurrent_upgrades: ");
-
-    constexpr int NUM_THREADS = 20;
-    std::atomic<int> upgrade_success{0};
-
-    {
-        auto arc = Arc<int>::make(777);
-        auto weak = downgrade(arc);
-        std::vector<std::thread> threads;
-
-        for (int i = 0; i < NUM_THREADS; ++i) {
-            threads.emplace_back([weak, &upgrade_success]() mutable {
-                for (int j = 0; j < 100; ++j) {
-                    auto maybe_arc = weak.upgrade();
-                    if (maybe_arc.is_some()) {
-                        auto strong = maybe_arc.unwrap();
-                        assert(*strong == 777);
-                        upgrade_success.fetch_add(1, std::memory_order_relaxed);
-                    }
-                }
-            });
-        }
-
-        for (auto& t : threads) {
-            t.join();
-        }
-
-        assert(upgrade_success.load() == NUM_THREADS * 100);
-    }
-
-    printf("PASS\n");
-}
+// Hand-written Arc no longer supports downgrade (rusty::sync::Weak is now
+// a template alias to the transpiled rusty::port::sync::Weak with a
+// different ControlBlock layout). MT weak coverage should live in a new
+// arc_port MT test exercising the transpiled Arc.
 
 // ============================================================================
 // Test 7: Cross-Thread Ownership Transfer
@@ -313,9 +286,10 @@ void test_maximum_concurrency_stress() {
                 auto c1 = arc.clone();
                 auto c2 = arc.clone();
                 c1->value.fetch_add(1, std::memory_order_relaxed);
-                auto w = downgrade(c2);
-                auto maybe = w.upgrade();
-                assert(maybe.is_some());
+                // Weak downgrade dropped — hand-written Arc no longer
+                // supports downgrade. The clone/fetch_add exercise above
+                // still validates the multi-thread invariant.
+                (void)c2;
             }
         });
     }
@@ -345,7 +319,6 @@ int main() {
     test_high_contention_refcount();
     test_immutability_guarantee();
     test_get_mut_exclusivity();
-    test_weak_concurrent_upgrades();
     test_cross_thread_transfer();
     test_arc_mutex_pattern();
     test_maximum_concurrency_stress();
@@ -354,7 +327,7 @@ int main() {
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
     printf("\n========================================\n");
-    printf("All 9 multi-threaded tests PASSED!\n");
+    printf("All 8 multi-threaded tests PASSED!\n");
     printf("Total time: %ld ms\n", duration.count());
     printf("========================================\n");
 
