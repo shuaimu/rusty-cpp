@@ -378,10 +378,13 @@ def patch_into_iter_alias(text: str) -> str:
     `::IntoIter` (Vec's) when the Rust source wants the local
     binary_heap_port::IntoIter (the one with the `.iter` field). The
     local namespace IntoIter gets shadowed by this nested alias, so the
-    designated init `IntoIter{.iter=…}` fails."""
+    designated init `IntoIter{.iter=…}` fails.
+
+    Namespace path is now `rusty::port::collections::binary_heap`
+    (was `binary_heap_port`)."""
     return text.replace(
         "    using IntoIter = ::IntoIter<T, A>;\n",
-        "    using IntoIter = ::binary_heap_port::IntoIter<T, A>;\n",
+        "    using IntoIter = ::rusty::port::collections::binary_heap::IntoIter<T, A>;\n",
     )
 
 
@@ -437,6 +440,29 @@ def patch_strip_orphan_vec_methods(text: str) -> str:
     return text[:start] + text[end + 4 :]
 
 
+FLAT_ALIAS_BLOCK = """
+// Patcher-injected flat alias: `rusty::port::collections::BinaryHeap`
+// re-exports the deep `rusty::port::collections::binary_heap::BinaryHeap`
+// so users can write either path. Mirrors how Rust std exposes
+// `std::collections::BinaryHeap` while the implementation lives in
+// `std::collections::binary_heap`.
+export namespace rusty::port::collections {
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap<T, A>;
+}
+"""
+
+
+def patch_inject_flat_alias(text: str) -> str:
+    """Append the flat `rusty::port::collections::BinaryHeap` alias at
+    the end of the module so importers see both paths. Idempotent."""
+    if "using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap" in text:
+        return text
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + FLAT_ALIAS_BLOCK
+
+
 # ---------------------------------------------------------------------------
 # Driver.
 # ---------------------------------------------------------------------------
@@ -476,6 +502,8 @@ def patch_file(path: Path) -> bool:
     text = patch_into_iter_alias(text)
     text = patch_into_iter_body(text)
     text = patch_clone_body(text)
+
+    text = patch_inject_flat_alias(text)
 
     if text != original:
         path.write_text(text)

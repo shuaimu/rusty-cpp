@@ -21,7 +21,7 @@
 
 import binary_heap_port;
 
-using binary_heap_port::BinaryHeap;
+using rusty::port::collections::BinaryHeap;
 
 constexpr int N = 10000;
 constexpr int ROUNDS = 200;

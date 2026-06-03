@@ -15,7 +15,7 @@ import binary_heap_port;
 #include <cstdio>
 #include <vector>
 
-using binary_heap_port::BinaryHeap;
+using rusty::port::collections::BinaryHeap;
 
 static void test_peek_returns_max() {
     auto h = BinaryHeap<int32_t, ::rusty::alloc::Global>::new_in(

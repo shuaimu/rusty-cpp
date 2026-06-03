@@ -428,7 +428,7 @@ return accept<E>(value);
 };
 
 struct unit_visitor {
-using Value = std::tuple<>;
+using Value = rusty::Unit;
 
 template<typename E>
 rusty::Result<Value, E> visit_unit() const {
@@ -549,7 +549,7 @@ return Ret::Ok(static_cast<Target>(*__bound));
 return Ret::Err(Err::custom("unsupported non-const reference target"));
 }
 } else if constexpr (
-std::is_same_v<Target, std::tuple<>>
+std::is_same_v<Target, rusty::Unit>
 && requires {
 rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer))
@@ -559,7 +559,7 @@ return rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer))
 .deserialize_unit(detail::unit_visitor{});
 } else if constexpr (
-std::is_same_v<Target, std::tuple<>>
+std::is_same_v<Target, rusty::Unit>
 && requires {
 rusty::next_token(rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer)));
@@ -569,22 +569,22 @@ std::forward<Deserializer>(deserializer)));
 using Err = std::remove_cv_t<std::remove_reference_t<
 decltype(__tok_res.unwrap_err())>>;
 if (__tok_res.is_err()) {
-return rusty::Result<std::tuple<>, Err>::Err(__tok_res.unwrap_err());
+return rusty::Result<rusty::Unit, Err>::Err(__tok_res.unwrap_err());
 }
 auto __tok = __tok_res.unwrap();
 if constexpr (requires { rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok); }) {
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok)) {
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
 rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok);
 }) {
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok)) {
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
 }
-return rusty::Result<std::tuple<>, Err>::Err(
+return rusty::Result<rusty::Unit, Err>::Err(
 Err::custom("expected unit token"));
 } else if constexpr (
 (std::is_arithmetic_v<Target> || std::is_enum_v<Target> || std::is_same_v<Target, bool>)
@@ -1545,9 +1545,9 @@ if (__res.is_ok()) {
 static_cast<void>(rusty::mem::replace(
 rusty::detail::deref_if_pointer_like(std::forward<Place>(place)),
 __res.unwrap()));
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
-return rusty::Result<std::tuple<>, Err>::Err(__res.unwrap_err());
+return rusty::Result<rusty::Unit, Err>::Err(__res.unwrap_err());
 } else {
 return Target::deserialize_in_place(
 std::forward<Deserializer>(deserializer), std::forward<Place>(place));
@@ -2038,7 +2038,7 @@ return std::forward<Serializer>(serializer).serialize_f64(std::forward<Value>(va
 std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
 }) {
 return std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
-} else if constexpr (std::is_same_v<ValueType, std::tuple<>> && requires {
+} else if constexpr (std::is_same_v<ValueType, rusty::Unit> && requires {
 std::forward<Serializer>(serializer).serialize_unit();
 }) {
 return std::forward<Serializer>(serializer).serialize_unit();
@@ -2120,7 +2120,7 @@ return true;
 };
 auto token_opt = __serializer_recv.next_token();
 if (token_opt.is_none()) {
-return rusty::Result<std::tuple<>, SerializerError>::Err(
+return rusty::Result<rusty::Unit, SerializerError>::Err(
 SerializerError::custom("expected Token::Bytes, Token::BorrowedBytes, or Token::ByteBuf"));
 }
 auto token = token_opt.unwrap();
@@ -2131,7 +2131,7 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0;
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
@@ -2141,7 +2141,7 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
@@ -2151,10 +2151,10 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0;
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
-return rusty::Result<std::tuple<>, SerializerError>::Err(
+return rusty::Result<rusty::Unit, SerializerError>::Err(
 SerializerError::custom(std::format(
 "serialized bytes did not match expected token (expected_len={0}, token={1})",
 expected.size(), rusty::to_string(token))));
@@ -2656,12 +2656,12 @@ return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - ear
 struct SystemTime {
 std::chrono::system_clock::time_point inner;
 static SystemTime now() { return SystemTime{std::chrono::system_clock::now()}; }
-rusty::Result<Duration, std::tuple<>> duration_since(SystemTime earlier) const {
+rusty::Result<Duration, rusty::Unit> duration_since(SystemTime earlier) const {
 if (inner >= earlier.inner) {
-return rusty::Result<Duration, std::tuple<>>::Ok(
+return rusty::Result<Duration, rusty::Unit>::Ok(
 Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)});
 }
-return rusty::Result<Duration, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<Duration, rusty::Unit>::Err(std::make_tuple());
 }
 };
 inline const SystemTime UNIX_EPOCH{std::chrono::system_clock::time_point{}};
@@ -2685,19 +2685,19 @@ Ready<std::decay_t<T>> ready(T&& value) {
 return Ready<std::decay_t<T>>{std::forward<T>(value), false};
 }
 struct Delay {
-using Output = std::tuple<>;
+using Output = rusty::Unit;
 std::chrono::nanoseconds duration{};
 bool done = false;
 static Delay new_(rusty::time::Duration duration) { return Delay{duration.inner, false}; }
 Delay into_future() { return std::move(*this); }
 Delay new_unchecked() { return std::move(*this); }
 Delay& as_mut() { return *this; }
-rusty::Poll<std::tuple<>> poll(rusty::Context&) {
+rusty::Poll<rusty::Unit> poll(rusty::Context&) {
 if (!done) {
 std::this_thread::sleep_for(duration);
 done = true;
 }
-return rusty::Poll<std::tuple<>>::ready_with(std::tuple<>{});
+return rusty::Poll<rusty::Unit>::ready_with(rusty::Unit{});
 }
 };
 }
@@ -2998,17 +2998,17 @@ return rusty::fmt::Result::Err(rusty::fmt::Error{});
 }
 }
 template<typename T, typename Input>
-rusty::Result<T, std::tuple<>> parse_hex(const Input& input) {
+rusty::Result<T, rusty::Unit> parse_hex(const Input& input) {
 std::string_view text;
 if constexpr (std::is_convertible_v<Input, std::string_view>) {
 text = std::string_view(input);
 } else if constexpr (requires { input.as_str(); }) {
 text = std::string_view(input.as_str());
 } else {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (text.empty()) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 bool negative = false;
 std::size_t start = 0;
@@ -3017,11 +3017,11 @@ negative = text[0] == '-';
 start = 1;
 }
 if (start >= text.size()) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 using RawT = std::remove_cv_t<std::remove_reference_t<T>>;
 if constexpr (!std::is_integral_v<RawT> || std::is_same_v<RawT, bool>) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 } else {
 using Unsigned = std::make_unsigned_t<RawT>;
 Unsigned value = 0;
@@ -3035,11 +3035,11 @@ digit = static_cast<unsigned>(10 + (ch - 'a'));
 } else if (ch >= 'A' && ch <= 'F') {
 digit = static_cast<unsigned>(10 + (ch - 'A'));
 } else {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (value > (std::numeric_limits<Unsigned>::max() - static_cast<Unsigned>(digit))
 / static_cast<Unsigned>(16)) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 value = static_cast<Unsigned>(value * static_cast<Unsigned>(16)
 + static_cast<Unsigned>(digit));
@@ -3049,23 +3049,23 @@ if (negative) {
 const auto max_mag = static_cast<Unsigned>(std::numeric_limits<RawT>::max())
 + static_cast<Unsigned>(1);
 if (value > max_mag) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (value == max_mag) {
-return rusty::Result<T, std::tuple<>>::Ok(std::numeric_limits<RawT>::min());
+return rusty::Result<T, rusty::Unit>::Ok(std::numeric_limits<RawT>::min());
 }
 const auto signed_value = static_cast<RawT>(value);
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(-signed_value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(-signed_value));
 }
 if (value > static_cast<Unsigned>(std::numeric_limits<RawT>::max())) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 } else {
 if (negative) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 }
 }
 }
@@ -3634,10 +3634,11 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 }
 
 export module binary_heap_port;
-import vec_port.vec;
-import vec_port.vec.into_iter;
 
-namespace binary_heap_port {
+import vec_port.vec;  // patcher-injected for ::Vec
+import vec_port.vec.into_iter;  // patcher-injected for ::IntoIter
+
+namespace rusty::port::collections::binary_heap {
 
 template<typename T>
 struct Hole;
@@ -3696,7 +3697,6 @@ using rusty::alloc::Global;
 // Rust-only: using std::vec::AsVecIntoIter;
 
 // Rust-only: using std::vec;
-// using rusty::Vec; removed — Vec is module-only
 
 /// Hole represents a hole in a slice i.e., an index without valid value
 /// (because it was moved from or duplicated).
@@ -3728,17 +3728,13 @@ struct Hole {
 
     static Hole<T> new_(std::span<T> data, size_t pos) {
         assert((rusty::detail::deref_if_pointer_like(pos) < rusty::len(data)));
-        // Phase C patch: rusty::ptr::read takes a pointer, not a reference.
         auto elt = rusty::ptr::read(&data[std::move(pos)]);
         return Hole<T>(data, rusty::mem::manually_drop_new(std::move(elt)), std::move(pos));
     }
     size_t pos() const {
         return this->pos_field;
     }
-    const T& element() const {
-        // Phase C patch: dereference ManuallyDrop to get T&.
-        return *this->elt;
-    }
+    const T& element() const { return *this->elt; }
     const T& get(size_t index) const {
         assert((rusty::detail::deref_if_pointer_like(index) != rusty::detail::deref_if_pointer_like(this->pos_field)));
         assert((rusty::detail::deref_if_pointer_like(index) < rusty::len(this->data)));
@@ -3764,8 +3760,6 @@ struct Hole {
         // @unsafe
         {
             const auto pos = this->pos_field;
-            // Phase C patch: copy_nonoverlapping takes pointers, not refs;
-            // need &data[pos] for the destination.
             rusty::ptr::copy_nonoverlapping(rusty::addr_of_temp(rusty::detail::deref_if_pointer_like(this->elt)), &this->data[std::move(pos)], 1);
         }
     }
@@ -4008,22 +4002,10 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct BinaryHeap {
     using Item = T;
-    // Transpiler emitted `using IntoIter = ::IntoIter<T, A>;` (Vec's
-    // IntoIter from the global namespace) but the Rust source has
-    // `type IntoIter = IntoIter<T, A>` (local — the binary_heap_port::
-    // IntoIter struct with a `.iter` field wrapping Vec's IntoIter).
-    // Without the namespace qualifier, the alias shadows the local
-    // namespace type and `into_iter()`'s emit `IntoIter{.iter = …}`
-    // fails because Vec's IntoIter isn't an aggregate.
-    using IntoIter = ::binary_heap_port::IntoIter<T, A>;
+    using IntoIter = ::rusty::port::collections::binary_heap::IntoIter<T, A>;
     ::Vec<T, A> data;
 
     BinaryHeap<T, A> clone() const {
-        // `rusty::clone(t)` in `include/rusty/move.hpp` is a thin alias
-        // for the copy ctor — for `Vec<T>` (which has a defaulted shallow
-        // copy ctor) that yields a buffer-pointer alias and double-free
-        // on destruction. Call Vec's own `.clone()` directly for the
-        // Rust-faithful deep copy.
         return BinaryHeap<T, A>{.data = this->data.clone()};
     }
     void clone_from(const BinaryHeap<T, A>& source) {
@@ -4060,7 +4042,6 @@ struct BinaryHeap {
     rusty::Option<T> pop() {
         return this->data.pop().map([&](auto&& item) {
 if (!rusty::is_empty((*this))) {
-    // Phase C patch: rusty::mem::swap takes refs, not pointers.
     rusty::mem::swap(item, this->data[0]);
     // @unsafe
     {
@@ -4094,12 +4075,6 @@ return std::move(item);
             // @unsafe
             {
                 const auto ptr_shadow1 = reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->data));
-                // Rust source: `ptr::swap(ptr, ptr.add(end))` — swaps the
-                // VALUES at the two pointers. Prior patcher item 13
-                // converted `ptr::swap` → `std::swap` which has the
-                // wrong semantics (it'd swap the pointer values
-                // themselves) and also fails because the 2nd arg is
-                // an rvalue. Restored via `rusty::ptr::swap`.
                 rusty::ptr::swap(ptr_shadow1, rusty::ptr::add(ptr_shadow1, std::move(end)));
             }
             // @unsafe
@@ -4250,10 +4225,10 @@ return std::move(keep);
     void reserve(size_t additional) {
         this->data.reserve(std::move(additional));
     }
-    auto try_reserve_exact(size_t additional) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+    auto try_reserve_exact(size_t additional) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError> {
         return this->data.try_reserve_exact(std::move(additional));
     }
-    auto try_reserve(size_t additional) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
+    auto try_reserve(size_t additional) -> rusty::Result<rusty::Unit, rusty::collections::TryReserveError> {
         return this->data.try_reserve(std::move(additional));
     }
     void shrink_to_fit() {
@@ -4284,16 +4259,6 @@ return std::move(keep);
         this->drain();
     }
     static BinaryHeap<T, A> from(::Vec<T, A> vec) {
-        // Transpiler emit bug: the outer wrapper type was `::Vec<T, A>`
-        // (the arg type) when it should be `BinaryHeap<T, A>` (the
-        // return type). Mirrors `from_raw_vec` at line 4039 which is
-        // correct. Patched inline; codify if/when a patcher script
-        // lands. Sibling Rust source:
-        //     fn from(vec: Vec<T, A>) -> BinaryHeap<T, A> {
-        //         let mut heap = BinaryHeap { data: vec };
-        //         heap.rebuild();
-        //         heap
-        //     }
         auto heap = BinaryHeap<T, A>{.data = std::move(vec)};
         heap.rebuild();
         return std::move(heap);
@@ -4307,12 +4272,6 @@ return std::move(keep);
         return BinaryHeap<T>::from(::Vec<T, A>::from_iter(rusty::iter(std::move(iter))));
     }
     IntoIter into_iter() {
-        // Transpiler emitted `rusty::iter(std::move(this->data))` —
-        // but `rusty::iter` is the borrowing CPO and yields a
-        // slice_iter::Iter (or similar) view, not Vec's consuming
-        // IntoIter. The Rust source is `IntoIter { iter:
-        // self.data.into_iter() }` — explicitly the consuming
-        // `into_iter()`. Patched to call Vec::into_iter() directly.
         return IntoIter{.iter = std::move(this->data).into_iter()};
     }
     template<typename I>
@@ -4326,11 +4285,6 @@ return std::move(keep);
     void extend_reserve(size_t additional) {
         this->reserve(std::move(additional));
     }
-    // Transpiler emitted a second `extend_one(const T&)` overload that
-    // is identical-by-call-site to `extend_one(T)` — for any rvalue arg
-    // both are equally viable → ambiguous. Removed; the by-value
-    // version handles both rvalue and lvalue callers via the implicit
-    // copy/move.
 };
 
 /// Structure wrapping a mutable reference to the greatest item on a
@@ -4434,13 +4388,6 @@ struct PeekMut {
 template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct RebuildOnDrop {
-    // Transpiler emit bug: field type was `::Vec<T, A>&` (probably
-    // recovered from the inner `BinaryHeap::data` field type) but the
-    // Rust source has `heap: &mut BinaryHeap<T, A>`. Confirmed by the
-    // destructor body which calls `heap.rebuild_tail(...)` — a method
-    // that lives on BinaryHeap, not Vec. Used by `append` and
-    // `retain` (call sites at lines 4212 and 4302). Patched the field
-    // and ctor accordingly.
     BinaryHeap<T, A>& heap;
     size_t rebuild_from;
     mutable bool _rusty_forgotten = false;
@@ -4581,8 +4528,14 @@ struct DrainSorted {
 // which is not valid C++ outside a member function. Move them into the
 // host type's struct body, or rewrite `this`/`(*this)` to an explicit
 // `self_` parameter and qualify all call sites accordingly.
-// Methods for Vec
-// Orphan impl block "Methods for Vec" deleted — transpiler emitted method
-// bodies outside any class. Vec already has its own factories in vec_port.
+} // namespace rusty::port::collections::binary_heap
 
-} // namespace binary_heap_port
+// Patcher-injected flat alias: `rusty::port::collections::BinaryHeap`
+// re-exports the deep `rusty::port::collections::binary_heap::BinaryHeap`
+// so users can write either path. Mirrors how Rust std exposes
+// `std::collections::BinaryHeap` while the implementation lives in
+// `std::collections::binary_heap`.
+export namespace rusty::port::collections {
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap<T, A>;
+}

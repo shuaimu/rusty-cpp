@@ -33,7 +33,7 @@ import vec_port.vec;
 #include <cstdio>
 #include <vector>
 
-using binary_heap_port::BinaryHeap;
+using rusty::port::collections::BinaryHeap;
 
 static auto make_heap(std::initializer_list<int> values) {
     auto h = BinaryHeap<int32_t, ::rusty::alloc::Global>::new_in(

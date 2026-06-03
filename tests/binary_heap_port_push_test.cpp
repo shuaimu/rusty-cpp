@@ -12,7 +12,7 @@ import binary_heap_port;
 #include <cstdio>
 
 int main() {
-    auto h = binary_heap_port::BinaryHeap<int32_t, ::rusty::alloc::Global>::new_in(
+    auto h = rusty::port::collections::BinaryHeap<int32_t, ::rusty::alloc::Global>::new_in(
         ::rusty::alloc::Global{});
 
     // Push five scrambled values; max-heap should put the largest on top.

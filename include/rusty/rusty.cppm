@@ -118,6 +118,7 @@ export import vec_port.vec;
 export import btree_port.btree.map;
 export import btree_port.btree.set;
 export import rc_port;
+export import binary_heap_port;  // namespace: rusty::port::collections::binary_heap
 
 export namespace rusty {
 
@@ -146,6 +147,17 @@ using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
 
 template<typename T, typename A = ::rusty::alloc::Global>
 using BTreeSet = ::btree_port::btree::set::BTreeSet<T, A>;
+
+// rusty::port — namespace hierarchy mirroring Rust std's layout
+// (port = transpiled-from-rustc). Each transpiled module lives under
+// `rusty::port::<section>::<crate_name>::Type` (the deep path), with
+// a flat alias `rusty::port::<section>::Type` for the common case.
+// E.g. `rusty::port::collections::BinaryHeap` →
+// `rusty::port::collections::binary_heap::BinaryHeap`.
+namespace port::collections {
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap<T, A>;
+}
 
 namespace rc {
 // `rusty::rc::Weak<T, A>` — the single-threaded weak reference,

@@ -17,7 +17,7 @@ import binary_heap_port;
 #include <cstdint>
 #include <cstdio>
 
-using binary_heap_port::BinaryHeap;
+using rusty::port::collections::BinaryHeap;
 
 static void test_as_slice_view() {
     auto h = BinaryHeap<int32_t, ::rusty::alloc::Global>::new_in(
