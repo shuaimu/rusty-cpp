@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "rusty/option.hpp"
+#include "rusty/dispatch.hpp"
 
 namespace rusty {
 
@@ -1089,8 +1090,19 @@ decltype(auto) preserve_for_in_range(Range&& range) {
 
 template<typename Range>
 decltype(auto) iter(Range&& range) {
-    if constexpr (requires { std::forward<Range>(range).iter(); }) {
-        return std::forward<Range>(range).iter();
+    // Walk the receiver's deref chain looking for `.iter()`. Replaces the
+    // old hand-rolled cooperation between a direct `.iter()` arm and a
+    // separate `*r` recursion arm — `rusty::deref_call` now handles both
+    // in one step. See rusty-std-book §6.11 for the universal-dispatcher
+    // design. Subsequent arms remain to adapt receivers that have no
+    // `.iter()` anywhere in their chain (raw `data()`/`size()`, Rust-shape
+    // `begin()` returning a pointer, STL `std::begin`/`std::end`).
+    if constexpr (requires {
+        rusty::deref_call(std::forward<Range>(range),
+            [](auto&& __r) -> decltype(__r.iter()) { return __r.iter(); });
+    }) {
+        return rusty::deref_call(std::forward<Range>(range),
+            [](auto&& __r) -> decltype(__r.iter()) { return __r.iter(); });
     } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         return detail::preserve_for_in_range(std::forward<Range>(range));
     } else if constexpr (requires { std::forward<Range>(range).data(); std::forward<Range>(range).size(); }) {
@@ -1186,8 +1198,17 @@ once_iter<std::decay_t<T>> once(T&& value) {
 
 template<typename Range>
 decltype(auto) iter_mut(Range&& range) {
-    if constexpr (requires { std::forward<Range>(range).iter_mut(); }) {
-        return std::forward<Range>(range).iter_mut();
+    // Mirror the `rusty::iter` change: walk the deref chain for `.iter_mut()`
+    // via `rusty::deref_call`. The remaining arms (as_mut_slice, deref_mut,
+    // data+size, std::begin/end, *r recursion) handle receivers that have
+    // no `.iter_mut()` in their chain — those still walk through `*r` for
+    // wrapped-container cases. See rusty-std-book §6.11.
+    if constexpr (requires {
+        rusty::deref_call(std::forward<Range>(range),
+            [](auto&& __r) -> decltype(__r.iter_mut()) { return __r.iter_mut(); });
+    }) {
+        return rusty::deref_call(std::forward<Range>(range),
+            [](auto&& __r) -> decltype(__r.iter_mut()) { return __r.iter_mut(); });
     } else if constexpr (requires { std::forward<Range>(range).as_mut_slice(); }) {
         return iter_mut(std::forward<Range>(range).as_mut_slice());
     } else if constexpr (requires { std::forward<Range>(range).deref_mut(); }) {

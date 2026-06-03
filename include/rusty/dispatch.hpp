@@ -32,14 +32,43 @@
 
 namespace rusty {
 
+namespace detail {
+
+/// @brief Check whether `f` is invocable somewhere along `r`'s deref chain.
+///
+/// Recursive `consteval` check used to make `deref_call` itself
+/// SFINAE-friendly: when neither `f(r)` nor any step of `*r` is
+/// invocable, `deref_call`'s constraint fails — letting callers wrap
+/// the call in `requires { rusty::deref_call(r, f); }` to probe
+/// reachability without triggering a hard static_assert in the body.
+template<typename R, typename F>
+consteval bool lambda_reachable_via_deref() {
+    if constexpr (requires(R&& r, F&& f) { static_cast<F&&>(f)(r); }) {
+        return true;
+    } else if constexpr (requires(R&& r) { *r; }) {
+        return lambda_reachable_via_deref<
+            decltype(*std::declval<R&&>()), F>();
+    } else {
+        return false;
+    }
+}
+
+} // namespace detail
+
 /// @brief Universal deref-walking method dispatcher.
 ///
 /// Tries to invoke `f(r)`. If ill-formed, recursively retries on `*r`,
 /// until either the invocation succeeds or `r` is no longer dereferenceable.
 ///
+/// Constrained on `detail::lambda_reachable_via_deref<R, F>()` so the
+/// call is SFINAE'd out — rather than hard-erroring — when no step of
+/// the chain accepts the lambda. This lets the outer `requires {
+/// rusty::deref_call(r, f); }` cleanly evaluate to false for receivers
+/// that have no matching method anywhere in their deref chain.
+///
 /// @tparam R Receiver type (forwarding reference).
 /// @tparam F Callable type — typically a generic lambda
-///           `[&](auto&& r) -> decltype(auto) { return r.METHOD(ARGS); }`.
+///           `[&](auto&& r) -> decltype(r.METHOD(ARGS)) { return r.METHOD(ARGS); }`.
 /// @return Whatever `f(r_after_derefs)` returns, with value category preserved.
 ///
 /// @note When the receiver type is concrete and the method is statically
@@ -53,18 +82,16 @@ namespace rusty {
 // @safe context. Marking it @bridge lets @safe callers invoke it
 // without an @unsafe block.
 template<typename R, typename F>
+    requires (detail::lambda_reachable_via_deref<R, F>())
 constexpr decltype(auto) deref_call(R&& r, F&& f) {
     if constexpr (requires { f(r); }) {
         return f(std::forward<R>(r));
-    } else if constexpr (requires { *r; }) {
-        return deref_call(*std::forward<R>(r), std::forward<F>(f));
     } else {
-        static_assert(
-            sizeof(R) == 0,
-            "rusty::deref_call: method not found on receiver type or its "
-            "deref chain. The lambda's body cannot be invoked on the "
-            "receiver, and *receiver is not well-formed."
-        );
+        // Constraint guarantees one of the two branches applies; if
+        // `f(r)` is not callable, `*r` must be well-formed and the
+        // recursion's reachability holds (consteval check threaded
+        // through `lambda_reachable_via_deref`).
+        return deref_call(*std::forward<R>(r), std::forward<F>(f));
     }
 }
 
