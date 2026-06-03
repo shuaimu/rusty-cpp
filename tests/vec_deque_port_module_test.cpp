@@ -9,7 +9,7 @@ import vec_deque_port;
 #include <cstdio>
 
 int main() {
-    auto q = vec_deque_port::VecDeque<int>::new_();
+    auto q = rusty::collections::VecDeque<int>::new_();
     q.push_back(1);
     q.push_back(2);
     q.push_back(3);

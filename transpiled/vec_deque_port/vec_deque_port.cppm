@@ -3643,7 +3643,7 @@ namespace slice {
 }
 
 
-namespace vec_deque_port {
+namespace rusty::port::collections::vec_deque {
 
 export template<typename T>
 struct Iter;
@@ -3667,10 +3667,10 @@ struct Splice;
 size_t wrap_index(size_t logical_index, size_t capacity);
 template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
-void prepend(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice);
+void prepend(rusty::port::collections::vec_deque::VecDeque<T, A>& deque, std::span<const T> slice);
 template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
-void prepend_reversed(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice);
+void prepend_reversed(rusty::port::collections::vec_deque::VecDeque<T, A>& deque, std::span<const T> slice);
 
 // Extension trait free-function forward declarations
 namespace rusty_ext {
@@ -4246,7 +4246,7 @@ written += 1; }();
 });
     }
     struct Guard {
-        vec_deque_port::VecDeque<T, A>& deque;
+        rusty::port::collections::vec_deque::VecDeque<T, A>& deque;
         size_t written;
         mutable bool _rusty_forgotten = false;
         Guard(VecDeque<T, A>& deque_init, size_t written_init) : deque(deque_init), written(std::move(written_init)) {}
@@ -4425,7 +4425,7 @@ written += 1; }();
         this->shrink_to(static_cast<size_t>(0));
     }
     struct Guard_2 {
-        vec_deque_port::VecDeque<T, A>& deque;
+        rusty::port::collections::vec_deque::VecDeque<T, A>& deque;
         size_t old_head;
         size_t target_cap;
         mutable bool _rusty_forgotten = false;
@@ -5162,14 +5162,14 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct Drain {
     using Item = T;
-    rusty::ptr::NonNull<vec_deque_port::VecDeque<T, A>> deque;
+    rusty::ptr::NonNull<rusty::port::collections::vec_deque::VecDeque<T, A>> deque;
     size_t drain_len;
     size_t idx;
     size_t tail_len;
     size_t remaining;
     rusty::PhantomData<const T&> _marker;
     mutable bool _rusty_forgotten = false;
-    Drain(rusty::ptr::NonNull<vec_deque_port::VecDeque<T, A>> deque_init, size_t drain_len_init, size_t idx_init, size_t tail_len_init, size_t remaining_init, rusty::PhantomData<const T&> _marker_init) : deque(std::move(deque_init)), drain_len(std::move(drain_len_init)), idx(std::move(idx_init)), tail_len(std::move(tail_len_init)), remaining(std::move(remaining_init)), _marker(std::move(_marker_init)) {}
+    Drain(rusty::ptr::NonNull<rusty::port::collections::vec_deque::VecDeque<T, A>> deque_init, size_t drain_len_init, size_t idx_init, size_t tail_len_init, size_t remaining_init, rusty::PhantomData<const T&> _marker_init) : deque(std::move(deque_init)), drain_len(std::move(drain_len_init)), idx(std::move(idx_init)), tail_len(std::move(tail_len_init)), remaining(std::move(remaining_init)), _marker(std::move(_marker_init)) {}
     Drain(const Drain&) = default;
     Drain(Drain&& other) noexcept : deque(std::move(other.deque)), drain_len(std::move(other.drain_len)), idx(std::move(other.idx)), tail_len(std::move(other.tail_len)), remaining(std::move(other.remaining)), _marker(std::move(other._marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -5187,10 +5187,10 @@ struct Drain {
     void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
 
 
-    static Drain<T, A> new_(vec_deque_port::VecDeque<T, A>& deque, size_t drain_start, size_t drain_len) {
+    static Drain<T, A> new_(rusty::port::collections::vec_deque::VecDeque<T, A>& deque, size_t drain_start, size_t drain_len) {
         const auto orig_len = rusty::mem::replace(deque.len_field, std::move(drain_start));
         auto tail_len = (rusty::detail::deref_if_pointer_like(orig_len) - rusty::detail::deref_if_pointer_like(drain_start)) - rusty::detail::deref_if_pointer_like(drain_len);
-        return Drain<T, A>(rusty::ptr::NonNull<vec_deque_port::VecDeque<T, A>>::from(deque), std::move(drain_len), std::move(drain_start), std::move(tail_len), std::move(drain_len), rusty::PhantomData<const T&>{});
+        return Drain<T, A>(rusty::ptr::NonNull<rusty::port::collections::vec_deque::VecDeque<T, A>>::from(deque), std::move(drain_len), std::move(drain_start), std::move(tail_len), std::move(drain_len), rusty::PhantomData<const T&>{});
     }
     std::tuple<std::add_pointer_t<std::span<T>>, std::add_pointer_t<std::span<T>>> as_slices() const {
         // patcher: stubbed (off smoke-test path)
@@ -5304,7 +5304,7 @@ struct Drain {
     }
     template<typename I>
     bool fill(I& replace_with) {
-        vec_deque_port::VecDeque<T, A>& deque = this->deque.as_mut();
+        rusty::port::collections::vec_deque::VecDeque<T, A>& deque = this->deque.as_mut();
         const auto range_start = deque.len;
         const auto range_end = rusty::detail::deref_if_pointer_like(range_start) + rusty::detail::deref_if_pointer_like(this->drain_len);
         for (auto&& idx : rusty::for_in(rusty::range(range_start, range_end))) {
@@ -5314,7 +5314,7 @@ struct Drain {
         return true;
     }
     void move_tail(size_t additional) {
-        vec_deque_port::VecDeque<T, A>& deque = this->deque.as_mut();
+        rusty::port::collections::vec_deque::VecDeque<T, A>& deque = this->deque.as_mut();
         auto tail_start = rusty::detail::deref_if_pointer_like(deque.len) + rusty::detail::deref_if_pointer_like(this->drain_len);
         deque.buf.reserve(rusty::detail::deref_if_pointer_like(tail_start) + rusty::detail::deref_if_pointer_like(this->tail_len), std::move(additional));
         auto new_tail_start = rusty::detail::deref_if_pointer_like(tail_start) + rusty::detail::deref_if_pointer_like(additional);
@@ -5330,12 +5330,12 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct IntoIter {
     using Item = T;
-    vec_deque_port::VecDeque<T, A> inner;
+    rusty::port::collections::vec_deque::VecDeque<T, A> inner;
 
-    static IntoIter<T, A> new_(vec_deque_port::VecDeque<T, A> inner) {
+    static IntoIter<T, A> new_(rusty::port::collections::vec_deque::VecDeque<T, A> inner) {
         return IntoIter<T, A>{.inner = std::move(inner)};
     }
-    vec_deque_port::VecDeque<T, A> into_vecdeque() {
+    rusty::port::collections::vec_deque::VecDeque<T, A> into_vecdeque() {
         return std::move(this->inner);
     }
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
@@ -5365,10 +5365,10 @@ return 0;
         return std::move(this->inner.len_field);
     }
     struct Guard_3 {
-        vec_deque_port::VecDeque<T, A>& deque;
+        rusty::port::collections::vec_deque::VecDeque<T, A>& deque;
         size_t consumed;
         mutable bool _rusty_forgotten = false;
-        Guard_3(vec_deque_port::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
+        Guard_3(rusty::port::collections::vec_deque::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
         Guard_3(const Guard_3&) = default;
         Guard_3(Guard_3&& other) noexcept : deque(other.deque), consumed(std::move(other.consumed)) {
             this->_rusty_forgotten = other._rusty_forgotten;
@@ -5428,10 +5428,10 @@ return 0;
         return rusty::num::NonZero<size_t>::new_(std::move(rem)).map_or(rusty::Result<std::tuple<>, rusty::num::NonZero<size_t>>::Ok(std::make_tuple()), rusty::Err);
     }
     struct Guard_4 {
-        vec_deque_port::VecDeque<T, A>& deque;
+        rusty::port::collections::vec_deque::VecDeque<T, A>& deque;
         size_t consumed;
         mutable bool _rusty_forgotten = false;
-        Guard_4(vec_deque_port::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
+        Guard_4(rusty::port::collections::vec_deque::VecDeque<T, A>& deque_init, size_t consumed_init) : deque(deque_init), consumed(std::move(consumed_init)) {}
         Guard_4(const Guard_4&) = default;
         Guard_4(Guard_4&& other) noexcept : deque(other.deque), consumed(std::move(other.consumed)) {
             this->_rusty_forgotten = other._rusty_forgotten;
@@ -5477,7 +5477,7 @@ export template<typename T, typename F, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct ExtractIf {
     using Item = T;
-    vec_deque_port::VecDeque<T, A>& vec;
+    rusty::port::collections::vec_deque::VecDeque<T, A>& vec;
     /// The index of the item that will be inspected by the next call to `next`.
     size_t idx;
     /// Elements at and beyond this point will be retained. Must be equal or smaller than `old_len`.
@@ -5489,7 +5489,7 @@ struct ExtractIf {
     /// The filter test predicate.
     F pred;
     mutable bool _rusty_forgotten = false;
-    ExtractIf(vec_deque_port::VecDeque<T, A>& vec_init, size_t idx_init, size_t end_init, size_t del_init, size_t old_len_init, F pred_init) : vec(vec_init), idx(std::move(idx_init)), end(std::move(end_init)), del(std::move(del_init)), old_len(std::move(old_len_init)), pred(std::move(pred_init)) {}
+    ExtractIf(rusty::port::collections::vec_deque::VecDeque<T, A>& vec_init, size_t idx_init, size_t end_init, size_t del_init, size_t old_len_init, F pred_init) : vec(vec_init), idx(std::move(idx_init)), end(std::move(end_init)), del(std::move(del_init)), old_len(std::move(old_len_init)), pred(std::move(pred_init)) {}
     ExtractIf(const ExtractIf&) = default;
     ExtractIf(ExtractIf&& other) noexcept : vec(other.vec), idx(std::move(other.idx)), end(std::move(other.end)), del(std::move(other.del)), old_len(std::move(other.old_len)), pred(std::move(other.pred)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -5508,7 +5508,7 @@ struct ExtractIf {
 
 
     template<typename R>
-    static ExtractIf<T, F, A> new_(vec_deque_port::VecDeque<T, A>& vec, F pred, R range) {
+    static ExtractIf<T, F, A> new_(rusty::port::collections::vec_deque::VecDeque<T, A>& vec, F pred, R range) {
         auto old_len = rusty::len(vec);
         auto&& _let_pat = slice::range(std::move(range), rusty::range_to(old_len));
         auto&& start = rusty::detail::deref_if_pointer(_let_pat.start);
@@ -5728,7 +5728,7 @@ size_t wrap_index(size_t logical_index, size_t capacity) {
 // @unsafe
 template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
-void prepend(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice) {
+void prepend(rusty::port::collections::vec_deque::VecDeque<T, A>& deque, std::span<const T> slice) {
     // @unsafe
     {
         deque.head = deque.wrap_sub(deque.head, rusty::len(slice));
@@ -5746,7 +5746,7 @@ void prepend(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice) {
 // @unsafe
 template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
-void prepend_reversed(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> slice) {
+void prepend_reversed(rusty::port::collections::vec_deque::VecDeque<T, A>& deque, std::span<const T> slice) {
     // @unsafe
     {
         deque.head = deque.wrap_sub(deque.head, rusty::len(slice));
@@ -5755,4 +5755,13 @@ void prepend_reversed(vec_deque_port::VecDeque<T, A>& deque, std::span<const T> 
     }
 }
 
-} // namespace vec_deque_port
+} // namespace rusty::port::collections::vec_deque
+
+// User-facing alias mirroring Rust's `std::collections::VecDeque`.
+// End users write `rusty::collections::VecDeque<T>` and don't observe
+// the underlying `rusty::port::*` transpilation scaffolding.
+export namespace rusty::collections {
+    template<typename T, typename A = ::rusty::alloc::Global>
+        requires (rusty::alloc::Allocator<A>)
+    using VecDeque = ::rusty::port::collections::vec_deque::VecDeque<T, A>;
+}
