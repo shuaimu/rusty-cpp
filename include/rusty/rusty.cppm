@@ -119,6 +119,12 @@ export import btree_port.btree.map;
 export import btree_port.btree.set;
 export import rc_port;
 export import binary_heap_port;  // namespace: rusty::port::collections::binary_heap
+export import hashbrown_port.map;
+export import hashbrown_port.set;
+export import vec_deque_port;
+export import cell_port;
+export import string_port;
+export import arc_port;
 
 export namespace rusty {
 
@@ -157,6 +163,9 @@ using BTreeSet = ::btree_port::btree::set::BTreeSet<T, A>;
 namespace port::collections {
     template<typename T, typename A = ::rusty::alloc::Global>
     using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap<T, A>;
+    template<typename T, typename A = ::rusty::alloc::Global>
+        requires (rusty::alloc::Allocator<A>)
+    using VecDeque = ::rusty::port::collections::vec_deque::VecDeque<T, A>;
 }
 
 namespace rc {
@@ -165,6 +174,19 @@ namespace rc {
 template<typename T, typename A = ::rusty::alloc::Global>
 using Weak = ::rusty::port::rc::Weak<T, A>;
 } // namespace rc
+
+// User-facing `rusty::collections::*` aliases. End users write
+// `rusty::collections::HashMap<K,V>` / `HashSet<T>` to match Rust's
+// `std::collections::*`. HashMap/HashSet come from hashbrown_port —
+// the underlying types are still emitted at the global namespace (full
+// namespace migration of all 16 hashbrown_port files deferred); the
+// aliases here are the user-observable contract.
+namespace collections {
+    template<typename K, typename V, typename S = ::DefaultHasher>
+    using HashMap = ::HashMap<K, V, S>;
+    template<typename T, typename S = ::DefaultHasher>
+    using HashSet = ::HashSet<T, S>;
+}
 
 } // export namespace rusty
 

@@ -5630,11 +5630,18 @@ static auto from(Vec<T, A> v) {
 
 } // namespace rusty::port::vec
 
-// Backward-compat global alias: existing consumers using `::Vec<T,A>`
-// keep working. Canonical type lives in `rusty::port::vec::Vec`.
+// Backward-compat global aliases: existing consumers using `::Vec<T,A>`
+// or `::Drain<T,A>` keep working. Canonical types live in
+// `rusty::port::vec::*`. Drain is defined in this file (line ~4101)
+// AND in the separate vec_port.vec.drain module (not currently built;
+// dropped during VecLegacy retirement due to cyclic dep). The alias
+// here surfaces this file's `rusty::port::vec::Drain`.
 export template<typename T, typename A = ::rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 using Vec = ::rusty::port::vec::Vec<T, A>;
+export template<typename T, typename A = ::rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+using Drain = ::rusty::port::vec::Drain<T, A>;
 
 // User-facing alias mirroring Rust's `std::vec::Vec`. End users write
 // `rusty::vec::Vec<T>` and don't observe the `rusty::port::*`
