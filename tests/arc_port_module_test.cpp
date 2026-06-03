@@ -9,8 +9,11 @@ import arc_port;
 #include <cassert>
 #include <cstdio>
 
-using arc_port::Arc;
-using arc_port::Weak;
+// Surface the transpiled types via their deep path. The user-facing
+// `rusty::sync::Arc/Weak` alias is deferred until the hand-written
+// `rusty::Arc` in `include/rusty/arc.hpp` retires in favor of arc_port.
+using rusty::port::sync::Arc;
+using rusty::port::sync::Weak;
 
 static void test_new_and_strong_count() {
     auto p = Arc<int>::new_(42);

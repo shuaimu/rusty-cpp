@@ -3646,7 +3646,7 @@ import vec_port.vec;  // patcher-injected for ::Vec
 
 // Cluster A completion: __TemplateArgs primary template (specializations at file end)
 template<typename T> struct __TemplateArgs;
-namespace arc_port {
+namespace rusty::port::sync {
 
 template<typename T>
 struct ArcInner;
@@ -4142,7 +4142,7 @@ struct Arc {
         auto [uninit_raw_ptr, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<ArcInner<T>>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = rusty::MaybeUninit<T>::uninit()}, std::move(alloc))))>>::into_raw_with_allocator(rusty::Box<ArcInner<T>>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = rusty::MaybeUninit<T>::uninit()}, std::move(alloc))));
         const auto uninit_ptr = ((uninit_raw_ptr)).into();
         rusty::ptr::NonNull<ArcInner<T>> init_ptr = uninit_ptr.cast();
-        auto weak = arc_port::Weak<T, A>(std::move(init_ptr), std::move(alloc_shadow1));
+        auto weak = rusty::port::sync::Weak<T, A>(std::move(init_ptr), std::move(alloc_shadow1));
         auto data = data_fn(weak);
         auto strong = [&]() { const auto inner = const_cast<std::add_pointer_t<ArcInner<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<ArcInner<T>>>>(rusty::as_ptr(init_ptr)));
 rusty::ptr::write(&(*inner).data, std::move(data));
@@ -4189,7 +4189,7 @@ return Arc<T, A>::from_inner_in(std::move(init_ptr), std::move(alloc_shadow2)); 
         auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
         T elem = rusty::ptr::read(rusty::addr_of_temp(this_shadow1.ptr.as_ref().data));
         A alloc = rusty::ptr::read(&this_shadow1.alloc);
-        const auto _weak = arc_port::Weak<T, A>(std::move(this_shadow1.ptr), std::move(alloc));
+        const auto _weak = rusty::port::sync::Weak<T, A>(std::move(this_shadow1.ptr), std::move(alloc));
         return rusty::Result<T, Arc<T, A>>::Ok(std::move(elem));
     }
     static rusty::Option<T> into_inner(Arc<T, A> this_) {
@@ -4200,7 +4200,7 @@ return Arc<T, A>::from_inner_in(std::move(init_ptr), std::move(alloc_shadow2)); 
         // TODO: acquire!(...)
         auto inner = rusty::ptr::read(this_shadow1.get_mut_unchecked());
         auto alloc = rusty::ptr::read(&this_shadow1.alloc);
-        rusty::mem::drop(arc_port::Weak<T, A>(std::move(this_shadow1.ptr), std::move(alloc)));
+        rusty::mem::drop(rusty::port::sync::Weak<T, A>(std::move(this_shadow1.ptr), std::move(alloc)));
         return rusty::Option<T>(std::move(inner));
     }
     static Arc<std::span<const rusty::MaybeUninit<T>>> new_uninit_slice(size_t len) {
@@ -4306,7 +4306,7 @@ return in_progress.into_arc(); }();
             return Arc<T, A>::from_ptr_in(std::move(arc_ptr), std::move(alloc));
         }
     }
-    static arc_port::Weak<T, A> downgrade(const Arc<T, A>& this_) {
+    static rusty::port::sync::Weak<T, A> downgrade(const Arc<T, A>& this_) {
         auto cur = this_.inner().weak.load(rusty::sync::atomic::Ordering::Relaxed);
         while (true) {
             if (cur == std::numeric_limits<size_t>::max()) {
@@ -4318,7 +4318,7 @@ return in_progress.into_arc(); }();
                 rusty::sync::atomic::Ordering::Acquire,
                 rusty::sync::atomic::Ordering::Relaxed);
             if (__res.is_ok()) {
-                return arc_port::Weak<T, A>(this_.ptr, A{});
+                return rusty::port::sync::Weak<T, A>(this_.ptr, A{});
             }
             cur = __res.unwrap_err();
         }
@@ -4351,7 +4351,7 @@ return in_progress.into_arc(); }();
         }
     }
     void drop_slow() {
-        const auto _weak = arc_port::Weak<T, A>(this->ptr, A{});
+        const auto _weak = rusty::port::sync::Weak<T, A>(this->ptr, A{});
         // @unsafe
         {
             rusty::ptr::drop_in_place(&(*rusty::as_ptr(this->ptr)).data);
@@ -4498,7 +4498,7 @@ return in_progress.into_arc(); }();
         if (this_.inner().strong.compare_exchange(1, 0, rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed).is_err()) {
             this_ = Arc<std::remove_cvref_t<decltype((rusty::detail::deref_if_pointer_like(this_)))>, std::remove_cvref_t<decltype((A{}))>>::clone_from_ref_in(rusty::detail::deref_if_pointer_like(this_), A{});
         } else if (this_.inner().weak.load(rusty::sync::atomic::Ordering::Relaxed) != 1) {
-            const auto _weak = arc_port::Weak<T, A>(this_.ptr, A{});
+            const auto _weak = rusty::port::sync::Weak<T, A>(this_.ptr, A{});
             UniqueArcUninit<T, A> in_progress = UniqueArcUninit<T, A>::new_(rusty::detail::deref_if_pointer_like(this_), A{});
             // @unsafe
             {
@@ -4690,8 +4690,8 @@ template <class T, class A>
 class ArcEqIdent {
 public:
     virtual ~ArcEqIdent() noexcept(false) {}
-    virtual bool eq(const arc_port::Arc<T, A>& other) const = 0;
-    virtual bool ne(const arc_port::Arc<T, A>& other) const = 0;
+    virtual bool eq(const rusty::port::sync::Arc<T, A>& other) const = 0;
+    virtual bool ne(const rusty::port::sync::Arc<T, A>& other) const = 0;
     ArcEqIdent(const ArcEqIdent&) = delete;
     ArcEqIdent& operator=(const ArcEqIdent&) = delete;
     ArcEqIdent(ArcEqIdent&&) = delete;
@@ -4800,7 +4800,7 @@ return reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintpt
 }();
         return Weak<T, A>(rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(std::move(ptr_shadow1)), std::move(alloc));
     }
-    rusty::Option<arc_port::Arc<T, A>> upgrade() const {
+    rusty::Option<rusty::port::sync::Arc<T, A>> upgrade() const {
         const rusty::SafeFn<rusty::Option<size_t>(size_t)> checked_increment = +[](size_t n) -> rusty::Option<size_t> {
             if (rusty::detail::deref_if_pointer_like(n) == static_cast<size_t>(0)) {
                 return rusty::Option<size_t>{rusty::None};
@@ -4811,10 +4811,10 @@ return reinterpret_cast<std::add_pointer_t<ArcInner<T>>>(static_cast<std::uintpt
         if (RUSTY_TRY_OPT(this->inner()).strong.try_update(rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed, std::move(checked_increment)).is_ok()) {
             // @unsafe
             {
-                return rusty::Option<arc_port::Arc<T, A>>(arc_port::Arc<T, A>::from_inner_in(this->ptr, A{}));
+                return rusty::Option<rusty::port::sync::Arc<T, A>>(rusty::port::sync::Arc<T, A>::from_inner_in(this->ptr, A{}));
             }
         } else {
-            return rusty::Option<arc_port::Arc<T, A>>{rusty::None};
+            return rusty::Option<rusty::port::sync::Arc<T, A>>{rusty::None};
         }
     }
     size_t strong_count() const {
@@ -4941,13 +4941,13 @@ struct UniqueArcUninit {
             return reinterpret_cast<std::add_pointer_t<T>>(static_cast<std::uintptr_t>(rusty::as_ptr(this->ptr)->byte_add(std::move(offset))));
         }
     }
-    arc_port::Arc<T, A> into_arc() {
+    rusty::port::sync::Arc<T, A> into_arc() {
         auto this_ = rusty::mem::manually_drop_new(std::move((*this)));
         const auto ptr_shadow1 = const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this_.ptr)));
         auto alloc = this_.alloc.take().unwrap();
         // @unsafe
         {
-            return arc_port::Arc<T, A>::from_ptr_in(ptr_shadow1, std::move(alloc));
+            return rusty::port::sync::Arc<T, A>::from_ptr_in(ptr_shadow1, std::move(alloc));
         }
     }
     ~UniqueArcUninit() noexcept(false) {
@@ -5087,7 +5087,7 @@ struct UniqueArc {
     static T unwrap(UniqueArc<T, A> this_) {
         const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
         T val = rusty::ptr::read(rusty::detail::deref_if_pointer_like(this_shadow1));
-        const auto _weak = arc_port::Weak<T, A>(std::move(this_shadow1.ptr), rusty::alloc::Global{});
+        const auto _weak = rusty::port::sync::Weak<T, A>(std::move(this_shadow1.ptr), rusty::alloc::Global{});
         return std::move(val);
     }
     static UniqueArc<T, A> from_raw(std::add_pointer_t<std::add_const_t<T>> ptr) {
@@ -5103,13 +5103,13 @@ struct UniqueArc {
         auto [ptr_shadow1, alloc_shadow1] = rusty::detail::deref_if_pointer_like(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<ArcInner<T>>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc))))>>::into_unique(rusty::Box<ArcInner<T>>::new_in(ArcInner<T>{.strong = rusty::sync::atomic::AtomicUsize::new_(0), .weak = rusty::sync::atomic::AtomicUsize::new_(1), .data = std::move(data)}, std::move(alloc))));
         return UniqueArc<T, A>(rusty::from_into<rusty::ptr::NonNull<ArcInner<T>>>(std::move(ptr_shadow1)), rusty::PhantomData<ArcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, std::move(alloc_shadow1));
     }
-    static arc_port::Arc<T, A> into_arc(UniqueArc<T, A> this_) {
+    static rusty::port::sync::Arc<T, A> into_arc(UniqueArc<T, A> this_) {
         const auto this_shadow1 = rusty::mem::manually_drop_new(std::move(this_));
         A alloc = rusty::ptr::read(&this_shadow1.alloc);
         // @unsafe
         {
             (*rusty::as_ptr(this_shadow1.ptr)).strong.store(1, rusty::sync::atomic::Ordering::Release);
-            return arc_port::Arc<T, A>::from_inner_in(std::move(this_shadow1.ptr), std::move(alloc));
+            return rusty::port::sync::Arc<T, A>::from_inner_in(std::move(this_shadow1.ptr), std::move(alloc));
         }
     }
     static size_t weak_count(const UniqueArc<T, A>& this_) {
@@ -5135,12 +5135,12 @@ struct UniqueArc {
     static UniqueArc<T, A> from_inner_in(rusty::ptr::NonNull<ArcInner<T>> ptr, A alloc) {
         return UniqueArc<T, A>(std::move(ptr), rusty::PhantomData<ArcInner<T>>{}, rusty::PhantomData<std::add_pointer_t<T>>{}, std::move(alloc));
     }
-    static arc_port::Weak<T, A> downgrade(const UniqueArc<T, A>& this_) {
+    static rusty::port::sync::Weak<T, A> downgrade(const UniqueArc<T, A>& this_) {
         const auto old_size = (*rusty::as_ptr(this_.ptr)).weak.fetch_add(1, rusty::sync::atomic::Ordering::Relaxed);
         if (rusty::detail::deref_if_pointer_like(old_size) > rusty::detail::deref_if_pointer_like(MAX_REFCOUNT)) {
             abort();
         }
-        return arc_port::Weak<T, A>(this_.ptr, A{});
+        return rusty::port::sync::Weak<T, A>(this_.ptr, A{});
     }
     /* patcher: assume_init method deleted (Cluster A SFINAE) */
     const T& operator*() const {
@@ -5157,7 +5157,7 @@ struct UniqueArc {
     }
     ~UniqueArc() noexcept(false) {
         if (_rusty_forgotten) { return; }
-        const auto _weak = arc_port::Weak<T, A>(this->ptr, A{});
+        const auto _weak = rusty::port::sync::Weak<T, A>(this->ptr, A{});
         // @unsafe
         {
             rusty::ptr::drop_in_place(&(*rusty::as_ptr(this->ptr)).data);
@@ -5260,4 +5260,10 @@ namespace rusty_ext {
 // for inner structs that participated in structural decomposition
 // (so absorbed methods that referenced dropped impl-generics can
 // recover them via `typename __TemplateArgs<HostParam>::arg_<N>`).
-} // namespace arc_port
+} // namespace rusty::port::sync
+
+// User-facing alias deferred. `rusty::Arc<T>` and `rusty::sync::Weak<T>`
+// are currently taken by the hand-written `include/rusty/arc.hpp`,
+// which is the canonical surface today. Surface the full
+// `rusty::sync::*` alias once the hand-written Arc retires in favor of
+// arc_port (the trajectory rc_port took). Tracked in task #240.
