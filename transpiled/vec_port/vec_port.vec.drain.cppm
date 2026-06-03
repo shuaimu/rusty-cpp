@@ -3637,6 +3637,8 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module vec_port.vec.drain;
 
+namespace rusty::port::vec {
+
 export template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
 struct Drain;
@@ -3850,4 +3852,11 @@ struct Drain {
         this->tail_start = std::move(new_tail_start);
     }
 };
+
+} // namespace rusty::port::vec
+
+// Backward-compat global alias.
+export template<typename T, typename A>
+    requires (rusty::alloc::Allocator<A>)
+using Drain = ::rusty::port::vec::Drain<T, A>;
 

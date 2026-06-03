@@ -3639,6 +3639,7 @@ export module vec_port.vec.into_iter;
 
 import vec_port.raw_vec;
 
+namespace rusty::port::vec {
 
 export template<typename T, typename A>
     requires (rusty::alloc::Allocator<A>)
@@ -3961,4 +3962,11 @@ protected:
 // host type's struct body, or rewrite `this`/`(*this)` to an explicit
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for T
+
+} // namespace rusty::port::vec
+
+// Backward-compat global alias.
+export template<typename T, typename A = ::rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+using IntoIter = ::rusty::port::vec::IntoIter<T, A>;
 

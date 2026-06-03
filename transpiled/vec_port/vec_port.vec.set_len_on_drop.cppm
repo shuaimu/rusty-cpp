@@ -30,6 +30,8 @@ module;
 
 export module vec_port.vec.set_len_on_drop;
 
+namespace rusty::port::vec {
+
 export struct SetLenOnDrop;
 
 export struct SetLenOnDrop {
@@ -78,3 +80,9 @@ SetLenOnDrop::~SetLenOnDrop() noexcept(false) {
     this->len = this->local_len;
 }
 
+} // namespace rusty::port::vec
+
+// Backward-compat global alias: `::SetLenOnDrop` keeps working for
+// existing consumers (vec_port.vec internal refs, patcher rules).
+// The canonical type lives in `rusty::port::vec::SetLenOnDrop`.
+export using SetLenOnDrop = ::rusty::port::vec::SetLenOnDrop;

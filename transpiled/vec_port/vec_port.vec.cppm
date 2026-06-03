@@ -3652,6 +3652,8 @@ import vec_port.vec.into_iter;
 
 import vec_port.vec.set_len_on_drop;
 
+namespace rusty::port::vec {
+
 
 
 
@@ -3687,7 +3689,7 @@ struct SpecFromElem {
 };
 
 // Forward declaration of Vec — moved up from its original position
-// (line ~3734) so SpecFromIter below can name `::Vec<T>` in its
+// (line ~3734) so SpecFromIter below can name `Vec<T>` in its
 // return type. Matches the export shape of the original line.
 export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
@@ -3706,7 +3708,7 @@ struct Vec;
 template<typename T, typename Iter>
 struct SpecFromIter {
     template<typename I>
-    static ::Vec<T> from_iter(I iter);
+    static Vec<T> from_iter(I iter);
 };
 
 // SpecExtend — generic fallback that mirrors the Rust default impl
@@ -3743,10 +3745,10 @@ struct SpecCloneIntoVec {
 // (Original `struct Vec;` forward decl moved up — see line ~3688.)
 export template<typename T>
     requires (std::copyable<T>)
-::Vec<T> from_elem(T elem, size_t n);
+Vec<T> from_elem(T elem, size_t n);
 export template<typename T, typename A>
     requires (std::copyable<T> && rusty::alloc::Allocator<A>)
-::Vec<T, A> from_elem_in(T elem, size_t n, A alloc);
+Vec<T, A> from_elem_in(T elem, size_t n, A alloc);
 
 // Extension trait free-function forward declarations
 namespace rusty_ext {
@@ -4554,13 +4556,13 @@ namespace rusty_ext {
     export template<typename T>
     bool is_zero(const rusty::num::Wrapping<T>& self_) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_zero(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::is_zero(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::is_zero(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(self_._0);
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_zero(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::is_zero(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::is_zero(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(self_._0);
     }
 
     export template<typename T>
     bool is_zero(const rusty::num::Saturating<T>& self_) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_zero(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::is_zero(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::is_zero(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(self_._0);
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_zero(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::is_zero(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::is_zero(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(self_._0);
     }
 
 }
@@ -4598,7 +4600,7 @@ struct Vec {
     void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
 
     // ── C++-ergonomic shortcuts (hand-added so that
-    // `using rusty::Vec = ::Vec<T,A>` can become a drop-in replacement for
+    // `using rusty::Vec = Vec<T,A>` can become a drop-in replacement for
     // the legacy rusty::VecLegacy class: default ctor, initializer-list
     // ctor, size_t-capacity ctor, make(), size() alias, mutable
     // operator[], and begin()/end() iterators). Codify in
@@ -4888,7 +4890,7 @@ struct Vec {
         this->retain_mut([&](auto&& elem) { return f(std::move(elem)); });
     }
     struct PanicGuard {
-        ::Vec<T, A>& v;
+        Vec<T, A>& v;
         size_t read;
         size_t write_;
         size_t original_len;
@@ -4982,7 +4984,7 @@ struct Vec {
     struct FillGapOnDrop {
         size_t read;
         size_t write_;
-        ::Vec<T, A>& vec;
+        Vec<T, A>& vec;
         mutable bool _rusty_forgotten = false;
         FillGapOnDrop(size_t read_init, size_t write_init, Vec<T, A>& vec_init) : read(std::move(read_init)), write_(std::move(write_init)), vec(vec_init) {}
         FillGapOnDrop(const FillGapOnDrop&) = default;
@@ -5162,7 +5164,7 @@ return same_bucket(&*current, &*prev); }();
             assert_failed(std::move(at), rusty::len((*this)));
         }
         auto other_len = rusty::detail::deref_if_pointer_like(this->len_field) - rusty::detail::deref_if_pointer_like(at);
-        auto other = ::Vec<T, std::remove_cvref_t<decltype((rusty::clone(this->allocator())))>>::with_capacity_in(std::move(other_len), rusty::clone(this->allocator()));
+        auto other = Vec<T, std::remove_cvref_t<decltype((rusty::clone(this->allocator())))>>::with_capacity_in(std::move(other_len), rusty::clone(this->allocator()));
         // @unsafe
         {
             this->set_len(std::move(at));
@@ -5533,10 +5535,10 @@ local_len.increment_len(1);
                 if (has_advanced) {
                     rusty::ptr::copy(rusty::as_ptr(it.ptr), rusty::as_ptr(it.buf), rusty::len(it));
                 }
-                return ::Vec<T, rusty::alloc::Global>::from_parts(std::move(it.buf), rusty::len(it), std::move(it.cap));
+                return Vec<T, rusty::alloc::Global>::from_parts(std::move(it.buf), rusty::len(it), std::move(it.cap));
             }
         }
-        auto vec = ::Vec<T>::new_();
+        auto vec = Vec<T>::new_();
         ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::spec_extend(std::forward<decltype(__self)>(__self), std::move(iterator)); }) { return rusty_ext::spec_extend(std::forward<decltype(__self)>(__self), std::move(iterator)); } else { return rusty_ext::spec_extend(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(iterator))); } })(vec);
         return std::move(vec);
     }
@@ -5548,8 +5550,8 @@ local_len.increment_len(1);
 // iterators) can override per Iter type if perf matters later.
 template<typename T, typename Iter>
 template<typename I>
-::Vec<T> SpecFromIter<T, Iter>::from_iter(I iter) {
-    auto vec = ::Vec<T>::new_();
+Vec<T> SpecFromIter<T, Iter>::from_iter(I iter) {
+    auto vec = Vec<T>::new_();
     while (true) {
         auto next = iter.next();
         if (next.is_none()) break;
@@ -5604,13 +5606,13 @@ protected:
 
 export template<typename T>
     requires (std::copyable<T>)
-::Vec<T> from_elem(T elem, size_t n) {
+Vec<T> from_elem(T elem, size_t n) {
     return SpecFromElem::from_elem(std::move(elem), std::move(n), rusty::alloc::Global{});
 }
 
 export template<typename T, typename A>
     requires (std::copyable<T> && rusty::alloc::Allocator<A>)
-::Vec<T, A> from_elem_in(T elem, size_t n, A alloc) {
+Vec<T, A> from_elem_in(T elem, size_t n, A alloc) {
     return SpecFromElem::from_elem(std::move(elem), std::move(n), std::move(alloc));
 }
 
@@ -5622,7 +5624,24 @@ export template<typename T, typename A>
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for Box
 template<typename T, typename A>
-static auto from(::Vec<T, A> v) {
+static auto from(Vec<T, A> v) {
     return rusty::into_boxed_slice(std::move(v));
+}
+
+} // namespace rusty::port::vec
+
+// Backward-compat global alias: existing consumers using `::Vec<T,A>`
+// keep working. Canonical type lives in `rusty::port::vec::Vec`.
+export template<typename T, typename A = ::rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+using Vec = ::rusty::port::vec::Vec<T, A>;
+
+// User-facing alias mirroring Rust's `std::vec::Vec`. End users write
+// `rusty::vec::Vec<T>` and don't observe the `rusty::port::*`
+// transpilation scaffolding.
+export namespace rusty::vec {
+    template<typename T, typename A = ::rusty::alloc::Global>
+        requires (rusty::alloc::Allocator<A>)
+    using Vec = ::rusty::port::vec::Vec<T, A>;
 }
 

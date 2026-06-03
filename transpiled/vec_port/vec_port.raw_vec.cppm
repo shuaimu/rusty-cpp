@@ -3637,6 +3637,8 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module vec_port.raw_vec;
 
+namespace rusty::port::vec {
+
 enum class AllocInit;
 constexpr AllocInit AllocInit_Uninitialized();
 constexpr AllocInit AllocInit_Zeroed();
@@ -3711,17 +3713,17 @@ struct RawVecInner {
     A alloc;
 
     static RawVecInner<A> with_capacity(size_t capacity, rusty::alloc::Layout elem_layout) {
-        return [&]() -> RawVecInner<A> { auto&& _m = RawVecInner<A>::try_allocate_in(std::move(capacity), AllocInit_Uninitialized(), rusty::alloc::Global{}, std::move(elem_layout)); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); ::handle_error(std::move(err)); std::abort(); } return [&]() -> RawVecInner<A> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> RawVecInner<A> { auto&& _m = RawVecInner<A>::try_allocate_in(std::move(capacity), AllocInit_Uninitialized(), rusty::alloc::Global{}, std::move(elem_layout)); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); handle_error(std::move(err)); std::abort(); } return [&]() -> RawVecInner<A> { rusty::intrinsics::unreachable(); }(); }();
     }
     static RawVecInner<A> with_capacity_in(size_t capacity, A alloc, rusty::alloc::Layout elem_layout) {
         return [&]() -> RawVecInner<A> { auto&& _m = RawVecInner<A>::try_allocate_in(std::move(capacity), AllocInit_Uninitialized(), std::move(alloc), std::move(elem_layout)); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& this_ = rusty::detail::deref_if_pointer(_mv0); return [&]() -> RawVecInner<A> { // @unsafe
 {
     __builtin_assume(!this_.needs_to_grow(static_cast<size_t>(0), std::move(capacity), std::move(elem_layout)));
 }
-return std::move(this_); }(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); ::handle_error(std::move(err)); std::abort(); } return [&]() -> RawVecInner<A> { rusty::intrinsics::unreachable(); }(); }();
+return std::move(this_); }(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); handle_error(std::move(err)); std::abort(); } return [&]() -> RawVecInner<A> { rusty::intrinsics::unreachable(); }(); }();
     }
     static rusty::Result<RawVecInner<A>, rusty::collections::TryReserveError> try_allocate_in(size_t capacity, const auto& init, A alloc, rusty::alloc::Layout elem_layout) {
-        auto layout = ({ auto&& _m = ::layout_array(std::move(capacity), std::move(elem_layout)); std::conditional_t<std::is_reference_v<decltype(_m.unwrap())>, std::optional<std::reference_wrapper<std::remove_reference_t<decltype(_m.unwrap())>>>, std::optional<std::remove_cvref_t<decltype(_m.unwrap())>>> _match_value; if (_m.is_ok()) { auto&& _mv = _m.unwrap();
+        auto layout = ({ auto&& _m = layout_array(std::move(capacity), std::move(elem_layout)); std::conditional_t<std::is_reference_v<decltype(_m.unwrap())>, std::optional<std::reference_wrapper<std::remove_reference_t<decltype(_m.unwrap())>>>, std::optional<std::remove_cvref_t<decltype(_m.unwrap())>>> _match_value; if (_m.is_ok()) { auto&& _mv = _m.unwrap();
 auto&& layout = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv));
 _match_value.emplace(std::forward<decltype(_mv)>(_mv)); } else { if (!(_m.is_err())) { rusty::intrinsics::unreachable(); } auto&& _mv = _m.unwrap_err();
 return rusty::Result<RawVecInner<A>, rusty::collections::TryReserveError>::Err(rusty::from_into<rusty::collections::TryReserveError>(rusty::collections::TryReserveErrorKind::CapacityOverflow)); } ([&](auto&& __v) -> decltype(auto) { using __MatchValueT = std::remove_cvref_t<decltype(__v)>; if constexpr (requires { typename __MatchValueT::type; }) { if constexpr (std::is_same_v<__MatchValueT, std::reference_wrapper<typename __MatchValueT::type>>) { return std::forward<decltype(__v)>(__v).get(); } else { return std::forward<decltype(__v)>(__v); } } else { return std::forward<decltype(__v)>(__v); } })(std::move(_match_value).value()); });
@@ -3739,7 +3741,7 @@ return rusty::Result<RawVecInner<A>, rusty::collections::TryReserveError>::Err(r
     void grow_one(rusty::alloc::Layout elem_layout) {
         if (auto&& _iflet_scrutinee = this->grow_amortized(this->cap, static_cast<size_t>(1), std::move(elem_layout)); _iflet_scrutinee.is_err()) {
             decltype(auto) err = _iflet_scrutinee.unwrap_err();
-            ::handle_error(std::move(err));
+            handle_error(std::move(err));
         }
     }
     auto grow_amortized(size_t len, size_t additional, rusty::alloc::Layout elem_layout) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
@@ -3749,7 +3751,7 @@ return rusty::Result<RawVecInner<A>, rusty::collections::TryReserveError>::Err(r
         }
         const auto required_cap = RUSTY_TRY_INTO([&]() { auto&& _checked_lhs = len; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(std::move(additional))); }().ok_or(rusty::collections::TryReserveErrorKind::CapacityOverflow), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
         auto cap = rusty::cmp::max(this->cap * 2, std::move(required_cap));
-        auto cap_shadow1 = rusty::cmp::max(::min_non_zero_cap(elem_layout.size), std::move(cap));
+        auto cap_shadow1 = rusty::cmp::max(min_non_zero_cap(elem_layout.size), std::move(cap));
         auto ptr_shadow1 = RUSTY_TRY_INTO(this->finish_grow(std::move(cap_shadow1), std::move(elem_layout)), rusty::Result<std::tuple<>, rusty::collections::TryReserveError>);
         // @unsafe
         {
@@ -3758,7 +3760,7 @@ return rusty::Result<RawVecInner<A>, rusty::collections::TryReserveError>::Err(r
         return rusty::Result<std::tuple<>, rusty::collections::TryReserveError>::Ok(std::make_tuple());
     }
     auto finish_grow(size_t cap, rusty::alloc::Layout elem_layout) const -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::collections::TryReserveError> {
-        auto new_layout = RUSTY_TRY_INTO(::layout_array(std::move(cap), std::move(elem_layout)), rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::collections::TryReserveError>);
+        auto new_layout = RUSTY_TRY_INTO(layout_array(std::move(cap), std::move(elem_layout)), rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::collections::TryReserveError>);
         auto _curmem = this->current_memory(std::move(elem_layout));
         auto memory = [&]() {
 if (_curmem.is_some()) {
@@ -3782,7 +3784,7 @@ return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::for
         return RawVecInner<A>::try_allocate_in(std::move(capacity), AllocInit_Uninitialized(), std::move(alloc), std::move(elem_layout));
     }
     static RawVecInner<A> with_capacity_zeroed_in(size_t capacity, A alloc, rusty::alloc::Layout elem_layout) {
-        return [&]() -> RawVecInner<A> { auto&& _m = RawVecInner<A>::try_allocate_in(std::move(capacity), AllocInit_Zeroed(), std::move(alloc), std::move(elem_layout)); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); ::handle_error(std::move(err)); std::abort(); } return [&]() -> RawVecInner<A> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> RawVecInner<A> { auto&& _m = RawVecInner<A>::try_allocate_in(std::move(capacity), AllocInit_Zeroed(), std::move(alloc), std::move(elem_layout)); if (_m.is_ok()) { return _m.unwrap(); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& err = rusty::detail::deref_if_pointer(_mv1); handle_error(std::move(err)); std::abort(); } return [&]() -> RawVecInner<A> { rusty::intrinsics::unreachable(); }(); }();
     }
     static RawVecInner<A> from_raw_parts_in(uint8_t* ptr, const auto& cap, A alloc) {
         return RawVecInner<A>{.ptr_field = rusty::ptr::Unique<uint8_t>::new_unchecked(ptr), .cap = std::move(cap), .alloc = std::move(alloc)};
@@ -3824,7 +3826,7 @@ return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::for
         const auto do_reserve_and_handle = [](auto& slf, size_t len, size_t additional, rusty::alloc::Layout elem_layout) {
             if (auto&& _iflet_scrutinee = slf.grow_amortized(std::move(len), std::move(additional), std::move(elem_layout)); _iflet_scrutinee.is_err()) {
                 decltype(auto) err = _iflet_scrutinee.unwrap_err();
-                ::handle_error(std::move(err));
+                handle_error(std::move(err));
             }
         };
         if (this->needs_to_grow(std::move(len), std::move(additional), std::move(elem_layout))) {
@@ -3850,7 +3852,7 @@ return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::for
     void reserve_exact(size_t len, size_t additional, rusty::alloc::Layout elem_layout) {
         if (auto&& _iflet_scrutinee = this->try_reserve_exact(std::move(len), std::move(additional), std::move(elem_layout)); _iflet_scrutinee.is_err()) {
             decltype(auto) err = _iflet_scrutinee.unwrap_err();
-            ::handle_error(std::move(err));
+            handle_error(std::move(err));
         }
     }
     auto try_reserve_exact(size_t len, size_t additional, rusty::alloc::Layout elem_layout) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
@@ -3869,7 +3871,7 @@ return ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::for
     void shrink_to_fit(size_t cap, rusty::alloc::Layout elem_layout) {
         if (auto&& _iflet_scrutinee = this->shrink(std::move(cap), std::move(elem_layout)); _iflet_scrutinee.is_err()) {
             decltype(auto) err = _iflet_scrutinee.unwrap_err();
-            ::handle_error(std::move(err));
+            handle_error(std::move(err));
         }
     }
     auto try_shrink_to_fit(size_t cap, rusty::alloc::Layout elem_layout) -> rusty::Result<std::tuple<>, rusty::collections::TryReserveError> {
@@ -3964,7 +3966,7 @@ RUSTY_TRY_INTO(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { 
 export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct RawVec {
-    static constexpr size_t MIN_NON_ZERO_CAP = ::min_non_zero_cap(sizeof(T));
+    static constexpr size_t MIN_NON_ZERO_CAP = min_non_zero_cap(sizeof(T));
     RawVecInner<A> inner;
     rusty::PhantomData<T> _marker;
     mutable bool _rusty_forgotten = false;
@@ -4027,7 +4029,7 @@ struct RawVec {
         // @unsafe
         {
             const auto ptr_shadow1 = ptr->cast();
-            auto capacity_shadow1 = ::new_cap<T>(std::move(capacity));
+            auto capacity_shadow1 = new_cap<T>(std::move(capacity));
             return RawVec<T, A>(RawVecInner<A>::from_raw_parts_in(std::move(ptr_shadow1), std::move(capacity_shadow1), std::move(alloc)), rusty::PhantomData<T>{});
         }
     }
@@ -4035,7 +4037,7 @@ struct RawVec {
         // @unsafe
         {
             auto ptr_shadow1 = ptr.cast();
-            auto capacity_shadow1 = ::new_cap<T>(std::move(capacity));
+            auto capacity_shadow1 = new_cap<T>(std::move(capacity));
             return RawVec<T, A>(RawVecInner<A>::from_nonnull_in(std::move(ptr_shadow1), std::move(capacity_shadow1), std::move(alloc)), rusty::PhantomData<T>{});
         }
     }
@@ -4123,7 +4125,7 @@ size_t min_non_zero_cap(size_t size) {
 
 void handle_error(rusty::collections::TryReserveError e) {
     if (e.kind == rusty::collections::TryReserveErrorKind::CapacityOverflow) {
-        ::capacity_overflow();
+        capacity_overflow();
     }
     // AllocError branch — abort for now; full impl would call handle_alloc_error.
     rusty::intrinsics::abort();
@@ -4133,4 +4135,13 @@ rusty::Result<rusty::alloc::Layout, rusty::collections::TryReserveError> layout_
     assert((elem_layout.size == elem_layout.pad_to_align().size));
     return [&]() -> rusty::Result<rusty::alloc::Layout, rusty::collections::TryReserveError> { auto&& _m = elem_layout.repeat_packed(std::move(cap)); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& layout = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<rusty::alloc::Layout, rusty::collections::TryReserveError>::Ok(std::move(layout)); } if (_m.is_err()) { return rusty::Result<rusty::alloc::Layout, rusty::collections::TryReserveError>::Err(rusty::from_into<rusty::collections::TryReserveError>(rusty::collections::TryReserveErrorKind::CapacityOverflow)); } return [&]() -> rusty::Result<rusty::alloc::Layout, rusty::collections::TryReserveError> { rusty::intrinsics::unreachable(); }(); }();
 }
+
+} // namespace rusty::port::vec
+
+// Backward-compat global aliases: existing consumers using `::RawVec<T,A>`
+// (or unqualified `RawVec<T,A>` from inside another file in this namespace)
+// keep working. The canonical type lives in `rusty::port::vec::RawVec`.
+export template<typename T, typename A = ::rusty::alloc::Global>
+    requires (rusty::alloc::Allocator<A>)
+using RawVec = ::rusty::port::vec::RawVec<T, A>;
 
