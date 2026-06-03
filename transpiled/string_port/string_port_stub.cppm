@@ -14,8 +14,14 @@ module;
 
 export module string_port;
 
-namespace string_port {
+namespace rusty::port::string {
 
 export using String = ::rusty::String;
 
-} // namespace string_port
+} // namespace rusty::port::string
+
+// User-facing alias: `rusty::string::*` mirrors Rust's `std::string::*`.
+// End users don't observe the underlying `rusty::port::*` scaffolding.
+export namespace rusty::string {
+    using String = ::rusty::port::string::String;
+}

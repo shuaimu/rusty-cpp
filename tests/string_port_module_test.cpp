@@ -6,7 +6,7 @@ import string_port;
 #include <cstdio>
 
 int main() {
-    string_port::String s = string_port::String::from("hello");
+    rusty::string::String s = rusty::string::String::from("hello");
     assert(s.len() == 5);
     std::printf("string_port (stub bridge) smoke OK: len=%zu\n", s.len());
     return 0;

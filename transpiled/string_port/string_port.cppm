@@ -3648,7 +3648,7 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module string_port;
 
-namespace string_port {
+namespace rusty::port::string {
 
 export struct FromUtf16Error;
 export struct Drain;
@@ -5967,4 +5967,17 @@ namespace rusty_ext {
 
 // TODO(interface_traits): skipped generic impl `ToStringAdapter<T>`
 
-} // namespace string_port
+} // namespace rusty::port::string
+
+// Patcher-injected user-facing aliases: `rusty::string::*` re-exports
+// the deep `rusty::port::string::*`. End users write
+// `rusty::string::String` — matching Rust's `std::string::String` —
+// and don't observe the underlying `rusty::port::*` transpilation
+// scaffolding.
+export namespace rusty::string {
+    using FromUtf16Error = ::rusty::port::string::FromUtf16Error;
+    using FromUtf8Error = ::rusty::port::string::FromUtf8Error;
+    using Drain = ::rusty::port::string::Drain;
+    using String = ::rusty::port::string::String;
+    using IntoChars = ::rusty::port::string::IntoChars;
+}

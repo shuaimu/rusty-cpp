@@ -1007,19 +1007,21 @@ inline bool operator!=(const char* lhs, const str& rhs) { return !(lhs == rhs); 
 inline bool operator==(std::string_view lhs, const String& rhs) { return lhs == rhs.as_str(); }
 inline bool operator==(const String& lhs, std::string_view rhs) { return lhs.as_str() == rhs; }
 
-// Factory functions
+// Factory functions (renamed from `string()` so the name doesn't
+// collide with the `rusty::string` namespace alias exported by the
+// `string_port` module).
 // @lifetime: owned
-inline String string(const char* s) {
+inline String string_from(const char* s) {
     return String::from(s);
 }
 
 // @lifetime: owned
-inline String string(const std::string& s) {
+inline String string_from(const std::string& s) {
     return String::from(s);
 }
 
 // @lifetime: owned
-inline String string(std::string_view sv) {
+inline String string_from(std::string_view sv) {
     return String::from(sv);
 }
 
