@@ -57,6 +57,26 @@ is small and BTreeMap-port-shaped. Most are `rusty::ptr::*` helper
 gaps that the BTreeMap port also hit (and which are already addressed
 in btree_port's patcher).
 
+## Advanced API impedances (surfaced 2026-06)
+
+A push to extend the test surface beyond push/pop/peek/iter into the
+consume / bulk-build / mutation APIs surfaced four fresh instantiation
+errors in the vendored `.cppm`. Tests in
+`tests/binary_heap_port_advanced_test.cpp` are guarded by
+`BHP_ADV_*` macros — they flip on once the respective fix lands.
+
+| Tag | Site | Symptom | Test that triggers |
+|---|---|---|---|
+| D1 | `into_vec()` body (line 4269) | `auto heap = ::Vec<T, A>{.data = std::move(vec)};` — designated init of non-aggregate `Vec`. | `test_into_vec_consumes` |
+| D2 | Sift-down (line 4085) | `std::swap(ptr_shadow1, rusty::ptr::add(ptr_shadow1, end))` — `std::swap` rejects the 2nd-arg rvalue. Likely needs `rusty::ptr::swap` shim or local lvalue capture. | `test_from_vec_bulk_builds`, `test_into_sorted_vec_ascending`, `test_drain_sorted_descending` |
+| D3 | Cross-module `from_iter` (vec.cppm:5305) | `from_iter<binary_heap_port::Iter<int>>` referenced before its deduced-return-type definition is visible across the module boundary. Probably a forward-declaration / definition-ordering issue between vec_port and binary_heap_port. | `test_from_vec_bulk_builds` (via collect), `test_into_sorted_vec_ascending` |
+| D4 | `RebuildOnDrop` ctor (line 4206) | `auto guard = RebuildOnDrop<T, A>((*this), rusty::len((*this)));` — the constructor signature doesn't match. Used internally by `append` and `retain`. | `test_append_merges_heaps`, `test_retain_filters_in_place` |
+
+**Covered by `_advanced_test.cpp` today** (compile + run green):
+`with_capacity_in`, `drain()`. Both surface paths the previous test
+files didn't touch (capacity-preallocating ctor; unsorted-clearing
+iterator).
+
 ## Reproducing
 
 ```bash

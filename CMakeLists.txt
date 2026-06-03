@@ -371,6 +371,11 @@ set(TEST_SOURCES
     # the other tests don't touch (Cluster C6 in STATUS.md).
     tests/binary_heap_port_iter_test.cpp
 
+    # binary_heap_port advanced: consume / bulk-build / mutation surface —
+    # with_capacity_in, from(Vec), into_sorted_vec, into_vec, drain,
+    # drain_sorted, append, retain. Hits the remaining API surface.
+    tests/binary_heap_port_advanced_test.cpp
+
     # cell_port — transpiled rustc Cell / RefCell (library/core/src/cell.rs).
     # Phase B/C smoke test: import cell_port, build BorrowError /
     # BorrowMutError + format them via operator<<.
