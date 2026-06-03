@@ -130,7 +130,7 @@ using Vec = ::Vec<T, A>;
 // transpiled rustc Rc from `library/alloc/src/rc.rs`. API change:
 // use `Rc<T>::new_(value)` instead of constructor / `make(value)`.
 template<typename T, typename A = ::rusty::alloc::Global>
-using Rc = ::rc_port::Rc<T, A>;
+using Rc = ::rusty::port::rc::Rc<T, A>;
 
 // Note: no top-level `rusty::Weak` alias — that would collapse the
 // distinct Rust types `std::rc::Weak<T>` and `std::sync::Weak<T>`
@@ -163,7 +163,7 @@ namespace rc {
 // `rusty::rc::Weak<T, A>` — the single-threaded weak reference,
 // companion to `rusty::Rc`. Mirrors Rust's `std::rc::Weak`.
 template<typename T, typename A = ::rusty::alloc::Global>
-using Weak = ::rc_port::Weak<T, A>;
+using Weak = ::rusty::port::rc::Weak<T, A>;
 } // namespace rc
 
 } // export namespace rusty

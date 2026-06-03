@@ -15,8 +15,8 @@ import rc_port;
 #include <cassert>
 #include <cstdio>
 
-using rc_port::Rc;
-using rc_port::Weak;
+using rusty::rc::Rc;
+using rusty::rc::Weak;
 
 static void test_new_and_strong_count() {
     auto p = Rc<int>::new_(42);

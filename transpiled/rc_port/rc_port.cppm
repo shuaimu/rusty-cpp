@@ -3646,7 +3646,7 @@ import vec_port.vec;  // patcher-injected for ::Vec
 
 // Cluster A completion: __TemplateArgs primary template (specializations at file end)
 template<typename T> struct __TemplateArgs;
-namespace rc_port {
+namespace rusty::port::rc {
 namespace { inline constexpr auto cast_identity_stub = [](auto&& x) { return std::forward<decltype(x)>(x); }; }
 
 
@@ -5093,4 +5093,15 @@ namespace rusty_ext {
 // for inner structs that participated in structural decomposition
 // (so absorbed methods that referenced dropped impl-generics can
 // recover them via `typename __TemplateArgs<HostParam>::arg_<N>`).
-} // namespace rc_port
+} // namespace rusty::port::rc
+
+// User-facing aliases: `rusty::rc::*` mirrors Rust's `std::rc::*`.
+// End users don't observe the underlying `rusty::port::*` scaffolding.
+export namespace rusty::rc {
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using Rc = ::rusty::port::rc::Rc<T, A>;
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using Weak = ::rusty::port::rc::Weak<T, A>;
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using UniqueRc = ::rusty::port::rc::UniqueRc<T, A>;
+}
