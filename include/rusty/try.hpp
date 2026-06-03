@@ -106,7 +106,7 @@ decltype(auto) convert_try_into_error(SrcErr&& err) {
     ({ \
         auto _rusty_try_result = (expr); \
         if (_rusty_try_result.is_none()) { \
-            return rusty::None; \
+            return ::rusty::None; \
         } \
         _rusty_try_result.unwrap(); \
     })

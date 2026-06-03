@@ -15,7 +15,7 @@ import btree_port.btree.map;
 #include <cstdio>
 
 int main() {
-    using BTreeMap = ::btree_port::btree::map::BTreeMap<
+    using BTreeMap = ::rusty::port::collections::btree::map::BTreeMap<
         int32_t, int32_t, ::rusty::alloc::Global>;
     auto m = BTreeMap::new_in(::rusty::alloc::Global{});
 

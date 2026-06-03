@@ -14,7 +14,7 @@ import btree_port.btree.set;
 #include <cstdio>
 
 int main() {
-    using BTreeSet = ::btree_port::btree::set::BTreeSet<
+    using BTreeSet = ::rusty::port::collections::btree::set::BTreeSet<
         int32_t, ::rusty::alloc::Global>;
     auto s = BTreeSet::new_in(::rusty::alloc::Global{});
 
