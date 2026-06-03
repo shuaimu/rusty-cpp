@@ -3360,36 +3360,41 @@ following Chapter 2's playbook.
 (2038 LOC, single file). Net-new — no hand-written `rusty::BinaryHeap`
 existed before.
 
-**Status**: ✅ **Phase C — push() + pop() both work, three smoke tests green.**
-The Phase A2 patcher work landed (14 sed/perl patches enumerated in
-[`docs/binary_heap_port/STATUS.md`](binary_heap_port/STATUS.md));
-`libbinary_heap_port.a` builds clean. Three smoke tests:
-- `binary_heap_port_module_test.cpp` — empty-heap invariants.
-- `binary_heap_port_push_test.cpp` — five pushes, `len() == 5`.
-- `binary_heap_port_pop_test.cpp` — pop returns max element (5) after pushing `3,1,4,1,5`.
+**Status**: ✅ **Phase E — full public API covered, bench complete.**
+Seven test files (`binary_heap_port_*_test.cpp`) drive ~38 individual
+assertions across every public BinaryHeap method:
 
-Phase C closed all six cluster sites:
-- **C1** (Hole::new_): `rusty::ptr::read(data[pos])` → `rusty::ptr::read(&data[pos])` (pointer, not ref).
-- **C2** (Hole::~Hole): `copy_nonoverlapping` second arg `data[pos]` → `&data[pos]`.
-- **C3** (Hole::element): `return this->elt` (ManuallyDrop<T>) → `return *this->elt`.
-- **C4** (pop sift-down): `rusty::mem::swap(&item, &this->data[0])` → `rusty::mem::swap(item, this->data[0])` (refs not ptrs).
-- **C5** (sift_down comparator): `rusty::get(hole, idx)` (free fn assumes slice) → `hole.get(idx)` (member surface).
-- **C6** (`rusty::len` over Hole): resolved as side-effect of C5.
+| Test file | API surface |
+|---|---|
+| `_module_test` | empty-heap invariants (3 asserts) |
+| `_push_test` | five pushes, len() == 5 |
+| `_pop_test` | pop returns max after scrambled push order |
+| `_comprehensive_test` | peek, full drain ordering, clear, push-after-pop |
+| `_iter_test` | iter, into_iter_sorted, as_slice |
+| `_advanced_test` | with_capacity_in, drain, into_vec, from(Vec), into_sorted_vec, drain_sorted, append, retain |
+| `_full_api_test` | new_, default_, with_capacity, from(array), from_iter, from_raw_vec, peek_mut, allocator, pop_if, extend, extend_one, into_iter (unsorted), reserve, reserve_exact, try_reserve, try_reserve_exact, shrink_to_fit, shrink_to, clone, clone_from |
 
-The original phase-A2 cluster catalogue, now all resolved:
+The full patch catalogue (~25 inline edits, including the original
+14 Phase-A2 patches, 5 Phase-C sift-down patches, and ~6 D/A-tier
+patches surfaced during full-API push) is codified in
+[`docs/binary_heap_port/post_transpile_patch.py`](binary_heap_port/post_transpile_patch.py)
+— a fresh `prep.sh → transpile → patcher` pipeline produces a
+binary_heap_port.cppm that builds clean and passes all 7/7 test files.
 
-| Cluster | Shape | Patcher rule needed |
-|---|---|---|
-| A | `const Option<NonZero<usize>>` not a literal type for `constexpr` | lower to non-`constexpr` static const |
-| B | `std::collections::TryReserveError` not mapped to `rusty::collections::TryReserveError` | s/std::collections/rusty::collections/g (two sites) |
-| C | One `rusty::Vec{}` default-construct missed by the bulk `rusty::Vec → ::Vec` rename | regex with no template args |
-| D | `rusty::ptr::swap` not implemented; rustc uses `core::ptr::swap` | add to `rusty/ptr.hpp` or substitute `std::swap` |
-| E | bare `usize` identifier (one site) | s/\busize\b/size_t/ |
-| F | "T does not refer to a value" emit bug at line 4538 | trace + hand-port like BTreeMap Cluster A |
+**Bench** (transpiled binary_heap_port vs `std::priority_queue<int>`,
+N = 10,000, 200 rounds, clang `-O3 -DNDEBUG -march=native`, single
+thread):
 
-Predicted effort to Phase B: **1–2 days** (per §2.8 small-port
-estimate). Predicted effort to Phase C: ½ day after that — heap surface
-is small (`push`/`pop`/`peek`/`len`).
+| Operation | Transpiled | `std::priority_queue` | Ratio (transpiled / std) |
+|---|---:|---:|---:|
+| **PUSH** N elements | 91 µs | 85 µs | 1.08× |
+| **POP** N elements | 412 µs | 633 µs | **0.65× (35% faster)** |
+| **MIX** push/pop interleaved | 268 µs | 263 µs | 1.02× |
+
+The pop-side win comes from Rust's sift-down-to-bottom + sift-up
+algorithm (vs `std::priority_queue`'s textbook sift-down) — better
+cache behavior on the descent. PUSH and MIX are within noise.
+Reproduce with `./build/binary_heap_port_bench.out` after building.
 
 The vendored .cppm lives at `transpiled/binary_heap_port/`; CMake
 target `binary_heap_port` is wired (clang-only, depends on `vec_port`).

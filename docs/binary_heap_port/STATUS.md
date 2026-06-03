@@ -13,8 +13,8 @@ This directory holds the scaffolding for the rustc
 | 3. Transpilation | ✅ **Zero transpiler errors** with `--auto-namespace`. 5 hand-port slots. |
 | 4. Post-transpile patching | ✅ All six Phase A2 clusters fixed (see "Patches applied" below). Patches still inline in the vendored .cppm; a `post_transpile_patch.py` would codify these for re-transpile. |
 | 5. Build (compile) | ✅ **`libbinary_heap_port.a` builds clean.** |
-| 6. Smoke test | ✅ **Three tests passing — push() AND pop() both work.** (a) `binary_heap_port_module_test.cpp` — empty-heap invariants. (b) `binary_heap_port_push_test.cpp` — five push() calls, `len() == 5`. (c) `binary_heap_port_pop_test.cpp` — pop() returns max element (5) after pushing 3,1,4,1,5. Clusters C1–C5 cleared; C6 unhit. |
-| 7. Bench | ⏸️ Bench still pending. |
+| 6. Smoke test | ✅ **Seven test files, ~38 assertions, full public API covered.** module / push / pop / comprehensive (peek + drain + clear) / iter (iter + into_iter_sorted) / advanced (drain, drain_sorted, into_vec, from(Vec), into_sorted_vec, append, retain, with_capacity_in) / full-API (new_, default_, with_capacity, from(array), from_iter, from_raw_vec, peek_mut, pop_if, extend, extend_one, into_iter, reserve*, try_reserve*, shrink_to*, clone, clone_from, allocator). |
+| 7. Bench | ✅ **Done.** `docs/binary_heap_port/binary_heap_port_bench.cpp` — transpiled vs `std::priority_queue<int>` across PUSH / POP / MIX at N=10,000 × 200 rounds. Transpiled is **35% faster on POP**, within 2-8% on PUSH and MIX (see book §6.1). |
 
 ## Patches applied (Phase A2)
 

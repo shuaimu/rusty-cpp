@@ -383,6 +383,12 @@ set(TEST_SOURCES
     # allocator.
     tests/binary_heap_port_full_api_test.cpp
 
+    # binary_heap_port micro-bench: transpiled BinaryHeap vs
+    # std::priority_queue across PUSH / POP / MIX. Built as a test so
+    # CMake handles module-aware linkage; prints to stdout — invoke
+    # directly (`./build/bench.out`), not via ctest.
+    docs/binary_heap_port/binary_heap_port_bench.cpp
+
     # cell_port — transpiled rustc Cell / RefCell (library/core/src/cell.rs).
     # Phase B/C smoke test: import cell_port, build BorrowError /
     # BorrowMutError + format them via operator<<.
