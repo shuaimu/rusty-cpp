@@ -5448,6 +5448,12 @@ struct BTreeMap {
     ::rusty::PhantomData<::rusty::Box<std::tuple<K, V>, A>> _marker;
     mutable bool _rusty_forgotten = false;
     BTreeMap(::rusty::Option<btree_internal::Root<K, V>> root_init, size_t length_init, ::rusty::mem::ManuallyDrop<A> alloc_init, ::rusty::PhantomData<::rusty::Box<std::tuple<K, V>, A>> _marker_init) : root(std::move(root_init)), length(std::move(length_init)), alloc(std::move(alloc_init)), _marker(std::move(_marker_init)) {}
+    // Hand-written-BTreeMap-compatibility default ctor — delegates to
+    // `new_in(A{})` (which returns an empty map). Real Rust BTreeMap is
+    // only constructible via `new()` / `default()` / `new_in()`; the
+    // C++ aggregate translation otherwise has no default ctor. Mako
+    // rrr's reactor declares plain-field BTreeMaps.
+    BTreeMap() : BTreeMap(BTreeMap<K, V, A>::new_in(A{})) {}
     BTreeMap(const BTreeMap&) = default;
     BTreeMap(BTreeMap&& other) noexcept : root(std::move(other.root)), length(std::move(other.length)), alloc(std::move(other.alloc)), _marker(std::move(other._marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;

@@ -4518,6 +4518,72 @@ struct HashMap {
     S hash_builder;
     RawTable<std::tuple<K, V>, A> table;
 
+    // Hand-written-HashMap-compatibility extension: default ctor delegates
+    // to default_(). Real Rust HashMap is only constructible via `new()`
+    // / `default()` / `with_capacity()`; the C++ aggregate translation
+    // otherwise has no default ctor (RawTable's ctor takes 3 args). Mako
+    // rrr's `SerializableRegistryMap` / `AnyMessageRegistryMap` and many
+    // ported map-of-X structs declare a plain `rusty::HashMap<K,V> map;`
+    // field; surface a default ctor here so those keep building.
+    HashMap()
+        : hash_builder(),
+          table(RawTable<std::tuple<K, V>, A>::new_()) {}
+
+    // Hand-written-HashMap-compatibility lookups: `contains_key`,
+    // `get`, `remove`. Real Rust expresses these with a `Q: Borrow<K>`
+    // trait bound that the transpiler skips; provide concrete K-typed
+    // overloads here using the existing table.find()/erase() entry
+    // points (same pattern HashSet uses above in set.cppm).
+    bool contains_key(const K& key) const {
+        auto& m = const_cast<HashMap<K, V, S, A>&>(*this);
+        auto h = make_hash<K, S>(m.hash_builder, key);
+        return m.table.find(h, [&](const auto& kv) {
+            return std::get<0>(kv) == key;
+        }).is_some();
+    }
+    ::rusty::Option<V&> get(const K& key) {
+        auto h = make_hash<K, S>(this->hash_builder, key);
+        auto b = this->table.find(h, [&](const auto& kv) {
+            return std::get<0>(kv) == key;
+        });
+        if (b.is_none()) return ::rusty::Option<V&>(::rusty::None);
+        auto&& bucket = b.unwrap();
+        return ::rusty::Option<V&>(std::get<1>(bucket.as_mut()));
+    }
+    ::rusty::Option<const V&> get(const K& key) const {
+        auto& m = const_cast<HashMap<K, V, S, A>&>(*this);
+        auto h = make_hash<K, S>(m.hash_builder, key);
+        auto b = m.table.find(h, [&](const auto& kv) {
+            return std::get<0>(kv) == key;
+        });
+        if (b.is_none()) return ::rusty::Option<const V&>(::rusty::None);
+        auto&& bucket = b.unwrap();
+        return ::rusty::Option<const V&>(
+            static_cast<const V&>(std::get<1>(bucket.as_mut())));
+    }
+    ::rusty::Option<V> remove(const K& key) {
+        auto h = make_hash<K, S>(this->hash_builder, key);
+        auto b = this->table.find(h, [&](const auto& kv) {
+            return std::get<0>(kv) == key;
+        });
+        if (b.is_none()) return ::rusty::Option<V>(::rusty::None);
+        auto bucket = b.unwrap();
+        auto kv = this->table.remove(bucket);
+        return ::rusty::Option<V>(
+            std::move(std::get<1>(std::get<0>(kv))));
+    }
+
+    // TODO: STL-compat begin()/end() for range-based-for. The
+    // transpiled `Iter<K, V>` uses Rust's `next() -> Option` semantics;
+    // adapting it to C++ iterator-pair shape requires care because the
+    // underlying bucket iterator yields tuple<const K&, V&> through
+    // unsafe pointer arithmetic. Mako rrr's reactor.cpp uses
+    // `for (auto& [k,v] : map)` in a few places — those sites need to
+    // be rewritten to use the existing `iter()`/`iter_mut()` Rust-style
+    // loop, OR this method needs a real adapter implementation. Left
+    // unimplemented to avoid the half-built version blocking the
+    // typed-API plumbing.
+
     HashMap<K, V, S, A> clone() const {
         return HashMap<K, V, S, A>(rusty::clone(this->hash_builder), rusty::clone(this->table));
     }
