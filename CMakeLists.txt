@@ -126,6 +126,27 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
+# binary_heap_tests_port — transpiled rustc binary_heap.rs test file
+# (library/alloctests/tests/collections/binary_heap.rs, 34 #[test]
+# functions). Imports binary_heap_port; tests are auto-registered via
+# rusty/test_runner.hpp at static-init time. Driver in
+# tests/binary_heap_tests_port_module_test.cpp.
+# ──────────────────────────────────────────────────────────────────────
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    file(GLOB BINARY_HEAP_TESTS_PORT_CPPM transpiled/binary_heap_tests_port/*.cppm)
+    add_library(binary_heap_tests_port STATIC)
+    target_sources(binary_heap_tests_port
+        PUBLIC FILE_SET CXX_MODULES FILES ${BINARY_HEAP_TESTS_PORT_CPPM}
+    )
+    target_include_directories(binary_heap_tests_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(binary_heap_tests_port PUBLIC cxx_std_23)
+    # Match binary_heap_port's release flags so the BMI is target-compatible.
+    target_compile_options(binary_heap_tests_port PRIVATE -O3 -DNDEBUG -march=native)
+    target_link_libraries(binary_heap_tests_port PUBLIC binary_heap_port vec_port)
+endif()
+
+# ──────────────────────────────────────────────────────────────────────
 # Phase B/C bridge modules for rc_port, arc_port, vec_deque_port,
 # linked_list_port, string_port. Each port's full transpiled .cppm
 # is blocked on transpiler-side issues (catalogued in their STATUS.md
@@ -354,6 +375,11 @@ set(TEST_SOURCES
     # asserts they come out in descending order.
     tests/binary_heap_port_module_test.cpp
 
+    # binary_heap_tests_port — driver for the transpiled rustc
+    # binary_heap.rs test file (34 test cases). Auto-registers each
+    # TEST_CASE at static-init via rusty/test_runner.hpp.
+    tests/binary_heap_tests_port_module_test.cpp
+
     # binary_heap_port Phase C: push() drive test, iterates on the 6
     # instantiation clusters documented in docs/binary_heap_port/STATUS.md.
     tests/binary_heap_port_push_test.cpp
@@ -423,7 +449,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     set(_vec_consuming_tests
         test_mutex test_thread rusty_vec_test rusty_array_test)
     list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
-    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port)_"
+    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port)_"
         OR test_name STREQUAL "async_module_test"
         OR NOT _vec_consume_idx EQUAL -1)
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
@@ -460,6 +486,13 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # binary_heap_port_* tests link binary_heap_port (which pulls vec_port).
     if(test_name MATCHES "^binary_heap_port_")
         target_link_libraries(${test_executable} PRIVATE binary_heap_port)
+        target_compile_features(${test_executable} PRIVATE cxx_std_23)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+        target_link_options(${test_executable} PRIVATE )
+    endif()
+    # binary_heap_tests_port driver imports the transpiled tests module.
+    if(test_name MATCHES "^binary_heap_tests_port_")
+        target_link_libraries(${test_executable} PRIVATE binary_heap_tests_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
         target_link_options(${test_executable} PRIVATE )
