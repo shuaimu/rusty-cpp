@@ -4034,9 +4034,24 @@ struct Arc {
         }
     }
     // patcher: ergonomic shims (make / operator->)
+    // `Arc::make(args...)` emplaces T directly inside the ArcInner
+    // allocation. Unlike `Arc::new_(T value)` (which requires T to be
+    // move-constructible because it does
+    // `ArcInner<T>{.data = std::move(value)}`), this path placement-
+    // news each ArcInner field individually so the T-ctor runs in-
+    // place. Critical for non-copyable / non-movable mako rrr types.
     template<typename... Args>
     static Arc<T, A> make(Args&&... args) {
-        return Arc<T, A>::new_(T(std::forward<Args>(args)...));
+        auto layout = rusty::alloc::Layout::new_<ArcInner<T>>();
+        auto* raw = rusty::alloc::alloc(layout);
+        auto* mem = reinterpret_cast<ArcInner<T>*>(raw);
+        ::new (&mem->strong) rusty::sync::atomic::detail::Atomic<size_t>(
+            rusty::sync::atomic::AtomicUsize::new_(1));
+        ::new (&mem->weak) rusty::sync::atomic::detail::Atomic<size_t>(
+            rusty::sync::atomic::AtomicUsize::new_(1));
+        ::new (&mem->data) T(std::forward<Args>(args)...);
+        return Arc<T, A>::from_inner(
+            rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(mem));
     }
     const T* operator->() const { return &this->inner().data; }
 
@@ -4500,6 +4515,27 @@ return in_progress.into_arc(); }();
     const T& operator*() const {
         return this->inner().data;
     }
+    // Hand-written-Arc-compatibility extensions (manual patcher addition).
+    // The hand-written legacy `rusty::Arc<T>` exposed `arc->member` and
+    // `arc.get()` returning `T*` (mutable). Mako rrr and ported
+    // transaction protocols call these freely. The existing patcher at
+    // line 4041 above only provides `const T* operator->() const`; add
+    // the mutable counterparts plus get() here.
+    // @unsafe: this breaks Rust's aliasing invariants if multiple Arc
+    // holders coexist with mutators — same caveat as the hand-written
+    // Arc had.
+    T& operator*() {
+        return const_cast<T&>(this->inner().data);
+    }
+    T* operator->() {
+        return const_cast<T*>(&this->inner().data);
+    }
+    T* get() {
+        return const_cast<T*>(&this->inner().data);
+    }
+    const T* get() const {
+        return &this->inner().data;
+    }
     static T& make_mut(Arc<T, A>& this_) {
         auto __size_of_val_v = size_of_val(rusty::detail::deref_if_pointer_like(this_));
         if (this_.inner().strong.compare_exchange(1, 0, rusty::sync::atomic::Ordering::Acquire, rusty::sync::atomic::Ordering::Relaxed).is_err()) {
@@ -4741,6 +4777,10 @@ struct Weak {
     A alloc;
     mutable bool _rusty_forgotten = false;
     Weak(rusty::ptr::NonNull<ArcInner<T>> ptr_init, A alloc_init) : ptr(std::move(ptr_init)), alloc(std::move(alloc_init)) {}
+    // Hand-written-Weak-compatibility default ctor — delegates to
+    // `Weak::new_()` (which creates a never-upgrading Weak, matching
+    // std::sync::Weak::new()). Mirror of the same shim in rc_port.
+    Weak() : Weak(Weak<T, A>::new_()) {}
     Weak(const Weak&) = default;
     Weak(Weak&& other) noexcept : ptr(std::move(other.ptr)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;

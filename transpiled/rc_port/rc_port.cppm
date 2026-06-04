@@ -3938,6 +3938,30 @@ struct Rc {
             return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<RcInner<T>>::new_(RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = std::move(value)})).leak()));
         }
     }
+    // Hand-written-Rc-compatibility ergonomic shim: `Rc::make(args...)`
+    // emplaces T directly inside the RcInner allocation. Unlike
+    // `Rc::new_(T value)` (which requires T move-constructible because
+    // it does `RcInner<T>{.value = std::move(value)}`), this path
+    // placement-news each RcInner field individually so the T-ctor
+    // runs in-place. Critical for non-copyable / non-movable mako rrr
+    // types like `Reactor` and `Fiber` that hold `RefCell` and other
+    // unique-ownership members.
+    template<typename... Args>
+    static Rc<T> make(Args&&... args) {
+        // Allocate raw RcInner-sized memory using the same path Box::new_
+        // uses (rusty::alloc::alloc → std::malloc for small alignments),
+        // so Rc's destructor can deallocate via Layout::for_value.
+        auto layout = rusty::alloc::Layout::new_<RcInner<T>>();
+        auto* raw = rusty::alloc::alloc(layout);
+        auto* mem = reinterpret_cast<RcInner<T>*>(raw);
+        ::new (&mem->strong) rusty::Cell<size_t>(
+            rusty::Cell<size_t>::new_(static_cast<size_t>(1)));
+        ::new (&mem->weak) rusty::Cell<size_t>(
+            rusty::Cell<size_t>::new_(static_cast<size_t>(1)));
+        ::new (&mem->value) T(std::forward<Args>(args)...);
+        return Rc<T, A>::from_inner(
+            rusty::ptr::NonNull<RcInner<T>>::new_unchecked(mem));
+    }
     template<typename F>
     static Rc<T> new_cyclic(F data_fn) {
         return Rc<T, A>::new_cyclic_in(std::move(data_fn), rusty::alloc::Global{});
@@ -4386,6 +4410,30 @@ return in_progress.into_rc(); }();
     const T& operator*() const {
         return this->inner().value;
     }
+    // Hand-written-Arc-compatibility extensions. Rust's std::rc::Rc<T>
+    // only allows immutable access through operator*; consumers needing
+    // mutation go through Cell<T> / RefCell<T>. The hand-written legacy
+    // `rusty::Rc<T>` exposed mutable access freely via `rc->`, so the
+    // mako rrr codebase (and ported transaction protocols) call `rc->m`
+    // and `rc.get()` directly. Surface these here to keep that code
+    // building after the rusty::Rc alias was retargeted at this
+    // transpiled port. @unsafe: this breaks Rust's aliasing invariants
+    // if multiple Rc holders coexist with mutators.
+    T& operator*() {
+        return const_cast<T&>(this->inner().value);
+    }
+    const T* operator->() const {
+        return &this->inner().value;
+    }
+    T* operator->() {
+        return const_cast<T*>(&this->inner().value);
+    }
+    T* get() {
+        return const_cast<T*>(&this->inner().value);
+    }
+    const T* get() const {
+        return &this->inner().value;
+    }
     ~Rc() noexcept(false) {
         if (_rusty_forgotten) { return; }
         // @unsafe
@@ -4550,6 +4598,20 @@ struct Weak {
     A alloc;
     mutable bool _rusty_forgotten = false;
     Weak(rusty::ptr::NonNull<RcInner<T>> ptr_init, A alloc_init) : ptr(std::move(ptr_init)), alloc(std::move(alloc_init)) {}
+    // Hand-written-Weak-compatibility default ctor — produces a
+    // never-upgrading Weak (matching std::rc::Weak::new() semantics).
+    // We bypass the transpiler-emitted `Weak::new_()` which references
+    // `NonNull::without_provenance` (a method that doesn't exist on
+    // the C++-side NonNull) and instead synthesize a dangling NonNull
+    // by reinterpreting `usize::MAX` as a pointer. Mako rrr declares
+    // `rusty::rc::Weak<Fiber> wp_fiber_{};` as a field and depends on
+    // default-initialization.
+    Weak()
+        : ptr(rusty::ptr::NonNull<RcInner<T>>::new_unchecked(
+              reinterpret_cast<RcInner<T>*>(std::numeric_limits<std::size_t>::max()))),
+          alloc(A{}) {
+        this->_rusty_forgotten = true;
+    }
     Weak(const Weak&) = default;
     Weak(Weak&& other) noexcept : ptr(std::move(other.ptr)), alloc(std::move(other.alloc)) {
         this->_rusty_forgotten = other._rusty_forgotten;

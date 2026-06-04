@@ -5448,6 +5448,12 @@ struct BTreeMap {
     ::rusty::PhantomData<::rusty::Box<std::tuple<K, V>, A>> _marker;
     mutable bool _rusty_forgotten = false;
     BTreeMap(::rusty::Option<btree_internal::Root<K, V>> root_init, size_t length_init, ::rusty::mem::ManuallyDrop<A> alloc_init, ::rusty::PhantomData<::rusty::Box<std::tuple<K, V>, A>> _marker_init) : root(std::move(root_init)), length(std::move(length_init)), alloc(std::move(alloc_init)), _marker(std::move(_marker_init)) {}
+    // Hand-written-BTreeMap-compatibility default ctor — delegates to
+    // `new_in(A{})` (which returns an empty map). Real Rust BTreeMap is
+    // only constructible via `new()` / `default()` / `new_in()`; the
+    // C++ aggregate translation otherwise has no default ctor. Mako
+    // rrr's reactor declares plain-field BTreeMaps.
+    BTreeMap() : BTreeMap(BTreeMap<K, V, A>::new_in(A{})) {}
     BTreeMap(const BTreeMap&) = default;
     BTreeMap(BTreeMap&& other) noexcept : root(std::move(other.root)), length(std::move(other.length)), alloc(std::move(other.alloc)), _marker(std::move(other._marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;
@@ -5555,7 +5561,16 @@ return VacantEntry{.key = std::move(key), .handle = ::rusty::Some(handle), .dorm
         return BTreeMap<K, V, ::rusty::alloc::Global>(::rusty::Option<btree_internal::Root<K, V>>{::rusty::None}, static_cast<size_t>(0), ::rusty::mem::manually_drop_new(::rusty::alloc::Global{}), ::rusty::PhantomData<::rusty::Box<std::tuple<K, V>, ::rusty::alloc::Global>>{});
     }
     void clear() {
-        ::rusty::mem::drop(BTreeMap<K, V, A>(::rusty::mem::replace(this->root, ::rusty::Option<btree_internal::Root<K, V>>{::rusty::None}), ::rusty::mem::replace(this->length, static_cast<size_t>(0)), ::rusty::clone(this->alloc), ::rusty::PhantomData<::rusty::Box<std::tuple<K, V>, A>>{}));
+        // Patcher fix: the transpiler emitted `::rusty::clone(this->alloc)`
+        // to construct a temporary BTreeMap holding the old root+length
+        // (which then drops). ManuallyDrop<A> explicitly deletes copy,
+        // so the clone fails. The semantic is "drop the old contents
+        // and reset to empty" — achieve that directly: replace the
+        // root with None (dropping the old tree), and zero the length.
+        ::rusty::mem::drop(::rusty::mem::replace(
+            this->root,
+            ::rusty::Option<btree_internal::Root<K, V>>{::rusty::None}));
+        this->length = 0;
     }
     static BTreeMap<K, V, A> new_in(A alloc) {
         return BTreeMap<K, V, A>(::rusty::Option<btree_internal::Root<K, V>>{::rusty::None}, static_cast<size_t>(0), ::rusty::mem::manually_drop_new(std::move(alloc)), ::rusty::PhantomData<::rusty::Box<std::tuple<K, V>, A>>{});
@@ -5646,8 +5661,17 @@ return std::move(v);
     template<typename Q>
     ::rusty::Option<std::tuple<K, V>> remove_entry(const Q& key) {
         auto [map, dormant_map] = ::rusty::detail::deref_if_pointer_like(__btree_port_make_dormant((*this)));
-        auto& root_node = RUSTY_TRY_OPT(map.root.as_mut()).borrow_mut();
-        return [&]() -> ::rusty::Option<std::tuple<K, V>> { auto&& _m = root_node.search_tree(key); if (::rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& handle = ::rusty::detail::deref_if_pointer(std::get<0>(::rusty::detail::deref_if_pointer(_m))._0); return ::rusty::Option<std::tuple<K, V>>(OccupiedEntry{.handle = handle, .dormant_map = std::move(dormant_map), .alloc = ::rusty::clone(((::rusty::detail::deref_if_pointer_like(map.alloc)))), ._marker = ::rusty::PhantomData<std::tuple<>>{}}.remove_entry()); } if (::rusty::detail::deref_if_pointer(_m).index() == 1) { return ::rusty::Option<std::tuple<K, V>>{::rusty::None}; } return [&]() -> ::rusty::Option<std::tuple<K, V>> { ::rusty::intrinsics::unreachable(); }(); }();
+        // Patcher fix: transpiler emitted `auto&` binding to a
+        // temporary returned by borrow_mut(). Use `auto&&` so the
+        // universal reference can bind to the rvalue NodeRef.
+        auto&& root_node = RUSTY_TRY_OPT(map.root.as_mut()).borrow_mut();
+        // Patcher fix: transpiler emitted `OccupiedEntry{...}` without
+        // template args, relying on CTAD that doesn't fire across
+        // designated initializers with deeply-nested template-param
+        // field types. Spell out `<K, V, A>` explicitly. Also fix the
+        // PhantomData type: OccupiedEntry's `_marker` is
+        // `PhantomData<std::tuple<K, V>&>`, not `PhantomData<std::tuple<>>`.
+        return [&]() -> ::rusty::Option<std::tuple<K, V>> { auto&& _m = root_node.search_tree(key); if (::rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& handle = ::rusty::detail::deref_if_pointer(std::get<0>(::rusty::detail::deref_if_pointer(_m))._0); return ::rusty::Option<std::tuple<K, V>>(OccupiedEntry<K, V, A>{.handle = handle, .dormant_map = std::move(dormant_map), .alloc = ::rusty::clone(((::rusty::detail::deref_if_pointer_like(map.alloc)))), ._marker = ::rusty::PhantomData<std::tuple<K, V>&>{}}.remove_entry()); } if (::rusty::detail::deref_if_pointer(_m).index() == 1) { return ::rusty::Option<std::tuple<K, V>>{::rusty::None}; } return [&]() -> ::rusty::Option<std::tuple<K, V>> { ::rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
     void retain(F f) {
@@ -6031,6 +6055,18 @@ _match_value.emplace(std::move(root.borrow_mut())); } else { if (!(_m.is_none())
         auto edge = root_node.upper_bound(btree_internal::SearchBound<K>::from_range(bound));
         return CursorMut<K, V, A>{.inner = CursorMutKey<K, V, A>{.current = ::rusty::Option<btree_internal::Handle<btree_internal::NodeRef<marker::Mut, K, V, marker::Leaf>, marker::Edge>>(std::move(edge)), .root = std::move(dormant_root), .length = this->length, .alloc = ::rusty::detail::deref_if_pointer_like(this->alloc)}};
     }
+
+    // BTreeMap STL begin()/end() omitted — instantiating `iter()` on
+    // BTreeMap<K, V> drags in a chain of transpiled btree_internal
+    // helpers (`NodeRef::full_range`, `LazyLeafRange::next_unchecked`,
+    // `descend`, `lower_bound_kv`, etc.) that have pre-existing
+    // transpiler bugs (member-name shadowing on `full_range`, pointer
+    // vs. reference confusion in `LazyLeafRange::next_unchecked`,
+    // non-const member call in `Handle::descend`, lambda return-type
+    // mismatch in `lower_bound_kv`). Rewrite the rrr call sites that
+    // use range-based-for over BTreeMap to use the existing iter()
+    // when those bugs are patched. For now, callers must walk via the
+    // Rust-style iter() / next() loop they're already using elsewhere.
 };
 
 // #[cfg(test)] module omitted

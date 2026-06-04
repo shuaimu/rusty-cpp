@@ -21,12 +21,16 @@ namespace rusty {
 
 // Forward declarations
 template<typename T> class Arc;
-// Note: `sync::Weak` / `sync::downgrade` were retired. `Weak` is now a
-// template alias for the transpiled `rusty::port::sync::Weak<T, A>`
-// (see include/rusty/sync/weak.hpp). The free function `downgrade(arc)`
-// is GONE — use the Rust idiom `Arc<T>::downgrade(arc)` on the
-// transpiled Arc; the hand-written `rusty::Arc<T>` no longer supports
-// downgrade (different ControlBlock layout from the transpiled Weak).
+
+// `rusty::sync::Weak<T>` paired with `rusty::Arc<T>` (hand-written
+// ControlBlock layout). Defined in `<rusty/sync/weak.hpp>`; forward-
+// declared here so `Arc<T>` can grant Weak `friend` access to its
+// ControlBlock / ptr / release_weak. The transpiled
+// `rusty::port::sync::Arc<T, A>` + `Weak<T, A>` pair is a separate
+// type with a different ControlBlock layout (see arc_port).
+namespace sync {
+template<typename T> class Weak;
+} // namespace sync
 
 // @unsafe - Raw pointer operations and atomic reference counting
 template<typename T>
@@ -35,6 +39,14 @@ private:
     // Allow other Arc instantiations to access private members for conversion
     template<typename U>
     friend class Arc;
+
+    // rusty::sync::Weak<T> reaches into Arc<T>'s ControlBlock to bump
+    // weak_count, share the raw pointer on construction, and call
+    // release_weak() on destruction. Declared here so the
+    // <rusty/sync/weak.hpp> header (paired with hand-written Arc) can
+    // access ControlBlock / ptr / release_weak.
+    template<typename U>
+    friend class ::rusty::sync::Weak;
 
     struct ControlBlock {
         T* value;

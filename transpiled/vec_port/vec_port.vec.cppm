@@ -4651,6 +4651,18 @@ struct Vec {
         return std::is_sorted(this->begin(), this->end());
     }
 
+    // Hand-written-Vec-compatibility extensions: `data()` returns the
+    // raw buffer (std::vector-like, also matching `as_mut_ptr()`/
+    // `as_ptr()`); `back()` / `front()` return references to the
+    // first/last element. Mako rrr's Marshal serializer + tests use
+    // `vec.data()` and `vec.back()` directly.
+    T* data() { return this->as_mut_ptr(); }
+    const T* data() const { return this->as_ptr(); }
+    T& back() { return this->as_mut_ptr()[this->len_field - 1]; }
+    const T& back() const { return this->as_ptr()[this->len_field - 1]; }
+    T& front() { return this->as_mut_ptr()[0]; }
+    const T& front() const { return this->as_ptr()[0]; }
+
 
     static Vec<T, A> new_() {
         return Vec<T, A>(RawVec<T, A>::new_(), static_cast<size_t>(0));

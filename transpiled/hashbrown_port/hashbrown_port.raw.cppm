@@ -4310,9 +4310,12 @@ struct RawTable {
             return;
         }
         auto self_ = guard((*this), [&](auto&& self_) { return self_.clear_no_drop(); });
+        // Patcher fix: transpiler emitted `self_.table` but ScopeGuard
+        // stores its wrapped value in `.value`, not via member-access
+        // pass-through. Reach the underlying RawTable explicitly.
         // @unsafe
         {
-            self_.table.template drop_elements<T>();
+            self_.value.table.template drop_elements<T>();
         }
     }
     void shrink_to(size_t min_size, const auto& hasher) {
@@ -4657,13 +4660,19 @@ if ((!std::is_trivially_destructible_v<T>)) {
     }
 }
 });
+        // Patcher fix: transpiler emitted std::get<>(_guard) but _guard
+        // is a ScopeGuard<tuple<...>>; reach the inner tuple via
+        // `.value`. Same pattern as the clear() fix above.
         // @unsafe
         {
             for (auto&& from : rusty::for_in(rusty::iter(source))) {
                 auto index = source.bucket_index(rusty::detail::deref_if_pointer_like(from));
-                const auto to = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(_guard).bucket(std::move(index));
-                to.write(rusty::clone(from.as_ref()));
-                ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(_guard) = rusty::detail::deref_if_pointer_like(index) + 1;
+                const auto to = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(_guard.value).bucket(std::move(index));
+                // Patcher fix: Bucket's method is `write_` (Rust `write`
+                // → C++ `write_` to escape the reserved-keyword clash).
+                // Transpiler emitted `to.write(...)` instead.
+                to.write_(rusty::clone(from.as_ref()));
+                ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(_guard.value) = rusty::detail::deref_if_pointer_like(index) + 1;
             }
         }
         rusty::mem::forget(std::move(_guard));
