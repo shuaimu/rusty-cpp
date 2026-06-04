@@ -54,6 +54,28 @@ module;
 
 export module rusty;
 
+// C++20 rule: every `export import …;` declaration must appear in the
+// module's import section, immediately following the module declaration
+// and preceding any other declarations. These re-export the transpiled
+// rustc-stdlib ports (`vec_port`, `btree_port`, `rc_port`,
+// `hashbrown_port`, …) plus the hand-written `rusty.async` module
+// through this umbrella, so consumers can `import rusty;` and get the
+// full surface. Previously these lived after the `export { #include … }`
+// block below — Clang 21+ rejects that ordering with "imports must
+// immediately follow the module declaration".
+export import rusty.async;
+export import vec_port.vec;
+export import btree_port.btree.map;
+export import btree_port.btree.set;
+export import rc_port;
+export import binary_heap_port;  // namespace: rusty::port::collections::binary_heap
+export import hashbrown_port.map;
+export import hashbrown_port.set;
+export import vec_deque_port;
+export import cell_port;
+export import string_port;
+export import arc_port;
+
 // Some runtime templates rely on placement-new/delete lookup in importers.
 export using ::operator new;
 export using ::operator delete;
@@ -111,20 +133,11 @@ export {
 } // export
 
 // `rusty::Executor`, `rusty::Vec`, `rusty::BTreeMap`, `rusty::BTreeSet`
-// live in C++20 modules now. Re-export the underlying modules via the
-// rusty umbrella so `import rusty;` continues to provide them.
-export import rusty.async;
-export import vec_port.vec;
-export import btree_port.btree.map;
-export import btree_port.btree.set;
-export import rc_port;
-export import binary_heap_port;  // namespace: rusty::port::collections::binary_heap
-export import hashbrown_port.map;
-export import hashbrown_port.set;
-export import vec_deque_port;
-export import cell_port;
-export import string_port;
-export import arc_port;
+// live in C++20 modules now — the `export import` lines for those have
+// been moved up to the import section immediately after the
+// `export module rusty;` declaration above, per the C++20 rule that all
+// imports precede every other declaration. The using-aliases below now
+// just bind those imported symbols into the `rusty::` namespace.
 
 export namespace rusty {
 
