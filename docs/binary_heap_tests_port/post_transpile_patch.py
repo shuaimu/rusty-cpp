@@ -46,7 +46,11 @@ TRANSPILER_EMIT_BLOCKED = [
 # other library-side gaps. These are blocked on follow-up library work,
 # not on transpiler bugs.
 LIBRARY_GAP_BLOCKED = [
-    # `Vec<T>::sort()`, `Vec<T>::is_sorted()` not in vec_port.
+    # `Vec::sort` is now in vec_port (commit pending), but these tests
+    # use additional unimplemented surface:
+    #   - test_peek_and_pop: uses `vec![...]` literal (transpiler emits
+    #     `vec ! [...]` verbatim) + `heap.pop_if(closure)` API.
+    #   - test_pop_if, test_to_vec: similar vec![] literal issue.
     "test_peek_and_pop",
     "test_pop_if",
     "test_to_vec",

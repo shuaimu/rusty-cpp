@@ -4629,6 +4629,28 @@ struct Vec {
     const T* begin() const { return this->as_ptr(); }
     const T* end() const { return this->as_ptr() + this->len_field; }
 
+    // Rust-API parity: in-place sort + sorted-check.
+    void sort() {
+        std::sort(this->begin(), this->end());
+    }
+    template<typename Cmp>
+    void sort_by(Cmp&& cmp) {
+        std::sort(this->begin(), this->end(),
+            [&](const T& a, const T& b) {
+                return std::forward<Cmp>(cmp)(a, b) == rusty::cmp::Ordering::Less;
+            });
+    }
+    template<typename Key>
+    void sort_by_key(Key&& key) {
+        std::sort(this->begin(), this->end(),
+            [&](const T& a, const T& b) {
+                return std::forward<Key>(key)(a) < std::forward<Key>(key)(b);
+            });
+    }
+    bool is_sorted() const {
+        return std::is_sorted(this->begin(), this->end());
+    }
+
 
     static Vec<T, A> new_() {
         return Vec<T, A>(RawVec<T, A>::new_(), static_cast<size_t>(0));
