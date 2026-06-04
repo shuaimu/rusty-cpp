@@ -1,6 +1,5 @@
 #pragma once
 
-#include <future>
 #include <memory>
 #include <concepts>
 #include <chrono>
@@ -8,9 +7,23 @@
 #include <vector>
 #include <functional>
 #include <exception>
+#include <optional>
+#include <utility>
 #include "platform/threading.hpp"
 #include "result.hpp"
 #include "traits.hpp"
+
+// rusty::thread — Rust-style threading primitives.
+//
+// Implementation note: this header used to depend on `<future>` for
+// `std::packaged_task<T>` / `std::shared_future<T>`. That dependency was
+// removed because libstdc++14 + clang19 + C++20 modules has a bug in
+// `<future>`'s internal `_Task_state` hierarchy that triggers when
+// non-trivial types from an imported module appear in `std::async` /
+// `std::packaged_task` template arguments (historically blocker 4 of
+// the rusty::Arc retire). The replacement is a hand-rolled state holder
+// (mutex + condvar + Option<T> / exception_ptr) wired via shared_ptr —
+// identical observable behavior, no `<future>` in the include graph.
 
 namespace rusty::thread {
 
@@ -25,6 +38,26 @@ inline std::shared_ptr<ParkToken> current_park_token() {
     thread_local std::shared_ptr<ParkToken> token = std::make_shared<ParkToken>();
     return token;
 }
+
+// Shared state holder for a spawned thread's result. Replaces
+// `std::shared_future<T>` / `std::packaged_task<T>` — see top-of-file
+// note for the libstdc++14 + modules motivation.
+template<typename T>
+struct JoinState {
+    platform::threading::mutex mutex;
+    platform::threading::condition_variable cv;
+    bool finished = false;
+    std::optional<T> value;
+    std::exception_ptr error;
+};
+
+template<>
+struct JoinState<void> {
+    platform::threading::mutex mutex;
+    platform::threading::condition_variable cv;
+    bool finished = false;
+    std::exception_ptr error;
+};
 } // namespace detail
 
 /// Opaque thread identifier.
@@ -107,13 +140,14 @@ template<typename T>
 class JoinHandle {
 private:
     mutable platform::threading::thread thread_;
-    mutable std::shared_future<T> future_;
+    std::shared_ptr<detail::JoinState<T>> state_;
     mutable bool joined_ = false;
 
 public:
-    JoinHandle(platform::threading::thread&& t, std::future<T>&& f)
+    JoinHandle(platform::threading::thread&& t,
+               std::shared_ptr<detail::JoinState<T>> s)
         : thread_(std::move(t))
-        , future_(std::move(f).share())
+        , state_(std::move(s))
     {}
 
     // Block until thread completes and return a Rust-style Result.
@@ -132,10 +166,15 @@ public:
         thread_.join();
         joined_ = true;
 
-        try {
-            return rusty::Result<T, std::exception_ptr>::Ok(future_.get());
-        } catch (...) {
-            return rusty::Result<T, std::exception_ptr>::Err(std::current_exception());
+        // After thread.join() returns the thread function has completed,
+        // so state_ is fully populated. No additional sync needed.
+        if (state_->error) {
+            return rusty::Result<T, std::exception_ptr>::Err(state_->error);
+        }
+        if constexpr (std::is_void_v<T>) {
+            return rusty::Result<T, std::exception_ptr>::Ok();
+        } else {
+            return rusty::Result<T, std::exception_ptr>::Ok(std::move(*state_->value));
         }
     }
 
@@ -151,8 +190,8 @@ public:
 
     // Check if thread has finished (non-blocking)
     [[nodiscard]] bool is_finished() const {
-        return future_.wait_for(std::chrono::seconds(0)) ==
-               std::future_status::ready;
+        platform::threading::lock_guard<platform::threading::mutex> lock(state_->mutex);
+        return state_->finished;
     }
 
     // Check if thread is joinable
@@ -174,75 +213,32 @@ public:
     }
 };
 
-// Specialization for void return type
-template<>
-class JoinHandle<void> {
-private:
-    mutable platform::threading::thread thread_;
-    mutable std::shared_future<void> future_;
-    mutable bool joined_ = false;
-
-public:
-    JoinHandle(platform::threading::thread&& t, std::future<void>&& f)
-        : thread_(std::move(t))
-        , future_(std::move(f).share())
-    {}
-
-    rusty::Result<void, std::exception_ptr> join() const {
-        if (joined_) {
-            return rusty::Result<void, std::exception_ptr>::Err(
-                std::make_exception_ptr(std::runtime_error("Thread already joined"))
-            );
-        }
-        if (!thread_.joinable()) {
-            return rusty::Result<void, std::exception_ptr>::Err(
-                std::make_exception_ptr(std::runtime_error("Thread not joinable"))
-            );
-        }
-
-        thread_.join();
-        joined_ = true;
-        try {
-            future_.get();
-            return rusty::Result<void, std::exception_ptr>::Ok();
-        } catch (...) {
-            return rusty::Result<void, std::exception_ptr>::Err(std::current_exception());
-        }
-    }
-
-    void detach() {
-        if (joined_) {
-            throw std::runtime_error("Thread already joined");
-        }
-        if (thread_.joinable()) {
-            thread_.detach();
-        }
-    }
-
-    [[nodiscard]] bool is_finished() const {
-        return future_.wait_for(std::chrono::seconds(0)) ==
-               std::future_status::ready;
-    }
-
-    [[nodiscard]] bool joinable() const {
-        return thread_.joinable() && !joined_;
-    }
-
-    JoinHandle(const JoinHandle&) = delete;
-    JoinHandle& operator=(const JoinHandle&) = delete;
-    JoinHandle(JoinHandle&&) = default;
-    JoinHandle& operator=(JoinHandle&&) = default;
-
-    ~JoinHandle() {
-        if (thread_.joinable() && !joined_) {
-            thread_.detach();
-        }
-    }
-};
-
 // ============================================================================
 // spawn() - Launch thread with Send checking
 // ============================================================================
+
+namespace detail {
+// Run user function and route result/exception into the shared state,
+// then mark finished + notify. Hoisted into a helper so both spawn() and
+// Scope::spawn() share the same body.
+template<typename T, typename F>
+inline void run_into_state(std::shared_ptr<JoinState<T>>& state, F&& body) {
+    try {
+        if constexpr (std::is_void_v<T>) {
+            std::forward<F>(body)();
+        } else {
+            state->value.emplace(std::forward<F>(body)());
+        }
+    } catch (...) {
+        state->error = std::current_exception();
+    }
+    {
+        platform::threading::lock_guard<platform::threading::mutex> lock(state->mutex);
+        state->finished = true;
+    }
+    state->cv.notify_all();
+}
+} // namespace detail
 
 template<typename F, typename... Args>
     requires (Send<std::decay_t<Args>> && ...) &&
@@ -250,22 +246,29 @@ template<typename F, typename... Args>
 auto spawn(F&& func, Args&&... args) -> JoinHandle<std::invoke_result_t<F, Args...>> {
     using ReturnType = std::invoke_result_t<F, Args...>;
 
-    // Package task with arguments captured
-    auto task = std::make_shared<std::packaged_task<ReturnType()>>(
-        [func = std::forward<F>(func),
-         ...args = std::forward<Args>(args)]() mutable -> ReturnType {
-            return std::invoke(func, std::move(args)...);
-        }
-    );
+    auto state = std::make_shared<detail::JoinState<ReturnType>>();
 
-    auto future = task->get_future();
+    // Type-erase the lambda body via std::function<void()> BEFORE handing
+    // it to platform::threading::thread (which on libstdc++ is std::thread).
+    // This avoids instantiating std::thread::_State_impl<UserLambdaType>
+    // with a transpiled-module type — that instantiation trips a
+    // libstdc++14 + clang19 + C++20-modules bug where the derived
+    // _State_impl's destructor exception-spec is "more lax than base
+    // version". With type-erasure the instantiation is always
+    // _State_impl<std::function<void()>>, a stable known-good shape.
+    std::function<void()> body =
+        [state,
+         func = std::forward<F>(func),
+         ...args = std::forward<Args>(args)]() mutable {
+            auto s = state;
+            detail::run_into_state<ReturnType>(s, [&]() {
+                return std::invoke(func, std::move(args)...);
+            });
+        };
 
-    // Launch using active runtime backend.
-    platform::threading::thread thread([task = std::move(task)]() {
-        (*task)();
-    });
+    platform::threading::thread thread(std::move(body));
 
-    return JoinHandle<ReturnType>(std::move(thread), std::move(future));
+    return JoinHandle<ReturnType>(std::move(thread), std::move(state));
 }
 
 // ============================================================================
@@ -282,12 +285,13 @@ private:
     template<typename T>
     struct ScopedThreadState final : ScopedThreadBase {
         platform::threading::thread thread_;
-        std::shared_future<T> future_;
+        std::shared_ptr<detail::JoinState<T>> state_;
         bool joined_ = false;
 
-        ScopedThreadState(platform::threading::thread&& t, std::future<T>&& f)
+        ScopedThreadState(platform::threading::thread&& t,
+                          std::shared_ptr<detail::JoinState<T>> s)
             : thread_(std::move(t))
-            , future_(std::move(f).share())
+            , state_(std::move(s))
         {}
 
         rusty::Result<T, std::exception_ptr> join() {
@@ -303,15 +307,13 @@ private:
             }
             thread_.join();
             joined_ = true;
-            try {
-                if constexpr (std::is_void_v<T>) {
-                    future_.get();
-                    return rusty::Result<T, std::exception_ptr>::Ok();
-                } else {
-                    return rusty::Result<T, std::exception_ptr>::Ok(future_.get());
-                }
-            } catch (...) {
-                return rusty::Result<T, std::exception_ptr>::Err(std::current_exception());
+            if (state_->error) {
+                return rusty::Result<T, std::exception_ptr>::Err(state_->error);
+            }
+            if constexpr (std::is_void_v<T>) {
+                return rusty::Result<T, std::exception_ptr>::Ok();
+            } else {
+                return rusty::Result<T, std::exception_ptr>::Ok(std::move(*state_->value));
             }
         }
 
@@ -351,15 +353,21 @@ public:
         requires std::invocable<Fn, Args...>
     auto spawn(Fn&& fn, Args&&... args) -> ScopedJoinHandle<std::invoke_result_t<Fn, Args...>> {
         using ReturnType = std::invoke_result_t<Fn, Args...>;
-        auto task = std::make_shared<std::packaged_task<ReturnType()>>(
-            [fn = std::forward<Fn>(fn),
-             ...args = std::forward<Args>(args)]() mutable -> ReturnType {
-                return std::invoke(fn, std::forward<Args>(args)...);
-            });
-        auto future = task->get_future();
-        platform::threading::thread t([task = std::move(task)]() mutable { (*task)(); });
+        auto inner_state = std::make_shared<detail::JoinState<ReturnType>>();
+        // Type-erase before reaching std::thread — same libstdc++14
+        // + modules workaround as the free `spawn` above.
+        std::function<void()> body =
+            [inner_state,
+             fn = std::forward<Fn>(fn),
+             ...args = std::forward<Args>(args)]() mutable {
+                auto s = inner_state;
+                detail::run_into_state<ReturnType>(s, [&]() {
+                    return std::invoke(fn, std::forward<Args>(args)...);
+                });
+            };
+        platform::threading::thread t(std::move(body));
         auto state =
-            std::make_shared<ScopedThreadState<ReturnType>>(std::move(t), std::move(future));
+            std::make_shared<ScopedThreadState<ReturnType>>(std::move(t), std::move(inner_state));
         threads_.push_back(state);
         return ScopedJoinHandle<ReturnType>(std::move(state));
     }

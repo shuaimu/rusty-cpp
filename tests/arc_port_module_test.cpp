@@ -6,6 +6,7 @@
 import arc_port;
 
 #include <rusty/rusty.hpp>
+#include <rusty/thread.hpp>
 #include <cassert>
 #include <cstdio>
 
@@ -92,6 +93,20 @@ static void test_operator_arrow_and_star() {
     assert(p->y == 20);
 }
 
+// Historical blocker 4 regression: import arc_port + rusty::thread::spawn
+// in the same TU previously hit libstdc++14's <future> internals
+// (_Task_state) under clang19 + C++20 modules. After thread.hpp dropped
+// its <future> dependency, this pattern compiles and runs cleanly.
+static void test_thread_spawn_with_arc_capture() {
+    auto arc = Arc<int>::make(101);
+    auto jh = rusty::thread::spawn([arc]() {
+        return *arc + 1;
+    });
+    auto r = jh.join();
+    assert(r.is_ok());
+    assert(std::move(r).unwrap() == 102);
+}
+
 static void run(const char* name, void (*fn)()) {
     std::printf("  %s ... ", name);
     std::fflush(stdout);
@@ -109,6 +124,7 @@ int main() {
     run("Weak::clone",                 test_weak_clone);
     run("make(args...) variadic",      test_make_variadic);
     run("operator-> and operator*",    test_operator_arrow_and_star);
+    run("thread::spawn + Arc capture", test_thread_spawn_with_arc_capture);
     std::printf("arc_port: all tests passed\n");
     return 0;
 }
