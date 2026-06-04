@@ -4528,6 +4528,14 @@ struct HashMap {
     HashMap()
         : hash_builder(),
           table(RawTable<std::tuple<K, V>, A>::new_()) {}
+    // Two-arg ctor previously provided implicitly via aggregate
+    // initialization (`HashMap{hash, table}`); adding the default ctor
+    // above suppressed the aggregate, so spell out the field-init form
+    // explicitly here. Used by `with_hasher` / `with_capacity_*` /
+    // `default_()` factories below.
+    HashMap(S hash_builder_init, RawTable<std::tuple<K, V>, A> table_init)
+        : hash_builder(std::move(hash_builder_init)),
+          table(std::move(table_init)) {}
 
     // Hand-written-HashMap-compatibility lookups: `contains_key`,
     // `get`, `remove`. Real Rust expresses these with a `Q: Borrow<K>`

@@ -3938,13 +3938,15 @@ struct Rc {
             return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<RcInner<T>>::new_(RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = std::move(value)})).leak()));
         }
     }
-    // Hand-written-Rc-compatibility ergonomic shim: `Rc::make(args...)`
-    // is the legacy factory name; mirror Arc's `make()` patcher to keep
-    // call sites unchanged. Forwards args into T and delegates to
-    // `Rc::new_`.
-    template<typename... Args>
-    static Rc<T> make(Args&&... args) {
-        return Rc<T, A>::new_(T(std::forward<Args>(args)...));
+    // Hand-written-Rc-compatibility ergonomic shim: `Rc::make(v)` is
+    // an alias of `Rc::new_(std::move(v))`. We take T by value (not
+    // variadic perfect-forwarding) because the perfect-forwarding
+    // version forwards into `T(args...)` which requires T to be
+    // copy/move-constructible from args — that fails for non-copyable
+    // mako rrr types like `Reactor` and `Fiber` that hold rusty::Box
+    // / unique-ownership members.
+    static Rc<T> make(T value) {
+        return Rc<T, A>::new_(std::move(value));
     }
     template<typename F>
     static Rc<T> new_cyclic(F data_fn) {
