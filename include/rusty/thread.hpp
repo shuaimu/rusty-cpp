@@ -1,63 +1,210 @@
 #pragma once
 
-#include <memory>
 #include <concepts>
 #include <chrono>
 #include <stdexcept>
-#include <vector>
-#include <functional>
 #include <exception>
-#include <optional>
 #include <utility>
+#include <atomic>
 #include "platform/threading.hpp"
 #include "result.hpp"
+#include "option.hpp"
 #include "traits.hpp"
 
 // rusty::thread — Rust-style threading primitives.
 //
-// Implementation note: this header used to depend on `<future>` for
-// `std::packaged_task<T>` / `std::shared_future<T>`. That dependency was
-// removed because libstdc++14 + clang19 + C++20 modules has a bug in
-// `<future>`'s internal `_Task_state` hierarchy that triggers when
-// non-trivial types from an imported module appear in `std::async` /
-// `std::packaged_task` template arguments (historically blocker 4 of
-// the rusty::Arc retire). The replacement is a hand-rolled state holder
-// (mutex + condvar + Option<T> / exception_ptr) wired via shared_ptr —
-// identical observable behavior, no `<future>` in the include graph.
+// Implementation note: this header is deliberately std-light. The
+// historical "blocker 4" of the rusty::Arc retire was a
+// libstdc++14 + clang19 + C++20 modules friction where std-templated
+// classes (std::thread::_State_impl, std::future::_Task_state, etc.)
+// generated derived destructors whose noexcept-spec was "more lax
+// than base version" when instantiated with transpiled-module types.
+//
+// This header replaces the std types that participated in that bug
+// AND the std utility types we'd otherwise carry along with them:
+//   - std::function<void()>     → detail::TypeErasedClosure
+//   - std::shared_ptr<State>    → detail::SharedState<State>
+//   - std::optional<T>          → rusty::Option<T>
+//   - std::packaged_task/future → hand-rolled JoinState + mutex/cv
+//
+// The only std types kept are intrinsics-grade (std::atomic), pure
+// metaprogramming (std::forward / std::invoke / std::is_void_v), and
+// exception machinery (std::exception_ptr) for which there is no
+// rusty equivalent. The Scope class still uses a hand-rolled intrusive
+// list rather than std::vector.
 
 namespace rusty::thread {
 
 namespace detail {
+
 struct ParkToken {
     platform::threading::mutex mutex;
     platform::threading::condition_variable cv;
     bool notified = false;
 };
 
-inline std::shared_ptr<ParkToken> current_park_token() {
-    thread_local std::shared_ptr<ParkToken> token = std::make_shared<ParkToken>();
+// ──────────────────────────────────────────────────────────────────────
+// SharedState<S> — minimal hand-rolled atomic-refcount shared pointer.
+// Replaces std::shared_ptr<S>. S must have a `std::atomic<size_t>
+// refcount` member that starts at 1 (we don't allocate the control
+// block separately; it's intrusive). Stays in headers without dragging
+// in <memory>.
+// ──────────────────────────────────────────────────────────────────────
+template<typename S>
+class SharedState {
+    S* ptr_ = nullptr;
+
+    explicit SharedState(S* p) noexcept : ptr_(p) {}
+
+public:
+    SharedState() noexcept = default;
+
+    template<typename... Args>
+    static SharedState make(Args&&... args) {
+        return SharedState(new S(std::forward<Args>(args)...));
+    }
+
+    SharedState(const SharedState& o) noexcept : ptr_(o.ptr_) {
+        if (ptr_) ptr_->refcount.fetch_add(1, std::memory_order_relaxed);
+    }
+    SharedState(SharedState&& o) noexcept : ptr_(o.ptr_) { o.ptr_ = nullptr; }
+    SharedState& operator=(const SharedState& o) noexcept {
+        if (this != &o) {
+            release();
+            ptr_ = o.ptr_;
+            if (ptr_) ptr_->refcount.fetch_add(1, std::memory_order_relaxed);
+        }
+        return *this;
+    }
+    SharedState& operator=(SharedState&& o) noexcept {
+        if (this != &o) {
+            release();
+            ptr_ = o.ptr_;
+            o.ptr_ = nullptr;
+        }
+        return *this;
+    }
+    ~SharedState() noexcept { release(); }
+
+    S* operator->() const noexcept { return ptr_; }
+    S& operator*() const noexcept { return *ptr_; }
+    S* get() const noexcept { return ptr_; }
+    explicit operator bool() const noexcept { return ptr_ != nullptr; }
+
+private:
+    void release() noexcept {
+        if (ptr_ && ptr_->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            std::atomic_thread_fence(std::memory_order_acquire);
+            delete ptr_;
+        }
+    }
+};
+
+// Thread-local park token state. Uses SharedState rather than std::shared_ptr.
+struct ParkTokenShared {
+    std::atomic<size_t> refcount{1};
+    ParkToken inner;
+};
+
+inline SharedState<ParkTokenShared> current_park_token() {
+    thread_local SharedState<ParkTokenShared> token =
+        SharedState<ParkTokenShared>::make();
     return token;
 }
 
-// Shared state holder for a spawned thread's result. Replaces
-// `std::shared_future<T>` / `std::packaged_task<T>` — see top-of-file
-// note for the libstdc++14 + modules motivation.
+// ──────────────────────────────────────────────────────────────────────
+// JoinState<T> — result-holder for a spawned thread. Replaces
+// `std::shared_future<T>` / `std::packaged_task<T>`. Uses rusty::Option
+// instead of std::optional for the value slot.
+// ──────────────────────────────────────────────────────────────────────
 template<typename T>
 struct JoinState {
+    std::atomic<size_t> refcount{1};
     platform::threading::mutex mutex;
     platform::threading::condition_variable cv;
     bool finished = false;
-    std::optional<T> value;
+    rusty::Option<T> value;
     std::exception_ptr error;
 };
 
 template<>
 struct JoinState<void> {
+    std::atomic<size_t> refcount{1};
     platform::threading::mutex mutex;
     platform::threading::condition_variable cv;
     bool finished = false;
     std::exception_ptr error;
 };
+
+// ──────────────────────────────────────────────────────────────────────
+// TypeErasedClosure — replaces std::function<void()> for the spawn
+// body. Plain function-pointer dispatch (no virtual hierarchy), so
+// std::thread's `_State_impl<TypeErasedClosure>` lands in a stable
+// noexcept-matching destructor shape and avoids the libstdc++14 +
+// modules friction that fires for arbitrary user-lambda payload types.
+// ──────────────────────────────────────────────────────────────────────
+class TypeErasedClosure {
+    void* state_ = nullptr;
+    void (*invoke_)(void*) = nullptr;
+    void (*destroy_)(void*) noexcept = nullptr;
+
+public:
+    TypeErasedClosure() noexcept = default;
+
+    template<typename F>
+        requires (!std::is_same_v<std::decay_t<F>, TypeErasedClosure>)
+    explicit TypeErasedClosure(F&& f) {
+        using FD = std::decay_t<F>;
+        state_ = new FD(std::forward<F>(f));
+        invoke_ = +[](void* p) { (*static_cast<FD*>(p))(); };
+        destroy_ = +[](void* p) noexcept {
+            try { delete static_cast<FD*>(p); } catch (...) { /* swallow */ }
+        };
+    }
+
+    TypeErasedClosure(TypeErasedClosure&& o) noexcept
+        : state_(o.state_), invoke_(o.invoke_), destroy_(o.destroy_) {
+        o.state_ = nullptr; o.invoke_ = nullptr; o.destroy_ = nullptr;
+    }
+
+    TypeErasedClosure& operator=(TypeErasedClosure&& o) noexcept {
+        if (this != &o) {
+            if (state_) destroy_(state_);
+            state_ = o.state_; invoke_ = o.invoke_; destroy_ = o.destroy_;
+            o.state_ = nullptr; o.invoke_ = nullptr; o.destroy_ = nullptr;
+        }
+        return *this;
+    }
+
+    TypeErasedClosure(const TypeErasedClosure&) = delete;
+    TypeErasedClosure& operator=(const TypeErasedClosure&) = delete;
+
+    ~TypeErasedClosure() noexcept { if (state_) destroy_(state_); }
+
+    void operator()() { if (invoke_) invoke_(state_); }
+};
+
+// Run user function and route result/exception into the shared state,
+// then mark finished + notify. Hoisted into a helper so spawn() and
+// Scope::spawn() share the same body.
+template<typename T, typename F>
+inline void run_into_state(SharedState<JoinState<T>>& state, F&& body) {
+    try {
+        if constexpr (std::is_void_v<T>) {
+            std::forward<F>(body)();
+        } else {
+            state->value = rusty::Option<T>(std::forward<F>(body)());
+        }
+    } catch (...) {
+        state->error = std::current_exception();
+    }
+    {
+        platform::threading::lock_guard<platform::threading::mutex> lock(state->mutex);
+        state->finished = true;
+    }
+    state->cv.notify_all();
+}
+
 } // namespace detail
 
 /// Opaque thread identifier.
@@ -89,11 +236,8 @@ inline ThreadId current_id() {
 
 class Thread {
 private:
-    std::shared_ptr<detail::ParkToken> token_;
+    detail::SharedState<detail::ParkTokenShared> token_;
     ThreadId id_;
-
-    explicit Thread(std::shared_ptr<detail::ParkToken> token)
-        : token_(std::move(token)), id_(platform::threading::current_thread_id()) {}
 
 public:
     Thread()
@@ -101,7 +245,7 @@ public:
           id_(platform::threading::current_thread_id()) {}
 
     static Thread current() {
-        return Thread(detail::current_park_token());
+        return Thread();
     }
 
     /// Get this thread's ID. Maps Rust's Thread::id().
@@ -111,9 +255,10 @@ public:
         if (!token_) {
             return;
         }
-        platform::threading::lock_guard<platform::threading::mutex> lock(token_->mutex);
-        token_->notified = true;
-        token_->cv.notify_one();
+        auto& inner = token_->inner;
+        platform::threading::lock_guard<platform::threading::mutex> lock(inner.mutex);
+        inner.notified = true;
+        inner.cv.notify_one();
     }
 };
 
@@ -123,9 +268,10 @@ inline Thread current() {
 
 inline void park() {
     auto token = detail::current_park_token();
-    platform::threading::unique_lock<platform::threading::mutex> lock(token->mutex);
-    token->cv.wait(lock, [&]() { return token->notified; });
-    token->notified = false;
+    auto& inner = token->inner;
+    platform::threading::unique_lock<platform::threading::mutex> lock(inner.mutex);
+    inner.cv.wait(lock, [&]() { return inner.notified; });
+    inner.notified = false;
 }
 
 inline void yield_now() {
@@ -140,12 +286,12 @@ template<typename T>
 class JoinHandle {
 private:
     mutable platform::threading::thread thread_;
-    std::shared_ptr<detail::JoinState<T>> state_;
+    detail::SharedState<detail::JoinState<T>> state_;
     mutable bool joined_ = false;
 
 public:
     JoinHandle(platform::threading::thread&& t,
-               std::shared_ptr<detail::JoinState<T>> s)
+               detail::SharedState<detail::JoinState<T>> s)
         : thread_(std::move(t))
         , state_(std::move(s))
     {}
@@ -174,7 +320,7 @@ public:
         if constexpr (std::is_void_v<T>) {
             return rusty::Result<T, std::exception_ptr>::Ok();
         } else {
-            return rusty::Result<T, std::exception_ptr>::Ok(std::move(*state_->value));
+            return rusty::Result<T, std::exception_ptr>::Ok(state_->value.unwrap());
         }
     }
 
@@ -217,54 +363,32 @@ public:
 // spawn() - Launch thread with Send checking
 // ============================================================================
 
-namespace detail {
-// Run user function and route result/exception into the shared state,
-// then mark finished + notify. Hoisted into a helper so both spawn() and
-// Scope::spawn() share the same body.
-template<typename T, typename F>
-inline void run_into_state(std::shared_ptr<JoinState<T>>& state, F&& body) {
-    try {
-        if constexpr (std::is_void_v<T>) {
-            std::forward<F>(body)();
-        } else {
-            state->value.emplace(std::forward<F>(body)());
-        }
-    } catch (...) {
-        state->error = std::current_exception();
-    }
-    {
-        platform::threading::lock_guard<platform::threading::mutex> lock(state->mutex);
-        state->finished = true;
-    }
-    state->cv.notify_all();
-}
-} // namespace detail
-
 template<typename F, typename... Args>
     requires (Send<std::decay_t<Args>> && ...) &&
              std::invocable<F, Args...>
 auto spawn(F&& func, Args&&... args) -> JoinHandle<std::invoke_result_t<F, Args...>> {
     using ReturnType = std::invoke_result_t<F, Args...>;
 
-    auto state = std::make_shared<detail::JoinState<ReturnType>>();
+    auto state = detail::SharedState<detail::JoinState<ReturnType>>::make();
+    auto thread_state = state;  // bumps refcount for the spawned thread.
 
-    // Type-erase the lambda body via std::function<void()> BEFORE handing
-    // it to platform::threading::thread (which on libstdc++ is std::thread).
-    // This avoids instantiating std::thread::_State_impl<UserLambdaType>
-    // with a transpiled-module type — that instantiation trips a
-    // libstdc++14 + clang19 + C++20-modules bug where the derived
-    // _State_impl's destructor exception-spec is "more lax than base
-    // version". With type-erasure the instantiation is always
-    // _State_impl<std::function<void()>>, a stable known-good shape.
-    std::function<void()> body =
-        [state,
+    // Type-erase the body via TypeErasedClosure BEFORE handing it to
+    // platform::threading::thread (= std::thread). This pins
+    // std::thread::_State_impl<F> to F = TypeErasedClosure (a plain
+    // function-pointer wrapper with noexcept destructor), avoiding the
+    // libstdc++14 + clang19 + C++20-modules destructor-noexcept bug
+    // that fires for arbitrary user lambda types that capture
+    // transpiled module values.
+    detail::TypeErasedClosure body{
+        [thread_state = std::move(thread_state),
          func = std::forward<F>(func),
          ...args = std::forward<Args>(args)]() mutable {
-            auto s = state;
+            auto s = thread_state;
             detail::run_into_state<ReturnType>(s, [&]() {
                 return std::invoke(func, std::move(args)...);
             });
-        };
+        }
+    };
 
     platform::threading::thread thread(std::move(body));
 
@@ -277,7 +401,13 @@ auto spawn(F&& func, Args&&... args) -> JoinHandle<std::invoke_result_t<F, Args.
 
 class Scope {
 private:
+    // Intrusive singly-linked list of scoped thread states. Replaces
+    // std::vector<std::shared_ptr<ScopedThreadBase>>. Each node is heap-
+    // allocated and held by both Scope (which joins on destruction) and
+    // ScopedJoinHandle (which calls join() directly) via SharedState.
     struct ScopedThreadBase {
+        std::atomic<size_t> refcount{1};
+        ScopedThreadBase* next_in_scope = nullptr;
         virtual ~ScopedThreadBase() = default;
         virtual void join_if_needed() = 0;
     };
@@ -285,11 +415,11 @@ private:
     template<typename T>
     struct ScopedThreadState final : ScopedThreadBase {
         platform::threading::thread thread_;
-        std::shared_ptr<detail::JoinState<T>> state_;
+        detail::SharedState<detail::JoinState<T>> state_;
         bool joined_ = false;
 
         ScopedThreadState(platform::threading::thread&& t,
-                          std::shared_ptr<detail::JoinState<T>> s)
+                          detail::SharedState<detail::JoinState<T>> s)
             : thread_(std::move(t))
             , state_(std::move(s))
         {}
@@ -313,7 +443,7 @@ private:
             if constexpr (std::is_void_v<T>) {
                 return rusty::Result<T, std::exception_ptr>::Ok();
             } else {
-                return rusty::Result<T, std::exception_ptr>::Ok(std::move(*state_->value));
+                return rusty::Result<T, std::exception_ptr>::Ok(state_->value.unwrap());
             }
         }
 
@@ -325,16 +455,16 @@ private:
         }
     };
 
-    std::vector<std::shared_ptr<ScopedThreadBase>> threads_;
+    ScopedThreadBase* head_ = nullptr;
 
 public:
     template<typename T>
     class ScopedJoinHandle {
     private:
-        std::shared_ptr<ScopedThreadState<T>> state_;
+        detail::SharedState<ScopedThreadState<T>> state_;
 
     public:
-        explicit ScopedJoinHandle(std::shared_ptr<ScopedThreadState<T>> state)
+        explicit ScopedJoinHandle(detail::SharedState<ScopedThreadState<T>> state)
             : state_(std::move(state))
         {}
 
@@ -353,33 +483,58 @@ public:
         requires std::invocable<Fn, Args...>
     auto spawn(Fn&& fn, Args&&... args) -> ScopedJoinHandle<std::invoke_result_t<Fn, Args...>> {
         using ReturnType = std::invoke_result_t<Fn, Args...>;
-        auto inner_state = std::make_shared<detail::JoinState<ReturnType>>();
-        // Type-erase before reaching std::thread — same libstdc++14
-        // + modules workaround as the free `spawn` above.
-        std::function<void()> body =
-            [inner_state,
+        auto inner_state = detail::SharedState<detail::JoinState<ReturnType>>::make();
+        auto thread_state = inner_state;
+
+        detail::TypeErasedClosure body{
+            [thread_state = std::move(thread_state),
              fn = std::forward<Fn>(fn),
              ...args = std::forward<Args>(args)]() mutable {
-                auto s = inner_state;
+                auto s = thread_state;
                 detail::run_into_state<ReturnType>(s, [&]() {
                     return std::invoke(fn, std::forward<Args>(args)...);
                 });
-            };
+            }};
         platform::threading::thread t(std::move(body));
-        auto state =
-            std::make_shared<ScopedThreadState<ReturnType>>(std::move(t), std::move(inner_state));
-        threads_.push_back(state);
+
+        auto state = detail::SharedState<ScopedThreadState<ReturnType>>::make(
+            std::move(t), std::move(inner_state));
+        // Link into Scope's intrusive list. Bump refcount because the
+        // Scope holds a non-SharedState raw pointer (it'll iterate and
+        // not own destruction — destruction goes via SharedState).
+        ScopedThreadState<ReturnType>* raw = state.get();
+        raw->refcount.fetch_add(1, std::memory_order_relaxed);
+        raw->next_in_scope = head_;
+        head_ = raw;
+
         return ScopedJoinHandle<ReturnType>(std::move(state));
     }
 
     // Destructor joins all threads (blocks until all complete)
     ~Scope() {
-        for (auto& state : threads_) {
-            if (state) {
-                state->join_if_needed();
+        // Walk the intrusive list, join each, then release the Scope's
+        // refcount.
+        ScopedThreadBase* cur = head_;
+        while (cur) {
+            ScopedThreadBase* next = cur->next_in_scope;
+            cur->join_if_needed();
+            // Drop the refcount we took at spawn(). Mirrors the
+            // SharedState::release() shape but inline since we hold
+            // a raw pointer here.
+            if (cur->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                std::atomic_thread_fence(std::memory_order_acquire);
+                delete cur;
             }
+            cur = next;
         }
+        head_ = nullptr;
     }
+
+    Scope() = default;
+    Scope(const Scope&) = delete;
+    Scope(Scope&&) = delete;
+    Scope& operator=(const Scope&) = delete;
+    Scope& operator=(Scope&&) = delete;
 };
 
 // ============================================================================
