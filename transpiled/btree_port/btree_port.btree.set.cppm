@@ -4667,7 +4667,13 @@ struct BTreeSet {
         return ::rusty::cmp::cmp(this->map, other.map);
     }
     BTreeSet<T, A> clone() const {
-        return BTreeSet<T, A>(::rusty::clone(this->map));
+        // Patcher fix: the transpiler emitted `::rusty::clone(this->map)`
+        // which requires BTreeMap copy ctor. BTreeMap's copy ctor is
+        // implicitly deleted (its `alloc` field is a ManuallyDrop<A>,
+        // and ManuallyDrop explicitly deletes copy). Use the BTreeMap
+        // member `clone()` method directly, which builds a fresh map
+        // from the iterator instead of relying on copy-construction.
+        return BTreeSet<T, A>(this->map.clone());
     }
     void clone_from(const BTreeSet<T, A>& source) {
         this->map.clone_from(source.map);
@@ -4859,6 +4865,11 @@ return std::move(k);
     ::rusty::fmt::Result fmt(::rusty::fmt::Formatter& f) const {
         return f.debug_list().entries(::rusty::iter((*this))).finish();
     }
+
+    // BTreeSet STL begin()/end() omitted — depends on BTreeMap's STL
+    // iter which is blocked by transpiler bugs in btree_internal (see
+    // BTreeMap-side comment). Callers must walk via the existing
+    // iter() / next() pattern instead of range-based-for.
 };
 
 

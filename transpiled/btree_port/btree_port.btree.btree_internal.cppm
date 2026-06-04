@@ -4817,7 +4817,17 @@ struct NodeRef {
         }
     }
     LazyLeafRange<marker::Immut, K, V> full_range() {
-        return full_range(std::move((*this)), std::move((*this)));
+        // Patcher fix: the transpiler emitted an unqualified
+        // `full_range(...)` call which resolves to this member function
+        // itself (infinite recursion / "too many arguments to function
+        // call, expected 0, have 2"). The intended target is the free
+        // function `full_range<BorrowType, K, V>(NodeRef, NodeRef)`
+        // declared at line ~3788 in the same namespace. Qualify it
+        // with the namespace path so member-name shadowing doesn't
+        // hijack the call.
+        return ::rusty::port::collections::btree::btree_internal::
+            full_range<marker::Immut, K, V>(
+                std::move((*this)), std::move((*this)));
     }
     Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> first_leaf_edge() const {
         // btree_port port: first/last_leaf_edge hand-ported by post_transpile_patch.py

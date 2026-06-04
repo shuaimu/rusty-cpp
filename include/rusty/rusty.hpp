@@ -37,7 +37,11 @@
 // #include "rusty/weak.hpp" — deleted (rusty::Weak unused; rc_port::Weak<T,A> is the transpiled one)
 // TODO: Enable once namespace conflicts are resolved
 // #include "rusty/rc/weak.hpp"  — deleted alongside rc.hpp
-// #include "rusty/sync/weak.hpp"  // Namespace-organized: rusty::sync_impl::Weak<T>
+// Hand-written rusty::sync::Weak<T> + rusty::sync::downgrade(arc) —
+// paired with the hand-written rusty::Arc<T> in arc.hpp. Restored
+// commit 2454468 added them back after the b8776ff retirement broke
+// consumers that hadn't migrated to the transpiled port::sync::Arc.
+#include "rusty/sync/weak.hpp"
 #include "rusty/vec.hpp"
 #include "rusty/vecdeque.hpp"
 #include "rusty/collections.hpp"  // TryReserveError (added for vec_port)

@@ -3789,8 +3789,11 @@ struct Iter {
         return Iter<K, V>{.inner = rusty::default_value<RawIter<std::tuple<K, V>>>(), .marker = rusty::PhantomData<std::tuple<const K&, const V&>>{}};
     }
     rusty::Option<std::tuple<const K&, const V&>> next() {
+        // Patcher fix: same `r._0` / `r._1` → `std::get<>(r)` swap as
+        // IterMut::next() below; transpiler emitted the Rust tuple
+        // field-access form which isn't valid for std::tuple.
         return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& x = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto& r = x.as_ref();
-return rusty::Option<std::tuple<const K&, const V&>>(std::tuple<const K&, const V&>{r._0, r._1}); }(); } if (_m.is_none()) { return rusty::Option<std::tuple<const K&, const V&>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { rusty::intrinsics::unreachable(); }(); }();
+return rusty::Option<std::tuple<const K&, const V&>>(std::tuple<const K&, const V&>{std::get<0>(r), std::get<1>(r)}); }(); } if (_m.is_none()) { return rusty::Option<std::tuple<const K&, const V&>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { rusty::intrinsics::unreachable(); }(); }();
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
@@ -3846,8 +3849,12 @@ struct IterMut {
         return IterMut<K, V>{.inner = rusty::default_value<RawIter<std::tuple<K, V>>>(), .marker = rusty::PhantomData<std::tuple<const K&, V&>>{}};
     }
     rusty::Option<std::tuple<const K&, V&>> next() {
+        // Patcher fix: transpiler emitted `r._0, r._1` to destructure
+        // the std::tuple<K, V>. Those `._0` / `._1` field-access forms
+        // are valid for transpiled Rust tuple structs but std::tuple
+        // requires std::get<>(). Swap to the std::get form.
         return [&]() -> rusty::Option<std::tuple<const K&, V&>> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& x = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Option<std::tuple<const K&, V&>> { auto& r = x.as_mut();
-return rusty::Option<std::tuple<const K&, V&>>(std::tuple<const K&, V&>{r._0, r._1}); }(); } if (_m.is_none()) { return rusty::Option<std::tuple<const K&, V&>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<const K&, V&>> { rusty::intrinsics::unreachable(); }(); }();
+return rusty::Option<std::tuple<const K&, V&>>(std::tuple<const K&, V&>{std::get<0>(r), std::get<1>(r)}); }(); } if (_m.is_none()) { return rusty::Option<std::tuple<const K&, V&>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<const K&, V&>> { rusty::intrinsics::unreachable(); }(); }();
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
@@ -4581,16 +4588,63 @@ struct HashMap {
             std::move(std::get<1>(std::get<0>(kv))));
     }
 
-    // TODO: STL-compat begin()/end() for range-based-for. The
-    // transpiled `Iter<K, V>` uses Rust's `next() -> Option` semantics;
-    // adapting it to C++ iterator-pair shape requires care because the
-    // underlying bucket iterator yields tuple<const K&, V&> through
-    // unsafe pointer arithmetic. Mako rrr's reactor.cpp uses
-    // `for (auto& [k,v] : map)` in a few places — those sites need to
-    // be rewritten to use the existing `iter()`/`iter_mut()` Rust-style
-    // loop, OR this method needs a real adapter implementation. Left
-    // unimplemented to avoid the half-built version blocking the
-    // typed-API plumbing.
+    // STL-compat range iteration. Wraps the underlying `iter_mut()`
+    // Rust-style next() iterator with a stateful adapter that exposes
+    // operator++ / operator* / != so consumers can write
+    // `for (auto& [k,v] : map)`. `*it` returns `std::tuple<const K&, V&>`
+    // which destructures into k (const K) and v (V&). All actual storage
+    // remains in the map; the tuple only holds references.
+    struct stl_iter_t {
+        // The raw iterator owns the bucket position. We cache the
+        // current Bucket so operator* can return refs into it without
+        // re-advancing.
+        rusty::Option<IterMut<K, V>> raw;
+        rusty::Option<std::tuple<const K&, V&>> cur;
+
+        stl_iter_t() : raw(rusty::None), cur(rusty::None) {}
+        explicit stl_iter_t(IterMut<K, V> it) : raw(std::move(it)), cur(rusty::None) {
+            advance();
+        }
+        void advance() {
+            if (raw.is_none()) { cur = rusty::None; return; }
+            cur = raw.as_mut().unwrap().next();
+        }
+        stl_iter_t& operator++() { advance(); return *this; }
+        std::tuple<const K&, V&> operator*() {
+            return cur.as_ref().unwrap();
+        }
+        bool operator==(const stl_iter_t& o) const {
+            return cur.is_none() && o.cur.is_none();
+        }
+        bool operator!=(const stl_iter_t& o) const { return !(*this == o); }
+    };
+
+    stl_iter_t begin() {
+        return stl_iter_t(this->iter_mut());
+    }
+    stl_iter_t end() {
+        return stl_iter_t{};
+    }
+
+    // operator[]: container-style insert-or-default-and-get. Returns a
+    // reference into the map's storage. Hand-written HashMap relied on
+    // std::unordered_map's `[]` returning a default-constructed value
+    // for missing keys. We replicate by inserting a default V on miss.
+    V& operator[](const K& key) {
+        auto h = make_hash<K, S>(this->hash_builder, key);
+        auto b = this->table.find(h, [&](const auto& kv) {
+            return std::get<0>(kv) == key;
+        });
+        if (b.is_some()) {
+            return std::get<1>(b.unwrap().as_mut());
+        }
+        // Not present: insert default V.
+        this->insert(K(key), V{});
+        auto b2 = this->table.find(h, [&](const auto& kv) {
+            return std::get<0>(kv) == key;
+        });
+        return std::get<1>(b2.unwrap().as_mut());
+    }
 
     HashMap<K, V, S, A> clone() const {
         return HashMap<K, V, S, A>(rusty::clone(this->hash_builder), rusty::clone(this->table));

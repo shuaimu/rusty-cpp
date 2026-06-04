@@ -71,6 +71,30 @@ struct HashSet {
     }
 
     HashSet<T, S> clone() const { return HashSet<T, S>(this->map.clone()); }
+
+    // STL-compat range iteration. Wraps the underlying HashMap's iter
+    // (entries are tuple<T, monostate>) and projects to just the key
+    // via operator*. Enables `for (const auto& x : set)`.
+    struct stl_iter_t {
+        typename HashMap<T, std::monostate, S>::stl_iter_t inner;
+
+        stl_iter_t() = default;
+        explicit stl_iter_t(typename HashMap<T, std::monostate, S>::stl_iter_t it)
+            : inner(std::move(it)) {}
+        stl_iter_t& operator++() { ++inner; return *this; }
+        const T& operator*() {
+            return std::get<0>(*inner);
+        }
+        bool operator==(const stl_iter_t& o) const { return inner == o.inner; }
+        bool operator!=(const stl_iter_t& o) const { return inner != o.inner; }
+    };
+
+    stl_iter_t begin() {
+        return stl_iter_t(this->map.begin());
+    }
+    stl_iter_t end() {
+        return stl_iter_t(this->map.end());
+    }
 };
 
 } // namespace rusty::port::collections::hashbrown

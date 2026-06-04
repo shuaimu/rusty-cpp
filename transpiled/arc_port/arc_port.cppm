@@ -4034,9 +4034,24 @@ struct Arc {
         }
     }
     // patcher: ergonomic shims (make / operator->)
+    // `Arc::make(args...)` emplaces T directly inside the ArcInner
+    // allocation. Unlike `Arc::new_(T value)` (which requires T to be
+    // move-constructible because it does
+    // `ArcInner<T>{.data = std::move(value)}`), this path placement-
+    // news each ArcInner field individually so the T-ctor runs in-
+    // place. Critical for non-copyable / non-movable mako rrr types.
     template<typename... Args>
     static Arc<T, A> make(Args&&... args) {
-        return Arc<T, A>::new_(T(std::forward<Args>(args)...));
+        auto layout = rusty::alloc::Layout::new_<ArcInner<T>>();
+        auto* raw = rusty::alloc::alloc(layout);
+        auto* mem = reinterpret_cast<ArcInner<T>*>(raw);
+        ::new (&mem->strong) rusty::sync::atomic::detail::Atomic<size_t>(
+            rusty::sync::atomic::AtomicUsize::new_(1));
+        ::new (&mem->weak) rusty::sync::atomic::detail::Atomic<size_t>(
+            rusty::sync::atomic::AtomicUsize::new_(1));
+        ::new (&mem->data) T(std::forward<Args>(args)...);
+        return Arc<T, A>::from_inner(
+            rusty::ptr::NonNull<ArcInner<T>>::new_unchecked(mem));
     }
     const T* operator->() const { return &this->inner().data; }
 

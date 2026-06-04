@@ -3938,15 +3938,29 @@ struct Rc {
             return Rc<T, A>::from_inner(rusty::from_into<rusty::ptr::NonNull<RcInner<T>>>((rusty::Box<RcInner<T>>::new_(RcInner<T>{.strong = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .weak = rusty::Cell<size_t>::new_(static_cast<size_t>(1)), .value = std::move(value)})).leak()));
         }
     }
-    // Hand-written-Rc-compatibility ergonomic shim: `Rc::make(v)` is
-    // an alias of `Rc::new_(std::move(v))`. We take T by value (not
-    // variadic perfect-forwarding) because the perfect-forwarding
-    // version forwards into `T(args...)` which requires T to be
-    // copy/move-constructible from args — that fails for non-copyable
-    // mako rrr types like `Reactor` and `Fiber` that hold rusty::Box
-    // / unique-ownership members.
-    static Rc<T> make(T value) {
-        return Rc<T, A>::new_(std::move(value));
+    // Hand-written-Rc-compatibility ergonomic shim: `Rc::make(args...)`
+    // emplaces T directly inside the RcInner allocation. Unlike
+    // `Rc::new_(T value)` (which requires T move-constructible because
+    // it does `RcInner<T>{.value = std::move(value)}`), this path
+    // placement-news each RcInner field individually so the T-ctor
+    // runs in-place. Critical for non-copyable / non-movable mako rrr
+    // types like `Reactor` and `Fiber` that hold `RefCell` and other
+    // unique-ownership members.
+    template<typename... Args>
+    static Rc<T> make(Args&&... args) {
+        // Allocate raw RcInner-sized memory using the same path Box::new_
+        // uses (rusty::alloc::alloc → std::malloc for small alignments),
+        // so Rc's destructor can deallocate via Layout::for_value.
+        auto layout = rusty::alloc::Layout::new_<RcInner<T>>();
+        auto* raw = rusty::alloc::alloc(layout);
+        auto* mem = reinterpret_cast<RcInner<T>*>(raw);
+        ::new (&mem->strong) rusty::Cell<size_t>(
+            rusty::Cell<size_t>::new_(static_cast<size_t>(1)));
+        ::new (&mem->weak) rusty::Cell<size_t>(
+            rusty::Cell<size_t>::new_(static_cast<size_t>(1)));
+        ::new (&mem->value) T(std::forward<Args>(args)...);
+        return Rc<T, A>::from_inner(
+            rusty::ptr::NonNull<RcInner<T>>::new_unchecked(mem));
     }
     template<typename F>
     static Rc<T> new_cyclic(F data_fn) {
