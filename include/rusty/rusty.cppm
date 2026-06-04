@@ -146,6 +146,18 @@ using BTreeMap = ::rusty::port::collections::btree::map::BTreeMap<K, V, A>;
 template<typename T, typename A = ::rusty::alloc::Global>
 using BTreeSet = ::rusty::port::collections::btree::set::BTreeSet<T, A>;
 
+// rusty::HashMap / rusty::HashSet alias the transpiled rustc hashbrown
+// port. These match Rust's `std::collections::HashMap` / `HashSet` at
+// the top level. The `rusty::collections::HashMap` / `HashSet` aliases
+// (declared below) are kept for code that prefers the namespaced form.
+template<typename K, typename V,
+         typename S = ::rusty::port::collections::hashbrown::DefaultHasher>
+using HashMap = ::rusty::port::collections::hashbrown::HashMap<K, V, S>;
+
+template<typename T,
+         typename S = ::rusty::port::collections::hashbrown::DefaultHasher>
+using HashSet = ::rusty::port::collections::hashbrown::HashSet<T, S>;
+
 // rusty::port — namespace hierarchy mirroring Rust std's layout
 // (port = transpiled-from-rustc). Each transpiled module lives under
 // `rusty::port::<section>::<crate_name>::Type` (the deep path), with
