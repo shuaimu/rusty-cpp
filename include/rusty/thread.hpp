@@ -2,8 +2,6 @@
 
 #include <concepts>
 #include <chrono>
-#include <stdexcept>
-#include <exception>
 #include <utility>
 #include <atomic>
 #include "platform/threading.hpp"
@@ -26,14 +24,27 @@
 //   - std::shared_ptr<State>    → detail::SharedState<State>
 //   - std::optional<T>          → rusty::Option<T>
 //   - std::packaged_task/future → hand-rolled JoinState + mutex/cv
+//   - std::exception_ptr        → DROPPED (Rust threads have no
+//                                 exceptions; if the user function
+//                                 throws, std::terminate fires at the
+//                                 std::thread boundary — matching
+//                                 Rust's panic=abort default).
 //
-// The only std types kept are intrinsics-grade (std::atomic), pure
-// metaprogramming (std::forward / std::invoke / std::is_void_v), and
-// exception machinery (std::exception_ptr) for which there is no
-// rusty equivalent. The Scope class still uses a hand-rolled intrusive
-// list rather than std::vector.
+// The std types kept are intrinsics-grade (std::atomic) and pure
+// metaprogramming (std::forward / std::invoke / std::is_void_v). The
+// Scope class uses a hand-rolled intrusive list rather than
+// std::vector. There is no exception handling in this header: a
+// throwing user function will terminate the process (Rust panic-abort
+// semantics).
 
 namespace rusty::thread {
+
+// Error variants from `JoinHandle<T>::join()`. Mechanical errors only —
+// Rust threads have no exception payload to capture.
+enum class JoinError {
+    AlreadyJoined,   // join() was already called on this handle
+    NotJoinable,     // thread was detached or moved-from
+};
 
 namespace detail {
 
@@ -124,7 +135,6 @@ struct JoinState {
     platform::threading::condition_variable cv;
     bool finished = false;
     rusty::Option<T> value;
-    std::exception_ptr error;
 };
 
 template<>
@@ -133,7 +143,6 @@ struct JoinState<void> {
     platform::threading::mutex mutex;
     platform::threading::condition_variable cv;
     bool finished = false;
-    std::exception_ptr error;
 };
 
 // ──────────────────────────────────────────────────────────────────────
@@ -184,19 +193,17 @@ public:
     void operator()() { if (invoke_) invoke_(state_); }
 };
 
-// Run user function and route result/exception into the shared state,
-// then mark finished + notify. Hoisted into a helper so spawn() and
-// Scope::spawn() share the same body.
+// Run user function and route result into the shared state, then mark
+// finished + notify. Hoisted into a helper so spawn() and Scope::spawn()
+// share the same body. No try/catch: a throwing user function will
+// propagate out of the thread body, std::thread will call
+// std::terminate (Rust panic-abort semantics).
 template<typename T, typename F>
 inline void run_into_state(SharedState<JoinState<T>>& state, F&& body) {
-    try {
-        if constexpr (std::is_void_v<T>) {
-            std::forward<F>(body)();
-        } else {
-            state->value = rusty::Option<T>(std::forward<F>(body)());
-        }
-    } catch (...) {
-        state->error = std::current_exception();
+    if constexpr (std::is_void_v<T>) {
+        std::forward<F>(body)();
+    } else {
+        state->value = rusty::Option<T>(std::forward<F>(body)());
     }
     {
         platform::threading::lock_guard<platform::threading::mutex> lock(state->mutex);
@@ -297,16 +304,12 @@ public:
     {}
 
     // Block until thread completes and return a Rust-style Result.
-    rusty::Result<T, std::exception_ptr> join() const {
+    rusty::Result<T, JoinError> join() const {
         if (joined_) {
-            return rusty::Result<T, std::exception_ptr>::Err(
-                std::make_exception_ptr(std::runtime_error("Thread already joined"))
-            );
+            return rusty::Result<T, JoinError>::Err(JoinError::AlreadyJoined);
         }
         if (!thread_.joinable()) {
-            return rusty::Result<T, std::exception_ptr>::Err(
-                std::make_exception_ptr(std::runtime_error("Thread not joinable"))
-            );
+            return rusty::Result<T, JoinError>::Err(JoinError::NotJoinable);
         }
 
         thread_.join();
@@ -314,22 +317,17 @@ public:
 
         // After thread.join() returns the thread function has completed,
         // so state_ is fully populated. No additional sync needed.
-        if (state_->error) {
-            return rusty::Result<T, std::exception_ptr>::Err(state_->error);
-        }
         if constexpr (std::is_void_v<T>) {
-            return rusty::Result<T, std::exception_ptr>::Ok();
+            return rusty::Result<T, JoinError>::Ok();
         } else {
-            return rusty::Result<T, std::exception_ptr>::Ok(state_->value.unwrap());
+            return rusty::Result<T, JoinError>::Ok(state_->value.unwrap());
         }
     }
 
-    // Explicitly detach the thread (like Rust)
+    // Explicitly detach the thread. No-op if already joined or not
+    // joinable (matches Rust's drop-detaches semantics — never throws).
     void detach() {
-        if (joined_) {
-            throw std::runtime_error("Thread already joined");
-        }
-        if (thread_.joinable()) {
+        if (!joined_ && thread_.joinable()) {
             thread_.detach();
         }
     }
@@ -424,26 +422,19 @@ private:
             , state_(std::move(s))
         {}
 
-        rusty::Result<T, std::exception_ptr> join() {
+        rusty::Result<T, JoinError> join() {
             if (joined_) {
-                return rusty::Result<T, std::exception_ptr>::Err(
-                    std::make_exception_ptr(std::runtime_error("Thread already joined"))
-                );
+                return rusty::Result<T, JoinError>::Err(JoinError::AlreadyJoined);
             }
             if (!thread_.joinable()) {
-                return rusty::Result<T, std::exception_ptr>::Err(
-                    std::make_exception_ptr(std::runtime_error("Thread not joinable"))
-                );
+                return rusty::Result<T, JoinError>::Err(JoinError::NotJoinable);
             }
             thread_.join();
             joined_ = true;
-            if (state_->error) {
-                return rusty::Result<T, std::exception_ptr>::Err(state_->error);
-            }
             if constexpr (std::is_void_v<T>) {
-                return rusty::Result<T, std::exception_ptr>::Ok();
+                return rusty::Result<T, JoinError>::Ok();
             } else {
-                return rusty::Result<T, std::exception_ptr>::Ok(state_->value.unwrap());
+                return rusty::Result<T, JoinError>::Ok(state_->value.unwrap());
             }
         }
 
@@ -468,11 +459,9 @@ public:
             : state_(std::move(state))
         {}
 
-        rusty::Result<T, std::exception_ptr> join() const {
+        rusty::Result<T, JoinError> join() const {
             if (!state_) {
-                return rusty::Result<T, std::exception_ptr>::Err(
-                    std::make_exception_ptr(std::runtime_error("Invalid scoped join handle"))
-                );
+                return rusty::Result<T, JoinError>::Err(JoinError::NotJoinable);
             }
             return state_->join();
         }

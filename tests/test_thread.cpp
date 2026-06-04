@@ -141,29 +141,10 @@ void test_is_finished() {
     std::cout << "PASSED\n";
 }
 
-void test_exception_propagation() {
-    std::cout << "Test: Exception propagation... ";
-
-    auto handle = thread::spawn([]() -> int {
-        throw std::runtime_error("Test exception");
-        return 42;
-    });
-
-    auto joined = handle.join();
-    assert(joined.is_err());
-
-    bool caught = false;
-    try {
-        std::rethrow_exception(joined.unwrap_err());
-    } catch (const std::runtime_error& e) {
-        caught = true;
-        assert(std::string(e.what()) == "Test exception");
-    }
-
-    assert(caught);
-
-    std::cout << "PASSED\n";
-}
+// (test_exception_propagation removed — rusty::thread no longer captures
+//  thread-function exceptions. Rust threads have no exception payload; a
+//  throwing function will terminate the process via std::thread's normal
+//  uncaught-exception path, matching Rust's panic=abort default.)
 
 void test_multiple_threads() {
     std::cout << "Test: Multiple threads... ";
@@ -267,7 +248,6 @@ int main() {
     test_detach_on_drop();
     test_explicit_detach();
     test_is_finished();
-    test_exception_propagation();
     test_multiple_threads();
     test_scoped_threads();
     test_scoped_with_arc_mutex();
