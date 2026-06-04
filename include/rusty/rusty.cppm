@@ -1,7 +1,31 @@
 module;
 
-// Keep std declarations in the global module to avoid libstdc++ named-module
-// attachment conflicts in importer translation units.
+// All std + rusty headers go in the GMF (Global Module Fragment), NOT
+// the module purview. The hand-written `<rusty/*.hpp>` files
+// transitively `#include <shared_mutex>` / `<fstream>` /
+// `<netinet/tcp.h>` etc. via the `platform/threading` sub-header
+// chain. Leaving them in the old `export { #include <rusty/*.hpp> }`
+// module-purview block attached every std type they touched to
+// module `rusty`, and importers that also `#include` the same std
+// headers in their own GMF (rrr's module units all do) then saw
+// duplicate declarations — Clang 21+ rejects with:
+//
+//   declaration of 'X' in module rusty follows declaration in the
+//   global module
+//
+// Moving the rusty/*.hpp `#include`s into the GMF below pulls the
+// whole transitive closure onto global-module attachment, matching
+// what importers see in their own GMFs.
+//
+// The rusty types declared via `namespace rusty { … }` inside those
+// headers are reachable in the module purview below as `::rusty::Foo`;
+// the `export namespace rusty { using = … }` aliases re-export them
+// for `import rusty;` consumers. Most consumers (rrr's module units)
+// already `#include <rusty/*.hpp>` directly via their own GMF, so the
+// umbrella's value-add is really the transpiled-port re-exports —
+// Vec / Rc / BTreeMap / BTreeSet / HashMap / HashSet / VecDeque /
+// BinaryHeap / …
+
 #if __has_include(<bits/stdc++.h>)
 #include <bits/stdc++.h>
 #else
@@ -52,6 +76,49 @@ module;
 #include <vector>
 #endif
 
+// Rusty hand-written headers in GMF (not module purview). See block
+// comment at the top for the libstdc++ attachment rationale.
+#include <rusty/box.hpp>
+#include <rusty/vec.hpp>
+#include <rusty/vecdeque.hpp>
+#include <rusty/option.hpp>
+#include <rusty/result.hpp>
+#include <rusty/marker.hpp>
+#include <rusty/ptr.hpp>
+#include <rusty/mem.hpp>
+#include <rusty/alloc.hpp>
+#include <rusty/panic.hpp>
+#include <rusty/cell.hpp>
+#include <rusty/refcell.hpp>
+#include <rusty/fmt.hpp>
+#include <rusty/string.hpp>
+#include <rusty/fn.hpp>
+#include <rusty/function.hpp>
+#include <rusty/array.hpp>
+#include <rusty/slice.hpp>
+#include <rusty/io.hpp>
+#include <rusty/net.hpp>
+#include <rusty/process.hpp>
+#include <rusty/error.hpp>
+#include <rusty/move.hpp>
+#include <rusty/dispatch.hpp>
+#include <rusty/sync/atomic.hpp>
+#include <rusty/sync/mpsc.hpp>
+#include <rusty/sys/fs.hpp>
+#include <rusty/sys/time.hpp>
+#include <rusty/sys/process.hpp>
+#include <rusty/sys/env.hpp>
+#include <rusty/sys/pthread.hpp>
+#include <rusty/os/fd.hpp>
+#include <rusty/net/tcp.hpp>
+#include <rusty/mutex.hpp>
+#include <rusty/rwlock.hpp>
+#include <rusty/condvar.hpp>
+#include <rusty/barrier.hpp>
+#include <rusty/once.hpp>
+#include <rusty/thread.hpp>
+#include <rusty/async.hpp>
+
 export module rusty;
 
 // C++20 rule: every `export import …;` declaration must appear in the
@@ -80,57 +147,13 @@ export import arc_port;
 export using ::operator new;
 export using ::operator delete;
 
-// NOTE:
-// This interface intentionally exports a GCC-14-stable subset of rusty headers.
-// The full umbrella `rusty/rusty.hpp` currently triggers importer ICEs under
-// `-fmodules-ts` for some header combinations.
-export {
-#include <rusty/box.hpp>
-#include <rusty/vec.hpp>
-#include <rusty/vecdeque.hpp>
-#include <rusty/option.hpp>
-#include <rusty/result.hpp>
-#include <rusty/marker.hpp>
-#include <rusty/ptr.hpp>
-#include <rusty/mem.hpp>
-#include <rusty/alloc.hpp>
-#include <rusty/panic.hpp>
-#include <rusty/cell.hpp>
-#include <rusty/refcell.hpp>
-#include <rusty/fmt.hpp>
-#include <rusty/string.hpp>
-#include <rusty/fn.hpp>
-#include <rusty/function.hpp>
-// rusty::BTreeMap / rusty::BTreeSet come from the transpiled btree_port
-// C++20 module. Consumers `import btree_port.btree.map;` (or import the
-// rusty umbrella, which re-exports). The legacy std::map/std::set facades
-// at include/rusty/btreemap.hpp / btreeset.hpp are deleted along with
-// the hand-written VecLegacy they depended on.
-#include <rusty/array.hpp>
-#include <rusty/slice.hpp>
-#include <rusty/io.hpp>
-#include <rusty/net.hpp>
-#include <rusty/process.hpp>
-#include <rusty/error.hpp>
-#include <rusty/move.hpp>
-#include <rusty/dispatch.hpp>
-#include <rusty/sync/atomic.hpp>
-#include <rusty/sync/mpsc.hpp>
-#include <rusty/sys/fs.hpp>
-#include <rusty/sys/time.hpp>
-#include <rusty/sys/process.hpp>
-#include <rusty/sys/env.hpp>
-#include <rusty/sys/pthread.hpp>
-#include <rusty/os/fd.hpp>
-#include <rusty/net/tcp.hpp>
-#include <rusty/mutex.hpp>
-#include <rusty/rwlock.hpp>
-#include <rusty/condvar.hpp>
-#include <rusty/barrier.hpp>
-#include <rusty/once.hpp>
-#include <rusty/thread.hpp>
-#include <rusty/async.hpp>
-} // export
+// rusty/*.hpp includes were moved into the GMF above. Including them
+// inside an `export { … }` block here would attach every std type they
+// transitively touch (`std::shared_mutex`, `std::basic_filebuf`, …) to
+// module rusty and re-introduce the importer-side attachment conflict.
+// `rusty::Box` / `Option` / `Result` / etc. are still reachable for
+// importers because every importer #includes the same rusty/*.hpp via
+// its own GMF (just like the umbrella's GMF here does).
 
 // `rusty::Executor`, `rusty::Vec`, `rusty::BTreeMap`, `rusty::BTreeSet`
 // live in C++20 modules now — the `export import` lines for those have
@@ -208,37 +231,18 @@ namespace collections {
 
 export namespace rusty {
 
+// `rusty::forward` / `rusty::exchange` / `rusty::swap` are no longer
+// (re-)defined here in the module purview — `<rusty/rusty.hpp>` (now
+// in this file's GMF via the `#include <rusty/vec.hpp>` chain, which
+// pulls in the umbrella header) already declares them attached to the
+// global module. Re-declaring them in module rusty's purview would
+// trigger "declaration of 'X' in module rusty follows declaration in
+// the global module" attachment conflicts. Importers reach them via
+// the global-module attachment chain through their own GMF includes.
 using Unit = std::tuple<>;
 using StrView = std::string_view;
 template<typename T, std::size_t Extent = std::dynamic_extent>
 using Span = std::span<T, Extent>;
-
-template<typename T>
-constexpr T&& forward(std::remove_reference_t<T>& value) noexcept {
-    return static_cast<T&&>(value);
-}
-
-template<typename T>
-constexpr T&& forward(std::remove_reference_t<T>&& value) noexcept {
-    static_assert(
-        !std::is_lvalue_reference_v<T>,
-        "rusty::forward<T>(value) with lvalue-reference T requires an lvalue");
-    return static_cast<T&&>(value);
-}
-
-template<typename T, typename U = T>
-constexpr T exchange(T& target, U&& replacement)
-    noexcept(std::is_nothrow_move_constructible_v<T> && std::is_nothrow_assignable_v<T&, U&&>) {
-    T old = rusty::move(target);
-    target = rusty::forward<U>(replacement);
-    return old;
-}
-
-template<typename T>
-constexpr void swap(T& lhs, T& rhs) noexcept(noexcept(std::swap(lhs, rhs))) {
-    using std::swap;
-    swap(lhs, rhs);
-}
 
 template<typename T>
 using ResultVoid = Result<T, void>;
