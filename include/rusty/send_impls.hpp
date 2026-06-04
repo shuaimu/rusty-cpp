@@ -11,7 +11,9 @@ namespace rusty {
 // Forward declarations
 template<typename T, typename A> class Box;
 template<typename T> class Arc;
-template<typename T> class Rc;  // NOT Send!
+// `rusty::Rc<T, A>` lives in module `rc_port`'s purview; cannot fwd-
+// declare it across the GMF / named-module boundary (C++20). The
+// `is_send<Rc<...>>` specialization is part of rc_port.
 // VecLegacy retired — the rusty::Vec is_send specialization for the
 // transpiled vec_port::Vec lives in vec_port itself (or its consumer
 // module). No header-mode forward decl needed.

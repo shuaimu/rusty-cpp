@@ -187,24 +187,21 @@ namespace rusty {
         return result;
     }
     
-    template<typename T>
-    // @lifetime: owned
-    Rc<T> rc_from_box(Box<T>&& box) {
-        T* ptr = box.into_raw();
-        Rc<T> result = Rc<T>::make(std::move(*ptr));
-        delete ptr;
-        return result;
-    }
-    
+    // rc_from_box deleted — rusty::Rc is the transpiled rc_port::Rc,
+    // which lives in module purview and is not reachable from this
+    // header (GMF). Construct rc_port::Rc directly via `Rc<T>::new_(...)`.
+
+
     // Rust-style type aliases for convenience
     template<typename T>
     using Boxed = Box<T>;
     
     template<typename T>
     using Shared = Arc<T>;
-    
-    template<typename T>
-    using RefCounted = Rc<T>;
+
+    // `RefCounted = Rc<T>` alias deleted — rusty::Rc is the transpiled
+    // rc_port::Rc<T,A>, which lives in module purview. Use Rc directly
+    // via `import rusty;` (or `import rc_port;`).
 
     namespace sync {
         template<typename T>

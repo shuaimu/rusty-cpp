@@ -8,7 +8,10 @@ namespace rusty {
 
 // Forward declarations for rusty types
 template<typename T> class Arc;
-template<typename T> class Rc;
+// `rusty::Rc<T, A>` is the transpiled rustc Rc; it lives in module
+// `rc_port`'s purview. C++20 modules forbid forward-declaring the same
+// name in the global module and inside a named module, so no fwd-decl
+// here. Its `is_send` / `is_sync` impls live alongside it.
 template<typename T, typename A> class Box;
 template<typename T> class Cell;
 template<typename T> class RefCell;
@@ -73,9 +76,8 @@ struct is_send<Arc<T>> : std::bool_constant<
     is_send<T>::value && is_sync<T>::value
 > {};
 
-// Rc<T> is NEVER Send (non-atomic refcount)
-template<typename T>
-struct is_send<Rc<T>> : std::false_type {};
+// Rc<T> is NEVER Send — specialization lives in rc_port.cppm alongside
+// the type; cannot specialize across the module boundary from GMF.
 
 // Box<T, A> is Send if T is Send
 template<typename T, typename A>
@@ -139,9 +141,8 @@ struct is_sync<Arc<T>> : std::bool_constant<
     is_send<T>::value && is_sync<T>::value
 > {};
 
-// Rc<T> is NEVER Sync
-template<typename T>
-struct is_sync<Rc<T>> : std::false_type {};
+// Rc<T> is NEVER Sync — specialization lives in rc_port.cppm alongside
+// the type; cannot specialize across the module boundary from GMF.
 
 // Box<T, A> is Sync if T is Sync
 template<typename T, typename A>
