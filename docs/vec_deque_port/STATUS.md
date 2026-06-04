@@ -1,10 +1,15 @@
-# VecDeque port — ✅ Phase B + C via bridge stub (full transpiled body still WIP)
+# VecDeque port — ✅ Phase C smoke test passes on full transpiled body
 
-The full transpiled vec_deque_port has the same multi-template-arg
-blockers as rc_port. **`transpiled/vec_deque_port/vec_deque_port_stub.cppm`**
-re-exports hand-written `rusty::VecDeque<T>` under
-`vec_deque_port::VecDeque<T, A=Global>`. `libvec_deque_port.a` builds;
-`tests/vec_deque_port_module_test.cpp` proves it.
+`transpiled/vec_deque_port/vec_deque_port.cppm` (5767 LOC, full
+transpiled body — no stub re-export) builds clean and powers
+`rusty::collections::VecDeque<T, A>`. `libvec_deque_port.a` builds;
+`tests/vec_deque_port_module_test.cpp` is the Phase C smoke test.
+
+The bridge stub (`vec_deque_port_stub.cppm`) that re-exported the
+hand-written `rusty::VecDeque<T>` has been retired — the multi-
+template-arg blockers in the original Phase A2/B attempt were
+resolved by the same Vec/Box deduction work that landed for
+binary_heap_port + vec_port.
 
 
 

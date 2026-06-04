@@ -207,14 +207,14 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
-# Phase B/C bridge modules for rc_port, arc_port, vec_deque_port,
-# linked_list_port, string_port. Each port's full transpiled .cppm
-# is blocked on transpiler-side issues (catalogued in their STATUS.md
-# files). The bridge `*_port_stub.cppm` re-exports the hand-written
-# equivalent (rusty::Rc, rusty::Arc, rusty::VecDeque, std::list,
-# rusty::String) under the port's namespace — giving us a working
-# library + smoke test today. When transpiler fixes land, swap the
-# stub for the full file.
+# string_port — the last bridge module. The full transpiled body
+# (string_port.cppm, 5983 LOC) builds against core::str::Pattern /
+# core::str::Searcher / alloc::borrow::Cow / core::ascii::Char which
+# aren't yet vendored; until those land, we build the 27-line
+# `string_port_stub.cppm` that re-exports the hand-written
+# `rusty::String` under `string_port::String`. The other "bridge"
+# ports (rc, arc, vec_deque, linked_list, cell) all moved past the
+# bridge — they build from their full transpiled .cppm directly.
 # ──────────────────────────────────────────────────────────────────────
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
    OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")

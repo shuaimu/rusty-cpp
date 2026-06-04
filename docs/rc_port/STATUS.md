@@ -1,15 +1,14 @@
-# Rc port — ✅ Phase B + C via bridge stub (full transpiled body still WIP)
+# Rc port — ✅ Phase C smoke test passes on full transpiled body
 
-The full transpiled `rc_port.cppm` (5094 LOC from `library/alloc/src/rc.rs`)
-is blocked on transpiler-side issues catalogued below. To unblock
-downstream consumers, **`transpiled/rc_port/rc_port_stub.cppm`** re-exports
-the hand-written `rusty::Rc<T>` under the `rc_port::Rc<T, A=Global>`
-alias. `librc_port.a` builds today; `tests/rc_port_module_test.cpp`
-proves it (constructs `Rc<int>(42)` + clone).
+`transpiled/rc_port/rc_port.cppm` (5107 LOC from `library/alloc/src/rc.rs`)
+builds clean and powers `rusty::rc::Rc<T, A>` + `rusty::Rc<T, A>`. The
+~20 codified patches in `post_transpile_patch.py` cover the surface;
+`librc_port.a` builds today and `tests/rc_port_module_test.cpp` is the
+Phase C smoke test (constructs `Rc<int>(42)` + clone).
 
-When transpiler fixes land (the ~20 patches in
-`post_transpile_patch.py` cover most of the surface), swap the stub
-for the full transpiled file and re-run the smoke test.
+The bridge stub (`rc_port_stub.cppm`) that re-exported the hand-written
+`rusty::Rc<T>` has been retired — the transpiler-side blockers (Box T
+deduction, generic match-arm unwrap, etc.) all landed upstream.
 
 
 

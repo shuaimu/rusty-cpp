@@ -190,6 +190,13 @@ namespace collections {
     using BTreeMap = ::rusty::port::collections::btree::map::BTreeMap<K, V, A>;
     template<typename T, typename A = ::rusty::alloc::Global>
     using BTreeSet = ::rusty::port::collections::btree::set::BTreeSet<T, A>;
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap<T, A>;
+    template<typename T, typename A = ::rusty::alloc::Global>
+        requires (rusty::alloc::Allocator<A>)
+    using VecDeque = ::rusty::port::collections::vec_deque::VecDeque<T, A>;
+    template<typename T, typename A = ::rusty::alloc::Global>
+    using LinkedList = ::rusty::port::collections::linked_list::LinkedList<T, A>;
 }
 
 } // export namespace rusty
