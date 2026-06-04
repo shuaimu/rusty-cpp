@@ -1,7 +1,16 @@
-# borrow_port — Phase A1 (transpile clean) + Phase A2 BLOCKED on trait emit
+# borrow_port — Phase A1 (transpile clean) + Phase A2 trait gaps RESOLVED
 
 `library/alloc/src/borrow.rs` (524 LOC source) → `borrow_port.cppm.wip`
 (3870 LOC C++). Transpiles cleanly (0 errors), 4 hand-port slots.
+
+**Update 2026-06-04**: Phase 3a/3b transpiler work resolved both
+trait-machinery error categories (2 and 6 below). Re-transpile against
+post-`fdefbff` transpiler emits `typename ToOwnedTraits<B>::Owned`
+(was `typename B::Owned`) and `typename ToOwnedTraits<B>::Owned::default_()`
+(was `ToOwned::Owned::default_()`) — both well-formed. The remaining
+three categories are patcher-tractable (visit_byte_buf stub, rusty_ext
+namespace qualification, orphan-impl `#if 0` block) — all already-codified
+patterns from sibling ports.
 
 ## Pipeline summary
 
