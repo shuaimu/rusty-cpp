@@ -5269,14 +5269,14 @@ struct Drain {
     ~Drain() noexcept(false) {
         if (_rusty_forgotten) { return; }
         const auto guard = DropGuard((*this));
-        if (mem::needs_drop<T>() && (rusty::detail::deref_if_pointer_like(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).remaining) != 0)) {
+        if (mem::needs_drop<T>() && (rusty::detail::deref_if_pointer_like(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).remaining) != 0)) {
             // @unsafe
             {
-                auto [front, back] = rusty::detail::deref_if_pointer_like(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).as_slices());
-                rusty::detail::deref_if_pointer_like(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).idx) += rusty::len(front);
-                rusty::detail::deref_if_pointer_like(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).remaining) -= rusty::len(front);
+                auto [front, back] = rusty::detail::deref_if_pointer_like(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).as_slices());
+                rusty::detail::deref_if_pointer_like(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).idx) += rusty::len(front);
+                rusty::detail::deref_if_pointer_like(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).remaining) -= rusty::len(front);
                 rusty::ptr::drop_in_place(std::move(front));
-                ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).remaining = 0;
+                ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).remaining = 0;
                 rusty::ptr::drop_in_place(std::move(back));
             }
         }

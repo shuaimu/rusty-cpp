@@ -3928,7 +3928,7 @@ struct IntoIter {
         const auto guard = DropGuard((*this));
         // @unsafe
         {
-            rusty::ptr::drop_in_place(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).as_raw_mut_slice());
+            rusty::ptr::drop_in_place(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).as_raw_mut_slice());
         }
     }
     static inline const rusty::Option<rusty::num::NonZero<size_t>> EXPAND_BY = rusty::num::NonZero<size_t>::new_(1);

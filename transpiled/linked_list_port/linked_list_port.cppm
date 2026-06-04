@@ -4089,7 +4089,7 @@ return std::move(node_shadow1); }(); });
         static_cast<void>(this->push_front_mut(std::move(elt)));
     }
     T& push_front_mut(T elt) {
-        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
+        auto node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
         // @unsafe
         {
             this->push_front_node(std::move(node));
@@ -4103,7 +4103,7 @@ return std::move(node_shadow1); }(); });
         static_cast<void>(this->push_back_mut(std::move(elt)));
     }
     T& push_back_mut(T elt) {
-        auto node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
+        auto node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
         // @unsafe
         {
             this->push_back_node(std::move(node));
@@ -4205,7 +4205,7 @@ return iter.tail;
     ~LinkedList() noexcept(false) {
         if (_rusty_forgotten) { return; }
         const auto guard = DropGuard((*this));
-        while (([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).pop_front_node().is_some()) {
+        while (([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(guard).pop_front_node().is_some()) {
         }
         rusty::mem::forget(std::move(guard));
     }
@@ -4665,7 +4665,7 @@ struct CursorMut {
     void insert_after(T item) {
         // @unsafe
         {
-            auto spliced_node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
+            auto spliced_node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
             auto node_next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().next; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(this->current_field, std::move(node_next), std::move(spliced_node), std::move(spliced_node), static_cast<size_t>(1));
             if (this->current_field.is_none()) {
@@ -4676,7 +4676,7 @@ struct CursorMut {
     void insert_before(T item) {
         // @unsafe
         {
-            auto spliced_node = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
+            auto spliced_node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
             auto node_prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().prev; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(std::move(node_prev), this->current_field, std::move(spliced_node), std::move(spliced_node), static_cast<size_t>(1));
             this->index_field += 1;

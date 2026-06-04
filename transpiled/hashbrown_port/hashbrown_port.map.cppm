@@ -4281,7 +4281,7 @@ return (this->f)(std::move(k), std::move(v));
 });
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return std::make_tuple(static_cast<size_t>(0), ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->inner.iter.size_hint()));
+        return std::make_tuple(static_cast<size_t>(0), ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->inner.iter.size_hint()));
     }
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
 };
@@ -4643,7 +4643,7 @@ struct HashMap {
         const auto hash = make_hash(this->hash_builder, k);
         const auto equivalent_shadow1 = equivalent_key(k);
         const auto hasher = make_hasher(this->hash_builder);
-        return [&]() -> rusty::Option<V> { auto&& _m = this->table.find_or_find_insert_index(std::move(hash), equivalent_shadow1, hasher); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& bucket = rusty::detail::deref_if_pointer(_mv0); return rusty::Option<V>(rusty::mem::replace(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(bucket.as_mut()), std::move(v))); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& index = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Option<V> { // @unsafe
+        return [&]() -> rusty::Option<V> { auto&& _m = this->table.find_or_find_insert_index(std::move(hash), equivalent_shadow1, hasher); if (_m.is_ok()) { auto&& _mv0 = _m.unwrap(); auto&& bucket = rusty::detail::deref_if_pointer(_mv0); return rusty::Option<V>(rusty::mem::replace(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(bucket.as_mut()), std::move(v))); } if (_m.is_err()) { auto&& _mv1 = _m.unwrap_err(); auto&& index = rusty::detail::deref_if_pointer(_mv1); return [&]() -> rusty::Option<V> { // @unsafe
 {
     this->table.insert_at_index(std::move(hash), std::move(index), std::make_tuple(std::move(k), std::move(v)));
 }
@@ -4828,7 +4828,7 @@ struct OccupiedEntry {
     const K& key() const {
         // @unsafe
         {
-            return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->elem.as_ref());
+            return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->elem.as_ref());
         }
     }
     K replace_key(K key) {
@@ -4839,30 +4839,30 @@ struct OccupiedEntry {
         }
     }
     K replace_key_unchecked(K key) {
-        return rusty::mem::replace(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->elem.as_mut()), std::move(key));
+        return rusty::mem::replace(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->elem.as_mut()), std::move(key));
     }
     std::tuple<K, V> remove_entry() {
         // @unsafe
         {
-            return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->table.table.remove(this->elem));
+            return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->table.table.remove(this->elem));
         }
     }
     const V& get() const {
         // @unsafe
         {
-            return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->elem.as_ref());
+            return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->elem.as_ref());
         }
     }
     V& get_mut() {
         // @unsafe
         {
-            return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->elem.as_mut());
+            return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->elem.as_mut());
         }
     }
     V& into_mut() {
         // @unsafe
         {
-            return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->elem.as_mut());
+            return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->elem.as_mut());
         }
     }
     std::tuple<const K&, V&> into_entry() {
@@ -4951,7 +4951,7 @@ struct VacantEntry {
     V& insert(V value) {
         auto& table = this->table.table;
         const auto entry = table.insert_entry(std::move(this->hash), std::make_tuple(std::move(this->key_field), std::move(value)), make_hasher(this->table.hash_builder));
-        return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(entry);
+        return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(entry);
     }
     OccupiedEntry<K, V, S, A> insert_entry(V value) {
         auto elem = this->table.table.insert(std::move(this->hash), std::make_tuple(std::move(this->key_field), std::move(value)), make_hasher(this->table.hash_builder));
@@ -5069,7 +5069,7 @@ struct VacantEntryRef {
     V& insert(V value) {
         auto& table = this->table.table;
         const auto entry = table.insert_entry(std::move(this->hash), std::make_tuple(rusty::to_owned(this->key_field), std::move(value)), make_hasher(this->table.hash_builder));
-        return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(entry);
+        return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(entry);
     }
     V& insert_with_key(K key, V value) {
         return this->insert_entry_with_key(std::move(key), std::move(value)).into_mut();
@@ -5142,14 +5142,14 @@ struct OccupiedError {
 /// instances of any functions like `RawTable::reserve` from being generated
 export template<typename Q, typename V, typename S>
 const auto& make_hasher(const S& hash_builder) {
-    return [=, hash_builder = std::move(hash_builder)](auto&& val) mutable -> uint64_t { return make_hash<Q, S>(hash_builder, rusty::detail::deref_if_pointer_like(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(val))); };
+    return [=, hash_builder = std::move(hash_builder)](auto&& val) mutable -> uint64_t { return make_hash<Q, S>(hash_builder, rusty::detail::deref_if_pointer_like(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(val))); };
 }
 
 /// Ensures that a single closure type across uses of this which, in turn prevents multiple
 /// instances of any functions like `RawTable::reserve` from being generated
 export template<typename Q, typename K, typename V>
 const auto& equivalent_key(const Q& k) {
-    return [=, k = std::move(k)](auto&& x) mutable -> bool { return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), &([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x)); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), &([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x)); } else { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(&([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x))); } })(k); };
+    return [=, k = std::move(k)](auto&& x) mutable -> bool { return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), &([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x)); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), &([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x)); } else { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(&([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x))); } })(k); };
 }
 
 /// Ensures that a single closure type across uses of this which, in turn prevents multiple

@@ -4661,9 +4661,9 @@ if ((!std::is_trivially_destructible_v<T>)) {
         {
             for (auto&& from : rusty::for_in(rusty::iter(source))) {
                 auto index = source.bucket_index(rusty::detail::deref_if_pointer_like(from));
-                const auto to = ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(_guard).bucket(std::move(index));
+                const auto to = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(_guard).bucket(std::move(index));
                 to.write(rusty::clone(from.as_ref()));
-                ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(_guard) = rusty::detail::deref_if_pointer_like(index) + 1;
+                ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(_guard) = rusty::detail::deref_if_pointer_like(index) + 1;
             }
         }
         rusty::mem::forget(std::move(_guard));

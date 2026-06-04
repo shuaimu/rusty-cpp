@@ -3722,7 +3722,7 @@ struct OccupiedEntry {
         return this->inner.key();
     }
     T remove() {
-        return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->inner.remove_entry());
+        return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->inner.remove_entry());
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename K, typename V>
@@ -3731,11 +3731,11 @@ struct OccupiedEntry {
     }
     template<typename K, typename V>
     const K& key() const {
-        return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->handle.reborrow().into_kv());
+        return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->handle.reborrow().into_kv());
     }
     template<typename K, typename V>
     const K& into_key() {
-        return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->handle.into_kv_mut());
+        return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->handle.into_kv_mut());
     }
     template<typename K, typename V>
     std::tuple<K, V> remove_entry() {
@@ -3743,11 +3743,11 @@ struct OccupiedEntry {
     }
     template<typename K, typename V>
     const V& get() const {
-        return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->handle.reborrow().into_kv());
+        return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->handle.reborrow().into_kv());
     }
     template<typename K, typename V>
     V& get_mut() {
-        return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->handle.kv_mut());
+        return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->handle.kv_mut());
     }
     template<typename K, typename V>
     V& into_mut() {
@@ -3851,7 +3851,7 @@ const auto root = map.root.insert(NodeRef::new_leaf(::rusty::clone(this->alloc))
 ::rusty::mem::drop(std::move(ins.left));
 auto& map = this->dormant_map.reborrow();
 auto& root = map.root.as_mut().unwrap();
-return root.push_internal_level(::rusty::clone(this->alloc)).push(std::move(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(ins.right));
+return root.push_internal_level(::rusty::clone(this->alloc)).push(std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(ins.right));
 }); } ::rusty::intrinsics::unreachable(); }();
         // @unsafe
         {

@@ -4976,7 +4976,7 @@ struct UniqueRcUninit {
 
 /// Calculate layout for `RcInner<T>` using the inner value's layout
 rusty::alloc::Layout rc_inner_layout_for_value_layout(rusty::alloc::Layout layout) {
-    return ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(Layout::new_<RcInner<std::tuple<>>>().extend(std::move(layout)).unwrap()).pad_to_align();
+    return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(Layout::new_<RcInner<std::tuple<>>>().extend(std::move(layout)).unwrap()).pad_to_align();
 }
 
 #if 0  // patcher: orphan-impl block stubbed

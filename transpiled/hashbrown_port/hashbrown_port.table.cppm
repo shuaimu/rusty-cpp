@@ -4072,7 +4072,7 @@ struct ExtractIf {
         return this->inner.next([&](auto&& val) { return (this->f)(std::move(val)); });
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return std::make_tuple(static_cast<size_t>(0), ([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->inner.iter.size_hint()));
+        return std::make_tuple(static_cast<size_t>(0), ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->inner.iter.size_hint()));
     }
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item

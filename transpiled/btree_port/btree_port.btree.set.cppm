@@ -4396,7 +4396,7 @@ this->current = ::rusty::Some(handle.left_edge()); return; } ([&](auto&& __v) ->
         const auto handle = edge.insert_recursing(std::move(key), std::move(value), ::rusty::clone(this->alloc), [&](auto&& ins) {
 ::rusty::mem::drop(std::move(ins.left));
 auto& root = this->root.reborrow().as_mut().unwrap();
-return root.push_internal_level(::rusty::clone(this->alloc)).push(std::move(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(ins.right));
+return root.push_internal_level(::rusty::clone(this->alloc)).push(std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(ins.right));
 });
         this->current = ::rusty::Some(handle.left_edge());
         ::rusty::detail::deref_if_pointer_like(this->length) += 1;
@@ -4416,7 +4416,7 @@ this->current = ::rusty::Some(handle.right_edge()); return; } ([&](auto&& __v) -
         const auto handle = edge.insert_recursing(std::move(key), std::move(value), ::rusty::clone(this->alloc), [&](auto&& ins) {
 ::rusty::mem::drop(std::move(ins.left));
 auto& root = this->root.reborrow().as_mut().unwrap();
-return root.push_internal_level(::rusty::clone(this->alloc)).push(std::move(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(ins.right));
+return root.push_internal_level(::rusty::clone(this->alloc)).push(std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(ins.kv)), std::move(ins.right));
 });
         this->current = ::rusty::Some(handle.right_edge());
         ::rusty::detail::deref_if_pointer_like(this->length) += 1;
@@ -4730,10 +4730,10 @@ return std::move(k);
 });
     }
     ::rusty::Option<T> pop_first() {
-        return this->map.pop_first().map([&](auto&& kv) { return std::move(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(kv)); });
+        return this->map.pop_first().map([&](auto&& kv) { return std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(kv)); });
     }
     ::rusty::Option<T> pop_last() {
-        return this->map.pop_last().map([&](auto&& kv) { return std::move(([&](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(kv)); });
+        return this->map.pop_last().map([&](auto&& kv) { return std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(kv)); });
     }
     bool insert(T value) {
         return this->map.insert(std::move(value), btree_internal::SetValZST::default_()).is_none();
@@ -4815,7 +4815,7 @@ return std::move(k);
     }
     template<typename I>
     static BTreeSet<T, A> from_sorted_iter(I iter, A alloc) {
-        auto iter_shadow1 = ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).map([&](auto&& k) { return std::make_tuple(std::move(k), btree_internal::SetValZST::default_()); }); }) { return std::forward<decltype(__recv)>(__recv).map([&](auto&& k) { return std::make_tuple(std::move(k), btree_internal::SetValZST::default_()); }); } else { return std::forward<decltype(__recv)>(__recv)->map([&](auto&& k) { return std::make_tuple(std::move(k), btree_internal::SetValZST::default_()); }); } }(iter));
+        auto iter_shadow1 = ::rusty::detail::deref_if_pointer_like(iter).map([&](auto&& k) { return std::make_tuple(std::move(k), btree_internal::SetValZST::default_()); });
         auto map = map::BTreeMap<T, btree_internal::SetValZST, A>::bulk_build_from_sorted_iter(std::move(iter_shadow1), std::move(alloc));
         return BTreeSet<T, A>(std::move(map));
     }
