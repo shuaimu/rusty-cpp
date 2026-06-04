@@ -61,3 +61,40 @@ cp /tmp/string_port/cpp_out/*.cppm transpiled/string_port/
 
 Per §2.8: **1–2 days** if str/borrow/ascii stubs are acceptable;
 **1 week** if the cross-port deps need real ports first.
+
+## 2026-06-04 attempt
+
+Tried flipping CMake to build the full 5983-LOC body with the
+codified patcher (renamed back from `.wip` for the attempt). After
+stubbing borrow/str/ascii namespaces the patcher reduces errors but
+~20 residual issues remain:
+
+- `rusty::ascii` still referenced in ~10 sites (e.g. line 3668,
+  4163-4164). Patcher's `using ascii::Char` injection at the
+  `string_port` namespace doesn't reach the fully-qualified
+  `rusty::ascii::Char` shape.
+- `std::basic_string_view<char>::Searcher` (line 4081, 4165) — the
+  transpiler assumed string_view has a nested Searcher type. It
+  doesn't. Needs a wrapper that adds the nested type.
+- `rusty::fmt::FormattingOptions`, `rusty::fmt::Formatter::new_`
+  (line 5751) — fmt API surface gaps.
+- `member reference base type 'const char32_t' is not a structure or union`
+  (line 5763) — transpiler emitted `.method()` on primitive
+  `char32_t`. Needs the same SFINAE dispatch shape that resolved
+  `.eq()` on size_t, or a char wrapper.
+- **Type identity mismatch**: the transpiled body's
+  `rusty::port::string::String` is a distinct C++ class from the
+  hand-written `rusty::String`. The bridge `string_port_stub.cppm`
+  works by re-exporting `rusty::String` under the
+  `string_port::String` name; the full body would introduce a
+  *separate* class with the same alias path. Switching breaks any
+  consumer that round-trips through `rusty::string::String`.
+
+Conclusion: pushing to full requires either
+(a) writing `core_str_port` + `alloc_borrow_port` + `alloc_ascii_port`
+(multi-week, the documented dependency-vendoring track), or
+(b) more invasive stubbing that re-routes the type identity question.
+
+The current bridge stub remains the right architecture for now. The
+WIP patcher is kept at `post_transpile_patch.py.wip` for whoever
+picks this up next.
