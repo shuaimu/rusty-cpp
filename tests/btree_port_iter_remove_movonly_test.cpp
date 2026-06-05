@@ -68,8 +68,7 @@ int main() {
     // free of rusty.function's full dependency set.
     using V = std::pair<int64_t, MoveOnlyCallable>;
     using BTreeMap =
-        ::rusty::port::collections::btree::map::BTreeMap<int64_t, V,
-                                                        ::rusty::alloc::Global>;
+        ::btree_port::btree::map::BTreeMap<int64_t, V, ::rusty::alloc::Global>;
 
     auto m = BTreeMap::new_in(::rusty::alloc::Global{});
 

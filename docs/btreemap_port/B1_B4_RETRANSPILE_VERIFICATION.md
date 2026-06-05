@@ -113,12 +113,61 @@ used to match. Updating the patcher to match is a separate work
 item — orthogonal to the B1–B4 fixes, which are demonstrably
 landed at the transpiler level.
 
-## Why we kept the previously-vendored `transpiled/btree_port/*.cppm`
+## Update 2026-06-05 — re-vendor with new patcher (partial)
 
-The vendored cppms remain the older emit (patcher-clean) so the
-existing build path stays green. Updating both the transpiler emit
-AND the patcher in lockstep is the next step; for now the B1–B4
-fixes are validated via:
+The previously-vendored cppms have been **replaced** with the freshly
+re-transpiled output, and `docs/btreemap_port/post_transpile_patch.py`
+extended with the 5 new patches to handle the new emit shape:
+
+- `fix_visit_byte_buf_unknown_vec` — drops the rusty::Vec-referencing
+  serde visitor stub at module purview.
+- `fix_using_rusty_vec` — strips the leftover `using rusty::Vec;`.
+- `fix_leafnode_shadow_arrow` — rewrites `*new_node_shadow1.field` →
+  `new_node_shadow1->field` in split_leaf_data (3 sites).
+- `fix_template_args_primary_scope` updated to handle the no-blank-line
+  emit shape (the relocation no-op'd silently before).
+- Auto-invocation of `btreeset_auto_namespace_postprocess.py` from
+  inside the main patcher's main(), so the alias injection that the
+  auto-namespace mode requires now runs in the pipeline.
+
+**Status**: `libbtree_port.a` builds clean against the fresh re-transpile.
+The 5 patcher-drift errors listed above are gone.
+
+**Caveat**: the move-only-T coverage-pin test
+(`tests/btree_port_iter_remove_movonly_test.cpp`, opt-in via
+`-DRUSTY_CPP_BUILD_BTREE_PORT_ITER_REMOVE_TEST=ON`) still fails to
+compile under template instantiation with errors that match the
+original B1/B2/B3/B4 shapes. The B1–B4 transpiler-side commits cover
+the common cases but have edge-case gaps:
+
+- **B1 gap** — `unique_data_enum_name_for_variant_name` lookup only
+  resolves variants that are unique in the TU. `Leaf` and `Internal`
+  are declared by both `ForceResult` and `Position` in btree_internal,
+  so the resolver leaves a `/* TODO transpiler: unresolved bare-glob
+  variant `Leaf` */ true` placeholder. The match-arm body still
+  accesses `_m._0` on the parent variant; at instantiation time this
+  errors.
+- **B3 gap** — making ALL self-by-value methods emit `const` broke
+  `fn split(mut self, alloc) -> SplitResult` (Rust `mut self` allows
+  in-binding mutation; the C++ equivalent must be non-const). The
+  emit doesn't distinguish `self` from `mut self`.
+- **B2 / B4 gaps** likely have similar edge-case sites surfacing
+  at instantiation.
+
+**Implication for downstream**: the rrr::Alarm BTreeMap swap with
+`std::pair<u64, rusty::Function<void()>>` (move-only value) still
+fails. Keep the `std::map` fallback in `src/rrr/misc/alarm.cpp` for
+the time being. The transpiler binary improvements are real and
+ship the fresh vendored emit ready for any *copyable*-V instantiation;
+move-only-V instantiation needs additional transpiler work (variant
+context tracking for B1; `mut self` vs `self` distinction for B3).
+
+## Why we previously kept the older vendored `transpiled/btree_port/*.cppm`
+
+(Historical, prior to 2026-06-05 update.) The vendored cppms remained
+the older emit (patcher-clean) so the existing build path stayed green.
+Updating both the transpiler emit AND the patcher in lockstep was the
+next step; for now the B1–B4 fixes are validated via:
 
 1. **Transpiler unit tests**: 6 new regression tests in
    `transpiler/src/codegen.rs::tests` (all 1568 transpiler tests

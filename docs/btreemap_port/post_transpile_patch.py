@@ -4095,6 +4095,85 @@ def drop_redundant_rusty_clone(path: Path) -> None:
         print(f"  no local rusty::clone block in: {path.name}")
 
 
+def fix_using_rusty_vec(path: Path) -> None:
+    """Strip the leftover `using rusty::Vec;` line. rusty::Vec lives in the
+    `rusty.vec` submodule which btree_port doesn't import (and shouldn't).
+    The transpiler emits the `using` declaration as a side-effect of seeing
+    `use alloc::vec::Vec` in the input Rust source; the declaration is
+    dead in our build.
+    """
+    src = path.read_text()
+    needle = "using rusty::Vec;\n"
+    if needle not in src:
+        return
+    src = src.replace(needle, "", 1)
+    path.write_text(src)
+    print(f"  stripped `using rusty::Vec;` in: {path.name}")
+
+
+def fix_visit_byte_buf_unknown_vec(path: Path) -> None:
+    """The transpiler emits a leftover `visit_byte_buf(rusty::Vec<uint8_t>)`
+    method inside a serde-style visitor trait stub at module purview (before
+    `namespace btree_port::btree::btree_internal`). `rusty::Vec` lives inside
+    the `rusty.vec` module which the btree TU does NOT import (and shouldn't —
+    btree has no need for Vec). Stub the body so it still parses but the
+    Vec reference is dropped.
+
+    Same shape sibling-port patcher (borrow_port P1) ships the equivalent
+    rewrite; bringing it into btree_port closes the latest emit-shape
+    drift between the two ports.
+    """
+    src = path.read_text()
+    old = (
+        "template<typename E>\n"
+        "rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {\n"
+        "return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));\n"
+        "}\n"
+    )
+    if old not in src:
+        print(f"  no visit_byte_buf rusty::Vec site in: {path.name}")
+        return
+    # `auto&&` here avoids declaring the unused `value` with a missing
+    # template, and we synthesize an empty error so the return type still
+    # deduces correctly.
+    new = (
+        "template<typename E>\n"
+        "rusty::Result<Value, E> visit_byte_buf(auto&& value) {\n"
+        "(void)value; return rusty::Result<Value, E>::Err(E{});\n"
+        "}\n"
+    )
+    src = src.replace(old, new, 1)
+    path.write_text(src)
+    print(f"  rewrote visit_byte_buf rusty::Vec stub in: {path.name}")
+
+
+def fix_leafnode_shadow_arrow(path: Path) -> None:
+    """The transpiler emits `*new_node_shadow1.field` for the body of
+    `split_leaf_data` (where `new_node_shadow1` is a pointer to a LeafNode
+    aliased from a Rust `&mut LeafNode<K, V>` parameter). The precedence
+    is wrong — C++ parses this as `*(ptr.field)` which is invalid.
+
+    Rewrite the three sites in `split_leaf_data` from `*new_node_shadow1.X`
+    to `new_node_shadow1->X` (semantically identical, syntactically valid).
+    """
+    src = path.read_text()
+    rewrites = [
+        ("*new_node_shadow1.len = ", "new_node_shadow1->len = "),
+        ("*new_node_shadow1.keys", "new_node_shadow1->keys"),
+        ("*new_node_shadow1.vals", "new_node_shadow1->vals"),
+    ]
+    changed = False
+    for old, new in rewrites:
+        if old in src:
+            src = src.replace(old, new)
+            changed = True
+    if changed:
+        path.write_text(src)
+        print(f"  rewrote *new_node_shadow1.X → ->X in: {path.name}")
+    else:
+        print(f"  no new_node_shadow1 sites in: {path.name}")
+
+
 def fix_template_args_primary_scope(path: Path) -> None:
     """Move the `template<typename T> struct __TemplateArgs;` primary
     declaration from module purview into the namespace wrap, matching
@@ -4121,22 +4200,38 @@ def fix_template_args_primary_scope(path: Path) -> None:
     )
     # Anchor: the namespace open immediately follows the primary.
     ns_open = "namespace btree_port::btree::btree_internal {\n"
-    if primary_with_comment + "\n" + ns_open in src:
-        # Move the comment + primary to inside the namespace.
-        new_src = src.replace(
-            primary_with_comment + "\n" + ns_open,
-            ns_open + "\n" + primary_with_comment,
-            1,
-        )
-        path.write_text(new_src)
-        print(f"  relocated __TemplateArgs primary into namespace in: {path.name}")
-    elif primary in src and src.index(primary) < src.index(ns_open):
-        # Variant without preceding comment block — same handling.
-        new_src = src.replace(primary + "\n" + ns_open, ns_open + "\n" + primary, 1)
-        path.write_text(new_src)
-        print(f"  relocated __TemplateArgs primary (uncommented) into namespace in: {path.name}")
-    else:
-        print(f"  no __TemplateArgs primary relocation needed in: {path.name}")
+    # Idempotency: if the primary already sits inside the namespace
+    # (i.e. comes AFTER the wrap opens), nothing to do.
+    if primary in src and ns_open in src and src.index(ns_open) < src.index(primary):
+        print(f"  __TemplateArgs primary already in-namespace in: {path.name}")
+        return
+    # Try both the "blank line between primary and ns_open" form and the
+    # "no blank line" form — both have appeared from the transpiler over
+    # the lifetime of this patcher.
+    for blank in ("\n", ""):
+        # Comment + primary + (optional blank) + ns_open
+        with_cmt = primary_with_comment + blank + ns_open
+        if with_cmt in src:
+            new_src = src.replace(
+                with_cmt,
+                ns_open + "\n" + primary_with_comment,
+                1,
+            )
+            path.write_text(new_src)
+            print(f"  relocated __TemplateArgs primary into namespace in: {path.name}")
+            return
+        # Bare primary (no comment) + (optional blank) + ns_open
+        bare = primary + blank + ns_open
+        if bare in src:
+            new_src = src.replace(
+                bare,
+                ns_open + "\n" + primary,
+                1,
+            )
+            path.write_text(new_src)
+            print(f"  relocated __TemplateArgs primary (uncommented) into namespace in: {path.name}")
+            return
+    print(f"  no __TemplateArgs primary relocation needed in: {path.name}")
 
 
 def fix_std_hash_specialization_scope(path: Path) -> None:
@@ -4790,6 +4885,31 @@ def patch_cmake(path: Path, rusty_include_dir: Path) -> None:
         )
 
 
+def _run_auto_namespace_postprocess(cpp_out_dir: Path) -> None:
+    """Invoke the sibling auto-namespace postprocess script.
+
+    That script (`btreeset_auto_namespace_postprocess.py`) is responsible
+    for the cross-cutting auto-namespace fix-ups: hoisting `import` lines
+    out of the namespace wrap, and emitting the `namespace LEAF = ::FULL;`
+    aliases inside each wrap. Doing it as a subprocess keeps the two
+    scripts decoupled — the postprocess is meant to be eventually folded
+    into the transpiler itself (see STATUS.md Step 86).
+    """
+    import subprocess
+
+    script = Path(__file__).resolve().parent / "btreeset_auto_namespace_postprocess.py"
+    if not script.exists():
+        print(f"  [warn] {script.name} not found; skipping auto-namespace step")
+        return
+    try:
+        subprocess.run(
+            [sys.executable, str(script), str(cpp_out_dir)],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"  [warn] auto-namespace postprocess failed: {exc}")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -4812,12 +4932,34 @@ def main() -> int:
     set_mod = cpp_out_dir / "btree_port.btree.set.cppm"
     rusty_include_dir = Path(__file__).resolve().parent.parent.parent / "include"
 
+    # Run the auto-namespace postprocess FIRST — it injects `import` lines
+    # at module purview (the transpiler stuffs them inside the namespace
+    # wrap, which is a parse error) and emits `namespace LEAF = ::FULL;`
+    # aliases inside each wrap so the transpiler's `btree_internal::X` /
+    # `marker::Y` / `node::Z` qualifiers resolve. This used to be a manual
+    # step (documented in STATUS.md §86) but is required for the wraps
+    # to compile, so we invoke it automatically.
+    print(f"[*] running auto-namespace postprocess (imports + aliases)")
+    _run_auto_namespace_postprocess(cpp_out_dir)
+
     print(f"[1/6] patching {internal.name}")
     # Apply the local-clone drop to every transpiled .cppm — each file
     # gets a copy from the transpiler's prelude.
     for p in (internal, map_mod, map_entry, set_mod, set_entry):
         if p.exists():
             drop_redundant_rusty_clone(p)
+    # New-emit-shape drift fixes (sibling-port pattern): drop the leftover
+    # serde visitor stub that references rusty::Vec (unimported in btree),
+    # strip the matching `using rusty::Vec;` declaration that the transpiler
+    # added as a side-effect of seeing `use alloc::vec::Vec` in source,
+    # and rewrite the `*new_node_shadow1.field` pointer-arrow precedence
+    # bug in split_leaf_data. All must run BEFORE patch_internal so that
+    # subsequent stub-injection sites aren't shifted by these edits.
+    for p in (internal, map_mod, map_entry, set_mod, set_entry):
+        if p.exists():
+            fix_using_rusty_vec(p)
+            fix_visit_byte_buf_unknown_vec(p)
+    fix_leafnode_shadow_arrow(internal)
     patch_internal(internal)
     # Phase B: replace stubs with real impls. Runs AFTER patch_internal
     # so that on fresh transpile output we first install the stub
