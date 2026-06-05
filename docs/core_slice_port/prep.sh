@@ -27,6 +27,15 @@ for f in "$SRC_DIR"/*.rs; do
     -e '/^pub use std::slice::sort::/d' \
     -e 's|impl const |impl |g' \
     -e 's|default impl |impl |g' \
+    -e 's|default fn |fn |g' \
+    -e 's|default unsafe fn |unsafe fn |g' \
+    -e 's|\[const\] ||g' \
+    -e 's| const Destruct\b||g' \
+    -e 's|^const trait |trait |g' \
+    -e 's|^const unsafe trait |unsafe trait |g' \
+    -e 's|^const pub trait |pub trait |g' \
+    -e 's|\(impl<[^>]*>\) const |\1 |g' \
+    -e 's|\(unsafe impl<[^>]*>\) const |\1 |g' \
     -e 's|#\[rustc_intrinsic\]||g' \
     -e 's|#\[rustc_inherit_overflow_checks\]||g' \
     -e 's|#\[rustc_no_implicit_autorefs\]||g' \
