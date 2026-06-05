@@ -1,6 +1,8 @@
 #ifndef RUSTY_OPS_HPP
 #define RUSTY_OPS_HPP
 
+#include <cstddef>
+
 // Stub declarations for Rust's `core::ops` traits.
 //
 // These trait names appear in transpiled rustc source as `using ops::Deref;`
@@ -57,7 +59,14 @@ struct RangeFull {};
 template<typename T = void> struct Try {};
 template<typename T = void> struct FromResidual {};
 template<typename B = void, typename C = void> struct ControlFlow {};
-struct IndexRange {};
+struct IndexRange {
+    // `IndexRange` in Rust is a half-open [start, end) over usize, used as
+    // the canonical iteration shape for slice indexing. Stubbed here with
+    // explicit `start`/`end` fields so the transpiled `field_start`/
+    // `field_end` accessors resolve.
+    std::size_t start{};
+    std::size_t end{};
+};
 // `OneSidedRangeBound` — enum in Rust with variants End, EndInclusive,
 // StartInclusive. We model it as an enum-class to support
 // `using ::rusty::ops::OneSidedRangeBound::End;` etc.

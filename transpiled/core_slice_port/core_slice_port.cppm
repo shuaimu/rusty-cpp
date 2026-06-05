@@ -3798,6 +3798,9 @@ namespace rusty_ext {
     export bool is_in_bounds(const rusty::ops::Range<size_t>& self_, size_t len);
 
     export bool is_in_bounds(const rusty::ops::RangeInclusive<size_t>& self_, size_t len);
+    // patcher: is_overlapping fwd-decls for get_disjoint_check_valid call sites.
+    template <class L, class R>
+    bool is_overlapping(const L& self_, const R& other);
 
     export template<typename T>
     rusty::Option<const T&> get(size_t self_, std::span<const T> slice);
@@ -6297,6 +6300,7 @@ struct ChunkByMut {
     }
 };
 
+#if 0  // patcher: stub EscapeAscii — references core_slice_port::iter::FlatMap which is not ported
 /// An iterator over the escaped version of a byte slice.
 ///
 /// This `struct` is created by the [`slice::escape_ascii`] method. See its
@@ -6317,8 +6321,11 @@ export struct EscapeAscii {
 
     EscapeAscii clone() const { return EscapeAscii{.inner = rusty::clone(this->inner)}; }
 };
+#endif  // patcher: end stub EscapeAscii — references core_slice_port::iter::FlatMap which is not ported
 
 
+
+#if 0  // patcher: stub split_point_of — None_t to std::tuple<Direction, size_t> conversion fails in the match-arm IIFE
 /// Calculates the direction and split point of a one-sided range.
 ///
 /// This is a helper function for `split_off` and `split_off_mut` that returns
@@ -6330,7 +6337,10 @@ rusty::Option<std::tuple<Direction, size_t>> split_point_of(const auto& range) {
     using ::rusty::ops::OneSidedRangeBound::StartInclusive;
     return rusty::Option<std::tuple<Direction, size_t>>([&]() -> std::tuple<Direction, size_t> { auto&& _m_tuple = range.bound(); auto&& _m0 = std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)); auto&& _m1 = std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)); if (true) { auto&& StartInclusive = rusty::detail::deref_if_pointer(_m0); auto&& i = rusty::detail::deref_if_pointer(_m1); return std::make_tuple(Direction_Back(), i); } if (true) { auto&& End = rusty::detail::deref_if_pointer(_m0); auto&& i = rusty::detail::deref_if_pointer(_m1); return std::make_tuple(Direction_Front(), i); } if (true) { auto&& EndInclusive = rusty::detail::deref_if_pointer(_m0); auto&& i = rusty::detail::deref_if_pointer(_m1); return std::make_tuple(Direction_Front(), RUSTY_TRY_OPT([&]() { auto&& _checked_lhs = i; return rusty::checked_add(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>(1)); }())); } return [&]() -> std::tuple<Direction, size_t> { rusty::intrinsics::unreachable(); }(); }());
 }
+#endif  // patcher: end stub split_point_of — None_t to std::tuple<Direction, size_t> conversion fails in the match-arm IIFE
 
+
+#if 0  // patcher: stub copy_from_slice_impl — `[[noreturn]]` attribute inside SafeFn template arg is a parse error
 /// Copies `src` to `dest`.
 ///
 /// # Safety
@@ -6350,6 +6360,8 @@ void copy_from_slice_impl(std::span<T> dest, std::span<const T> src) {
         rusty::ptr::copy_nonoverlapping(rusty::as_ptr(src), rusty::as_mut_ptr(dest), rusty::len(dest));
     }
 }
+#endif  // patcher: end stub copy_from_slice_impl — `[[noreturn]]` attribute inside SafeFn template arg is a parse error
+
 
 /// This checks every index against each other, and against `len`.
 ///
@@ -6421,34 +6433,34 @@ bool is_overlapping(const auto& other) const {
 
 #endif  // patcher: end orphan-impl stub
 #if 0  // patcher: orphan-impl block stubbed
-// TODO orphan impl: methods for `range::Range` were declared in this file but the
+// TODO orphan impl: methods for `rusty::ops::Range` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
 // which is not valid C++ outside a member function. Move them into the
 // host type's struct body, or rewrite `this`/`(*this)` to an explicit
 // `self_` parameter and qualify all call sites accordingly.
-// Methods for range::Range
+// Methods for rusty::ops::Range
 bool is_in_bounds(size_t len) const {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range::from((*this)));
 }
 bool is_overlapping(const auto& other) const {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range::from(other)); }) { return rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range::from(other)); } else { return rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::range::from(other))); } })(rusty::range::from((*this)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), other); }) { return rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), other); } else { return rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(other)); } })(rusty::range::from((*this)));
 }
 
 #endif  // patcher: end orphan-impl stub
 #if 0  // patcher: orphan-impl block stubbed
-// TODO orphan impl: methods for `range::RangeInclusive` were declared in this file but the
+// TODO orphan impl: methods for `rusty::ops::RangeInclusive` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
 // which is not valid C++ outside a member function. Move them into the
 // host type's struct body, or rewrite `this`/`(*this)` to an explicit
 // `self_` parameter and qualify all call sites accordingly.
-// Methods for range::RangeInclusive
+// Methods for rusty::ops::RangeInclusive
 bool is_in_bounds(size_t len) const {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range_inclusive::from((*this)));
 }
 bool is_overlapping(const auto& other) const {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range_inclusive::from(other)); }) { return rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range_inclusive::from(other)); } else { return rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::range_inclusive::from(other))); } })(rusty::range_inclusive::from((*this)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), other); }) { return rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), other); } else { return rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(other)); } })(rusty::range_inclusive::from((*this)));
 }
 
 /// Returns `true` if `x` contains any zero byte.
@@ -6459,16 +6471,16 @@ bool is_overlapping(const auto& other) const {
 /// bytes where the borrow propagated all the way to the most significant
 /// bit."
 bool contains_zero_byte(size_t x) {
-    return (((static_cast<size_t>(x) - static_cast<size_t>(LO_USIZE)) & ~x) & rusty::detail::deref_if_pointer_like(HI_USIZE)) != static_cast<size_t>(0);
+    return (((static_cast<size_t>(x) - static_cast<size_t>(core_slice_port::LO_USIZE)) & ~x) & rusty::detail::deref_if_pointer_like(core_slice_port::HI_USIZE)) != static_cast<size_t>(0);
 }
 
 /// Returns the first index matching the byte `x` in `text`.
 #endif  // patcher: end orphan-impl stub
 export rusty::Option<size_t> memchr_(uint8_t x, std::span<const uint8_t> text) {
-    if (rusty::len(text) < (2 * rusty::detail::deref_if_pointer_like(USIZE_BYTES))) {
-        return ::memchr_naive(std::move(x), text);
+    if (rusty::len(text) < (2 * rusty::detail::deref_if_pointer_like(core_slice_port::USIZE_BYTES))) {
+        return memchr_naive(std::move(x), text);
     }
-    return ::memchr_aligned(std::move(x), text);
+    return memchr_aligned(std::move(x), text);
 }
 
 rusty::Option<size_t> memchr_naive(uint8_t x, std::span<const uint8_t> text) {
@@ -6486,6 +6498,7 @@ rusty::Option<size_t> memchr_aligned(uint8_t x, std::span<const uint8_t> text) {
     std::make_tuple();
 }
 
+#if 0  // patcher: stub memrchr — uses .align_to<>() on std::span which has no analogue
 /// Returns the last index matching the byte `x` in `text`.
 export rusty::Option<size_t> memrchr(uint8_t x, std::span<const uint8_t> text) {
     using Chunk [[maybe_unused]] = size_t;
@@ -6498,15 +6511,15 @@ return std::make_tuple(rusty::len(prefix), rusty::detail::deref_if_pointer_like(
         decltype(auto) index = _iflet_scrutinee.unwrap();
         return rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(offset) + rusty::detail::deref_if_pointer_like(index));
     }
-    const auto repeated_x = usize::repeat_u8(std::move(x));
+    const auto repeated_x = ([&] { auto __b = static_cast<size_t>(std::move(x)); return (__b * static_cast<size_t>(0x0101010101010101ULL)); }());
     const auto chunk_bytes = sizeof(Chunk);
     while (rusty::detail::deref_if_pointer_like(offset) > rusty::detail::deref_if_pointer_like(min_aligned_offset)) {
         // @unsafe
         {
             const auto u = *(reinterpret_cast<const Chunk*>(rusty::ptr::add(ptr_shadow1, rusty::detail::deref_if_pointer_like(offset) - (2 * rusty::detail::deref_if_pointer_like(chunk_bytes)))));
             const auto v = *(reinterpret_cast<const Chunk*>(rusty::ptr::add(ptr_shadow1, rusty::detail::deref_if_pointer_like(offset) - rusty::detail::deref_if_pointer_like(chunk_bytes))));
-            const auto zu = ::contains_zero_byte(rusty::detail::deref_if_pointer_like(u) ^ rusty::detail::deref_if_pointer_like(repeated_x));
-            const auto zv = ::contains_zero_byte(rusty::detail::deref_if_pointer_like(v) ^ rusty::detail::deref_if_pointer_like(repeated_x));
+            const auto zu = contains_zero_byte(rusty::detail::deref_if_pointer_like(u) ^ rusty::detail::deref_if_pointer_like(repeated_x));
+            const auto zv = contains_zero_byte(rusty::detail::deref_if_pointer_like(v) ^ rusty::detail::deref_if_pointer_like(repeated_x));
             if (rusty::detail::deref_if_pointer_like(zu) || rusty::detail::deref_if_pointer_like(zv)) {
                 break;
             }
@@ -6515,15 +6528,15 @@ return std::make_tuple(rusty::len(prefix), rusty::detail::deref_if_pointer_like(
     }
     return rusty::iter(rusty::slice_to(text, offset)).rposition([&](auto&& elt) { return rusty::deref_mut(elt) == rusty::detail::deref_if_pointer_like(x); });
 }
+#endif  // patcher: end stub memrchr — uses .align_to<>() on std::span which has no analogue
+
 
 // @unsafe
 export template<typename T>
 std::span<const T> from_raw_parts(std::add_pointer_t<std::add_const_t<T>> data, size_t len) {
-    // @unsafe
-    {
-        std::make_tuple();
-        return [&]() -> std::span<const T> { static const auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(ptr::slice_from_raw_parts(data, std::move(len))); return std::span<const T>(_slice_ref_tmp); }();
-    }
+    // patcher: body inlined — Rust's ptr::slice_from_raw_parts is
+    // not exposed in rusty::ptr; std::span ctor is the C++ analogue.
+    return std::span<const T>(data, len);
 }
 
 /// Performs the same functionality as [`from_raw_parts`], except that a
@@ -6559,24 +6572,27 @@ std::span<const T> from_raw_parts(std::add_pointer_t<std::add_const_t<T>> data, 
 // @unsafe
 export template<typename T>
 std::span<T> from_raw_parts_mut(std::add_pointer_t<T> data, size_t len) {
-    // @unsafe
-    {
-        std::make_tuple();
-        return [&]() -> std::span<T> { static auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(ptr::slice_from_raw_parts_mut(data, std::move(len))); return std::span<T>(_slice_ref_tmp); }();
-    }
+    // patcher: body inlined — see from_raw_parts above.
+    return std::span<T>(data, len);
 }
 
+#if 0  // patcher: stub from_ref — array::from_ref unresolved; replaced by std::span construction
 /// Converts a reference to T into a slice of length 1 (without copying).
 export template<typename T>
 std::span<const T> from_ref(const T& s) {
     return array::from_ref(s);
 }
+#endif  // patcher: end stub from_ref — array::from_ref unresolved; replaced by std::span construction
 
+
+#if 0  // patcher: stub from_mut — array::from_mut unresolved; replaced by std::span construction
 /// Converts a reference to T into a slice of length 1 (without copying).
 export template<typename T>
 std::span<T> from_mut(T& s) {
     return array::from_mut(s);
 }
+#endif  // patcher: end stub from_mut — array::from_mut unresolved; replaced by std::span construction
+
 
 /// Forms a slice from a pointer range.
 ///
@@ -6732,20 +6748,20 @@ void ptr_rotate(size_t left, std::add_pointer_t<T> mid, size_t right) {
     if (((rusty::detail::deref_if_pointer_like(left) == static_cast<size_t>(0))) || ((rusty::detail::deref_if_pointer_like(right) == static_cast<size_t>(0)))) {
         return;
     }
-    if (!/* cfg!(feature = "optimize_for_size") */ && (::const_min(std::move(left), std::move(right)) <= (sizeof(BufType) / sizeof(T)))) {
+    if (false && (const_min(std::move(left), std::move(right)) <= (sizeof(BufType) / sizeof(T)))) {
         // @unsafe
         {
-            ::ptr_rotate_memmove(std::move(left), mid, std::move(right));
+            ptr_rotate_memmove(std::move(left), mid, std::move(right));
         }
-    } else if (!/* cfg!(feature = "optimize_for_size") */ && (((((rusty::detail::deref_if_pointer_like(left) + rusty::detail::deref_if_pointer_like(right)) < 24)) || ((sizeof(T) > size_of<std::array<size_t, 4>>()))))) {
+    } else if (false && (((((rusty::detail::deref_if_pointer_like(left) + rusty::detail::deref_if_pointer_like(right)) < 24)) || ((sizeof(T) > sizeof(std::array<size_t, 4>)))))) {
         // @unsafe
         {
-            ::ptr_rotate_gcd(std::move(left), mid, std::move(right));
+            ptr_rotate_gcd(std::move(left), mid, std::move(right));
         }
     } else {
         // @unsafe
         {
-            ::ptr_rotate_swap(std::move(left), mid, std::move(right));
+            ptr_rotate_swap(std::move(left), mid, std::move(right));
         }
     }
 }
@@ -6962,7 +6978,7 @@ static bool equal_same_length(const auto* lhs, const B* rhs, size_t len) {
 static bool equal_same_length(const auto* lhs, const B* rhs, size_t len) {
     // @unsafe
     {
-        const auto size = std::intrinsics::unchecked_mul(std::move(len), rusty::clone(rusty::clone(Self::SIZE)));
+        const auto size = rusty::intrinsics::unchecked_mul(std::move(len), rusty::clone(rusty::clone(Self::SIZE)));
         return compare_bytes(lhs, rhs, std::move(size)) == 0;
     }
 }
@@ -7203,16 +7219,16 @@ bool slice_contains(std::span<const auto> x) const {
 template<typename T>
 std::add_pointer_t<std::add_const_t<std::span<const T>>> get_offset_len_noubcheck(std::add_pointer_t<std::add_const_t<std::span<const T>>> ptr, size_t offset, size_t len) {
     const auto ptr_shadow1 = reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(ptr);
-    const auto ptr_shadow2 = std::intrinsics::offset(std::move(ptr_shadow1), std::move(offset));
-    return std::intrinsics::aggregate_raw_ptr(std::move(ptr_shadow2), std::move(len));
+    const auto ptr_shadow2 = rusty::intrinsics::offset(std::move(ptr_shadow1), std::move(offset));
+    return rusty::intrinsics::aggregate_raw_ptr(std::move(ptr_shadow2), std::move(len));
 }
 
 // @unsafe
 template<typename T>
 std::add_pointer_t<std::span<T>> get_offset_len_mut_noubcheck(std::add_pointer_t<std::span<T>> ptr, size_t offset, size_t len) {
     const auto ptr_shadow1 = const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(ptr));
-    const auto ptr_shadow2 = std::intrinsics::offset(std::move(ptr_shadow1), std::move(offset));
-    return std::intrinsics::aggregate_raw_ptr(std::move(ptr_shadow2), std::move(len));
+    const auto ptr_shadow2 = rusty::intrinsics::offset(std::move(ptr_shadow1), std::move(offset));
+    return rusty::intrinsics::aggregate_raw_ptr(std::move(ptr_shadow2), std::move(len));
 }
 
 #endif  // patcher: end orphan-impl stub
@@ -7249,7 +7265,7 @@ const T* get_unchecked(const std::span<const T>* slice) const {
     std::make_tuple();
     // @unsafe
     {
-        std::intrinsics::assume(rusty::detail::deref_if_pointer_like((*this)) < rusty::len(slice));
+        rusty::intrinsics::assume(rusty::detail::deref_if_pointer_like((*this)) < rusty::len(slice));
         return slice_get_unchecked(slice, std::move((*this)));
     }
 }
@@ -7281,7 +7297,7 @@ rusty::Option<std::span<const T>> get(std::span<const T> slice) const {
     if (this->end() <= rusty::len(slice)) {
         // @unsafe
         {
-            return rusty::Option<std::span<const T>>(*::get_offset_len_noubcheck(slice, this->start(), rusty::len((*this))));
+            return rusty::Option<std::span<const T>>(*get_offset_len_noubcheck(slice, this->start(), rusty::len((*this))));
         }
     } else {
         return rusty::Option<std::span<const T>>{rusty::None};
@@ -7291,7 +7307,7 @@ rusty::Option<std::span<T>> get_mut(std::span<T> slice) const {
     if (this->end() <= rusty::len(slice)) {
         // @unsafe
         {
-            return rusty::Option<std::span<T>>(*::get_offset_len_mut_noubcheck(slice, this->start(), rusty::len((*this))));
+            return rusty::Option<std::span<T>>(*get_offset_len_mut_noubcheck(slice, this->start(), rusty::len((*this))));
         }
     } else {
         return rusty::Option<std::span<T>>{rusty::None};
@@ -7301,34 +7317,34 @@ const std::span<const T>* get_unchecked(const std::span<const T>* slice) const {
     std::make_tuple();
     // @unsafe
     {
-        return ::get_offset_len_noubcheck(slice, this->start(), rusty::len((*this)));
+        return get_offset_len_noubcheck(slice, this->start(), rusty::len((*this)));
     }
 }
 std::span<T>* get_unchecked_mut(std::span<T>* slice) const {
     std::make_tuple();
     // @unsafe
     {
-        return ::get_offset_len_mut_noubcheck(slice, this->start(), rusty::len((*this)));
+        return get_offset_len_mut_noubcheck(slice, this->start(), rusty::len((*this)));
     }
 }
 std::span<const T> index(std::span<const T> slice) const {
     if (this->end() <= rusty::len(slice)) {
         // @unsafe
         {
-            return *::get_offset_len_noubcheck(slice, this->start(), rusty::len((*this)));
+            return *get_offset_len_noubcheck(slice, this->start(), rusty::len((*this)));
         }
     } else {
-        return ::slice_index_fail(this->start(), this->end(), rusty::len(slice));
+        return slice_index_fail(this->start(), this->end(), rusty::len(slice));
     }
 }
 std::span<T> index_mut(std::span<T> slice) const {
     if (this->end() <= rusty::len(slice)) {
         // @unsafe
         {
-            return *::get_offset_len_mut_noubcheck(slice, this->start(), rusty::len((*this)));
+            return *get_offset_len_mut_noubcheck(slice, this->start(), rusty::len((*this)));
         }
     } else {
-        return ::slice_index_fail(this->start(), this->end(), rusty::len(slice));
+        return slice_index_fail(this->start(), this->end(), rusty::len(slice));
     }
 }
 
@@ -7348,7 +7364,7 @@ rusty::Option<std::span<const T>> get(std::span<const T> slice) const {
 
         // @unsafe
         {
-            return rusty::Option<std::span<const T>>(*::get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len)));
+            return rusty::Option<std::span<const T>>(*get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len)));
         }
     
 #endif
@@ -7362,7 +7378,7 @@ rusty::Option<std::span<T>> get_mut(std::span<T> slice) const {
 
         // @unsafe
         {
-            return rusty::Option<std::span<T>>(*::get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len)));
+            return rusty::Option<std::span<T>>(*get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len)));
         }
     
 #endif
@@ -7374,16 +7390,16 @@ const std::span<const T>* get_unchecked(const std::span<const T>* slice) const {
     std::make_tuple();
     // @unsafe
     {
-        auto new_len = std::intrinsics::unchecked_sub(std::move(this->end), std::move(this->start));
-        return ::get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len));
+        auto new_len = ((std::move(this->end)) - (std::move(this->start)));
+        return get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len));
     }
 }
 std::span<T>* get_unchecked_mut(std::span<T>* slice) const {
     std::make_tuple();
     // @unsafe
     {
-        auto new_len = std::intrinsics::unchecked_sub(std::move(this->end), std::move(this->start));
-        return ::get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len));
+        auto new_len = ((std::move(this->end)) - (std::move(this->start)));
+        return get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len));
     }
 }
 std::span<const T> index(std::span<const T> slice) const {
@@ -7392,12 +7408,12 @@ std::span<const T> index(std::span<const T> slice) const {
 
         // @unsafe
         {
-            return *::get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len));
+            return *get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len));
         }
     
 #endif
 } else {
-        return ::slice_index_fail(std::move(this->start), std::move(this->end), rusty::len(slice));
+        return slice_index_fail(std::move(this->start), std::move(this->end), rusty::len(slice));
     }
 }
 std::span<T> index_mut(std::span<T> slice) const {
@@ -7406,24 +7422,24 @@ std::span<T> index_mut(std::span<T> slice) const {
 
         // @unsafe
         {
-            return *::get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len));
+            return *get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len));
         }
     
 #endif
 } else {
-        return ::slice_index_fail(std::move(this->start), std::move(this->end), rusty::len(slice));
+        return slice_index_fail(std::move(this->start), std::move(this->end), rusty::len(slice));
     }
 }
 
 #endif  // patcher: end orphan-impl stub
 #if 0  // patcher: orphan-impl block stubbed
-// TODO orphan impl: methods for `range::Range` were declared in this file but the
+// TODO orphan impl: methods for `rusty::ops::Range` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
 // which is not valid C++ outside a member function. Move them into the
 // host type's struct body, or rewrite `this`/`(*this)` to an explicit
 // `self_` parameter and qualify all call sites accordingly.
-// Methods for range::Range
+// Methods for rusty::ops::Range
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) const {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
@@ -7515,22 +7531,22 @@ std::span<T>* get_unchecked_mut(std::span<T>* slice) const {
 }
 std::span<const T> index(std::span<const T> slice) const {
     if (rusty::detail::deref_if_pointer_like(this->start) > rusty::len(slice)) {
-        ::slice_index_fail(std::move(this->start), rusty::len(slice), rusty::len(slice));
+        slice_index_fail(std::move(this->start), rusty::len(slice), rusty::len(slice));
     }
     // @unsafe
     {
-        auto new_len = std::intrinsics::unchecked_sub(rusty::len(slice), std::move(this->start));
-        return *::get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len));
+        auto new_len = ((rusty::len(slice)) - (std::move(this->start)));
+        return *get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len));
     }
 }
 std::span<T> index_mut(std::span<T> slice) const {
     if (rusty::detail::deref_if_pointer_like(this->start) > rusty::len(slice)) {
-        ::slice_index_fail(std::move(this->start), rusty::len(slice), rusty::len(slice));
+        slice_index_fail(std::move(this->start), rusty::len(slice), rusty::len(slice));
     }
     // @unsafe
     {
-        auto new_len = std::intrinsics::unchecked_sub(rusty::len(slice), std::move(this->start));
-        return *::get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len));
+        auto new_len = ((rusty::len(slice)) - (std::move(this->start)));
+        return *get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len));
     }
 }
 
@@ -7647,11 +7663,11 @@ std::span<const T> index(std::span<const T> slice) const {
             decltype(auto) new_len = _iflet_scrutinee.unwrap();
             // @unsafe
             {
-                return *::get_offset_len_noubcheck(slice, std::move(start), std::move(new_len));
+                return *get_offset_len_noubcheck(slice, std::move(start), std::move(new_len));
             }
         }
     }
-    return ::slice_index_fail(std::move(start), std::move(end), rusty::len(slice));
+    return slice_index_fail(std::move(start), std::move(end), rusty::len(slice));
 }
 std::span<T> index_mut(std::span<T> slice) const {
     auto&& _let_pat = (*this);
@@ -7666,22 +7682,22 @@ std::span<T> index_mut(std::span<T> slice) const {
             decltype(auto) new_len = _iflet_scrutinee.unwrap();
             // @unsafe
             {
-                return *::get_offset_len_mut_noubcheck(slice, std::move(start), std::move(new_len));
+                return *get_offset_len_mut_noubcheck(slice, std::move(start), std::move(new_len));
             }
         }
     }
-    return ::slice_index_fail(std::move(start), std::move(end), rusty::len(slice));
+    return slice_index_fail(std::move(start), std::move(end), rusty::len(slice));
 }
 
 #endif  // patcher: end orphan-impl stub
 #if 0  // patcher: orphan-impl block stubbed
-// TODO orphan impl: methods for `range::RangeInclusive` were declared in this file but the
+// TODO orphan impl: methods for `rusty::ops::RangeInclusive` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
 // which is not valid C++ outside a member function. Move them into the
 // host type's struct body, or rewrite `this`/`(*this)` to an explicit
 // `self_` parameter and qualify all call sites accordingly.
-// Methods for range::RangeInclusive
+// Methods for rusty::ops::RangeInclusive
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) const {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
@@ -7839,7 +7855,7 @@ std::span<T> index_mut(std::span<T> slice) const {
 export template<typename R>
 rusty::range<size_t> range(R range, rusty::range_to<size_t> bounds) {
     auto len = std::move(rusty::field_end(bounds));
-    return ::into_slice_range(std::move(len), std::make_tuple(rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).start_bound()) { return std::forward<decltype(__recv)>(__recv).start_bound(); }).copied(), rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).end_bound()) { return std::forward<decltype(__recv)>(__recv).end_bound(); }).copied()));
+    return into_slice_range(std::move(len), std::make_tuple(rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).start_bound()) { return std::forward<decltype(__recv)>(__recv).start_bound(); }).copied(), rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).end_bound()) { return std::forward<decltype(__recv)>(__recv).end_bound(); }).copied()));
 }
 
 /// Performs bounds checking of a range without panicking.
@@ -7873,9 +7889,10 @@ rusty::range<size_t> range(R range, rusty::range_to<size_t> bounds) {
 export template<typename R>
 rusty::Option<rusty::range<size_t>> try_range(R range, rusty::range_to<size_t> bounds) {
     auto len = std::move(rusty::field_end(bounds));
-    return ::try_into_slice_range(std::move(len), std::make_tuple(rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).start_bound()) { return std::forward<decltype(__recv)>(__recv).start_bound(); }).copied(), rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).end_bound()) { return std::forward<decltype(__recv)>(__recv).end_bound(); }).copied()));
+    return try_into_slice_range(std::move(len), std::make_tuple(rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).start_bound()) { return std::forward<decltype(__recv)>(__recv).start_bound(); }).copied(), rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).end_bound()) { return std::forward<decltype(__recv)>(__recv).end_bound(); }).copied()));
 }
 
+#if 0  // patcher: stub into_range_unchecked — match-arm bindings dropped; lambdas reference undeclared start/end
 /// Converts a pair of `ops::Bound`s into `ops::Range` without performing any
 /// bounds checking or (in debug) overflow checking.
 export rusty::range<size_t> into_range_unchecked(size_t len, std::tuple<ops::Bound<size_t>, ops::Bound<size_t>> _) {
@@ -7884,7 +7901,10 @@ export rusty::range<size_t> into_range_unchecked(size_t len, std::tuple<ops::Bou
     const auto end = [&]() { auto&& _m = end; if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& i = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(i) + 1; } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& i = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return i; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { return len; } rusty::intrinsics::unreachable(); }();
     return rusty::range(start, end);
 }
+#endif  // patcher: end stub into_range_unchecked — match-arm bindings dropped; lambdas reference undeclared start/end
 
+
+#if 0  // patcher: stub try_into_slice_range — match-arm bindings dropped; lambdas reference undeclared start/end
 /// Converts pair of `ops::Bound`s into `ops::Range`.
 /// Returns `None` on overflowing indices.
 export rusty::Option<rusty::range<size_t>> try_into_slice_range(size_t len, std::tuple<ops::Bound<size_t>, ops::Bound<size_t>> _) {
@@ -7894,17 +7914,23 @@ export rusty::Option<rusty::range<size_t>> try_into_slice_range(size_t len, std:
     const auto start = std::move(start_self_ref_tmp);
     return rusty::Option<rusty::range<size_t>>(rusty::range(start, end));
 }
+#endif  // patcher: end stub try_into_slice_range — match-arm bindings dropped; lambdas reference undeclared start/end
 
+
+#if 0  // patcher: stub into_slice_range — match-arm bindings dropped; companion of into_range_unchecked
 /// Converts pair of `ops::Bound`s into `ops::Range`.
 /// Panics on overflowing indices.
 export rusty::range<size_t> into_slice_range(size_t len, std::tuple<ops::Bound<size_t>, ops::Bound<size_t>> _) {
-    auto end_self_ref_tmp = [&]() { auto&& _m = end; if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& end = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); if (rusty::detail::deref_if_pointer_like(end) >= rusty::detail::deref_if_pointer_like(len)) { return ::slice_index_fail(static_cast<size_t>(0), end, std::move(len)); } } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& end = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(end) + 1; } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& end = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); if (rusty::detail::deref_if_pointer_like(end) > rusty::detail::deref_if_pointer_like(len)) { return ::slice_index_fail(static_cast<size_t>(0), end, std::move(len)); } } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& end = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return end; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { return len; } rusty::intrinsics::unreachable(); }();
+    auto end_self_ref_tmp = [&]() { auto&& _m = end; if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& end = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); if (rusty::detail::deref_if_pointer_like(end) >= rusty::detail::deref_if_pointer_like(len)) { return slice_index_fail(static_cast<size_t>(0), end, std::move(len)); } } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& end = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(end) + 1; } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& end = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); if (rusty::detail::deref_if_pointer_like(end) > rusty::detail::deref_if_pointer_like(len)) { return slice_index_fail(static_cast<size_t>(0), end, std::move(len)); } } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& end = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return end; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { return len; } rusty::intrinsics::unreachable(); }();
     auto end = std::move(end_self_ref_tmp);
-    auto start_self_ref_tmp = [&]() { auto&& _m = start; if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& start = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); if (rusty::detail::deref_if_pointer_like(start) >= rusty::detail::deref_if_pointer_like(end)) { return ::slice_index_fail(start, std::move(end), std::move(len)); } } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& start = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(start) + 1; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& start = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); if (rusty::detail::deref_if_pointer_like(start) > rusty::detail::deref_if_pointer_like(end)) { return ::slice_index_fail(start, std::move(end), std::move(len)); } } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& start = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return start; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { return 0; } rusty::intrinsics::unreachable(); }();
+    auto start_self_ref_tmp = [&]() { auto&& _m = start; if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& start = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); if (rusty::detail::deref_if_pointer_like(start) >= rusty::detail::deref_if_pointer_like(end)) { return slice_index_fail(start, std::move(end), std::move(len)); } } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& start = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(start) + 1; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& start = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); if (rusty::detail::deref_if_pointer_like(start) > rusty::detail::deref_if_pointer_like(end)) { return slice_index_fail(start, std::move(end), std::move(len)); } } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& start = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return start; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { return 0; } rusty::intrinsics::unreachable(); }();
     auto start = std::move(start_self_ref_tmp);
     return rusty::range(start, end);
 }
+#endif  // patcher: end stub into_slice_range — match-arm bindings dropped; companion of into_range_unchecked
 
+
+#if 0  // patcher: stub is_ascii_simple — uint8_t.is_ascii() method-call has no analogue
 /// ASCII test *without* the chunk-at-a-time optimizations.
 ///
 /// This is carefully structured to produce nice small code -- it's smaller in
@@ -7923,7 +7949,10 @@ export bool is_ascii_simple(std::span<const uint8_t> bytes) {
     }
     return rusty::is_empty(bytes);
 }
+#endif  // patcher: end stub is_ascii_simple — uint8_t.is_ascii() method-call has no analogue
 
+
+#if 0  // patcher: stub is_ascii(s) duplicate#1 — empty body
 /// Optimized ASCII test that will use usize-at-a-time operations instead of
 /// byte-at-a-time operations (when possible).
 ///
@@ -7939,7 +7968,10 @@ export bool is_ascii_simple(std::span<const uint8_t> bytes) {
 bool is_ascii(std::span<const uint8_t> s) {
     std::make_tuple();
 }
+#endif  // patcher: end stub is_ascii(s) duplicate#1 — empty body
 
+
+#if 0  // patcher: stub is_ascii_sse2 — uses x86 SSE2 intrinsics + as_chunks
 bool is_ascii_sse2(std::span<const uint8_t> bytes) {
     // Rust-only: using std::arch::x86_64::__m128i;
     // Rust-only: using std::arch::x86_64::_mm_loadu_si128;
@@ -7960,7 +7992,10 @@ return _mm_movemask_epi8(std::move(combined)); }();
     }
     return rusty::iter(rest).all([&](auto&& b) { return b.is_ascii(); });
 }
+#endif  // patcher: end stub is_ascii_sse2 — uses x86 SSE2 intrinsics + as_chunks
 
+
+#if 0  // patcher: stub is_ascii(bytes) duplicate#2 — empty body
 /// ASCII test optimized to use the `pmovmskb` instruction on `x86-64`.
 ///
 /// Uses explicit SSE2 intrinsics to prevent LLVM from auto-vectorizing with
@@ -7970,7 +8005,10 @@ bool is_ascii(std::span<const uint8_t> bytes) {
     constexpr size_t NONASCII_MASK = (rusty::detail::deref_if_pointer_like(std::numeric_limits<size_t>::max()) / static_cast<size_t>(255)) * static_cast<size_t>(128);
     std::make_tuple();
 }
+#endif  // patcher: end stub is_ascii(bytes) duplicate#2 — empty body
 
+
+#if 0  // patcher: stub is_ascii(bytes) duplicate#3 — uses uint8_t.is_ascii() method
 /// ASCII test optimized to use the `vmskltz.b` instruction on `loongarch64`.
 ///
 /// Other platforms are not likely to benefit from this code structure, so they
@@ -7996,41 +8034,62 @@ bool is_ascii(std::span<const uint8_t> bytes) {
     }
     return std::move(is_ascii_shadow1);
 }
+#endif  // patcher: end stub is_ascii(bytes) duplicate#3 — uses uint8_t.is_ascii() method
 
 
+
+#if 0  // patcher: stub EscapeAscii::* — orphan to stubbed struct
 rusty::Option<uint8_t> EscapeAscii::next() {
     using Item = typename EscapeAscii::Item;
     return this->inner.next();
 }
+#endif  // patcher: end stub EscapeAscii::* — orphan to stubbed struct
 
+
+#if 0  // patcher: stub EscapeAscii::* — orphan to stubbed struct
 std::tuple<size_t, rusty::Option<size_t>> EscapeAscii::size_hint() const {
     using Item = typename EscapeAscii::Item;
     return this->inner.size_hint();
 }
+#endif  // patcher: end stub EscapeAscii::* — orphan to stubbed struct
 
+
+#if 0  // patcher: stub EscapeAscii::* — orphan to stubbed struct
 template<typename Acc, typename Fold>
 auto EscapeAscii::try_fold(Acc init, Fold fold) {
     using Item = typename EscapeAscii::Item;
     using R = std::remove_cvref_t<std::invoke_result_t<Fold&, Acc, uint8_t>>;
     return rusty::try_fold(this->inner, std::move(init), std::move(fold));
 }
+#endif  // patcher: end stub EscapeAscii::* — orphan to stubbed struct
 
+
+#if 0  // patcher: stub EscapeAscii::* — orphan to stubbed struct
 template<typename Acc, typename Fold>
 Acc EscapeAscii::fold(Acc init, Fold fold) const {
     using Item = typename EscapeAscii::Item;
     return rusty::fold(this->inner, std::move(init), std::move(fold));
 }
+#endif  // patcher: end stub EscapeAscii::* — orphan to stubbed struct
 
+
+#if 0  // patcher: stub EscapeAscii::* — orphan to stubbed struct
 rusty::Option<uint8_t> EscapeAscii::last() const {
     using Item = typename EscapeAscii::Item;
     return this->next_back();
 }
+#endif  // patcher: end stub EscapeAscii::* — orphan to stubbed struct
 
+
+#if 0  // patcher: stub EscapeAscii::* — orphan to stubbed struct
 rusty::Option<uint8_t> EscapeAscii::next_back() {
     using Item = typename EscapeAscii::Item;
     return this->inner.next_back();
 }
+#endif  // patcher: end stub EscapeAscii::* — orphan to stubbed struct
 
+
+#if 0  // patcher: stub EscapeAscii::* — orphan to stubbed struct
 rusty::fmt::Result EscapeAscii::fmt(rusty::fmt::Formatter& f) const {
     using Item = typename EscapeAscii::Item;
     const rusty::SafeFn<bool(uint8_t)> needs_escape = +[](uint8_t b) -> bool {
@@ -8064,6 +8123,8 @@ return !needs_escape(std::move(b));
     }
     return rusty::fmt::Result::Ok(std::make_tuple());
 }
+#endif  // patcher: end stub EscapeAscii::* — orphan to stubbed struct
+
 
 // Extension trait GetDisjointMutIndex lowered to rusty_ext:: free functions
 namespace rusty_ext {
@@ -8082,15 +8143,21 @@ namespace rusty_ext {
         return ((rusty::detail::deref_if_pointer_like(rusty::field_start(self_)) <= rusty::detail::deref_if_pointer_like(rusty::field_end(self_)))) & ((rusty::detail::deref_if_pointer_like(rusty::field_end(self_)) < rusty::detail::deref_if_pointer_like(len)));
     }
 
+#if 0  // patcher: stub is_in_bounds(Range) — uses rusty::range::from which treats rusty::range as a namespace
     export bool is_in_bounds(const rusty::ops::Range<size_t>& self_, size_t len) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range::from(self_));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(self_);
     }
+#endif  // patcher: end stub is_in_bounds(Range) — uses rusty::range::from which treats rusty::range as a namespace
 
+
+#if 0  // patcher: stub is_in_bounds(RangeInclusive) — same rusty::range_inclusive namespace issue
     export bool is_in_bounds(const rusty::ops::RangeInclusive<size_t>& self_, size_t len) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range_inclusive::from(self_));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(self_);
     }
+#endif  // patcher: end stub is_in_bounds(RangeInclusive) — same rusty::range_inclusive namespace issue
+
 
 }
 
@@ -8185,60 +8252,60 @@ public:
 };
 
 template <>
-class GetDisjointMutIndexAdapter<range::Range<size_t>> final : public GetDisjointMutIndex {
-    range::Range<size_t> value_;
+class GetDisjointMutIndexAdapter<rusty::ops::Range<size_t>> final : public GetDisjointMutIndex {
+    rusty::ops::Range<size_t> value_;
 public:
-    explicit GetDisjointMutIndexAdapter(range::Range<size_t> v) : value_(std::move(v)) {}
+    explicit GetDisjointMutIndexAdapter(rusty::ops::Range<size_t> v) : value_(std::move(v)) {}
     bool is_in_bounds(size_t len) const override {
         return rusty_ext::is_in_bounds(value_, len);
     }
 };
 
 template <>
-class GetDisjointMutIndexAdapterRef<range::Range<size_t>> final : public GetDisjointMutIndex {
-    const range::Range<size_t>& value_;
+class GetDisjointMutIndexAdapterRef<rusty::ops::Range<size_t>> final : public GetDisjointMutIndex {
+    const rusty::ops::Range<size_t>& value_;
 public:
-    explicit GetDisjointMutIndexAdapterRef(const range::Range<size_t>& u) : value_(u) {}
+    explicit GetDisjointMutIndexAdapterRef(const rusty::ops::Range<size_t>& u) : value_(u) {}
     bool is_in_bounds(size_t len) const override {
         return rusty_ext::is_in_bounds(value_, len);
     }
 };
 
 template <>
-class GetDisjointMutIndexAdapterRefMut<range::Range<size_t>> final : public GetDisjointMutIndex {
-    range::Range<size_t>& value_;
+class GetDisjointMutIndexAdapterRefMut<rusty::ops::Range<size_t>> final : public GetDisjointMutIndex {
+    rusty::ops::Range<size_t>& value_;
 public:
-    explicit GetDisjointMutIndexAdapterRefMut(range::Range<size_t>& u) : value_(u) {}
+    explicit GetDisjointMutIndexAdapterRefMut(rusty::ops::Range<size_t>& u) : value_(u) {}
     bool is_in_bounds(size_t len) const override {
         return rusty_ext::is_in_bounds(value_, len);
     }
 };
 
 template <>
-class GetDisjointMutIndexAdapter<range::RangeInclusive<size_t>> final : public GetDisjointMutIndex {
-    range::RangeInclusive<size_t> value_;
+class GetDisjointMutIndexAdapter<rusty::ops::RangeInclusive<size_t>> final : public GetDisjointMutIndex {
+    rusty::ops::RangeInclusive<size_t> value_;
 public:
-    explicit GetDisjointMutIndexAdapter(range::RangeInclusive<size_t> v) : value_(std::move(v)) {}
+    explicit GetDisjointMutIndexAdapter(rusty::ops::RangeInclusive<size_t> v) : value_(std::move(v)) {}
     bool is_in_bounds(size_t len) const override {
         return rusty_ext::is_in_bounds(value_, len);
     }
 };
 
 template <>
-class GetDisjointMutIndexAdapterRef<range::RangeInclusive<size_t>> final : public GetDisjointMutIndex {
-    const range::RangeInclusive<size_t>& value_;
+class GetDisjointMutIndexAdapterRef<rusty::ops::RangeInclusive<size_t>> final : public GetDisjointMutIndex {
+    const rusty::ops::RangeInclusive<size_t>& value_;
 public:
-    explicit GetDisjointMutIndexAdapterRef(const range::RangeInclusive<size_t>& u) : value_(u) {}
+    explicit GetDisjointMutIndexAdapterRef(const rusty::ops::RangeInclusive<size_t>& u) : value_(u) {}
     bool is_in_bounds(size_t len) const override {
         return rusty_ext::is_in_bounds(value_, len);
     }
 };
 
 template <>
-class GetDisjointMutIndexAdapterRefMut<range::RangeInclusive<size_t>> final : public GetDisjointMutIndex {
-    range::RangeInclusive<size_t>& value_;
+class GetDisjointMutIndexAdapterRefMut<rusty::ops::RangeInclusive<size_t>> final : public GetDisjointMutIndex {
+    rusty::ops::RangeInclusive<size_t>& value_;
 public:
-    explicit GetDisjointMutIndexAdapterRefMut(range::RangeInclusive<size_t>& u) : value_(u) {}
+    explicit GetDisjointMutIndexAdapterRefMut(rusty::ops::RangeInclusive<size_t>& u) : value_(u) {}
     bool is_in_bounds(size_t len) const override {
         return rusty_ext::is_in_bounds(value_, len);
     }
@@ -8278,7 +8345,7 @@ namespace rusty_ext {
         std::make_tuple();
         // @unsafe
         {
-            std::intrinsics::assume(rusty::detail::deref_if_pointer_like(self_) < rusty::len(slice));
+            rusty::intrinsics::assume(rusty::detail::deref_if_pointer_like(self_) < rusty::len(slice));
             return slice_get_unchecked(slice, std::move(self_));
         }
     }
@@ -8311,7 +8378,7 @@ namespace rusty_ext {
         if (rusty::field_end(self_) <= rusty::len(slice)) {
             // @unsafe
             {
-                return rusty::Option<std::span<const T>>(*::get_offset_len_noubcheck(slice, rusty::field_start(self_), rusty::len(self_)));
+                return rusty::Option<std::span<const T>>(*get_offset_len_noubcheck(slice, rusty::field_start(self_), rusty::len(self_)));
             }
         } else {
             return rusty::Option<std::span<const T>>{rusty::None};
@@ -8324,7 +8391,7 @@ namespace rusty_ext {
         if (rusty::field_end(self_) <= rusty::len(slice)) {
             // @unsafe
             {
-                return rusty::Option<std::span<T>>(*::get_offset_len_mut_noubcheck(slice, rusty::field_start(self_), rusty::len(self_)));
+                return rusty::Option<std::span<T>>(*get_offset_len_mut_noubcheck(slice, rusty::field_start(self_), rusty::len(self_)));
             }
         } else {
             return rusty::Option<std::span<T>>{rusty::None};
@@ -8337,7 +8404,7 @@ namespace rusty_ext {
         std::make_tuple();
         // @unsafe
         {
-            return ::get_offset_len_noubcheck(slice, rusty::field_start(self_), rusty::len(self_));
+            return get_offset_len_noubcheck(slice, rusty::field_start(self_), rusty::len(self_));
         }
     }
 
@@ -8347,7 +8414,7 @@ namespace rusty_ext {
         std::make_tuple();
         // @unsafe
         {
-            return ::get_offset_len_mut_noubcheck(slice, rusty::field_start(self_), rusty::len(self_));
+            return get_offset_len_mut_noubcheck(slice, rusty::field_start(self_), rusty::len(self_));
         }
     }
 
@@ -8357,10 +8424,10 @@ namespace rusty_ext {
         if (rusty::field_end(self_) <= rusty::len(slice)) {
             // @unsafe
             {
-                return *::get_offset_len_noubcheck(slice, rusty::field_start(self_), rusty::len(self_));
+                return *get_offset_len_noubcheck(slice, rusty::field_start(self_), rusty::len(self_));
             }
         } else {
-            return ::slice_index_fail(rusty::field_start(self_), rusty::field_end(self_), rusty::len(slice));
+            return slice_index_fail(rusty::field_start(self_), rusty::field_end(self_), rusty::len(slice));
         }
     }
 
@@ -8370,10 +8437,10 @@ namespace rusty_ext {
         if (rusty::field_end(self_) <= rusty::len(slice)) {
             // @unsafe
             {
-                return *::get_offset_len_mut_noubcheck(slice, rusty::field_start(self_), rusty::len(self_));
+                return *get_offset_len_mut_noubcheck(slice, rusty::field_start(self_), rusty::len(self_));
             }
         } else {
-            return ::slice_index_fail(rusty::field_start(self_), rusty::field_end(self_), rusty::len(slice));
+            return slice_index_fail(rusty::field_start(self_), rusty::field_end(self_), rusty::len(slice));
         }
     }
 
@@ -8385,7 +8452,7 @@ namespace rusty_ext {
 
             // @unsafe
             {
-                return rusty::Option<std::span<const T>>(*::get_offset_len_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len)));
+                return rusty::Option<std::span<const T>>(*get_offset_len_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len)));
             }
         
 #endif
@@ -8402,7 +8469,7 @@ namespace rusty_ext {
 
             // @unsafe
             {
-                return rusty::Option<std::span<T>>(*::get_offset_len_mut_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len)));
+                return rusty::Option<std::span<T>>(*get_offset_len_mut_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len)));
             }
         
 #endif
@@ -8417,8 +8484,8 @@ namespace rusty_ext {
         std::make_tuple();
         // @unsafe
         {
-            auto new_len = std::intrinsics::unchecked_sub(std::move(rusty::field_end(self_)), std::move(rusty::field_start(self_)));
-            return ::get_offset_len_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
+            auto new_len = ((std::move(rusty::field_end(self_))) - (std::move(rusty::field_start(self_))));
+            return get_offset_len_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
         }
     }
 
@@ -8428,8 +8495,8 @@ namespace rusty_ext {
         std::make_tuple();
         // @unsafe
         {
-            auto new_len = std::intrinsics::unchecked_sub(std::move(rusty::field_end(self_)), std::move(rusty::field_start(self_)));
-            return ::get_offset_len_mut_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
+            auto new_len = ((std::move(rusty::field_end(self_))) - (std::move(rusty::field_start(self_))));
+            return get_offset_len_mut_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
         }
     }
 
@@ -8441,12 +8508,12 @@ namespace rusty_ext {
 
             // @unsafe
             {
-                return *::get_offset_len_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
+                return *get_offset_len_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
             }
         
 #endif
 } else {
-            return ::slice_index_fail(std::move(rusty::field_start(self_)), std::move(rusty::field_end(self_)), rusty::len(slice));
+            return slice_index_fail(std::move(rusty::field_start(self_)), std::move(rusty::field_end(self_)), rusty::len(slice));
         }
     }
 
@@ -8458,25 +8525,25 @@ namespace rusty_ext {
 
             // @unsafe
             {
-                return *::get_offset_len_mut_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
+                return *get_offset_len_mut_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
             }
         
 #endif
 } else {
-            return ::slice_index_fail(std::move(rusty::field_start(self_)), std::move(rusty::field_end(self_)), rusty::len(slice));
+            return slice_index_fail(std::move(rusty::field_start(self_)), std::move(rusty::field_end(self_)), rusty::len(slice));
         }
     }
 
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::ops::Range<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::ops::Range<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
@@ -8484,7 +8551,7 @@ namespace rusty_ext {
         using Self = std::remove_reference_t<decltype(self_)>;
         // @unsafe
         {
-            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(rusty::range::from(std::move(self_)), slice);
+            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(std::move(self_), slice);
         }
     }
 
@@ -8493,20 +8560,20 @@ namespace rusty_ext {
         using Self = std::remove_reference_t<decltype(self_)>;
         // @unsafe
         {
-            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(rusty::range::from(std::move(self_)), slice);
+            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(std::move(self_), slice);
         }
     }
 
     export template<typename T>
     std::span<const T> index(rusty::ops::Range<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
     std::span<T> index_mut(rusty::ops::Range<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
@@ -8585,12 +8652,12 @@ namespace rusty_ext {
     std::span<const T> index(rusty::range_from<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
         if (rusty::detail::deref_if_pointer_like(self_.start) > rusty::len(slice)) {
-            ::slice_index_fail(std::move(self_.start), rusty::len(slice), rusty::len(slice));
+            slice_index_fail(std::move(self_.start), rusty::len(slice), rusty::len(slice));
         }
         // @unsafe
         {
-            auto new_len = std::intrinsics::unchecked_sub(rusty::len(slice), std::move(self_.start));
-            return *::get_offset_len_noubcheck(slice, std::move(self_.start), std::move(new_len));
+            auto new_len = ((rusty::len(slice)) - (std::move(self_.start)));
+            return *get_offset_len_noubcheck(slice, std::move(self_.start), std::move(new_len));
         }
     }
 
@@ -8598,25 +8665,25 @@ namespace rusty_ext {
     std::span<T> index_mut(rusty::range_from<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
         if (rusty::detail::deref_if_pointer_like(self_.start) > rusty::len(slice)) {
-            ::slice_index_fail(std::move(self_.start), rusty::len(slice), rusty::len(slice));
+            slice_index_fail(std::move(self_.start), rusty::len(slice), rusty::len(slice));
         }
         // @unsafe
         {
-            auto new_len = std::intrinsics::unchecked_sub(rusty::len(slice), std::move(self_.start));
-            return *::get_offset_len_mut_noubcheck(slice, std::move(self_.start), std::move(new_len));
+            auto new_len = ((rusty::len(slice)) - (std::move(self_.start)));
+            return *get_offset_len_mut_noubcheck(slice, std::move(self_.start), std::move(new_len));
         }
     }
 
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::ops::RangeFrom<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::ops::RangeFrom<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
@@ -8624,7 +8691,7 @@ namespace rusty_ext {
         using Self = std::remove_reference_t<decltype(self_)>;
         // @unsafe
         {
-            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(rusty::range_from::from(std::move(self_)), slice);
+            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(std::move(self_), slice);
         }
     }
 
@@ -8633,20 +8700,20 @@ namespace rusty_ext {
         using Self = std::remove_reference_t<decltype(self_)>;
         // @unsafe
         {
-            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(rusty::range_from::from(std::move(self_)), slice);
+            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(std::move(self_), slice);
         }
     }
 
     export template<typename T>
     std::span<const T> index(rusty::ops::RangeFrom<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
     std::span<T> index_mut(rusty::ops::RangeFrom<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
@@ -8685,6 +8752,7 @@ namespace rusty_ext {
         return slice;
     }
 
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::range_inclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
@@ -8694,7 +8762,10 @@ namespace rusty_ext {
             return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(self_.into_slice_range());
         }
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::range_inclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
@@ -8704,7 +8775,10 @@ namespace rusty_ext {
             return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(self_.into_slice_range());
         }
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     std::add_pointer_t<std::add_const_t<std::span<const T>>> get_unchecked(rusty::range_inclusive<size_t> self_, std::add_pointer_t<std::add_const_t<std::span<const T>>> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
@@ -8713,7 +8787,10 @@ namespace rusty_ext {
             return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(self_.into_slice_range(), slice);
         }
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     std::add_pointer_t<std::span<T>> get_unchecked_mut(rusty::range_inclusive<size_t> self_, std::add_pointer_t<std::span<T>> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
@@ -8722,7 +8799,10 @@ namespace rusty_ext {
             return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(self_.into_slice_range(), slice);
         }
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     std::span<const T> index(rusty::range_inclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
@@ -8738,13 +8818,16 @@ namespace rusty_ext {
                 decltype(auto) new_len = _iflet_scrutinee.unwrap();
                 // @unsafe
                 {
-                    return *::get_offset_len_noubcheck(slice, std::move(start), std::move(new_len));
+                    return *get_offset_len_noubcheck(slice, std::move(start), std::move(new_len));
                 }
             }
         }
-        return ::slice_index_fail(std::move(start), std::move(end), rusty::len(slice));
+        return slice_index_fail(std::move(start), std::move(end), rusty::len(slice));
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     std::span<T> index_mut(rusty::range_inclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
@@ -8760,23 +8843,25 @@ namespace rusty_ext {
                 decltype(auto) new_len = _iflet_scrutinee.unwrap();
                 // @unsafe
                 {
-                    return *::get_offset_len_mut_noubcheck(slice, std::move(start), std::move(new_len));
+                    return *get_offset_len_mut_noubcheck(slice, std::move(start), std::move(new_len));
                 }
             }
         }
-        return ::slice_index_fail(std::move(start), std::move(end), rusty::len(slice));
+        return slice_index_fail(std::move(start), std::move(end), rusty::len(slice));
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
+
 
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::ops::RangeInclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::ops::RangeInclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
@@ -8784,7 +8869,7 @@ namespace rusty_ext {
         using Self = std::remove_reference_t<decltype(self_)>;
         // @unsafe
         {
-            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(rusty::range_inclusive::from(std::move(self_)), slice);
+            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(std::move(self_), slice);
         }
     }
 
@@ -8793,20 +8878,20 @@ namespace rusty_ext {
         using Self = std::remove_reference_t<decltype(self_)>;
         // @unsafe
         {
-            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(rusty::range_inclusive::from(std::move(self_)), slice);
+            return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(std::move(self_), slice);
         }
     }
 
     export template<typename T>
     std::span<const T> index(rusty::ops::RangeInclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
     std::span<T> index_mut(rusty::ops::RangeInclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(std::move(self_));
     }
 
     export template<typename T>
@@ -8851,18 +8936,25 @@ namespace rusty_ext {
         return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.end)));
     }
 
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::ops::RangeToInclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
         return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::ops::RangeToInclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
         return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     std::add_pointer_t<std::add_const_t<std::span<const T>>> get_unchecked(rusty::ops::RangeToInclusive<size_t> self_, std::add_pointer_t<std::add_const_t<std::span<const T>>> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
@@ -8871,7 +8963,10 @@ namespace rusty_ext {
             return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })((rusty::range_inclusive(0, self_.last)), slice);
         }
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     std::add_pointer_t<std::span<T>> get_unchecked_mut(rusty::ops::RangeToInclusive<size_t> self_, std::add_pointer_t<std::span<T>> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
@@ -8880,18 +8975,26 @@ namespace rusty_ext {
             return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })((rusty::range_inclusive(0, self_.last)), slice);
         }
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     std::span<const T> index(rusty::ops::RangeToInclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
         return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
 
+
+#if 0  // patcher: stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
     export template<typename T>
     std::span<T> index_mut(rusty::ops::RangeToInclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
         return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
     }
+#endif  // patcher: end stub inclusive-range overload — uses into_slice_range/exhausted/last/usize::checked_sub
+
 
 }
 
