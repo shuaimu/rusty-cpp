@@ -1,16 +1,27 @@
-# borrow_port — Phase A1 (transpile clean) + Phase A2 trait gaps RESOLVED
+# borrow_port — Phase A2 COMPLETE: libborrow_port.a builds clean
 
-`library/alloc/src/borrow.rs` (524 LOC source) → `borrow_port.cppm.wip`
-(3870 LOC C++). Transpiles cleanly (0 errors), 4 hand-port slots.
+`library/alloc/src/borrow.rs` (524 LOC source) → `borrow_port.cppm`
+(3877 LOC C++). Compile-clean static library wired into CMake.
 
-**Update 2026-06-04**: Phase 3a/3b transpiler work resolved both
-trait-machinery error categories (2 and 6 below). Re-transpile against
-post-`fdefbff` transpiler emits `typename ToOwnedTraits<B>::Owned`
-(was `typename B::Owned`) and `typename ToOwnedTraits<B>::Owned::default_()`
-(was `ToOwned::Owned::default_()`) — both well-formed. The remaining
-three categories are patcher-tractable (visit_byte_buf stub, rusty_ext
-namespace qualification, orphan-impl `#if 0` block) — all already-codified
-patterns from sibling ports.
+**Update 2026-06-04 (final)**: Phase A2 closed via commit `766b62f`.
+
+| Stage | Status |
+|---|---|
+| 1. Source acquisition | ✅ `library/alloc/src/borrow.rs` |
+| 2. Prep | ✅ `prep.sh` normalises `core::` → `std::`, `crate::` → `std::` |
+| 3. Transpile | ✅ Zero errors, 4 hand-slots (clean against post-`fdefbff` transpiler) |
+| 4. Patcher | ✅ 4 patches in `post_transpile_patch.py` |
+| 5. Compile | ✅ `cmake --build build --target borrow_port` → `libborrow_port.a` |
+| 6. Build (CMake target) | ✅ Linked against `vec_port` |
+
+**What unblocked it**:
+- Phase 3a/3b transpiler work (commits `9fe6506` → `fdefbff`) emits
+  `typename ToOwnedTraits<B>::Owned` (was `typename B::Owned`) and
+  `typename ToOwnedTraits<B>::Owned::default_()` (was the broken
+  `ToOwned::Owned::default_()`).
+- Phase A2 patcher applies 4 rules: (P0) ToOwnedTraits primary body
+  `using Owned = B;`, (P1) visit_byte_buf stub, (P2) `::rusty_ext` →
+  `rusty_ext`, (P3) orphan-impl `#if 0` block.
 
 ## Pipeline summary
 
