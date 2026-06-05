@@ -102,9 +102,15 @@ public:
     // ensure (1) the value is initialized and (2) for non-Copy T the
     // aliasing/double-drop hazards are avoided. For trivially-copyable
     // T (the usual transpiled-btree usage: NonNull, sizes), this is a
-    // bitwise copy.
+    // bitwise copy. Gated on `is_copy_constructible_v<T>` so that
+    // instantiating MaybeUninit<MoveOnlyT> does not eagerly require a
+    // copy ctor that won't exist (btree_port B4 — surfaces when a map
+    // is instantiated with a move-only value type like
+    // `std::pair<long, rusty::Function<void()>>`).
     // @unsafe
-    T assume_init_read() const noexcept(std::is_nothrow_copy_constructible_v<T>) {
+    T assume_init_read() const noexcept(std::is_nothrow_copy_constructible_v<T>)
+        requires (std::is_copy_constructible_v<T>)
+    {
         return *as_ptr();
     }
 
