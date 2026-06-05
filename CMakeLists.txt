@@ -523,6 +523,11 @@ set(TEST_SOURCES
     tests/linked_list_port_module_test.cpp
     tests/string_port_module_test.cpp
 
+    # borrow_port — Phase B smoke test: import borrow_port, construct
+    # Cow<int>::Borrowed/Owned + verify is_borrowed/is_owned. Phase 3a/3b
+    # trait machinery (commits 9fe6506 → fdefbff) unblocked the full body.
+    tests/borrow_port_module_test.cpp
+
     # TODO: Re-enable when String API is complete
     # tests/rusty_string_test.cpp
     # tests/test_all_types.cpp
@@ -544,7 +549,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     set(_vec_consuming_tests
         test_mutex test_thread rusty_vec_test rusty_array_test)
     list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
-    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|linked_list_tests_port|eq_diff_len_tests_port|vec_deque_tests_port|vec_tests_port|arc_tests_port|rc_tests_port|string_tests_port|btree_set_hash_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port)_"
+    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|linked_list_tests_port|eq_diff_len_tests_port|vec_deque_tests_port|vec_tests_port|arc_tests_port|rc_tests_port|string_tests_port|btree_set_hash_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port|borrow_port)_"
         OR test_name STREQUAL "async_module_test"
         OR NOT _vec_consume_idx EQUAL -1)
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
@@ -630,7 +635,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # rc_port_* / arc_port_* / vec_deque_port_* / linked_list_port_* /
     # string_port_* tests link their respective Phase B/C bridge stub
     # modules.
-    foreach(_bridge rc_port arc_port vec_deque_port linked_list_port string_port)
+    foreach(_bridge rc_port arc_port vec_deque_port linked_list_port string_port borrow_port)
         if(test_name MATCHES "^${_bridge}_")
             target_link_libraries(${test_executable} PRIVATE ${_bridge})
             target_compile_features(${test_executable} PRIVATE cxx_std_23)
