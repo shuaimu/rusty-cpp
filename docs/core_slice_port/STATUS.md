@@ -76,22 +76,45 @@ Plus infra additions:
 - `include/rusty/intrinsics.hpp` (assume/likely; unreachable comes from cppm)
 - `rusty::ptr::without_provenance{,_mut}` helpers
 
-## Remaining error categories after iter 2
+## Phase A2 iter 3 — orphan-impl stub + scoped qualification
+
+Patcher additions in iter 3:
+
+- `OneSidedRangeBound` stub added to `include/rusty/ops.hpp` (enum class
+  with End/EndInclusive/StartInclusive variants).
+- Strip namespace-qualified declarators: `export enum class core_slice_port::GetDisjointMutError`
+  → bare (illegal C++ to qualify a declarator with the current namespace).
+- Function-body-scoped qualification for `get_disjoint_check_valid`:
+  brace-counted body walk, rewrite bare `GetDisjointMutError` and
+  `rusty_ext::is_in_bounds`/`is_overlapping` to `core_slice_port::`
+  qualified forms.
+- `patch_stub_orphan_impls` — sibling-port pattern from borrow_port P3,
+  wraps `// TODO orphan impl:` blocks in `#if 0`/`#endif`. These blocks
+  emit free-standing methods of types from other TUs that reference
+  `this` and `const`-qualify; not legal C++.
+- Bare `iter::FlatMap` → `core_slice_port::iter::FlatMap`;
+  `ascii::EscapeDefault` → `rusty::ascii::EscapeDefault`.
+
+## Remaining error categories after iter 3
 
 | Count | Category |
 |---:|---|
-| 6 | `rusty_ext` undeclared (concept/template body uses it before declaration) |
-| 3 | `GetDisjointMutError` bare ref (needs namespace qualification) |
-| 3 | `rusty::ops::OneSidedRangeBound` missing (header stub needed) |
-| 1+ | `iter` / `ascii` undeclared (mid-method refs from collapsed bodies) |
-| 1 | `None_t` → tuple<Direction, size_t> conversion |
-| Various | Lambda capture, expected '>' — context-dependent |
+| 3 | `core_slice_port::rusty_ext::is_overlapping` missing (only `is_in_bounds` in fwd decls) |
+| 2 | `ptr` undeclared (transpiler emit needs `core_slice_port::` qualification) |
+| 2 | `contains_zero_byte` global ref (needs qualification) |
+| 1 each | `USIZE_BYTES`, `usize`, `memchr_naive`, `memchr_aligned`, `iter`, `ascii` bare refs |
+| 1 | `rusty::ptr::slice_from_raw_parts` missing helper |
+| 1 | `align_to` missing on `std::span` |
+| 1 | `None_t` → `std::tuple<Direction, size_t>` conversion |
 
-## Next: Phase A2 iter 3
+## Next: Phase A2 iter 4
 
-Add `OneSidedRangeBound` stub to rusty/ops.hpp. Qualify `GetDisjointMutError`
-references via namespace prefix patch. Investigate `rusty_ext` ordering
-(declaration vs use). Then re-attempt and iterate.
+Add `is_overlapping` to `core_slice_port::rusty_ext` namespace via patcher
+(forward-decl insertion). Add a general patcher for "bare identifier
+that should be `core_slice_port::X`" — there are a dozen of these
+(`ptr`, `contains_zero_byte`, `memchr_naive`, `memchr_aligned`,
+`USIZE_BYTES`, `usize`, `iter`, `ascii`). Add `slice_from_raw_parts`
+to `rusty::ptr`. Add `align_to` to rusty Span/slice utilities.
 
 ## Files
 

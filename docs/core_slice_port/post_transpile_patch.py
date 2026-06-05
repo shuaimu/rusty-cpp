@@ -209,6 +209,150 @@ def patch_len_self_placeholder(text: str) -> str:
     return text.replace("/* len!(self) */", "0")
 
 
+def patch_qualify_get_disjoint_mut_error(text: str) -> str:
+    # Two facts about the transpiler's emit:
+    # (a) It emits the type definition inside `namespace core_slice_port`
+    #     as `export enum class core_slice_port::GetDisjointMutError`
+    #     — a qualified declarator, which is illegal C++. Strip.
+    # (b) It emits a free function `get_disjoint_check_valid` whose
+    #     body lives inside many nested anonymous namespaces (orphan
+    #     impl emit) where GetDisjointMutError is not visible.
+    #     Qualify all use sites with `core_slice_port::`.
+    import re
+
+    # (a) strip qualifier from the type decl/definition lines.
+    for needle, repl in [
+        ("export enum class core_slice_port::GetDisjointMutError",
+         "export enum class GetDisjointMutError"),
+        ("export constexpr core_slice_port::GetDisjointMutError core_slice_port::GetDisjointMutError_IndexOutOfBounds",
+         "export constexpr GetDisjointMutError GetDisjointMutError_IndexOutOfBounds"),
+        ("export constexpr core_slice_port::GetDisjointMutError core_slice_port::GetDisjointMutError_OverlappingIndices",
+         "export constexpr GetDisjointMutError GetDisjointMutError_OverlappingIndices"),
+        ("inline constexpr core_slice_port::GetDisjointMutError core_slice_port::GetDisjointMutError_IndexOutOfBounds",
+         "inline constexpr GetDisjointMutError GetDisjointMutError_IndexOutOfBounds"),
+        ("inline constexpr core_slice_port::GetDisjointMutError core_slice_port::GetDisjointMutError_OverlappingIndices",
+         "inline constexpr GetDisjointMutError GetDisjointMutError_OverlappingIndices"),
+    ]:
+        text = text.replace(needle, repl)
+
+    # (b) qualify use sites — but only AFTER line ~6300 (the orphan-impl
+    # block). Cheaper proxy: only qualify inside the body of
+    # `get_disjoint_check_valid` function. Find the function DEFINITION
+    # (not the forward decl earlier in the file) by anchoring on the
+    # opening `{` after the parameter list.
+    #
+    # First search for the forward decl `... size_t len);` and start
+    # the body search AFTER it.
+    fwd_decl_marker = "get_disjoint_check_valid(const std::array<I, rusty::sanitize_array_capacity<N>()>& indices, size_t len);"
+    fwd_idx = text.find(fwd_decl_marker)
+    search_start = (fwd_idx + len(fwd_decl_marker)) if fwd_idx != -1 else 0
+    func_start = text.find(
+        "rusty::Result<rusty::Unit, core_slice_port::GetDisjointMutError> get_disjoint_check_valid(",
+        search_start,
+    )
+    if func_start == -1:
+        # The forward-decl pass above replaced bare with qualified; if
+        # the definition hasn't been qualified yet, search for the bare
+        # form (which only appears once after the forward-decl strip).
+        func_start = text.find(
+            "rusty::Result<rusty::Unit, GetDisjointMutError> get_disjoint_check_valid(",
+            search_start,
+        )
+    if func_start != -1:
+        # Walk forward to find matching close `}` at brace depth 0.
+        brace_depth = 0
+        in_body = False
+        i = func_start
+        end = -1
+        while i < len(text):
+            ch = text[i]
+            if ch == "{":
+                brace_depth += 1
+                in_body = True
+            elif ch == "}":
+                brace_depth -= 1
+                if in_body and brace_depth == 0:
+                    end = i + 1
+                    break
+            i += 1
+        if end != -1:
+            body = text[func_start:end]
+            body = re.sub(
+                r"(?<![:\w])GetDisjointMutError(?![:\w])",
+                "core_slice_port::GetDisjointMutError",
+                body,
+            )
+            body = re.sub(
+                r"(?<![:\w])GetDisjointMutError_IndexOutOfBounds(?![:\w])",
+                "core_slice_port::GetDisjointMutError_IndexOutOfBounds",
+                body,
+            )
+            body = re.sub(
+                r"(?<![:\w])GetDisjointMutError_OverlappingIndices(?![:\w])",
+                "core_slice_port::GetDisjointMutError_OverlappingIndices",
+                body,
+            )
+            # Also qualify rusty_ext::is_in_bounds / is_overlapping which
+            # resolve only inside an open `core_slice_port::rusty_ext`
+            # block — the orphan-impl function is at deeper namespace
+            # nesting and ADL can't find them.
+            body = re.sub(
+                r"(?<![:\w])rusty_ext::(is_in_bounds|is_overlapping)\b",
+                r"core_slice_port::rusty_ext::\1",
+                body,
+            )
+            text = text[:func_start] + body + text[end:]
+    return text
+
+
+def patch_stub_orphan_impls(text: str) -> str:
+    # The transpiler emits methods of types defined in other TUs (e.g.
+    # `impl X for usize { fn is_in_bounds(...) }`) as free-standing
+    # functions referencing `this`/`(*this)` with a `const` qualifier —
+    # neither is legal C++ outside a member context. Wrap each block
+    # in `#if 0 / #endif`. Sibling-port pattern from borrow_port P3.
+    if "#if 0  // patcher: orphan-impl block stubbed" in text:
+        return text
+    lines = text.splitlines(keepends=True)
+    n = len(lines)
+    out: list[str] = []
+    i = 0
+    changed = False
+    while i < n:
+        if lines[i].startswith("// TODO orphan impl:"):
+            j = i + 1
+            while j < n:
+                line = lines[j]
+                if (
+                    line.startswith("// TODO orphan impl:")
+                    or line.startswith("export ")
+                    or line.startswith("} // namespace")
+                    or line.startswith("// Extension trait")
+                ):
+                    break
+                j += 1
+            out.append("#if 0  // patcher: orphan-impl block stubbed\n")
+            out.extend(lines[i:j])
+            out.append("#endif  // patcher: end orphan-impl stub\n")
+            i = j
+            changed = True
+            continue
+        out.append(lines[i])
+        i += 1
+    if changed:
+        return "".join(out)
+    return text
+
+
+def patch_qualify_iter_ascii_bare(text: str) -> str:
+    # `iter::FlatMap<...>` and `ascii::EscapeDefault` emitted bare
+    # inside the orphan-impl block at the bottom of the file. Qualify
+    # with core_slice_port:: so they resolve.
+    return text.replace("iter::FlatMap", "core_slice_port::iter::FlatMap").replace(
+        "ascii::EscapeDefault", "rusty::ascii::EscapeDefault"
+    )
+
+
 def patch_visit_byte_buf(text: str) -> str:
     # Same as borrow_port P1: stub visit_byte_buf because rusty::Vec
     # isn't visible from the global module fragment.
@@ -248,6 +392,9 @@ def patch_file(path: Path) -> bool:
     text = patch_unreachable_in_if(text)
     text = patch_unreachable_branch_block(text)
     text = patch_len_self_placeholder(text)
+    text = patch_qualify_get_disjoint_mut_error(text)
+    text = patch_qualify_iter_ascii_bare(text)
+    text = patch_stub_orphan_impls(text)
     if text != original:
         path.write_text(text)
         return True

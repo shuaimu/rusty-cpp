@@ -58,6 +58,10 @@ template<typename T = void> struct Try {};
 template<typename T = void> struct FromResidual {};
 template<typename B = void, typename C = void> struct ControlFlow {};
 struct IndexRange {};
+// `OneSidedRangeBound` — enum in Rust with variants End, EndInclusive,
+// StartInclusive. We model it as an enum-class to support
+// `using ::rusty::ops::OneSidedRangeBound::End;` etc.
+enum class OneSidedRangeBound { End, EndInclusive, StartInclusive };
 
 } // namespace ops
 } // namespace rusty

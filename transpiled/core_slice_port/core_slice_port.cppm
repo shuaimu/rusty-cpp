@@ -6303,7 +6303,7 @@ struct ChunkByMut {
 /// documentation for more information.
 export struct EscapeAscii {
     using Item = uint8_t;
-    iter::FlatMap<Iter<uint8_t>, ascii::EscapeDefault, EscapeByte> inner;
+    core_slice_port::iter::FlatMap<Iter<uint8_t>, rusty::ascii::EscapeDefault, EscapeByte> inner;
 
     rusty::Option<uint8_t> next();
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const;
@@ -6356,22 +6356,23 @@ void copy_from_slice_impl(std::span<T> dest, std::span<const T> src) {
 /// This will do `binomial(N + 1, 2) = N * (N + 1) / 2 = 0, 1, 3, 6, 10, ..`
 /// comparison operations.
 template<typename I, size_t N>
-rusty::Result<rusty::Unit, GetDisjointMutError> get_disjoint_check_valid(const std::array<I, rusty::sanitize_array_capacity<N>()>& indices, size_t len) {
+rusty::Result<rusty::Unit, core_slice_port::GetDisjointMutError> get_disjoint_check_valid(const std::array<I, rusty::sanitize_array_capacity<N>()>& indices, size_t len) {
     for (auto&& _for_item : rusty::for_in(rusty::enumerate(rusty::iter(indices)))) {
         auto&& i = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));
         auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));
-        if (!([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(idx)) {
-            return rusty::Result<rusty::Unit, GetDisjointMutError>::Err(GetDisjointMutError_IndexOutOfBounds());
+        if (!([&](auto&& __self) -> decltype(auto) { if constexpr (requires { core_slice_port::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return core_slice_port::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return core_slice_port::rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(idx)) {
+            return rusty::Result<rusty::Unit, core_slice_port::GetDisjointMutError>::Err(core_slice_port::GetDisjointMutError_IndexOutOfBounds());
         }
         for (auto&& idx2 : rusty::for_in(rusty::iter(rusty::slice_to(indices, i)))) {
-            if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::detail::deref_if_pointer_like(idx2)); }) { return rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::detail::deref_if_pointer_like(idx2)); } else { return rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(idx2))); } })(idx)) {
-                return rusty::Result<rusty::Unit, GetDisjointMutError>::Err(GetDisjointMutError_OverlappingIndices());
+            if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { core_slice_port::rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::detail::deref_if_pointer_like(idx2)); }) { return core_slice_port::rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::detail::deref_if_pointer_like(idx2)); } else { return core_slice_port::rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(idx2))); } })(idx)) {
+                return rusty::Result<rusty::Unit, core_slice_port::GetDisjointMutError>::Err(core_slice_port::GetDisjointMutError_OverlappingIndices());
             }
         }
     }
-    return rusty::Result<rusty::Unit, GetDisjointMutError>::Ok(std::make_tuple());
+    return rusty::Result<rusty::Unit, core_slice_port::GetDisjointMutError>::Ok(std::make_tuple());
 }
 
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `usize` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -6386,6 +6387,8 @@ bool is_overlapping(const auto& other) const {
     return (*this) == other;
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `Range` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -6400,6 +6403,8 @@ bool is_overlapping(const auto& other) const {
     return ((rusty::detail::deref_if_pointer_like(this->start) < rusty::detail::deref_if_pointer_like(rusty::field_end(other)))) & ((rusty::detail::deref_if_pointer_like(other.start) < rusty::detail::deref_if_pointer_like(this->end)));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `RangeInclusive` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -6414,6 +6419,8 @@ bool is_overlapping(const auto& other) const {
     return ((rusty::detail::deref_if_pointer_like(this->start) <= rusty::detail::deref_if_pointer_like(rusty::field_end(other)))) & ((rusty::detail::deref_if_pointer_like(other.start) <= rusty::detail::deref_if_pointer_like(this->end)));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `range::Range` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -6428,6 +6435,8 @@ bool is_overlapping(const auto& other) const {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range::from(other)); }) { return rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range::from(other)); } else { return rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::range::from(other))); } })(rusty::range::from((*this)));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `range::RangeInclusive` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -6454,6 +6463,7 @@ bool contains_zero_byte(size_t x) {
 }
 
 /// Returns the first index matching the byte `x` in `text`.
+#endif  // patcher: end orphan-impl stub
 export rusty::Option<size_t> memchr_(uint8_t x, std::span<const uint8_t> text) {
     if (rusty::len(text) < (2 * rusty::detail::deref_if_pointer_like(USIZE_BYTES))) {
         return ::memchr_naive(std::move(x), text);
@@ -6921,6 +6931,7 @@ uint8_t as_underlying(rusty::ops::ControlFlow<bool> x) {
     }
 }
 
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `A` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -6939,6 +6950,8 @@ static bool equal_same_length(const auto* lhs, const B* rhs, size_t len) {
     return true;
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `A` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -6954,6 +6967,8 @@ static bool equal_same_length(const auto* lhs, const B* rhs, size_t len) {
     }
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `A` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -6969,6 +6984,8 @@ static rusty::Option<rusty::cmp::Ordering> partial_compare(std::span<const A> le
     return std::move(b);
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `A` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7000,6 +7017,8 @@ rusty::ops::ControlFlow<B, C> chaining_impl(std::span<const A> left, std::span<c
     return len_chain(rusty::len(left), rusty::len(right));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `A` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7011,6 +7030,8 @@ static rusty::Option<rusty::cmp::Ordering> partial_compare(std::span<const A> le
     return rusty::Option<rusty::cmp::Ordering>(SliceOrd::compare(left, right));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `A` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7027,6 +7048,8 @@ static rusty::cmp::Ordering compare(std::span<const auto> left, std::span<const 
     return std::move(b);
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `bool` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7035,6 +7058,8 @@ static rusty::cmp::Ordering compare(std::span<const auto> left, std::span<const 
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for bool
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `u8` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7043,6 +7068,8 @@ static rusty::cmp::Ordering compare(std::span<const auto> left, std::span<const 
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for u8
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `NonZero` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7051,6 +7078,8 @@ static rusty::cmp::Ordering compare(std::span<const auto> left, std::span<const 
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for NonZero
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `Option` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7059,6 +7088,8 @@ static rusty::cmp::Ordering compare(std::span<const auto> left, std::span<const 
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for Option
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `ascii::Char` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7067,6 +7098,8 @@ static rusty::cmp::Ordering compare(std::span<const auto> left, std::span<const 
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for ascii::Char
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `A` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7086,6 +7119,8 @@ static rusty::cmp::Ordering compare(std::span<const auto> left, std::span<const 
     return rusty::cmp::cmp(order, 0);
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `A` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7110,6 +7145,8 @@ static rusty::ops::ControlFlow<bool> chaining_ge(std::span<const auto> left, std
 { const auto& ne = _m; return rusty::ops::ControlFlow<bool>::Break(ne.is_ge());  } }();
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `T` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7121,6 +7158,8 @@ bool slice_contains(std::span<const auto> x) const {
     return rusty::iter(x).any([&](auto&& y) { return rusty::deref_mut(y) == (*this); });
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `u8` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7132,6 +7171,8 @@ bool slice_contains(std::span<const auto> x) const {
     return rusty::memchr_runtime::memchr((*this), x).is_some();
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `i8` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7174,6 +7215,8 @@ std::add_pointer_t<std::span<T>> get_offset_len_mut_noubcheck(std::add_pointer_t
     return std::intrinsics::aggregate_raw_ptr(std::move(ptr_shadow2), std::move(len));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `usize` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7224,6 +7267,8 @@ T& index_mut(std::span<T> slice) {
     return (rusty::detail::deref_if_pointer_like(slice))[(*this)];
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `ops::IndexRange` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7287,6 +7332,8 @@ std::span<T> index_mut(std::span<T> slice) {
     }
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `ops::Range` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7368,6 +7415,8 @@ std::span<T> index_mut(std::span<T> slice) {
     }
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `range::Range` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7401,6 +7450,8 @@ std::span<T> index_mut(std::span<T> slice) {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `ops::RangeTo` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7434,6 +7485,8 @@ std::span<T> index_mut(std::span<T> slice) {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, this->end)));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `ops::RangeFrom` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7481,6 +7534,8 @@ std::span<T> index_mut(std::span<T> slice) {
     }
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `range::RangeFrom` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7514,6 +7569,8 @@ std::span<T> index_mut(std::span<T> slice) {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move((*this))));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `ops::RangeFull` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7541,6 +7598,8 @@ std::span<T> index_mut(std::span<T> slice) {
     return slice;
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `ops::RangeInclusive` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7614,6 +7673,8 @@ std::span<T> index_mut(std::span<T> slice) {
     return ::slice_index_fail(std::move(start), std::move(end), rusty::len(slice));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `range::RangeInclusive` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7647,6 +7708,8 @@ std::span<T> index_mut(std::span<T> slice) {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `ops::RangeToInclusive` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7680,6 +7743,8 @@ std::span<T> index_mut(std::span<T> slice) {
     return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->end)));
 }
 
+#endif  // patcher: end orphan-impl stub
+#if 0  // patcher: orphan-impl block stubbed
 // TODO orphan impl: methods for `range::RangeToInclusive` were declared in this file but the
 // host type lives in another module / TU. These methods are emitted as
 // free-standing template functions that reference `this`/`(*this)`,
@@ -7770,6 +7835,7 @@ std::span<T> index_mut(std::span<T> slice) {
 /// ```
 ///
 /// [`Index::index`]: ops::Index::index
+#endif  // patcher: end orphan-impl stub
 export template<typename R>
 rusty::range<size_t> range(R range, rusty::range_to<size_t> bounds) {
     auto len = std::move(rusty::field_end(bounds));
