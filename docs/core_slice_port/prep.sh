@@ -34,6 +34,8 @@ for f in "$SRC_DIR"/*.rs; do
     -e 's|^const trait |trait |g' \
     -e 's|^const unsafe trait |unsafe trait |g' \
     -e 's|^const pub trait |pub trait |g' \
+    -e 's|^pub const trait |pub trait |g' \
+    -e 's|^pub const unsafe trait |pub unsafe trait |g' \
     -e 's|\(impl<[^>]*>\) const |\1 |g' \
     -e 's|\(unsafe impl<[^>]*>\) const |\1 |g' \
     -e 's|#\[rustc_intrinsic\]||g' \
@@ -141,13 +143,16 @@ for f in src_dir.glob("*.rs"):
     for mac in EXPR_MACROS:
         out = []
         i = 0
+        # Match optional `path::path::` prefix so `ub_checks::assert_unsafe_precondition!`
+        # collapses to `();` rather than leaving the prefix behind.
+        pat = re.compile(rf"(?:\b\w+::)*\b{mac}!\(")
         while True:
-            m = re.search(rf"\b{mac}!\(", text[i:])
+            m = pat.search(text, i)
             if not m:
                 out.append(text[i:])
                 break
-            out.append(text[i : i + m.start()])
-            j = i + m.end()
+            out.append(text[i : m.start()])
+            j = m.end()
             depth = 1
             while j < len(text) and depth > 0:
                 ch = text[j]
