@@ -13,26 +13,65 @@ SRC_DIR="${1:?usage: prep.sh <src_dir>}"
 
 for f in "$SRC_DIR"/*.rs; do
   sed -i \
-    -e 's|use crate::|use std::|g' \
-    -e 's|crate::ascii::Char|std::ascii::Char|g' \
+    -e 's|\bcrate::|std::|g' \
     -e 's|#\[derive_const(\([^)]*\))\]|#[derive(\1)] // derive_const → derive|g' \
     -e 's|let check_mask = #\[cold\]|let check_mask =|g' \
+    -e '/^use std::slice::memchr/d' \
+    -e '/^use std::ub_checks/d' \
+    -e '/^use std::intrinsics/d' \
+    -e 's|#\[rustc_diagnostic_item = "[^"]*"\]||g' \
+    -e 's|#\[rustc_const_unstable[^]]*\]||g' \
+    -e 's|#\[rustc_allow_const_fn_unstable[^]]*\]||g' \
     "$f"
 done
 
-# Multi-line assert_unsafe_precondition! stripping via Python.
+# Multi-line macro stripping via Python — handles invocations whose
+# arguments span multiple lines / contain nested parens. Each macro is
+# stripped to `();` so the surrounding statement sequence stays valid.
 python3 - "$SRC_DIR" <<'PY'
 import re
 import sys
 from pathlib import Path
 
+# Macros to strip entirely (rustc-internal, no analogue).
+# `assert_unsafe_precondition!` — debug-only safety check.
+# `const_eval_select!` — chooses between ct/rt impl, no analogue.
+EXPR_MACROS = [
+    "assert_unsafe_precondition",
+    "const_eval_select",
+]
+
 src_dir = Path(sys.argv[1])
 for f in src_dir.glob("*.rs"):
     text = f.read_text()
+    for mac in EXPR_MACROS:
+        out = []
+        i = 0
+        while True:
+            m = re.search(rf"\b{mac}!\(", text[i:])
+            if not m:
+                out.append(text[i:])
+                break
+            out.append(text[i : i + m.start()])
+            j = i + m.end()
+            depth = 1
+            while j < len(text) and depth > 0:
+                ch = text[j]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                j += 1
+            if j < len(text) and text[j] == ";":
+                j += 1
+            out.append("();")
+            i = j
+        text = "".join(out)
+    # impl_fn_for_zst! { ... } takes braces, not parens — strip the whole block.
     out = []
     i = 0
     while True:
-        m = re.search(r"assert_unsafe_precondition!\(", text[i:])
+        m = re.search(r"\bimpl_fn_for_zst!\s*\{", text[i:])
         if not m:
             out.append(text[i:])
             break
@@ -41,18 +80,15 @@ for f in src_dir.glob("*.rs"):
         depth = 1
         while j < len(text) and depth > 0:
             ch = text[j]
-            if ch == "(":
+            if ch == "{":
                 depth += 1
-            elif ch == ")":
+            elif ch == "}":
                 depth -= 1
             j += 1
-        if j < len(text) and text[j] == ";":
-            j += 1
-        out.append("();")
+        out.append("// impl_fn_for_zst! { ... } stripped\n")
         i = j
-    new_text = "".join(out)
-    if new_text != text:
-        f.write_text(new_text)
+    text = "".join(out)
+    f.write_text(text)
 PY
 
 echo "[core_str_port prep] normalized $SRC_DIR"

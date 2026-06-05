@@ -12,32 +12,39 @@ prep infrastructure landed; transpile blocked on use-statement dedup.
 | 3. Collapse | ⚠️ Body merge + crate-attr strip works; multi-line use-import dedup partial |
 | 4. Transpile | 🔴 Blocked: duplicate symbol imports from braced uses |
 
-## Current blocker
+## Current state
 
-`cargo check` errors with duplicate imports:
+After the multi-line use-dedup land + extended prep stripping:
+- ✅ All parse-blocking syntax stripped (`#[cold]` on expr, multi-line
+  `assert_unsafe_precondition!`, `const_eval_select!`, `impl_fn_for_zst!`,
+  `derive_const`, `#![unstable(...)]` multi-line attrs, rustc-internal
+  use-paths to `slice::memchr`/`ub_checks`/`intrinsics`).
+- ✅ Use-statement dedup parses single + multi-leaf braced uses and
+  rewrites multi-leaf imports to drop already-bound names.
+- ⚠️ ~661 rustc resolution errors visible (was 1 parse error). Categories:
+  - `cannot find X in slice/intrinsics/ub_checks/lang_items` — many rustc
+    internal items the rusty surface doesn't replicate
+  - `is not yet stable as a const fn` — many const fns reference
+    unstable APIs we'd need to either add or de-const
+  - Type collisions where collapsed bodies define types that the
+    `mod.rs` body already references (e.g. `from_utf8` conflicts)
 
-```
-error[E0252]: the name `FusedIterator` is defined multiple times
- --> src/lib.rs:15:46
-13 | use std::iter::FusedIterator;
-14 | use std::iter::{
-15 |     Chain, Copied, Filter, FlatMap, Flatten, FusedIterator, ...};
-```
+## Next steps (all multi-day arcs)
 
-The collapse dedupes single-line uses by leaf symbol but multi-line
-braced uses contain BOTH already-seen and new symbols; current pass
-keeps them whole.
-
-## Next steps
-
-**A. Smarter use-rewrite** (recommended): when a multi-leaf import
-contains seen symbols, REWRITE it to drop the seen ones. Multi-line
-braced-use parsing extends collapse.py cleanly. ~half-day.
+**A. Continue patching** — peel rustc errors layer by layer in the
+playbook style. Estimate: 1–2 weeks for full compile clean. Most
+errors fall into 10–15 categorical patches; iterating until the count
+trends to zero.
 
 **B. Hand-port the str surface** (sibling alternative discussed in
 docs/string_port/STATUS.md): port just the ~5 fns String actually uses
 (`find`, `starts_with`, `contains`, `split`, `replace`) without
-the full Pattern trait machinery. Faster but less complete.
+the full Pattern trait machinery. ~½ day. Less complete but unblocks
+string_port faster.
+
+**C. Slice-port first** — many errors point at `std::slice::index::*`
+helpers; if those land via a `core_slice_port` (similar collapse) the
+core_str errors drop substantially.
 
 ## Files
 

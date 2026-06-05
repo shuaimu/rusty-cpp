@@ -157,6 +157,112 @@ def filter_uses(uses: list[str]) -> list[str]:
     return kept
 
 
+def parse_use(use_text: str) -> tuple[str, list[tuple[str, str | None]] | None]:
+    """Parse a `use [pub] PATH;` statement.
+
+    Returns (path_prefix, leafs_or_None). For a single-symbol form
+    (`use std::cmp::Ordering;`) leafs_or_None is a single-element list
+    `[("Ordering", None)]` with path_prefix `use std::cmp::`. For a
+    braced form (`use std::fmt::{Formatter, Write as W};`) it's
+    `[("Formatter", None), ("Write", "W")]` with path_prefix
+    `use std::fmt::`.
+
+    Returns (use_text, None) when we can't parse the shape cleanly —
+    caller should keep the use as-is.
+    """
+    # Strip trailing `;` + whitespace and leading whitespace.
+    text = use_text.strip()
+    if not text.endswith(";"):
+        return use_text, None
+    body = text[:-1].strip()
+    # Pull off optional `pub` (or `pub(crate)`).
+    pub_match = re.match(r"^(pub(?:\([^)]+\))?\s+)?use\s+", body)
+    if not pub_match:
+        return use_text, None
+    pub_prefix = pub_match.group(1) or ""
+    rest = body[pub_match.end():]
+
+    # Two forms:
+    #   PATH::{A, B as C, ...}
+    #   PATH::Leaf [as Alias]
+    # PATH always uses `::`.
+    if rest.endswith("}"):
+        # Braced form. Find the matching open brace.
+        open_idx = rest.rfind("{")
+        if open_idx == -1:
+            return use_text, None
+        path = rest[:open_idx].rstrip()  # e.g. `std::fmt::`
+        if not path.endswith("::"):
+            return use_text, None
+        inner = rest[open_idx + 1 : -1]
+        # Split inner by top-level commas (no `{...}` nesting in core::str).
+        leaf_strs = [s.strip() for s in inner.split(",") if s.strip()]
+        leafs: list[tuple[str, str | None]] = []
+        for ls in leaf_strs:
+            m = re.match(r"^([\w:]+)(?:\s+as\s+(\w+))?$", ls)
+            if not m:
+                # Self-import (`self`) or nested braces — bail out.
+                return use_text, None
+            leafs.append((m.group(1), m.group(2)))
+        # path here is `use std::fmt::`; recombine with pub_prefix.
+        return pub_prefix + "use " + path, leafs
+    else:
+        # Single-symbol form: `PATH::Leaf [as Alias]`.
+        m = re.match(r"^(.+?::)([\w]+)(?:\s+as\s+(\w+))?$", rest)
+        if not m:
+            return use_text, None
+        path = m.group(1)
+        leaf = m.group(2)
+        alias = m.group(3)
+        return pub_prefix + "use " + path, [(leaf, alias)]
+
+
+def _leaf_key(leaf: tuple[str, str | None]) -> str:
+    """Dedup key — the bound name (alias if present, else symbol)."""
+    return leaf[1] if leaf[1] is not None else leaf[0]
+
+
+def _format_leaf(leaf: tuple[str, str | None]) -> str:
+    if leaf[1] is None:
+        return leaf[0]
+    return f"{leaf[0]} as {leaf[1]}"
+
+
+def dedup_uses(uses: list[str]) -> list[str]:
+    """Dedup use-statements by tracked bound names.
+
+    Multi-leaf braced uses are REWRITTEN to drop leafs whose bound
+    names are already seen. Single-leaf uses whose bound name is
+    already seen are dropped entirely.
+
+    Use-statements we can't parse are kept as-is — better to fail
+    later at rustc than to mangle them silently.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in uses:
+        prefix, leafs = parse_use(u)
+        if leafs is None:
+            # Unparseable — keep as-is, but try to track its leafs to
+            # avoid downstream conflicts. Best-effort via heuristic.
+            for sym in re.findall(r"\b([A-Z][A-Za-z0-9_]*)\b", u):
+                seen.add(sym)
+            out.append(u)
+            continue
+        kept = [l for l in leafs if _leaf_key(l) not in seen]
+        if not kept:
+            continue  # drop entirely
+        for l in kept:
+            seen.add(_leaf_key(l))
+        if len(kept) == 1 and prefix.endswith("::"):
+            # Re-emit as single-symbol form.
+            out.append(f"{prefix}{_format_leaf(kept[0])};")
+        else:
+            inner = ", ".join(_format_leaf(l) for l in kept)
+            out.append(f"{prefix}{{{inner}}};")
+    return out
+
+
 def main(src_dir: Path) -> int:
     lib_path = src_dir / "lib.rs"
     if not lib_path.exists():
@@ -202,27 +308,7 @@ def main(src_dir: Path) -> int:
     lib_uses = filter_uses(lib_uses)
     lib_body = normalize_paths(lib_body)
 
-    # Dedup uses by extracting the leaf symbol(s) and dropping later
-    # imports of the same symbol — collapse-then-merge can produce two
-    # `use std::fmt::{... Write ...};` lines from different submodules
-    # that import overlapping subsets.
-    seen_leafs: set[str] = set()
-    deduped: list[str] = []
-    for u in sorted(set(lib_uses + sub_uses_combined)):
-        # Extract braced symbols `use path::{A, B as C, D};`
-        leafs = re.findall(r"\b([A-Z][A-Za-z0-9_]*)(?:\s+as\s+\w+)?\s*[,}]", u)
-        # And the tail symbol for `use path::Foo;` form.
-        m = re.match(r"\s*(?:pub\s+)?use\s+[\w:]+::([A-Z][A-Za-z0-9_]*)\s*(?:as\s+\w+)?\s*;", u)
-        if m:
-            leafs.append(m.group(1))
-        # If ALL its leafs are already seen, drop the whole use.
-        new_leafs = [s for s in leafs if s not in seen_leafs]
-        if leafs and not new_leafs:
-            continue
-        for s in leafs:
-            seen_leafs.add(s)
-        deduped.append(u)
-    all_uses = deduped
+    all_uses = dedup_uses(sorted(set(lib_uses + sub_uses_combined)))
 
     out: list[str] = []
     out.append("//! Collapsed core::str module — single-file flattening of\n")
