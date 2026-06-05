@@ -279,6 +279,21 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_compile_features(vec_deque_port PUBLIC cxx_std_23)
     target_compile_options(vec_deque_port PRIVATE -O3 -DNDEBUG -march=native )
     target_link_libraries(vec_deque_port PUBLIC vec_port)
+
+    # borrow_port: transpiled alloc::borrow (Cow<'a, B> + ToOwned).
+    # Phase 3a/3b transpiler trait machinery unblocked the assoc-type
+    # emission; remaining patches in docs/borrow_port/post_transpile_patch.py
+    # handle visit_byte_buf stub, ::rusty_ext qualification, and
+    # orphan-impl `#if 0` block (all sibling-port patterns).
+    add_library(borrow_port STATIC)
+    target_sources(borrow_port
+        PUBLIC FILE_SET CXX_MODULES FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/borrow_port/borrow_port.cppm
+    )
+    target_include_directories(borrow_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(borrow_port PUBLIC cxx_std_23)
+    target_compile_options(borrow_port PRIVATE -O3 -DNDEBUG -march=native )
+    target_link_libraries(borrow_port PUBLIC vec_port)
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
