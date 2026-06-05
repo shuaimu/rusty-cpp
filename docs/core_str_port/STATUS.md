@@ -1,54 +1,58 @@
-# core::str::Pattern port — Phase A1 (scaffolding)
+# core_str_port — Phase A1 in progress (collapse infrastructure)
 
-The String port (docs/string_port/) is blocked on `str::Pattern +
-str::Searcher` — a Rust trait family that doesn't transpile cleanly.
-This directory holds the scaffolding for porting it.
+`library/core/src/str/*.rs` (9 files, 8838 LOC source) — collapse +
+prep infrastructure landed; transpile blocked on use-statement dedup.
 
-## Reproducing
+## Pipeline
 
-```bash
-mkdir -p /tmp/core_str_port/core_str_crate/src
-cp ~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/str/pattern.rs \
-   /tmp/core_str_port/core_str_crate/src/lib.rs
-cp docs/core_str_port/Cargo.toml.template /tmp/core_str_port/core_str_crate/Cargo.toml
+| Stage | Status |
+|---|---|
+| 1. Source acquisition | ✅ 9 files from rustup core/src/str/ |
+| 2. Prep | ✅ `prep.sh` — crate:: → std::, derive_const → derive, #[cold] on expr, multi-line assert_unsafe_precondition! |
+| 3. Collapse | ⚠️ Body merge + crate-attr strip works; multi-line use-import dedup partial |
+| 4. Transpile | 🔴 Blocked: duplicate symbol imports from braced uses |
 
-./target/release/rusty-cpp-transpiler \
-    --crate /tmp/core_str_port/core_str_crate/Cargo.toml \
-    --output-dir /tmp/core_str_port/cpp_out
+## Current blocker
+
+`cargo check` errors with duplicate imports:
+
+```
+error[E0252]: the name `FusedIterator` is defined multiple times
+ --> src/lib.rs:15:46
+13 | use std::iter::FusedIterator;
+14 | use std::iter::{
+15 |     Chain, Copied, Filter, FlatMap, Flatten, FusedIterator, ...};
 ```
 
-Output: 1983-line `pattern.rs` → 20 build errors at first cmake.
+The collapse dedupes single-line uses by leaf symbol but multi-line
+braced uses contain BOTH already-seen and new symbols; current pass
+keeps them whole.
 
-## First-pass error catalogue
+## Next steps
 
-| Error shape | Count | Notes |
-|-------------|-------|-------|
-| `cmp` / `slice` unqualified namespace | ~2 | Same as Vec's V-A cluster |
-| `CharIndices`/`Chars` partial in `rusty::str_runtime` | ~6 | rusty has the types but missing methods (`iter`, `next_back`) |
-| Stray `char_` identifier, `this` outside member fn | ~5 | Rust raw-keyword emit bugs |
-| Misc emit issues | ~7 | TBD; need full triage |
+**A. Smarter use-rewrite** (recommended): when a multi-leaf import
+contains seen symbols, REWRITE it to drop the seen ones. Multi-line
+braced-use parsing extends collapse.py cleanly. ~half-day.
 
-## Why pause here
+**B. Hand-port the str surface** (sibling alternative discussed in
+docs/string_port/STATUS.md): port just the ~5 fns String actually uses
+(`find`, `starts_with`, `contains`, `split`, `replace`) without
+the full Pattern trait machinery. Faster but less complete.
 
-Pattern.rs alone is 1983 lines, and the broader `core::str` surface
-(mod.rs + iter.rs + traits.rs + validations.rs) totals ~7000 lines —
-substantially more than Vec's ~2000. Realistic effort: 2–3 days of
-iteration following the Vec playbook (clusters, patcher, tests).
+## Files
 
-This file documents the entry point so a future session can pick up
-without re-discovering the scope. The pattern (no pun intended) is
-clear: vendor → prep → transpile → catalogue errors → write patcher →
-write smoke tests → close phase B (instantiation runtime). Tied to
-String port's resumption in `docs/string_port/STATUS.md`.
+- `Cargo.toml.template` — minimal lib crate manifest
+- `prep.sh` — crate:: → std::, attribute normalization, multi-line
+  `assert_unsafe_precondition!` stripping, `#[cold]` on expr removal
+- `collapse.py` — 8-submodule flatten + crate-attr stripping +
+  single-line use dedup. Multi-line braced-use rewrite is the next add.
 
-## Smarter alternative
+## Why "collapse + transpile single file"
 
-Rather than transpiling `core::str::pattern` faithfully, hand-port
-just the surface that `String` actually uses (`find`, `starts_with`,
-`contains`, `split`, `replace`). That subset is ~5 functions and
-takes a substring or char as the haystack/needle — no full Pattern
-trait machinery. ~½ day of focused work vs 2–3 days transpiling.
-
-When this work resumes, evaluate that trade-off first. The
-transpile-everything approach is "faithful but slow"; the hand-port-
-surface approach is "pragmatic and unblocks String fastest".
+vs. transpiling each file independently:
+- Each Rust submodule references its siblings (`super::Chars`,
+  `super::Pattern`) — multi-file emit would need 8 C++20 module
+  partitions with cross-imports that form a cycle.
+- vec_deque_port and other ports use the same collapse strategy
+  successfully (see docs/vec_deque_port/collapse.py for the
+  reference implementation).
