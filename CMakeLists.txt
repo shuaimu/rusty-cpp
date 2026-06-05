@@ -569,6 +569,17 @@ set(TEST_SOURCES
     # tests/final_btree_test.cpp
 )
 
+# Opt-in coverage-gap pin for the four latent bugs in btree_port's
+# iter()/remove()/clone() paths (variant ._0 emit, NodeRef temp
+# binding, const-correctness drift, copy-ctor on move-only T). The
+# test EXPECTS TO FAIL TO COMPILE on btree_port as it stands today;
+# it is wired through this flag so CI's default builds stay green
+# while the bug coverage gap is pinned in tree.
+# Enable with `cmake -DRUSTY_CPP_BUILD_BTREE_PORT_ITER_REMOVE_TEST=ON`.
+if(RUSTY_CPP_BUILD_BTREE_PORT_ITER_REMOVE_TEST)
+    list(APPEND TEST_SOURCES tests/btree_port_iter_remove_movonly_test.cpp)
+endif()
+
 find_package(Threads REQUIRED)
 
 set(TEST_TARGETS)
