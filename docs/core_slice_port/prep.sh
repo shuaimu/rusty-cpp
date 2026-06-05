@@ -46,16 +46,75 @@ for f in "$SRC_DIR"/*.rs; do
 done
 
 # Inline iter/macros.rs (referenced via `macro_use` from iter.rs).
-# After inlining the macros file at the top of iter.rs, transpile sees
-# them as already-defined.
-if [[ -f "$SRC_DIR/iter/macros.rs" ]]; then
-  if [[ -f "$SRC_DIR/iter.rs" ]]; then
-    # Prepend macros body (minus its uses) to iter.rs.
-    cat "$SRC_DIR/iter/macros.rs" "$SRC_DIR/iter.rs" > "$SRC_DIR/iter.rs.new"
-    mv "$SRC_DIR/iter.rs.new" "$SRC_DIR/iter.rs"
-  fi
-  rm -rf "$SRC_DIR/iter"
+# Order is constrained: macro_rules! must be defined before its
+# invocation. So macros.rs body comes first. But iter.rs's `use`
+# statements need to be at the top of the combined file so collapse's
+# split_uses can extract them; otherwise duplicate-import errors leak
+# through.
+#
+# Strategy:
+#   1. extract iter.rs's leading `use` lines.
+#   2. write iter.rs = [iter uses] + [macros body] + [iter remainder].
+if [[ -f "$SRC_DIR/iter/macros.rs" ]] && [[ -f "$SRC_DIR/iter.rs" ]]; then
+  python3 - "$SRC_DIR" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+iter_text = (src / "iter.rs").read_text()
+macros_text = (src / "iter/macros.rs").read_text()
+
+# Walk iter_text head, lifting `use ... ;` (single-line + multi-line braced).
+lines = iter_text.splitlines(keepends=True)
+uses: list[str] = []
+i = 0
+n = len(lines)
+in_use = False
+use_buf = ""
+while i < n:
+    ln = lines[i]
+    stripped = ln.strip()
+    if in_use:
+        use_buf += ln
+        if stripped.endswith(";"):
+            uses.append(use_buf)
+            use_buf = ""
+            in_use = False
+        i += 1
+        continue
+    if not stripped or stripped.startswith("//") or stripped.startswith("/*"):
+        i += 1
+        continue
+    if stripped.startswith("//!"):
+        i += 1
+        continue
+    if stripped.startswith("#"):
+        i += 1
+        continue
+    if stripped.startswith("mod ") and stripped.endswith(";"):
+        # Skip `mod X;` declaration (e.g. iter.rs's `mod macros;`).
+        i += 1
+        continue
+    if stripped.startswith("use "):
+        if stripped.endswith(";"):
+            uses.append(ln)
+            i += 1
+            continue
+        else:
+            use_buf = ln
+            in_use = True
+            i += 1
+            continue
+    break
+remainder = "".join(lines[i:])
+
+(src / "iter.rs").write_text(
+    "".join(uses) + "\n" + macros_text + "\n" + remainder
+)
+PY
 fi
+rm -rf "$SRC_DIR/iter"
 
 # Drop sort subdirectory entirely — not needed for unblocking str/string.
 rm -rf "$SRC_DIR/sort"

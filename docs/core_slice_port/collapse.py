@@ -221,9 +221,19 @@ def parse_use(use_text: str) -> tuple[str, list[tuple[str, str | None]] | None]:
         return pub_prefix + "use " + path, [(leaf, alias)]
 
 
-def _leaf_key(leaf: tuple[str, str | None]) -> str:
-    """Dedup key — the bound name (alias if present, else symbol)."""
-    return leaf[1] if leaf[1] is not None else leaf[0]
+def _leaf_key(leaf: tuple[str, str | None], path_tail: str | None = None) -> str:
+    """Dedup key — the bound name (alias if present, else symbol).
+
+    Special case: `use path::Last::{self, ...};` binds the LAST segment
+    of the path as the symbol, not `self`. Caller passes `path_tail`
+    (the last `::Foo` segment of the use's path prefix) so we resolve
+    `self` to it.
+    """
+    if leaf[1] is not None:
+        return leaf[1]
+    if leaf[0] == "self" and path_tail is not None:
+        return path_tail
+    return leaf[0]
 
 
 def _format_leaf(leaf: tuple[str, str | None]) -> str:
@@ -247,19 +257,24 @@ def dedup_uses(uses: list[str]) -> list[str]:
     for u in uses:
         prefix, leafs = parse_use(u)
         if leafs is None:
-            # Unparseable — keep as-is, but try to track its leafs to
-            # avoid downstream conflicts. Best-effort via heuristic.
             for sym in re.findall(r"\b([A-Z][A-Za-z0-9_]*)\b", u):
                 seen.add(sym)
             out.append(u)
             continue
-        kept = [l for l in leafs if _leaf_key(l) not in seen]
+        # Path tail (last `::Foo` of the prefix) — used when a brace
+        # contains `self`, which binds the path tail rather than literal
+        # "self". e.g. `use std::cmp::Ordering::{self, Equal};` binds
+        # `Ordering`, `Equal`, `Greater`, `Less`.
+        path_tail = None
+        m_tail = re.search(r"::([\w]+)::$", prefix)
+        if m_tail:
+            path_tail = m_tail.group(1)
+        kept = [l for l in leafs if _leaf_key(l, path_tail) not in seen]
         if not kept:
-            continue  # drop entirely
+            continue
         for l in kept:
-            seen.add(_leaf_key(l))
+            seen.add(_leaf_key(l, path_tail))
         if len(kept) == 1 and prefix.endswith("::"):
-            # Re-emit as single-symbol form.
             out.append(f"{prefix}{_format_leaf(kept[0])};")
         else:
             inner = ", ".join(_format_leaf(l) for l in kept)
