@@ -56,6 +56,8 @@ template<typename Idx = void> struct RangeToInclusive {};
 struct RangeFull {};
 template<typename T = void> struct Try {};
 template<typename T = void> struct FromResidual {};
+template<typename B = void, typename C = void> struct ControlFlow {};
+struct IndexRange {};
 
 } // namespace ops
 } // namespace rusty

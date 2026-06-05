@@ -307,6 +307,20 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_include_directories(ascii_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_features(ascii_port PUBLIC cxx_std_23)
     target_compile_options(ascii_port PRIVATE -O3 -DNDEBUG -march=native )
+
+    # core_slice_port: transpiled library/core/src/slice/* (collapsed via
+    # docs/core_slice_port/prep.sh + collapse.py). Phase A1 transpile
+    # clean (8773 LOC C++); Phase A2 patches TBD as compile errors surface.
+    if(RUSTY_CPP_BUILD_CORE_SLICE_PORT)
+        add_library(core_slice_port STATIC)
+        target_sources(core_slice_port
+            PUBLIC FILE_SET CXX_MODULES FILES
+            ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/core_slice_port/core_slice_port.cppm
+        )
+        target_include_directories(core_slice_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_compile_features(core_slice_port PUBLIC cxx_std_23)
+        target_compile_options(core_slice_port PRIVATE -O3 -DNDEBUG -march=native )
+    endif()
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
