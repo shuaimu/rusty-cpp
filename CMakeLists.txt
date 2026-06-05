@@ -294,6 +294,19 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_compile_features(borrow_port PUBLIC cxx_std_23)
     target_compile_options(borrow_port PRIVATE -O3 -DNDEBUG -march=native )
     target_link_libraries(borrow_port PUBLIC vec_port)
+
+    # ascii_port: transpiled core::ascii (AsciiChar enum + impl block).
+    # Phase A1 transpile clean (4151 LOC); Phase A2 patches in
+    # docs/ascii_port/post_transpile_patch.py — TBD as compile errors
+    # surface.
+    add_library(ascii_port STATIC)
+    target_sources(ascii_port
+        PUBLIC FILE_SET CXX_MODULES FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/transpiled/ascii_port/ascii_port.cppm
+    )
+    target_include_directories(ascii_port PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(ascii_port PUBLIC cxx_std_23)
+    target_compile_options(ascii_port PRIVATE -O3 -DNDEBUG -march=native )
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
@@ -528,6 +541,12 @@ set(TEST_SOURCES
     # trait machinery (commits 9fe6506 → fdefbff) unblocked the full body.
     tests/borrow_port_module_test.cpp
 
+    # ascii_port — Phase B smoke test: import ascii_port, exercise
+    # AsciiChar enum + manifest constants + to_u8/to_char. Other API
+    # methods (to_uppercase/is_alphabetic/etc.) are patcher-stubbed
+    # pending rusty::ascii::* helper additions.
+    tests/ascii_port_module_test.cpp
+
     # TODO: Re-enable when String API is complete
     # tests/rusty_string_test.cpp
     # tests/test_all_types.cpp
@@ -549,7 +568,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     set(_vec_consuming_tests
         test_mutex test_thread rusty_vec_test rusty_array_test)
     list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
-    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|linked_list_tests_port|eq_diff_len_tests_port|vec_deque_tests_port|vec_tests_port|arc_tests_port|rc_tests_port|string_tests_port|btree_set_hash_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port|borrow_port)_"
+    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|linked_list_tests_port|eq_diff_len_tests_port|vec_deque_tests_port|vec_tests_port|arc_tests_port|rc_tests_port|string_tests_port|btree_set_hash_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port|borrow_port|ascii_port)_"
         OR test_name STREQUAL "async_module_test"
         OR NOT _vec_consume_idx EQUAL -1)
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
@@ -635,7 +654,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # rc_port_* / arc_port_* / vec_deque_port_* / linked_list_port_* /
     # string_port_* tests link their respective Phase B/C bridge stub
     # modules.
-    foreach(_bridge rc_port arc_port vec_deque_port linked_list_port string_port borrow_port)
+    foreach(_bridge rc_port arc_port vec_deque_port linked_list_port string_port borrow_port ascii_port)
         if(test_name MATCHES "^${_bridge}_")
             target_link_libraries(${test_executable} PRIVATE ${_bridge})
             target_compile_features(${test_executable} PRIVATE cxx_std_23)
