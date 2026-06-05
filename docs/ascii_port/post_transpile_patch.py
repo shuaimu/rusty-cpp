@@ -183,20 +183,42 @@ def patch_escape_ascii_stub(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 PRIM_METHOD_STUBS = [
-    ("to_uppercase", "return self_;"),
-    ("to_lowercase", "return self_;"),
-    ("make_uppercase", "(void)self_;"),
-    ("make_lowercase", "(void)self_;"),
-    ("eq_ignore_case", "(void)self_; (void)other; return false;"),
-    ("is_alphabetic", "return false;"),
-    ("is_uppercase", "return false;"),
-    ("is_lowercase", "return false;"),
-    ("is_alphanumeric", "return false;"),
-    ("is_octdigit", "return false;"),
-    ("is_punctuation", "return false;"),
-    ("is_graphic", "return false;"),
-    ("is_whitespace", "return false;"),
-    ("is_control", "return false;"),
+    # Case folding — call into rusty::to_ascii_X(byte) and rewrap.
+    (
+        "to_uppercase",
+        "return static_cast<AsciiChar>(\n"
+        "        rusty::to_ascii_uppercase(static_cast<uint8_t>(self_)));",
+    ),
+    (
+        "to_lowercase",
+        "return static_cast<AsciiChar>(\n"
+        "        rusty::to_ascii_lowercase(static_cast<uint8_t>(self_)));",
+    ),
+    (
+        "make_uppercase",
+        "self_ = static_cast<AsciiChar>(\n"
+        "        rusty::to_ascii_uppercase(static_cast<uint8_t>(self_)));",
+    ),
+    (
+        "make_lowercase",
+        "self_ = static_cast<AsciiChar>(\n"
+        "        rusty::to_ascii_lowercase(static_cast<uint8_t>(self_)));",
+    ),
+    (
+        "eq_ignore_case",
+        "return rusty::eq_ignore_ascii_case(\n"
+        "        static_cast<uint8_t>(self_), static_cast<uint8_t>(other));",
+    ),
+    # Predicates — call into rusty::is_ascii_X(byte).
+    ("is_alphabetic", "return rusty::is_ascii_alphabetic(static_cast<uint8_t>(self_));"),
+    ("is_uppercase", "return rusty::is_ascii_uppercase(static_cast<uint8_t>(self_));"),
+    ("is_lowercase", "return rusty::is_ascii_lowercase(static_cast<uint8_t>(self_));"),
+    ("is_alphanumeric", "return rusty::is_ascii_alphanumeric(static_cast<uint8_t>(self_));"),
+    ("is_octdigit", "return rusty::is_ascii_octdigit(static_cast<uint8_t>(self_));"),
+    ("is_punctuation", "return rusty::is_ascii_punctuation(static_cast<uint8_t>(self_));"),
+    ("is_graphic", "return rusty::is_ascii_graphic(static_cast<uint8_t>(self_));"),
+    ("is_whitespace", "return rusty::is_ascii_whitespace(static_cast<uint8_t>(self_));"),
+    ("is_control", "return rusty::is_ascii_control(static_cast<uint8_t>(self_));"),
 ]
 
 

@@ -59,6 +59,7 @@
 #include "rusty/refcell.hpp"
 #include "rusty/fmt.hpp"
 #include "rusty/string.hpp"
+#include "rusty/ascii.hpp"
 #include "rusty/fn.hpp"
 #include "rusty/function.hpp"
 // rusty::HashMap / HashSet replaced by hashbrown_port C++20 modules.

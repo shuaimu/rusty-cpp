@@ -27,6 +27,31 @@ int main() {
     assert(::ascii_port::to_u8(AsciiChar::CapitalA) == 65);
     assert(::ascii_port::to_char(AsciiChar::CapitalA) == U'A');
 
-    std::printf("ascii_port module smoke OK: enum + factories + to_u8/to_char\n");
+    // Case folding now delegates to rusty::to_ascii_X helpers.
+    assert(::ascii_port::to_uppercase(AsciiChar::SmallA) == AsciiChar::CapitalA);
+    assert(::ascii_port::to_lowercase(AsciiChar::CapitalA) == AsciiChar::SmallA);
+    assert(::ascii_port::to_uppercase(AsciiChar::Digit5) == AsciiChar::Digit5);
+    AsciiChar c = AsciiChar::SmallZ;
+    ::ascii_port::make_uppercase(c);
+    assert(c == AsciiChar::CapitalZ);
+
+    // Predicates delegate to rusty::is_ascii_X.
+    assert(::ascii_port::is_alphabetic(AsciiChar::CapitalA));
+    assert(::ascii_port::is_alphabetic(AsciiChar::SmallZ));
+    assert(!::ascii_port::is_alphabetic(AsciiChar::Digit0));
+    assert(::ascii_port::is_uppercase(AsciiChar::CapitalA));
+    assert(!::ascii_port::is_uppercase(AsciiChar::SmallA));
+    assert(::ascii_port::is_lowercase(AsciiChar::SmallA));
+    assert(::ascii_port::is_digit(AsciiChar::Digit5));
+    assert(::ascii_port::is_hexdigit(AsciiChar::SmallF));
+    assert(!::ascii_port::is_hexdigit(AsciiChar::SmallG));
+    assert(::ascii_port::is_whitespace(AsciiChar::Space));
+    assert(::ascii_port::is_control(AsciiChar::Null));
+    assert(!::ascii_port::is_control(AsciiChar::CapitalA));
+    assert(::ascii_port::is_graphic(AsciiChar::Tilde));
+    assert(::ascii_port::eq_ignore_case(AsciiChar::CapitalA, AsciiChar::SmallA));
+
+    std::printf("ascii_port module smoke OK: enum + factories + to_u8/to_char\n"
+                "                          + case folding + predicates (rusty::ascii::*)\n");
     return 0;
 }

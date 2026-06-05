@@ -4085,65 +4085,70 @@ inline std::string_view as_str(const AsciiChar& self_) {
 }
 inline auto to_uppercase(AsciiChar self_) {
     // patcher: stub primitive-method body `to_uppercase`
-    return self_;
+    return static_cast<AsciiChar>(
+        rusty::to_ascii_uppercase(static_cast<uint8_t>(self_)));
 }
 inline auto to_lowercase(AsciiChar self_) {
     // patcher: stub primitive-method body `to_lowercase`
-    return self_;
+    return static_cast<AsciiChar>(
+        rusty::to_ascii_lowercase(static_cast<uint8_t>(self_)));
 }
 inline bool eq_ignore_case(AsciiChar self_, auto other) {
     // patcher: stub primitive-method body `eq_ignore_case`
-    (void)self_; (void)other; return false;
+    return rusty::eq_ignore_ascii_case(
+        static_cast<uint8_t>(self_), static_cast<uint8_t>(other));
 }
 inline void make_uppercase(AsciiChar& self_) {
     // patcher: stub primitive-method body `make_uppercase`
-    (void)self_;
+    self_ = static_cast<AsciiChar>(
+        rusty::to_ascii_uppercase(static_cast<uint8_t>(self_)));
 }
 inline void make_lowercase(AsciiChar& self_) {
     // patcher: stub primitive-method body `make_lowercase`
-    (void)self_;
+    self_ = static_cast<AsciiChar>(
+        rusty::to_ascii_lowercase(static_cast<uint8_t>(self_)));
 }
 inline bool is_alphabetic(AsciiChar self_) {
     // patcher: stub primitive-method body `is_alphabetic`
-    return false;
+    return rusty::is_ascii_alphabetic(static_cast<uint8_t>(self_));
 }
 inline bool is_uppercase(AsciiChar self_) {
     // patcher: stub primitive-method body `is_uppercase`
-    return false;
+    return rusty::is_ascii_uppercase(static_cast<uint8_t>(self_));
 }
 inline bool is_lowercase(AsciiChar self_) {
     // patcher: stub primitive-method body `is_lowercase`
-    return false;
+    return rusty::is_ascii_lowercase(static_cast<uint8_t>(self_));
 }
 inline bool is_alphanumeric(AsciiChar self_) {
     // patcher: stub primitive-method body `is_alphanumeric`
-    return false;
+    return rusty::is_ascii_alphanumeric(static_cast<uint8_t>(self_));
 }
 inline bool is_digit(AsciiChar self_) {
     return rusty::is_ascii_digit(to_u8(self_));
 }
 inline bool is_octdigit(AsciiChar self_) {
     // patcher: stub primitive-method body `is_octdigit`
-    return false;
+    return rusty::is_ascii_octdigit(static_cast<uint8_t>(self_));
 }
 inline bool is_hexdigit(AsciiChar self_) {
     return rusty::is_ascii_hexdigit(to_u8(self_));
 }
 inline bool is_punctuation(AsciiChar self_) {
     // patcher: stub primitive-method body `is_punctuation`
-    return false;
+    return rusty::is_ascii_punctuation(static_cast<uint8_t>(self_));
 }
 inline bool is_graphic(AsciiChar self_) {
     // patcher: stub primitive-method body `is_graphic`
-    return false;
+    return rusty::is_ascii_graphic(static_cast<uint8_t>(self_));
 }
 inline bool is_whitespace(AsciiChar self_) {
     // patcher: stub primitive-method body `is_whitespace`
-    return false;
+    return rusty::is_ascii_whitespace(static_cast<uint8_t>(self_));
 }
 inline bool is_control(AsciiChar self_) {
     // patcher: stub primitive-method body `is_control`
-    return false;
+    return rusty::is_ascii_control(static_cast<uint8_t>(self_));
 }
 // patcher: escape_ascii stubbed — EscapeDefault lives in parent
 // core::ascii module (not ported).
