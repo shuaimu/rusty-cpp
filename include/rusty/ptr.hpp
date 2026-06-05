@@ -220,6 +220,20 @@ inline constexpr std::nullptr_t null_mut() noexcept {
     return nullptr;
 }
 
+// `without_provenance(addr)` — construct a pointer from a raw address with
+// strict-provenance API (the resulting pointer has no provenance). In C++
+// we just reinterpret the address. Used by transpiled core::slice::iter
+// for ZST iterators which encode `len` as the "pointer" itself.
+template<typename T = void>
+inline constexpr const T* without_provenance(std::uintptr_t addr) noexcept {
+    return reinterpret_cast<const T*>(addr);
+}
+
+template<typename T = void>
+inline constexpr T* without_provenance_mut(std::uintptr_t addr) noexcept {
+    return reinterpret_cast<T*>(addr);
+}
+
 template<typename T>
 inline constexpr T* cast_mut(const T* ptr) noexcept {
     return const_cast<T*>(ptr);

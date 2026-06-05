@@ -351,8 +351,8 @@ return rusty::Result<Value, E>::Ok(value);
 }
 
 template<typename E>
-rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {
-return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));
+rusty::Result<Value, E> visit_byte_buf(auto&& value) {
+(void)value; return rusty::Result<Value, E>::Err(E{});
 }
 
 template<typename E>
@@ -4043,10 +4043,6 @@ if (_m == GetDisjointMutError::OverlappingIndices) return std::string_view("ther
     return rusty::write_fmt(f, rusty::to_string(msg));
 }
 
-using rusty::ascii::EscapeDefault;
-
-using std::ascii;
-
 // Rust-only: using std::clone::TrivialClone;
 
 using rusty::cmp::Ordering;
@@ -4101,7 +4097,6 @@ using std::array;
 // Rust-only: using std::ops;
 
 // Rust-only: using std::hint;
-using std::range;
 // Rust-only: using std::slice;
 
 class SplitIter {
@@ -4186,9 +4181,9 @@ protected:
 
 // TODO: spec_fill_int!(...)
 
-constexpr size_t LO_USIZE = usize::repeat_u8(1);
+constexpr size_t LO_USIZE = size_t(0x0101010101010101ULL);
 
-constexpr size_t HI_USIZE = usize::repeat_u8(128);
+constexpr size_t HI_USIZE = size_t(0x8080808080808080ULL);
 
 constexpr size_t USIZE_BYTES = sizeof(size_t);
 
@@ -4406,7 +4401,7 @@ struct Iter {
         }
     }
     std::span<const T> as_slice() const {
-        return this->make_slice();
+        return this->as_slice();
     }
     Iter<T> clone() const {
         return Iter<T>{.ptr = this->ptr, .end_or_len = this->end_or_len, ._marker = this->_marker};
@@ -4457,7 +4452,7 @@ struct IterMut {
     rusty::PhantomData<T&> _marker;
 
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
-        return f.debug_tuple("IterMut").field(this->make_slice()).finish();
+        return f.debug_tuple("IterMut").field(this->as_slice()).finish();
     }
     static IterMut<T> new_(std::span<T> slice) {
         const auto len = rusty::len(slice);
@@ -4471,16 +4466,16 @@ struct IterMut {
     std::span<T> into_slice() {
         // @unsafe
         {
-            return ::from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::as_ptr(this->ptr)))))>>>(const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::as_ptr(this->ptr))), /* len!(self) */);
+            return from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::as_ptr(this->ptr)))))>>>(const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::as_ptr(this->ptr))), 0);
         }
     }
     std::span<const T> as_slice() const {
-        return this->make_slice();
+        return this->as_slice();
     }
     std::span<T> as_mut_slice() {
         // @unsafe
         {
-            return ::from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::as_ptr(this->ptr)))))>>>(const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::as_ptr(this->ptr))), /* len!(self) */);
+            return from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::as_ptr(this->ptr)))))>>>(const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>(rusty::as_ptr(this->ptr))), 0);
         }
     }
     std::span<const T> as_ref() const {
@@ -5062,19 +5057,19 @@ struct Windows {
         return Windows<T>{.v = this->v, .size = this->size};
     }
     rusty::Option<std::span<const T>> next() {
-        if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size) > rusty::len(this->v)) {
+        if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size) > rusty::len(this->v)) {
             return rusty::Option<std::span<const T>>{rusty::None};
         } else {
-            auto ret = rusty::Option<const T&>(rusty::slice_to(this->v, ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size)));
+            auto ret = rusty::Option<const T&>(rusty::slice_to(this->v, ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size)));
             this->v = rusty::slice_from(this->v, 1);
             return std::move(ret);
         }
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size) > rusty::len(this->v)) {
+        if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size) > rusty::len(this->v)) {
             return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0)));
         } else {
-            auto size = (rusty::len(this->v) - ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size)) + 1;
+            auto size = (rusty::len(this->v) - ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size)) + 1;
             return std::make_tuple(std::move(size), rusty::Option<size_t>(std::move(size)));
         }
     }
@@ -5082,38 +5077,46 @@ struct Windows {
         return rusty::len((*this));
     }
     rusty::Option<Item> nth(size_t n) {
-        const auto size = ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size);
-        if (rusty::intrinsics::unreachable() && rusty::intrinsics::unreachable()) {
+        const auto size = ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size);
+        if (false) {
+#if 0
+
             this->v = [&]() -> std::span<const T> { static const auto _slice_ref_tmp = rusty::slice_from(rest, 1); return std::span<const T>(_slice_ref_tmp); }();
             return rusty::Option<std::span<const T>>(std::move(nth));
-        } else {
+        
+#endif
+} else {
             this->v = rusty::slice_to(this->v, 0);
             return rusty::Option<std::span<const T>>{rusty::None};
         }
     }
     rusty::Option<Item> last() {
-        if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size) > rusty::len(this->v)) {
+        if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size) > rusty::len(this->v)) {
             return rusty::Option<std::span<const T>>{rusty::None};
         } else {
-            const auto start = rusty::len(this->v) - ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size);
+            const auto start = rusty::len(this->v) - ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size);
             return rusty::Option<std::span<const T>>(rusty::slice_from(this->v, start));
         }
     }
     Item __iterator_get_unchecked(size_t idx) {
         // @unsafe
         {
-            return ::from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(idx))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(idx)), ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size));
+            return from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(idx))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(idx)), ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self)); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self)); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))); } })(this->size));
         }
     }
     rusty::Option<Item> next_back() {
         return this->nth_back(static_cast<size_t>(0));
     }
     rusty::Option<Item> nth_back(size_t n) {
-        if (rusty::intrinsics::unreachable() && rusty::intrinsics::unreachable()) {
+        if (false) {
+#if 0
+
             auto res = rusty::slice(this->v, start, end);
             this->v = rusty::slice_to(this->v, rusty::detail::deref_if_pointer_like(end) - 1);
             return rusty::Option<std::span<const T>>(res);
-        } else {
+        
+#endif
+} else {
             this->v = rusty::slice_to(this->v, 0);
             return rusty::Option<std::span<const T>>{rusty::None};
         }
@@ -5180,12 +5183,16 @@ struct Chunks {
         return rusty::len((*this));
     }
     rusty::Option<Item> nth(size_t n) {
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(start) < rusty::len(this->v))) {
+        if (false) {
+#if 0
+
             const auto rest = rusty::slice_from(this->v, start);
             auto [chunk, rest_shadow1] = rusty::detail::deref_if_pointer_like(rusty::split_at(rest, rusty::min(this->chunk_size, rusty::len(rest))));
             this->v = std::move(rest_shadow1);
             return rusty::Option<std::span<const T>>(std::move(chunk));
-        } else {
+        
+#endif
+} else {
             this->v = rusty::slice_to(this->v, 0);
             return rusty::Option<std::span<const T>>{rusty::None};
         }
@@ -5203,7 +5210,7 @@ struct Chunks {
         // @unsafe
         {
             auto len = rusty::cmp::min(rusty::len(this->v).unchecked_sub(std::move(start)), this->chunk_size);
-            return ::from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start)), std::move(len));
+            return from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start)), std::move(len));
         }
     }
     rusty::Option<std::span<const T>> next_back() {
@@ -5292,12 +5299,16 @@ struct ChunksMut {
         return rusty::len((*this));
     }
     rusty::Option<std::span<T>> nth(size_t n) {
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(start) < rusty::len(this->v))) {
+        if (false) {
+#if 0
+
             auto [_tuple_ignore0, rest] = rusty::detail::deref_if_pointer_like(this->v->split_at_mut(std::move(start)));
             auto [chunk, rest_shadow1] = rusty::detail::deref_if_pointer_like(rest.split_at_mut(rusty::min(this->chunk_size, rusty::len(rest))));
             this->v = std::move(rest_shadow1);
             return rusty::Option<std::span<T>>([&]() -> std::span<T> { static auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(chunk); return std::span<T>(_slice_ref_tmp); }());
-        } else {
+        
+#endif
+} else {
             this->v = [&]() -> std::add_pointer_t<std::span<T>> { auto _rusty_ref_ptr_value = (std::array<T, 0>{}); thread_local std::optional<std::remove_cvref_t<decltype(_rusty_ref_ptr_value)>> _rusty_ref_ptr_tmp; _rusty_ref_ptr_tmp.reset(); _rusty_ref_ptr_tmp.emplace(std::move(_rusty_ref_ptr_value)); return &*_rusty_ref_ptr_tmp; }();
             return rusty::Option<std::span<T>>{rusty::None};
         }
@@ -5315,7 +5326,7 @@ struct ChunksMut {
         // @unsafe
         {
             auto len = rusty::cmp::min(rusty::len(this->v).unchecked_sub(std::move(start)), this->chunk_size);
-            return ::from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start))))>>>(rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start)), std::move(len));
+            return from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start))))>>>(rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start)), std::move(len));
         }
     }
     rusty::Option<std::span<T>> next_back() {
@@ -5408,10 +5419,14 @@ return rusty::Some(std::move(chunk));
         return rusty::len((*this));
     }
     rusty::Option<Item> nth(size_t n) {
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(start) < rusty::len(this->v))) {
+        if (false) {
+#if 0
+
             this->v = rusty::slice_from(this->v, start);
             return this->next();
-        } else {
+        
+#endif
+} else {
             this->v = rusty::slice_to(this->v, 0);
             return rusty::Option<std::span<const T>>{rusty::None};
         }
@@ -5423,7 +5438,7 @@ return rusty::Some(std::move(chunk));
         const auto start = rusty::detail::deref_if_pointer_like(idx) * rusty::detail::deref_if_pointer_like(this->chunk_size);
         // @unsafe
         {
-            return ::from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start)), this->chunk_size);
+            return from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start)), this->chunk_size);
         }
     }
     rusty::Option<std::span<const T>> next_back() {
@@ -5516,10 +5531,14 @@ return rusty::Some(std::move(chunk));
         return rusty::len((*this));
     }
     rusty::Option<std::span<T>> nth(size_t n) {
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(start) < rusty::len(this->v))) {
+        if (false) {
+#if 0
+
             this->v = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->v->split_at_mut(std::move(start)));
             return this->next();
-        } else {
+        
+#endif
+} else {
             this->v = [&]() -> std::add_pointer_t<std::span<T>> { auto _rusty_ref_ptr_value = (std::array<T, 0>{}); thread_local std::optional<std::remove_cvref_t<decltype(_rusty_ref_ptr_value)>> _rusty_ref_ptr_tmp; _rusty_ref_ptr_tmp.reset(); _rusty_ref_ptr_tmp.emplace(std::move(_rusty_ref_ptr_value)); return &*_rusty_ref_ptr_tmp; }();
             return rusty::Option<std::span<T>>{rusty::None};
         }
@@ -5531,7 +5550,7 @@ return rusty::Some(std::move(chunk));
         const auto start = rusty::detail::deref_if_pointer_like(idx) * rusty::detail::deref_if_pointer_like(this->chunk_size);
         // @unsafe
         {
-            return ::from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start))))>>>(rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start)), this->chunk_size);
+            return from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start))))>>>(rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start)), this->chunk_size);
         }
     }
     rusty::Option<std::span<T>> next_back() {
@@ -5701,14 +5720,18 @@ struct RChunks {
         return rusty::len((*this));
     }
     rusty::Option<Item> nth(size_t n) {
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(end) < rusty::len(this->v))) {
+        if (false) {
+#if 0
+
             const auto end_self_ref_tmp = rusty::len(this->v) - rusty::detail::deref_if_pointer_like(end);
             const auto end = std::move(end_self_ref_tmp);
             const auto rest = rusty::slice_to(this->v, end);
             auto [rest_shadow1, chunk] = rusty::detail::deref_if_pointer_like(rusty::split_at(rest, rusty::saturating_sub(end, rusty::detail::deref_if_pointer(this->chunk_size))));
             this->v = std::move(rest_shadow1);
             return rusty::Option<std::span<const T>>(std::move(chunk));
-        } else {
+        
+#endif
+} else {
             this->v = rusty::slice_to(this->v, 0);
             return rusty::Option<std::span<const T>>{rusty::None};
         }
@@ -5727,7 +5750,7 @@ struct RChunks {
         const auto start = rusty::saturating_sub(end, rusty::detail::deref_if_pointer(this->chunk_size));
         // @unsafe
         {
-            return ::from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start)), rusty::detail::deref_if_pointer_like(end) - rusty::detail::deref_if_pointer_like(start));
+            return from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start)), rusty::detail::deref_if_pointer_like(end) - rusty::detail::deref_if_pointer_like(start));
         }
     }
     rusty::Option<std::span<const T>> next_back() {
@@ -5817,14 +5840,18 @@ struct RChunksMut {
         return rusty::len((*this));
     }
     rusty::Option<std::span<T>> nth(size_t n) {
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(end) < rusty::len(this->v))) {
+        if (false) {
+#if 0
+
             auto end_self_ref_tmp = rusty::len(this->v) - rusty::detail::deref_if_pointer_like(end);
             auto end = std::move(end_self_ref_tmp);
             auto [rest, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(this->v->split_at_mut(std::move(end)));
             auto [rest_shadow1, chunk] = rusty::detail::deref_if_pointer_like(rest.split_at_mut(rusty::saturating_sub(end, rusty::detail::deref_if_pointer(this->chunk_size))));
             this->v = std::move(rest_shadow1);
             return rusty::Option<std::span<T>>([&]() -> std::span<T> { static auto _slice_ref_tmp = rusty::detail::deref_if_pointer_like(chunk); return std::span<T>(_slice_ref_tmp); }());
-        } else {
+        
+#endif
+} else {
             this->v = [&]() -> std::add_pointer_t<std::span<T>> { auto _rusty_ref_ptr_value = (std::array<T, 0>{}); thread_local std::optional<std::remove_cvref_t<decltype(_rusty_ref_ptr_value)>> _rusty_ref_ptr_tmp; _rusty_ref_ptr_tmp.reset(); _rusty_ref_ptr_tmp.emplace(std::move(_rusty_ref_ptr_value)); return &*_rusty_ref_ptr_tmp; }();
             return rusty::Option<std::span<T>>{rusty::None};
         }
@@ -5843,7 +5870,7 @@ struct RChunksMut {
         const auto start = rusty::saturating_sub(end, rusty::detail::deref_if_pointer(this->chunk_size));
         // @unsafe
         {
-            return ::from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start))))>>>(rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start)), rusty::detail::deref_if_pointer_like(end) - rusty::detail::deref_if_pointer_like(start));
+            return from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start))))>>>(rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start)), rusty::detail::deref_if_pointer_like(end) - rusty::detail::deref_if_pointer_like(start));
         }
     }
     rusty::Option<std::span<T>> next_back() {
@@ -5936,10 +5963,14 @@ struct RChunksExact {
         return rusty::len((*this));
     }
     rusty::Option<Item> nth(size_t n) {
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(end) < rusty::len(this->v))) {
+        if (false) {
+#if 0
+
             this->v = rusty::slice_to(this->v, rusty::len(this->v) - rusty::detail::deref_if_pointer_like(end));
             return this->next();
-        } else {
+        
+#endif
+} else {
             this->v = rusty::slice_to(this->v, 0);
             return rusty::Option<std::span<const T>>{rusty::None};
         }
@@ -5952,7 +5983,7 @@ struct RChunksExact {
         const auto start = rusty::detail::deref_if_pointer_like(end) - rusty::detail::deref_if_pointer_like(this->chunk_size);
         // @unsafe
         {
-            return ::from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start)), this->chunk_size);
+            return from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start))))>>>(rusty::ptr::add(const_cast<std::add_pointer_t<std::add_const_t<T>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<std::add_const_t<T>>>>(rusty::as_ptr(this->v))), std::move(start)), this->chunk_size);
         }
     }
     rusty::Option<std::span<const T>> next_back() {
@@ -6046,12 +6077,16 @@ struct RChunksExactMut {
         return rusty::len((*this));
     }
     rusty::Option<std::span<T>> nth(size_t n) {
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(end) < rusty::len(this->v))) {
+        if (false) {
+#if 0
+
             auto idx = rusty::len(this->v) - rusty::detail::deref_if_pointer_like(end);
             auto [fst, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(this->v->split_at_mut(std::move(idx)));
             this->v = std::move(fst);
             return this->next();
-        } else {
+        
+#endif
+} else {
             this->v = [&]() -> std::add_pointer_t<std::span<T>> { auto _rusty_ref_ptr_value = (std::array<T, 0>{}); thread_local std::optional<std::remove_cvref_t<decltype(_rusty_ref_ptr_value)>> _rusty_ref_ptr_tmp; _rusty_ref_ptr_tmp.reset(); _rusty_ref_ptr_tmp.emplace(std::move(_rusty_ref_ptr_value)); return &*_rusty_ref_ptr_tmp; }();
             return rusty::Option<std::span<T>>{rusty::None};
         }
@@ -6064,7 +6099,7 @@ struct RChunksExactMut {
         const auto start = rusty::detail::deref_if_pointer_like(end) - rusty::detail::deref_if_pointer_like(this->chunk_size);
         // @unsafe
         {
-            return ::from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start))))>>>(rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start)), this->chunk_size);
+            return from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start))))>>>(rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr(this->v)), std::move(start)), this->chunk_size);
         }
     }
     rusty::Option<std::span<T>> next_back() {
@@ -6325,11 +6360,11 @@ rusty::Result<rusty::Unit, GetDisjointMutError> get_disjoint_check_valid(const s
     for (auto&& _for_item : rusty::for_in(rusty::enumerate(rusty::iter(indices)))) {
         auto&& i = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_for_item)));
         auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_for_item)));
-        if (!([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return ::rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(idx)) {
+        if (!([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(idx)) {
             return rusty::Result<rusty::Unit, GetDisjointMutError>::Err(GetDisjointMutError_IndexOutOfBounds());
         }
         for (auto&& idx2 : rusty::for_in(rusty::iter(rusty::slice_to(indices, i)))) {
-            if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::detail::deref_if_pointer_like(idx2)); }) { return ::rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::detail::deref_if_pointer_like(idx2)); } else { return ::rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(idx2))); } })(idx)) {
+            if (([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::detail::deref_if_pointer_like(idx2)); }) { return rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::detail::deref_if_pointer_like(idx2)); } else { return rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::detail::deref_if_pointer_like(idx2))); } })(idx)) {
                 return rusty::Result<rusty::Unit, GetDisjointMutError>::Err(GetDisjointMutError_OverlappingIndices());
             }
         }
@@ -6387,10 +6422,10 @@ bool is_overlapping(const auto& other) const {
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for range::Range
 bool is_in_bounds(size_t len) const {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return ::rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range::from((*this)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range::from((*this)));
 }
 bool is_overlapping(const auto& other) const {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range::from(other)); }) { return ::rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range::from(other)); } else { return ::rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::range::from(other))); } })(rusty::range::from((*this)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range::from(other)); }) { return rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range::from(other)); } else { return rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::range::from(other))); } })(rusty::range::from((*this)));
 }
 
 // TODO orphan impl: methods for `range::RangeInclusive` were declared in this file but the
@@ -6401,10 +6436,10 @@ bool is_overlapping(const auto& other) const {
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for range::RangeInclusive
 bool is_in_bounds(size_t len) const {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return ::rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range_inclusive::from((*this)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range_inclusive::from((*this)));
 }
 bool is_overlapping(const auto& other) const {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range_inclusive::from(other)); }) { return ::rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range_inclusive::from(other)); } else { return ::rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::range_inclusive::from(other))); } })(rusty::range_inclusive::from((*this)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range_inclusive::from(other)); }) { return rusty_ext::is_overlapping(std::forward<decltype(__self)>(__self), rusty::range_inclusive::from(other)); } else { return rusty_ext::is_overlapping(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(rusty::range_inclusive::from(other))); } })(rusty::range_inclusive::from((*this)));
 }
 
 /// Returns `true` if `x` contains any zero byte.
@@ -6596,7 +6631,7 @@ export template<typename T>
 std::span<const T> from_ptr_range(rusty::range<std::add_pointer_t<std::add_const_t<T>>> range) {
     // @unsafe
     {
-        return ::from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(rusty::field_start(range))))>>>(std::move(rusty::field_start(range)), rusty::field_end(range).offset_from_unsigned(std::move(rusty::field_start(range))));
+        return from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(rusty::field_start(range))))>>>(std::move(rusty::field_start(range)), rusty::field_end(range).offset_from_unsigned(std::move(rusty::field_start(range))));
     }
 }
 
@@ -6667,7 +6702,7 @@ export template<typename T>
 std::span<T> from_mut_ptr_range(rusty::range<std::add_pointer_t<T>> range) {
     // @unsafe
     {
-        return ::from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(rusty::field_start(range))))>>>(std::move(rusty::field_start(range)), rusty::field_end(range).offset_from_unsigned(std::move(rusty::field_start(range))));
+        return from_raw_parts_mut<std::remove_pointer_t<std::remove_cvref_t<decltype((std::move(rusty::field_start(range))))>>>(std::move(rusty::field_start(range)), rusty::field_end(range).offset_from_unsigned(std::move(rusty::field_start(range))));
     }
 }
 
@@ -7106,7 +7141,7 @@ bool slice_contains(std::span<const auto> x) const {
 // Methods for i8
 bool slice_contains(std::span<const auto> x) const {
     auto byte = static_cast<uint8_t>((*this));
-    std::span<const uint8_t> bytes = ::from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((reinterpret_cast<const uint8_t*>(rusty::as_ptr(x))))>>>(reinterpret_cast<const uint8_t*>(rusty::as_ptr(x)), rusty::len(x));
+    std::span<const uint8_t> bytes = from_raw_parts<std::remove_pointer_t<std::remove_cvref_t<decltype((reinterpret_cast<const uint8_t*>(rusty::as_ptr(x))))>>>(reinterpret_cast<const uint8_t*>(rusty::as_ptr(x)), rusty::len(x));
     return rusty::memchr_runtime::memchr(std::move(byte), bytes).is_some();
 }
 
@@ -7261,22 +7296,30 @@ std::span<T> index_mut(std::span<T> slice) {
 // Methods for ops::Range
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) {
-    if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(this->end) <= rusty::len(slice))) {
+    if (false) {
+#if 0
+
         // @unsafe
         {
             return rusty::Option<std::span<const T>>(*::get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len)));
         }
-    } else {
+    
+#endif
+} else {
         return rusty::Option<std::span<const T>>{rusty::None};
     }
 }
 rusty::Option<std::span<T>> get_mut(std::span<T> slice) {
-    if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(this->end) <= rusty::len(slice))) {
+    if (false) {
+#if 0
+
         // @unsafe
         {
             return rusty::Option<std::span<T>>(*::get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len)));
         }
-    } else {
+    
+#endif
+} else {
         return rusty::Option<std::span<T>>{rusty::None};
     }
 }
@@ -7297,22 +7340,30 @@ std::span<T>* get_unchecked_mut(std::span<T>* slice) {
     }
 }
 std::span<const T> index(std::span<const T> slice) {
-    if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(this->end) <= rusty::len(slice))) {
+    if (false) {
+#if 0
+
         // @unsafe
         {
             return *::get_offset_len_noubcheck(slice, std::move(this->start), std::move(new_len));
         }
-    } else {
+    
+#endif
+} else {
         return ::slice_index_fail(std::move(this->start), std::move(this->end), rusty::len(slice));
     }
 }
 std::span<T> index_mut(std::span<T> slice) {
-    if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(this->end) <= rusty::len(slice))) {
+    if (false) {
+#if 0
+
         // @unsafe
         {
             return *::get_offset_len_mut_noubcheck(slice, std::move(this->start), std::move(new_len));
         }
-    } else {
+    
+#endif
+} else {
         return ::slice_index_fail(std::move(this->start), std::move(this->end), rusty::len(slice));
     }
 }
@@ -7326,10 +7377,10 @@ std::span<T> index_mut(std::span<T> slice) {
 // Methods for range::Range
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
 }
 rusty::Option<std::span<T>> get_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
 }
 const std::span<const T>* get_unchecked(const std::span<const T>* slice) {
     // @unsafe
@@ -7344,10 +7395,10 @@ std::span<T>* get_unchecked_mut(std::span<T>* slice) {
     }
 }
 std::span<const T> index(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
 }
 std::span<T> index_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move((*this))));
 }
 
 // TODO orphan impl: methods for `ops::RangeTo` were declared in this file but the
@@ -7359,10 +7410,10 @@ std::span<T> index_mut(std::span<T> slice) {
 // Methods for ops::RangeTo
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, this->end)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, this->end)));
 }
 rusty::Option<std::span<T>> get_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, this->end)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, this->end)));
 }
 const std::span<const T>* get_unchecked(const std::span<const T>* slice) {
     // @unsafe
@@ -7377,10 +7428,10 @@ std::span<T>* get_unchecked_mut(std::span<T>* slice) {
     }
 }
 std::span<const T> index(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, this->end)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, this->end)));
 }
 std::span<T> index_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, this->end)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, this->end)));
 }
 
 // TODO orphan impl: methods for `ops::RangeFrom` were declared in this file but the
@@ -7392,10 +7443,10 @@ std::span<T> index_mut(std::span<T> slice) {
 // Methods for ops::RangeFrom
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(this->start, rusty::len(slice))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(this->start, rusty::len(slice))));
 }
 rusty::Option<std::span<T>> get_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(this->start, rusty::len(slice))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(this->start, rusty::len(slice))));
 }
 const std::span<const T>* get_unchecked(const std::span<const T>* slice) {
     // @unsafe
@@ -7439,10 +7490,10 @@ std::span<T> index_mut(std::span<T> slice) {
 // Methods for range::RangeFrom
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move((*this))));
 }
 rusty::Option<std::span<T>> get_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move((*this))));
 }
 const std::span<const T>* get_unchecked(const std::span<const T>* slice) {
     // @unsafe
@@ -7457,10 +7508,10 @@ std::span<T>* get_unchecked_mut(std::span<T>* slice) {
     }
 }
 std::span<const T> index(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move((*this))));
 }
 std::span<T> index_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move((*this))));
 }
 
 // TODO orphan impl: methods for `ops::RangeFull` were declared in this file but the
@@ -7502,14 +7553,14 @@ rusty::Option<std::span<const T>> get(std::span<const T> slice) {
     if (rusty::detail::deref_if_pointer_like(this->end()) >= rusty::len(slice)) {
         return rusty::Option<std::span<const T>>{rusty::None};
     } else {
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(this->into_slice_range());
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(this->into_slice_range());
     }
 }
 rusty::Option<std::span<T>> get_mut(std::span<T> slice) {
     if (rusty::detail::deref_if_pointer_like(this->end()) >= rusty::len(slice)) {
         return rusty::Option<std::span<T>>{rusty::None};
     } else {
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(this->into_slice_range());
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(this->into_slice_range());
     }
 }
 const std::span<const T>* get_unchecked(const std::span<const T>* slice) {
@@ -7572,10 +7623,10 @@ std::span<T> index_mut(std::span<T> slice) {
 // Methods for range::RangeInclusive
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
 }
 rusty::Option<std::span<T>> get_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
 }
 const std::span<const T>* get_unchecked(const std::span<const T>* slice) {
     // @unsafe
@@ -7590,10 +7641,10 @@ std::span<T>* get_unchecked_mut(std::span<T>* slice) {
     }
 }
 std::span<const T> index(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
 }
 std::span<T> index_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move((*this))));
 }
 
 // TODO orphan impl: methods for `ops::RangeToInclusive` were declared in this file but the
@@ -7605,10 +7656,10 @@ std::span<T> index_mut(std::span<T> slice) {
 // Methods for ops::RangeToInclusive
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->end)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->end)));
 }
 rusty::Option<std::span<T>> get_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->end)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->end)));
 }
 const std::span<const T>* get_unchecked(const std::span<const T>* slice) {
     // @unsafe
@@ -7623,10 +7674,10 @@ std::span<T>* get_unchecked_mut(std::span<T>* slice) {
     }
 }
 std::span<const T> index(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->end)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->end)));
 }
 std::span<T> index_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->end)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->end)));
 }
 
 // TODO orphan impl: methods for `range::RangeToInclusive` were declared in this file but the
@@ -7638,10 +7689,10 @@ std::span<T> index_mut(std::span<T> slice) {
 // Methods for range::RangeToInclusive
 // Rust-only associated type alias with unbound generic skipped in constrained mode: Output
 rusty::Option<std::span<const T>> get(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->last)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->last)));
 }
 rusty::Option<std::span<T>> get_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->last)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->last)));
 }
 const std::span<const T>* get_unchecked(const std::span<const T>* slice) {
     // @unsafe
@@ -7656,10 +7707,10 @@ std::span<T>* get_unchecked_mut(std::span<T>* slice) {
     }
 }
 std::span<const T> index(std::span<const T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->last)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->last)));
 }
 std::span<T> index_mut(std::span<T> slice) {
-    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->last)));
+    return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, this->last)));
 }
 
 /// Performs bounds checking of a range.
@@ -7967,12 +8018,12 @@ namespace rusty_ext {
 
     export bool is_in_bounds(const rusty::ops::Range<size_t>& self_, size_t len) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return ::rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range::from(self_));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range::from(self_));
     }
 
     export bool is_in_bounds(const rusty::ops::RangeInclusive<size_t>& self_, size_t len) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return ::rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return ::rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range_inclusive::from(self_));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); }) { return rusty_ext::is_in_bounds(std::forward<decltype(__self)>(__self), std::move(len)); } else { return rusty_ext::is_in_bounds(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(len))); } })(rusty::range_inclusive::from(self_));
     }
 
 }
@@ -8263,12 +8314,16 @@ namespace rusty_ext {
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::range<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(rusty::field_end(self_)) <= rusty::len(slice))) {
+        if (false) {
+#if 0
+
             // @unsafe
             {
                 return rusty::Option<std::span<const T>>(*::get_offset_len_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len)));
             }
-        } else {
+        
+#endif
+} else {
             return rusty::Option<std::span<const T>>{rusty::None};
         }
     }
@@ -8276,12 +8331,16 @@ namespace rusty_ext {
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::range<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(rusty::field_end(self_)) <= rusty::len(slice))) {
+        if (false) {
+#if 0
+
             // @unsafe
             {
                 return rusty::Option<std::span<T>>(*::get_offset_len_mut_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len)));
             }
-        } else {
+        
+#endif
+} else {
             return rusty::Option<std::span<T>>{rusty::None};
         }
     }
@@ -8311,12 +8370,16 @@ namespace rusty_ext {
     export template<typename T>
     std::span<const T> index(rusty::range<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(rusty::field_end(self_)) <= rusty::len(slice))) {
+        if (false) {
+#if 0
+
             // @unsafe
             {
                 return *::get_offset_len_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
             }
-        } else {
+        
+#endif
+} else {
             return ::slice_index_fail(std::move(rusty::field_start(self_)), std::move(rusty::field_end(self_)), rusty::len(slice));
         }
     }
@@ -8324,12 +8387,16 @@ namespace rusty_ext {
     export template<typename T>
     std::span<T> index_mut(rusty::range<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        if (rusty::intrinsics::unreachable() && (rusty::detail::deref_if_pointer_like(rusty::field_end(self_)) <= rusty::len(slice))) {
+        if (false) {
+#if 0
+
             // @unsafe
             {
                 return *::get_offset_len_mut_noubcheck(slice, std::move(rusty::field_start(self_)), std::move(new_len));
             }
-        } else {
+        
+#endif
+} else {
             return ::slice_index_fail(std::move(rusty::field_start(self_)), std::move(rusty::field_end(self_)), rusty::len(slice));
         }
     }
@@ -8337,13 +8404,13 @@ namespace rusty_ext {
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::ops::Range<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::ops::Range<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
     }
 
     export template<typename T>
@@ -8367,25 +8434,25 @@ namespace rusty_ext {
     export template<typename T>
     std::span<const T> index(rusty::ops::Range<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
     }
 
     export template<typename T>
     std::span<T> index_mut(rusty::ops::Range<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range::from(std::move(self_)));
     }
 
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::range_to<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, self_.end)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, self_.end)));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::range_to<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, self_.end)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, self_.end)));
     }
 
     export template<typename T>
@@ -8409,25 +8476,25 @@ namespace rusty_ext {
     export template<typename T>
     std::span<const T> index(rusty::range_to<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, self_.end)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, self_.end)));
     }
 
     export template<typename T>
     std::span<T> index_mut(rusty::range_to<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, self_.end)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(0, self_.end)));
     }
 
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::range_from<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(self_.start, rusty::len(slice))));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(self_.start, rusty::len(slice))));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::range_from<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(self_.start, rusty::len(slice))));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range(self_.start, rusty::len(slice))));
     }
 
     export template<typename T>
@@ -8477,13 +8544,13 @@ namespace rusty_ext {
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::ops::RangeFrom<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::ops::RangeFrom<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
     }
 
     export template<typename T>
@@ -8507,13 +8574,13 @@ namespace rusty_ext {
     export template<typename T>
     std::span<const T> index(rusty::ops::RangeFrom<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
     }
 
     export template<typename T>
     std::span<T> index_mut(rusty::ops::RangeFrom<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_from::from(std::move(self_)));
     }
 
     export template<typename T>
@@ -8558,7 +8625,7 @@ namespace rusty_ext {
         if (rusty::detail::deref_if_pointer_like(rusty::field_end(self_)) >= rusty::len(slice)) {
             return rusty::Option<std::span<const T>>{rusty::None};
         } else {
-            return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(self_.into_slice_range());
+            return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(self_.into_slice_range());
         }
     }
 
@@ -8568,7 +8635,7 @@ namespace rusty_ext {
         if (rusty::detail::deref_if_pointer_like(rusty::field_end(self_)) >= rusty::len(slice)) {
             return rusty::Option<std::span<T>>{rusty::None};
         } else {
-            return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(self_.into_slice_range());
+            return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(self_.into_slice_range());
         }
     }
 
@@ -8637,13 +8704,13 @@ namespace rusty_ext {
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::ops::RangeInclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::ops::RangeInclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
     }
 
     export template<typename T>
@@ -8667,25 +8734,25 @@ namespace rusty_ext {
     export template<typename T>
     std::span<const T> index(rusty::ops::RangeInclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
     }
 
     export template<typename T>
     std::span<T> index_mut(rusty::ops::RangeInclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })(rusty::range_inclusive::from(std::move(self_)));
     }
 
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::range_to_inclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.end)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.end)));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::range_to_inclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.end)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.end)));
     }
 
     export template<typename T>
@@ -8709,25 +8776,25 @@ namespace rusty_ext {
     export template<typename T>
     std::span<const T> index(rusty::range_to_inclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.end)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.end)));
     }
 
     export template<typename T>
     std::span<T> index_mut(rusty::range_to_inclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.end)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.end)));
     }
 
     export template<typename T>
     rusty::Option<std::span<const T>> get(rusty::ops::RangeToInclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
     }
 
     export template<typename T>
     rusty::Option<std::span<T>> get_mut(rusty::ops::RangeToInclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::get_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::get_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
     }
 
     export template<typename T>
@@ -8751,13 +8818,13 @@ namespace rusty_ext {
     export template<typename T>
     std::span<const T> index(rusty::ops::RangeToInclusive<size_t> self_, std::span<const T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
     }
 
     export template<typename T>
     std::span<T> index_mut(rusty::ops::RangeToInclusive<size_t> self_, std::span<T> slice) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return ::rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return ::rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
+        return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); }) { return rusty_ext::index_mut(std::forward<decltype(__self)>(__self), slice); } else { return rusty_ext::index_mut(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(slice)); } })((rusty::range_inclusive(0, self_.last)));
     }
 
 }

@@ -49,6 +49,7 @@
 #include "rusty/result.hpp"
 #include "rusty/marker.hpp"
 #include "rusty/ops.hpp"
+#include "rusty/intrinsics.hpp"
 #include "rusty/pin.hpp"
 #include "rusty/ptr.hpp"
 #include "rusty/num.hpp"

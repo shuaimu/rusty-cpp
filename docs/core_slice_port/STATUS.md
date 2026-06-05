@@ -58,29 +58,40 @@ categories:
 
 Plus added `ControlFlow` and `IndexRange` stubs to `include/rusty/ops.hpp`.
 
-## Remaining error categories after first patcher pass
+## Phase A2 iter 2 — additional patches
+
+Iteration 2 of the patcher added:
+
+- Strip orphan `using std::ascii;` / `using std::range;` / `using rusty::ascii::EscapeDefault;`
+- `make_slice()` → `as_slice()` (emit-name divergence)
+- `::from_raw_parts_mut<` → `from_raw_parts_mut<` (drop leading `::`)
+- `(?<![:\w])::rusty_ext::` → `rusty_ext::` (anchored to avoid `::de::rusty_ext::` corruption)
+- `usize::repeat_u8(N)` → inline byte-broadcast constant
+- visit_byte_buf stub (sibling-port pattern from borrow_port P1)
+- `if (rusty::intrinsics::unreachable() && ...)` → `if (false) { #if 0 ... #endif }` (brace-counted wrap so type-check is skipped)
+- `/* len!(self) */` → `0`
+
+Plus infra additions:
+
+- `include/rusty/intrinsics.hpp` (assume/likely; unreachable comes from cppm)
+- `rusty::ptr::without_provenance{,_mut}` helpers
+
+## Remaining error categories after iter 2
 
 | Count | Category |
 |---:|---|
-| 4 | `from_raw_parts_mut` global-ns refs (probably need `rusty::slice::`) |
-| 2 | `usize` undeclared (needs `using usize = size_t;` or rewrite) |
-| 2 | `make_slice` not on `Iter<T>` / `IterMut<T>` (emit→`as_slice`) |
-| 2 | `::rusty_ext::` leading `::` (sibling-port pattern) |
-| 2 | `expected expression` |
-| 1 | `rusty::Vec` not in namespace (needs vec_port import) |
-| 1 | `rusty::ptr::without_provenance_mut` missing |
-| 1 | `rusty::ptr::without_provenance` missing |
-| 1 | `rusty::ascii` namespace missing (header needs ascii ns) |
-| 1 | Residual `std::range` |
-| 1 | Residual `std::ascii` |
+| 6 | `rusty_ext` undeclared (concept/template body uses it before declaration) |
+| 3 | `GetDisjointMutError` bare ref (needs namespace qualification) |
+| 3 | `rusty::ops::OneSidedRangeBound` missing (header stub needed) |
+| 1+ | `iter` / `ascii` undeclared (mid-method refs from collapsed bodies) |
+| 1 | `None_t` → tuple<Direction, size_t> conversion |
+| Various | Lambda capture, expected '>' — context-dependent |
 
-## Next: Phase A2 continued
+## Next: Phase A2 iter 3
 
-Iterate over these categories. Many are simple regex rewrites; some
-will need rusty/ header stubs (ascii namespace, ptr helpers). The
-40+ iterator!()/forward_iterator!() macro stubs from the slot
-manifest are likely the bigger arc once these surface-level
-rewrites clear.
+Add `OneSidedRangeBound` stub to rusty/ops.hpp. Qualify `GetDisjointMutError`
+references via namespace prefix patch. Investigate `rusty_ext` ordering
+(declaration vs use). Then re-attempt and iterate.
 
 ## Files
 
