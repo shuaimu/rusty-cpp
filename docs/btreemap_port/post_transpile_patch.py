@@ -4495,6 +4495,97 @@ def fix_const_new_pos_binding(path: Path) -> None:
         print(f"  dropped const on new_pos binding in: {path.name}")
 
 
+def fix_btreemap_insert_arm_swap(path: Path) -> None:
+    """The transpiler emit of BTreeMap::insert(K, V) has its Entry arms
+    swapped. Rust source:
+        match self.entry(key) {
+            Occupied(mut entry) => Some(entry.insert(value)),
+            Vacant(entry) => { entry.insert(value); None }
+        }
+    Entry is `std::variant<Entry_Vacant, Entry_Occupied>` (Vacant=0,
+    Occupied=1). The emit at index 0 (Vacant) wraps the V& return in
+    Some — which (a) is the wrong arm (should discard) and (b) requires
+    copy ctor for move-only V (VacantEntry::insert returns V&).
+
+    Hand-port the function to match the Rust semantics. Idempotent —
+    sentinel guard.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: BTreeMap::insert hand-port (arm swap fix)"
+    if sentinel in src:
+        return
+    sig = "rusty::Option<V> insert(K key, V value) {"
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        return
+    brace_open = src.find("{", sig_pos + len(sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        return
+    body = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        auto _entry = this->entry(std::move(key));\n"
+        "        // Entry variants: Vacant=index 0, Occupied=index 1.\n"
+        "        // Match Rust: Occupied → Some(old V from insert); Vacant → { insert; None }.\n"
+        "        if (_entry.index() == 1) {\n"
+        "            auto&& occ = std::get<1>(_entry)._0;\n"
+        "            return rusty::Option<V>(occ.insert(std::move(value)));\n"
+        "        }\n"
+        "        auto&& vac = std::get<0>(_entry)._0;\n"
+        "        vac.insert(std::move(value));\n"
+        "        return rusty::Option<V>{rusty::None};\n"
+        "    }"
+    )
+    new_src = src[:brace_open] + body + src[brace_close + 1:]
+    path.write_text(new_src)
+    print(f"  hand-ported BTreeMap::insert arm-swap in: {path.name}")
+
+
+def fix_insert_recursing_const_handle(path: Path) -> None:
+    """Drop `std::as_const` on the `_mv1` binding inside `insert_entry`
+    so the follow-up `handle.insert_recursing(...)` call (non-const
+    member function) is well-formed. The current emit is:
+
+        auto&& _mv1 = std::as_const(_m).unwrap();
+        auto&& handle = rusty::detail::deref_if_pointer(_mv1);
+        return handle.insert_recursing(...)
+
+    `std::as_const(_m).unwrap()` returns `const T&` (the const-ref
+    overload of unwrap), which propagates const through
+    `deref_if_pointer` and breaks the non-const method call.
+    Semantically: `_m` is a local Option owned by the lambda; we want
+    to consume it (the by-value/by-rvalue unwrap), not get a const ref.
+
+    Targeted to the specific Some-branch of insert_entry — match the
+    sentinel pattern that immediately follows. Idempotent.
+    """
+    src = path.read_text()
+    needle = (
+        "if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); "
+        "auto&& handle = rusty::detail::deref_if_pointer(_mv1); "
+        "return handle.insert_recursing("
+    )
+    replacement = (
+        "if (_m.is_some()) { auto&& _mv1 = std::move(_m).unwrap(); "
+        "auto&& handle = rusty::detail::deref_if_pointer(_mv1); "
+        "return handle.insert_recursing("
+    )
+    new_src = src.replace(needle, replacement)
+    if new_src != src:
+        path.write_text(new_src)
+        print(f"  dropped std::as_const on insert_entry _mv1 in: {path.name}")
+
+
 def fix_next_kv_loop_hand_port(path: Path) -> None:
     """Hand-port `next_kv` / `next_back_kv` to use a real loop.
 
@@ -5926,6 +6017,14 @@ def main() -> int:
         # stub_broken_map_methods so the stubbed bodies get OVERWRITTEN
         # with the real implementations.
         apply_step66_map_runtime_fixes(map_mod)
+        # Drop std::as_const on the Some-branch `_mv1` binding of
+        # `VacantEntry::insert_entry` so the follow-up
+        # `handle.insert_recursing(...)` call works (insert_recursing
+        # is not marked const).
+        fix_insert_recursing_const_handle(map_mod)
+        # The transpiler swapped the Vacant/Occupied arms of
+        # BTreeMap::insert. Hand-port to match Rust semantics.
+        fix_btreemap_insert_arm_swap(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")

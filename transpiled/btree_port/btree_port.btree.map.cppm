@@ -5324,7 +5324,7 @@ auto& root = map.root.insert(btree_internal::NodeRef<marker::Owned, K, V, marker
 {
     auto leaf = root.borrow_mut().cast_to_leaf_unchecked();
     return leaf.push_with_handle(std::move(this->key_field), std::move(value));
-} }(); } if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); auto&& handle = rusty::detail::deref_if_pointer(_mv1); return handle.insert_recursing(std::move(this->key_field), std::move(value), rusty::clone(this->alloc), [&](auto&& ins) {
+} }(); } if (_m.is_some()) { auto&& _mv1 = std::move(_m).unwrap(); auto&& handle = rusty::detail::deref_if_pointer(_mv1); return handle.insert_recursing(std::move(this->key_field), std::move(value), rusty::clone(this->alloc), [&](auto&& ins) {
 rusty::mem::drop(std::move(ins.left));
 auto& map = this->dormant_map.reborrow();
 auto& root = map.root.as_mut().unwrap();
@@ -5651,8 +5651,17 @@ return VacantEntry{.key = std::move(key), .handle = rusty::Some(handle), .dorman
         return [&]() -> rusty::Option<V&> { auto&& _m = root_node.search_tree(key); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& handle = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Option<V&>(handle.into_val_mut()); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { return rusty::Option<V&>{rusty::None}; } return [&]() -> rusty::Option<V&> { rusty::intrinsics::unreachable(); }(); }();
     }
     rusty::Option<V> insert(K key, V value) {
-        return [&]() -> rusty::Option<V> { auto&& _m = this->entry(std::move(key)); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Option<V>(entry_shadow1.insert(std::move(value))); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> rusty::Option<V> { entry_shadow1.insert(std::move(value));
-return rusty::Option<V>{rusty::None}; }(); } return [&]() -> rusty::Option<V> { rusty::intrinsics::unreachable(); }(); }();
+        // btree_port port: BTreeMap::insert hand-port (arm swap fix)
+        auto _entry = this->entry(std::move(key));
+        // Entry variants: Vacant=index 0, Occupied=index 1.
+        // Match Rust: Occupied → Some(old V from insert); Vacant → { insert; None }.
+        if (_entry.index() == 1) {
+            auto&& occ = std::get<1>(_entry)._0;
+            return rusty::Option<V>(occ.insert(std::move(value)));
+        }
+        auto&& vac = std::get<0>(_entry)._0;
+        vac.insert(std::move(value));
+        return rusty::Option<V>{rusty::None};
     }
     rusty::Result<V&, entry::OccupiedError<K, V, A>> try_insert(K key, V value) {
         return [&]() -> rusty::Result<V&, entry::OccupiedError<K, V, A>> { auto&& _m = this->entry(std::move(key)); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Result<V&, entry::OccupiedError<K, V, A>>::Err(entry::OccupiedError<K, V, A>{.entry = entry_shadow1, .value = std::move(value)}); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Result<V&, entry::OccupiedError<K, V, A>>::Ok([&]() -> auto& { auto _result_ref_value = (entry_shadow1.insert(std::move(value))); thread_local std::optional<V> _result_ref_tmp; _result_ref_tmp.reset(); _result_ref_tmp.emplace(std::move(_result_ref_value)); return *_result_ref_tmp; }()); } return [&]() -> rusty::Result<V&, entry::OccupiedError<K, V, A>> { rusty::intrinsics::unreachable(); }(); }();
