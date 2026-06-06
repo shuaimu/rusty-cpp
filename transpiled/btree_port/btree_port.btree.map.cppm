@@ -5266,7 +5266,7 @@ struct OccupiedEntry {
     std::tuple<K, V> remove_kv() {
         auto emptied_internal_root = false;
         auto&& [old_kv, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(this->handle.remove_kv_tracking([&]() { return emptied_internal_root = true; }, rusty::clone(this->alloc)));
-        const auto map = this->dormant_map.awaken();
+        auto& map = this->dormant_map.awaken();
         rusty::detail::deref_if_pointer_like(map.length) -= 1;
         if (emptied_internal_root) {
             auto& root = map.root.as_mut().unwrap();
@@ -5667,7 +5667,7 @@ return std::move(v);
     rusty::Option<std::tuple<K, V>> remove_entry(const Q& key) {
         auto&& [map, dormant_map] = rusty::detail::deref_if_pointer_like(__btree_port_make_dormant((*this)));
         auto&& root_node = RUSTY_TRY_OPT(map.root.as_mut()).borrow_mut();
-        return [&]() -> rusty::Option<std::tuple<K, V>> { auto&& _m = root_node.search_tree(key); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& handle = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Option<std::tuple<K, V>>(OccupiedEntry{.handle = handle, .dormant_map = std::move(dormant_map), .alloc = rusty::clone(((rusty::detail::deref_if_pointer_like(map.alloc)))), ._marker = rusty::PhantomData<rusty::Unit>{}}.remove_entry()); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { return rusty::Option<std::tuple<K, V>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<K, V>> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::Option<std::tuple<K, V>> { auto&& _m = root_node.search_tree(key); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& handle = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Option<std::tuple<K, V>>(OccupiedEntry<K, V, A>{.handle = handle, .dormant_map = std::move(dormant_map), .alloc = rusty::clone(((rusty::detail::deref_if_pointer_like(map.alloc)))), ._marker = rusty::PhantomData<rusty::Unit>{}}.remove_entry()); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { return rusty::Option<std::tuple<K, V>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<K, V>> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
     void retain(F f) {

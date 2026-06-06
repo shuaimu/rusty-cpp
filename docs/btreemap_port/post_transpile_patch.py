@@ -3706,6 +3706,16 @@ def fix_dormant_map_reborrow_binding(path: Path) -> None:
         # an OccupiedEntry; needs non-const so `.forget_node_type()` works.
         ("const auto handle = [&]() { auto&& _m = this->handle;",
          "auto handle = [&]() { auto&& _m = this->handle;"),
+        # `const auto map = this->dormant_map.awaken();` —
+        # `DormantMutRef::awaken(self) -> &'a mut T` returns a mutable
+        # reference. The body then does `map.length -= 1` and
+        # `map.root.as_mut().unwrap()`, both of which require non-const.
+        # Drop the `const` so the binding becomes `auto& map`. (Without
+        # this, the build hits "call to deleted constructor of const
+        # BTreeMap" on move-only V instantiations because `const auto`
+        # tries to copy-construct from the lvalue ref.)
+        ("const auto map = this->dormant_map.awaken();",
+         "auto& map = this->dormant_map.awaken();"),
     ]
     n_fixed = 0
     for old, new in pairs:
@@ -4261,6 +4271,38 @@ def fix_visit_byte_buf_unknown_vec(path: Path) -> None:
     src = src.replace(old, new, 1)
     path.write_text(src)
     print(f"  rewrote visit_byte_buf rusty::Vec stub in: {path.name}")
+
+
+def fix_occupied_entry_no_template_args(path: Path) -> None:
+    """Rewrite `OccupiedEntry{.handle = …}` aggregate-init shape to
+    `OccupiedEntry<K, V, A>{…}` so the compiler can deduce the template
+    args.
+
+    Rust source has `OccupiedEntry { handle, dormant_map, alloc, _marker }`
+    with type-context inference. The transpiler emits the bare
+    `OccupiedEntry{…}` which fails CTAD because aggregate-init doesn't
+    do template-arg deduction without an explicit guide.
+
+    The site is in BTreeMap methods that have K, V, A in scope (e.g.
+    `remove_entry`), so `OccupiedEntry<K, V, A>` resolves cleanly.
+
+    Note: be careful to only match the specific aggregate-init shape,
+    not method-style references like `OccupiedEntry<…, …>::remove_entry`.
+    Anchor on the field-init `{.handle = ` token to be precise.
+    """
+    src = path.read_text()
+    needle = "OccupiedEntry{.handle = "
+    if needle not in src:
+        return
+    # Replace with explicit template args. K, V, A are the standard
+    # in-scope generics for the enclosing BTreeMap method.
+    new_src = src.replace(needle, "OccupiedEntry<K, V, A>{.handle = ")
+    if new_src != src:
+        path.write_text(new_src)
+        print(
+            "  added <K, V, A> to OccupiedEntry aggregate-init in: "
+            f"{path.name}"
+        )
 
 
 def fix_noderef_borrow_mut_auto_ref(path: Path) -> None:
@@ -5168,6 +5210,7 @@ def main() -> int:
     for p in (internal, map_mod, map_entry, set_mod, set_entry):
         if p.exists():
             fix_noderef_borrow_mut_auto_ref(p)
+            fix_occupied_entry_no_template_args(p)
     patch_internal(internal)
     # Phase B: replace stubs with real impls. Runs AFTER patch_internal
     # so that on fresh transpile output we first install the stub
