@@ -3756,7 +3756,7 @@ struct OccupiedEntry {
         return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->handle.into_kv_mut());
     }
     template<typename K, typename V>
-    std::tuple<K, V> remove_entry() const {
+    std::tuple<K, V> remove_entry() {
         return this->remove_kv();
     }
     template<typename K, typename V>
@@ -3776,7 +3776,7 @@ struct OccupiedEntry {
         return rusty::mem::replace(this->get_mut(), std::move(value));
     }
     template<typename K, typename V>
-    V remove() const {
+    V remove() {
         return std::get<1>(this->remove_kv());
     }
     template<typename K, typename V>
@@ -3854,7 +3854,7 @@ struct VacantEntry {
         return std::move(this->key);
     }
     template<typename K, typename V>
-    V& insert(V value) const {
+    V& insert(V value) {
         return this->insert_entry(std::move(value)).into_mut();
     }
     template<typename K, typename V>

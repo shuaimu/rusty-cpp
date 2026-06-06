@@ -5242,7 +5242,7 @@ struct OccupiedEntry {
     const K& into_key() {
         return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->handle.into_kv_mut());
     }
-    std::tuple<K, V> remove_entry() const {
+    std::tuple<K, V> remove_entry() {
         return this->remove_kv();
     }
     const V& get() const {
@@ -5260,7 +5260,7 @@ struct OccupiedEntry {
     V insert(V value) {
         return rusty::mem::replace(this->get_mut(), std::move(value));
     }
-    V remove() const {
+    V remove() {
         return std::get<1>(this->remove_kv());
     }
     std::tuple<K, V> remove_kv() {
@@ -5313,7 +5313,7 @@ struct VacantEntry {
         // btree_port port: OccupiedEntry::into_key stubbed by post_transpile_patch.py
         throw ::std::runtime_error("rusty-cpp-transpiler: OccupiedEntry::into_key stub");
     }
-    V& insert(V value) const {
+    V& insert(V value) {
         return this->insert_entry(std::move(value)).into_mut();
     }
     OccupiedEntry<K, V, A> insert_entry(V value) {
@@ -5876,10 +5876,10 @@ return std::move(v);
             return std::make_tuple(ExtractIfInner<K, V, R>{.length = this->length, .dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>{rusty::None}, .cur_leaf_edge = rusty::Option<btree_internal::Handle<btree_internal::NodeRef<marker::Mut, K, V, marker::Leaf>, marker::Edge>>{rusty::None}, .range = std::move(range)}, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
         }
     }
-    IntoKeys<K, V, A> into_keys() const {
+    IntoKeys<K, V, A> into_keys() {
         return IntoKeys<K, V, A>{.inner = this->into_iter()};
     }
-    IntoValues<K, V, A> into_values() const {
+    IntoValues<K, V, A> into_values() {
         return IntoValues<K, V, A>{.inner = this->into_iter()};
     }
     template<typename I>
