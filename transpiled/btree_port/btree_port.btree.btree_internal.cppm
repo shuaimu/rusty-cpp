@@ -4948,7 +4948,7 @@ return internal.first_edge(); }(); } rusty::intrinsics::unreachable(); }();
         if (rusty::detail::deref_if_pointer_like(len) >= rusty::detail::deref_if_pointer_like(MIN_LEN)) {
             return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>{rusty::None});
         } else {
-            return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = this->choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& left_parent_kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv0)._0); return [&]() {
+            return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = this->choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).index() == 0) { auto&& left_parent_kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0); return [&]() {
 if (left_parent_kv.can_merge()) {
 auto parent = left_parent_kv.merge_tracking_parent(std::move(alloc));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>(std::move(parent)));
@@ -4956,7 +4956,7 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
 left_parent_kv.bulk_steal_left(rusty::detail::deref_if_pointer_like(MIN_LEN) - rusty::detail::deref_if_pointer_like(len));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>{rusty::None});
 }
-}(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& right_parent_kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv1)._0); return [&]() {
+}(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv1).index() == 1) { auto&& right_parent_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return [&]() {
 if (right_parent_kv.can_merge()) {
 auto parent = right_parent_kv.merge_tracking_parent(std::move(alloc));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>(std::move(parent)));
@@ -5855,13 +5855,13 @@ return next_internal_edge.descend().last_leaf_edge(); }(); } rusty::intrinsics::
         const auto len = rusty::len(pos.reborrow().into_node());
         if (rusty::detail::deref_if_pointer_like(len) < rusty::detail::deref_if_pointer_like(MIN_LEN)) {
             auto idx = pos.idx();
-            const auto new_pos = [&]() -> Handle<Node, Type> { auto&& _m = rusty::deref_call(pos.into_node(), [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).forget_type()) { return std::forward<decltype(__recv)>(__recv).forget_type(); }).choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& left_parent_kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv0)._0); return [&]() -> Handle<Node, Type> { assert((left_parent_kv.right_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
+            const auto new_pos = [&]() -> Handle<Node, Type> { auto&& _m = rusty::deref_call(pos.into_node(), [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).forget_type()) { return std::forward<decltype(__recv)>(__recv).forget_type(); }).choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).index() == 0) { auto&& left_parent_kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0); return [&]() -> Handle<Node, Type> { assert((left_parent_kv.right_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
 if (left_parent_kv.can_merge()) {
     return left_parent_kv.merge_tracking_child_edge(LeftOrRight<size_t>{LeftOrRight_Right<size_t>{std::move(idx)}}, rusty::clone(alloc));
 } else {
     assert((left_parent_kv.left_child_len() > rusty::detail::deref_if_pointer_like(MIN_LEN)));
     return left_parent_kv.steal_left(std::move(idx));
-} }(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& right_parent_kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv1)._0); return [&]() -> Handle<Node, Type> { assert((right_parent_kv.left_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
+} }(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv1).index() == 1) { auto&& right_parent_kv = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return [&]() -> Handle<Node, Type> { assert((right_parent_kv.left_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
 if (right_parent_kv.can_merge()) {
     return right_parent_kv.merge_tracking_child_edge(LeftOrRight<size_t>{LeftOrRight_Left<size_t>{std::move(idx)}}, rusty::clone(alloc));
 } else {

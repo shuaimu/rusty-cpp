@@ -4341,6 +4341,64 @@ def fix_noderef_borrow_mut_auto_ref(path: Path) -> None:
         )
 
 
+def fix_nested_ok_variant_index_uses_outer_m(path: Path) -> None:
+    """Rewrite `auto&& _mvN = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_m).index() == N)`
+    to use `_mvN` instead of `_m` in the index check.
+
+    The transpiler emits the outer `Ok(...)` arm's inner data-enum-variant
+    condition with the wrong scrutinee. For
+    `match self.choose_parent_kv() { Ok(LeftOrRight::Left(kv)) => ..., Ok(LeftOrRight::Right(kv)) => ..., ... }`
+    the inner condition for arm 0 should be
+    `deref_if_pointer(_mv0).index() == 0` (checking the LeftOrRight variant)
+    but is currently emitted as `deref_if_pointer(_m).index() == 0`
+    (where `_m` is the outer Result, which has no `.index()`).
+
+    The bug only fires for some configurations (the transpiler unit-test
+    repro with simpler types emits the correct shape). Codify a textual
+    fix here while the transpiler-level cause is being investigated.
+
+    Idempotent: rewrites only sites that still use the outer `_m`.
+    """
+    src = path.read_text()
+    # Match `auto&& _mvN = std::as_const(_m).unwrap();` (or with intervening
+    # whitespace/newlines) followed by `if (rusty::detail::deref_if_pointer(_m).index() == N)`
+    # where the two N values match. The scrutinee binding is `_m` (length 2),
+    # and we want to replace just the inner `_m` with `_mvN`.
+    pattern = re.compile(
+        r"(auto&& _mv(\d+) = std::as_const\(_m\)\.unwrap\(\);\s*"
+        r"if \(rusty::detail::deref_if_pointer\()_m(\)\.index\(\) == \2\b)"
+    )
+    new_src, count = pattern.subn(r"\1_mv\2\3", src)
+    # Companion fix: the binding extracted from the variant uses the wrong
+    # accessor. Buggy emit:
+    #     auto&& NAME = rusty::detail::deref_if_pointer(
+    #         rusty::detail::deref_if_pointer(_mvN)._0);
+    # Variants have no `._0`; correct emit goes through `std::get<N>`:
+    #     auto&& NAME = rusty::detail::deref_if_pointer(
+    #         std::get<N>(rusty::detail::deref_if_pointer(_mvN))._0);
+    # Match exactly inside an `index() == N` arm so N is the variant index.
+    binding_pattern = re.compile(
+        r"(if \(rusty::detail::deref_if_pointer\(_mv(\d+)\)\.index\(\) == \2\) \{ "
+        r"auto&& [A-Za-z_][A-Za-z0-9_]* = rusty::detail::deref_if_pointer\()"
+        r"(rusty::detail::deref_if_pointer\(_mv\2\))(\._0\))"
+    )
+    new_src, bind_count = binding_pattern.subn(
+        r"\1std::get<\2>(\3)\4", new_src
+    )
+    if count or bind_count:
+        path.write_text(new_src)
+    if count:
+        print(
+            f"  rewrote {count} `_mvN = unwrap(); deref_if_pointer(_m).index() == N` "
+            f"→ `deref_if_pointer(_mvN)` in: {path.name}"
+        )
+    if bind_count:
+        print(
+            f"  rewrote {bind_count} `deref_if_pointer(_mvN)._0` "
+            f"→ `std::get<N>(deref_if_pointer(_mvN))._0` in: {path.name}"
+        )
+
+
 def fix_full_range_recursive_call(path: Path) -> None:
     """Qualify `full_range(self, self)` calls inside the NodeRef::full_range
     method body so they resolve to the FREE function rather than recursing
@@ -5207,6 +5265,10 @@ def main() -> int:
             fix_unresolved_bare_glob_variants(p)
     fix_leafnode_shadow_arrow(internal)
     fix_full_range_recursive_call(internal)
+    # Nested `Ok(LeftOrRight::Variant(_))` arm: inner condition wraps the
+    # outer `_m` (Result) instead of the unwrapped `_mvN` (LeftOrRight).
+    # Affects 4 sites in fix_node_through_parent (B-tree's rebalance path).
+    fix_nested_ok_variant_index_uses_outer_m(internal)
     for p in (internal, map_mod, map_entry, set_mod, set_entry):
         if p.exists():
             fix_noderef_borrow_mut_auto_ref(p)
