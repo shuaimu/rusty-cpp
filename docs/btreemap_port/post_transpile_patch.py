@@ -4445,6 +4445,39 @@ def fix_nested_ok_variant_index_uses_outer_m(path: Path) -> None:
         )
 
 
+def fix_inner_some_payload_binding_const(path: Path) -> None:
+    """Drop const on inner-Some-payload bindings of the shape
+        auto&& X = rusty::detail::deref_if_pointer(
+            std::as_const(rusty::detail::deref_if_pointer(_mvN)).unwrap());
+    so non-const methods (e.g. NodeRef::forget_type) work on X.
+
+    Companion of `fix_nested_ok_variant_index_uses_outer_m`'s const_cast
+    rewrite — same const-correctness issue, but for the
+    `Ok(Some(payload))` shape (not `Ok(LeftOrRight::Variant(...))`).
+
+    Idempotent: only rewrites the std::as_const wrap, leaves other shapes
+    alone.
+    """
+    src = path.read_text()
+    # Wrap the deref_if_pointer chain in a const_cast so the binding is
+    # non-const. Match the shape after the earlier std::as_const has been
+    # removed too.
+    src_pattern = (
+        r"(auto&&) ([A-Za-z_][A-Za-z0-9_]*) = (rusty::detail::deref_if_pointer\("
+        r"(?:std::as_const\()?(rusty::detail::deref_if_pointer\(_mv\d+\))(?:\))?\.unwrap\(\)\));"
+    )
+    pattern = re.compile(src_pattern)
+    new_src, count = pattern.subn(
+        r"\1 \2 = const_cast<std::remove_cvref_t<decltype(\3)>&>(\3);",
+        src,
+    )
+    if count:
+        path.write_text(new_src)
+        print(
+            f"  const_cast on {count} inner-Some-payload binding(s) in: {path.name}"
+        )
+
+
 def fix_const_left_kv_ok_unwrap(path: Path) -> None:
     """Drop `const` on the `auto left_leaf_kv = …` binding chain so the
     subsequent `.ok().unwrap_unchecked()` call (non-const) is well-formed.
@@ -4502,14 +4535,20 @@ def fix_full_range_recursive_call(path: Path) -> None:
     # `btree_port::btree::btree_internal::`, NOT at global scope, so
     # `::full_range` doesn't resolve. Replace the prefix to point at
     # the right namespace.
-    needle = "::full_range(std::move((*this)), std::move((*this)))"
-    if needle not in src:
-        return
-    repl = (
-        "::btree_port::btree::btree_internal::full_range(std::move((*this)), std::move((*this)))"
+    #
+    # Idempotency: the replacement string contains the needle as a
+    # substring (we prepend, not replace), so a naive .replace() would
+    # accumulate the prefix on re-runs. Use a negative lookbehind regex
+    # to skip sites that already have the full qualifier.
+    needle_re = re.compile(
+        r"(?<!btree_port::btree::btree_internal)::full_range"
+        r"\(std::move\(\(\*this\)\), std::move\(\(\*this\)\)\)"
     )
-    new_src = src.replace(needle, repl)
-    if new_src != src:
+    new_src, n = needle_re.subn(
+        "::btree_port::btree::btree_internal::full_range(std::move((*this)), std::move((*this)))",
+        src,
+    )
+    if n:
         path.write_text(new_src)
         print(f"  qualified full_range(self, self) recursive call in: {path.name}")
 
@@ -5339,6 +5378,9 @@ def main() -> int:
     # outer `_m` (Result) instead of the unwrapped `_mvN` (LeftOrRight).
     # Affects 4 sites in fix_node_through_parent (B-tree's rebalance path).
     fix_nested_ok_variant_index_uses_outer_m(internal)
+    # Companion: drop const on inner-Some-payload bindings so
+    # non-const methods (NodeRef::forget_type) work on the binding.
+    fix_inner_some_payload_binding_const(internal)
     for p in (internal, map_mod, map_entry, set_mod, set_entry):
         if p.exists():
             fix_noderef_borrow_mut_auto_ref(p)
@@ -5423,12 +5465,15 @@ def main() -> int:
     # search_tree is hand-ported; the older stub_broken_search_tree
     # is left in the source for reference but not invoked.
     implement_search_tree(internal)
-    print(f"[2/6] patching {cmake.name}")
-    patch_cmake(cmake, rusty_include_dir)
-    print(f"[*] writing link_smoke.cpp")
-    write_link_smoke(cpp_out_dir)
-    print(f"[*] writing transpiled_read_smoke.cpp")
-    write_transpiled_read_smoke(cpp_out_dir)
+    if cmake.exists():
+        print(f"[2/6] patching {cmake.name}")
+        patch_cmake(cmake, rusty_include_dir)
+        print(f"[*] writing link_smoke.cpp")
+        write_link_smoke(cpp_out_dir)
+        print(f"[*] writing transpiled_read_smoke.cpp")
+        write_transpiled_read_smoke(cpp_out_dir)
+    else:
+        print(f"[2/6] skipping {cmake.name} (not present — vendored target)")
     print(f"[3/6] patching {set_entry.name}")
     if set_entry.exists():
         # set.entry imports map.entry (and indirectly map). Strip the

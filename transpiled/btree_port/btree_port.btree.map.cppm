@@ -3684,6 +3684,7 @@ import btree_port.btree.btree_internal;
 // btree_port port step 52: map.entry merged into this module. The
 // OccupiedEntry / VacantEntry / Entry / OccupiedError struct defs
 // are now inlined below, ahead of the BTreeMap struct.
+
 namespace btree_port::btree::btree_internal {}
 namespace btree_port::btree::map::entry {}
 namespace btree_port::btree::map {
@@ -4696,7 +4697,7 @@ return rusty::Option<std::tuple<K&, V&>>{rusty::None}; }(); } return [&]() -> ru
     rusty::Option<std::tuple<K&, V&>> peek_prev() {
         auto* current_try_ref_ptr = ({ auto _rusty_try_result = (this->current.as_mut()); if (_rusty_try_result.is_none()) { return rusty::Option<decltype(_rusty_try_result.unwrap())>::none(); } &(_rusty_try_result.unwrap()); });
         btree_internal::Handle<btree_internal::NodeRef<marker::Mut, K, V, marker::Leaf>, marker::Edge>& current = *current_try_ref_ptr;
-        auto& kv = RUSTY_TRY_OPT(current.reborrow_mut().next_back_kv().ok()).into_kv_mut();
+        auto&& kv = RUSTY_TRY_OPT(current.reborrow_mut().next_back_kv().ok()).into_kv_mut();
         return rusty::Option<std::tuple<K&, V&>>(kv);
     }
     Cursor<K, V> as_cursor() const {

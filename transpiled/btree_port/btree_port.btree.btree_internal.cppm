@@ -3666,11 +3666,7 @@ return std::forward<A>(a).cmp(std::forward<B>(b));
 
 export module btree_port.btree.btree_internal;
 
-namespace marker {}
-
-
 namespace btree_port::btree::btree_internal {
-
 // Cluster A completion: __TemplateArgs primary template (specializations at file end)
 template<typename T> struct __TemplateArgs;
 
@@ -4574,29 +4570,7 @@ struct NodeRef {
     NodeRef<marker::Dying, K, V, Type> into_dying() {
         return NodeRef<marker::Dying, K, V, Type>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Dying, Type>>{}};
     }
-    Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV> push_with_handle(K key, V val) {
-        // btree_port port: B3 push_with_handle hand-ported by post_transpile_patch.py
-        // Same pattern as the already-transpiled `push()`: increment
-        // len, write into the key/val areas at idx, then return a
-        // Handle pointing at the new (key, val) pair. The returned
-        // NodeRef has a fresh lifetime 'b in Rust; in C++ lifetimes
-        // are erased, so it's just a sibling NodeRef<Mut, K, V, Leaf>.
-        uint16_t& __len = this->len_mut();
-        auto __idx = static_cast<size_t>(__len);
-        assert((__idx < CAPACITY));
-        __len += 1;
-        // @unsafe — caller has the only mutable borrow of this leaf.
-        this->key_area_mut(__idx).write(std::move(key));
-        this->val_area_mut(__idx).write(std::move(val));
-        return Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV>::new_kv(
-            NodeRef<marker::Mut, K, V, marker::Leaf>{
-                .height_field = this->height_field,
-                .node = this->node,
-                ._marker = rusty::PhantomData<std::tuple<marker::Mut, marker::Leaf>>{}
-            },
-            __idx
-        );
-    }
+    Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV> push_with_handle(K key, V val) { throw ::std::runtime_error("rusty-cpp-transpiler: btree internal method stub (template-parameter recovery limitation; see docs/btreemap_port/STATUS.md)"); }
     std::add_pointer_t<V> push(K key, V val) {
         // @unsafe
         {
@@ -4971,7 +4945,7 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
     bool fix_node_and_affected_ancestors(A alloc) {
         while (true) {
-            return [&]() -> bool { auto&& _m = this->fix_node_through_parent(rusty::clone(alloc)); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).is_some()) { auto&& parent = rusty::detail::deref_if_pointer(std::as_const(rusty::detail::deref_if_pointer(_mv0)).unwrap()); return (*this) = parent.forget_type(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (_mv1.is_none()) { return true; } } if (_m.is_err()) { return false; } return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }();
+            return [&]() -> bool { auto&& _m = this->fix_node_through_parent(rusty::clone(alloc)); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).is_some()) { auto&& parent = const_cast<std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv0).unwrap()))>&>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv0).unwrap())); return (*this) = parent.forget_type(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (_mv1.is_none()) { return true; } } if (_m.is_err()) { return false; } return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }();
         }
     }
     template<typename A>

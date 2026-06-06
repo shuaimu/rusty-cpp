@@ -21,6 +21,55 @@ def postprocess(path: Path, extra_imports: list[str]) -> None:
     text = path.read_text()
     lines = text.split('\n')
 
+    # 0. Idempotency — strip artifacts from previous postprocess runs so
+    #    we don't accumulate duplicates. The script inserts three things:
+    #    a) import lines above the namespace wrap
+    #    b) `namespace X {}` forward-decls right above the wrap
+    #    c) `namespace LEAF = ::FULL;` aliases inside the wrap
+    #    A re-run keeps adding these without removing prior copies. Strip
+    #    each before re-inserting (the canonical set is recomputed below).
+    ns_open_idx_pre = None
+    for i, line in enumerate(lines):
+        m = re.match(r'^namespace ([a-zA-Z_][a-zA-Z0-9_:]*) \{$', line)
+        if m and m.group(1).startswith('btree_port::'):
+            ns_open_idx_pre = i
+            break
+    if ns_open_idx_pre is not None:
+        # (a)+(b): strip standalone import/forward-decl lines between the
+        # last comment/code and the namespace open. Walk backwards from
+        # the open, removing import lines and single-line `namespace X {}`
+        # decls. Stop at the first line that's neither.
+        i = ns_open_idx_pre - 1
+        while i >= 0:
+            s = lines[i].strip()
+            if (re.match(r'^import [a-z_.]+;$', s)
+                    or re.match(r'^namespace [a-zA-Z_:0-9]+ \{\}$', s)
+                    or s == ''):
+                lines[i] = None  # type: ignore
+                i -= 1
+            else:
+                break
+        lines = [ln for ln in lines if ln is not None]
+        # (c): strip `namespace X = ::btree_port::...;` alias lines right
+        # after the namespace open.
+        ns_open_idx_pre = None
+        for j, line in enumerate(lines):
+            m = re.match(r'^namespace ([a-zA-Z_][a-zA-Z0-9_:]*) \{$', line)
+            if m and m.group(1).startswith('btree_port::'):
+                ns_open_idx_pre = j
+                break
+        if ns_open_idx_pre is not None:
+            j = ns_open_idx_pre + 1
+            while j < len(lines):
+                s = lines[j].strip()
+                if (re.match(r'^namespace [a-zA-Z_][a-zA-Z_0-9]* = ::btree_port::[a-zA-Z_:0-9]+;$', s)
+                        or s == ''):
+                    lines[j] = None  # type: ignore
+                    j += 1
+                else:
+                    break
+            lines = [ln for ln in lines if ln is not None]
+
     # 1. Find the namespace wrap open and close.
     ns_open_idx = None
     ns_close_idx = None
@@ -208,7 +257,11 @@ if __name__ == "__main__":
     postprocess(src / "btree_port.btree.btree_internal.cppm", [])
     postprocess(src / "btree_port.btree.map.cppm", [
         "btree_port.btree.btree_internal",
-        "btree_port.btree.map.entry",
+        # `btree_port.btree.map.entry` is merged into map.cppm by the
+        # main patcher's `merge_map_entry_into_map`; the standalone
+        # module no longer ships, so the import would be dead. Forward-
+        # decl + alias still get emitted because merge_map_entry_into_map
+        # keeps `entry::Foo` references in the merged content.
     ])
     postprocess(src / "btree_port.btree.map.entry.cppm", [
         "btree_port.btree.btree_internal",
