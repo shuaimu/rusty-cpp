@@ -4385,7 +4385,24 @@ def fix_nested_ok_variant_index_uses_outer_m(path: Path) -> None:
     new_src, bind_count = binding_pattern.subn(
         r"\1std::get<\2>(\3)\4", new_src
     )
-    if count or bind_count:
+    # Drop const on the variant-payload binding so by-value methods (like
+    # `BalancingContext::merge_tracking_parent(self, ...)`) can be called.
+    # The `_mvN = std::as_const(_m).unwrap()` chain produces a const view of
+    # the variant; the `std::get<N>(...)._0` access then yields a const
+    # reference to the inner type. Rust's `mut` binding in the match arm
+    # implies the payload is consumed, so C++ needs a mutable handle. A
+    # const_cast on the expression is safe here because the original storage
+    # (held by `_m`) is non-const inside this IIFE.
+    const_drop_pattern = re.compile(
+        r"(if \(rusty::detail::deref_if_pointer\(_mv(\d+)\)\.index\(\) == \2\) \{ "
+        r"auto&&) ([A-Za-z_][A-Za-z0-9_]*) = rusty::detail::deref_if_pointer\("
+        r"(std::get<\2>\(rusty::detail::deref_if_pointer\(_mv\2\)\)\._0)\);"
+    )
+    new_src, const_count = const_drop_pattern.subn(
+        r"\1 \3 = const_cast<std::remove_cvref_t<decltype(\4)>&>(\4);",
+        new_src,
+    )
+    if count or bind_count or const_count:
         path.write_text(new_src)
     if count:
         print(
@@ -4396,6 +4413,11 @@ def fix_nested_ok_variant_index_uses_outer_m(path: Path) -> None:
         print(
             f"  rewrote {bind_count} `deref_if_pointer(_mvN)._0` "
             f"→ `std::get<N>(deref_if_pointer(_mvN))._0` in: {path.name}"
+        )
+    if const_count:
+        print(
+            f"  rewrote {const_count} variant-payload binding to drop const_cast "
+            f"in: {path.name}"
         )
 
 
