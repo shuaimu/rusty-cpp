@@ -87,20 +87,23 @@ int main() {
     auto it = cref.iter();
     (void)it;
 
-    // (B1) range-for over iter — yields std::tuple<const K&, const V&>
-    // (or similar). If transpiler emits `.._0` access on the tuple
-    // return value inside btree_internal node helpers, this fails to
-    // compile. Range-for is the canonical user-facing path so it must
-    // work.
+    // (B1) iter loop yields std::tuple<const K&, const V&>. If the
+    // transpiler emits `.._0` access on the tuple return value inside
+    // btree_internal node helpers, the call chain fails to compile.
+    // We use the Rust-style iter()/next() pattern here (range-for would
+    // need a separate begin/end shim, tested elsewhere).
     int64_t seen = 0;
-    for (const auto& kv : cref) {
-        // Either binding shape — both should work post-fix.
-        // structured-binding form catches `._0` emit issues by
-        // forcing the compiler to project the tuple.
-        const auto& k = std::get<0>(kv);
-        const auto& v = std::get<1>(kv);
-        (void)v;
-        seen += k;
+    {
+        auto walk = cref.iter();
+        while (true) {
+            auto next = walk.next();
+            if (next.is_none()) break;
+            auto kv = std::move(next).unwrap();
+            const auto& k = std::get<0>(kv);
+            const auto& v = std::get<1>(kv);
+            (void)v;
+            seen += k;
+        }
     }
     assert(seen == 1 + 2 + 3);
 

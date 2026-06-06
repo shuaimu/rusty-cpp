@@ -4495,6 +4495,40 @@ def fix_const_new_pos_binding(path: Path) -> None:
         print(f"  dropped const on new_pos binding in: {path.name}")
 
 
+def fix_lazy_leaf_range_init(path: Path) -> None:
+    """Fix two emit bugs in `LazyLeafRange::init_front` / `init_back`:
+    (a) `rusty::ptr::read(std::move(root))` — `read` takes `T*`, not
+        an rvalue. Rewrite to `rusty::ptr::read(&root)`.
+    (b) `auto&& _m = &this->{front,back};` — `&` makes `_m` a pointer
+        and breaks the follow-up `_m.is_none()` member access. Drop
+        the `&` so `_m` is the Option itself.
+
+    Both happen because the Rust source uses `&mut self.{front,back}`
+    (matching by mutable borrow) and `unsafe { ptr::read(root) }`
+    (taking a borrow as ptr). In C++ these auto-borrows are implicit
+    via `this->` access; the explicit `&` is wrong.
+
+    Idempotent."""
+    src = path.read_text()
+    changed = False
+    for f in ("front", "back"):
+        # (a) ptr::read(std::move(<binding>)) just inside init_<f>
+        old_a = f"rusty::ptr::read(std::move(root)).{ 'first' if f == 'front' else 'last' }_leaf_edge()"
+        new_a = f"rusty::ptr::read(&root).{ 'first' if f == 'front' else 'last' }_leaf_edge()"
+        if old_a in src:
+            src = src.replace(old_a, new_a)
+            changed = True
+        # (b) `&this->{front,back}` in the IIFE
+        old_b = f"auto&& _m = &this->{f};"
+        new_b = f"auto&& _m = this->{f};"
+        if old_b in src:
+            src = src.replace(old_b, new_b)
+            changed = True
+    if changed:
+        path.write_text(src)
+        print(f"  fixed LazyLeafRange::init_front/back emit in: {path.name}")
+
+
 def fix_btreemap_insert_arm_swap(path: Path) -> None:
     """The transpiler emit of BTreeMap::insert(K, V) has its Entry arms
     swapped. Rust source:
@@ -5783,6 +5817,10 @@ def main() -> int:
     # shape can't express "assign edge then re-iterate" semantics, and
     # the deduced Result return type is wrong (Unit instead of NodeRef).
     fix_next_kv_loop_hand_port(internal)
+    # LazyLeafRange::init_front/init_back emit `ptr::read(std::move(root))`
+    # (wrong; read takes T*) and `auto&& _m = &this->{front,back};`
+    # (wrong; makes _m a pointer).
+    fix_lazy_leaf_range_init(internal)
     for p in (internal, map_mod, map_entry, set_mod, set_entry):
         if p.exists():
             fix_noderef_borrow_mut_auto_ref(p)
