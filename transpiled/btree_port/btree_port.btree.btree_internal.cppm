@@ -5881,8 +5881,8 @@ if (right_parent_kv.can_merge()) {
     template<typename F, typename A>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
     std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove_internal_kv(F handle_emptied_internal_root, A alloc) {
-        const auto left_leaf_kv = this->left_edge().descend().last_leaf_edge().left_kv();
-        const auto left_leaf_kv_shadow1 = left_leaf_kv.ok().unwrap_unchecked();
+        auto&& left_leaf_kv = this->left_edge().descend().last_leaf_edge().left_kv();
+        auto&& left_leaf_kv_shadow1 = left_leaf_kv.ok().unwrap_unchecked();
         auto&& [left_kv, left_hole] = rusty::detail::deref_if_pointer_like(left_leaf_kv_shadow1.remove_leaf_kv(std::move(handle_emptied_internal_root), std::move(alloc)));
         auto internal = left_hole.next_kv().ok().unwrap_unchecked();
         auto old_kv = internal.replace_kv(std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(left_kv)), std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(left_kv)));

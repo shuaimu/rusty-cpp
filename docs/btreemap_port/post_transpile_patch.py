@@ -4445,6 +4445,30 @@ def fix_nested_ok_variant_index_uses_outer_m(path: Path) -> None:
         )
 
 
+def fix_const_left_kv_ok_unwrap(path: Path) -> None:
+    """Drop `const` on the `auto left_leaf_kv = …` binding chain so the
+    subsequent `.ok().unwrap_unchecked()` call (non-const) is well-formed.
+
+    The transpiler emits:
+        const auto left_leaf_kv = this->left_edge()...left_kv();
+        const auto left_leaf_kv_shadow1 = left_leaf_kv.ok().unwrap_unchecked();
+    But `Result::ok()` is a non-const method that consumes self. Drop the
+    `const` on both bindings so the method resolution succeeds.
+
+    Idempotent: skips when neither shape is present."""
+    src = path.read_text()
+    new_src = src.replace(
+        "const auto left_leaf_kv = ",
+        "auto&& left_leaf_kv = ",
+    ).replace(
+        "const auto left_leaf_kv_shadow1 = ",
+        "auto&& left_leaf_kv_shadow1 = ",
+    )
+    if new_src != src:
+        path.write_text(new_src)
+        print(f"  dropped const on left_leaf_kv*/_shadow1 in: {path.name}")
+
+
 def fix_full_range_recursive_call(path: Path) -> None:
     """Qualify `full_range(self, self)` calls inside the NodeRef::full_range
     method body so they resolve to the FREE function rather than recursing
