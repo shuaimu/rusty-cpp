@@ -4535,8 +4535,8 @@ struct NodeRef {
         }
     }
     void clear_parent_link() {
-        auto& root_node = this->borrow_mut();
-        auto& leaf = root_node.as_leaf_mut();
+        auto&& root_node = this->borrow_mut();
+        auto&& leaf = root_node.as_leaf_mut();
         leaf.parent = rusty::None;
     }
     template<typename A>

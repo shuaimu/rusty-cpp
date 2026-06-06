@@ -4334,10 +4334,34 @@ def fix_noderef_borrow_mut_auto_ref(path: Path) -> None:
         re.DOTALL,
     )
     new_src, count = pattern.subn(r"auto&& \1 = \2", src)
-    if count:
+    # Also handle `auto& X = this->borrow_mut();` (plain receiver, no
+    # RUSTY_TRY_OPT wrap). `this->borrow_mut()` returns NodeRef by value,
+    # same root cause.
+    plain_pattern = re.compile(
+        r"\bauto& (\w+) = (this->borrow_mut\(\);)",
+    )
+    new_src, plain_count = plain_pattern.subn(r"auto&& \1 = \2", new_src)
+    # And the `auto& leaf = X.as_leaf_mut();` shape — `as_leaf_mut()`
+    # returns a reference, but if `X` is a temporary chain (typical), the
+    # binding's lifetime requires `auto&&` for safety; the existing
+    # `auto&` heuristic mistakenly matches.
+    leaf_pattern = re.compile(
+        r"\bauto& (\w+) = (\w+\.as_leaf_mut\(\);)",
+    )
+    new_src, leaf_count = leaf_pattern.subn(r"auto&& \1 = \2", new_src)
+    if count or plain_count or leaf_count:
         path.write_text(new_src)
+    if count:
         print(
-            f"  rewrote {count} `auto& X = …borrow_mut();` → `auto&&` in: {path.name}"
+            f"  rewrote {count} `auto& X = RUSTY_TRY_OPT(...).borrow_mut();` → `auto&&` in: {path.name}"
+        )
+    if plain_count:
+        print(
+            f"  rewrote {plain_count} `auto& X = this->borrow_mut();` → `auto&&` in: {path.name}"
+        )
+    if leaf_count:
+        print(
+            f"  rewrote {leaf_count} `auto& X = Y.as_leaf_mut();` → `auto&&` in: {path.name}"
         )
 
 
