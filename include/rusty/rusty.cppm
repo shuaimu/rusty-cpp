@@ -91,14 +91,15 @@ export module rusty;
 // `import rusty;` exposes the full surface.
 export import rusty.async;
 export import vec_port.vec;
-export import btree_port.btree.map;
-export import btree_port.btree.set;
+export import btree_port.btree.map;  // namespace: btree_port::btree::map
+export import btree_port.btree.set;  // namespace: btree_port::btree::set
 export import rc_port;
-export import binary_heap_port;  // namespace: rusty::port::collections::binary_heap
+export import binary_heap_port;  // exports rusty::collections::BinaryHeap alias
 export import hashbrown_port.hasher;  // exports rusty::port::collections::hashbrown::DefaultHasher
 export import hashbrown_port.map;
 export import hashbrown_port.set;
-export import vec_deque_port;
+export import vec_deque_port;  // exports rusty::collections::VecDeque alias
+export import linked_list_port;  // exports rusty::collections::LinkedList alias
 export import cell_port;
 export import string_port;
 export import arc_port;
@@ -140,11 +141,16 @@ using Rc = ::rusty::port::rc::Rc<T, A>;
 // Note: no Compare parameter — Rust's BTreeMap uses the Ord trait
 // directly, mirrored in C++ via operator<. Consumers that need a
 // custom comparator should use the deep path explicitly.
+//
+// The deep-namespace migration (`--cxx-namespace` transpile flag)
+// moved btree's transpiled output from `rusty::port::collections::btree::*`
+// to its module-name root `btree_port::btree::*`. Aliases below point
+// at the new path.
 template<typename K, typename V, typename A = ::rusty::alloc::Global>
-using BTreeMap = ::rusty::port::collections::btree::map::BTreeMap<K, V, A>;
+using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
 
 template<typename T, typename A = ::rusty::alloc::Global>
-using BTreeSet = ::rusty::port::collections::btree::set::BTreeSet<T, A>;
+using BTreeSet = ::btree_port::btree::set::BTreeSet<T, A>;
 
 // rusty::HashMap / rusty::HashSet alias the transpiled rustc hashbrown
 // port. These match Rust's `std::collections::HashMap` / `HashSet` at
@@ -187,16 +193,16 @@ namespace collections {
     template<typename T, typename S = ::rusty::port::collections::hashbrown::DefaultHasher>
     using HashSet = ::rusty::port::collections::hashbrown::HashSet<T, S>;
     template<typename K, typename V, typename A = ::rusty::alloc::Global>
-    using BTreeMap = ::rusty::port::collections::btree::map::BTreeMap<K, V, A>;
+    using BTreeMap = ::btree_port::btree::map::BTreeMap<K, V, A>;
     template<typename T, typename A = ::rusty::alloc::Global>
-    using BTreeSet = ::rusty::port::collections::btree::set::BTreeSet<T, A>;
-    template<typename T, typename A = ::rusty::alloc::Global>
-    using BinaryHeap = ::rusty::port::collections::binary_heap::BinaryHeap<T, A>;
-    template<typename T, typename A = ::rusty::alloc::Global>
-        requires (rusty::alloc::Allocator<A>)
-    using VecDeque = ::rusty::port::collections::vec_deque::VecDeque<T, A>;
-    template<typename T, typename A = ::rusty::alloc::Global>
-    using LinkedList = ::rusty::port::collections::linked_list::LinkedList<T, A>;
+    using BTreeSet = ::btree_port::btree::set::BTreeSet<T, A>;
+    // BinaryHeap / VecDeque / LinkedList — the transpiled ports each
+    // emit their own `export namespace rusty::collections { using X = …; }`
+    // alias (see binary_heap_port.cppm, vec_deque_port.cppm,
+    // linked_list_port.cppm). The `export import <port>;` lines above
+    // bring those aliases into scope here; re-declaring them at this
+    // scope would conflict (clang: "declaration of 'X' in module rusty
+    // follows declaration in module <port>").
 }
 
 } // export namespace rusty
