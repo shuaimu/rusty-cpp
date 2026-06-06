@@ -35,6 +35,7 @@ Codified in `post_transpile_patch.py`. Idempotent.
 | 4 | `Box<T>::from_raw_in(ptr, &alloc)` not defined on hand-written Box | Rewrite to `Box<T>::from_raw(ptr)` (allocator dropped) |
 | 5 | `rusty::alloc::Global` used as value (positional arg) instead of type | Rewrite to `rusty::alloc::Global{}` for `Global)` / `Global,` / `Global.` shapes |
 | 6 | `node_shadow1.next` / `.prev` / `.element` — Rust auto-deref on Box, C++ requires `->` | Rewrite to `node_shadow1->next` etc. (narrow: only the 3 known Node fields on this specific binding) |
+| 7 | `--auto-namespace` wraps in `namespace linked_list_port`, but end users write `rusty::collections::LinkedList<T>` | Rename namespace wrap to `rusty::port::collections::linked_list` and append a `using LinkedList = ::rusty::port::collections::linked_list::LinkedList<T,A>;` alias in `rusty::collections` |
 
 ## Reproducing
 

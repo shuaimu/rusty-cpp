@@ -78,6 +78,24 @@ if (detail::less_than(b, a)) return Ordering::Greater;
 return Ordering::Equal;
 }
 }
+// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==.
+// Derefs pointer-like rhs (Rust `&other` becomes addr_of_temp() in C++ emit).
+template<typename A, typename B>
+bool eq(const A& a, const B& b) {
+if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.eq(rusty::detail::deref_if_pointer_like(b));
+} else {
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+}
+template<typename A, typename B>
+bool ne(const A& a, const B& b) {
+if constexpr (requires { a.ne(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.ne(rusty::detail::deref_if_pointer_like(b));
+} else {
+return !(a == rusty::detail::deref_if_pointer_like(b));
+}
+}
 template<typename F>
 Ordering then_with(Ordering ord, F&& f) {
 if (ord == Ordering::Equal) {
@@ -434,7 +452,7 @@ return accept<E>(value);
 };
 
 struct unit_visitor {
-using Value = std::tuple<>;
+using Value = rusty::Unit;
 
 template<typename E>
 rusty::Result<Value, E> visit_unit() const {
@@ -555,7 +573,7 @@ return Ret::Ok(static_cast<Target>(*__bound));
 return Ret::Err(Err::custom("unsupported non-const reference target"));
 }
 } else if constexpr (
-std::is_same_v<Target, std::tuple<>>
+std::is_same_v<Target, rusty::Unit>
 && requires {
 rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer))
@@ -565,7 +583,7 @@ return rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer))
 .deserialize_unit(detail::unit_visitor{});
 } else if constexpr (
-std::is_same_v<Target, std::tuple<>>
+std::is_same_v<Target, rusty::Unit>
 && requires {
 rusty::next_token(rusty::detail::deref_if_pointer_like(
 std::forward<Deserializer>(deserializer)));
@@ -575,22 +593,22 @@ std::forward<Deserializer>(deserializer)));
 using Err = std::remove_cv_t<std::remove_reference_t<
 decltype(__tok_res.unwrap_err())>>;
 if (__tok_res.is_err()) {
-return rusty::Result<std::tuple<>, Err>::Err(__tok_res.unwrap_err());
+return rusty::Result<rusty::Unit, Err>::Err(__tok_res.unwrap_err());
 }
 auto __tok = __tok_res.unwrap();
 if constexpr (requires { rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok); }) {
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Unit>(__tok)) {
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
 rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok);
 }) {
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_UnitStruct>(__tok)) {
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
 }
-return rusty::Result<std::tuple<>, Err>::Err(
+return rusty::Result<rusty::Unit, Err>::Err(
 Err::custom("expected unit token"));
 } else if constexpr (
 (std::is_arithmetic_v<Target> || std::is_enum_v<Target> || std::is_same_v<Target, bool>)
@@ -1551,9 +1569,9 @@ if (__res.is_ok()) {
 static_cast<void>(rusty::mem::replace(
 rusty::detail::deref_if_pointer_like(std::forward<Place>(place)),
 __res.unwrap()));
-return rusty::Result<std::tuple<>, Err>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, Err>::Ok(std::make_tuple());
 }
-return rusty::Result<std::tuple<>, Err>::Err(__res.unwrap_err());
+return rusty::Result<rusty::Unit, Err>::Err(__res.unwrap_err());
 } else {
 return Target::deserialize_in_place(
 std::forward<Deserializer>(deserializer), std::forward<Place>(place));
@@ -2044,7 +2062,7 @@ return std::forward<Serializer>(serializer).serialize_f64(std::forward<Value>(va
 std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
 }) {
 return std::forward<Serializer>(serializer).serialize_char(std::forward<Value>(value));
-} else if constexpr (std::is_same_v<ValueType, std::tuple<>> && requires {
+} else if constexpr (std::is_same_v<ValueType, rusty::Unit> && requires {
 std::forward<Serializer>(serializer).serialize_unit();
 }) {
 return std::forward<Serializer>(serializer).serialize_unit();
@@ -2126,7 +2144,7 @@ return true;
 };
 auto token_opt = __serializer_recv.next_token();
 if (token_opt.is_none()) {
-return rusty::Result<std::tuple<>, SerializerError>::Err(
+return rusty::Result<rusty::Unit, SerializerError>::Err(
 SerializerError::custom("expected Token::Bytes, Token::BorrowedBytes, or Token::ByteBuf"));
 }
 auto token = token_opt.unwrap();
@@ -2137,7 +2155,7 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0;
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_Bytes>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_Bytes>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
@@ -2147,7 +2165,7 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_BorrowedBytes>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_BorrowedBytes>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
 if constexpr (requires {
@@ -2157,10 +2175,10 @@ rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0;
 if (rusty::detail::variant_holds<::rusty_token_placeholder::Token_ByteBuf>(token)
 && same_bytes(rusty::as_u8_slice(
 rusty::detail::deref_if_pointer(rusty::detail::variant_get<::rusty_token_placeholder::Token_ByteBuf>(token)._0)))) {
-return rusty::Result<std::tuple<>, SerializerError>::Ok(std::make_tuple());
+return rusty::Result<rusty::Unit, SerializerError>::Ok(std::make_tuple());
 }
 }
-return rusty::Result<std::tuple<>, SerializerError>::Err(
+return rusty::Result<rusty::Unit, SerializerError>::Err(
 SerializerError::custom(std::format(
 "serialized bytes did not match expected token (expected_len={0}, token={1})",
 expected.size(), rusty::to_string(token))));
@@ -2662,12 +2680,12 @@ return Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - ear
 struct SystemTime {
 std::chrono::system_clock::time_point inner;
 static SystemTime now() { return SystemTime{std::chrono::system_clock::now()}; }
-rusty::Result<Duration, std::tuple<>> duration_since(SystemTime earlier) const {
+rusty::Result<Duration, rusty::Unit> duration_since(SystemTime earlier) const {
 if (inner >= earlier.inner) {
-return rusty::Result<Duration, std::tuple<>>::Ok(
+return rusty::Result<Duration, rusty::Unit>::Ok(
 Duration{std::chrono::duration_cast<std::chrono::nanoseconds>(inner - earlier.inner)});
 }
-return rusty::Result<Duration, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<Duration, rusty::Unit>::Err(std::make_tuple());
 }
 };
 inline const SystemTime UNIX_EPOCH{std::chrono::system_clock::time_point{}};
@@ -2691,19 +2709,19 @@ Ready<std::decay_t<T>> ready(T&& value) {
 return Ready<std::decay_t<T>>{std::forward<T>(value), false};
 }
 struct Delay {
-using Output = std::tuple<>;
+using Output = rusty::Unit;
 std::chrono::nanoseconds duration{};
 bool done = false;
 static Delay new_(rusty::time::Duration duration) { return Delay{duration.inner, false}; }
 Delay into_future() { return std::move(*this); }
 Delay new_unchecked() { return std::move(*this); }
 Delay& as_mut() { return *this; }
-rusty::Poll<std::tuple<>> poll(rusty::Context&) {
+rusty::Poll<rusty::Unit> poll(rusty::Context&) {
 if (!done) {
 std::this_thread::sleep_for(duration);
 done = true;
 }
-return rusty::Poll<std::tuple<>>::ready_with(std::tuple<>{});
+return rusty::Poll<rusty::Unit>::ready_with(rusty::Unit{});
 }
 };
 }
@@ -3004,17 +3022,17 @@ return rusty::fmt::Result::Err(rusty::fmt::Error{});
 }
 }
 template<typename T, typename Input>
-rusty::Result<T, std::tuple<>> parse_hex(const Input& input) {
+rusty::Result<T, rusty::Unit> parse_hex(const Input& input) {
 std::string_view text;
 if constexpr (std::is_convertible_v<Input, std::string_view>) {
 text = std::string_view(input);
 } else if constexpr (requires { input.as_str(); }) {
 text = std::string_view(input.as_str());
 } else {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (text.empty()) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 bool negative = false;
 std::size_t start = 0;
@@ -3023,11 +3041,11 @@ negative = text[0] == '-';
 start = 1;
 }
 if (start >= text.size()) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 using RawT = std::remove_cv_t<std::remove_reference_t<T>>;
 if constexpr (!std::is_integral_v<RawT> || std::is_same_v<RawT, bool>) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 } else {
 using Unsigned = std::make_unsigned_t<RawT>;
 Unsigned value = 0;
@@ -3041,11 +3059,11 @@ digit = static_cast<unsigned>(10 + (ch - 'a'));
 } else if (ch >= 'A' && ch <= 'F') {
 digit = static_cast<unsigned>(10 + (ch - 'A'));
 } else {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (value > (std::numeric_limits<Unsigned>::max() - static_cast<Unsigned>(digit))
 / static_cast<Unsigned>(16)) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 value = static_cast<Unsigned>(value * static_cast<Unsigned>(16)
 + static_cast<Unsigned>(digit));
@@ -3055,23 +3073,23 @@ if (negative) {
 const auto max_mag = static_cast<Unsigned>(std::numeric_limits<RawT>::max())
 + static_cast<Unsigned>(1);
 if (value > max_mag) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
 if (value == max_mag) {
-return rusty::Result<T, std::tuple<>>::Ok(std::numeric_limits<RawT>::min());
+return rusty::Result<T, rusty::Unit>::Ok(std::numeric_limits<RawT>::min());
 }
 const auto signed_value = static_cast<RawT>(value);
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(-signed_value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(-signed_value));
 }
 if (value > static_cast<Unsigned>(std::numeric_limits<RawT>::max())) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 } else {
 if (negative) {
-return rusty::Result<T, std::tuple<>>::Err(std::make_tuple());
+return rusty::Result<T, rusty::Unit>::Err(std::make_tuple());
 }
-return rusty::Result<T, std::tuple<>>::Ok(static_cast<RawT>(value));
+return rusty::Result<T, rusty::Unit>::Ok(static_cast<RawT>(value));
 }
 }
 }
@@ -3735,12 +3753,12 @@ struct LinkedList {
     rusty::PhantomData<rusty::Box<Node<T>, A>> marker;
     mutable bool _rusty_forgotten = false;
     LinkedList(rusty::Option<rusty::ptr::NonNull<Node<T>>> head_init, rusty::Option<rusty::ptr::NonNull<Node<T>>> tail_init, size_t len_init, A alloc_init, rusty::PhantomData<rusty::Box<Node<T>, A>> marker_init) : head(std::move(head_init)), tail(std::move(tail_init)), len_field(std::move(len_init)), alloc(std::move(alloc_init)), marker(std::move(marker_init)) {}
-    LinkedList(const LinkedList&) = default;
+    LinkedList(const LinkedList&) = delete;
     LinkedList(LinkedList&& other) noexcept : head(std::move(other.head)), tail(std::move(other.tail)), len_field(std::move(other.len_field)), alloc(std::move(other.alloc)), marker(std::move(other.marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    LinkedList& operator=(const LinkedList&) = default;
+    LinkedList& operator=(const LinkedList&) = delete;
     LinkedList& operator=(LinkedList&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -4012,7 +4030,7 @@ return std::move(node_shadow1); }(); });
             if (!_m_matched) {
                 if (_m.is_some()) {
                     auto&& _mv1 = std::as_const(_m).unwrap();
-                    auto tail = rusty::detail::deref_if_pointer(_mv1);
+                    auto&& tail = rusty::detail::deref_if_pointer(_mv1);
                     if (auto&& _iflet_scrutinee = other.head.take(); _iflet_scrutinee.is_some()) {
                         decltype(auto) other_head = _iflet_scrutinee.unwrap();
                         // @unsafe
@@ -4089,7 +4107,7 @@ return std::move(node_shadow1); }(); });
         static_cast<void>(this->push_front_mut(std::move(elt)));
     }
     T& push_front_mut(T elt) {
-        auto node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
+        auto node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<Node<T>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<Node<T>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
         // @unsafe
         {
             this->push_front_node(std::move(node));
@@ -4103,7 +4121,7 @@ return std::move(node_shadow1); }(); });
         static_cast<void>(this->push_back_mut(std::move(elt)));
     }
     T& push_back_mut(T elt) {
-        auto node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
+        auto node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<Node<T>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)))>>::into_non_null_with_allocator(rusty::Box<Node<T>>::new_in(Node<std::remove_cvref_t<decltype(std::move(elt))>>::new_(std::move(elt)), this->alloc)));
         // @unsafe
         {
             this->push_back_node(std::move(node));
@@ -4215,7 +4233,7 @@ return iter.tail;
         list.extend(std::move(iter));
         return std::move(list);
     }
-    IntoIter into_iter() {
+    IntoIter into_iter() const {
         return IntoIter(std::move((*this)));
     }
     template<typename I>
@@ -4237,7 +4255,7 @@ return iter.tail;
         this->push_back(std::move(elem));
     }
     bool operator==(const LinkedList<T, A>& other) const {
-        return (rusty::len((*this)) == rusty::len(other)) && rusty::iter((*this)).eq(other);
+        return (rusty::len((*this)) == rusty::len(other)) && rusty::cmp::eq(rusty::iter((*this)), other);
     }
     std::partial_ordering operator<=>(const LinkedList<T, A>& other) const {
         return rusty::to_partial_ordering([&]() -> rusty::Option<rusty::cmp::Ordering> {
@@ -4271,7 +4289,7 @@ return iter.tail;
     }
     template<typename H>
     void hash(H& state) const {
-        ([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).write_length_prefix(rusty::len((*this))); }) { return std::forward<decltype(__recv)>(__recv).write_length_prefix(rusty::len((*this))); } else { return std::forward<decltype(__recv)>(__recv)->write_length_prefix(rusty::len((*this))); } }(state));
+        rusty::deref_call(state, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).write_length_prefix(rusty::len((*this)))) { return std::forward<decltype(__recv)>(__recv).write_length_prefix(rusty::len((*this))); });
         for (auto&& elt : rusty::for_in(rusty::iter((*this)))) {
             rusty::hash::hash(elt, state);
         }
@@ -4665,7 +4683,7 @@ struct CursorMut {
     void insert_after(T item) {
         // @unsafe
         {
-            auto spliced_node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
+            auto spliced_node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<Node<T>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<Node<T>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
             auto node_next = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.head; } if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().next; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(this->current_field, std::move(node_next), std::move(spliced_node), std::move(spliced_node), static_cast<size_t>(1));
             if (this->current_field.is_none()) {
@@ -4676,7 +4694,7 @@ struct CursorMut {
     void insert_before(T item) {
         // @unsafe
         {
-            auto spliced_node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<std::remove_cvref_t<decltype((Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item))))>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
+            auto spliced_node = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(rusty::Box<std::remove_cvref_t<decltype((rusty::Box<Node<T>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)))>>::into_non_null_with_allocator(rusty::Box<Node<T>>::new_in(Node<std::remove_cvref_t<decltype(std::move(item))>>::new_(std::move(item)), &this->list.alloc)));
             auto node_prev = [&]() { auto&& _m = this->current_field; if (_m.is_none()) { return this->list.tail; } if (_m.is_some()) { auto&& _mv1 = std::as_const(_m).unwrap(); auto&& node = rusty::detail::deref_if_pointer(_mv1); return node.as_ref().prev; } rusty::intrinsics::unreachable(); }();
             this->list.splice_nodes(std::move(node_prev), this->current_field, std::move(spliced_node), std::move(spliced_node), static_cast<size_t>(1));
             this->index_field += 1;
