@@ -4478,6 +4478,154 @@ def fix_inner_some_payload_binding_const(path: Path) -> None:
         )
 
 
+def fix_const_new_pos_binding(path: Path) -> None:
+    """Drop `const` on `const auto new_pos = …` so the subsequent
+    `new_pos.cast_to_leaf_unchecked()` / `cast_to_internal_unchecked()`
+    by-value method call is well-formed.
+
+    Companion to fix_const_left_kv_ok_unwrap — same const-correctness
+    drift, different binding. Idempotent."""
+    src = path.read_text()
+    new_src = src.replace(
+        "const auto new_pos = [&]()",
+        "auto&& new_pos = [&]()",
+    )
+    if new_src != src:
+        path.write_text(new_src)
+        print(f"  dropped const on new_pos binding in: {path.name}")
+
+
+def fix_new_pos_lambda_return_type(path: Path) -> None:
+    """The `new_pos = [&]() -> Handle<Node, Type> { … }()` lambda in
+    `remove_leaf_kv` / `remove_internal_kv` has the wrong declared
+    return type — the body's arms call `merge_tracking_child_edge` /
+    `steal_left` / `steal_right` / `Handle::new_edge(pos, idx)`, all of
+    which return `Handle<NodeRef<Mut, K, V, LeafOrInternal>, Edge>`,
+    not `Handle<Node, Type>` (where Type=Leaf for remove_leaf_kv,
+    Type=Internal for remove_internal_kv).
+
+    The misinference probably happened in the lambda-IIFE-as-match
+    lowering: it reused the enclosing function's return-type slot
+    instead of computing per-lambda. The right type is the
+    parent_kv branch's merged-result type, which is invariant on Type.
+
+    Patch: within each `new_pos = [&]() -> Handle<Node, Type>` block
+    (brace-walked), substitute every `Handle<Node, Type>` with
+    `Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1,
+    typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>,
+    marker::Edge>`. Trailing `pos = new_pos.cast_to_leaf_unchecked()`
+    (or `cast_to_internal_unchecked()`) lifts back to the function's
+    Type — that already compiles correctly because cast_to_X returns
+    Handle<NodeRef<Mut, K, V, X>, Edge>.
+
+    Idempotent — checks for the wrong shape before rewriting.
+    """
+    src = path.read_text()
+    needle = "const auto new_pos = [&]() -> Handle<Node, Type> {"
+    correct_type = (
+        "Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, "
+        "typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge>"
+    )
+    changed = False
+    pos = 0
+    out_chunks: list[str] = []
+    while True:
+        i = src.find(needle, pos)
+        if i == -1:
+            out_chunks.append(src[pos:])
+            break
+        out_chunks.append(src[pos:i])
+        # Walk braces from `{` after the `->`. The lambda is
+        # `[&]() -> Handle<Node, Type> { ... }()`. We want to span up to
+        # the matching `}` of the body.
+        brace_open = src.find("{", i + len(needle) - 1)
+        depth = 0
+        brace_close = -1
+        for k in range(brace_open, len(src)):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    brace_close = k
+                    break
+        if brace_close == -1:
+            out_chunks.append(src[i:])
+            break
+        block = src[i:brace_close + 1]
+        new_block = block.replace("Handle<Node, Type>", correct_type)
+        if new_block != block:
+            changed = True
+        out_chunks.append(new_block)
+        pos = brace_close + 1
+    if changed:
+        path.write_text("".join(out_chunks))
+        print(f"  retyped new_pos lambda return in: {path.name}")
+
+
+def fix_fix_node_and_affected_ancestors_loop(path: Path) -> None:
+    """Hand-port `fix_node_and_affected_ancestors` to a real `while`
+    loop instead of the transpiler's lambda-IIFE-as-match shape.
+
+    The transpiler lowered the Rust source
+        loop {
+            match self.fix_node_through_parent(alloc.clone()) {
+                Ok(Some(parent)) => { *self = parent.forget_type(); }
+                Ok(None) => return true,
+                Err(_) => return false,
+            }
+        }
+    as a `while (true) { return [&]() -> bool { ... }(); }` shape — but
+    the `Ok(Some(parent))` arm has no early return; in Rust it mutates
+    *self and falls through to re-enter the loop. The IIFE lowering can't
+    express "do this side-effect and continue the OUTER loop", so it
+    emitted `return (*this) = parent.forget_type();` which returns a
+    NodeRef& (the assignment's lvalue), not bool. clang then flags the
+    return-type mismatch.
+
+    Rewrite the body to a plain C++ `while` that does what Rust meant.
+    Idempotent — match the sentinel before replacing.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: fix_node_and_affected_ancestors hand-port loop"
+    if sentinel in src:
+        return
+    sig = "bool fix_node_and_affected_ancestors(A alloc) {"
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        return
+    # Locate the function body braces (depth walk).
+    brace_open = src.find("{", sig_pos + len(sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        return
+    body = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        while (true) {\n"
+        "            auto&& _m = this->fix_node_through_parent(rusty::clone(alloc));\n"
+        "            if (_m.is_err()) { return false; }\n"
+        "            auto&& _opt = std::as_const(_m).unwrap();\n"
+        "            if (rusty::detail::deref_if_pointer(_opt).is_none()) { return true; }\n"
+        "            auto&& parent = const_cast<std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_opt).unwrap()))>&>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_opt).unwrap()));\n"
+        "            (*this) = parent.forget_type();\n"
+        "        }\n"
+        "    }"
+    )
+    new_src = src[:brace_open] + body + src[brace_close + 1 :]
+    path.write_text(new_src)
+    print(f"  hand-ported fix_node_and_affected_ancestors loop in: {path.name}")
+
+
 def fix_const_left_kv_ok_unwrap(path: Path) -> None:
     """Drop `const` on the `auto left_leaf_kv = …` binding chain so the
     subsequent `.ok().unwrap_unchecked()` call (non-const) is well-formed.
@@ -5381,6 +5529,17 @@ def main() -> int:
     # Companion: drop const on inner-Some-payload bindings so
     # non-const methods (NodeRef::forget_type) work on the binding.
     fix_inner_some_payload_binding_const(internal)
+    # Hand-port `fix_node_and_affected_ancestors` to a real loop —
+    # the transpiler's lambda-IIFE-as-match shape can't express the
+    # Ok(Some(parent)) "fall-through-to-continue" arm correctly.
+    fix_fix_node_and_affected_ancestors_loop(internal)
+    # remove_leaf_kv / remove_internal_kv have a `new_pos` lambda whose
+    # declared return type `Handle<Node, Type>` doesn't match the body's
+    # actual return values (`Handle<NodeRef<…LeafOrInternal>, Edge>`).
+    fix_new_pos_lambda_return_type(internal)
+    # Drop `const` on `const auto new_pos = …` so the subsequent
+    # `new_pos.cast_to_leaf_unchecked()` by-value method call works.
+    fix_const_new_pos_binding(internal)
     for p in (internal, map_mod, map_entry, set_mod, set_entry):
         if p.exists():
             fix_noderef_borrow_mut_auto_ref(p)

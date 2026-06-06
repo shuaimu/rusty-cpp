@@ -3684,9 +3684,9 @@ import btree_port.btree.btree_internal;
 // btree_port port step 52: map.entry merged into this module. The
 // OccupiedEntry / VacantEntry / Entry / OccupiedError struct defs
 // are now inlined below, ahead of the BTreeMap struct.
+import btree_port.btree.btree_internal;
 
 namespace btree_port::btree::btree_internal {}
-namespace btree_port::btree::map::entry {}
 namespace btree_port::btree::map {
 namespace btree_internal = ::btree_port::btree::btree_internal;
 namespace marker = ::btree_port::btree::btree_internal::marker;

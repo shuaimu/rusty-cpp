@@ -4944,8 +4944,14 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
     template<typename A>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
     bool fix_node_and_affected_ancestors(A alloc) {
+        // btree_port port: fix_node_and_affected_ancestors hand-port loop
         while (true) {
-            return [&]() -> bool { auto&& _m = this->fix_node_through_parent(rusty::clone(alloc)); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).is_some()) { auto&& parent = const_cast<std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv0).unwrap()))>&>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv0).unwrap())); return (*this) = parent.forget_type(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (_mv1.is_none()) { return true; } } if (_m.is_err()) { return false; } return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }();
+            auto&& _m = this->fix_node_through_parent(rusty::clone(alloc));
+            if (_m.is_err()) { return false; }
+            auto&& _opt = std::as_const(_m).unwrap();
+            if (rusty::detail::deref_if_pointer(_opt).is_none()) { return true; }
+            auto&& parent = const_cast<std::remove_cvref_t<decltype(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_opt).unwrap()))>&>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_opt).unwrap()));
+            (*this) = parent.forget_type();
         }
     }
     template<typename A>
@@ -5829,19 +5835,19 @@ return next_internal_edge.descend().last_leaf_edge(); }(); } rusty::intrinsics::
         const auto len = rusty::len(pos.reborrow().into_node());
         if (rusty::detail::deref_if_pointer_like(len) < rusty::detail::deref_if_pointer_like(MIN_LEN)) {
             auto idx = pos.idx();
-            const auto new_pos = [&]() -> Handle<Node, Type> { auto&& _m = rusty::deref_call(pos.into_node(), [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).forget_type()) { return std::forward<decltype(__recv)>(__recv).forget_type(); }).choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).index() == 0) { auto&& left_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0)>&>(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0); return [&]() -> Handle<Node, Type> { assert((left_parent_kv.right_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
+            auto&& new_pos = [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { auto&& _m = rusty::deref_call(pos.into_node(), [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).forget_type()) { return std::forward<decltype(__recv)>(__recv).forget_type(); }).choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv0).index() == 0) { auto&& left_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0)>&>(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0); return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { assert((left_parent_kv.right_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
 if (left_parent_kv.can_merge()) {
     return left_parent_kv.merge_tracking_child_edge(LeftOrRight<size_t>{LeftOrRight_Right<size_t>{std::move(idx)}}, rusty::clone(alloc));
 } else {
     assert((left_parent_kv.left_child_len() > rusty::detail::deref_if_pointer_like(MIN_LEN)));
     return left_parent_kv.steal_left(std::move(idx));
-} }(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv1).index() == 1) { auto&& right_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0)>&>(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return [&]() -> Handle<Node, Type> { assert((right_parent_kv.left_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
+} }(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_mv1).index() == 1) { auto&& right_parent_kv = const_cast<std::remove_cvref_t<decltype(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0)>&>(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0); return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { assert((right_parent_kv.left_child_len() == (rusty::detail::deref_if_pointer_like(MIN_LEN) - 1)));
 if (right_parent_kv.can_merge()) {
     return right_parent_kv.merge_tracking_child_edge(LeftOrRight<size_t>{LeftOrRight_Left<size_t>{std::move(idx)}}, rusty::clone(alloc));
 } else {
     assert((right_parent_kv.right_child_len() > rusty::detail::deref_if_pointer_like(MIN_LEN)));
     return right_parent_kv.steal_right(std::move(idx));
-} }(); } } if (_m.is_err()) { auto&& _mv2 = _m.unwrap_err(); auto&& pos = rusty::detail::deref_if_pointer(_mv2); return std::conditional_t<true, Handle<std::remove_cvref_t<decltype((pos))>, marker::Edge>, F>::new_edge(std::move(pos), std::move(idx)); } return [&]() -> Handle<Node, Type> { rusty::intrinsics::unreachable(); }(); }();
+} }(); } } if (_m.is_err()) { auto&& _mv2 = _m.unwrap_err(); auto&& pos = rusty::detail::deref_if_pointer(_mv2); return std::conditional_t<true, Handle<std::remove_cvref_t<decltype((pos))>, marker::Edge>, F>::new_edge(std::move(pos), std::move(idx)); } return [&]() -> Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, marker::Edge> { rusty::intrinsics::unreachable(); }(); }();
             pos = new_pos.cast_to_leaf_unchecked();
             if (auto&& _iflet_scrutinee = rusty::deref_call(pos.reborrow_mut().into_node(), [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).ascend()) { return std::forward<decltype(__recv)>(__recv).ascend(); }); _iflet_scrutinee.is_ok()) {
                 decltype(auto) parent = _iflet_scrutinee.unwrap();
