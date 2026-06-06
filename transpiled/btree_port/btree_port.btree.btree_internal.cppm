@@ -4570,7 +4570,29 @@ struct NodeRef {
     NodeRef<marker::Dying, K, V, Type> into_dying() {
         return NodeRef<marker::Dying, K, V, Type>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Dying, Type>>{}};
     }
-    Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV> push_with_handle(K key, V val) { throw ::std::runtime_error("rusty-cpp-transpiler: btree internal method stub (template-parameter recovery limitation; see docs/btreemap_port/STATUS.md)"); }
+    Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV> push_with_handle(K key, V val) {
+        // btree_port port: B3 push_with_handle hand-ported by post_transpile_patch.py
+        // Same pattern as the already-transpiled `push()`: increment
+        // len, write into the key/val areas at idx, then return a
+        // Handle pointing at the new (key, val) pair. The returned
+        // NodeRef has a fresh lifetime 'b in Rust; in C++ lifetimes
+        // are erased, so it's just a sibling NodeRef<Mut, K, V, Leaf>.
+        uint16_t& __len = this->len_mut();
+        auto __idx = static_cast<size_t>(__len);
+        assert((__idx < CAPACITY));
+        __len += 1;
+        // @unsafe — caller has the only mutable borrow of this leaf.
+        this->key_area_mut(__idx).write(std::move(key));
+        this->val_area_mut(__idx).write(std::move(val));
+        return Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV>::new_kv(
+            NodeRef<marker::Mut, K, V, marker::Leaf>{
+                .height_field = this->height_field,
+                .node = this->node,
+                ._marker = rusty::PhantomData<std::tuple<marker::Mut, marker::Leaf>>{}
+            },
+            __idx
+        );
+    }
     std::add_pointer_t<V> push(K key, V val) {
         // @unsafe
         {

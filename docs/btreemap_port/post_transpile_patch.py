@@ -1166,9 +1166,22 @@ def implement_push_with_handle(path: Path) -> None:
     if sentinel in src:
         print(f"  no changes to: {path.name} (B3 already landed)")
         return
-    sig = ("Handle<NodeRef<::marker::Mut, K, V, ::marker::Leaf>, ::marker::KV> "
-           "push_with_handle(K key, V val) {")
-    sig_pos = src.find(sig)
+    # Try both global-qualified and unqualified marker forms; the
+    # global-qualifier strip may have already run on a re-vendored copy.
+    sig_qualified = (
+        "Handle<NodeRef<::marker::Mut, K, V, ::marker::Leaf>, ::marker::KV> "
+        "push_with_handle(K key, V val) {"
+    )
+    sig_unqualified = (
+        "Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV> "
+        "push_with_handle(K key, V val) {"
+    )
+    sig_pos = src.find(sig_qualified)
+    if sig_pos == -1:
+        sig_pos = src.find(sig_unqualified)
+        sig = sig_unqualified
+    else:
+        sig = sig_qualified
     if sig_pos == -1:
         print(f"  no B3 stub site in: {path.name}")
         return
