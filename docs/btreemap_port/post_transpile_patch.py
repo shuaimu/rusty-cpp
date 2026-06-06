@@ -4263,6 +4263,87 @@ def fix_visit_byte_buf_unknown_vec(path: Path) -> None:
     print(f"  rewrote visit_byte_buf rusty::Vec stub in: {path.name}")
 
 
+def fix_noderef_borrow_mut_auto_ref(path: Path) -> None:
+    """Rewrite `auto& X = …NodeRef-chain….borrow_mut();` to `auto&& X = …`.
+
+    btree_port's `NodeRef::borrow_mut(&mut self) -> NodeRef<Mut, …>`
+    returns by VALUE — a new NodeRef wrapper around the same underlying
+    pointer. The transpiler's heuristic treats any method named
+    `borrow_mut` as returning a reference (the std `RefCell::borrow_mut`
+    convention), and emits `auto& …` at the binding site. For NodeRef
+    that's wrong: the return is an rvalue, and `auto&` can't bind to
+    rvalues — the build fails with "non-const lvalue reference … cannot
+    bind to a temporary".
+
+    The fix is at the call shape level — patch the specific
+    `auto& <name> = RUSTY_TRY_OPT(<expr>).borrow_mut();` shape to
+    `auto&&`.
+
+    The dual `auto&` heuristic for `as_mut` is correct (Rust's
+    Option::as_mut returns `Option<&mut T>`), so leave those alone.
+    """
+    import re
+    src = path.read_text()
+    # Match `auto& <ident> = …).borrow_mut();` where the receiver is a
+    # method-chain RUSTY_TRY_OPT(...).as_mut() / similar pattern from
+    # which `.borrow_mut()` returns by value.
+    pattern = re.compile(
+        r"\bauto& (\w+) = (RUSTY_TRY_OPT\(.+?\.borrow_mut\(\);)",
+        re.DOTALL,
+    )
+    new_src, count = pattern.subn(r"auto&& \1 = \2", src)
+    if count:
+        path.write_text(new_src)
+        print(
+            f"  rewrote {count} `auto& X = …borrow_mut();` → `auto&&` in: {path.name}"
+        )
+
+
+def fix_full_range_recursive_call(path: Path) -> None:
+    """Qualify `full_range(self, self)` calls inside the NodeRef::full_range
+    method body so they resolve to the FREE function rather than recursing
+    into the surrounding method.
+
+    Rust source:
+        impl NodeRef<…> {
+            pub(super) fn full_range(self) -> LazyLeafRange<…> {
+                full_range(self, self)
+            }
+        }
+    where the unqualified `full_range(...)` call at line 2 resolves to the
+    free function `fn full_range<BorrowType, K, V>(root1, root2) ->
+    LazyLeafRange<…>` defined at module scope (arity-disambiguation:
+    Rust picks the 2-arg form because the method is 0-arg).
+
+    C++ method dispatch doesn't do arity disambiguation — inside the
+    method body, `full_range(...)` first matches the surrounding method
+    (`this->full_range(...)`), which takes 0 args, so the call's 2 args
+    are flagged as "too many arguments to function call".
+
+    Rewrite the recursive call shape `full_range(std::move((*this)),
+    std::move((*this)))` to use the explicit `::<full-ns>::full_range(...)`
+    qualifier so C++ resolves to the free function.
+    """
+    src = path.read_text()
+    # The fresh transpile emits `::full_range(...)` (global qualifier) —
+    # because the transpiler sees the method-vs-free shadowing in Rust
+    # and tries to disambiguate via the global namespace. Under auto-
+    # namespace mode the free function lives in
+    # `btree_port::btree::btree_internal::`, NOT at global scope, so
+    # `::full_range` doesn't resolve. Replace the prefix to point at
+    # the right namespace.
+    needle = "::full_range(std::move((*this)), std::move((*this)))"
+    if needle not in src:
+        return
+    repl = (
+        "::btree_port::btree::btree_internal::full_range(std::move((*this)), std::move((*this)))"
+    )
+    new_src = src.replace(needle, repl)
+    if new_src != src:
+        path.write_text(new_src)
+        print(f"  qualified full_range(self, self) recursive call in: {path.name}")
+
+
 def fix_leafnode_shadow_arrow(path: Path) -> None:
     """The transpiler emits `*new_node_shadow1.field` for the body of
     `split_leaf_data` (where `new_node_shadow1` is a pointer to a LeafNode
@@ -4832,14 +4913,17 @@ def fix_global_qualifiers_for_namespace_wrap(path: Path) -> None:
         (r"::LeafNode<", "LeafNode<"),
         (r"::InternalNode<", "InternalNode<"),
         # Free functions defined inside btree_internal:
-        (r"::move_to_slice\(", "move_to_slice("),
-        (r"::slice_remove\(", "slice_remove("),
-        (r"::slice_insert\(", "slice_insert("),
-        (r"::slice_shr\(", "slice_shr("),
-        (r"::slice_shl\(", "slice_shl("),
-        (r"::take_mut\(", "take_mut("),
-        (r"::full_range\(", "full_range("),
-        (r"::splitpoint\(", "splitpoint("),
+        # All bare-global `::name(` strips below are anchored with a
+        # negative lookbehind so we don't mangle qualified-path tails
+        # like `btree_internal::full_range(` → `btree_internalfull_range(`.
+        (r"(?<![a-zA-Z0-9_])::move_to_slice\(", "move_to_slice("),
+        (r"(?<![a-zA-Z0-9_])::slice_remove\(", "slice_remove("),
+        (r"(?<![a-zA-Z0-9_])::slice_insert\(", "slice_insert("),
+        (r"(?<![a-zA-Z0-9_])::slice_shr\(", "slice_shr("),
+        (r"(?<![a-zA-Z0-9_])::slice_shl\(", "slice_shl("),
+        (r"(?<![a-zA-Z0-9_])::take_mut\(", "take_mut("),
+        (r"(?<![a-zA-Z0-9_])::full_range\(", "full_range("),
+        (r"(?<![a-zA-Z0-9_])::splitpoint\(", "splitpoint("),
         # Alias-rewriter helpers (Cluster A / orphan-method recovery):
         (r"::(__rusty_alias_[A-Za-z_]+)\(", r"\1("),
         # `replace(` is a method on rusty::Option etc; the bare `::replace`
@@ -5080,6 +5164,10 @@ def main() -> int:
             # ForceResult/Position; Left/Right in LeafOrRight/Either).
             fix_unresolved_bare_glob_variants(p)
     fix_leafnode_shadow_arrow(internal)
+    fix_full_range_recursive_call(internal)
+    for p in (internal, map_mod, map_entry, set_mod, set_entry):
+        if p.exists():
+            fix_noderef_borrow_mut_auto_ref(p)
     patch_internal(internal)
     # Phase B: replace stubs with real impls. Runs AFTER patch_internal
     # so that on fresh transpile output we first install the stub

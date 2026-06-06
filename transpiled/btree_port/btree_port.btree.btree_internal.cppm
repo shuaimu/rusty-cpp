@@ -4789,8 +4789,8 @@ struct NodeRef {
                     auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv1)));
                     auto&& lower_edge_idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1)));
                     auto&& upper_edge_idx = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_mv1)));
-                    auto lower_child_bound = rusty::detail::deref_if_pointer(std::get<3>(rusty::detail::deref_if_pointer(_mv1)));
-                    auto upper_child_bound = rusty::detail::deref_if_pointer(std::get<4>(rusty::detail::deref_if_pointer(_mv1)));
+                    auto&& lower_child_bound = rusty::detail::deref_if_pointer(std::get<3>(rusty::detail::deref_if_pointer(_mv1)));
+                    auto&& upper_child_bound = rusty::detail::deref_if_pointer(std::get<4>(rusty::detail::deref_if_pointer(_mv1)));
                     auto lower_edge_self_ref_tmp = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((rusty::ptr::read(&node)))>, marker::Edge>, Q>::new_edge(rusty::ptr::read(&node), lower_edge_idx);
                     auto lower_edge = std::move(lower_edge_self_ref_tmp);
                     auto upper_edge_self_ref_tmp = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((node))>, marker::Edge>, Q>::new_edge(std::move(node), upper_edge_idx);
@@ -4833,7 +4833,7 @@ struct NodeRef {
         }
     }
     LazyLeafRange<marker::Immut, K, V> full_range() const {
-        return full_range(std::move((*this)), std::move((*this)));
+        return ::btree_port::btree::btree_internal::full_range(std::move((*this)), std::move((*this)));
     }
     Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> first_leaf_edge() const {
         // btree_port port: first/last_leaf_edge hand-ported by post_transpile_patch.py
@@ -4948,7 +4948,7 @@ return internal.first_edge(); }(); } rusty::intrinsics::unreachable(); }();
         if (rusty::detail::deref_if_pointer_like(len) >= rusty::detail::deref_if_pointer_like(MIN_LEN)) {
             return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>{rusty::None});
         } else {
-            return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = this->choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto left_parent_kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv0)._0); return [&]() {
+            return [&]() -> rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>> { auto&& _m = this->choose_parent_kv(); if (_m.is_ok()) { auto&& _mv0 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& left_parent_kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv0)._0); return [&]() {
 if (left_parent_kv.can_merge()) {
 auto parent = left_parent_kv.merge_tracking_parent(std::move(alloc));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>(std::move(parent)));
@@ -4956,7 +4956,7 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
 left_parent_kv.bulk_steal_left(rusty::detail::deref_if_pointer_like(MIN_LEN) - rusty::detail::deref_if_pointer_like(len));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>{rusty::None});
 }
-}(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto right_parent_kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv1)._0); return [&]() {
+}(); } } if (_m.is_ok()) { auto&& _mv1 = std::as_const(_m).unwrap(); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& right_parent_kv = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_mv1)._0); return [&]() {
 if (right_parent_kv.can_merge()) {
 auto parent = right_parent_kv.merge_tracking_parent(std::move(alloc));
 return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>, NodeRef<BorrowType, K, V, Type>>::Ok(rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>(std::move(parent)));
@@ -5629,8 +5629,8 @@ struct Handle {
                     auto _m_tuple = std::forward_as_tuple(_m0, _m1);
                     bool _m_matched = false;
                     if (!_m_matched && ((rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1 && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1))) {
-                        auto left = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
-                        auto right = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
+                        auto&& left = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
+                        auto&& right = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
                         move_to_slice(left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, rusty::detail::deref_if_pointer_like(old_left_len) + 1)), right.edge_area_mut(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1)));
                         right.correct_childrens_parent_links(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1));
                         _m_matched = true;
@@ -5919,7 +5919,7 @@ struct BalancingContext {
     auto do_merge(F result, A alloc) {
         using R = std::remove_cvref_t<std::invoke_result_t<F&, NodeRef<marker::Mut, K, V, marker::Internal>, NodeRef<marker::Mut, K, V, marker::LeafOrInternal>>>;
         auto&& _let_pat = this->parent;
-        auto parent_node = rusty::detail::deref_if_pointer(_let_pat.node);
+        auto&& parent_node = rusty::detail::deref_if_pointer(_let_pat.node);
         auto&& parent_idx = rusty::detail::deref_if_pointer(_let_pat.idx_field);
         auto&& _marker = rusty::detail::deref_if_pointer(_let_pat._marker);
         const auto old_parent_len = rusty::len(parent_node);
@@ -6021,8 +6021,8 @@ struct BalancingContext {
                 auto _m_tuple = std::forward_as_tuple(_m0, _m1);
                 bool _m_matched = false;
                 if (!_m_matched && ((rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1 && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1))) {
-                    auto left = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
-                    auto right = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
+                    auto&& left = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
+                    auto&& right = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
                     slice_shr(right.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(new_right_len) + 1)), std::move(count));
                     move_to_slice(left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, rusty::detail::deref_if_pointer_like(old_left_len) + 1)), right.edge_area_mut(rusty::range_to(count)));
                     right.correct_childrens_parent_links(rusty::range(0, rusty::detail::deref_if_pointer_like(new_right_len) + 1));
@@ -6069,8 +6069,8 @@ struct BalancingContext {
                 auto _m_tuple = std::forward_as_tuple(_m0, _m1);
                 bool _m_matched = false;
                 if (!_m_matched && ((rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1 && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1))) {
-                    auto left = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
-                    auto right = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
+                    auto&& left = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
+                    auto&& right = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
                     move_to_slice(right.edge_area_mut(rusty::range_to(count)), left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1)));
                     slice_shl(right.edge_area_mut(rusty::range_to(rusty::detail::deref_if_pointer_like(old_right_len) + 1)), std::move(count));
                     left.correct_childrens_parent_links(rusty::range(rusty::detail::deref_if_pointer_like(old_left_len) + 1, rusty::detail::deref_if_pointer_like(new_left_len) + 1));

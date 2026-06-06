@@ -3946,13 +3946,13 @@ return entry.insert(std::move(value)); }(); } return [&]() -> V& { rusty::intrin
 #endif
     template<typename F, typename K, typename V>
     Entry<T, A> and_modify(F f) const {
-        return [&]() -> Entry<T, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> Entry<T, A> { f(entry.get_mut());
+        return [&]() -> Entry<T, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> Entry<T, A> { f(entry.get_mut());
 return Entry<T, A>{Entry_Occupied<T, A>{entry}}; }(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return Entry<T, A>{Entry_Vacant<T, A>{entry}}; } return [&]() -> Entry<T, A> { rusty::intrinsics::unreachable(); }(); }();
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
     template<typename K, typename V>
     OccupiedEntry<K, V, A> insert_entry(V value) const {
-        return [&]() -> OccupiedEntry<K, V, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> OccupiedEntry<K, V, A> { entry.insert(std::move(value));
+        return [&]() -> OccupiedEntry<K, V, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> OccupiedEntry<K, V, A> { entry.insert(std::move(value));
 return entry; }(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert_entry(std::move(value)); } return [&]() -> OccupiedEntry<K, V, A> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename K, typename V>
