@@ -4095,6 +4095,122 @@ def drop_redundant_rusty_clone(path: Path) -> None:
         print(f"  no local rusty::clone block in: {path.name}")
 
 
+def fix_unresolved_bare_glob_variants(path: Path) -> None:
+    """Rewrite `/* TODO transpiler: unresolved bare-glob variant `X` */ true`
+    placeholders to position-based variant-dispatch.
+
+    Background (closes the B1 edge case the verification doc flagged):
+
+    The transpiler's bare-glob variant resolver consults
+    `unique_data_enum_name_for_variant_name` and falls back to a TODO
+    marker if the variant name is ambiguous across enums. In btree,
+    `Leaf` and `Internal` are both declared by `ForceResult` AND
+    `Position`; `Left` and `Right` by `LeafOrRight` AND `Either` (built
+    in). The resolver leaves the marker AND emits `_m._0` directly on
+    the `std::variant`, which fails at template instantiation.
+
+    Within each consecutive run of TODO-style arms that share an
+    `auto&& _m = SCRUT;` opener (an IIFE-shaped match), we rewrite the
+    Nth arm's condition to `_m.index() == N` and the body's `_m._0`
+    accesses to `std::get<N>(_m)._0`. This assumes source-order ==
+    enum-declaration-order, which holds for the btree force()/up()
+    family — both `ForceResult` and `Position` order their variants
+    Leaf=0, Internal=1, and `LeafOrRight` orders Left=0, Right=1.
+    """
+    import re
+
+    src = path.read_text()
+    sentinel = (
+        "// btree_port port: bare-glob variant TODOs rewritten by "
+        "post_transpile_patch.py"
+    )
+    if sentinel in src:
+        print(
+            f"  no changes to: {path.name} (bare-glob TODOs already rewritten)"
+        )
+        return
+    todo_re = re.compile(
+        r"if \(/\* TODO transpiler: unresolved bare-glob variant "
+        r"`[A-Za-z_][A-Za-z0-9_]*` \(no enum decl visible in this TU; "
+        r"patch arm manually\) \*/ true\)"
+    )
+    m_assign_re = re.compile(r"auto&& _m = ")
+    total = 0
+    # State machine: walk through the file from left to right, tracking
+    # the position-counter that resets at each `auto&& _m = `. When we
+    # find a TODO marker, rewrite condition + first `_m._0` access in
+    # the arm body.
+    out: list[str] = []
+    i = 0
+    n = len(src)
+    arm_index: int = 0
+    while i < n:
+        # Check for the start of a new match scope.
+        m_assign = m_assign_re.match(src, i)
+        if m_assign:
+            arm_index = 0
+            out.append(src[i:m_assign.end()])
+            i = m_assign.end()
+            continue
+        # Check for a TODO marker arm.
+        todo = todo_re.match(src, i)
+        if todo:
+            # Brace-match the body of this `if (...)` arm.
+            j = todo.end()
+            # Skip whitespace to find `{`
+            while j < n and src[j].isspace():
+                j += 1
+            if j < n and src[j] == "{":
+                # Walk through the body, brace-counted.
+                body_start = j + 1
+                depth = 1
+                k = body_start
+                while k < n and depth > 0:
+                    ch = src[k]
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                    k += 1
+                body_end = k - 1  # exclusive of closing `}`
+                body = src[body_start:body_end]
+                # Rewrite the FIRST `rusty::detail::deref_if_pointer(_m)._0`
+                # (which is the variant-payload access for this arm) to
+                # `std::get<N>(rusty::detail::deref_if_pointer(_m))._0`.
+                # That's the same shape the resolved arms use; emitting
+                # the same shape here keeps the patch trivially diff-able.
+                old_acc = "rusty::detail::deref_if_pointer(_m)._0"
+                new_acc = (
+                    f"std::get<{arm_index}>(rusty::detail::deref_if_pointer(_m))._0"
+                )
+                if old_acc in body:
+                    body = body.replace(old_acc, new_acc, 1)
+                # Emit the new condition + rewritten body + closing `}`.
+                new_cond = (
+                    f"if (rusty::detail::deref_if_pointer(_m).index() == {arm_index})"
+                )
+                out.append(new_cond)
+                out.append(src[todo.end():body_start])  # whitespace + `{`
+                out.append(body)
+                out.append("}")
+                i = k
+                arm_index += 1
+                total += 1
+                continue
+        out.append(src[i])
+        i += 1
+    new_src = "".join(out)
+    if total:
+        # Add the sentinel at the top so future runs are idempotent.
+        new_src = sentinel + "\n" + new_src
+        path.write_text(new_src)
+        print(
+            f"  rewrote {total} bare-glob TODO arm(s) in: {path.name}"
+        )
+    else:
+        print(f"  no bare-glob TODO arms in: {path.name}")
+
+
 def fix_using_rusty_vec(path: Path) -> None:
     """Strip the leftover `using rusty::Vec;` line. rusty::Vec lives in the
     `rusty.vec` submodule which btree_port doesn't import (and shouldn't).
@@ -4959,6 +5075,10 @@ def main() -> int:
         if p.exists():
             fix_using_rusty_vec(p)
             fix_visit_byte_buf_unknown_vec(p)
+            # Closes the B1 edge case: position-based dispatch for
+            # ambiguous bare-glob variants (Leaf/Internal in
+            # ForceResult/Position; Left/Right in LeafOrRight/Either).
+            fix_unresolved_bare_glob_variants(p)
     fix_leafnode_shadow_arrow(internal)
     patch_internal(internal)
     # Phase B: replace stubs with real impls. Runs AFTER patch_internal

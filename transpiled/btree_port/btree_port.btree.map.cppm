@@ -3841,13 +3841,13 @@ struct Iter {
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return std::make_tuple(this->length, rusty::Option<size_t>(this->length));
     }
-    rusty::Option<std::tuple<const K&, const V&>> last() const {
+    rusty::Option<std::tuple<const K&, const V&>> last() {
         return this->next_back();
     }
-    rusty::Option<std::tuple<const K&, const V&>> min() const {
+    rusty::Option<std::tuple<const K&, const V&>> min() {
         return this->next();
     }
-    rusty::Option<std::tuple<const K&, const V&>> max() const {
+    rusty::Option<std::tuple<const K&, const V&>> max() {
         return this->next_back();
     }
     rusty::Option<std::tuple<const K&, const V&>> next_back() {
@@ -3885,15 +3885,15 @@ struct Iter {
         return this->iter.size_hint();
     }
     template<typename T>
-    rusty::Option<const T&> last() const {
+    rusty::Option<const T&> last() {
         return this->next_back();
     }
     template<typename T>
-    rusty::Option<const T&> min() const {
+    rusty::Option<const T&> min() {
         return this->next();
     }
     template<typename T>
-    rusty::Option<const T&> max() const {
+    rusty::Option<const T&> max() {
         return this->next_back();
     }
     template<typename T>
@@ -3942,13 +3942,13 @@ struct IterMut {
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return std::make_tuple(this->length, rusty::Option<size_t>(this->length));
     }
-    rusty::Option<std::tuple<const K&, V&>> last() const {
+    rusty::Option<std::tuple<const K&, V&>> last() {
         return this->next_back();
     }
-    rusty::Option<std::tuple<const K&, V&>> min() const {
+    rusty::Option<std::tuple<const K&, V&>> min() {
         return this->next();
     }
-    rusty::Option<std::tuple<const K&, V&>> max() const {
+    rusty::Option<std::tuple<const K&, V&>> max() {
         return this->next_back();
     }
     rusty::Option<std::tuple<const K&, V&>> next_back() {
@@ -4143,13 +4143,13 @@ return std::move(k);
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
     }
-    rusty::Option<const K&> last() const {
+    rusty::Option<const K&> last() {
         return this->next_back();
     }
-    rusty::Option<const K&> min() const {
+    rusty::Option<const K&> min() {
         return this->next();
     }
-    rusty::Option<const K&> max() const {
+    rusty::Option<const K&> max() {
         return this->next_back();
     }
     rusty::Option<const K&> next_back() {
@@ -4192,7 +4192,7 @@ return std::move(v);
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
     }
-    rusty::Option<const V&> last() const {
+    rusty::Option<const V&> last() {
         return this->next_back();
     }
     rusty::Option<const V&> next_back() {
@@ -4238,7 +4238,7 @@ return std::move(v);
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
     }
-    rusty::Option<V&> last() const {
+    rusty::Option<V&> last() {
         return this->next_back();
     }
     rusty::Option<V&> next_back() {
@@ -4282,13 +4282,13 @@ return std::move(k);
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
     }
-    rusty::Option<K> last() const {
+    rusty::Option<K> last() {
         return this->next_back();
     }
-    rusty::Option<K> min() const {
+    rusty::Option<K> min() {
         return this->next();
     }
-    rusty::Option<K> max() const {
+    rusty::Option<K> max() {
         return this->next_back();
     }
     rusty::Option<K> next_back() {
@@ -4332,7 +4332,7 @@ return std::move(v);
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
     }
-    rusty::Option<V> last() const {
+    rusty::Option<V> last() {
         return this->next_back();
     }
     rusty::Option<V> next_back() {
@@ -4367,13 +4367,13 @@ struct Range {
     rusty::Option<std::tuple<const K&, const V&>> next() {
         return this->inner.next_checked();
     }
-    rusty::Option<std::tuple<const K&, const V&>> last() const {
+    rusty::Option<std::tuple<const K&, const V&>> last() {
         return this->next_back();
     }
-    rusty::Option<std::tuple<const K&, const V&>> min() const {
+    rusty::Option<std::tuple<const K&, const V&>> min() {
         return this->next();
     }
-    rusty::Option<std::tuple<const K&, const V&>> max() const {
+    rusty::Option<std::tuple<const K&, const V&>> max() {
         return this->next_back();
     }
     static Range<K, V> default_() {
@@ -4401,15 +4401,15 @@ return std::move(k);
 });
     }
     template<typename T>
-    rusty::Option<const T&> last() const {
+    rusty::Option<const T&> last() {
         return this->next_back();
     }
     template<typename T>
-    rusty::Option<const T&> min() const {
+    rusty::Option<const T&> min() {
         return this->next();
     }
     template<typename T>
-    rusty::Option<const T&> max() const {
+    rusty::Option<const T&> max() {
         return this->next_back();
     }
     template<typename T>
@@ -4448,13 +4448,13 @@ struct RangeMut {
     rusty::Option<std::tuple<const K&, V&>> next() {
         return this->inner.next_checked();
     }
-    rusty::Option<std::tuple<const K&, V&>> last() const {
+    rusty::Option<std::tuple<const K&, V&>> last() {
         return this->next_back();
     }
-    rusty::Option<std::tuple<const K&, V&>> min() const {
+    rusty::Option<std::tuple<const K&, V&>> min() {
         return this->next();
     }
-    rusty::Option<std::tuple<const K&, V&>> max() const {
+    rusty::Option<std::tuple<const K&, V&>> max() {
         return this->next_back();
     }
     rusty::Option<std::tuple<const K&, V&>> next_back() {
@@ -5313,7 +5313,7 @@ struct VacantEntry {
     V& insert(V value) const {
         return this->insert_entry(std::move(value)).into_mut();
     }
-    OccupiedEntry<K, V, A> insert_entry(V value) const {
+    OccupiedEntry<K, V, A> insert_entry(V value) {
         auto handle = [&]() { auto&& _m = this->handle; if (_m.is_none()) { return [&]() { auto& map = this->dormant_map.reborrow();
 auto& root = map.root.insert(btree_internal::NodeRef<marker::Owned, K, V, marker::Leaf>::new_leaf(rusty::clone(this->alloc)).forget_type());
 // @unsafe

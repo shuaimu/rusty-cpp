@@ -3858,7 +3858,7 @@ struct VacantEntry {
         return this->insert_entry(std::move(value)).into_mut();
     }
     template<typename K, typename V>
-    OccupiedEntry<K, V, A> insert_entry(V value) const {
+    OccupiedEntry<K, V, A> insert_entry(V value) {
         auto handle = [&]() { auto&& _m = this->handle; if (_m.is_none()) { return [&]() { auto& map = this->dormant_map.reborrow();
 const auto root = map.root.insert(NodeRef::new_leaf(rusty::clone(this->alloc)).forget_type());
 // @unsafe

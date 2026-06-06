@@ -3790,13 +3790,13 @@ struct Iter {
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->iter.size_hint();
     }
-    rusty::Option<const T&> last() const {
+    rusty::Option<const T&> last() {
         return this->next_back();
     }
-    rusty::Option<const T&> min() const {
+    rusty::Option<const T&> min() {
         return this->next();
     }
-    rusty::Option<const T&> max() const {
+    rusty::Option<const T&> max() {
         return this->next_back();
     }
     rusty::Option<const T&> next_back() {
@@ -3834,15 +3834,15 @@ struct Iter {
         return std::make_tuple(this->length, rusty::Option<size_t>(this->length));
     }
     template<typename K, typename V>
-    rusty::Option<std::tuple<const K&, const V&>> last() const {
+    rusty::Option<std::tuple<const K&, const V&>> last() {
         return this->next_back();
     }
     template<typename K, typename V>
-    rusty::Option<std::tuple<const K&, const V&>> min() const {
+    rusty::Option<std::tuple<const K&, const V&>> min() {
         return this->next();
     }
     template<typename K, typename V>
-    rusty::Option<std::tuple<const K&, const V&>> max() const {
+    rusty::Option<std::tuple<const K&, const V&>> max() {
         return this->next_back();
     }
     template<typename K, typename V>
@@ -4051,13 +4051,13 @@ auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_p
 return std::move(k);
 });
     }
-    rusty::Option<const T&> last() const {
+    rusty::Option<const T&> last() {
         return this->next_back();
     }
-    rusty::Option<const T&> min() const {
+    rusty::Option<const T&> min() {
         return this->next();
     }
-    rusty::Option<const T&> max() const {
+    rusty::Option<const T&> max() {
         return this->next_back();
     }
     rusty::Option<const T&> next_back() {
@@ -4082,15 +4082,15 @@ return std::move(k);
         return this->inner.next_checked();
     }
     template<typename K, typename V>
-    rusty::Option<std::tuple<const K&, const V&>> last() const {
+    rusty::Option<std::tuple<const K&, const V&>> last() {
         return this->next_back();
     }
     template<typename K, typename V>
-    rusty::Option<std::tuple<const K&, const V&>> min() const {
+    rusty::Option<std::tuple<const K&, const V&>> min() {
         return this->next();
     }
     template<typename K, typename V>
-    rusty::Option<std::tuple<const K&, const V&>> max() const {
+    rusty::Option<std::tuple<const K&, const V&>> max() {
         return this->next_back();
     }
     template<typename K, typename V>
@@ -4136,7 +4136,7 @@ struct SymmetricDifference {
         auto&& [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());
         return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(a_len) + rusty::detail::deref_if_pointer_like(b_len)));
     }
-    rusty::Option<const T&> min() const {
+    rusty::Option<const T&> min() {
         return this->next();
     }
 };
@@ -4165,7 +4165,7 @@ struct Union {
         auto&& [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());
         return std::make_tuple(max(std::move(a_len), std::move(b_len)), rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(a_len) + rusty::detail::deref_if_pointer_like(b_len)));
     }
-    rusty::Option<const T&> min() const {
+    rusty::Option<const T&> min() {
         return this->next();
     }
 };
@@ -4958,7 +4958,7 @@ struct Difference {
         auto&& [self_len, other_len] = rusty::detail::deref_if_pointer_like([&]() { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).other_iter); return std::make_tuple(rusty::len(self_iter), rusty::len(other_iter)); } if (_m.index() == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(_m).other_set); return std::make_tuple(rusty::len(self_iter), rusty::len(other_set)); } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& iter = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return std::make_tuple(rusty::len(iter), 0); } rusty::intrinsics::unreachable(); }());
         return std::make_tuple(rusty::saturating_sub(self_len, rusty::detail::deref_if_pointer(std::move(other_len))), rusty::Option<size_t>(std::move(self_len)));
     }
-    rusty::Option<const T&> min() const {
+    rusty::Option<const T&> min() {
         return this->next();
     }
 };
@@ -5083,7 +5083,7 @@ struct Intersection {
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return [&]() -> std::tuple<size_t, rusty::Option<size_t>> { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& a = rusty::detail::deref_if_pointer(std::get<0>(_m).a); auto&& b = rusty::detail::deref_if_pointer(std::get<0>(_m).b); return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(min(rusty::len(a), rusty::len(b)))); } if (_m.index() == 1) { auto&& small_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).small_iter); return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::len(small_iter))); } if ((rusty::detail::deref_if_pointer(_m).index() == 2 && std::get<2>(rusty::detail::deref_if_pointer(_m))._0.is_none())) { return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0))); } if ((rusty::detail::deref_if_pointer(_m).index() == 2 && rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0).is_some())) { return std::make_tuple(static_cast<size_t>(1), rusty::Option<size_t>(static_cast<size_t>(1))); } return [&]() -> std::tuple<size_t, rusty::Option<size_t>> { rusty::intrinsics::unreachable(); }(); }();
     }
-    rusty::Option<const T&> min() const {
+    rusty::Option<const T&> min() {
         return this->next();
     }
 };
