@@ -4929,7 +4929,7 @@ struct CursorMut {
     Cursor<K, V> as_cursor() const {
         return this->inner.as_cursor();
     }
-    CursorMutKey<K, V, A> with_mutable_key() const {
+    CursorMutKey<K, V, A> with_mutable_key() {
         return std::move(this->inner);
     }
     void insert_after_unchecked(K key, V value) {
@@ -4990,7 +4990,7 @@ return std::move(k);
         return Cursor<T>{.inner = this->inner.as_cursor()};
     }
     template<typename T>
-    CursorMutKey<T, A> with_mutable_key() const {
+    CursorMutKey<T, A> with_mutable_key() {
         return CursorMutKey<T, A>{.inner = this->inner.with_mutable_key()};
     }
     template<typename T>
@@ -5239,7 +5239,7 @@ struct OccupiedEntry {
         // btree_port port: OccupiedEntry::key stubbed by post_transpile_patch.py
         throw ::std::runtime_error("rusty-cpp-transpiler: OccupiedEntry::key stub");
     }
-    const K& into_key() const {
+    const K& into_key() {
         return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->handle.into_kv_mut());
     }
     std::tuple<K, V> remove_entry() const {
@@ -5252,7 +5252,9 @@ struct OccupiedEntry {
         // Step 64: un-stubbed — Rust: `self.handle.kv_mut().1`.
         return std::get<1>(this->handle.kv_mut());
     }
-    V& into_mut() const {
+    V& into_mut() {
+        // Step 64: un-stubbed — calls Handle::into_val_mut on the
+        // owned KV handle to get a mutable ref into the leaf node.
         return this->handle.into_val_mut();
     }
     V insert(V value) {
@@ -5261,7 +5263,7 @@ struct OccupiedEntry {
     V remove() const {
         return std::get<1>(this->remove_kv());
     }
-    std::tuple<K, V> remove_kv() const {
+    std::tuple<K, V> remove_kv() {
         auto emptied_internal_root = false;
         auto&& [old_kv, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(this->handle.remove_kv_tracking([&]() { return emptied_internal_root = true; }, rusty::clone(this->alloc)));
         const auto map = this->dormant_map.awaken();
@@ -5282,7 +5284,7 @@ struct OccupiedEntry {
         return this->inner.key();
     }
     template<typename T>
-    T remove() const {
+    T remove() {
         return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->inner.remove_entry());
     }
 #endif
@@ -5307,8 +5309,9 @@ struct VacantEntry {
     const K& key() const {
         return this->key_field;
     }
-    K into_key() const {
-        return std::move(this->key_field);
+    K into_key() {
+        // btree_port port: OccupiedEntry::into_key stubbed by post_transpile_patch.py
+        throw ::std::runtime_error("rusty-cpp-transpiler: OccupiedEntry::into_key stub");
     }
     V& insert(V value) const {
         return this->insert_entry(std::move(value)).into_mut();
@@ -5342,15 +5345,15 @@ return root.push_internal_level(rusty::clone(this->alloc)).push(std::move(([](au
         return this->inner.key();
     }
     template<typename T>
-    T into_value() const {
+    T into_value() {
         return this->inner.into_key();
     }
     template<typename T>
-    void insert() const {
+    void insert() {
         this->inner.insert(SetValZST);
     }
     template<typename T>
-    OccupiedEntry<K, V, A> insert_entry() const {
+    OccupiedEntry<K, V, A> insert_entry() {
         return OccupiedEntry<K, V, A>{.inner = this->inner.insert_entry(btree_internal::SetValZST{})};
     }
 #endif

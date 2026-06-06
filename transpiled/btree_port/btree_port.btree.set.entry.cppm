@@ -3739,7 +3739,7 @@ struct OccupiedEntry {
     const T& get() const {
         return this->inner.key();
     }
-    T remove() const {
+    T remove() {
         return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->inner.remove_entry());
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
@@ -3752,7 +3752,7 @@ struct OccupiedEntry {
         return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->handle.reborrow().into_kv());
     }
     template<typename K, typename V>
-    const K& into_key() const {
+    const K& into_key() {
         return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(this->handle.into_kv_mut());
     }
     template<typename K, typename V>
@@ -3768,7 +3768,7 @@ struct OccupiedEntry {
         return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->handle.kv_mut());
     }
     template<typename K, typename V>
-    V& into_mut() const {
+    V& into_mut() {
         return this->handle.into_val_mut();
     }
     template<typename K, typename V>
@@ -3780,7 +3780,7 @@ struct OccupiedEntry {
         return std::get<1>(this->remove_kv());
     }
     template<typename K, typename V>
-    std::tuple<K, V> remove_kv() const {
+    std::tuple<K, V> remove_kv() {
         auto emptied_internal_root = false;
         auto&& [old_kv, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(this->handle.remove_kv_tracking([&]() { return emptied_internal_root = true; }, rusty::clone(this->alloc)));
         const auto map = this->dormant_map.awaken();
@@ -3831,13 +3831,13 @@ struct VacantEntry {
     const T& get() const {
         return this->inner.key();
     }
-    T into_value() const {
+    T into_value() {
         return this->inner.into_key();
     }
-    void insert() const {
+    void insert() {
         this->inner.insert(btree_internal::SetValZST{});
     }
-    OccupiedEntry<T, A> insert_entry() const {
+    OccupiedEntry<T, A> insert_entry() {
         return OccupiedEntry<T, A>{.inner = this->inner.insert_entry(btree_internal::SetValZST{})};
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
@@ -3850,7 +3850,7 @@ struct VacantEntry {
         return this->key;
     }
     template<typename K, typename V>
-    K into_key() const {
+    K into_key() {
         return std::move(this->key);
     }
     template<typename K, typename V>

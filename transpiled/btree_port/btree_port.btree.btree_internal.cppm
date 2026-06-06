@@ -4360,7 +4360,7 @@ struct NodeRef {
     static std::add_pointer_t<LeafNode<K, V>> as_leaf_ptr(const NodeRef<BorrowType, K, V, Type>& this_) {
         return const_cast<std::add_pointer_t<LeafNode<K, V>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<LeafNode<K, V>>>>(rusty::as_ptr(this_.node)));
     }
-    rusty::Result<Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>, NodeRef<BorrowType, K, V, Type>> ascend() const {
+    rusty::Result<Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>, NodeRef<BorrowType, K, V, Type>> ascend() {
         // const-block elided (Rust 2024 compile-time fence)
         const auto* leaf_ptr = as_leaf_ptr((*this));
         return (*leaf_ptr).parent.as_ref().map([&](auto&& parent) -> Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge> { return Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>(NodeRef<BorrowType, K, V, marker::Internal>::from_internal(std::move(rusty::deref_mut(parent)), rusty::detail::deref_if_pointer_like(this->height_field) + static_cast<size_t>(1)), static_cast<size_t>((*leaf_ptr).parent_idx.assume_init()), rusty::PhantomData<marker::Edge>{}); }).ok_or(NodeRef<BorrowType, K, V, Type>(std::move((*this))));
@@ -4422,7 +4422,7 @@ struct NodeRef {
     }
     template<typename A>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Internal>, marker::Edge>> deallocate_and_ascend(A alloc) const {
+    rusty::Option<Handle<NodeRef<marker::Dying, K, V, marker::Internal>, marker::Edge>> deallocate_and_ascend(A alloc) {
         const auto height = std::move(this->height_field);
         const auto node = std::move(this->node);
         auto ret = this->ascend().ok();
@@ -4452,7 +4452,7 @@ struct NodeRef {
     NodeRef<marker::DormantMut, K, V, Type> dormant() const {
         return NodeRef<marker::DormantMut, K, V, Type>{.height_field = this->height_field, .node = this->node, ._marker = rusty::PhantomData<std::tuple<marker::DormantMut, Type>>{}};
     }
-    NodeRef<marker::Mut, K, V, Type> awaken() const {
+    NodeRef<marker::Mut, K, V, Type> awaken() {
         return NodeRef<marker::Mut, K, V, Type>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Mut, Type>>{}};
     }
     LeafNode<K, V>& as_leaf_dying() {
@@ -4571,7 +4571,7 @@ struct NodeRef {
     NodeRef<marker::ValMut, K, V, Type> borrow_valmut() {
         return NodeRef<marker::ValMut, K, V, Type>{.height_field = this->height_field, .node = this->node, ._marker = rusty::PhantomData<std::tuple<marker::ValMut, Type>>{}};
     }
-    NodeRef<marker::Dying, K, V, Type> into_dying() const {
+    NodeRef<marker::Dying, K, V, Type> into_dying() {
         return NodeRef<marker::Dying, K, V, Type>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Dying, Type>>{}};
     }
     Handle<NodeRef<marker::Mut, K, V, marker::Leaf>, marker::KV> push_with_handle(K key, V val) {
@@ -4617,21 +4617,21 @@ struct NodeRef {
             std::conditional_t<true, Handle<std::remove_cvref_t<decltype((this->reborrow_mut()))>, marker::Edge>, K>::new_edge(this->reborrow_mut(), rusty::detail::deref_if_pointer_like(idx) + static_cast<size_t>(1)).correct_parent_link();
         }
     }
-    NodeRef<BorrowType, K, V, marker::LeafOrInternal> forget_type() const {
+    NodeRef<BorrowType, K, V, marker::LeafOrInternal> forget_type() {
         return NodeRef<BorrowType, K, V, marker::LeafOrInternal>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<BorrowType, marker::LeafOrInternal>>{}};
     }
-    ForceResult<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>> force() const {
+    ForceResult<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>> force() {
         if (rusty::detail::deref_if_pointer_like(this->height_field) == static_cast<size_t>(0)) {
             return ForceResult<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{ForceResult_Leaf<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{NodeRef<BorrowType, K, V, marker::Leaf>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<BorrowType, marker::Leaf>>{}}}};
         } else {
             return ForceResult<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{ForceResult_Internal<NodeRef<BorrowType, K, V, marker::Leaf>, NodeRef<BorrowType, K, V, marker::Internal>>{NodeRef<BorrowType, K, V, marker::Internal>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<BorrowType, marker::Internal>>{}}}};
         }
     }
-    NodeRef<marker::Mut, K, V, marker::Leaf> cast_to_leaf_unchecked() const {
+    NodeRef<marker::Mut, K, V, marker::Leaf> cast_to_leaf_unchecked() {
         assert((rusty::detail::deref_if_pointer_like(this->height_field) == static_cast<size_t>(0)));
         return NodeRef<marker::Mut, K, V, marker::Leaf>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Mut, marker::Leaf>>{}};
     }
-    NodeRef<marker::Mut, K, V, marker::Internal> cast_to_internal_unchecked() const {
+    NodeRef<marker::Mut, K, V, marker::Internal> cast_to_internal_unchecked() {
         assert((rusty::detail::deref_if_pointer_like(this->height_field) > 0));
         return NodeRef<marker::Mut, K, V, marker::Internal>{.height_field = std::move(this->height_field), .node = std::move(this->node), ._marker = rusty::PhantomData<std::tuple<marker::Mut, marker::Internal>>{}};
     }
@@ -5226,7 +5226,7 @@ struct Handle {
     Handle<Node, Type> clone() const {
         return {.node = rusty::clone(this->node), .idx_field = rusty::clone(this->idx_field), ._marker = rusty::clone(this->_marker)};
     }
-    Node into_node() const {
+    Node into_node() {
         return std::move(this->node);
     }
     size_t idx() const {
@@ -5236,13 +5236,13 @@ struct Handle {
         assert((rusty::detail::deref_if_pointer_like(idx) < rusty::len(node)));
         return Handle<Node, Type>(std::move(node), std::move(idx), rusty::PhantomData<Type>{});
     }
-    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge> left_edge() const {
+    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge> left_edge() {
         // @unsafe
         {
             return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge>::new_edge(std::move(this->node), std::move(this->idx_field));
         }
     }
-    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge> right_edge() const {
+    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge> right_edge() {
         // @unsafe
         {
             return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::Edge>::new_edge(std::move(this->node), rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1));
@@ -5264,21 +5264,21 @@ struct Handle {
     Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> dormant() const {
         return Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).dormant()) { return std::forward<decltype(__recv)>(__recv).dormant(); }), this->idx_field, rusty::PhantomData<Type>{});
     }
-    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> awaken() const {
+    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type> awaken() {
         return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, Type>(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).awaken()) { return std::forward<decltype(__recv)>(__recv).awaken(); }), std::move(this->idx_field), rusty::PhantomData<Type>{});
     }
     static Handle<Node, Type> new_edge(NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3> node, size_t idx) {
         assert((rusty::detail::deref_if_pointer_like(idx) <= rusty::len(node)));
         return Handle<Node, Type>(std::move(node), std::move(idx), rusty::PhantomData<Type>{});
     }
-    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>> left_kv() const {
+    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>> left_kv() {
         if (rusty::detail::deref_if_pointer_like(this->idx_field) > 0) {
             return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Ok(Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>::new_kv(std::move(this->node), rusty::detail::deref_if_pointer_like(this->idx_field) - static_cast<size_t>(1)));
         } else {
             return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Err(std::move((*this)));
         }
     }
-    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>> right_kv() const {
+    rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>> right_kv() {
         if (rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)) {
             return rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>, Handle<Node, Type>>::Ok(Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>::new_kv(std::move(this->node), std::move(this->idx_field)));
         } else {
@@ -5298,7 +5298,7 @@ struct Handle {
     }
     template<typename A>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    std::tuple<rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>, Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>> insert(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val, A alloc) const {
+    std::tuple<rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>, Handle<NodeRef<marker::DormantMut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>, marker::KV>> insert(typename __TemplateArgs<Node>::arg_1 key, typename __TemplateArgs<Node>::arg_2 val, A alloc) {
         if (rusty::len(this->node) < rusty::detail::deref_if_pointer_like(CAPACITY)) {
             auto handle = this->insert_fit(std::move(key), std::move(val));
             return std::make_tuple(rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>{rusty::None}, handle.dormant());
@@ -5311,7 +5311,7 @@ struct Handle {
             return std::make_tuple(rusty::Option<SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>>(std::move(result)), std::move(handle));
         }
     }
-    void correct_parent_link() const {
+    void correct_parent_link() {
         auto ptr_shadow1 = std::conditional_t<true, NonNull<InternalNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>>, Node>::new_unchecked(NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>::as_internal_ptr(this->node));
         auto idx = std::move(this->idx_field);
         auto child = this->descend();
@@ -5361,7 +5361,7 @@ struct Handle {
             auto&& handle = rusty::detail::deref_if_pointer(_let_match_m1);
             return std::make_tuple(split.forget_node_type(), handle);
         }();
-        auto [split, handle] = _let_match_result;
+        auto&& [split, handle] = _let_match_result;
         while (true) {
             auto& _assign_match_lhs = split;
             {
@@ -5404,13 +5404,13 @@ struct Handle {
             }
         }
     }
-    NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal> descend() const {
+    NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal> descend() {
         // const-block elided (Rust 2024 compile-time fence)
         const auto parent_ptr = NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>::as_internal_ptr(this->node);
         auto node = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })((*parent_ptr).edges, std::move(this->idx_field)).assume_init_read();
         return NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>{.height_field = rusty::detail::deref_if_pointer_like(this->node.height_field) - static_cast<size_t>(1), .node = std::move(node), ._marker = rusty::PhantomData<std::tuple<typename __TemplateArgs<Node>::arg_0, marker::LeafOrInternal>>{}};
     }
-    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> into_kv() const {
+    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> into_kv() {
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
         auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).into_leaf()) { return std::forward<decltype(__recv)>(__recv).into_leaf(); });
         auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_ref();
@@ -5424,7 +5424,7 @@ struct Handle {
             return rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).key_area_mut(this->idx_field)) { return std::forward<decltype(__recv)>(__recv).key_area_mut(this->idx_field); }).assume_init_mut();
         }
     }
-    typename __TemplateArgs<Node>::arg_2& into_val_mut() const {
+    typename __TemplateArgs<Node>::arg_2& into_val_mut() {
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
         auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).into_leaf_mut()) { return std::forward<decltype(__recv)>(__recv).into_leaf_mut(); });
         // @unsafe
@@ -5432,7 +5432,7 @@ struct Handle {
             return ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_mut();
         }
     }
-    std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_mut() const {
+    std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_mut() {
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
         auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).into_leaf_mut()) { return std::forward<decltype(__recv)>(__recv).into_leaf_mut(); });
         auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked_mut(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_mut();
@@ -5440,7 +5440,7 @@ struct Handle {
         auto& v = v_self_ref_tmp;
         return std::tuple<typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&>{k, v};
     }
-    std::tuple<const typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_valmut() const {
+    std::tuple<const typename __TemplateArgs<Node>::arg_1&, typename __TemplateArgs<Node>::arg_2&> into_kv_valmut() {
         // @unsafe
         {
             return rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).into_key_val_mut_at(std::move(this->idx_field))) { return std::forward<decltype(__recv)>(__recv).into_key_val_mut_at(std::move(this->idx_field)); });
@@ -5552,16 +5552,58 @@ struct Handle {
         auto self2 = rusty::ptr::read(&(*this));
         return BalancingContext<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>(std::move((*this)), self1.left_edge().descend(), self2.right_edge().descend());
     }
-    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type> forget_node_type() const {
+    Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type> forget_node_type() {
         // @unsafe
         {
             return Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>, Type>::new_edge(rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).forget_type()) { return std::forward<decltype(__recv)>(__recv).forget_type(); }), std::move(this->idx_field));
         }
     }
-    ForceResult<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>, Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Internal>, Type>> force() const {
-        return [&]() -> ForceResult<Node, Type> { auto&& _m = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).force()) { return std::forward<decltype(__recv)>(__recv).force(); }); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return ForceResult<Node, Type>{ForceResult_Leaf<Node, Type>{Handle<Node, Type>(std::move(node), std::move(this->idx_field), rusty::PhantomData<Type>{})}}; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& node = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return ForceResult<Node, Type>{ForceResult_Internal<Node, Type>{Handle<Node, Type>(std::move(node), std::move(this->idx_field), rusty::PhantomData<Type>{})}}; } return [&]() -> ForceResult<Node, Type> { rusty::intrinsics::unreachable(); }(); }();
+    // btree_port port: Handle::force hand-ported by post_transpile_patch.py
+    // The Rust source is `impl<BorrowType, K, V, Type>
+    //   Handle<NodeRef<BorrowType, K, V, LeafOrInternal>, Type>
+    //   { fn force(self) -> ForceResult<…, …> }`.
+    // C++ can't constrain Node to NodeRef<…,LeafOrInternal>
+    // at the class level, so we destructure Node via
+    // __TemplateArgs/__NodeRefArgs and build the result Handles.
+    ForceResult<
+        Handle<NodeRef<typename __TemplateArgs<Node>::arg_0,
+                       typename __TemplateArgs<Node>::arg_1,
+                       typename __TemplateArgs<Node>::arg_2,
+                       marker::Leaf>, Type>,
+        Handle<NodeRef<typename __TemplateArgs<Node>::arg_0,
+                       typename __TemplateArgs<Node>::arg_1,
+                       typename __TemplateArgs<Node>::arg_2,
+                       marker::Internal>, Type>>
+    force() {
+        using __B = typename __TemplateArgs<Node>::arg_0;
+        using __K = typename __TemplateArgs<Node>::arg_1;
+        using __V = typename __TemplateArgs<Node>::arg_2;
+        using __LeafH = Handle<NodeRef<__B, __K, __V, marker::Leaf>, Type>;
+        using __IntH  = Handle<NodeRef<__B, __K, __V, marker::Internal>, Type>;
+        using __Ret   = ForceResult<__LeafH, __IntH>;
+        // this->node : NodeRef<__B, __K, __V, LeafOrInternal>
+        // .force() returns ForceResult<NodeRef<…,Leaf>, NodeRef<…,Internal>>
+        auto __forced = this->node.force();
+        if (__forced.index() == 0) {
+            auto&& __leaf_node = std::get<0>(__forced)._0;
+            return __Ret{
+                ForceResult_Leaf<__LeafH, __IntH>{
+                    __LeafH{std::move(__leaf_node),
+                            std::move(this->idx_field),
+                            rusty::PhantomData<Type>{}}
+                }
+            };
+        }
+        auto&& __int_node = std::get<1>(__forced)._0;
+        return __Ret{
+            ForceResult_Internal<__LeafH, __IntH>{
+                __IntH{std::move(__int_node),
+                       std::move(this->idx_field),
+                       rusty::PhantomData<Type>{}}
+            }
+        };
     }
-    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type> cast_to_leaf_unchecked() const {
+    Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type> cast_to_leaf_unchecked() {
         auto node_self_ref_tmp = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).cast_to_leaf_unchecked()) { return std::forward<decltype(__recv)>(__recv).cast_to_leaf_unchecked(); });
         auto node = std::move(node_self_ref_tmp);
         return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>(std::move(node), std::move(this->idx_field), rusty::PhantomData<Type>{});
@@ -5787,10 +5829,10 @@ struct BalancingContext {
     size_t right_child_len() const {
         return rusty::len(this->right_child);
     }
-    NodeRef<marker::Mut, K, V, marker::LeafOrInternal> into_left_child() const {
+    NodeRef<marker::Mut, K, V, marker::LeafOrInternal> into_left_child() {
         return std::move(this->left_child);
     }
-    NodeRef<marker::Mut, K, V, marker::LeafOrInternal> into_right_child() const {
+    NodeRef<marker::Mut, K, V, marker::LeafOrInternal> into_right_child() {
         return std::move(this->right_child);
     }
     bool can_merge() const {
@@ -5798,7 +5840,7 @@ struct BalancingContext {
     }
     template<typename F, typename A>
         requires (rusty::alloc::Allocator<A>)
-    auto do_merge(F result, A alloc) const {
+    auto do_merge(F result, A alloc) {
         using R = std::remove_cvref_t<std::invoke_result_t<F&, NodeRef<marker::Mut, K, V, marker::Internal>, NodeRef<marker::Mut, K, V, marker::LeafOrInternal>>>;
         auto&& _let_pat = this->parent;
         auto parent_node = rusty::detail::deref_if_pointer(_let_pat.node);
@@ -5847,7 +5889,7 @@ struct BalancingContext {
     }
     template<typename A>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
-    Handle<NodeRef<marker::Mut, K, V, marker::LeafOrInternal>, marker::Edge> merge_tracking_child_edge(LeftOrRight<size_t> track_edge_idx, A alloc) const {
+    Handle<NodeRef<marker::Mut, K, V, marker::LeafOrInternal>, marker::Edge> merge_tracking_child_edge(LeftOrRight<size_t> track_edge_idx, A alloc) {
         const auto old_left_len = rusty::len(this->left_child);
         const auto right_len = rusty::len(this->right_child);
         assert(([&]() -> bool { auto&& _m = track_edge_idx; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(idx) <= rusty::detail::deref_if_pointer_like(old_left_len); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::detail::deref_if_pointer_like(idx) <= rusty::detail::deref_if_pointer_like(right_len); } return [&]() -> bool { rusty::intrinsics::unreachable(); }(); }()));
@@ -5978,7 +6020,7 @@ struct SplitResult {
     std::tuple<K, V> kv;
     NodeRef<marker::Owned, K, V, NodeType> right;
 
-    SplitResult<K, V, marker::LeafOrInternal> forget_node_type() const {
+    SplitResult<K, V, marker::LeafOrInternal> forget_node_type() {
         return SplitResult<K, V, marker::LeafOrInternal>{.left = this->left.forget_type(), .kv = std::move(this->kv), .right = this->right.forget_type()};
     }
 };

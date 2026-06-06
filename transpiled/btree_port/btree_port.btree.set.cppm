@@ -4538,7 +4538,7 @@ return std::move(k);
         return Cursor<T>{.inner = this->inner.as_cursor()};
     }
     template<typename T>
-    CursorMutKey<T, A> with_mutable_key() const {
+    CursorMutKey<T, A> with_mutable_key() {
         return CursorMutKey<T, A>{.inner = this->inner.with_mutable_key()};
     }
     template<typename T>
@@ -4844,7 +4844,7 @@ return std::move(k);
         arr.sort();
         return BTreeSet<T, rusty::alloc::Global>::from_sorted_iter(arr.into_iter(), rusty::alloc::Global{});
     }
-    IntoIter into_iter() const {
+    IntoIter into_iter() {
         return IntoIter(this->map.into_iter());
     }
     void extend_one(T elem) {
