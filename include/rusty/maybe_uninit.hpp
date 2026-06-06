@@ -114,6 +114,27 @@ public:
         return *as_ptr();
     }
 
+    // Move-only T overload — mirrors Rust's `ptr::read`, which is a
+    // bitwise copy. After this call the source storage is conceptually
+    // "moved-from": the caller must not read it again and must not
+    // re-invoke a destructor on the source. This matches the contract
+    // of Rust's `ptr::read`. We use `__builtin_memcpy` to bypass the
+    // missing copy/move ctor — equivalent to a bitwise relocation.
+    // Used by btree's slice_remove and the dying-iterator paths where
+    // the source storage is unconditionally overwritten or freed
+    // immediately afterwards (e.g. `rusty::ptr::copy(...)` shifts the
+    // rest of the slice down on top of the read slot).
+    // @unsafe
+    T assume_init_read() const noexcept(std::is_nothrow_move_constructible_v<T>)
+        requires (!std::is_copy_constructible_v<T>
+                  && std::is_move_constructible_v<T>)
+    {
+        alignas(T) std::byte buf[sizeof(T)];
+        __builtin_memcpy(buf, storage_, sizeof(T));
+        T* p = std::launder(reinterpret_cast<T*>(buf));
+        return std::move(*p);
+    }
+
     // Assume initialized and move out (UNSAFE - caller must ensure initialized)
     // After this, the storage is uninitialized again
     T assume_init() noexcept(std::is_nothrow_move_constructible_v<T>) {

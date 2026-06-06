@@ -4495,6 +4495,148 @@ def fix_const_new_pos_binding(path: Path) -> None:
         print(f"  dropped const on new_pos binding in: {path.name}")
 
 
+def fix_next_kv_loop_hand_port(path: Path) -> None:
+    """Hand-port `next_kv` / `next_back_kv` to use a real loop.
+
+    The transpiler lowered the Rust source
+        loop {
+            edge = match edge.{right,left}_kv() {
+                Ok(kv) => return Ok(kv),
+                Err(last_edge) => match last_edge.into_node().ascend() {
+                    Ok(parent_edge) => parent_edge.forget_node_type(),
+                    Err(root) => return Err(root),
+                }
+            };
+        }
+    as `while (true) { return edge = [&]() { ... }(); }` — but the
+    inner lambda's returns include both early-exit `Result<Handle, Unit>::{Ok,Err}`
+    (the wrong inner type!) AND value-returning Handle from
+    `parent_edge.forget_node_type()`. The lambda return type is unspecified
+    and the deduced type doesn't match the function's return type
+    `Result<Handle, NodeRef<…LeafOrInternal>>` — plus the move-only V
+    breaks `Result::Err(root)` lvalue copy.
+
+    Replace both functions with a hand-port that uses a real loop
+    + explicit Result return types matching the function signature.
+
+    Idempotent — checks the sentinel before rewriting.
+    """
+    src = path.read_text()
+    sentinel = "// btree_port port: next_kv / next_back_kv hand-port loop"
+    if sentinel in src:
+        return
+    # The Result<Handle<NodeRef<...arg_0..arg_2..LeafOrInternal>, KV>,
+    # NodeRef<...LeafOrInternal>> return type — used verbatim across
+    # both functions.
+    ret_ty = (
+        "rusty::Result<Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, "
+        "typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, "
+        "marker::LeafOrInternal>, marker::KV>, NodeRef<typename __TemplateArgs<Node>::arg_0, "
+        "typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, "
+        "marker::LeafOrInternal>>"
+    )
+    handle_inner = (
+        "Handle<NodeRef<typename __TemplateArgs<Node>::arg_0, "
+        "typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, "
+        "marker::LeafOrInternal>, marker::KV>"
+    )
+    noderef_inner = (
+        "NodeRef<typename __TemplateArgs<Node>::arg_0, "
+        "typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, "
+        "marker::LeafOrInternal>"
+    )
+    changed = False
+    for fn_name, kv_method in (("next_kv", "right_kv"), ("next_back_kv", "left_kv")):
+        # Match the function signature line — the return type spans one
+        # huge line followed by the method name.
+        sig = f"{ret_ty} {fn_name}()"
+        sig_pos = src.find(sig)
+        if sig_pos == -1:
+            continue
+        # Find the body open `{` immediately after the signature.
+        brace_open = src.find("{", sig_pos + len(sig))
+        depth = 0
+        brace_close = -1
+        for k in range(brace_open, len(src)):
+            if src[k] == "{":
+                depth += 1
+            elif src[k] == "}":
+                depth -= 1
+                if depth == 0:
+                    brace_close = k
+                    break
+        if brace_close == -1:
+            continue
+        body = (
+            "{\n"
+            f"        {sentinel}\n"
+            "        auto edge = this->forget_node_type();\n"
+            "        while (true) {\n"
+            f"            auto _m = edge.{kv_method}();\n"
+            "            if (_m.is_ok()) {\n"
+            f"                return rusty::Result<{handle_inner}, {noderef_inner}>::Ok(std::move(_m).unwrap());\n"
+            "            }\n"
+            "            auto last_edge = std::move(_m).unwrap_err();\n"
+            "            auto _m2 = last_edge.into_node().ascend();\n"
+            "            if (_m2.is_err()) {\n"
+            f"                return rusty::Result<{handle_inner}, {noderef_inner}>::Err(std::move(_m2).unwrap_err());\n"
+            "            }\n"
+            "            edge = std::move(_m2).unwrap().forget_node_type();\n"
+            "        }\n"
+            "    }"
+        )
+        src = src[:brace_open] + body + src[brace_close + 1:]
+        changed = True
+    if changed:
+        path.write_text(src)
+        print(f"  hand-ported next_kv / next_back_kv loop in: {path.name}")
+
+
+def fix_const_slice_remove_binding(path: Path) -> None:
+    """Drop `const` on `const auto parent_key = slice_remove(…)` and
+    `const auto parent_val = slice_remove(…)` bindings so the
+    follow-up `…write(std::move(parent_key))` placement-new can
+    move-construct from the rvalue. Without dropping const, `std::move`
+    on a const lvalue yields `const T&&` which won't bind to T's
+    move ctor; the compiler then tries copy ctor, which is deleted
+    for move-only T.
+
+    Two sites in `merge_tracking_child_edge` / `merge` (parent_key and
+    parent_val). Idempotent."""
+    src = path.read_text()
+    new_src = src.replace(
+        "const auto parent_key = slice_remove(",
+        "auto parent_key = slice_remove(",
+    ).replace(
+        "const auto parent_val = slice_remove(",
+        "auto parent_val = slice_remove(",
+    )
+    if new_src != src:
+        path.write_text(new_src)
+        print(f"  dropped const on parent_key/val slice_remove bindings in: {path.name}")
+
+
+def fix_const_next_internal_edge_binding(path: Path) -> None:
+    """Drop `const` on `const auto next_internal_edge = …` so the
+    subsequent `.descend()` by-value call is well-formed.
+
+    `next_leaf_edge` / `next_back_leaf_edge` emit:
+        const auto next_internal_edge = internal_kv.right_edge();
+        return next_internal_edge.descend().first_leaf_edge();
+    but `descend()` takes self by-value (consumes Handle); the const
+    binding can't be moved into the call.
+
+    Idempotent."""
+    src = path.read_text()
+    new_src = src.replace(
+        "const auto next_internal_edge = ",
+        "auto&& next_internal_edge = ",
+    )
+    if new_src != src:
+        path.write_text(new_src)
+        print(f"  dropped const on next_internal_edge binding in: {path.name}")
+
+
 def fix_new_pos_lambda_return_type(path: Path) -> None:
     """The `new_pos = [&]() -> Handle<Node, Type> { … }()` lambda in
     `remove_leaf_kv` / `remove_internal_kv` has the wrong declared
@@ -5540,6 +5682,16 @@ def main() -> int:
     # Drop `const` on `const auto new_pos = …` so the subsequent
     # `new_pos.cast_to_leaf_unchecked()` by-value method call works.
     fix_const_new_pos_binding(internal)
+    # Same const-drift on `const auto next_internal_edge = …` —
+    # the subsequent `.descend()` consumes by value.
+    fix_const_next_internal_edge_binding(internal)
+    # `const auto parent_key/val = slice_remove(…)` then
+    # `…write(std::move(parent_X))` — drop const so move ctor binds.
+    fix_const_slice_remove_binding(internal)
+    # Hand-port next_kv / next_back_kv loops — the lambda-IIFE-as-match
+    # shape can't express "assign edge then re-iterate" semantics, and
+    # the deduced Result return type is wrong (Unit instead of NodeRef).
+    fix_next_kv_loop_hand_port(internal)
     for p in (internal, map_mod, map_entry, set_mod, set_entry):
         if p.exists():
             fix_noderef_borrow_mut_auto_ref(p)
