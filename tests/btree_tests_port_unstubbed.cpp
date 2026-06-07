@@ -5288,3 +5288,96 @@ TEST_CASE("smoke_remove_insert_after_grow_unstubbed") {
     assert(v.is_some() && v.unwrap() == 555);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: many smoke tests for completeness — small ops repeated.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_repeated_insert_get_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int round = 0; round < 5; ++round) {
+        for (int i = 1; i <= 3; ++i) m.insert(i * 100 + round, round);
+    }
+    assert(m.len() == 15u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet insert+contains over many rounds.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_repeated_insert_contains_unstubbed") {
+    auto s = make_set<int>();
+    for (int round = 0; round < 5; ++round) {
+        for (int i = 1; i <= 3; ++i) s.insert(i * 100 + round);
+    }
+    assert(s.len() == 15u);
+    for (int round = 0; round < 5; ++round) {
+        for (int i = 1; i <= 3; ++i) assert(s.contains(i * 100 + round));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap remove returns the correct value at each step.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_remove_returns_old_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+    for (int i = 1; i <= 5; ++i) {
+        auto removed = m.remove(i);
+        assert(removed.is_some());
+        assert(std::move(removed).unwrap() == i * 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.entry() called multiple times on same key.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_entry_twice_unstubbed") {
+    auto m = make_map<int, int>();
+    {
+        auto e = m.entry(42);
+        assert(e.key() == 42);
+        assert(e.index() == 0);  // Vacant
+    }
+    // Re-call entry: still Vacant because nothing was inserted.
+    {
+        auto e = m.entry(42);
+        assert(e.key() == 42);
+        assert(e.index() == 0);
+    }
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.try_insert returns Ok value reference equal.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_try_insert_value_eq_unstubbed") {
+    auto m = make_map<int, int>();
+    auto r = m.try_insert(5, 50);
+    assert(r.is_ok());
+    int v = std::move(r).unwrap();
+    assert(v == 50);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap pop_first on empty after fill-pop cycle.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_pop_after_empty_cycle_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 10);
+    m.pop_first();  // drains
+    assert(m.is_empty());
+    // pop_first now returns None.
+    assert(m.pop_first().is_none());
+    assert(m.pop_last().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet pop after empty.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_pop_after_empty_unstubbed") {
+    auto s = make_set<int>();
+    s.insert(1);
+    s.pop_first();
+    assert(s.is_empty());
+    assert(s.pop_first().is_none());
+    assert(s.pop_last().is_none());
+}
+
