@@ -8742,3 +8742,34 @@ TEST_CASE("set_test_union_size_hint_unstubbed") {
     assert(std::get<1>(hint).is_some());
     assert(std::get<1>(hint).unwrap() == 6u);
 }
+
+// is_subset / is_superset — now hand-ported via iter+contains.
+TEST_CASE("set_test_is_subset_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3}) a.insert(v);
+    for (int v : {0, 1, 2, 3, 4}) b.insert(v);
+    assert(a.is_subset(b));
+    assert(!b.is_subset(a));
+    assert(b.is_superset(a));
+}
+
+TEST_CASE("set_test_is_subset_eq_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3}) a.insert(v);
+    for (int v : {1, 2, 3}) b.insert(v);
+    assert(a.is_subset(b));
+    assert(b.is_subset(a));
+    assert(a.is_superset(b));
+    assert(b.is_superset(a));
+}
+
+TEST_CASE("set_test_is_subset_disjoint_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3}) a.insert(v);
+    for (int v : {4, 5, 6}) b.insert(v);
+    assert(!a.is_subset(b));
+    assert(!b.is_subset(a));
+}

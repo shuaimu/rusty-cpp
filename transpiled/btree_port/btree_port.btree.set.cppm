@@ -4803,8 +4803,13 @@ struct BTreeSet {
     bool is_disjoint(const BTreeSet<T, A>& other) const {
         return this->intersection(other).next().is_none();
     }
+    // Hand-port: ∀x∈*this, x ∈ other.
     bool is_subset(const BTreeSet<T, A>& other) const {
-        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
+        auto it = this->iter();
+        for (auto v = it.next(); v.is_some(); v = it.next()) {
+            if (!other.contains(v.unwrap())) return false;
+        }
+        return true;
     }
     bool is_superset(const BTreeSet<T, A>& other) const {
         return other.is_subset((*this));
