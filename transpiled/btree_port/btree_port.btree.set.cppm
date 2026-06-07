@@ -4046,10 +4046,11 @@ struct Range {
         return Range<T>{.iter = rusty::clone(this->iter)};
     }
     rusty::Option<const T&> next() {
-        return this->iter.next().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
+        // Same const-ref fix as Keys::next — return `-> const T&` so we
+        // don't decay an lvalue-ref to const T&& via std::move.
+        return this->iter.next().map([&](auto&& _destruct_param0) -> const T& {
+            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+        });
     }
     rusty::Option<const T&> last() {
         return this->next_back();
@@ -4061,10 +4062,9 @@ return std::move(k);
         return this->next_back();
     }
     rusty::Option<const T&> next_back() {
-        return this->iter.next_back().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
+        return this->iter.next_back().map([&](auto&& _destruct_param0) -> const T& {
+            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+        });
     }
     static Range<T> default_() {
         return Range<T>{.iter = rusty::range<T>(static_cast<T>(0), static_cast<T>(0))};
@@ -4695,7 +4695,9 @@ struct BTreeSet {
     static BTreeSet<T, A> new_in(A alloc) {
         return BTreeSet<T, A>(map::BTreeMap<T, btree_internal::SetValZST, A>::new_in(std::move(alloc)));
     }
-    template<typename K, typename R>
+    // Drop unused K template param (Rust uses it for the Borrow trait;
+    // C++ has no analog and it's undeducible at the call site).
+    template<typename R>
     Range<T> range(R range) const {
         return Range<T>{.iter = this->map.range(std::move(range))};
     }
