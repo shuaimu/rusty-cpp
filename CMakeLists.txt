@@ -618,7 +618,11 @@ foreach(test_source IN LISTS TEST_SOURCES)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/btree_tests_port_unstubbed.cpp)
         target_link_libraries(${test_executable} PRIVATE btree_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
-        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native)
+        # -UNDEBUG so the assert() calls in the un-stubbed test bodies
+        # actually run. Without this, many "passing" tests would silently
+        # drop their post-condition checks (the operations still execute
+        # but the result assertions get compiled out).
+        target_compile_options(${test_executable} PRIVATE -O3 -march=native -UNDEBUG)
     endif()
     target_include_directories(${test_executable} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(${test_executable} PRIVATE -Wall -Wextra -Wpedantic)
