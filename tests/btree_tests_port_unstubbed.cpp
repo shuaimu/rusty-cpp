@@ -3419,3 +3419,107 @@ TEST_CASE("smoke_last_key_after_inserts_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet pop_first drains in ascending order.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_pop_first_drain_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 1; i <= 5; ++i) s.insert(i);
+    for (int expected = 1; expected <= 5; ++expected) {
+        auto v = s.pop_first();
+        assert(v.is_some());
+        assert(std::move(v).unwrap() == expected);
+    }
+    assert(s.is_empty());
+    assert(s.pop_first().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet pop_last drains in descending order.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_pop_last_drain_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 1; i <= 5; ++i) s.insert(i);
+    for (int expected = 5; expected >= 1; --expected) {
+        auto v = s.pop_last();
+        assert(v.is_some());
+        assert(std::move(v).unwrap() == expected);
+    }
+    assert(s.is_empty());
+    assert(s.pop_last().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: Mixed pop_first/pop_last on BTreeSet.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_pop_mixed_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 1; i <= 8; ++i) s.insert(i);
+    {
+        auto v = s.pop_first();
+        assert(v.is_some() && std::move(v).unwrap() == 1);
+    }
+    {
+        auto v = s.pop_last();
+        assert(v.is_some() && std::move(v).unwrap() == 8);
+    }
+    {
+        auto v = s.pop_first();
+        assert(v.is_some() && std::move(v).unwrap() == 2);
+    }
+    {
+        auto v = s.pop_last();
+        assert(v.is_some() && std::move(v).unwrap() == 7);
+    }
+    assert(s.len() == 4u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() preserved across re-iter() calls.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_restart_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 4; ++i) m.insert(i, i * 10);
+    // Drain via iter().
+    {
+        auto it = m.iter();
+        while (it.next().is_some()) {}
+    }
+    // The map itself isn't modified — iter() starts fresh.
+    assert(m.len() == 4u);
+    {
+        auto it = m.iter();
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: empty map iter().last() is None.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_empty_iter_last_unstubbed") {
+    auto m = make_map<int, int>();
+    assert(m.iter().last().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet iter().count() empty.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_iter_count_empty_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.iter().count() == 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet iter().len() consistent with set len.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_iter_len_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.iter().len() == 0u);
+    for (int i = 0; i < 5; ++i) s.insert(i);
+    assert(s.iter().len() == s.len());
+    assert(s.iter().len() == 5u);
+}
+
