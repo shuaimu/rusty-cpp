@@ -1210,8 +1210,9 @@ TEST_CASE("set_test_first_last_unstubbed") {
 }
 
 // BLOCKED: set_test_recovery. BTreeSet::replace() forwards to a
-// nonexistent BTreeMap::replace(). BTreeSet::get() also hits the
-// `Option<tuple<K&,V&>>::map → Option<const T&>` return-type bug.
+// nonexistent BTreeMap::replace(). BTreeSet::get() and take() also
+// instantiate Option<tuple<K&,V&>>::map → Option<const T&> which hits
+// the return-type conversion bug.
 
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_vacant_entry_key
@@ -1253,6 +1254,31 @@ TEST_CASE("set_test_ord_absence_unstubbed") {
     assert(s.len() == 0u);
     s.clear();
     assert(s.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_borrow (trimmed)
+// Original verifies that map[Box<T>] indexing accepts &T (via Borrow).
+// We approximate with plain int keys — confirms get/contains_key/remove
+// compile and work with the same value type, no Box/Rc indirection.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_borrow_unstubbed") {
+    auto map = make_map<int, int>();
+    map.insert(0, 1);
+    {
+        auto v = map.get(0);
+        assert(v.is_some());
+        assert(v.unwrap() == 1);
+    }
+    assert(map.contains_key(0));
+    assert(!map.contains_key(1));
+    {
+        auto kv = map.get_key_value(0);
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 0);
+        assert(std::get<1>(t) == 1);
+    }
 }
 
 // Smoke test of map.iter() len() after partial draining. Not a 1:1 rustc
