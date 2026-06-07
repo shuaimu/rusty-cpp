@@ -5416,11 +5416,15 @@ struct Handle {
         auto node = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })((*parent_ptr).edges, std::move(this->idx_field)).assume_init_read();
         return NodeRef<typename __TemplateArgs<Node>::arg_0, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>{.height_field = rusty::detail::deref_if_pointer_like(this->node.height_field) - static_cast<size_t>(1), .node = std::move(node), ._marker = rusty::PhantomData<std::tuple<typename __TemplateArgs<Node>::arg_0, marker::LeafOrInternal>>{}};
     }
-    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> into_kv() {
+    std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&> into_kv() const {
+        // Range-path const fix: into_kv() reads from the node and returns
+        // refs; no mutation. Const-qualifying it lets the range iter
+        // pipeline (which holds a `const auto kv = ...` from Cluster B)
+        // call into_kv() without a const-mismatch.
         assert((rusty::detail::deref_if_pointer_like(this->idx_field) < rusty::len(this->node)));
         auto& leaf = rusty::deref_call(this->node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).into_leaf()) { return std::forward<decltype(__recv)>(__recv).into_leaf(); });
-        auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.keys, std::move(this->idx_field)).assume_init_ref();
-        auto& v_self_ref_tmp = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.vals, std::move(this->idx_field)).assume_init_ref();
+        auto& k = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.keys, this->idx_field).assume_init_ref();
+        auto& v_self_ref_tmp = ([&](auto&& __recv, auto&& __idx) -> decltype(auto) { if constexpr (requires { __recv[__idx]; }) { return __recv[__idx]; } else { return __recv.get_unchecked(__idx); } })(leaf.vals, this->idx_field).assume_init_ref();
         auto& v = v_self_ref_tmp;
         return std::tuple<const typename __TemplateArgs<Node>::arg_1&, const typename __TemplateArgs<Node>::arg_2&>{k, v};
     }

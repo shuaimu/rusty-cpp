@@ -5521,7 +5521,8 @@ TEST_CASE("set_test_iter_min_max_unstubbed") {
 
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_range_small (simplified)
-// test_range: signature fix landed (range() no longer requires unused T
-// template arg), but deeper range_search path has const-correctness
-// issues in btree_internal that need more work before range() can be
-// fully exercised. Tracked separately.
+// test_range: still BLOCKED — the const-correctness cascade past
+// Handle::next_leaf_edge() reaches NodeRef::force() which moves out
+// of `this->height_field` and `this->node`. Marking that const would
+// require either const_cast or a deeper rework of the move semantics.
+// Held until the deeper cascade is unwound.
