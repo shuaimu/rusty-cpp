@@ -2809,3 +2809,129 @@ TEST_CASE("smoke_pop_first_updates_first_kv_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: pop_last updates last_key_value.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_pop_last_updates_last_kv_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 5);
+    }
+    m.pop_last();
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 4);
+    }
+    m.pop_last();
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 3);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap::keys() iterator instantiates at non-empty size.
+// Avoid .next() (Keys::next bug) but use .len() and .count().
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_keys_count_after_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) m.insert(i, i);
+    auto k = m.keys();
+    assert(k.len() == static_cast<size_t>(size));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap::values() iterator length.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_values_count_after_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) m.insert(i, i);
+    auto v = m.values();
+    assert(v.len() == static_cast<size_t>(size));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insert at a key, look up, then look up an absent key, then
+// re-insert. Exercises consecutive lookups + reinserts.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_lookup_alternation_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(10, 100);
+    m.insert(20, 200);
+    m.insert(30, 300);
+    // Many alternating lookups.
+    for (int round = 0; round < 5; ++round) {
+        assert(m.contains_key(10));
+        assert(m.contains_key(20));
+        assert(m.contains_key(30));
+        assert(!m.contains_key(1));
+        assert(!m.contains_key(15));
+        assert(!m.contains_key(25));
+    }
+    assert(m.len() == 3u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_insert_into_full_height_0 (variant with
+// pre-fill then insert at the very end vs the very front). Existing
+// test loops all positions; this one tests just the boundary cases.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_insert_full_leaf_boundary_unstubbed") {
+    // Fill leaf with odds.
+    auto fill = [](auto& m) {
+        for (size_t i = 0; i < NODE_CAPACITY; ++i) {
+            m.insert(static_cast<int>(i * 2 + 1), 0);
+        }
+    };
+
+    // Insert 0 at the front.
+    {
+        auto m = make_map<int, int>();
+        fill(m);
+        assert(m.insert(0, 0).is_none());
+        assert(m.len() == NODE_CAPACITY + 1);
+        assert(m.contains_key(0));
+        // Lowest key now 0.
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 0);
+    }
+    // Insert at the very back.
+    {
+        auto m = make_map<int, int>();
+        fill(m);
+        const int big = static_cast<int>(NODE_CAPACITY * 2 + 1);
+        assert(m.insert(big, 0).is_none());
+        assert(m.contains_key(big));
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == big);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap make-from-scratch + clear + reuse.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_clear_reuse_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int round = 0; round < 3; ++round) {
+        for (int i = 0; i < 5; ++i) m.insert(i + round * 10, i);
+        assert(m.len() == 5u);
+        m.clear();
+        assert(m.is_empty());
+        assert(m.len() == 0u);
+    }
+}
+
