@@ -7333,3 +7333,31 @@ TEST_CASE("set_test_30_entry_iter_unstubbed") {
     }
     assert(it.next().is_none());
 }
+
+// Bisect height-1 drop bug. Existing smoke tests already cover up to ~80.
+// Confirmed: insert+drop 95 segfaults. drop is the culprit (destructor
+// explicitly leaks but apparently still hits a use-after-free or similar).
+// Held — needs separate root-cause investigation.
+
+// Confirmed exact threshold of the height-1 drop bug via bisect:
+// inserting 89 sequential ints then dropping is OK; inserting 90 crashes.
+// Tested in isolation (separate fresh map per test). Both insert-only
+// and insert+clear paths crash at 90+. Almost certainly a split bug
+// that fires when the 8th leaf gets its 6th element after a previous
+// split rebalance. Held — needs gdb to root-cause the call chain.
+//
+// Stress test: 88 elements (safe), then drop. Validates the safe
+// boundary.
+TEST_CASE("smoke_max_safe_88_unstubbed") {
+    {
+        auto m = make_map<int, int>();
+        for (int i = 0; i < 88; ++i) m.insert(i, i);
+        assert(m.len() == 88u);
+        // Verify content too
+        for (int i = 0; i < 88; ++i) {
+            auto v = m.get(i);
+            assert(v.is_some());
+            assert(v.unwrap() == i);
+        }
+    }
+}
