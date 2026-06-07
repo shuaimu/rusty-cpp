@@ -5719,3 +5719,189 @@ TEST_CASE("set_smoke_iter_len_unstubbed") {
 //   - ManuallyDrop<Global>::clone deleted ctor (same family as B-clear
 //     but a different code path)
 // Each needs its own hand-fix; held until those land.
+
+// ─────────────────────────────────────────────────────────────────────
+// Batch un-stubs for simple test names that didn't need new API.
+// Each maps to a SKIP entry in transpiled/btree_tests_port.cppm.
+// Tests intentionally exercise just the public API surface that
+// btree_port has un-blocked, not the original rustc internals.
+// ─────────────────────────────────────────────────────────────────────
+
+// rustc map/tests.rs::empty — empty map invariants.
+TEST_CASE("empty_unstubbed") {
+    auto m = make_map<int, int>();
+    assert(m.is_empty());
+    assert(m.len() == 0u);
+    assert(m.get(0).is_none());
+    assert(!m.contains_key(0));
+    assert(m.first_key_value().is_none());
+    assert(m.last_key_value().is_none());
+    assert(m.pop_first().is_none());
+    assert(m.pop_last().is_none());
+}
+
+// rustc map/tests.rs::test_basic_small — small read/write cycle.
+TEST_CASE("test_basic_small_unstubbed") {
+    auto m = make_map<int, int>();
+    // Insert 10 distinct keys.
+    for (int i = 1; i <= 10; ++i) {
+        assert(m.insert(i, i * 100).is_none());
+    }
+    assert(m.len() == 10u);
+    // All keys retrievable with correct value.
+    for (int i = 1; i <= 10; ++i) {
+        assert(m.contains_key(i));
+        auto v = m.get(i);
+        assert(v.is_some());
+        assert(v.unwrap() == i * 100);
+    }
+    // Re-insert returns previous.
+    {
+        auto displaced = m.insert(5, 999);
+        assert(displaced.is_some());
+        assert(std::move(displaced).unwrap() == 500);
+    }
+    assert(m.len() == 10u);
+    // Remove a few keys.
+    for (int i : {2, 5, 8}) {
+        auto r = m.remove(i);
+        assert(r.is_some());
+    }
+    assert(m.len() == 7u);
+    assert(!m.contains_key(2));
+    assert(!m.contains_key(5));
+    assert(!m.contains_key(8));
+}
+
+// rustc set/tests.rs::set_test_show — minimal Debug-like coverage by
+// just iterating the set. Real Display test would format to a string.
+TEST_CASE("set_test_show_unstubbed") {
+    auto s = make_set<int>();
+    s.insert(1);
+    s.insert(2);
+    auto it = s.iter();
+    int count = 0;
+    int expected[] = {1, 2};
+    while (true) {
+        auto v = it.next();
+        if (!v.is_some()) break;
+        assert(v.unwrap() == expected[count]);
+        ++count;
+    }
+    assert(count == 2);
+}
+
+// rustc map/tests.rs::test_id_based_insert — insert preserves insertion
+// data via IdBased.name even though IdBased.id is the ordering key.
+// Uses the IdBased helper from tests/btree_testing_helpers.hpp.
+#include "btree_testing_helpers.hpp"
+TEST_CASE("test_id_based_insert_unstubbed") {
+    using btree_testing::IdBased;
+    auto m = BTreeMap<IdBased, int>::new_in(::rusty::alloc::Global{});
+    m.insert(IdBased(1, "alice"), 100);
+    m.insert(IdBased(2, "bob"), 200);
+    m.insert(IdBased(3, "charlie"), 300);
+    assert(m.len() == 3u);
+    // Re-insert with same id but different name — should displace.
+    {
+        auto displaced = m.insert(IdBased(2, "rename"), 250);
+        assert(displaced.is_some());
+        assert(std::move(displaced).unwrap() == 200);
+    }
+    assert(m.len() == 3u);
+    // Iteration order: sorted by id (1, 2, 3).
+    auto it = m.iter();
+    int expected = 1;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t).id == static_cast<uint32_t>(expected));
+        ++expected;
+    }
+    assert(expected == 4);
+}
+
+// rustc set/tests.rs::set_test_append-style: empty + insert via append-like
+// semantics on a small set. (Real set_test_append needs append API; this
+// covers the equivalent insert-only flow.)
+TEST_CASE("set_smoke_append_via_insert_unstubbed") {
+    auto a = make_set<int>();
+    a.insert(1); a.insert(2); a.insert(3);
+    auto b = make_set<int>();
+    b.insert(3); b.insert(4); b.insert(5);
+    // Manually merge b into a (insert-only).
+    {
+        auto it = b.iter();
+        for (auto v = it.next(); v.is_some(); v = it.next()) {
+            a.insert(v.unwrap());
+        }
+    }
+    // a should contain 1..=5.
+    for (int v : {1, 2, 3, 4, 5}) {
+        assert(a.contains(v));
+    }
+    assert(a.len() == 5u);
+}
+
+// rustc map/tests.rs::test_iter (subset). Walks an iter forward.
+TEST_CASE("test_iter_forward_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 100);
+    auto it = m.iter();
+    int expected = 1;
+    int count = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == expected);
+        assert(std::get<1>(t) == expected * 100);
+        ++expected;
+        ++count;
+    }
+    assert(count == 5);
+}
+
+// rustc map/tests.rs::test_iter_rev (subset). Walks an iter backward.
+TEST_CASE("test_iter_rev_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 100);
+    auto it = m.iter();
+    int expected = 5;
+    int count = 0;
+    for (auto v = it.next_back(); v.is_some(); v = it.next_back()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == expected);
+        assert(std::get<1>(t) == expected * 100);
+        --expected;
+        ++count;
+    }
+    assert(count == 5);
+}
+
+// rustc map/tests.rs::test_iter_mixed — alternate next() and next_back().
+TEST_CASE("test_iter_mixed_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 4; ++i) m.insert(i, i * 100);
+    auto it = m.iter();
+    {
+        auto v = it.next();
+        assert(v.is_some());
+        assert(std::get<0>(v.unwrap()) == 1);
+    }
+    {
+        auto v = it.next_back();
+        assert(v.is_some());
+        assert(std::get<0>(v.unwrap()) == 4);
+    }
+    {
+        auto v = it.next();
+        assert(v.is_some());
+        assert(std::get<0>(v.unwrap()) == 2);
+    }
+    {
+        auto v = it.next_back();
+        assert(v.is_some());
+        assert(std::get<0>(v.unwrap()) == 3);
+    }
+    // Should be exhausted.
+    assert(it.next().is_none());
+    assert(it.next_back().is_none());
+}
