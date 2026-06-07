@@ -7490,10 +7490,8 @@ TEST_CASE("test_basic_large_v2_unstubbed") {
     assert(drained == N);
 }
 
-// test_iter_h2_forward: BLOCKED. Forward iter on a h2 tree throws
-// "slice range out of bounds" — there's an iter-pipeline bug that
-// only surfaces at h2 depth. Held for separate fix.
-#if 0
+// test_iter_h2_forward: was BLOCKED, fixed in h2 iter-pipeline fix.
+#if 1
 TEST_CASE("test_iter_h2_forward_unstubbed") {
     auto m = make_map<int, int>();
     for (int i = 0; i < 200; ++i) m.insert(i, i * 7);
@@ -7511,8 +7509,8 @@ TEST_CASE("test_iter_h2_forward_unstubbed") {
 }
 #endif
 
-// test_iter_h2_rev: BLOCKED. Same h2 iter pipeline issue.
-#if 0
+// test_iter_h2_rev: was BLOCKED, fixed in h2 iter-pipeline fix.
+#if 1
 TEST_CASE("test_iter_h2_rev_unstubbed") {
     auto m = make_map<int, int>();
     for (int i = 0; i < 200; ++i) m.insert(i, i * 7);
@@ -7528,3 +7526,101 @@ TEST_CASE("test_iter_h2_rev_unstubbed") {
     assert(count == 200);
 }
 #endif
+
+// h2 iter stress: walk an iter on a deep h2 tree (500 entries).
+TEST_CASE("test_iter_h2_forward_500_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 500; ++i) m.insert(i, i);
+    auto it = m.iter();
+    int expected = 0;
+    int count = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == expected);
+        assert(std::get<1>(t) == expected);
+        ++expected;
+        ++count;
+    }
+    assert(count == 500);
+}
+
+TEST_CASE("test_iter_h2_rev_500_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 500; ++i) m.insert(i, i);
+    auto it = m.iter();
+    int expected = 499;
+    int count = 0;
+    for (auto v = it.next_back(); v.is_some(); v = it.next_back()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == expected);
+        --expected;
+        ++count;
+    }
+    assert(count == 500);
+}
+
+// h2 iter alternating front/back walk.
+TEST_CASE("test_iter_h2_alt_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 200; ++i) m.insert(i, i);
+    auto it = m.iter();
+    int fwd = 0;
+    int bwd = 199;
+    int count = 0;
+    while (true) {
+        auto v = it.next();
+        if (!v.is_some()) break;
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == fwd);
+        ++fwd;
+        ++count;
+
+        auto v2 = it.next_back();
+        if (!v2.is_some()) break;
+        auto t2 = v2.unwrap();
+        assert(std::get<0>(t2) == bwd);
+        --bwd;
+        ++count;
+    }
+    assert(count == 200);
+}
+
+// h2 boundary tests: ~144 (MIN_INSERTS_HEIGHT_2) and h3 boundary.
+TEST_CASE("test_iter_h2_min_inserts_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 144; ++i) m.insert(i, i);
+    auto it = m.iter();
+    int count = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == count);
+        ++count;
+    }
+    assert(count == 144);
+}
+
+TEST_CASE("test_iter_h2_at_1000_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 1000; ++i) m.insert(i, i);
+    auto it = m.iter();
+    int count = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == count);
+        ++count;
+    }
+    assert(count == 1000);
+}
+
+TEST_CASE("test_iter_h2_at_1000_rev_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 1000; ++i) m.insert(i, i);
+    auto it = m.iter();
+    int count = 0;
+    for (auto v = it.next_back(); v.is_some(); v = it.next_back()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == 999 - count);
+        ++count;
+    }
+    assert(count == 1000);
+}
