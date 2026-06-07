@@ -194,7 +194,8 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
         arc_tests_port
         rc_tests_port
         string_tests_port
-        btree_set_hash_tests_port)
+        btree_set_hash_tests_port
+        btree_tests_port)
         file(GLOB _CPPM transpiled/${_port}/*.cppm)
         add_library(${_port} STATIC)
         target_sources(${_port}
@@ -501,6 +502,9 @@ set(TEST_SOURCES
     tests/string_tests_port_module_test.cpp
     # btree_set_hash_tests_port — driver for tests/btree_set_hash.rs (2 tests, stub).
     tests/btree_set_hash_tests_port_module_test.cpp
+    # btree_tests_port — driver for btree/{map,set}/tests.rs
+    # (115 map + 32 set = 147 tests, all stubbed; see docs/btree_tests_port/).
+    tests/btree_tests_port_module_test.cpp
 
     # binary_heap_port Phase C: push() drive test, iterates on the 6
     # instantiation clusters documented in docs/binary_heap_port/STATUS.md.
@@ -593,7 +597,7 @@ foreach(test_source IN LISTS TEST_SOURCES)
     set(_vec_consuming_tests
         test_mutex test_thread rusty_vec_test rusty_array_test)
     list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
-    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|linked_list_tests_port|eq_diff_len_tests_port|vec_deque_tests_port|vec_tests_port|arc_tests_port|rc_tests_port|string_tests_port|btree_set_hash_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port|borrow_port|ascii_port)_"
+    if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|linked_list_tests_port|eq_diff_len_tests_port|vec_deque_tests_port|vec_tests_port|arc_tests_port|rc_tests_port|string_tests_port|btree_set_hash_tests_port|btree_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port|borrow_port|ascii_port)_"
         OR test_name STREQUAL "async_module_test"
         OR NOT _vec_consume_idx EQUAL -1)
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
@@ -661,7 +665,8 @@ foreach(test_source IN LISTS TEST_SOURCES)
         arc_tests_port
         rc_tests_port
         string_tests_port
-        btree_set_hash_tests_port)
+        btree_set_hash_tests_port
+        btree_tests_port)
         if(test_name MATCHES "^${_stub_port}_")
             target_link_libraries(${test_executable} PRIVATE ${_stub_port})
             target_compile_features(${test_executable} PRIVATE cxx_std_23)
