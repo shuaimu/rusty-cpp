@@ -4359,3 +4359,137 @@ TEST_CASE("smoke_wide_int_range_unstubbed") {
     assert(m.len() == 21u);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet wider value range.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_wide_value_range_unstubbed") {
+    auto s = make_set<int>();
+    for (int v = -10; v <= 10; ++v) s.insert(v);
+    for (int v = -10; v <= 10; ++v) assert(s.contains(v));
+    assert(s.len() == 21u);
+    // pop_first returns the most-negative.
+    {
+        auto v = s.pop_first();
+        assert(v.is_some());
+        assert(std::move(v).unwrap() == -10);
+    }
+    // pop_last returns the largest.
+    {
+        auto v = s.pop_last();
+        assert(v.is_some());
+        assert(std::move(v).unwrap() == 10);
+    }
+    assert(s.len() == 19u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().count() after partial drain.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_count_after_partial_drain_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i);
+    auto it = m.iter();
+    it.next();
+    it.next();
+    assert(it.count() == 3u);  // 3 remaining after pulling 2
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter().next() on map with mixed positive/negative.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_mixed_signs_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i : {3, -1, 5, -3, 1}) m.insert(i, i);
+    auto it = m.iter();
+    for (int expected : {-3, -1, 1, 3, 5}) {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == expected);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.remove after iter (doesn't invalidate behavior).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_then_remove_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+    // Run iter to completion (drops the iterator).
+    {
+        auto it = m.iter();
+        while (it.next().is_some()) {}
+    }
+    // Removes still work afterwards.
+    {
+        auto removed = m.remove(3);
+        assert(removed.is_some());
+        assert(std::move(removed).unwrap() == 30);
+    }
+    assert(m.len() == 4u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() on a map after re-clear.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_after_clear_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 10);
+    m.insert(2, 20);
+    m.clear();
+    auto it = m.iter();
+    assert(it.next().is_none());
+    assert(it.len() == 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet operator!= on differing sets.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_neq_different_unstubbed") {
+    auto a = make_set<int>();
+    a.insert(1);
+    a.insert(2);
+    auto b = make_set<int>();
+    b.insert(1);
+    b.insert(3);
+    assert(!(a == b));
+    assert(a != b);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap operator!= on differing maps.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_neq_different_unstubbed") {
+    auto a = make_map<int, int>();
+    a.insert(1, 10);
+    a.insert(2, 20);
+    auto b = make_map<int, int>();
+    b.insert(1, 10);
+    b.insert(2, 200);  // different value
+    assert(!(a == b));
+    assert(a != b);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap large-keyed insert.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_large_keys_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1000000, 1);
+    m.insert(-1000000, -1);
+    m.insert(0, 0);
+    assert(m.len() == 3u);
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == -1000000);
+    }
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 1000000);
+    }
+}
+
