@@ -21,6 +21,39 @@ test name. Both run on each invocation.
 | Rust test | C++ TEST_CASE | Status |
 |---|---|---|
 | `map/tests.rs::test_get_key_value` | `test_get_key_value_unstubbed` | passing (trimmed: removed `map.remove()` tail — blocked by clear() bug below) |
+| (synthetic smoke) | `smoke_insert_lookup_unstubbed` | passing — covers insert/contains_key/len/get/first/last_key_value |
+
+## Helpers wired up
+
+- **`check(M)` shim** in `btree_tests_port_unstubbed.cpp` — no-op `template<typename M> void check(const M&) {}`. Translated tests that hit `map.check()` route through it. We lose internal-invariant checking but keep the test's own public-API assertions.
+
+## Attempted but blocked (new findings)
+
+These tests were translated and the build compiles, but they trigger
+runtime aborts or hit additional transpile bugs. Each is one more
+latent btree_port issue surfaced:
+
+### B-try-insert: try_insert Vacant/Occupied arm-swap (same shape as the old BTreeMap::insert bug)
+
+**Symptom:** `try_insert` at map.cppm:5667 takes the Vacant arm at
+`index() == 0` but constructs `OccupiedError{.entry = vacant_entry,
+.value = …}`, which fails compile with "no viable conversion from
+VacantEntry to size_t". Same root cause as
+`fix_btreemap_insert_arm_swap` in the patcher — needs a sibling
+patcher rule for try_insert.
+
+**Tests blocked:** `test_try_insert` and anything else that calls
+`.try_insert()`.
+
+### B-pop: pop_first / pop_last runtime abort
+
+**Symptom:** `test_pop_first_last_unstubbed` compiled cleanly but the
+test process aborts mid-execution at the first `map.pop_first()`
+unwrap on a non-empty map. Likely a related move-semantics or
+destructor bug in pop's emit path.
+
+**Tests blocked:** `test_pop_first_last` plus any test that
+exercises `.pop_first()` / `.pop_last()` on non-empty maps.
 
 ## Known blockers found while un-stubbing
 
