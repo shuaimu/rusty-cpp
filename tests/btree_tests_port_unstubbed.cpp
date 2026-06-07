@@ -82,25 +82,22 @@ TEST_CASE("test_get_key_value_unstubbed") {
     assert(map.get_key_value(4).is_none());
 }
 
-// B-pop-last bisected to: pop_last works in isolation (alone, or
-// repeatedly on a fresh map). It also works after a single pop_first
-// (size 2 map drained that way is fine). But:
-//
-//   insert 1,2,3,4 → pop_first → pop_first → pop_last  ⇒  CRASH inside
-//   remove_entry / remove_kv_tracking. last_entry() itself returns OK.
-//
-// So pop_first leaves the leaf in a state that pop_last later misreads.
-// Verified the slice_remove emit at NodeRef::remove() does
-// `std::move(this->idx_field)` twice for K and V columns — for size_t
-// fields that's harmless (std::move on primitive returns rvalue ref
-// without invalidating the source). The likely culprit is elsewhere in
-// the rebalance/merge path after the leaf falls under MIN_LEN, but
-// root-causing requires live runtime debugging (gdb on remove_kv_tracking).
-// Deferred.
-//
-// Status: pop_first-only un-stubbed and exercising the same internals
-// from the "left walk" side. Drain testing with mixed pop_first/pop_last
-// remains blocked.
+// B-pop-last was a dangling-reference bug in remove_leaf_kv. The
+// transpiler emitted `auto&& [old_kv, pos] = deref_if_pointer_like(this->remove())`,
+// but `this->remove()` returns a prvalue tuple; `deref_if_pointer_like`
+// materializes it into a `T&&` parameter and forwards back an rvalue
+// ref, so the temporary dies at the semicolon and pos is left dangling.
+// Reads worked until the rebalance lambda was entered — calling the
+// lambda clobbered the stack memory pos pointed at. Mostly latent (the
+// stale bytes happened to read as None), but on the 3rd consecutive
+// pop the garbage parent pointer read as Some and choose_parent_kv took
+// the Ok arm with a stack address, segfaulting in `as_leaf_ptr`.
+// Workaround: replace `auto&&` with `auto` at that site, which lets the
+// structured binding own the tuple. Same pattern appears ~92x across
+// btree_port and core_slice_port; only the pop hot path is on a
+// crashable path so the rest stay as-is for now. Proper fix is in the
+// transpiler — emit `auto [a,b] = ...` for `let` patterns whose RHS is
+// a prvalue. See docs/btreemap_port/STATUS.md for the writeup.
 
 TEST_CASE("test_pop_first_only_unstubbed") {
     auto map = make_map<int, int>();
@@ -124,10 +121,71 @@ TEST_CASE("test_pop_first_only_unstubbed") {
     assert(map.pop_first().is_none());
 }
 
-// pop_last drain test was attempted but a 3rd consecutive pop_last
-// triggered B-pop-last on its own (not just when mixed with pop_first).
-// So the bug surface is actually wider than the earlier bisection
-// indicated. Held out of un-stubs pending root cause.
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_pop_first_last
+// Un-stubbed after fixing B-pop-last (dangling structured binding in
+// remove_leaf_kv).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_pop_first_last_unstubbed") {
+    auto map = make_map<int, int>();
+    assert(map.pop_first().is_none());
+    assert(map.pop_last().is_none());
+
+    map.insert(1, 10);
+    map.insert(2, 20);
+    map.insert(3, 30);
+    map.insert(4, 40);
+
+    // pop_first then pop_last then pop_first then pop_last — the exact
+    // mix that previously crashed.
+    {
+        auto kv = map.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 10);
+    }
+    {
+        auto kv = map.pop_last();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 4);
+        assert(std::get<1>(t) == 40);
+    }
+    {
+        auto kv = map.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 2);
+        assert(std::get<1>(t) == 20);
+    }
+    {
+        auto kv = map.pop_last();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 3);
+        assert(std::get<1>(t) == 30);
+    }
+    assert(map.is_empty());
+    assert(map.pop_first().is_none());
+    assert(map.pop_last().is_none());
+}
+
+// Repeats of the pre-fix crash shape: pop_first × 2 then pop_last drains
+// the rest. Plus a pure pop_last drain.
+TEST_CASE("test_pop_last_drain_unstubbed") {
+    auto map = make_map<int, int>();
+    for (int k = 1; k <= 4; ++k) map.insert(k, k * 10);
+
+    for (int expected_k = 4; expected_k >= 1; --expected_k) {
+        auto kv = map.pop_last();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == expected_k);
+        assert(std::get<1>(t) == expected_k * 10);
+    }
+    assert(map.is_empty());
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_try_insert

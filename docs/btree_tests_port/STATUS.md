@@ -15,13 +15,15 @@ Un-stubbed tests use `_unstubbed` suffix on their name so the
 test-runner registry doesn't collide with the stub of the same Rust
 test name. Both run on each invocation.
 
-## Un-stubbed so far (5 real tests + the synthetic smoke)
+## Un-stubbed so far (7 real tests + the synthetic smoke)
 
 | Rust test | C++ TEST_CASE | Status |
 |---|---|---|
 | `map/tests.rs::test_get_key_value` | `test_get_key_value_unstubbed` | passing (trimmed: skipped `.remove()` tail) |
 | `map/tests.rs::test_try_insert` | `test_try_insert_unstubbed` | passing (re-enabled by fix_btreemap_try_insert_arm_swap) |
 | `map/tests.rs::test_pop_first_last` (pop_first half) | `test_pop_first_only_unstubbed` | passing — drains a 4-element map by pop_first to empty |
+| `map/tests.rs::test_pop_first_last` (full mix) | `test_pop_first_last_unstubbed` | passing — re-enabled by B-pop-last fix |
+| `map/tests.rs::test_pop_first_last` (pop_last drain) | `test_pop_last_drain_unstubbed` | passing — re-enabled by B-pop-last fix |
 | `set/tests.rs::test_clear` | `set_test_clear_unstubbed` | passing (re-enabled by fix_btreemap_clear_manuallydrop) |
 | (synthetic smoke) | `smoke_insert_lookup_unstubbed` | passing — covers insert/contains_key/len/get/first/last_key_value |
 
@@ -36,50 +38,63 @@ test name. Both run on each invocation.
 | `fix_btreemap_try_insert_arm_swap` | B-try-insert: `try_insert()` had same Vacant/Occupied arm-swap as the old `insert()` did. Hand-port the function body to match Rust semantics. |
 | `fix_btreemap_clear_manuallydrop` | B-clear: `clear()` emit's `rusty::clone(this->alloc)` where alloc is `ManuallyDrop<A>` (copy ctor deleted). Rewrite to `manually_drop_new(rusty::clone(*this->alloc))` to unwrap-clone-rewrap. |
 
-## Remaining latent bugs
+## Resolved latent bugs
 
-### B-pop-last: pop_last on the **3rd** consecutive pop crashes
+### B-pop-last: dangling structured binding in remove_leaf_kv ✅ FIXED
 
-**Reproduce:**
+**Symptom:** crash on the 3rd consecutive pop (any mix of pop_first /
+pop_last) of a 4-element map.
+
+**Root cause:** transpiler emitted
 ```cpp
-auto m = make_map<int, int>();
-m.insert(1, 10); m.insert(2, 20); m.insert(3, 30); m.insert(4, 40);
-m.pop_first();  // ok
-m.pop_first();  // ok
-m.pop_last();   // ← aborts mid-execution
+auto&& [old_kv, pos] = rusty::detail::deref_if_pointer_like(this->remove());
+```
+`this->remove()` returns a prvalue tuple. `deref_if_pointer_like<T>(T&&
+v)` materializes the temporary into its parameter and returns
+`std::forward<T>(v)` — an rvalue ref. The original temporary's
+lifetime ends at the semicolon (the full expression). `pos` and
+`old_kv` are then dangling references into destroyed stack memory.
+
+Reads against the stale memory worked while nothing else wrote to it,
+which covered insertion of pos.idx() and entry to the rebalance
+branch. But entering the IIFE lambda
+(`auto&& new_pos = [&]() { … }();`) clobbered those stack bytes with
+the lambda's own locals. The pattern was masked on most paths because
+the garbage bytes happened to read as `Option::None` in the parent
+slot — `choose_parent_kv` then took the Err arm and called
+`new_edge()`, which doesn't dereference. On the 3rd pop the garbage
+read as `Some(...)`, choose_parent_kv took the Ok arm, and `ascend()`
+SIGSEGV'd in `as_leaf_ptr` with a stack address.
+
+**Confirmed via runtime tracing** (printf-based — gdb gave confused
+output due to -O3 optimization). Sequence:
+```
+[trace remove_leaf_kv] AFTER remove: pos.node.node=0x60ee...2b0 (heap, valid)
+[trace remove_leaf_kv] entering rebalance branch: pos still valid
+[trace remove_leaf_kv] after pos.idx(): pos still valid
+[trace lambda entry] pos.node.node=0x7ffd...da60 (stack address, corrupt!)
 ```
 
-**What I know:**
-- `pop_first` works in isolation, even drained to empty.
-- `pop_last` works in isolation for 1 or 2 calls.
-- `pop_last` aborts on the 3rd consecutive call, regardless of what
-  came before (pop_first or pop_last).
-- `last_entry()` itself returns OK. The crash is inside
-  `OccupiedEntry::remove_entry()` → `Handle::remove_kv_tracking()` →
-  somewhere in the rebalance/merge path.
-- `NodeRef::remove()` emit does `slice_remove(..., std::move(this->idx_field))`
-  twice for key and value columns. Harmless for size_t (std::move on
-  a primitive is a no-op for the source) but worth noting.
-- The 3rd pop fires when the leaf is at len=2 (well under MIN_LEN=5),
-  so the rebalance branch in `remove_leaf_kv` is triggered every time.
-- `choose_parent_kv()` on a single-leaf root returns Err — the
-  Err-arm constructs a new edge handle but doesn't actually merge or
-  steal. Yet the crash happens here.
+**Fix:** s/`auto&&`/`auto`/ in `remove_leaf_kv`. Plain `auto` makes the
+structured binding object own the tuple (move-construct), which
+extends the lifetime to the enclosing function scope. The change is
+inside the hand-port slot of `btree_internal.cppm:remove_leaf_kv` —
+not patcher-codified yet because the proper fix is transpiler-side.
 
-**Hypothesis (unconfirmed):** the leaf storage layout after pop_first
-ends up with valid data at slots [0, len) and uninitialized memory in
-later slots. NodeRef::remove() at the rightmost valid index then
-either reads uninit garbage or trips an invariant inside
-`assume_init_read` / `slice_remove` / the post-remove rebalance.
+**Tests un-stubbed:** `test_pop_first_last_unstubbed` (full pop_first
++ pop_last mix) and `test_pop_last_drain_unstubbed` (pure pop_last
+drain).
 
-**Next investigation step:** gdb / runtime tracing through
-`remove_kv_tracking` → `remove_leaf_kv` → `choose_parent_kv` →
-`new_edge(pos, idx)`. Specifically check the values of `pos.node.len`,
-`pos.idx`, and the actual KV slot contents before and after each step.
-
-**Tests blocked:** the full `test_pop_first_last` (only pop_first half
-runs), and anything that exercises a drain mixing pop_first/pop_last
-or repeats either past 2 calls.
+**Wider exposure:** the same `auto&& [...] = deref_if_pointer_like(call())`
+shape appears ~92 times across transpiled ports (44 in btree_port, 48
+in core_slice_port). All are latent dangling references. They mostly
+work today because their dead stack regions happen to read as
+non-crashing bit patterns. Each is one stack-layout reshuffle away
+from triggering the same bug. **Proper fix:** transpiler should emit
+`auto [a, b] = …` (no `&&`) for `let` patterns when the RHS is a
+prvalue. Tracked as a follow-up; not addressed in this commit because
+the diff would touch many auto-generated lines and we don't yet have a
+test that crashes anywhere outside the pop_last hot path.
 
 ### B-into-iter: into_keys / into_values miss ManuallyDrop auto-deref
 

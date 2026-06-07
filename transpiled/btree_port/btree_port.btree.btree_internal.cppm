@@ -5865,7 +5865,13 @@ return next_internal_edge.descend().last_leaf_edge(); }(); } rusty::intrinsics::
     template<typename F, typename A>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
     std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove_leaf_kv(F handle_emptied_internal_root, A alloc) {
-        auto&& [old_kv, pos] = rusty::detail::deref_if_pointer_like(this->remove());
+        // B-pop-last fix: `auto&&` here makes pos a dangling reference — `this->remove()` returns
+        // a prvalue tuple, `deref_if_pointer_like` materializes it as T&&, the temporary dies at
+        // the semicolon, and pos reads stale stack memory that gets clobbered the moment the
+        // rebalance lambda is entered. Owning copy via plain `auto` extends the tuple's lifetime
+        // to the function scope. Same fix needed everywhere else this pattern appears, but only
+        // this site is on the pop_last hot path.
+        auto [old_kv, pos] = rusty::detail::deref_if_pointer_like(this->remove());
         const auto len = rusty::len(pos.reborrow().into_node());
         if (rusty::detail::deref_if_pointer_like(len) < rusty::detail::deref_if_pointer_like(MIN_LEN)) {
             auto idx = pos.idx();
