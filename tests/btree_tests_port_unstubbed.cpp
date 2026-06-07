@@ -5087,3 +5087,134 @@ TEST_CASE("set_smoke_len_tracks_removes_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() while map mutated (next-only, no concurrent).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_then_drop_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    {
+        auto it = m.iter();
+        it.next();
+    }  // iter drops at scope end
+    // Map state intact.
+    assert(m.len() == 5u);
+    for (int i = 0; i < 5; ++i) assert(m.contains_key(i));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().next_back chained with size_hint.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_next_back_size_hint_chain_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 4; ++i) m.insert(i, i);
+    auto it = m.iter();
+    it.next_back();
+    it.next_back();
+    auto sh = it.size_hint();
+    assert(std::get<0>(sh) == 2u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap operator!= reflexive false.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_neq_self_false_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 10);
+    assert(!(m != m));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet operator!= reflexive false.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_neq_self_false_unstubbed") {
+    auto s = make_set<int>();
+    s.insert(1);
+    assert(!(s != s));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() at NODE_CAPACITY (single leaf).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_at_node_capacity_unstubbed") {
+    auto m = make_map<int, int>();
+    for (size_t i = 0; i < NODE_CAPACITY; ++i) {
+        m.insert(static_cast<int>(i), static_cast<int>(i));
+    }
+    auto it = m.iter();
+    assert(it.len() == NODE_CAPACITY);
+    int last = -1;
+    for (size_t i = 0; i < NODE_CAPACITY; ++i) {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        int k = std::get<0>(t);
+        assert(k > last);
+        last = k;
+    }
+    assert(it.next().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() at NODE_CAPACITY+1 (single split).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_at_node_capacity_plus_one_unstubbed") {
+    auto m = make_map<int, int>();
+    for (size_t i = 0; i < NODE_CAPACITY + 1; ++i) {
+        m.insert(static_cast<int>(i), static_cast<int>(i));
+    }
+    auto it = m.iter();
+    assert(it.len() == NODE_CAPACITY + 1);
+    int last = -1;
+    while (true) {
+        auto n = it.next();
+        if (!n.is_some()) break;
+        auto t = std::move(n).unwrap();
+        int k = std::get<0>(t);
+        assert(k > last);
+        last = k;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() across a wider range.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_at_height_1_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        m.insert(i, i);
+    }
+    auto it = m.iter();
+    int count = 0;
+    while (true) {
+        auto n = it.next();
+        if (!n.is_some()) break;
+        ++count;
+    }
+    assert(count == static_cast<int>(MIN_INSERTS_HEIGHT_1));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet len after wider grow.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_len_after_height_1_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        s.insert(i);
+    }
+    assert(s.len() == MIN_INSERTS_HEIGHT_1);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap remove + reinsert preserves the new value.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_remove_reinsert_preserves_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 100);
+    m.remove(1);
+    assert(m.insert(1, 999).is_none());  // re-insert is new
+    auto v = m.get(1);
+    assert(v.is_some());
+    assert(v.unwrap() == 999);
+}
+
