@@ -5518,3 +5518,10 @@ TEST_CASE("set_test_iter_min_max_unstubbed") {
     assert(max == 3);
     assert(count == 3);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_range_small (simplified)
+// test_range: signature fix landed (range() no longer requires unused T
+// template arg), but deeper range_search path has const-correctness
+// issues in btree_internal that need more work before range() can be
+// fully exercised. Tracked separately.

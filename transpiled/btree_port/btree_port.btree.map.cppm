@@ -5819,7 +5819,11 @@ return std::move(v);
             }
         }
     }
-    template<typename T, typename R>
+    // Range API const-correctness fix: `T` was an unused template
+    // parameter (Rust uses it for the Borrow trait bound; C++ doesn't
+    // have that, so T can't be deduced from the call site and broke
+    // overload resolution). Drop it.
+    template<typename R>
     Range<K, V> range(R range) const {
         if (this->root.is_some()) {
             decltype(auto) root = std::as_const(this->root).unwrap();
@@ -5828,7 +5832,7 @@ return std::move(v);
             return Range<K, V>{.inner = btree_internal::LeafRange<marker::Immut, K, V>::none()};
         }
     }
-    template<typename T, typename R>
+    template<typename R>
     RangeMut<K, V> range_mut(R range) {
         if (this->root.is_some()) {
             decltype(auto) root = this->root.as_mut().unwrap();
