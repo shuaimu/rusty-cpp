@@ -4586,3 +4586,117 @@ TEST_CASE("smoke_iter_back_drains_unstubbed") {
 // non-empty branch even when the runtime map happens to be empty —
 // template instantiation doesn't see that.
 
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_borrow (substitute with int keys).
+// Original uses String/Box keys which aren't trivially supported.
+// We exercise the same shape: insert, lookup via the operator[]
+// substitute (get), checks.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_borrow_int_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(0, 1);
+    {
+        auto v = m.get(0);
+        assert(v.is_some());
+        assert(v.unwrap() == 1);
+    }
+    m.insert(1, 2);
+    {
+        auto v = m.get(0);
+        assert(v.is_some() && v.unwrap() == 1);
+    }
+    {
+        auto v = m.get(1);
+        assert(v.is_some() && v.unwrap() == 2);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: many inserts of same key, len stays at 1.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_same_key_no_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 100; ++i) m.insert(7, i);
+    assert(m.len() == 1u);
+    auto v = m.get(7);
+    assert(v.is_some());
+    assert(v.unwrap() == 99);  // last write
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet many inserts of same value.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_same_value_no_grow_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 100; ++i) s.insert(7);
+    assert(s.len() == 1u);
+    assert(s.contains(7));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insert at 0 and -0 (same value).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_zero_keys_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(0, 100);
+    m.insert(-0, 200);  // -0 == 0
+    assert(m.len() == 1u);
+    auto v = m.get(0);
+    assert(v.is_some() && v.unwrap() == 200);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter().next_back() on single-element map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_back_single_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(42, 100);
+    auto it = m.iter();
+    {
+        auto n = it.next_back();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 42);
+        assert(std::get<1>(t) == 100);
+    }
+    assert(it.next_back().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap insert/get all in succession.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_insert_get_chain_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) {
+        m.insert(i, i * 10);
+        auto v = m.get(i);
+        assert(v.is_some());
+        assert(v.unwrap() == i * 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap remove and confirm absence in same scope.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_remove_then_confirm_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    for (int i = 0; i < 5; ++i) {
+        m.remove(i);
+        assert(!m.contains_key(i));
+    }
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet remove with confirm.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_remove_then_confirm_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 5; ++i) s.insert(i);
+    for (int i = 0; i < 5; ++i) {
+        assert(s.remove(i) == true);
+        assert(!s.contains(i));
+    }
+}
+
