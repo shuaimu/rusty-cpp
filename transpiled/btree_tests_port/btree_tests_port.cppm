@@ -17,6 +17,20 @@ export module btree_tests_port;
 
 namespace btree_tests_port {
 
+// Hand-translated rustc tests below replace the auto-generated skip
+// stubs. As more API surface is wired up (testing/ helpers, internal
+// invariant checks, panic-unwinding), additional tests move from
+// stub → translated. See docs/btree_tests_port/STATUS.md for the
+// running un-stub log.
+//
+// NOTE: TEST_CASE blocks that exercise the actual BTreeMap/BTreeSet
+// API live in tests/btree_tests_port_unstubbed.cpp (separate TU,
+// imports btree_port.btree.{map,set}). Putting them in the module
+// purview here triggers an unrelated bug — ManuallyDrop<Global>
+// gets clone()'d in BTreeMap's destructor path under module-internal
+// instantiation, which surfaces as a static_assert failure on
+// is_copy_constructible. The work-around is the separate TU.
+
 TEST_CASE("test_levels") {
     std::printf("[port] SKIP test_levels: transpiled module needs rusty/std API surface gaps filled\n");
 }
@@ -318,7 +332,7 @@ TEST_CASE("test_pop_first_last") {
 }
 
 TEST_CASE("test_get_key_value") {
-    std::printf("[port] SKIP test_get_key_value: transpiled module needs rusty/std API surface gaps filled\n");
+    std::printf("[port] SKIP test_get_key_value: body lives in tests/btree_tests_port_unstubbed.cpp\n");
 }
 
 TEST_CASE("test_insert_into_full_height_0") {
@@ -394,11 +408,16 @@ TEST_CASE("test_into_iter_drop_leak_height_1") {
 }
 
 TEST_CASE("test_into_keys") {
-    std::printf("[port] SKIP test_into_keys: transpiled module needs rusty/std API surface gaps filled\n");
+    // SKIP: BTreeMap::into_keys() instantiation hits a separate bug —
+    // map.cppm:5904 references `this->root` / `this->length` through a
+    // `ManuallyDrop<BTreeMap>` wrapper without auto-deref. Separate
+    // port-side fix needed before this test can un-stub.
+    std::printf("[port] SKIP test_into_keys: into_keys hits ManuallyDrop field-access bug in btree_port\n");
 }
 
 TEST_CASE("test_into_values") {
-    std::printf("[port] SKIP test_into_values: transpiled module needs rusty/std API surface gaps filled\n");
+    // SKIP: same ManuallyDrop blocker as test_into_keys.
+    std::printf("[port] SKIP test_into_values: into_values hits ManuallyDrop field-access bug in btree_port\n");
 }
 
 TEST_CASE("test_insert_remove_intertwined") {
@@ -538,7 +557,7 @@ TEST_CASE("set_test_extract_if_pred_panic_leak") {
 }
 
 TEST_CASE("set_test_clear") {
-    std::printf("[port] SKIP set_test_clear: transpiled module needs rusty/std API surface gaps filled\n");
+    std::printf("[port] SKIP set_test_clear: body lives in tests/btree_tests_port_unstubbed.cpp\n");
 }
 
 TEST_CASE("set_test_remove") {

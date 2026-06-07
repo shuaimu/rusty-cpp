@@ -205,6 +205,11 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
         target_compile_features(${_port} PUBLIC cxx_std_23)
         target_compile_options(${_port} PRIVATE -O3 -DNDEBUG -march=native)
     endforeach()
+    # btree_tests_port now imports btree_port modules to exercise real
+    # API surface (test bodies are being un-stubbed incrementally).
+    if(TARGET btree_tests_port)
+        target_link_libraries(btree_tests_port PUBLIC btree_port)
+    endif()
 endif()
 
 # ──────────────────────────────────────────────────────────────────────
@@ -605,6 +610,16 @@ foreach(test_source IN LISTS TEST_SOURCES)
         continue()
     endif()
     add_executable(${test_executable} ${test_source})
+    # btree_tests_port driver also pulls in the hand-translated test
+    # bodies that live in a sibling .cpp (separate TU to work around
+    # an in-module-purview BTreeMap instantiation bug).
+    if(test_name STREQUAL "btree_tests_port_module_test")
+        target_sources(${test_executable} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/btree_tests_port_unstubbed.cpp)
+        target_link_libraries(${test_executable} PRIVATE btree_port)
+        target_compile_features(${test_executable} PRIVATE cxx_std_23)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native)
+    endif()
     target_include_directories(${test_executable} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(${test_executable} PRIVATE -Wall -Wextra -Wpedantic)
     target_link_libraries(${test_executable} PRIVATE Threads::Threads)
