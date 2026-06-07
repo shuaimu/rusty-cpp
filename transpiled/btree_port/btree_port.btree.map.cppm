@@ -4136,10 +4136,14 @@ struct Keys {
         return f.debug_list().entries(rusty::clone((*this))).finish();
     }
     rusty::Option<const K&> next() {
-        return this->inner.next().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
+        // Set-iter return-type fix: lambda was `return std::move(k);` where
+        // k binds to `const K&`. std::move turns that into `const K&&`,
+        // which Option<const K&> can't be constructed from. Return the
+        // ref-extracted lvalue and let the deduced lambda result type be
+        // `const K&`. Matches rustc — keys() projects to refs, no move.
+        return this->inner.next().map([&](auto&& _destruct_param0) -> const K& {
+            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+        });
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();

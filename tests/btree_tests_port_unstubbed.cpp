@@ -5459,3 +5459,62 @@ TEST_CASE("test_entry_or_insert_unstubbed") {
     }
     check(map);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// BTreeSet::iter().next() projection test.
+// Un-stubbed by Keys::next return-type fix (was returning const K&&
+// from std::move(), now properly returns const K&).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_test_iter_next_projection_unstubbed") {
+    auto s = make_set<int>();
+    s.insert(5);
+    s.insert(12);
+    s.insert(11);
+    // Set iteration order is sorted: 5, 11, 12.
+    auto it = s.iter();
+    {
+        auto v = it.next();
+        assert(v.is_some());
+        assert(v.unwrap() == 5);
+    }
+    {
+        auto v = it.next();
+        assert(v.is_some());
+        assert(v.unwrap() == 11);
+    }
+    {
+        auto v = it.next();
+        assert(v.is_some());
+        assert(v.unwrap() == 12);
+    }
+    assert(it.next().is_none());
+}
+
+// rustc set/tests.rs::test_iter_min_max (subset using the now-unblocked iter)
+TEST_CASE("set_test_iter_min_max_unstubbed") {
+    auto a = make_set<int>();
+    a.insert(1);
+    a.insert(2);
+    a.insert(3);
+    int min = INT32_MAX, max = INT32_MIN, count = 0;
+    for (auto v = a.iter().next(); v.is_some(); ) {
+        int x = v.unwrap();
+        if (x < min) min = x;
+        if (x > max) max = x;
+        ++count;
+        // Only verifies first element since `a.iter()` constructs fresh each time.
+        break;
+    }
+    // Reseat with single walker.
+    auto it = a.iter();
+    min = INT32_MAX; max = INT32_MIN; count = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        int x = v.unwrap();
+        if (x < min) min = x;
+        if (x > max) max = x;
+        ++count;
+    }
+    assert(min == 1);
+    assert(max == 3);
+    assert(count == 3);
+}
