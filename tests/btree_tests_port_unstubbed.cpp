@@ -3074,3 +3074,137 @@ TEST_CASE("smoke_iter_single_back_unstubbed") {
     assert(it.next().is_none());
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet VacantEntry insert via entry path. Note that set's
+// Entry variant ordering is reversed from map's: <Occupied, Vacant>
+// so Vacant is at index 1.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_vacant_entry_insert_unstubbed") {
+    auto s = make_set<int>();
+    {
+        auto e = s.entry(42);
+        assert(e.index() == 1);  // Vacant (index 1 for set)
+        std::get<1>(e)._0.insert();
+    }
+    assert(s.contains(42));
+    assert(s.len() == 1u);
+    // Same key now Occupied (index 0).
+    {
+        auto e = s.entry(42);
+        assert(e.index() == 0);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().last() drains to the final pair.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_last_drain_unstubbed") {
+    auto m = make_map<int, int>();
+    assert(m.iter().last().is_none());
+    for (int i = 1; i <= 6; ++i) m.insert(i, i * 10);
+    {
+        auto l = m.iter().last();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 6);
+        assert(std::get<1>(t) == 60);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().min/max with single element.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_min_max_single_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(5, 50);
+    {
+        auto mi = m.iter().min();
+        assert(mi.is_some());
+        auto t = std::move(mi).unwrap();
+        assert(std::get<0>(t) == 5);
+        assert(std::get<1>(t) == 50);
+    }
+    {
+        auto mx = m.iter().max();
+        assert(mx.is_some());
+        auto t = std::move(mx).unwrap();
+        assert(std::get<0>(t) == 5);
+        assert(std::get<1>(t) == 50);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insertion at sorted vs reverse-sorted vs random order produces
+// the same final map state.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_insert_order_independence_unstubbed") {
+    // Sorted.
+    auto m1 = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m1.insert(i, i * 10);
+
+    // Reverse sorted.
+    auto m2 = make_map<int, int>();
+    for (int i = 5; i >= 1; --i) m2.insert(i, i * 10);
+
+    // Random.
+    auto m3 = make_map<int, int>();
+    for (int i : {3, 1, 5, 2, 4}) m3.insert(i, i * 10);
+
+    // All three have the same len + same key/value pairs.
+    assert(m1.len() == m2.len() && m2.len() == m3.len() && m1.len() == 5u);
+    for (int k = 1; k <= 5; ++k) {
+        auto v1 = m1.get(k);
+        auto v2 = m2.get(k);
+        auto v3 = m3.get(k);
+        assert(v1.is_some() && v2.is_some() && v3.is_some());
+        assert(v1.unwrap() == v2.unwrap());
+        assert(v2.unwrap() == v3.unwrap());
+        assert(v1.unwrap() == k * 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet insertion order independence.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_insert_order_independence_unstubbed") {
+    auto s1 = make_set<int>();
+    for (int i = 1; i <= 5; ++i) s1.insert(i);
+
+    auto s2 = make_set<int>();
+    for (int i = 5; i >= 1; --i) s2.insert(i);
+
+    auto s3 = make_set<int>();
+    for (int i : {3, 1, 5, 2, 4}) s3.insert(i);
+
+    assert(s1.len() == s2.len() && s2.len() == s3.len() && s1.len() == 5u);
+    for (int k = 1; k <= 5; ++k) {
+        assert(s1.contains(k));
+        assert(s2.contains(k));
+        assert(s3.contains(k));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: Negative keys work as int comparisons.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_negative_keys_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(-5, -50);
+    m.insert(0, 0);
+    m.insert(5, 50);
+    assert(m.len() == 3u);
+    // First key is the most negative.
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == -5);
+    }
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 5);
+    }
+}
+
