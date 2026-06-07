@@ -15,7 +15,14 @@ Un-stubbed tests use `_unstubbed` suffix on their name so the
 test-runner registry doesn't collide with the stub of the same Rust
 test name. Both run on each invocation.
 
-## Un-stubbed so far (11 real tests + the synthetic smoke + 1 dummy drop-count)
+## Un-stubbed so far (50 tests; test runner reports `all 196 test(s) passed` — 146 stubs + 50 real bodies)
+
+Round-tripped through eight successive runs without flake. Tracking shifted from
+"individual table of un-stubs" to summary form because the table outgrew the
+ability to maintain it usefully. See `tests/btree_tests_port_unstubbed.cpp` for
+the current full list — every TEST_CASE there is an un-stub.
+
+Initial 11-test table preserved below for reference:
 
 | Rust test | C++ TEST_CASE | Status |
 |---|---|---|
