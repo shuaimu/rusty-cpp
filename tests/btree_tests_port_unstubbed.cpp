@@ -1256,6 +1256,22 @@ TEST_CASE("set_test_ord_absence_unstubbed") {
     assert(s.is_empty());
 }
 
+// Iter::last() is a convenience for "consume the iter, return final item".
+// Exercises map.iter().last() — distinct from BTreeMap::last_key_value.
+TEST_CASE("smoke_iter_last_unstubbed") {
+    auto map = make_map<int, int>();
+    // Empty case: last() on an empty iter returns None.
+    assert(map.iter().last().is_none());
+
+    for (int i = 0; i < 5; ++i) map.insert(i, i * 10);
+    auto it = map.iter();
+    auto l = it.last();
+    assert(l.is_some());
+    auto t = std::move(l).unwrap();
+    assert(std::get<0>(t) == 4);
+    assert(std::get<1>(t) == 40);
+}
+
 // Sanity: insert returns true on novel keys, false on duplicates.
 TEST_CASE("set_test_insert_returns_unstubbed") {
     auto s = make_set<int>();
