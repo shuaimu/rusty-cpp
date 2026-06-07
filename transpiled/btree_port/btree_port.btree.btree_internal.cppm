@@ -4828,7 +4828,11 @@ struct NodeRef {
             return this->find_leaf_edges_spanning_range(std::move(range));
         }
     }
-    LazyLeafRange<marker::Immut, K, V> full_range() const {
+    LazyLeafRange<BorrowType, K, V> full_range() const {
+        // B-into-iter fix: was hardcoded as LazyLeafRange<marker::Immut, K, V>
+        // even when BorrowType is marker::Dying / marker::Mut etc. The
+        // underlying free fn preserves the borrow, so the return type has
+        // to follow.
         return ::btree_port::btree::btree_internal::full_range(std::move((*this)), std::move((*this)));
     }
     Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> first_leaf_edge() const {

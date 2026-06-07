@@ -5381,3 +5381,48 @@ TEST_CASE("set_smoke_pop_after_empty_unstubbed") {
     assert(s.pop_last().is_none());
 }
 
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_into_keys
+// Un-stubbed by the B-into-iter fix: into_iter()'s ManuallyDrop me.root
+// access now correctly derefs through (*me).root.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_into_keys_unstubbed") {
+    auto map = make_map<int, int>();
+    map.insert(1, 100);
+    map.insert(2, 200);
+    map.insert(3, 300);
+    auto keys = std::move(map).into_keys();
+    // Walk the iterator and collect.
+    int count = 0;
+    bool saw1 = false, saw2 = false, saw3 = false;
+    for (auto k = keys.next(); k.is_some(); k = keys.next()) {
+        int v = std::move(k).unwrap();
+        if (v == 1) saw1 = true;
+        else if (v == 2) saw2 = true;
+        else if (v == 3) saw3 = true;
+        ++count;
+    }
+    assert(count == 3);
+    assert(saw1 && saw2 && saw3);
+}
+
+// rustc map/tests.rs::test_into_values
+TEST_CASE("test_into_values_unstubbed") {
+    auto map = make_map<int, int>();
+    map.insert(1, 100);
+    map.insert(2, 200);
+    map.insert(3, 300);
+    auto values = std::move(map).into_values();
+    int count = 0;
+    bool saw100 = false, saw200 = false, saw300 = false;
+    for (auto v = values.next(); v.is_some(); v = values.next()) {
+        int x = std::move(v).unwrap();
+        if (x == 100) saw100 = true;
+        else if (x == 200) saw200 = true;
+        else if (x == 300) saw300 = true;
+        ++count;
+    }
+    assert(count == 3);
+    assert(saw100 && saw200 && saw300);
+}

@@ -5904,11 +5904,11 @@ return std::move(v);
             return std::make_tuple(ExtractIfInner<K, V, R>{.length = this->length, .dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>{rusty::None}, .cur_leaf_edge = rusty::Option<btree_internal::Handle<btree_internal::NodeRef<marker::Mut, K, V, marker::Leaf>, marker::Edge>>{rusty::None}, .range = std::move(range)}, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
         }
     }
-    IntoKeys<K, V, A> into_keys() {
-        return IntoKeys<K, V, A>{.inner = this->into_iter()};
+    IntoKeys<K, V, A> into_keys() && {
+        return IntoKeys<K, V, A>{.inner = std::move(*this).into_iter()};
     }
-    IntoValues<K, V, A> into_values() {
-        return IntoValues<K, V, A>{.inner = this->into_iter()};
+    IntoValues<K, V, A> into_values() && {
+        return IntoValues<K, V, A>{.inner = std::move(*this).into_iter()};
     }
     template<typename I>
     static BTreeMap<K, V, A> bulk_build_from_sorted_iter(I iter, A alloc) {
@@ -5917,14 +5917,18 @@ return std::move(v);
         root.bulk_push(__btree_port_make_dedup<K, V>(rusty::iter(std::move(iter))), &length, rusty::clone(alloc));
         return BTreeMap<K, V, A>(rusty::Option<btree_internal::Root<K, V>>(std::move(root)), std::move(length), rusty::mem::manually_drop_new(std::move(alloc)), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{});
     }
-    IntoIter into_iter() const {
+    IntoIter into_iter() && {
+        // B-into-iter fix: was `const` but body moves *this — incompatible.
+        // Switch to `&&` qualifier (matches Rust's `pub fn into_iter(self)`).
+        // Also fix `me.root` → `(*me).root` to deref through the
+        // ManuallyDrop wrapper.
         auto me = rusty::mem::manually_drop_new(std::move((*this)));
-        if (auto&& _iflet_scrutinee = me.root.take(); _iflet_scrutinee.is_some()) {
+        if (auto&& _iflet_scrutinee = (*me).root.take(); _iflet_scrutinee.is_some()) {
             decltype(auto) root = _iflet_scrutinee.unwrap();
             auto full_range = root.into_dying().full_range();
-            return IntoIter(std::move(full_range), std::move(me.length), me.alloc.take());
+            return IntoIter(std::move(full_range), std::move((*me).length), (*me).alloc.take());
         } else {
-            return IntoIter(btree_internal::LazyLeafRange<marker::Dying, K, V>::none(), static_cast<size_t>(0), me.alloc.take());
+            return IntoIter(btree_internal::LazyLeafRange<marker::Dying, K, V>::none(), static_cast<size_t>(0), (*me).alloc.take());
         }
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
