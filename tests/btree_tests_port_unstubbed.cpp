@@ -1690,3 +1690,241 @@ TEST_CASE("set_test_extend_ref_manual_unstubbed") {
     assert(a.len() == 6u);
     for (int x : {1, 2, 3, 4, 5, 6}) assert(a.contains(x));
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_get_key_value (continuation) — covers the
+// remove path after get_key_value. Already exercised by smoke + entry
+// tests but consolidated into a single round-trip here.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_get_key_value_remove_unstubbed") {
+    auto map = make_map<int, int>();
+    map.insert(1, 10);
+    map.insert(2, 20);
+    map.insert(3, 30);
+    // Verify get_key_value succeeds for present keys.
+    {
+        auto kv = map.get_key_value(2);
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 2);
+        assert(std::get<1>(t) == 20);
+    }
+    // Remove and re-check.
+    {
+        auto removed = map.remove(2);
+        assert(removed.is_some());
+        assert(std::move(removed).unwrap() == 20);
+    }
+    assert(map.get_key_value(2).is_none());
+    // 1 and 3 unaffected.
+    {
+        auto kv = map.get_key_value(1);
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+    {
+        auto kv = map.get_key_value(3);
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 3);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: pop_first/pop_last alternation drains the map in order.
+// Combines previously-translated tests into a single sequence covering
+// all 4 elements pulled from both ends, then re-empty.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_pop_alternating_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 6; ++i) m.insert(i, i * 10);
+    assert(m.len() == 6u);
+
+    {  // 1
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 10);
+    }
+    {  // 6
+        auto kv = m.pop_last();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 6);
+        assert(std::get<1>(t) == 60);
+    }
+    {  // 2
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 2);
+        assert(std::get<1>(t) == 20);
+    }
+    {  // 5
+        auto kv = m.pop_last();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 5);
+        assert(std::get<1>(t) == 50);
+    }
+    {  // 3
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 3);
+        assert(std::get<1>(t) == 30);
+    }
+    {  // 4
+        auto kv = m.pop_last();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 4);
+        assert(std::get<1>(t) == 40);
+    }
+    assert(m.is_empty());
+    assert(m.pop_first().is_none());
+    assert(m.pop_last().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: re-insert after pop. Ensures pop_first/pop_last don't leave
+// the tree in a bad state for subsequent inserts.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_pop_then_insert_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    m.pop_first();  // removes 0
+    m.pop_last();   // removes 4
+    assert(m.len() == 3u);
+    m.insert(0, 100);  // re-add the popped key
+    m.insert(4, 400);
+    assert(m.len() == 5u);
+    {
+        auto v = m.get(0);
+        assert(v.is_some());
+        assert(v.unwrap() == 100);
+    }
+    {
+        auto v = m.get(4);
+        assert(v.is_some());
+        assert(v.unwrap() == 400);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc set/tests.rs::test_remove (longer drain). Repeats the original
+// pattern but with a 10-element set to walk the height-0 boundary.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_test_remove_drain_unstubbed") {
+    auto x = make_set<int>();
+    for (int i = 1; i <= 10; ++i) assert(x.insert(i) == true);
+    assert(x.len() == 10u);
+    // Drain by removing every key once; second remove of same key fails.
+    for (int i = 1; i <= 10; ++i) {
+        assert(x.remove(i) == true);
+        assert(x.remove(i) == false);
+    }
+    assert(x.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: contains_key on size 0/1/many. Tests the simple contains_key
+// trait method beyond what existing tests cover.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_contains_key_progression_unstubbed") {
+    auto m = make_map<int, int>();
+    // Empty.
+    assert(!m.contains_key(0));
+    assert(!m.contains_key(1));
+    // Single key.
+    m.insert(5, 50);
+    assert(m.contains_key(5));
+    assert(!m.contains_key(4));
+    assert(!m.contains_key(6));
+    // Many keys.
+    for (int i = 0; i < 10; ++i) m.insert(i, i * 10);
+    for (int i = 0; i < 10; ++i) assert(m.contains_key(i));
+    assert(!m.contains_key(10));
+    assert(!m.contains_key(-1));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_first_last_entry (key()/remove() variant)
+// Already exists as test_first_last_entry_unstubbed; this variant
+// exercises remove() (the V-only variant) alongside remove_entry().
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_first_last_entry_remove_v_unstubbed") {
+    auto a = make_map<int, int>();
+    a.insert(1, 100);
+    a.insert(2, 200);
+    a.insert(3, 300);
+    assert(a.len() == 3u);
+    // first_entry().remove() returns just the value.
+    {
+        auto fe = a.first_entry();
+        assert(fe.is_some());
+        int v = std::move(fe).unwrap().remove();
+        assert(v == 100);
+    }
+    assert(a.len() == 2u);
+    // last_entry().remove() returns just the value.
+    {
+        auto le = a.last_entry();
+        assert(le.is_some());
+        int v = std::move(le).unwrap().remove();
+        assert(v == 300);
+    }
+    assert(a.len() == 1u);
+    // Remaining single key.
+    {
+        auto v = a.get(2);
+        assert(v.is_some());
+        assert(v.unwrap() == 200);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: entry() on present and absent keys, exercising the Entry's
+// index() discriminant. Vacant=0, Occupied=1.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_entry_discriminant_unstubbed") {
+    auto m = make_map<int, int>();
+    // Empty: any key → Vacant.
+    {
+        auto e = m.entry(1);
+        assert(e.index() == 0);  // Vacant
+    }
+    m.insert(1, 10);
+    // Present key → Occupied.
+    {
+        auto e = m.entry(1);
+        assert(e.index() == 1);  // Occupied
+    }
+    // Absent key → Vacant.
+    {
+        auto e = m.entry(2);
+        assert(e.index() == 0);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet pop_first/pop_last on empty. Covers the None-return
+// path which was previously exercised only indirectly.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_pop_empty_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.pop_first().is_none());
+    assert(s.pop_last().is_none());
+    s.insert(42);
+    assert(s.len() == 1u);
+    {
+        auto v = s.pop_first();
+        assert(v.is_some());
+        assert(std::move(v).unwrap() == 42);
+    }
+    assert(s.is_empty());
+    assert(s.pop_first().is_none());
+    assert(s.pop_last().is_none());
+}
