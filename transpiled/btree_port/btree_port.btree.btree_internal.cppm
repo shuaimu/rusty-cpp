@@ -4593,7 +4593,7 @@ struct NodeRef {
             __idx
         );
     }
-    std::add_pointer_t<V> push(K key, V val) {
+    V& push(K key, V val) {
         // @unsafe
         {
             return this->push_with_handle(std::move(key), std::move(val)).into_val_mut();

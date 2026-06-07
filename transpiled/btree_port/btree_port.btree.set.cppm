@@ -4684,7 +4684,7 @@ struct BTreeSet {
         return rusty::cmp::cmp(this->map, other.map);
     }
     BTreeSet<T, A> clone() const {
-        return BTreeSet<T, A>(rusty::clone(this->map));
+        return BTreeSet<T, A>(this->map.clone());
     }
     void clone_from(const BTreeSet<T, A>& source) {
         this->map.clone_from(source.map);

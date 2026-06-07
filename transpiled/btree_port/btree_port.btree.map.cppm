@@ -5543,10 +5543,10 @@ return std::move(out_tree); }(); } if (rusty::detail::deref_if_pointer(_m).index
         in_edge = kv.right_edge();
         auto k_shadow1 = rusty::clone(((rusty::detail::deref_if_pointer_like(k))));
         const auto v_shadow1 = rusty::clone(((rusty::detail::deref_if_pointer_like(v))));
-        const auto subtree = __self(__self, in_edge.descend(), rusty::clone(alloc));
-        auto [subroot, sublength] = rusty::detail::deref_if_pointer_like([&]() { const auto subtree_shadow1 = rusty::mem::manually_drop_new(std::move(subtree));
-auto root = rusty::ptr::read(&subtree_shadow1.root);
-auto length = std::move(subtree_shadow1.length);
+        auto subtree = __self(__self, in_edge.descend(), rusty::clone(alloc));
+        auto [subroot, sublength] = rusty::detail::deref_if_pointer_like([&]() { auto subtree_shadow1 = rusty::mem::manually_drop_new(std::move(subtree));
+auto root = rusty::ptr::read(&(*subtree_shadow1).root);
+auto length = std::move((*subtree_shadow1).length);
 return std::make_tuple(std::move(root), std::move(length)); }());
         out_node.push(std::move(k_shadow1), std::move(v_shadow1), subroot.unwrap_or_else([&]() { return btree_internal::Root<K, V>::new_(rusty::clone(alloc)); }));
         out_tree.length += 1 + rusty::detail::deref_if_pointer_like(sublength);

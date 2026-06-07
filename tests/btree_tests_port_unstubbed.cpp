@@ -3320,12 +3320,9 @@ TEST_CASE("smoke_iter_size_hint_exact_unstubbed") {
     assert(lo == 5u);
 }
 
-// BLOCKED: smoke_clone_independence + smoke_eq_reflexive. These
-// require an LHS variable `auto c = m.clone()`, but the BTreeMap::clone
-// path traverses rusty::clone(this->map) at set.cppm:4687 (and similar
-// internal sites) which fails the copy-constructibility static assert.
-// The existing test_clone variant works only because the assert macro
-// (NDEBUG) elides the actual call.
+// UNBLOCKED: smoke_clone_independence + smoke_eq_reflexive. Covered by
+// smoke_map_clone_unstubbed / smoke_set_clone_unstubbed at end of file
+// (assigns clone result to LHS variable, then verifies independence).
 
 // ─────────────────────────────────────────────────────────────────────
 // Smoke: Iter::clone allows reusing a starting position.
@@ -4608,10 +4605,9 @@ TEST_CASE("smoke_iter_back_drains_unstubbed") {
     assert(it.next_back().is_none());
 }
 
-// BLOCKED: smoke_clone_after_clear + set variant. The clone() body
-// triggers B-into-iter (ManuallyDrop missing root/length deref) on the
-// non-empty branch even when the runtime map happens to be empty —
-// template instantiation doesn't see that.
+// UNBLOCKED: smoke_clone_after_clear (formerly the ManuallyDrop deref
+// blocker is gone). Covered now by the cloned-and-mutated branches in
+// smoke_map_clone_unstubbed / smoke_set_clone_unstubbed below.
 
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_borrow (substitute with int keys).
@@ -6093,14 +6089,15 @@ TEST_CASE("smoke_first_last_entry_unstubbed") {
     assert(m.len() == 3u);
 }
 
-// BTreeMap::clone / BTreeSet::clone: BLOCKED. Y-combinator clone_subtree
-// body has cascading compile errors:
-//   - ManuallyDrop<BTreeMap>.root / .length access needs deref but body
-//     accesses directly (subtree_shadow1.root / subtree_shadow1.length)
-//   - push_internal_level / push template-arg deduction stays unresolved
-//   - rusty::clone(BTreeMap) trips std::is_copy_constructible because
-//     ManuallyDrop fields aren't copyable (need to use m.clone() member,
-//     but clone() body fails to compile)
+// BTreeMap::clone / BTreeSet::clone: UNBLOCKED. The Y-combinator clone_subtree
+// body has been fixed by hand-porting the ManuallyDrop deref:
+//   - subtree_shadow1.root → (*subtree_shadow1).root
+//   - subtree_shadow1.length → (*subtree_shadow1).length
+//   - const auto subtree → auto subtree (so std::move works through deleted copy ctor)
+//   - BTreeSet::clone now calls this->map.clone() member, not rusty::clone(this->map)
+//   - LeafNode::push() return type changed from V* to V& (matches Rust &mut V; the
+//     emitted body returned an lvalue, so V* path failed to compile).
+// See smoke_map_clone_unstubbed and friends below.
 
 // rustc map/tests.rs::test_iter_min_max — Iter::min() and Iter::max() return
 // the first/last keys. Built-in iter methods.
@@ -7623,4 +7620,79 @@ TEST_CASE("test_iter_h2_at_1000_rev_unstubbed") {
         ++count;
     }
     assert(count == 1000);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke tests for BTreeMap::clone() and BTreeSet::clone() — the
+// Y-combinator clone body in btree_port.btree.map.cppm. Previously
+// BLOCKED on ManuallyDrop deref bug; now fixed.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_map_clone_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 100);
+    auto c = m.clone();
+    assert(c.len() == m.len());
+    for (int i = 1; i <= 5; ++i) {
+        auto v = c.get(i);
+        assert(v.is_some());
+        assert(v.unwrap() == i * 100);
+    }
+    // Independence: mutating clone leaves original untouched.
+    c.insert(99, 9900);
+    assert(c.len() == 6u);
+    assert(m.len() == 5u);
+    assert(!m.contains_key(99));
+}
+
+TEST_CASE("smoke_set_clone_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 1; i <= 5; ++i) s.insert(i);
+    auto c = s.clone();
+    assert(c.len() == s.len());
+    for (int i = 1; i <= 5; ++i) {
+        assert(c.contains(i));
+    }
+    c.insert(99);
+    assert(c.len() == 6u);
+    assert(s.len() == 5u);
+    assert(!s.contains(99));
+}
+
+// h1 clone — exercises the Internal-node branch of the Y-combinator
+// (~30 entries forces tree height 1).
+TEST_CASE("smoke_map_clone_h1_unstubbed") {
+    auto m = make_map<int, int>();
+    const int N = 30;
+    for (int i = 0; i < N; ++i) m.insert(i, i * 10);
+    auto c = m.clone();
+    assert(c.len() == m.len());
+    assert(c.len() == static_cast<size_t>(N));
+    for (int i = 0; i < N; ++i) {
+        auto v = c.get(i);
+        assert(v.is_some());
+        assert(v.unwrap() == i * 10);
+    }
+    // Independence.
+    c.insert(1000, 99999);
+    assert(c.len() == static_cast<size_t>(N + 1));
+    assert(m.len() == static_cast<size_t>(N));
+}
+
+// h2 clone — ~150 entries forces tree height 2 (multi-level
+// Internal-Internal-Leaf path through the Y-combinator).
+TEST_CASE("smoke_map_clone_h2_unstubbed") {
+    auto m = make_map<int, int>();
+    const int N = 150;
+    for (int i = 0; i < N; ++i) m.insert(i, i * 7);
+    auto c = m.clone();
+    assert(c.len() == m.len());
+    assert(c.len() == static_cast<size_t>(N));
+    for (int i = 0; i < N; ++i) {
+        auto v = c.get(i);
+        assert(v.is_some());
+        assert(v.unwrap() == i * 7);
+    }
+    assert(c.contains_key(0));
+    assert(c.contains_key(N - 1));
+    assert(!c.contains_key(N));
 }
