@@ -3208,3 +3208,95 @@ TEST_CASE("smoke_negative_keys_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet negative values.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_negative_values_unstubbed") {
+    auto s = make_set<int>();
+    s.insert(-3);
+    s.insert(0);
+    s.insert(3);
+    s.insert(-10);
+    s.insert(10);
+    assert(s.len() == 5u);
+    for (int v : {-10, -3, 0, 3, 10}) assert(s.contains(v));
+    assert(!s.contains(-5));
+    assert(!s.contains(5));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().size_hint() at MIN_INSERTS_HEIGHT_1.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_size_hint_at_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) m.insert(i, i);
+    auto it = m.iter();
+    auto sh = it.size_hint();
+    assert(std::get<0>(sh) == static_cast<size_t>(size));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: empty-then-grow sequence covering each insert boundary.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_empty_to_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    assert(m.is_empty());
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        const size_t before = m.len();
+        assert(m.insert(i, i).is_none());
+        assert(m.len() == before + 1);
+    }
+    assert(m.len() == MIN_INSERTS_HEIGHT_1);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet sized grow.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_empty_to_grow_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        const size_t before = s.len();
+        assert(s.insert(i) == true);
+        assert(s.len() == before + 1);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insertion of dups doesn't grow.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_dup_no_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 10);
+    const size_t start = m.len();
+    for (int round = 0; round < 10; ++round) {
+        auto old = m.insert(1, round);
+        assert(old.is_some());
+    }
+    assert(m.len() == start);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().size_hint() upper bound = lower bound for
+// ExactSizeIterator.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_size_hint_exact_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    auto it = m.iter();
+    auto sh = it.size_hint();
+    const size_t lo = std::get<0>(sh);
+    auto up_opt = std::get<1>(sh);
+    assert(up_opt.is_some());
+    const size_t up = up_opt.unwrap();
+    assert(lo == up);
+    assert(lo == 5u);
+}
+
+// BLOCKED: smoke_clone_independence + smoke_eq_reflexive. These
+// require an LHS variable `auto c = m.clone()`, but the BTreeMap::clone
+// path traverses rusty::clone(this->map) at set.cppm:4687 (and similar
+// internal sites) which fails the copy-constructibility static assert.
+// The existing test_clone variant works only because the assert macro
+// (NDEBUG) elides the actual call.
+
