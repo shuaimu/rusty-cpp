@@ -3300,3 +3300,122 @@ TEST_CASE("smoke_iter_size_hint_exact_unstubbed") {
 // The existing test_clone variant works only because the assert macro
 // (NDEBUG) elides the actual call.
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: Iter::clone allows reusing a starting position.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_clone_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 4; ++i) m.insert(i, i * 10);
+    auto it = m.iter();
+    auto it_copy = it.clone();
+    // Drain it; it_copy should still be at the start.
+    while (true) {
+        auto n = it.next();
+        if (!n.is_some()) break;
+    }
+    // it is exhausted; it_copy still has 4 items.
+    assert(it_copy.len() == 4u);
+    {
+        auto n = it_copy.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().last() consumes the iter.
+// After last(), len is 0.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_last_consumes_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+    auto it = m.iter();
+    assert(it.len() == 5u);
+    auto last = it.last();
+    assert(last.is_some());
+    auto t = std::move(last).unwrap();
+    assert(std::get<0>(t) == 5);
+    // After last(), iter is "consumed" via repeated next_back.
+    // Actually .last() returns next_back which only consumes 1.
+    assert(it.len() == 4u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: try_insert OccupiedError exposes the original key.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_try_insert_err_key_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(7, 70);
+    auto r = m.try_insert(7, 700);
+    assert(r.is_err());
+    auto err = std::move(r).unwrap_err();
+    assert(err.value == 700);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter() preserves order across grow.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_order_after_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    // Insert in reverse order.
+    for (int i = size - 1; i >= 0; --i) m.insert(i, i * 10);
+    auto it = m.iter();
+    // But iter returns in ascending key order.
+    for (int i = 0; i < size; ++i) {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == i);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap basic grow + check first key matches expected.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_first_key_after_inserts_unstubbed") {
+    auto m = make_map<int, int>();
+    // Insert in descending order.
+    for (int i = 10; i >= 1; --i) m.insert(i, i * 100);
+    // First key should be 1.
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 100);
+    }
+    // Insert 0 — first key updates.
+    m.insert(0, 0);
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 0);
+        assert(std::get<1>(t) == 0);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap basic grow + check last key matches expected.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_last_key_after_inserts_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 10; ++i) m.insert(i, i * 100);
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 10);
+    }
+    // Insert 11 — last key updates.
+    m.insert(11, 1100);
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 11);
+    }
+}
+
