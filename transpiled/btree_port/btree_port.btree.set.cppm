@@ -4720,10 +4720,11 @@ struct BTreeSet {
     }
     template<typename Q>
     rusty::Option<const T&> get(const Q& value) const {
-        return this->map.get_key_value(value).map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
+        // Same const-ref fix as Keys::next: return `-> const T&` so we
+        // don't decay an lvalue-ref to const T&& via std::move.
+        return this->map.get_key_value(value).map([&](auto&& _destruct_param0) -> const T& {
+            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+        });
     }
     bool is_disjoint(const BTreeSet<T, A>& other) const {
         return this->intersection(other).next().is_none();
@@ -4735,16 +4736,14 @@ return std::move(k);
         return other.is_subset((*this));
     }
     rusty::Option<const T&> first() const {
-        return this->map.first_key_value().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
+        return this->map.first_key_value().map([&](auto&& _destruct_param0) -> const T& {
+            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+        });
     }
     rusty::Option<const T&> last() const {
-        return this->map.last_key_value().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
+        return this->map.last_key_value().map([&](auto&& _destruct_param0) -> const T& {
+            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+        });
     }
     rusty::Option<T> pop_first() {
         return this->map.pop_first().map([&](auto&& kv) { return std::move(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(kv)); });

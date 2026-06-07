@@ -2522,9 +2522,26 @@ TEST_CASE("set_smoke_take_unstubbed") {
     assert(s.take(1).is_none());  // already taken
 }
 
-// BLOCKED: set_smoke_get. BTreeSet::get(value) chains map.get_key_value
-// followed by Option<tuple<K&,V&>>::map → Option<const T&>, which trips
-// the same return-type conversion bug as Keys::next (set.cppm:4723).
+// BTreeSet::get(value) — un-stubbed by the const-T& return fix on
+// BTreeSet::get (mirrors the Keys::next const-ref fix).
+TEST_CASE("set_smoke_get_unstubbed") {
+    auto s = make_set<int>();
+    s.insert(3);
+    s.insert(7);
+    s.insert(15);
+    {
+        auto g = s.get(7);
+        assert(g.is_some());
+        assert(g.unwrap() == 7);
+    }
+    {
+        auto g = s.get(3);
+        assert(g.is_some());
+        assert(g.unwrap() == 3);
+    }
+    assert(s.get(8).is_none());
+    assert(s.get(0).is_none());
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Smoke: BTreeMap::contains_key on a longer key range. Walks past the
@@ -2540,11 +2557,21 @@ TEST_CASE("smoke_contains_key_large_unstubbed") {
     }
 }
 
-// BLOCKED: set_smoke_first_last_wide. BTreeSet::first/last each map a
-// (k, v) tuple to just k, hitting the same Option<tuple<K&,V&>> →
-// Option<const T&> conversion bug at set.cppm:4737/4743.
-// (The existing set_test_first_last works only because NDEBUG hides
-// every actual call inside assert().)
+// BTreeSet::first()/last() — un-stubbed by the same const-T& fix.
+TEST_CASE("set_smoke_first_last_wide_unstubbed") {
+    auto s = make_set<int>();
+    for (int v : {5, 2, 9, 1, 7, 3, 8, 4, 6}) s.insert(v);
+    {
+        auto f = s.first();
+        assert(f.is_some());
+        assert(f.unwrap() == 1);
+    }
+    {
+        auto l = s.last();
+        assert(l.is_some());
+        assert(l.unwrap() == 9);
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // Smoke: BTreeMap::get_mut Some/None for a wider range.
@@ -5608,6 +5635,30 @@ TEST_CASE("smoke_map_values_iter_next_back_unstubbed") {
         assert(v.unwrap() == 100);
     }
     assert(vs.len() == 2u);
+}
+
+// Smoke test of BTreeSet iter as iterator-of-T (was BLOCKED with stale
+// comment at top of file — the Keys::next const-ref fix unblocked it).
+TEST_CASE("set_smoke_iter_forward_unstubbed") {
+    auto s = make_set<int>();
+    for (int v : {3, 1, 4}) s.insert(v);
+    auto it = s.iter();
+    {
+        auto v = it.next();
+        assert(v.is_some());
+        assert(v.unwrap() == 1);
+    }
+    {
+        auto v = it.next();
+        assert(v.is_some());
+        assert(v.unwrap() == 3);
+    }
+    {
+        auto v = it.next();
+        assert(v.is_some());
+        assert(v.unwrap() == 4);
+    }
+    assert(it.next().is_none());
 }
 
 // BTreeSet::iter().next_back() — forwards to Keys::next_back, same path.
