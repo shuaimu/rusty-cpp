@@ -4127,3 +4127,119 @@ TEST_CASE("smoke_get_key_value_all_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: try_insert returns Ok with the just-inserted value reference.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_try_insert_ok_returns_inserted_unstubbed") {
+    auto m = make_map<int, int>();
+    {
+        auto r = m.try_insert(1, 100);
+        assert(r.is_ok());
+        assert(std::move(r).unwrap() == 100);
+    }
+    {
+        auto r = m.try_insert(2, 200);
+        assert(r.is_ok());
+        assert(std::move(r).unwrap() == 200);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap construction with new_in().
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_new_in_unstubbed") {
+    auto m = BTreeMap<int, int>::new_in(::rusty::alloc::Global{});
+    assert(m.is_empty());
+    assert(m.len() == 0u);
+    m.insert(1, 10);
+    assert(m.len() == 1u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet construction with new_in().
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_new_in_unstubbed") {
+    auto s = BTreeSet<int>::new_in(::rusty::alloc::Global{});
+    assert(s.is_empty());
+    s.insert(42);
+    assert(s.contains(42));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap mass insert into single leaf.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_mass_insert_single_leaf_unstubbed") {
+    auto m = make_map<int, int>();
+    for (size_t i = 0; i < NODE_CAPACITY; ++i) {
+        assert(m.insert(static_cast<int>(i), static_cast<int>(i)).is_none());
+    }
+    assert(m.len() == NODE_CAPACITY);
+    // Each key retrievable.
+    for (size_t i = 0; i < NODE_CAPACITY; ++i) {
+        auto v = m.get(static_cast<int>(i));
+        assert(v.is_some());
+        assert(v.unwrap() == static_cast<int>(i));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet mass insert into single leaf.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_mass_insert_single_leaf_unstubbed") {
+    auto s = make_set<int>();
+    for (size_t i = 0; i < NODE_CAPACITY; ++i) {
+        assert(s.insert(static_cast<int>(i)) == true);
+    }
+    assert(s.len() == NODE_CAPACITY);
+    for (size_t i = 0; i < NODE_CAPACITY; ++i) {
+        assert(s.contains(static_cast<int>(i)));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter() drains 1 then 1 then 1.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_partial_drain_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+    auto it = m.iter();
+    assert(it.len() == 5u);
+    it.next();
+    assert(it.len() == 4u);
+    it.next_back();
+    assert(it.len() == 3u);
+    it.next();
+    assert(it.len() == 2u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().next() on growing-then-shrinking map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_after_remove_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+    m.remove(3);  // delete key 3
+    auto it = m.iter();
+    for (int expected : {1, 2, 4, 5}) {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == expected);
+    }
+    assert(it.next().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet remove returns false on absent.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_remove_absent_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.remove(1) == false);
+    s.insert(1);
+    assert(s.remove(1) == true);
+    assert(s.remove(1) == false);  // double remove
+    for (int v : {2, 3, 4}) {
+        assert(s.remove(v) == false);
+    }
+}
+
