@@ -4493,3 +4493,96 @@ TEST_CASE("smoke_large_keys_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter().min on a max-spanning map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_min_extreme_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1000000, 1);
+    m.insert(-1000000, -1);
+    {
+        auto mi = m.iter().min();
+        assert(mi.is_some());
+        auto t = std::move(mi).unwrap();
+        assert(std::get<0>(t) == -1000000);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter().max on a max-spanning map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_max_extreme_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1000000, 1);
+    m.insert(-1000000, -1);
+    {
+        auto mx = m.iter().max();
+        assert(mx.is_some());
+        auto t = std::move(mx).unwrap();
+        assert(std::get<0>(t) == 1000000);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet len matches after clear+refill.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_len_after_clear_refill_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 5; ++i) s.insert(i);
+    assert(s.len() == 5u);
+    s.clear();
+    for (int i = 0; i < 7; ++i) s.insert(i);
+    assert(s.len() == 7u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap len after clear+refill.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_len_after_clear_refill_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    m.clear();
+    for (int i = 0; i < 9; ++i) m.insert(i, i * 10);
+    assert(m.len() == 9u);
+    for (int i = 0; i < 9; ++i) {
+        auto v = m.get(i);
+        assert(v.is_some() && v.unwrap() == i * 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() drained at exactly len.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_drains_at_len_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 7; ++i) m.insert(i, i);
+    auto it = m.iter();
+    for (int i = 0; i < 7; ++i) {
+        auto n = it.next();
+        assert(n.is_some());
+    }
+    assert(it.len() == 0u);
+    assert(it.next().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter() back drain.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_back_drains_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    auto it = m.iter();
+    for (int i = 0; i < 5; ++i) {
+        auto n = it.next_back();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 4 - i);
+    }
+    assert(it.next_back().is_none());
+}
+
+// BLOCKED: smoke_clone_after_clear + set variant. The clone() body
+// triggers B-into-iter (ManuallyDrop missing root/length deref) on the
+// non-empty branch even when the runtime map happens to be empty —
+// template instantiation doesn't see that.
+
