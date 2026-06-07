@@ -5905,3 +5905,29 @@ TEST_CASE("test_iter_mixed_unstubbed") {
     assert(it.next().is_none());
     assert(it.next_back().is_none());
 }
+
+// test_id_based_append / set_test_append: BLOCKED. BTreeMap::append() body
+// calls root.append_from_sorted_iters() with a signature mismatch — that
+// helper's template-arg deduction never resolves. Held until that helper
+// is hand-ported.
+
+// rustc set/tests.rs::set_test_zip — iter().zip(other.iter()) semantics.
+// We simulate zip manually since rusty::zip may not be available on both
+// iterators directly. This validates two iter() walks line up step-by-step.
+TEST_CASE("set_test_zip_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3, 4, 5}) a.insert(v);
+    for (int v : {10, 20, 30, 40, 50}) b.insert(v);
+    auto ita = a.iter();
+    auto itb = b.iter();
+    int count = 0;
+    while (true) {
+        auto va = ita.next();
+        auto vb = itb.next();
+        if (!va.is_some() || !vb.is_some()) break;
+        assert(va.unwrap() * 10 == vb.unwrap());
+        ++count;
+    }
+    assert(count == 5);
+}
