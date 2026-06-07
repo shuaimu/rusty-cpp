@@ -6846,3 +6846,490 @@ TEST_CASE("smoke_clear_50_unstubbed") {
     m.clear();
     assert(m.is_empty());
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Sequential Entry chaining across multiple distinct keys.
+// Mirrors test_entry but walks several keys to exercise the Entry path
+// repeatedly: or_insert then and_modify then or_default-on-occupied.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_entry_sequential_keys_unstubbed") {
+    auto map = make_map<int, int>();
+    // First pass: or_insert seeds keys 1..=5.
+    for (int k = 1; k <= 5; ++k) {
+        auto& v = map.entry(k).or_insert(k * 10);
+        assert(v == k * 10);
+    }
+    assert(map.len() == 5u);
+    // Second pass: and_modify doubles each.
+    for (int k = 1; k <= 5; ++k) {
+        map.entry(k).and_modify([](int& v) { v *= 2; });
+    }
+    for (int k = 1; k <= 5; ++k) {
+        auto g = map.get(k);
+        assert(g.is_some() && g.unwrap() == k * 20);
+    }
+    // Third pass: or_insert on already-occupied keys should not change.
+    for (int k = 1; k <= 5; ++k) {
+        auto& v = map.entry(k).or_insert(-1);
+        assert(v == k * 20);  // unchanged
+    }
+    assert(map.len() == 5u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Map equality check via iter — manually walk two maps built in
+// different insertion orders and verify they expose the same sorted
+// key-value sequence.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_map_iter_equality_unstubbed") {
+    auto a = make_map<int, int>();
+    auto b = make_map<int, int>();
+    // Different insertion order, same logical content.
+    for (int k : {3, 1, 4, 1, 5, 9, 2, 6}) a.insert(k, k * 10);
+    for (int k : {9, 6, 5, 4, 3, 2, 1}) b.insert(k, k * 10);
+    assert(a.len() == b.len());
+    auto ia = a.iter();
+    auto ib = b.iter();
+    while (true) {
+        auto na = ia.next();
+        auto nb = ib.next();
+        if (na.is_none() && nb.is_none()) break;
+        assert(na.is_some() && nb.is_some());
+        auto ta = std::move(na).unwrap();
+        auto tb = std::move(nb).unwrap();
+        assert(std::get<0>(ta) == std::get<0>(tb));
+        assert(std::get<1>(ta) == std::get<1>(tb));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Push/pop alternation: alternately insert and pop_first, verifying
+// the remaining state on each step.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_push_pop_alternation_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(10, 100);
+    m.insert(20, 200);
+    assert(m.len() == 2u);
+    {
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 10);
+        assert(std::get<1>(t) == 100);
+    }
+    assert(m.len() == 1u);
+    m.insert(5, 50);   // smaller than 20
+    assert(m.len() == 2u);
+    {
+        // pop_first should give 5 (sorted order).
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 5);
+        assert(std::get<1>(t) == 50);
+    }
+    {
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 20);
+    }
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Mixed insert+remove sequence with len-after-each-step assertions.
+// Drives the tree through several growth/shrink transitions.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_insert_remove_interleaved_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 1); assert(m.len() == 1u);
+    m.insert(2, 2); assert(m.len() == 2u);
+    m.insert(3, 3); assert(m.len() == 3u);
+    assert(m.remove(2).is_some()); assert(m.len() == 2u);
+    m.insert(4, 4); assert(m.len() == 3u);
+    m.insert(5, 5); assert(m.len() == 4u);
+    assert(m.remove(1).is_some()); assert(m.len() == 3u);
+    assert(m.remove(5).is_some()); assert(m.len() == 2u);
+    // Re-insert previously removed key.
+    m.insert(1, 11); assert(m.len() == 3u);
+    // Surviving keys: {1->11, 3->3, 4->4}.
+    {
+        auto g = m.get(1); assert(g.is_some() && g.unwrap() == 11);
+    }
+    {
+        auto g = m.get(3); assert(g.is_some() && g.unwrap() == 3);
+    }
+    {
+        auto g = m.get(4); assert(g.is_some() && g.unwrap() == 4);
+    }
+    assert(m.get(2).is_none());
+    assert(m.get(5).is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// iter() walk on map A combined with mutations on a separate map B.
+// Verifies that A's iterator state is unaffected by changes to B.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_iter_a_mutate_b_unstubbed") {
+    auto a = make_map<int, int>();
+    auto b = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) a.insert(i, i * 10);
+    auto it = a.iter();
+    // Walk first element of a's iter.
+    {
+        auto nx = it.next();
+        assert(nx.is_some());
+        auto t = std::move(nx).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+    // Mutate b: insert, remove, clear — should not affect a's iter.
+    b.insert(100, 1000);
+    b.insert(200, 2000);
+    b.remove(100);
+    assert(b.len() == 1u);
+    // Continue walking a.
+    for (int expected = 2; expected <= 5; ++expected) {
+        auto nx = it.next();
+        assert(nx.is_some());
+        auto t = std::move(nx).unwrap();
+        assert(std::get<0>(t) == expected);
+        assert(std::get<1>(t) == expected * 10);
+    }
+    assert(it.next().is_none());
+    // a still has all its keys.
+    assert(a.len() == 5u);
+    for (int i = 1; i <= 5; ++i) assert(a.contains_key(i));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Map with 30 entries: drive iter() forward, then verify keys()/values().
+// Slightly larger than typical (under the 50-entry safe threshold).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_30_entry_iter_keys_values_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 30; ++i) m.insert(i, i * 3);
+    assert(m.len() == 30u);
+    // Walk iter() and verify sorted order.
+    {
+        auto it = m.iter();
+        for (int i = 0; i < 30; ++i) {
+            auto nx = it.next();
+            assert(nx.is_some());
+            auto t = std::move(nx).unwrap();
+            assert(std::get<0>(t) == i);
+            assert(std::get<1>(t) == i * 3);
+        }
+        assert(it.next().is_none());
+    }
+    // keys() / values() exist and have proper len.
+    {
+        auto k = m.keys();
+        assert(k.len() == 30u);
+    }
+    {
+        auto v = m.values();
+        assert(v.len() == 30u);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// uint64_t keys: same semantics as int but exercises the codegen on a
+// different integer width.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_uint64_keys_unstubbed") {
+    auto m = make_map<uint64_t, int>();
+    m.insert(uint64_t{1ULL << 40}, 1);
+    m.insert(uint64_t{1ULL << 20}, 2);
+    m.insert(uint64_t{42}, 3);
+    assert(m.len() == 3u);
+    // first_key_value should be smallest (42).
+    {
+        auto fkv = m.first_key_value();
+        assert(fkv.is_some());
+        auto t = std::move(fkv).unwrap();
+        assert(std::get<0>(t) == uint64_t{42});
+        assert(std::get<1>(t) == 3);
+    }
+    // last_key_value should be largest (1<<40).
+    {
+        auto lkv = m.last_key_value();
+        assert(lkv.is_some());
+        auto t = std::move(lkv).unwrap();
+        assert(std::get<0>(t) == uint64_t{1ULL << 40});
+        assert(std::get<1>(t) == 1);
+    }
+    assert(m.contains_key(uint64_t{1ULL << 20}));
+    assert(!m.contains_key(uint64_t{0}));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// int8_t keys: tiny key width with negative values, exercises signed
+// ordering across the zero crossing.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_int8_keys_unstubbed") {
+    auto m = make_map<int8_t, int>();
+    m.insert(int8_t{5}, 50);
+    m.insert(int8_t{-3}, -30);
+    m.insert(int8_t{0}, 0);
+    m.insert(int8_t{-128}, -1280);
+    m.insert(int8_t{127}, 1270);
+    assert(m.len() == 5u);
+    {
+        auto fkv = m.first_key_value();
+        assert(fkv.is_some());
+        auto t = std::move(fkv).unwrap();
+        assert(std::get<0>(t) == int8_t{-128});
+    }
+    {
+        auto lkv = m.last_key_value();
+        assert(lkv.is_some());
+        auto t = std::move(lkv).unwrap();
+        assert(std::get<0>(t) == int8_t{127});
+    }
+    // Walk sorted: -128, -3, 0, 5, 127.
+    int8_t expected[] = {int8_t{-128}, int8_t{-3}, int8_t{0}, int8_t{5}, int8_t{127}};
+    auto it = m.iter();
+    for (int i = 0; i < 5; ++i) {
+        auto nx = it.next();
+        assert(nx.is_some());
+        auto t = std::move(nx).unwrap();
+        assert(std::get<0>(t) == expected[i]);
+    }
+    assert(it.next().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// std::string keys via std::move: exercises non-trivial K type with
+// move semantics through insert/get/contains.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_string_keys_unstubbed") {
+    auto m = make_map<std::string, int>();
+    {
+        std::string k1 = "apple";
+        m.insert(std::move(k1), 1);
+    }
+    {
+        std::string k2 = "banana";
+        m.insert(std::move(k2), 2);
+    }
+    {
+        std::string k3 = "cherry";
+        m.insert(std::move(k3), 3);
+    }
+    assert(m.len() == 3u);
+    assert(m.contains_key(std::string("apple")));
+    assert(m.contains_key(std::string("banana")));
+    assert(m.contains_key(std::string("cherry")));
+    assert(!m.contains_key(std::string("durian")));
+    {
+        auto g = m.get(std::string("banana"));
+        assert(g.is_some() && g.unwrap() == 2);
+    }
+    // First sorted key should be "apple".
+    {
+        auto fkv = m.first_key_value();
+        assert(fkv.is_some());
+        auto t = std::move(fkv).unwrap();
+        assert(std::get<0>(t) == "apple");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// BTreeSet: insert + take cycle. take() returns the removed element.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_test_insert_take_cycle_unstubbed") {
+    auto s = make_set<int>();
+    s.insert(10);
+    s.insert(20);
+    s.insert(30);
+    assert(s.len() == 3u);
+    // take returns Some(value) for present keys.
+    {
+        auto taken = s.take(20);
+        assert(taken.is_some());
+        assert(taken.unwrap() == 20);
+    }
+    assert(s.len() == 2u);
+    assert(!s.contains(20));
+    // take returns None for absent keys.
+    {
+        auto taken = s.take(99);
+        assert(taken.is_none());
+    }
+    assert(s.len() == 2u);
+    // Re-insert and take again.
+    s.insert(20);
+    assert(s.len() == 3u);
+    {
+        auto taken = s.take(20);
+        assert(taken.is_some() && taken.unwrap() == 20);
+    }
+    assert(s.len() == 2u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// BTreeSet: pop_first / pop_last alternation with 10 elements.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_test_pop_alternating_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 10; ++i) s.insert(i);
+    assert(s.len() == 10u);
+    // Alternate pop_first / pop_last and verify sorted order.
+    int lo = 0, hi = 9;
+    while (lo < hi) {
+        {
+            auto v = s.pop_first();
+            assert(v.is_some());
+            assert(v.unwrap() == lo);
+            ++lo;
+        }
+        if (lo >= hi) break;
+        {
+            auto v = s.pop_last();
+            assert(v.is_some());
+            assert(v.unwrap() == hi);
+            --hi;
+        }
+    }
+    // One element left in the middle.
+    if (!s.is_empty()) {
+        assert(s.len() == 1u);
+        auto first = s.first();
+        auto last = s.last();
+        assert(first.is_some() && last.is_some());
+        assert(first.unwrap() == last.unwrap());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// BTreeMap iter().clone() — exercise the Iter::clone() projection.
+// Walks the original to position 2, then clones and walks both.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_iter_clone_independent_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 100);
+    auto it1 = m.iter();
+    // Advance it1 by 2 steps.
+    {
+        auto a = it1.next();
+        assert(a.is_some());
+        auto t = std::move(a).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+    {
+        auto a = it1.next();
+        assert(a.is_some());
+        auto t = std::move(a).unwrap();
+        assert(std::get<0>(t) == 2);
+    }
+    // Clone it1; both should yield 3,4,5 independently.
+    auto it2 = it1.clone();
+    for (int expected = 3; expected <= 5; ++expected) {
+        auto a = it1.next();
+        assert(a.is_some());
+        auto t = std::move(a).unwrap();
+        assert(std::get<0>(t) == expected);
+    }
+    assert(it1.next().is_none());
+    // it2 should still walk 3,4,5.
+    for (int expected = 3; expected <= 5; ++expected) {
+        auto b = it2.next();
+        assert(b.is_some());
+        auto t = std::move(b).unwrap();
+        assert(std::get<0>(t) == expected);
+    }
+    assert(it2.next().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 20-entry map with bidirectional iter walk (next + next_back meeting
+// in the middle).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_iter_bidirectional_meet_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 20; ++i) m.insert(i, i);
+    auto it = m.iter();
+    int front_seen = 0, back_seen = 19;
+    int collected = 0;
+    while (collected < 20) {
+        if (collected % 2 == 0) {
+            auto nx = it.next();
+            assert(nx.is_some());
+            auto t = std::move(nx).unwrap();
+            assert(std::get<0>(t) == front_seen);
+            ++front_seen;
+        } else {
+            auto nx = it.next_back();
+            assert(nx.is_some());
+            auto t = std::move(nx).unwrap();
+            assert(std::get<0>(t) == back_seen);
+            --back_seen;
+        }
+        ++collected;
+    }
+    // Iterator is now exhausted.
+    assert(it.next().is_none());
+    assert(it.next_back().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// VacantEntry::insert via the discriminator path on multiple keys.
+// Builds the map purely via Entry API (no direct .insert()).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_vacant_insert_chain_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int k = 1; k <= 5; ++k) {
+        auto e = m.entry(k);
+        assert(e.index() == 0);  // Vacant
+        std::get<0>(e)._0.insert(k * 7);
+    }
+    assert(m.len() == 5u);
+    for (int k = 1; k <= 5; ++k) {
+        auto g = m.get(k);
+        assert(g.is_some() && g.unwrap() == k * 7);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// BTreeMap iter().min() / .max() on a 20-entry map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_iter_min_max_20_entries_unstubbed") {
+    auto m = make_map<int, int>();
+    // Insertion order randomized; min/max should still find correct endpoints.
+    for (int k : {7, 3, 11, 19, 1, 5, 9, 13, 17, 2, 4, 6, 8, 10, 12, 14, 15, 16, 18, 0}) {
+        m.insert(k, k * 100);
+    }
+    assert(m.len() == 20u);
+    {
+        auto mn = m.iter().min();
+        assert(mn.is_some());
+        auto t = std::move(mn).unwrap();
+        assert(std::get<0>(t) == 0);
+        assert(std::get<1>(t) == 0);
+    }
+    {
+        auto mx = m.iter().max();
+        assert(mx.is_some());
+        auto t = std::move(mx).unwrap();
+        assert(std::get<0>(t) == 19);
+        assert(std::get<1>(t) == 1900);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// BTreeSet 30-entry insert + iter walk in sorted order.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_test_30_entry_iter_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 30; ++i) s.insert(i);
+    assert(s.len() == 30u);
+    auto it = s.iter();
+    for (int i = 0; i < 30; ++i) {
+        auto nx = it.next();
+        assert(nx.is_some());
+        assert(nx.unwrap() == i);
+    }
+    assert(it.next().is_none());
+}
