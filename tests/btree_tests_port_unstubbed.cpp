@@ -7334,20 +7334,34 @@ TEST_CASE("set_test_30_entry_iter_unstubbed") {
     assert(it.next().is_none());
 }
 
-// Bisect height-1 drop bug. Existing smoke tests already cover up to ~80.
-// Confirmed: insert+drop 95 segfaults. drop is the culprit (destructor
-// explicitly leaks but apparently still hits a use-after-free or similar).
-// Held — needs separate root-cause investigation.
-
-// Confirmed exact threshold of the height-1 drop bug via bisect:
-// inserting 89 sequential ints then dropping is OK; inserting 90 crashes.
-// Tested in isolation (separate fresh map per test). Both insert-only
-// and insert+clear paths crash at 90+. Almost certainly a split bug
-// that fires when the 8th leaf gets its 6th element after a previous
-// split rebalance. Held — needs gdb to root-cause the call chain.
+// Height-1 → height-2 transition bug (root cause + fix recorded below).
+// Bisect originally pinned the threshold at N=90: insert(0..89) → drop
+// would segfault in find_key_index on the *next* insert (i.e. crash was
+// observed while inserting key=89 but the corruption was planted during
+// insert(88), which triggered the very first root split). Despite the
+// "drop" framing in the original bug report, the crash was an
+// insert-path NULL deref, not a destructor issue — `~BTreeMap` already
+// leaks by design (sets `_rusty_forgotten = true` and returns).
 //
-// Stress test: 88 elements (safe), then drop. Validates the safe
-// boundary.
+// Root cause: the transpiler only emitted the leaf-handle
+// `split` impl (allocates a `LeafNode`); the internal-handle `split`
+// impl was missing. When the root internal node hit CAPACITY=11 and
+// split, the right half was allocated as a LeafNode → no `edges` array.
+// Subsequent descents into edges of that right half read past the leaf
+// allocation, got NULL/garbage, and crashed in `find_key_index` on the
+// next search.
+//
+// Fix in transpiled/btree_port/btree_port.btree.btree_internal.cppm
+// (`Handle::split`): dispatch on `Type_` + `node.height_field`. If
+// the handle's node is an internal node, allocate `InternalNode`, run
+// the same leaf-data split on `new_internal.data`, move edges
+// `[idx+1..old_len+1]` to `new_internal.edges[0..new_len+1]`, then
+// wrap via `from_new_internal` (which calls
+// `correct_all_childrens_parent_links`). Mirrors the
+// `impl Handle<NodeRef<Mut, K, V, Internal>, KV>::split` block in
+// libcore/alloc/src/collections/btree/node.rs.
+//
+// Stress test: 88 elements (safe pre-fix boundary), then drop.
 TEST_CASE("smoke_max_safe_88_unstubbed") {
     {
         auto m = make_map<int, int>();
@@ -7360,4 +7374,60 @@ TEST_CASE("smoke_max_safe_88_unstubbed") {
             assert(v.unwrap() == i);
         }
     }
+}
+
+// Regression test for the N=90+ insert+drop crash. Sequential inserts
+// past 89 elements trigger the height-1 → height-2 transition (the root
+// internal node splits and a new internal root is pushed). The transpiler
+// only ported the leaf-Handle::split impl, so the internal split was
+// allocating a LeafNode for the right half instead of an InternalNode,
+// leaving the new node without an `edges` array. Subsequent descents into
+// edges of that right half read garbage / NULL pointers and SIGSEGV'd.
+// Fix lives in transpiled/btree_port/btree_port.btree.btree_internal.cppm
+// inside `Handle::split`: dispatch on `Type_` (Internal / LeafOrInternal +
+// height>0 → internal allocation, else → leaf allocation).
+TEST_CASE("smoke_height2_transition_100_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 100; ++i) m.insert(i, i);
+    assert(m.len() == 100u);
+    // Verify content
+    for (int i = 0; i < 100; ++i) {
+        auto v = m.get(i);
+        assert(v.is_some());
+        assert(v.unwrap() == i);
+    }
+    // Cross-key sanity (last/first)
+    {
+        auto last = m.last_key_value();
+        assert(last.is_some());
+        auto t = std::move(last).unwrap();
+        assert(std::get<0>(t) == 99);
+        assert(std::get<1>(t) == 99);
+    }
+    {
+        auto first = m.first_key_value();
+        assert(first.is_some());
+        auto t = std::move(first).unwrap();
+        assert(std::get<0>(t) == 0);
+        assert(std::get<1>(t) == 0);
+    }
+    // Drop here (end of scope) — used to crash, now succeeds.
+}
+
+// Extra stress: 200 sequential keys exercises multiple internal-node
+// splits at height 2 (each height-1 internal child fills + splits
+// independently, and we may see another root push to height 3 depending
+// on growth pattern). Confirms the Handle::split internal-allocation
+// fix is robust beyond just the first transition.
+TEST_CASE("smoke_height2_stress_200_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 200; ++i) m.insert(i, i * 7);
+    assert(m.len() == 200u);
+    for (int i = 0; i < 200; ++i) {
+        auto v = m.get(i);
+        assert(v.is_some());
+        assert(v.unwrap() == i * 7);
+    }
+    assert(m.get(200).is_none());
+    assert(m.get(-1).is_none());
 }

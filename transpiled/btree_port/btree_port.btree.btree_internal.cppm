@@ -5569,10 +5569,57 @@ struct Handle {
     template<typename A>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
     SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3> split(A alloc) {
-        auto new_node = LeafNode<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>::new_(std::move(alloc));
+        // btree_port fix (N=90+ drop crash): the transpiler only ported the
+        // Leaf-Handle::split impl; the corresponding Internal-Handle::split
+        // impl was missing, so when the root needed to split (height-1 →
+        // height-2 transition at 90 sequential inserts), this method
+        // allocated a LeafNode for the right half of an Internal split,
+        // leaving the new node without an `edges` array. Subsequent
+        // descents into that right half read past the leaf allocation
+        // and got NULL/garbage child pointers → SIGSEGV in find_key_index.
+        //
+        // Mirrors libcore/alloc/src/collections/btree/node.rs's
+        //   impl Handle<NodeRef<Mut, K, V, Internal>, KV>::split.
+        //
+        // Dispatched via `if constexpr` on the NodeRef's Type marker so
+        // that the leaf-only instantiations (which lack edge_area_mut /
+        // as_internal_mut) don't try to compile the internal branch.
+        using K_ = typename __TemplateArgs<Node>::arg_1;
+        using V_ = typename __TemplateArgs<Node>::arg_2;
+        using Type_ = typename __TemplateArgs<Node>::arg_3;
+        if constexpr (std::is_same_v<Type_, marker::Internal>
+                      || std::is_same_v<Type_, marker::LeafOrInternal>) {
+            if (rusty::detail::deref_if_pointer_like(this->node.height_field) > static_cast<size_t>(0)) {
+                // Internal split: allocate InternalNode, move keys/vals/edges,
+                // construct via from_new_internal so parent links get fixed.
+                const auto old_len = rusty::len(this->node);
+                auto new_node_box = InternalNode<K_, V_>::new_(rusty::clone(alloc));
+                auto& new_internal = *new_node_box;
+                // Reuse split_leaf_data on the .data (LeafNode) portion — the
+                // key/val arrays + len bookkeeping are identical to a leaf.
+                auto kv = this->split_leaf_data(new_internal.data);
+                const auto new_len = static_cast<size_t>(new_internal.data.len);
+                // Move edges (idx+1..old_len+1) from old → new's [0..new_len+1].
+                // @unsafe
+                {
+                    move_to_slice(
+                        this->node.edge_area_mut(rusty::range(
+                            rusty::detail::deref_if_pointer_like(this->idx_field) + static_cast<size_t>(1),
+                            rusty::detail::deref_if_pointer_like(old_len) + static_cast<size_t>(1))),
+                        rusty::slice_to(new_internal.edges, new_len + static_cast<size_t>(1)));
+                }
+                const auto height = this->node.height_field;
+                auto right = NodeRef<marker::Owned, K_, V_, Type_>::from_new_internal(
+                    std::move(new_node_box),
+                    rusty::num::NonZero<size_t>::new_(height).unwrap());
+                return SplitResult<K_, V_, Type_>(std::move(this->node), std::move(kv), std::move(right));
+            }
+        }
+        // Leaf split (original codegen).
+        auto new_node = LeafNode<K_, V_>::new_(std::move(alloc));
         auto kv = this->split_leaf_data(rusty::detail::deref_if_pointer_like(new_node));
-        auto right = NodeRef<marker::Owned, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>::from_new_leaf(std::move(new_node));
-        return SplitResult<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, typename __TemplateArgs<Node>::arg_3>(std::move(this->node), std::move(kv), std::move(right));
+        auto right = NodeRef<marker::Owned, K_, V_, Type_>::from_new_leaf(std::move(new_node));
+        return SplitResult<K_, V_, Type_>(std::move(this->node), std::move(kv), std::move(right));
     }
     std::tuple<std::tuple<typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2>, Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, marker::Edge>> remove() {
         const auto old_len = rusty::len(this->node);
