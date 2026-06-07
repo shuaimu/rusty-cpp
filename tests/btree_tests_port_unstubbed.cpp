@@ -2680,3 +2680,132 @@ TEST_CASE("smoke_iter_back_sequential_unstubbed") {
     assert(it.next_back().is_none());
 }
 
+// BLOCKED: set_smoke_iter_next. BTreeSet's Iter<T>::next delegates to
+// Keys<T, SetValZST>::next which trips the documented return-type
+// conversion bug at map.cppm:4139.
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_vacant_entry_key (longer-form).
+// Existing variant covers single insert+remove cycle. This variant
+// inserts through VacantEntry::insert multiple times with intermixed
+// non-entry paths to check the dormant-map mechanism doesn't break.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_vacant_entry_multiple_inserts_unstubbed") {
+    auto m = make_map<int, int>();
+    // Insert via VacantEntry on each of 5 keys in non-sorted order.
+    for (int k : {5, 2, 7, 1, 4}) {
+        auto e = m.entry(k);
+        // Vacant.
+        assert(e.index() == 0);
+        std::get<0>(e)._0.insert(k * 10);
+    }
+    assert(m.len() == 5u);
+    // All keys present.
+    for (int k : {1, 2, 4, 5, 7}) {
+        auto v = m.get(k);
+        assert(v.is_some());
+        assert(v.unwrap() == k * 10);
+    }
+    check(m);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_occupied_entry_key (extended).
+// After inserting via entry().insert(), entry() returns Occupied
+// containing the same key.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_occupied_entry_key_extended_unstubbed") {
+    auto m = make_map<int, int>();
+    // Insert via Vacant path first.
+    {
+        auto e = m.entry(42);
+        assert(e.index() == 0);
+        std::get<0>(e)._0.insert(420);
+    }
+    // Now the same key returns Occupied.
+    {
+        auto e = m.entry(42);
+        assert(e.index() == 1);
+        assert(e.key() == 42);
+    }
+    // Different key still Vacant.
+    {
+        auto e = m.entry(99);
+        assert(e.index() == 0);
+        assert(e.key() == 99);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap::is_empty/len after each operation.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_is_empty_len_consistency_unstubbed") {
+    auto m = make_map<int, int>();
+    // Empty start.
+    assert(m.is_empty());
+    assert(m.len() == 0u);
+    // After insert.
+    m.insert(1, 10);
+    assert(!m.is_empty());
+    assert(m.len() == 1u);
+    // After clear.
+    m.clear();
+    assert(m.is_empty());
+    assert(m.len() == 0u);
+    // After multiple inserts + removes.
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    assert(m.len() == 5u);
+    for (int i = 0; i < 3; ++i) m.remove(i);
+    assert(m.len() == 2u);
+    assert(!m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet::is_empty/len consistency.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_is_empty_len_consistency_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.is_empty());
+    assert(s.len() == 0u);
+    s.insert(1);
+    assert(!s.is_empty());
+    assert(s.len() == 1u);
+    s.clear();
+    assert(s.is_empty());
+    for (int i = 0; i < 5; ++i) s.insert(i);
+    assert(s.len() == 5u);
+    s.remove(2);
+    assert(s.len() == 4u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: pop_first updates first_key_value across the sequence.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_pop_first_updates_first_kv_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+    // Initial first is 1.
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+    // Pop, then first is 2.
+    m.pop_first();
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 2);
+    }
+    // Pop again, then first is 3.
+    m.pop_first();
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 3);
+    }
+}
+
