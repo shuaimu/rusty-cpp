@@ -6092,3 +6092,106 @@ TEST_CASE("smoke_first_last_entry_unstubbed") {
     // Map unchanged.
     assert(m.len() == 3u);
 }
+
+// BTreeMap::clone / BTreeSet::clone: BLOCKED. Y-combinator clone_subtree
+// body has cascading compile errors:
+//   - ManuallyDrop<BTreeMap>.root / .length access needs deref but body
+//     accesses directly (subtree_shadow1.root / subtree_shadow1.length)
+//   - push_internal_level / push template-arg deduction stays unresolved
+//   - rusty::clone(BTreeMap) trips std::is_copy_constructible because
+//     ManuallyDrop fields aren't copyable (need to use m.clone() member,
+//     but clone() body fails to compile)
+
+// rustc map/tests.rs::test_iter_min_max — Iter::min() and Iter::max() return
+// the first/last keys. Built-in iter methods.
+TEST_CASE("test_iter_min_max_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i : {3, 7, 1, 9, 4}) m.insert(i, i * 10);
+    auto it1 = m.iter();
+    {
+        auto mn = it1.min();
+        assert(mn.is_some());
+        assert(std::get<0>(mn.unwrap()) == 1);
+    }
+    auto it2 = m.iter();
+    {
+        auto mx = it2.max();
+        assert(mx.is_some());
+        assert(std::get<0>(mx.unwrap()) == 9);
+    }
+}
+
+// rustc set/tests.rs::set_test_iter_min_max — set version.
+TEST_CASE("set_test_iter_min_max_full_unstubbed") {
+    auto s = make_set<int>();
+    for (int v : {5, 2, 8, 1, 7, 3}) s.insert(v);
+    auto it1 = s.iter();
+    {
+        auto mn = it1.min();
+        assert(mn.is_some());
+        assert(mn.unwrap() == 1);
+    }
+    auto it2 = s.iter();
+    {
+        auto mx = it2.max();
+        assert(mx.is_some());
+        assert(mx.unwrap() == 8);
+    }
+}
+
+// rustc map/tests.rs::test_iter (full forward walk).
+// More comprehensive than test_iter_forward — walks a height-1 tree.
+TEST_CASE("test_iter_full_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 20; ++i) m.insert(i, i * 100);
+    auto it = m.iter();
+    int expected = 1;
+    int count = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == expected);
+        assert(std::get<1>(t) == expected * 100);
+        ++expected;
+        ++count;
+    }
+    assert(count == 20);
+}
+
+// rustc map/tests.rs::test_iter_rev (full backward walk on height-1).
+TEST_CASE("test_iter_rev_full_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 20; ++i) m.insert(i, i * 100);
+    auto it = m.iter();
+    int expected = 20;
+    int count = 0;
+    for (auto v = it.next_back(); v.is_some(); v = it.next_back()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == expected);
+        assert(std::get<1>(t) == expected * 100);
+        --expected;
+        ++count;
+    }
+    assert(count == 20);
+}
+
+// rustc map/tests.rs::test_check_ord_chaos — insert Cyclic3 keys with
+// non-transitive order. Should NOT segfault even when invariants are
+// violated. The btree must remain memory-safe.
+#include <variant>
+TEST_CASE("test_check_ord_chaos_unstubbed") {
+    using btree_testing::Cyclic3;
+    auto m = BTreeMap<Cyclic3, int>::new_in(::rusty::alloc::Global{});
+    m.insert(Cyclic3::A, 100);
+    m.insert(Cyclic3::B, 200);
+    m.insert(Cyclic3::C, 300);
+    // Don't assert specific iteration order — the cyclic order means the
+    // tree's internal structure is undefined. We only require it not crash
+    // and have correct len.
+    assert(m.len() == 3u);
+    int count = 0;
+    auto it = m.iter();
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        ++count;
+    }
+    assert(count == 3);
+}
