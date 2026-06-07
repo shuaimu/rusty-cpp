@@ -1281,6 +1281,33 @@ TEST_CASE("set_test_insert_returns_unstubbed") {
     assert(s.len() == 2u);
 }
 
+// Iter::min/max convenience for "consume the iter, return first/last item".
+// Distinct from BTreeMap::first/last_key_value.
+TEST_CASE("smoke_iter_min_max_drain_unstubbed") {
+    auto map = make_map<int, int>();
+    // Empty case.
+    assert(map.iter().min().is_none());
+    assert(map.iter().max().is_none());
+
+    map.insert(3, 30);
+    map.insert(1, 10);
+    map.insert(2, 20);
+    {
+        auto m = map.iter().min();
+        assert(m.is_some());
+        auto t = std::move(m).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 10);
+    }
+    {
+        auto m = map.iter().max();
+        assert(m.is_some());
+        auto t = std::move(m).unwrap();
+        assert(std::get<0>(t) == 3);
+        assert(std::get<1>(t) == 30);
+    }
+}
+
 // Set pop_first/pop_last drain through alternating push/pop
 TEST_CASE("set_test_pop_alternating_unstubbed") {
     auto s = make_set<int>();
