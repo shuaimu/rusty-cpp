@@ -8679,3 +8679,36 @@ TEST_CASE("test_range_mut_h1_unstubbed") {
         }
     }
 }
+
+// set_test_symmetric_difference / set_test_union: BLOCKED. The
+// transpiled MergeIterInner::nexts has a double-wrapped
+// Option<tuple<Option<T>, Option<T>>> emit; can't fix from set.cppm
+// because Peeked variant types aren't exported. Held.
+
+// rustc set/tests.rs::set_test_symmetric_difference_size_hint
+TEST_CASE("set_test_symmetric_difference_size_hint_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3, 4}) a.insert(v);
+    for (int v : {3, 4, 5, 6}) b.insert(v);
+    auto sd = a.symmetric_difference(b);
+    auto hint = sd.size_hint();
+    // Lower bound is 0; upper bound is a.len + b.len.
+    assert(std::get<0>(hint) == 0u);
+    assert(std::get<1>(hint).is_some());
+    assert(std::get<1>(hint).unwrap() == 8u);
+}
+
+// rustc set/tests.rs::set_test_union_size_hint
+TEST_CASE("set_test_union_size_hint_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3}) a.insert(v);
+    for (int v : {3, 4, 5}) b.insert(v);
+    auto u = a.union_(b);
+    auto hint = u.size_hint();
+    // Lower = max(3, 3) = 3, upper = 3 + 3 = 6.
+    assert(std::get<0>(hint) == 3u);
+    assert(std::get<1>(hint).is_some());
+    assert(std::get<1>(hint).unwrap() == 6u);
+}

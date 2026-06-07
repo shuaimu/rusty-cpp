@@ -4130,6 +4130,12 @@ struct SymmetricDifference {
         return SymmetricDifference(rusty::clone(this->_0));
     }
     rusty::Option<const T&> next() {
+        // BLOCKED: Peeked / Peeked_Left / Peeked_Right are internal to
+        // btree_internal module and not exported, so we can't manipulate
+        // _0.peeked from this TU. The transpiled MergeIterInner::nexts
+        // itself has a double-wrapped Option<tuple<Option,Option>> emit
+        // bug. Held until either the marker types are exported or
+        // nexts() is hand-ported.
         throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
@@ -4159,6 +4165,7 @@ struct Union {
         return Union(rusty::clone(this->_0));
     }
     rusty::Option<const T&> next() {
+        // BLOCKED: see SymmetricDifference::next.
         throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
