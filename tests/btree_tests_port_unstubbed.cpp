@@ -4828,3 +4828,136 @@ TEST_CASE("smoke_vacant_entry_then_get_unstubbed") {
     assert(v.unwrap() == 70);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap pop_first on size 1.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_pop_first_one_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(42, 100);
+    {
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 42);
+        assert(std::get<1>(t) == 100);
+    }
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap pop_last on size 1.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_pop_last_one_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(42, 100);
+    {
+        auto kv = m.pop_last();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 42);
+        assert(std::get<1>(t) == 100);
+    }
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet pop_first/pop_last on size 1.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_pop_one_unstubbed") {
+    auto s = make_set<int>();
+    s.insert(42);
+    {
+        auto v = s.pop_first();
+        assert(v.is_some());
+        assert(std::move(v).unwrap() == 42);
+    }
+    s.insert(42);
+    {
+        auto v = s.pop_last();
+        assert(v.is_some());
+        assert(std::move(v).unwrap() == 42);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter().next_back() decrements size_hint.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_size_hint_post_back_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 3; ++i) m.insert(i, i);
+    auto it = m.iter();
+    it.next_back();
+    auto sh = it.size_hint();
+    auto upper = std::get<1>(sh);
+    assert(upper.is_some());
+    assert(upper.unwrap() == 2u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter() on single element with both directions.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_single_both_directions_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(7, 70);
+    auto it = m.iter();
+    // Pull from front.
+    {
+        auto n = it.next();
+        assert(n.is_some());
+    }
+    // Now both front and back should return None.
+    assert(it.next().is_none());
+    assert(it.next_back().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet operator== reflexive (already covered, this one
+// works with explicit clone via NDEBUG-elided assert form).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_eq_two_sets_same_unstubbed") {
+    auto s1 = make_set<int>();
+    auto s2 = make_set<int>();
+    for (int i = 1; i <= 3; ++i) {
+        s1.insert(i);
+        s2.insert(i);
+    }
+    assert(s1 == s2);
+    assert(s2 == s1);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap operator== on two same-content maps.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_eq_two_maps_same_unstubbed") {
+    auto m1 = make_map<int, int>();
+    auto m2 = make_map<int, int>();
+    for (int i = 1; i <= 3; ++i) {
+        m1.insert(i, i * 10);
+        m2.insert(i, i * 10);
+    }
+    assert(m1 == m2);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap pop after remove_entry doesn't double-decrement.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_remove_entry_then_pop_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+    {
+        auto kv = m.remove_entry(3);
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 3);
+        assert(std::get<1>(t) == 30);
+    }
+    assert(m.len() == 4u);
+    {
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+    assert(m.len() == 3u);
+}
+
