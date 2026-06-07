@@ -4798,30 +4798,47 @@ struct NodeRef {
                     auto lower_edge = std::move(lower_edge_self_ref_tmp);
                     auto upper_edge_self_ref_tmp = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((node))>, marker::Edge>, Q>::new_edge(std::move(node), upper_edge_idx);
                     auto upper_edge = std::move(upper_edge_self_ref_tmp);
+                    // Range-path manual rewrite: the transpiled body
+                    // had `_0` accessors on a std::variant and used
+                    // `(true && true)` guards on the match arms because
+                    // the bare-glob variant names `Leaf` / `Internal`
+                    // weren't visible at emit time. The Rust source is:
+                    //   match (lower_edge.force(), upper_edge.force()) {
+                    //     (Leaf(f), Leaf(b)) => return LeafRange{front: Some(f), back: Some(b)},
+                    //     (Internal(f), Internal(b)) => {
+                    //         (lower_edge, lower_child_bound) =
+                    //             f.descend().find_lower_bound_edge(lower_child_bound);
+                    //         (upper_edge, upper_child_bound) =
+                    //             b.descend().find_upper_bound_edge(upper_child_bound);
+                    //     }
+                    //     _ => unreachable!("BTreeMap has different depths"),
+                    //   }
                     while (true) {
-                        {
-                            auto&& _m0 = lower_edge.force();
-                            auto&& _m1 = upper_edge.force();
-                            auto _m_tuple = std::forward_as_tuple(_m0, _m1);
-                            bool _m_matched = false;
-                            if (!_m_matched && ((/* TODO transpiler: unresolved bare-glob variant `Leaf` (no enum decl visible in this TU; patch arm manually) */ true && /* TODO transpiler: unresolved bare-glob variant `Leaf` (no enum decl visible in this TU; patch arm manually) */ true))) {
-                                auto&& f = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
-                                auto&& b = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
-                                return LeafRange<BorrowType, K, V>(rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(f), rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(b));
-                                _m_matched = true;
-                            }
-                            if (!_m_matched && ((/* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true && /* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true))) {
-                                auto&& f = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
-                                auto&& b = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
-                                std::make_tuple(std::move(lower_edge), lower_child_bound) = f.descend().find_lower_bound_edge(lower_child_bound);
-                                std::make_tuple(std::move(upper_edge), upper_child_bound) = b.descend().find_upper_bound_edge(upper_child_bound);
-                                _m_matched = true;
-                            }
-                            if (!_m_matched && (true)) {
-                                ([&]() { std::println(stderr, "BTreeMap has different depths"); rusty::intrinsics::unreachable(); }());
-                                _m_matched = true;
-                            }
+                        auto _m0 = lower_edge.force();
+                        auto _m1 = upper_edge.force();
+                        // Both Leaf — terminate, return the leaf range.
+                        if (_m0.index() == 0 && _m1.index() == 0) {
+                            auto f = std::move(std::get<0>(_m0)._0);
+                            auto b = std::move(std::get<0>(_m1)._0);
+                            return LeafRange<BorrowType, K, V>(
+                                rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(f)),
+                                rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(b)));
                         }
+                        // Both Internal — descend.
+                        if (_m0.index() == 1 && _m1.index() == 1) {
+                            auto f = std::move(std::get<1>(_m0)._0);
+                            auto b = std::move(std::get<1>(_m1)._0);
+                            auto lower_pair = f.descend().find_lower_bound_edge(lower_child_bound);
+                            lower_edge = std::move(std::get<0>(lower_pair));
+                            lower_child_bound = std::move(std::get<1>(lower_pair));
+                            auto upper_pair = b.descend().find_upper_bound_edge(upper_child_bound);
+                            upper_edge = std::move(std::get<0>(upper_pair));
+                            upper_child_bound = std::move(std::get<1>(upper_pair));
+                            continue;
+                        }
+                        // Mixed depth: unreachable.
+                        std::println(stderr, "BTreeMap has different depths");
+                        rusty::intrinsics::unreachable();
                     }
                     _m_matched = true;
                 }

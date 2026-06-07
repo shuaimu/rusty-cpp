@@ -5572,12 +5572,89 @@ TEST_CASE("test_clear_drop_panic_leak_unstubbed") {
     }
 }
 
-// test_range: BLOCKED at find_leaf_edges_spanning_range() — body has
-// unresolved bare-glob variant `Leaf`/`Internal` match arms (transpiler
-// emits `_0` accessors on a std::variant rather than std::get<N>). The
-// body needs a manual rewrite. Const cascade through force() /
-// next_leaf_edge() lands ahead of it, but range() is still not
-// instantiable for this reason.
+// values_mut() / iter_mut(): BLOCKED — LazyLeafRange::next_unchecked is
+// hardcoded to return std::tuple<const K&, const V&> regardless of
+// BorrowType. ValMut should return tuple<const K&, V&> but the port
+// dropped the parallel-impl structure. Needs a separate fix to thread
+// BorrowType-dependent return types through next_unchecked.
+
+// BTreeMap::values() smoke tests.
+// Unblocked by Values::next/next_back const-ref fix (same as Keys).
+TEST_CASE("smoke_map_values_iter_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 4; ++i) m.insert(i, i * 100);
+    // Values iterate in key order: 100, 200, 300, 400.
+    auto vs = m.values();
+    int expected = 100;
+    for (auto v = vs.next(); v.is_some(); v = vs.next()) {
+        assert(v.unwrap() == expected);
+        expected += 100;
+    }
+    assert(expected == 500);
+}
+
+TEST_CASE("smoke_map_values_iter_next_back_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 4; ++i) m.insert(i, i * 100);
+    auto vs = m.values();
+    {
+        auto v = vs.next_back();
+        assert(v.is_some());
+        assert(v.unwrap() == 400);
+    }
+    {
+        auto v = vs.next();
+        assert(v.is_some());
+        assert(v.unwrap() == 100);
+    }
+    assert(vs.len() == 2u);
+}
+
+// BTreeSet::iter().next_back() — forwards to Keys::next_back, same path.
+TEST_CASE("set_smoke_iter_next_back_unstubbed") {
+    auto s = make_set<int>();
+    for (int v : {3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5}) s.insert(v);
+    auto it = s.iter();
+    // Sorted distinct: 1, 2, 3, 4, 5, 6, 9
+    {
+        auto v = it.next_back();
+        assert(v.is_some());
+        assert(v.unwrap() == 9);
+    }
+    {
+        auto v = it.next_back();
+        assert(v.is_some());
+        assert(v.unwrap() == 6);
+    }
+    {
+        auto v = it.next();
+        assert(v.is_some());
+        assert(v.unwrap() == 1);
+    }
+}
+
+// BTreeSet::iter().len() and size_hint() — both forward to Keys.
+TEST_CASE("set_smoke_iter_len_unstubbed") {
+    auto s = make_set<int>();
+    for (int v : {10, 20, 30, 40}) s.insert(v);
+    auto it = s.iter();
+    assert(it.len() == 4u);
+    auto hint = it.size_hint();
+    assert(std::get<0>(hint) == 4u);
+    assert(std::get<1>(hint).is_some());
+    assert(std::get<1>(hint).unwrap() == 4u);
+    auto _v = it.next();
+    assert(it.len() == 3u);
+}
+
+// test_range: find_leaf_edges_spanning_range() body is hand-rewritten
+// (the transpiler emitted `_0` accessors on a std::variant + bogus
+// `(true && true)` match arm guards). BUT range() is STILL blocked
+// because instantiating it pulls in search_tree_for_bifurcation,
+// which has its own emit bugs (std::visit on tuple-of-Bound match,
+// SearchBound<const Q&> with non-assignable reference type breaks
+// many constructors). Held until search_tree_for_bifurcation is
+// hand-rewritten the same way find_leaf_edges_spanning_range was.
 
 // test_split_off: deeper-than-expected blockers. The
 // __rusty_alias_Root_new_pillar template-arg fix lands but exposes a

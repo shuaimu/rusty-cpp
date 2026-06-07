@@ -4158,10 +4158,10 @@ struct Keys {
         return this->next_back();
     }
     rusty::Option<const K&> next_back() {
-        return this->inner.next_back().map([&](auto&& _destruct_param0) {
-auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(k);
-});
+        // Same fix as Keys::next() — return const K&, not const K&&.
+        return this->inner.next_back().map([&](auto&& _destruct_param0) -> const K& {
+            return rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
+        });
     }
     size_t len() const {
         return rusty::len(this->inner);
@@ -4189,10 +4189,10 @@ struct Values {
         return f.debug_list().entries(rusty::clone((*this))).finish();
     }
     rusty::Option<const V&> next() {
-        return this->inner.next().map([&](auto&& _destruct_param0) {
-auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(v);
-});
+        // Same fix as Keys::next() — return const V&, not const V&&.
+        return this->inner.next().map([&](auto&& _destruct_param0) -> const V& {
+            return rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_destruct_param0)));
+        });
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
@@ -4201,10 +4201,9 @@ return std::move(v);
         return this->next_back();
     }
     rusty::Option<const V&> next_back() {
-        return this->inner.next_back().map([&](auto&& _destruct_param0) {
-auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(v);
-});
+        return this->inner.next_back().map([&](auto&& _destruct_param0) -> const V& {
+            return rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_destruct_param0)));
+        });
     }
     size_t len() const {
         return rusty::len(this->inner);
