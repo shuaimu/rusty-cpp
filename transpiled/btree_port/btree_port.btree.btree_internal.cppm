@@ -5044,7 +5044,10 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
     NodeRef<BorrowType, K, V, Type> split_off(const Q& key, A alloc) {
         NodeRef<BorrowType, K, V, Type>& left_root = (*this);
-        auto right_root = __rusty_alias_Root_new_pillar(left_root.height(), rusty::clone(alloc));
+        // split_off fix: __rusty_alias_Root_new_pillar's template
+        // parameters K, V can't be deduced from arguments (only A can);
+        // pass them explicitly so the function is instantiable.
+        auto right_root = __rusty_alias_Root_new_pillar<A, K, V>(left_root.height(), rusty::clone(alloc));
         auto* left_node = &(left_root.borrow_mut());
         auto* right_node = &(right_root.borrow_mut());
         while (true) {
@@ -6594,7 +6597,9 @@ template<typename Q, typename A, typename K, typename V>
     requires (rusty::alloc::Allocator<A> && std::copyable<A>)
 inline auto __rusty_alias_Root_split_off(auto& self_, const Q& key, A alloc) {
     Root<K, V>& left_root = self_;
-    auto right_root = __rusty_alias_Root_new_pillar(left_root.height(), rusty::clone(alloc));
+    // split_off fix: explicit K, V on the new_pillar call so it's
+    // deducible (template params not inferable from the size_t arg alone).
+    auto right_root = __rusty_alias_Root_new_pillar<A, K, V>(left_root.height(), rusty::clone(alloc));
     auto* left_node = &(left_root.borrow_mut());
     auto* right_node = &(right_root.borrow_mut());
     while (true) {

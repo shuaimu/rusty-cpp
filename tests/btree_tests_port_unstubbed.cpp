@@ -5578,3 +5578,16 @@ TEST_CASE("test_clear_drop_panic_leak_unstubbed") {
 // body needs a manual rewrite. Const cascade through force() /
 // next_leaf_edge() lands ahead of it, but range() is still not
 // instantiable for this reason.
+
+// test_split_off: deeper-than-expected blockers. The
+// __rusty_alias_Root_new_pillar template-arg fix lands but exposes a
+// chain of unresolved transpiler-emit bugs in the split_off body:
+//   - `_0` accessor on std::variant (match-arm emit broken, ~same as
+//     find_leaf_edges_spanning_range)
+//   - missing __rusty_alias_Root_fix_right_border / fix_left_border
+//     template-arg deduction (same K, V issue)
+//   - address-of-temporary on borrow_mut() return
+//   - Position_Leaf missing `index()` (variant access shape)
+//   - ManuallyDrop<Global>::clone deleted ctor (same family as B-clear
+//     but a different code path)
+// Each needs its own hand-fix; held until those land.
