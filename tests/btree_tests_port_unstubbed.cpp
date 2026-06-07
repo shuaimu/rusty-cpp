@@ -5218,3 +5218,73 @@ TEST_CASE("smoke_remove_reinsert_preserves_unstubbed") {
     assert(v.unwrap() == 999);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() correctness on alternating insert order.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_alt_insert_unstubbed") {
+    auto m = make_map<int, int>();
+    // Insert pairs to make a zigzag.
+    for (int i : {3, 1, 4, 1, 5, 9, 2, 6}) m.insert(i, i * 10);
+    // Expect unique sorted: 1, 2, 3, 4, 5, 6, 9
+    auto it = m.iter();
+    for (int expected : {1, 2, 3, 4, 5, 6, 9}) {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == expected);
+    }
+    assert(it.next().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet iter().count() across NODE_CAPACITY.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_iter_count_at_node_capacity_unstubbed") {
+    auto s = make_set<int>();
+    for (size_t i = 0; i < NODE_CAPACITY; ++i) s.insert(static_cast<int>(i));
+    assert(s.iter().count() == NODE_CAPACITY);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter().count() across NODE_CAPACITY.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_count_at_node_capacity_unstubbed") {
+    auto m = make_map<int, int>();
+    for (size_t i = 0; i < NODE_CAPACITY; ++i) m.insert(static_cast<int>(i), 0);
+    assert(m.iter().count() == NODE_CAPACITY);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.get_key_value across split.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_get_key_value_at_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        m.insert(i, i * 10);
+    }
+    // Sample some keys.
+    for (int k : {0, 5, 11}) {
+        auto kv = m.get_key_value(k);
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == k);
+        assert(std::get<1>(t) == k * 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.remove + insert sequence after grow.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_remove_insert_after_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        m.insert(i, i);
+    }
+    // Remove middle.
+    m.remove(5);
+    // Re-insert with different value.
+    assert(m.insert(5, 555).is_none());
+    auto v = m.get(5);
+    assert(v.is_some() && v.unwrap() == 555);
+}
+
