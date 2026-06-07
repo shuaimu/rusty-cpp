@@ -4700,3 +4700,131 @@ TEST_CASE("set_smoke_remove_then_confirm_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.try_insert into empty map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_try_insert_into_empty_unstubbed") {
+    auto m = make_map<int, int>();
+    {
+        auto r = m.try_insert(0, 1);
+        assert(r.is_ok());
+        assert(std::move(r).unwrap() == 1);
+    }
+    assert(m.len() == 1u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.try_insert returns Err on a one-element map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_try_insert_dup_on_one_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(0, 1);
+    auto r = m.try_insert(0, 999);
+    assert(r.is_err());
+    auto err = std::move(r).unwrap_err();
+    assert(err.value == 999);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().size_hint() decreases by 1 per next().
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_size_hint_decreasing_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    auto it = m.iter();
+    auto sh0 = it.size_hint();
+    assert(std::get<0>(sh0) == 5u);
+    it.next();
+    auto sh1 = it.size_hint();
+    assert(std::get<0>(sh1) == 4u);
+    it.next();
+    auto sh2 = it.size_hint();
+    assert(std::get<0>(sh2) == 3u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().size_hint() decreases by next_back too.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_size_hint_back_decreasing_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    auto it = m.iter();
+    it.next_back();
+    auto sh = it.size_hint();
+    assert(std::get<0>(sh) == 4u);
+    it.next_back();
+    auto sh2 = it.size_hint();
+    assert(std::get<0>(sh2) == 3u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: Empty test cases for many operations on a fresh BTreeMap.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_empty_all_ops_unstubbed") {
+    auto m = make_map<int, int>();
+    // Many operations on empty.
+    assert(m.is_empty());
+    assert(m.len() == 0u);
+    assert(m.iter().count() == 0u);
+    assert(m.iter().next().is_none());
+    assert(m.iter().next_back().is_none());
+    assert(m.iter().min().is_none());
+    assert(m.iter().max().is_none());
+    assert(m.iter().last().is_none());
+    assert(m.keys().len() == 0u);
+    assert(m.values().len() == 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: Empty test cases for BTreeSet.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_empty_all_ops_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.is_empty());
+    assert(s.len() == 0u);
+    assert(s.iter().count() == 0u);
+    assert(s.iter().len() == 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.entry().key() doesn't insert.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_entry_key_no_insert_unstubbed") {
+    auto m = make_map<int, int>();
+    {
+        auto e = m.entry(42);
+        assert(e.key() == 42);
+    }
+    assert(m.is_empty());  // entry() alone doesn't insert
+    assert(!m.contains_key(42));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet.entry().get() doesn't insert.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_entry_get_no_insert_unstubbed") {
+    auto s = make_set<int>();
+    {
+        auto e = s.entry(42);
+        // Vacant entry (index 1 for set).
+        assert(e.index() == 1);
+    }
+    assert(s.is_empty());
+    assert(!s.contains(42));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap state after entries used with VacantEntry::insert.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_vacant_entry_then_get_unstubbed") {
+    auto m = make_map<int, int>();
+    {
+        auto e = m.entry(7);
+        assert(e.index() == 0);  // Vacant
+        std::get<0>(e)._0.insert(70);
+    }
+    auto v = m.get(7);
+    assert(v.is_some());
+    assert(v.unwrap() == 70);
+}
+
