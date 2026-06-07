@@ -1928,3 +1928,37 @@ TEST_CASE("set_smoke_pop_empty_unstubbed") {
     assert(s.pop_first().is_none());
     assert(s.pop_last().is_none());
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: map keys() length matches map size. Avoids next() to dodge
+// the Keys::next return-type conversion bug (map.cppm:4139).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_keys_len_unstubbed") {
+    auto m = make_map<int, int>();
+    {
+        auto k = m.keys();
+        assert(k.len() == 0u);
+    }
+    m.insert(1, 10);
+    m.insert(2, 20);
+    {
+        auto k = m.keys();
+        assert(k.len() == 2u);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: map values() iter type instantiates. Just len().
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_values_len_unstubbed") {
+    auto m = make_map<int, int>();
+    {
+        auto v = m.values();
+        assert(v.len() == 0u);
+    }
+    for (int i = 0; i < 3; ++i) m.insert(i, i * 10);
+    {
+        auto v = m.values();
+        assert(v.len() == 3u);
+    }
+}
