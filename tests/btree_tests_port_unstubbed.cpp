@@ -5931,3 +5931,94 @@ TEST_CASE("set_test_zip_unstubbed") {
     }
     assert(count == 5);
 }
+
+// rustc map/tests.rs::test_iter_entering_root_twice (subset).
+// Walk iter forward to completion, then verify next() is None.
+// The rustc test exercises an internal-node bookkeeping issue.
+TEST_CASE("test_iter_entering_root_twice_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i);
+    auto it = m.iter();
+    while (true) {
+        auto v = it.next();
+        if (!v.is_some()) break;
+    }
+    // After exhaustion, next() should return None consistently.
+    assert(it.next().is_none());
+    assert(it.next().is_none());
+    assert(it.next_back().is_none());
+}
+
+// rustc map/tests.rs::test_iter_descending_to_same_node_twice (subset).
+// Walk iter from both ends and verify they meet correctly.
+TEST_CASE("test_iter_descending_to_same_node_twice_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 8; ++i) m.insert(i, i * 10);
+    auto it = m.iter();
+    // Alternate next() / next_back() to walk both ends inward.
+    int forward = 1;
+    int backward = 8;
+    int count = 0;
+    while (forward <= backward) {
+        if (count % 2 == 0) {
+            auto v = it.next();
+            assert(v.is_some());
+            assert(std::get<0>(v.unwrap()) == forward);
+            ++forward;
+        } else {
+            auto v = it.next_back();
+            assert(v.is_some());
+            assert(std::get<0>(v.unwrap()) == backward);
+            --backward;
+        }
+        ++count;
+    }
+    assert(count == 8);
+}
+
+// rustc map/tests.rs::test_into_iter_drop_leak_height_0.
+// Uses panic-in-drop key. Drops the into_iter during a catch_unwind.
+// After the panic, all live dummies should have been dropped exactly once.
+TEST_CASE("test_into_iter_drop_leak_height_0_unstubbed") {
+    using namespace btree_testing;
+    CrashTestDummy a(0);
+    CrashTestDummy b(1);
+    {
+        auto map = BTreeMap<Instance, Unit>::new_in(::rusty::alloc::Global{});
+        map.insert(a.spawn(Panic::Never), kUnit);
+        map.insert(b.spawn(Panic::InDrop), kUnit);
+        // Catch the panic-in-drop by triggering a destructor via into_iter.
+        auto r = rusty::panic::catch_unwind(rusty::panic::AssertUnwindSafe([&] {
+            auto into_iter = std::move(map).into_iter();
+            // Just drop the iter; its destructor walks remaining keys.
+        }));
+        assert(r.is_err());
+        assert(a.dropped() == 1);
+        assert(b.dropped() == 1);
+    }
+}
+
+// rustc map/tests.rs::test_into_iter_drop_leak_kv_panic_in_key.
+// Variant: key drop panics on a specific dummy mid-iter.
+TEST_CASE("test_into_iter_drop_leak_kv_panic_in_key_unstubbed") {
+    using namespace btree_testing;
+    CrashTestDummy a(0);
+    CrashTestDummy b(1);
+    CrashTestDummy c(2);
+    {
+        auto map = BTreeMap<Instance, Unit>::new_in(::rusty::alloc::Global{});
+        map.insert(a.spawn(Panic::Never), kUnit);
+        map.insert(b.spawn(Panic::InDrop), kUnit);
+        map.insert(c.spawn(Panic::Never), kUnit);
+        auto r = rusty::panic::catch_unwind(rusty::panic::AssertUnwindSafe([&] {
+            auto into_iter = std::move(map).into_iter();
+        }));
+        assert(r.is_err());
+        // All three dummies should have been dropped exactly once
+        // regardless of where the panic happened (some via the normal
+        // drop path, some during stack unwinding).
+        assert(a.dropped() == 1);
+        assert(b.dropped() == 1);
+        assert(c.dropped() == 1);
+    }
+}
