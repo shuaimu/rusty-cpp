@@ -5571,3 +5571,10 @@ TEST_CASE("test_clear_drop_panic_leak_unstubbed") {
         // depends on internal ordering.
     }
 }
+
+// test_range: BLOCKED at find_leaf_edges_spanning_range() — body has
+// unresolved bare-glob variant `Leaf`/`Internal` match arms (transpiler
+// emits `_0` accessors on a std::variant rather than std::get<N>). The
+// body needs a manual rewrite. Const cascade through force() /
+// next_leaf_edge() lands ahead of it, but range() is still not
+// instantiable for this reason.
