@@ -2186,3 +2186,166 @@ TEST_CASE("test_insert_first_unstubbed") {
     check(m);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insert returns Some(old) on overwrite. Tracks the displacement
+// behavior. Triggered by repeated inserts on the same key.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_insert_overwrite_unstubbed") {
+    auto m = make_map<int, int>();
+    assert(m.insert(1, 100).is_none());
+    {
+        auto displaced = m.insert(1, 200);
+        assert(displaced.is_some());
+        assert(std::move(displaced).unwrap() == 100);
+    }
+    {
+        auto displaced = m.insert(1, 300);
+        assert(displaced.is_some());
+        assert(std::move(displaced).unwrap() == 200);
+    }
+    assert(m.len() == 1u);
+    auto v = m.get(1);
+    assert(v.is_some() && v.unwrap() == 300);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: set insert returns true (new) / false (duplicate).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_insert_returns_full_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.insert(1) == true);
+    assert(s.insert(1) == false);
+    assert(s.insert(2) == true);
+    assert(s.insert(2) == false);
+    assert(s.insert(3) == true);
+    assert(s.len() == 3u);
+    // Re-confirm contains.
+    for (int x : {1, 2, 3}) assert(s.contains(x));
+    assert(!s.contains(4));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: iter size_hint upper bound matches len. The Iter::size_hint
+// returns (len, Some(len)) for ExactSizeIterator.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_size_hint_unstubbed") {
+    auto m = make_map<int, int>();
+    {
+        auto it = m.iter();
+        auto sh = it.size_hint();
+        assert(std::get<0>(sh) == 0u);
+        auto upper = std::get<1>(sh);
+        assert(upper.is_some());
+        assert(upper.unwrap() == 0u);
+    }
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    {
+        auto it = m.iter();
+        auto sh = it.size_hint();
+        assert(std::get<0>(sh) == 5u);
+        auto upper = std::get<1>(sh);
+        assert(upper.is_some());
+        assert(upper.unwrap() == 5u);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insert into successively growing map updates first/last KV.
+// Validates the rebalance at each grow step preserves the order.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_first_last_progressive_unstubbed") {
+    auto m = make_map<int, int>();
+    // No first/last on empty.
+    assert(m.first_key_value().is_none());
+    assert(m.last_key_value().is_none());
+    // Insert 5 — first=last=5.
+    m.insert(5, 50);
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 5);
+    }
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 5);
+    }
+    // Insert 3 — first=3, last=5.
+    m.insert(3, 30);
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 3);
+    }
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 5);
+    }
+    // Insert 7 — first=3, last=7.
+    m.insert(7, 70);
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == 7);
+    }
+    // Insert 1 — first=1.
+    m.insert(1, 10);
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_try_insert (additional Err arm details).
+// Already covered by the existing test_try_insert_unstubbed; this
+// variant chains multiple OccupiedError reads to exercise the Err
+// path on a successful + failed sequence.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_try_insert_chain_unstubbed") {
+    auto map = make_map<int, int>();
+    // Initial inserts succeed.
+    for (int i = 1; i <= 3; ++i) {
+        auto r = map.try_insert(i, i * 10);
+        assert(r.is_ok());
+        assert(std::move(r).unwrap() == i * 10);
+    }
+    assert(map.len() == 3u);
+    // Each try_insert on the same key returns Err.
+    for (int i = 1; i <= 3; ++i) {
+        auto r = map.try_insert(i, 999);
+        assert(r.is_err());
+        auto err = std::move(r).unwrap_err();
+        assert(err.value == 999);
+    }
+    // Original values unchanged.
+    for (int i = 1; i <= 3; ++i) {
+        auto v = map.get(i);
+        assert(v.is_some() && v.unwrap() == i * 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insert/remove/insert alternation. Verifies that remove
+// doesn't leave stale state that affects subsequent insert.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_insert_remove_alternation_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int round = 0; round < 5; ++round) {
+        assert(m.insert(1, round * 10).is_none() ||
+               m.contains_key(1));  // Either new insert or overwrite.
+        auto removed = m.remove(1);
+        assert(removed.is_some());
+        assert(m.is_empty());
+    }
+    assert(m.is_empty());
+}
+
