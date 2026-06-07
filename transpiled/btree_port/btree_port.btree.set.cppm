@@ -4129,14 +4129,45 @@ struct SymmetricDifference {
     SymmetricDifference<T> clone() const {
         return SymmetricDifference(rusty::clone(this->_0));
     }
+    // Hand-port: bypass the broken MergeIterInner::nexts emit. Use
+    // _0.peeked directly. Peeked variant 0 = Left (a-buffered),
+    // variant 1 = Right (b-buffered).
     rusty::Option<const T&> next() {
-        // BLOCKED: Peeked / Peeked_Left / Peeked_Right are internal to
-        // btree_internal module and not exported, so we can't manipulate
-        // _0.peeked from this TU. The transpiled MergeIterInner::nexts
-        // itself has a double-wrapped Option<tuple<Option,Option>> emit
-        // bug. Held until either the marker types are exported or
-        // nexts() is hand-ported.
-        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
+        while (true) {
+            rusty::Option<const T&> a_val{rusty::None};
+            rusty::Option<const T&> b_val{rusty::None};
+            if (this->_0.peeked.is_some()) {
+                auto pv = std::move(this->_0.peeked).unwrap();
+                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};
+                if (pv.index() == 0) {
+                    a_val = rusty::Option<const T&>(std::get<0>(pv)._0);
+                    b_val = this->_0.b.next();
+                } else {
+                    b_val = rusty::Option<const T&>(std::get<1>(pv)._0);
+                    a_val = this->_0.a.next();
+                }
+            } else {
+                a_val = this->_0.a.next();
+                b_val = this->_0.b.next();
+            }
+            if (!a_val.is_some() && !b_val.is_some()) {
+                return rusty::Option<const T&>{rusty::None};
+            }
+            if (!b_val.is_some()) return std::move(a_val);
+            if (!a_val.is_some()) return std::move(b_val);
+            const T& a_ref = a_val.unwrap();
+            const T& b_ref = b_val.unwrap();
+            if (a_ref < b_ref) {
+                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(
+                    btree_internal::Peeked_Right<Iter<T>>{b_ref});
+                return rusty::Option<const T&>(a_ref);
+            } else if (b_ref < a_ref) {
+                this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(
+                    btree_internal::Peeked_Left<Iter<T>>{a_ref});
+                return rusty::Option<const T&>(b_ref);
+            }
+            // equal: drop both, loop
+        }
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         auto [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());
@@ -4164,9 +4195,43 @@ struct Union {
     Union<T> clone() const {
         return Union(rusty::clone(this->_0));
     }
+    // Union: emit a if Some, else b. For equal pair, emit a and drop b.
+    // Implementation uses _0.peeked directly (see SymmetricDifference::next).
     rusty::Option<const T&> next() {
-        // BLOCKED: see SymmetricDifference::next.
-        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
+        rusty::Option<const T&> a_val{rusty::None};
+        rusty::Option<const T&> b_val{rusty::None};
+        if (this->_0.peeked.is_some()) {
+            auto pv = std::move(this->_0.peeked).unwrap();
+            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>{rusty::None};
+            if (pv.index() == 0) {
+                a_val = rusty::Option<const T&>(std::get<0>(pv)._0);
+                b_val = this->_0.b.next();
+            } else {
+                b_val = rusty::Option<const T&>(std::get<1>(pv)._0);
+                a_val = this->_0.a.next();
+            }
+        } else {
+            a_val = this->_0.a.next();
+            b_val = this->_0.b.next();
+        }
+        if (!a_val.is_some() && !b_val.is_some()) {
+            return rusty::Option<const T&>{rusty::None};
+        }
+        if (!b_val.is_some()) return std::move(a_val);
+        if (!a_val.is_some()) return std::move(b_val);
+        const T& a_ref = a_val.unwrap();
+        const T& b_ref = b_val.unwrap();
+        if (a_ref < b_ref) {
+            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(
+                btree_internal::Peeked_Right<Iter<T>>{b_ref});
+            return rusty::Option<const T&>(a_ref);
+        } else if (b_ref < a_ref) {
+            this->_0.peeked = rusty::Option<btree_internal::Peeked<Iter<T>>>(
+                btree_internal::Peeked_Left<Iter<T>>{a_ref});
+            return rusty::Option<const T&>(b_ref);
+        }
+        // equal: emit a, drop b
+        return rusty::Option<const T&>(a_ref);
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         auto [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());

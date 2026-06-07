@@ -8680,10 +8680,40 @@ TEST_CASE("test_range_mut_h1_unstubbed") {
     }
 }
 
-// set_test_symmetric_difference / set_test_union: BLOCKED. The
-// transpiled MergeIterInner::nexts has a double-wrapped
-// Option<tuple<Option<T>, Option<T>>> emit; can't fix from set.cppm
-// because Peeked variant types aren't exported. Held.
+// rustc set/tests.rs::set_test_symmetric_difference — now works via
+// hand-ported SymmetricDifference::next using exported Peeked variants.
+TEST_CASE("set_test_symmetric_difference_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3, 4}) a.insert(v);
+    for (int v : {3, 4, 5, 6}) b.insert(v);
+    auto sd = a.symmetric_difference(b);
+    int expected[] = {1, 2, 5, 6};
+    int count = 0;
+    for (auto v = sd.next(); v.is_some(); v = sd.next()) {
+        assert(count < 4);
+        assert(v.unwrap() == expected[count]);
+        ++count;
+    }
+    assert(count == 4);
+}
+
+// rustc set/tests.rs::set_test_union — hand-ported Union::next.
+TEST_CASE("set_test_union_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3, 4}) a.insert(v);
+    for (int v : {3, 4, 5, 6}) b.insert(v);
+    auto u = a.union_(b);
+    int expected[] = {1, 2, 3, 4, 5, 6};
+    int count = 0;
+    for (auto v = u.next(); v.is_some(); v = u.next()) {
+        assert(count < 6);
+        assert(v.unwrap() == expected[count]);
+        ++count;
+    }
+    assert(count == 6);
+}
 
 // rustc set/tests.rs::set_test_symmetric_difference_size_hint
 TEST_CASE("set_test_symmetric_difference_size_hint_unstubbed") {

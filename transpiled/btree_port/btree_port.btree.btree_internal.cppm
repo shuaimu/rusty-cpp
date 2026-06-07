@@ -3675,11 +3675,11 @@ struct DormantMutRef;
 export struct SetValZST;
 export template<typename K, typename V, typename I>
 struct DedupSortedIter;
-template<typename I>
+export template<typename I>
 struct Peeked_Left;
-template<typename I>
+export template<typename I>
 struct Peeked_Right;
-template<typename I>
+export template<typename I>
 using Peeked = std::variant<Peeked_Left<I>, Peeked_Right<I>>;
 export template<typename I>
 struct MergeIterInner;
@@ -3930,12 +3930,14 @@ using rusty::cmp::Ordering;
 
 // Rust-only: using std::iter::FusedIterator;
 
-// Algebraic data type
-template<typename I>
+// Algebraic data type — exported so set.cppm can use Peeked / Peeked_Left
+// / Peeked_Right for hand-ported set-op merge bodies (bypassing the
+// broken transpiled MergeIterInner::nexts).
+export template<typename I>
 struct Peeked_Left {
     rusty::detail::associated_item_t<I> _0;
 };
-template<typename I>
+export template<typename I>
 struct Peeked_Right {
     rusty::detail::associated_item_t<I> _0;
 };
@@ -3943,7 +3945,7 @@ template<typename I>
 Peeked_Left<I> Left(rusty::detail::associated_item_t<I> _0);
 template<typename I>
 Peeked_Right<I> Right(rusty::detail::associated_item_t<I> _0);
-template<typename I>
+export template<typename I>
 using Peeked = std::variant<Peeked_Left<I>, Peeked_Right<I>>;
 template<typename I>
 Peeked_Left<I> Left(rusty::detail::associated_item_t<I> _0) { return Peeked_Left<I>{std::forward<rusty::detail::associated_item_t<I>>(_0)};  }
