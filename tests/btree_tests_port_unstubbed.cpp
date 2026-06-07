@@ -1962,3 +1962,119 @@ TEST_CASE("smoke_values_len_unstubbed") {
         assert(v.len() == 3u);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.entry(k) and .key(). Vacant entry's key field is the
+// key passed in.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_entry_vacant_key_unstubbed") {
+    auto m = make_map<int, int>();
+    {
+        auto e = m.entry(42);
+        assert(e.index() == 0);  // Vacant
+        assert(e.key() == 42);
+    }
+    {
+        auto e = m.entry(7);
+        assert(e.index() == 0);
+        assert(e.key() == 7);
+    }
+    // Nothing was inserted.
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet.entry(value). Entry is the same shape as the map's
+// — Vacant/Occupied discriminant.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_entry_discriminant_unstubbed") {
+    auto s = make_set<int>();
+    {
+        auto e = s.entry(1);
+        assert(e.index() == 0);  // Vacant
+    }
+    s.insert(1);
+    {
+        auto e = s.entry(1);
+        assert(e.index() == 1);  // Occupied
+    }
+    {
+        auto e = s.entry(2);
+        assert(e.index() == 0);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_basic_small (insert path post-grow). The
+// existing test_basic_small_unstubbed handles small sizes; this
+// variant continues into the height-1 split path.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_basic_small_post_grow_unstubbed") {
+    auto m = make_map<int, int>();
+    // Grow past a single leaf.
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        m.insert(i, i * 10);
+    }
+    assert(m.len() == MIN_INSERTS_HEIGHT_1);
+    // All values retrievable.
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        auto v = m.get(i);
+        assert(v.is_some());
+        assert(v.unwrap() == i * 10);
+    }
+    // first/last_key_value reflect new boundaries.
+    {
+        auto f = m.first_key_value();
+        assert(f.is_some());
+        auto t = std::move(f).unwrap();
+        assert(std::get<0>(t) == 0);
+        assert(std::get<1>(t) == 0);
+    }
+    {
+        auto l = m.last_key_value();
+        assert(l.is_some());
+        auto t = std::move(l).unwrap();
+        assert(std::get<0>(t) == static_cast<int>(MIN_INSERTS_HEIGHT_1) - 1);
+        assert(std::get<1>(t) == (static_cast<int>(MIN_INSERTS_HEIGHT_1) - 1) * 10);
+    }
+    check(m);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: empty-on-empty operations — many "empty case" round-trips
+// that should each return None / 0 / false.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_all_empty_returns_unstubbed") {
+    auto m = make_map<int, int>();
+    assert(m.is_empty());
+    assert(m.len() == 0u);
+    assert(!m.contains_key(0));
+    assert(!m.contains_key(1));
+    assert(m.get(0).is_none());
+    assert(m.get(1).is_none());
+    assert(m.get_key_value(0).is_none());
+    assert(m.first_key_value().is_none());
+    assert(m.last_key_value().is_none());
+    assert(m.first_entry().is_none());
+    assert(m.last_entry().is_none());
+    assert(m.pop_first().is_none());
+    assert(m.pop_last().is_none());
+    assert(m.remove(0).is_none());
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: set empty-case round-trip. Similar to above but for BTreeSet.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_all_empty_returns_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.is_empty());
+    assert(s.len() == 0u);
+    assert(!s.contains(0));
+    assert(!s.contains(1));
+    assert(s.first().is_none());
+    assert(s.last().is_none());
+    assert(s.pop_first().is_none());
+    assert(s.pop_last().is_none());
+    assert(s.remove(0) == false);
+}
