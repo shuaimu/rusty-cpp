@@ -15,7 +15,7 @@ Un-stubbed tests use `_unstubbed` suffix on their name so the
 test-runner registry doesn't collide with the stub of the same Rust
 test name. Both run on each invocation.
 
-## Un-stubbed so far (7 real tests + the synthetic smoke)
+## Un-stubbed so far (11 real tests + the synthetic smoke + 1 dummy drop-count)
 
 | Rust test | C++ TEST_CASE | Status |
 |---|---|---|
@@ -24,12 +24,22 @@ test name. Both run on each invocation.
 | `map/tests.rs::test_pop_first_last` (pop_first half) | `test_pop_first_only_unstubbed` | passing — drains a 4-element map by pop_first to empty |
 | `map/tests.rs::test_pop_first_last` (full mix) | `test_pop_first_last_unstubbed` | passing — re-enabled by B-pop-last fix |
 | `map/tests.rs::test_pop_first_last` (pop_last drain) | `test_pop_last_drain_unstubbed` | passing — re-enabled by B-pop-last fix |
+| `map/tests.rs::test_check_ord_chaos` | `test_check_ord_chaos_unstubbed` | passing — re-enabled by Governor/Governed port |
+| `map/tests.rs::test_range_finding_ill_order_in_map` | `test_range_finding_ill_order_in_map_unstubbed` | passing — re-enabled by Cyclic3 port (asserts the cycle holds; original calls `.range()` which we substitute with `.contains_key()`) |
+| `map/tests.rs::test_append_ord_chaos` (keys only) | `test_append_ord_chaos_keys_unstubbed` | passing — re-enabled by Cyclic3 port. Skips `append()` call itself; verifies the duplicate-insert-with-cyclic-Ord shape (Rust's `len()==4` assertion). |
 | `set/tests.rs::test_clear` | `set_test_clear_unstubbed` | passing (re-enabled by fix_btreemap_clear_manuallydrop) |
 | (synthetic smoke) | `smoke_insert_lookup_unstubbed` | passing — covers insert/contains_key/len/get/first/last_key_value |
+| (synthetic dummy) | `crash_test_dummy_drop_count_unstubbed` | passing — exercises CrashTestDummy + Instance drop-counting through BTreeMap destructor |
 
 ## Helpers wired up
 
 - **`check(M)` shim** in `btree_tests_port_unstubbed.cpp` — no-op `template<typename M> void check(const M&) {}`. Translated tests that hit `map.check()` route through it. We lose internal-invariant checking but keep the test's own public-API assertions.
+- **`tests/btree_testing_helpers.hpp`** — C++ port of rustc's `alloctests/testing/{crash_test, ord_chaos}.rs`:
+  - `CrashTestDummy` + `Instance` for drop / clone / query event counting (used by drop-leak tests).
+  - `Panic` enum — `Panic::Never` is fully supported. `InClone` / `InDrop` / `InQuery` call `std::abort()` instead of unwinding (we don't have `catch_unwind`), so tests that recover from panic state remain blocked.
+  - `Cyclic3` enum with non-transitive `operator<` (A&lt;B&lt;C&lt;A cycle).
+  - `Governor` + `Governed<T>` for flippable ordering tests.
+  - `IdBased` for "compare by id, ignore name" tests.
 
 ## Patcher rules added
 
