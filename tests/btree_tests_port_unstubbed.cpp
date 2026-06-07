@@ -1209,6 +1209,54 @@ TEST_CASE("set_test_first_last_unstubbed") {
     assert(a.pop_last().is_none());
 }
 
+// BLOCKED: set_test_recovery. BTreeSet::replace() forwards to a
+// nonexistent BTreeMap::replace(). BTreeSet::get() also hits the
+// `Option<tuple<K&,V&>>::map → Option<const T&>` return-type bug.
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_iter_mixed (reduced)
+// Mixes next() and next_back() calls. Original size is 10000;
+// we use MIN_INSERTS_HEIGHT_1 to stay within a height-1 tree.
+// Skips iter_mut()/into_iter() per the iter_mut conversion bug.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_iter_mixed_unstubbed") {
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    auto map = make_map<int, int>();
+    for (int i = 0; i < size; ++i) map.insert(i, i);
+
+    auto iter = map.iter();
+    for (int i = 0; i < size / 4; ++i) {
+        auto sz = iter.size_hint();
+        assert(std::get<0>(sz) == static_cast<size_t>(size - i * 2));
+        {
+            auto nx = iter.next();
+            assert(nx.is_some());
+            auto t = std::move(nx).unwrap();
+            assert(std::get<0>(t) == i);
+            assert(std::get<1>(t) == i);
+        }
+        {
+            auto nx = iter.next_back();
+            assert(nx.is_some());
+            auto t = std::move(nx).unwrap();
+            assert(std::get<0>(t) == size - i - 1);
+            assert(std::get<1>(t) == size - i - 1);
+        }
+    }
+    for (int i = size / 4; i < size * 3 / 4; ++i) {
+        auto sz = iter.size_hint();
+        assert(std::get<0>(sz) == static_cast<size_t>(size * 3 / 4 - i));
+        auto nx = iter.next();
+        assert(nx.is_some());
+        auto t = std::move(nx).unwrap();
+        assert(std::get<0>(t) == i);
+        assert(std::get<1>(t) == i);
+    }
+    auto sz = iter.size_hint();
+    assert(std::get<0>(sz) == 0u);
+    assert(iter.next().is_none());
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_iter_descending_to_same_node_twice
 // Translated to iter() instead of iter_mut(). Walks next() once, then
