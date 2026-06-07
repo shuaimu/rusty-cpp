@@ -2935,3 +2935,142 @@ TEST_CASE("smoke_clear_reuse_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: OccupiedEntry::get() returns the current value via const ref.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_occupied_entry_get_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 100);
+    m.insert(2, 200);
+    {
+        auto e = m.entry(1);
+        assert(e.index() == 1);  // Occupied
+        const int v = std::get<1>(e)._0.get();
+        assert(v == 100);
+    }
+    {
+        auto e = m.entry(2);
+        assert(e.index() == 1);
+        const int v = std::get<1>(e)._0.get();
+        assert(v == 200);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap re-clear after many inserts is idempotent.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_clear_idempotent_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    m.clear();
+    // Re-clear works.
+    m.clear();
+    m.clear();
+    assert(m.is_empty());
+    assert(m.len() == 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet clear idempotent.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_clear_idempotent_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 5; ++i) s.insert(i);
+    s.clear();
+    s.clear();
+    s.clear();
+    assert(s.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_get_key_value (post-clear).
+// After clear, get_key_value returns None for all queries.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_get_key_value_post_clear_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 10);
+    m.insert(2, 20);
+    m.insert(3, 30);
+    m.clear();
+    for (int k : {1, 2, 3, 4}) {
+        assert(m.get_key_value(k).is_none());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter().next() then .next() advances properly without
+// jumping or repeating.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_next_no_skip_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 6; ++i) m.insert(i, i * 10);
+    auto it = m.iter();
+    int prev = -1;
+    for (int i = 0; i < 6; ++i) {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        int k = std::get<0>(t);
+        assert(k > prev);  // strictly increasing
+        prev = k;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap repeated insert+remove of distinct keys preserves
+// length consistency across permutations.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_distinct_churn_unstubbed") {
+    auto m = make_map<int, int>();
+    // Insert 1..=5 in a specific order.
+    for (int k : {3, 1, 5, 2, 4}) m.insert(k, k);
+    assert(m.len() == 5u);
+    // Remove 3, 1, 5 in another order.
+    for (int k : {5, 3, 1}) {
+        assert(m.remove(k).is_some());
+    }
+    assert(m.len() == 2u);
+    // 2, 4 still present.
+    assert(m.contains_key(2));
+    assert(m.contains_key(4));
+    assert(!m.contains_key(1));
+    assert(!m.contains_key(3));
+    assert(!m.contains_key(5));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() on map with 1 element returns that element.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_single_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(42, 100);
+    auto it = m.iter();
+    {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 42);
+        assert(std::get<1>(t) == 100);
+    }
+    assert(it.next().is_none());
+    assert(it.next_back().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() going backward on a single-element map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_single_back_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(42, 100);
+    auto it = m.iter();
+    {
+        auto n = it.next_back();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 42);
+        assert(std::get<1>(t) == 100);
+    }
+    assert(it.next_back().is_none());
+    assert(it.next().is_none());
+}
+
