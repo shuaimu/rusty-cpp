@@ -766,6 +766,66 @@ TEST_CASE("set_test_clone_eq_unstubbed") {
     assert(m.clone() == m);
 }
 
+// rustc set/tests.rs::test_is_subset (compact in-table form). Uses
+// btree_port BTreeSet's is_subset directly.
+TEST_CASE("set_test_is_subset_unstubbed") {
+    auto make_with = [](std::initializer_list<int> xs) {
+        auto s = make_set<int>();
+        for (int x : xs) s.insert(x);
+        return s;
+    };
+    auto subset_of = [&](std::initializer_list<int> a, std::initializer_list<int> b) {
+        auto sa = make_with(a);
+        auto sb = make_with(b);
+        return sa.is_subset(sb);
+    };
+    assert(subset_of({}, {}));
+    assert(subset_of({}, {1, 2}));
+    assert(!subset_of({0}, {1, 2}));
+    assert(subset_of({1}, {1, 2}));
+    assert(subset_of({2}, {1, 2}));
+    assert(!subset_of({3}, {1, 2}));
+    assert(!subset_of({1, 2}, {1}));
+    assert(subset_of({1, 2}, {1, 2}));
+    assert(!subset_of({1, 2}, {2, 3}));
+}
+
+// rustc set/tests.rs::test_is_superset
+TEST_CASE("set_test_is_superset_unstubbed") {
+    auto make_with = [](std::initializer_list<int> xs) {
+        auto s = make_set<int>();
+        for (int x : xs) s.insert(x);
+        return s;
+    };
+    auto super_of = [&](std::initializer_list<int> a, std::initializer_list<int> b) {
+        auto sa = make_with(a);
+        auto sb = make_with(b);
+        return sa.is_superset(sb);
+    };
+    assert(super_of({}, {}));
+    assert(!super_of({}, {1, 2}));
+    assert(!super_of({0}, {1, 2}));
+    assert(!super_of({1}, {1, 2}));
+    assert(!super_of({4}, {1, 2}));
+    assert(!super_of({1, 4}, {1, 2}));
+    assert(super_of({1, 2}, {1, 2}));
+    assert(super_of({1, 2, 3}, {1, 3}));
+    assert(super_of({1, 2, 3}, {}));
+    assert(super_of({-1, 1, 2, 3}, {-1, 3}));
+}
+
+// rustc set/tests.rs::test_from_iter — uses btree_port's from_iter-like
+// path (manual loop since rusty C++ doesn't have the same trait magic).
+TEST_CASE("set_test_from_iter_unstubbed") {
+    int xs[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+    auto set = make_set<int>();
+    for (int x : xs) set.insert(x);
+    for (int x : xs) assert(set.contains(x));
+}
+
+// test_zip: BLOCKED — set.iter() instantiation hits a return-type
+// conversion bug in map.cppm:4139 (Option<tuple<int,SetValZST>> → Option<int>).
+
 // rustc map/tests.rs::test_retain — substitute with a remove-by-key loop
 // since the real retain() path hits B-into-iter.
 TEST_CASE("test_retain_manual_unstubbed") {
