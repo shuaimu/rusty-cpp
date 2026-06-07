@@ -3523,3 +3523,148 @@ TEST_CASE("set_smoke_iter_len_unstubbed") {
     assert(s.iter().len() == 5u);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet iter().size_hint() on empty.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_iter_size_hint_empty_unstubbed") {
+    auto s = make_set<int>();
+    auto it = s.iter();
+    auto sh = it.size_hint();
+    assert(std::get<0>(sh) == 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet iter().size_hint() consistent.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_iter_size_hint_consistent_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 5; ++i) s.insert(i);
+    auto it = s.iter();
+    auto sh = it.size_hint();
+    assert(std::get<0>(sh) == 5u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: many inserts then full drain via pop_first.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_full_drain_pop_first_unstubbed") {
+    auto m = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) m.insert(i, i * 10);
+    for (int expected = 0; expected < size; ++expected) {
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == expected);
+        assert(std::get<1>(t) == expected * 10);
+    }
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: many inserts then full drain via pop_last.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_full_drain_pop_last_unstubbed") {
+    auto m = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) m.insert(i, i * 10);
+    for (int expected = size - 1; expected >= 0; --expected) {
+        auto kv = m.pop_last();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == expected);
+        assert(std::get<1>(t) == expected * 10);
+    }
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: many inserts then drain via remove(key).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_full_drain_remove_key_unstubbed") {
+    auto m = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) m.insert(i, i * 10);
+    // Remove in order.
+    for (int i = 0; i < size; ++i) {
+        auto removed = m.remove(i);
+        assert(removed.is_some());
+        assert(std::move(removed).unwrap() == i * 10);
+        assert(m.len() == static_cast<size_t>(size - i - 1));
+    }
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet remove all by drain.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_full_drain_unstubbed") {
+    auto s = make_set<int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) s.insert(i);
+    for (int i = 0; i < size; ++i) {
+        assert(s.remove(i) == true);
+        assert(s.len() == static_cast<size_t>(size - i - 1));
+    }
+    assert(s.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter().next_back/next interleaved walk.
+// Walks one from front, one from back, repeats. Smaller scale to
+// avoid the dangling-binding family.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_interleaved_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 6; ++i) m.insert(i, i * 10);
+    auto it = m.iter();
+    {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 0);
+    }
+    {
+        auto n = it.next_back();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 5);
+    }
+    {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+    {
+        auto n = it.next_back();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 4);
+    }
+    // Remaining: 2, 3.
+    assert(it.len() == 2u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: get returns the most recently inserted value.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_get_returns_latest_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 100);
+    {
+        auto v = m.get(1);
+        assert(v.is_some() && v.unwrap() == 100);
+    }
+    m.insert(1, 200);
+    {
+        auto v = m.get(1);
+        assert(v.is_some() && v.unwrap() == 200);
+    }
+    m.insert(1, 300);
+    {
+        auto v = m.get(1);
+        assert(v.is_some() && v.unwrap() == 300);
+    }
+}
+
