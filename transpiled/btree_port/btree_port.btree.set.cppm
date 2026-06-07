@@ -4133,7 +4133,7 @@ struct SymmetricDifference {
         throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        auto&& [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());
+        auto [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());
         return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(a_len) + rusty::detail::deref_if_pointer_like(b_len)));
     }
     rusty::Option<const T&> min() {
@@ -4162,7 +4162,7 @@ struct Union {
         throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        auto&& [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());
+        auto [a_len, b_len] = rusty::detail::deref_if_pointer_like(this->_0.lens());
         return std::make_tuple(max(std::move(a_len), std::move(b_len)), rusty::Option<size_t>(rusty::detail::deref_if_pointer_like(a_len) + rusty::detail::deref_if_pointer_like(b_len)));
     }
     rusty::Option<const T&> min() {
@@ -4793,7 +4793,7 @@ return std::move(k);
     }
     template<typename F, typename R>
     ExtractIf<T, R, F, A> extract_if(R range, F pred) {
-        auto&& [inner, alloc] = rusty::detail::deref_if_pointer_like(this->map.extract_if_inner(std::move(range)));
+        auto [inner, alloc] = rusty::detail::deref_if_pointer_like(this->map.extract_if_inner(std::move(range)));
         return ExtractIf<T, R, F, A>{.pred = std::move(pred), .inner = std::move(inner), .alloc = std::move(alloc)};
     }
     Iter<T> iter() const {
@@ -4955,7 +4955,7 @@ struct Difference {
         }
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        auto&& [self_len, other_len] = rusty::detail::deref_if_pointer_like([&]() { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).other_iter); return std::make_tuple(rusty::len(self_iter), rusty::len(other_iter)); } if (_m.index() == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(_m).other_set); return std::make_tuple(rusty::len(self_iter), rusty::len(other_set)); } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& iter = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return std::make_tuple(rusty::len(iter), 0); } rusty::intrinsics::unreachable(); }());
+        auto [self_len, other_len] = rusty::detail::deref_if_pointer_like([&]() { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).other_iter); return std::make_tuple(rusty::len(self_iter), rusty::len(other_iter)); } if (_m.index() == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(_m).other_set); return std::make_tuple(rusty::len(self_iter), rusty::len(other_set)); } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& iter = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return std::make_tuple(rusty::len(iter), 0); } rusty::intrinsics::unreachable(); }());
         return std::make_tuple(rusty::saturating_sub(self_len, rusty::detail::deref_if_pointer(std::move(other_len))), rusty::Option<size_t>(std::move(self_len)));
     }
     rusty::Option<const T&> min() {

@@ -3782,7 +3782,7 @@ struct OccupiedEntry {
     template<typename K, typename V>
     std::tuple<K, V> remove_kv() {
         auto emptied_internal_root = false;
-        auto&& [old_kv, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(this->handle.remove_kv_tracking([&]() { return emptied_internal_root = true; }, rusty::clone(this->alloc)));
+        auto [old_kv, _tuple_ignore1] = rusty::detail::deref_if_pointer_like(this->handle.remove_kv_tracking([&]() { return emptied_internal_root = true; }, rusty::clone(this->alloc)));
         const auto map = this->dormant_map.awaken();
         rusty::detail::deref_if_pointer_like(map.length) -= 1;
         if (emptied_internal_root) {
