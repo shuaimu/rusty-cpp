@@ -1255,6 +1255,50 @@ TEST_CASE("set_test_ord_absence_unstubbed") {
     assert(s.is_empty());
 }
 
+// Smoke test of map.iter() len() after partial draining. Not a 1:1 rustc
+// test but covers the Iter::len + Iter::size_hint surface together.
+TEST_CASE("smoke_iter_len_unstubbed") {
+    auto map = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) map.insert(i, i * 10);
+    auto it = map.iter();
+    assert(it.len() == 5u);
+    {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 0);
+    }
+    assert(it.len() == 4u);
+    {
+        auto n = it.next_back();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 4);
+    }
+    assert(it.len() == 3u);
+    // Drain via next.
+    {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 1);
+    }
+    {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 2);
+    }
+    {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 3);
+    }
+    assert(it.len() == 0u);
+    assert(it.next().is_none());
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_iter_mixed (reduced)
 // Mixes next() and next_back() calls. Original size is 10000;
