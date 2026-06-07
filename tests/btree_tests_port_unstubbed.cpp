@@ -4243,3 +4243,119 @@ TEST_CASE("set_smoke_remove_absent_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap is_empty checked at every removal step.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_is_empty_during_drain_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i);
+    assert(!m.is_empty());
+    while (!m.is_empty()) {
+        m.pop_first();
+    }
+    assert(m.is_empty());
+    assert(m.len() == 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet is_empty during drain.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_is_empty_during_drain_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 1; i <= 5; ++i) s.insert(i);
+    while (!s.is_empty()) {
+        s.pop_first();
+    }
+    assert(s.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.get on empty map for many keys.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_empty_get_many_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int k : {-100, -1, 0, 1, 50, 100, 999}) {
+        assert(m.get(k).is_none());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.contains_key on empty map for many keys.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_empty_contains_many_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int k : {-100, -1, 0, 1, 50, 100, 999}) {
+        assert(!m.contains_key(k));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet.contains on empty map for many values.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_empty_contains_many_unstubbed") {
+    auto s = make_set<int>();
+    for (int v : {-100, -1, 0, 1, 50, 100, 999}) {
+        assert(!s.contains(v));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.try_insert on existing key with same value still Err.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_try_insert_same_value_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 100);
+    {
+        auto r = m.try_insert(1, 100);
+        assert(r.is_err());
+        auto err = std::move(r).unwrap_err();
+        assert(err.value == 100);  // the new value, even if same
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.try_insert at multiple keys then revoke none.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_try_insert_multiple_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 3; ++i) {
+        auto r = m.try_insert(i, i * 10);
+        assert(r.is_ok());
+    }
+    assert(m.len() == 3u);
+    for (int i = 1; i <= 3; ++i) {
+        auto v = m.get(i);
+        assert(v.is_some() && v.unwrap() == i * 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap insert/remove deeply alternating.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_deep_alternation_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int round = 0; round < 20; ++round) {
+        const int k = round % 5;
+        if (m.contains_key(k)) {
+            m.remove(k);
+        } else {
+            m.insert(k, round);
+        }
+    }
+    // After 20 rounds with mod-5, len is bounded by 5.
+    assert(m.len() <= 5);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insert wider range of integers.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_wide_int_range_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = -10; i <= 10; ++i) m.insert(i, i * i);
+    for (int i = -10; i <= 10; ++i) {
+        auto v = m.get(i);
+        assert(v.is_some() && v.unwrap() == i * i);
+    }
+    assert(m.len() == 21u);
+}
+
