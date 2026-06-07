@@ -5426,3 +5426,36 @@ TEST_CASE("test_into_values_unstubbed") {
     assert(count == 3);
     assert(saw100 && saw200 && saw300);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_entry — Entry::or_insert / and_modify usage.
+// Un-stubbed by the Entry const-mismatch fix.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_entry_or_insert_unstubbed") {
+    auto map = make_map<int, int>();
+    map.insert(1, 10);
+    map.insert(2, 20);
+
+    // and_modify on existing key.
+    map.entry(1).and_modify([](int& v) { v *= 10; });
+    {
+        auto v = map.get(1);
+        assert(v.is_some() && v.unwrap() == 100);
+    }
+
+    // or_insert on vacant key.
+    map.entry(99).or_insert(999);
+    assert(map.len() == 3);
+    {
+        auto v = map.get(99);
+        assert(v.is_some() && v.unwrap() == 999);
+    }
+
+    // or_insert on occupied key — should NOT overwrite.
+    map.entry(2).or_insert(2222);
+    {
+        auto v = map.get(2);
+        assert(v.is_some() && v.unwrap() == 20);
+    }
+    check(map);
+}

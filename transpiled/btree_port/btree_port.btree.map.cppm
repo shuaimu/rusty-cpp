@@ -5385,11 +5385,14 @@ struct Entry : std::variant<Entry_Vacant<K, V, A>, Entry_Occupied<K, V, A>> {
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return [&]() -> rusty::fmt::Result { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 0) { const auto& v = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("Entry").field(v).finish(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { const auto& o = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("Entry").field(o).finish(); } return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }();
     }
-    V& or_insert(V default_) const {
+    // Entry consume-self fix: was emitted as `const`, but body calls
+    // OccupiedEntry::into_mut() / VacantEntry::insert() which are both
+    // non-const. Drop const so the body type-checks.
+    V& or_insert(V default_) {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(std::move(default_)); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
-    V& or_insert_with(F default_) const {
+    V& or_insert_with(F default_) {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(default_()); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
@@ -5401,15 +5404,15 @@ return entry.insert(std::move(value)); }(); } return [&]() -> V& { rusty::intrin
         return [&]() -> const K& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { const auto& entry = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return entry.key(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { const auto& entry = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return entry.key(); } return [&]() -> const K& { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
-    Entry<K, V, A> and_modify(F f) const {
+    Entry<K, V, A> and_modify(F f) {
         return [&]() -> Entry<K, V, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> Entry<K, V, A> { f(entry.get_mut());
 return Entry<K, V, A>{Entry_Occupied<K, V, A>{entry}}; }(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return Entry<K, V, A>{Entry_Vacant<K, V, A>{entry}}; } return [&]() -> Entry<K, V, A> { rusty::intrinsics::unreachable(); }(); }();
     }
-    OccupiedEntry<K, V, A> insert_entry(V value) const {
+    OccupiedEntry<K, V, A> insert_entry(V value) {
         return [&]() -> OccupiedEntry<K, V, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> OccupiedEntry<K, V, A> { entry.insert(std::move(value));
 return entry; }(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert_entry(std::move(value)); } return [&]() -> OccupiedEntry<K, V, A> { rusty::intrinsics::unreachable(); }(); }();
     }
-    V& or_default() const {
+    V& or_default() {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(rusty::default_value<V>()); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
 #if 0  // // btree_port port: orphan-impl misroutes hidden by post_transpile_patch.py
