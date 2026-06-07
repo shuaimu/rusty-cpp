@@ -82,14 +82,26 @@ TEST_CASE("test_get_key_value_unstubbed") {
     assert(map.get_key_value(4).is_none());
 }
 
-// rustc map/tests.rs::test_pop_first_last partially un-stubbed: only
-// the pop_first path. pop_last hits B-pop-last — runtime aborts inside
-// `last_entry()` / `OccupiedEntry::remove_entry()` chain. `last_key_value`
-// works (purely const, no dormant_map). `pop_first` works (calls into
-// `first_entry`/`first_leaf_edge`/`right_kv`). The asymmetric failure
-// makes it look like a bug in `last_entry` / `last_leaf_edge` /
-// `left_kv` / `remove_entry` somewhere on the rightmost-walk path.
-// Deferred — needs deeper investigation.
+// B-pop-last bisected to: pop_last works in isolation (alone, or
+// repeatedly on a fresh map). It also works after a single pop_first
+// (size 2 map drained that way is fine). But:
+//
+//   insert 1,2,3,4 → pop_first → pop_first → pop_last  ⇒  CRASH inside
+//   remove_entry / remove_kv_tracking. last_entry() itself returns OK.
+//
+// So pop_first leaves the leaf in a state that pop_last later misreads.
+// Verified the slice_remove emit at NodeRef::remove() does
+// `std::move(this->idx_field)` twice for K and V columns — for size_t
+// fields that's harmless (std::move on primitive returns rvalue ref
+// without invalidating the source). The likely culprit is elsewhere in
+// the rebalance/merge path after the leaf falls under MIN_LEN, but
+// root-causing requires live runtime debugging (gdb on remove_kv_tracking).
+// Deferred.
+//
+// Status: pop_first-only un-stubbed and exercising the same internals
+// from the "left walk" side. Drain testing with mixed pop_first/pop_last
+// remains blocked.
+
 TEST_CASE("test_pop_first_only_unstubbed") {
     auto map = make_map<int, int>();
     assert(map.pop_first().is_none());
@@ -100,23 +112,22 @@ TEST_CASE("test_pop_first_only_unstubbed") {
     map.insert(4, 40);
     assert(map.len() == 4);
 
-    {
+    for (int expected_k = 1; expected_k <= 4; ++expected_k) {
         auto kv = map.pop_first();
         assert(kv.is_some());
         auto t = std::move(kv).unwrap();
-        assert(std::get<0>(t) == 1);
-        assert(std::get<1>(t) == 10);
-        assert(map.len() == 3);
+        assert(std::get<0>(t) == expected_k);
+        assert(std::get<1>(t) == expected_k * 10);
+        assert(map.len() == static_cast<size_t>(4 - expected_k));
     }
-    {
-        auto kv = map.pop_first();
-        assert(kv.is_some());
-        auto t = std::move(kv).unwrap();
-        assert(std::get<0>(t) == 2);
-        assert(std::get<1>(t) == 20);
-        assert(map.len() == 2);
-    }
+    assert(map.is_empty());
+    assert(map.pop_first().is_none());
 }
+
+// pop_last drain test was attempted but a 3rd consecutive pop_last
+// triggered B-pop-last on its own (not just when mixed with pop_first).
+// So the bug surface is actually wider than the earlier bisection
+// indicated. Held out of un-stubs pending root cause.
 
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_try_insert
