@@ -5767,6 +5767,104 @@ TEST_CASE("test_range_on_empty_map_unstubbed") {
 // Each needs its own hand-fix; held until those land.
 
 // ─────────────────────────────────────────────────────────────────────
+// test_split_off_h0: small map (single leaf, height 0). 11 entries fit
+// in CAPACITY=11. Splits at key 5; left=[0..5), right=[5..11).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_split_off_h0_unstubbed") {
+    auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+    for (int i = 0; i < 11; ++i) m.insert(i, i * 10);
+    auto right = m.split_off(5);
+    assert(m.len() == 5u);
+    assert(right.len() == 6u);
+    for (int i = 0; i < 5; ++i) {
+        assert(m.contains_key(i));
+        assert(!right.contains_key(i));
+    }
+    for (int i = 5; i < 11; ++i) {
+        assert(!m.contains_key(i));
+        assert(right.contains_key(i));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// test_split_off_h1: height-1 tree (root + leaves). 80 entries forces
+// height 1 (CAPACITY=11). Splits at 40 → left=[0..40), right=[40..80).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_split_off_h1_unstubbed") {
+    auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+    const int N = 80;
+    for (int i = 0; i < N; ++i) m.insert(i, i * 10);
+    auto right = m.split_off(40);
+    assert(m.len() == 40u);
+    assert(right.len() == 40u);
+    for (int i = 0; i < 40; ++i) {
+        assert(m.contains_key(i));
+        assert(!right.contains_key(i));
+        assert(m.get(i).unwrap() == i * 10);
+    }
+    for (int i = 40; i < N; ++i) {
+        assert(!m.contains_key(i));
+        assert(right.contains_key(i));
+        assert(right.get(i).unwrap() == i * 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// test_split_off_h2: height-2 tree. 200 entries (> 144 = 12*12). Splits
+// at 100 → left=[0..100), right=[100..200).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_split_off_h2_unstubbed") {
+    auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+    const int N = 200;
+    for (int i = 0; i < N; ++i) m.insert(i, i * 10);
+    auto right = m.split_off(100);
+    assert(m.len() == 100u);
+    assert(right.len() == 100u);
+    for (int i = 0; i < 100; ++i) {
+        assert(m.contains_key(i));
+        assert(!right.contains_key(i));
+        assert(m.get(i).unwrap() == i * 10);
+    }
+    for (int i = 100; i < N; ++i) {
+        assert(!m.contains_key(i));
+        assert(right.contains_key(i));
+        assert(right.get(i).unwrap() == i * 10);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// test_split_off_edge_cases: split at key not in map; split at first
+// key; split at past-last key.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_split_off_edge_cases_unstubbed") {
+    // split at first key — left should be empty, right should have all.
+    {
+        auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+        for (int i = 0; i < 10; ++i) m.insert(i, i * 10);
+        auto right = m.split_off(0);
+        assert(m.len() == 0u);
+        assert(right.len() == 10u);
+    }
+    // split past-last key — right should be empty.
+    {
+        auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+        for (int i = 0; i < 10; ++i) m.insert(i, i * 10);
+        auto right = m.split_off(100);
+        assert(m.len() == 10u);
+        assert(right.len() == 0u);
+    }
+    // split at a key not in map (between existing keys).
+    {
+        auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+        for (int i = 0; i < 10; ++i) m.insert(i * 2, i);  // 0,2,4,6,8,...
+        auto right = m.split_off(5);  // key 5 not present
+        // keys >= 5 go to right: 6, 8, 10, 12, 14, 16, 18 → 7 entries
+        assert(m.len() == 3u);  // 0, 2, 4
+        assert(right.len() == 7u);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Batch un-stubs for simple test names that didn't need new API.
 // Each maps to a SKIP entry in transpiled/btree_tests_port.cppm.
 // Tests intentionally exercise just the public API surface that

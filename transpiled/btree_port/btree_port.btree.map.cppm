@@ -5898,7 +5898,10 @@ return std::move(v);
         auto right_root = left_root.split_off(key, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
         auto [new_left_len, right_len] = rusty::detail::deref_if_pointer_like(btree_internal::Root<K, V>::calc_split_length(std::move(total_num), left_root, right_root));
         this->length = std::move(new_left_len);
-        return BTreeMap<K, V, A>(rusty::Option<btree_internal::Root<K, V>>(std::move(right_root)), std::move(right_len), rusty::clone(this->alloc), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{});
+        // ManuallyDrop<A> is move-only; clone the inner A then re-wrap.
+        // Matches the idiom used elsewhere in this file (e.g. drop_subtree at
+        // line 5587: `manually_drop_new(rusty::clone(*this->alloc))`).
+        return BTreeMap<K, V, A>(rusty::Option<btree_internal::Root<K, V>>(std::move(right_root)), std::move(right_len), rusty::mem::manually_drop_new(rusty::clone(*this->alloc)), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{});
     }
     template<typename F, typename R>
     ExtractIf<K, V, R, F, A> extract_if(R range, F pred) {

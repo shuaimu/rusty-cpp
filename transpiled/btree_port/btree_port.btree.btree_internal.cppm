@@ -5014,9 +5014,35 @@ return internal.first_edge(); }(); } rusty::intrinsics::unreachable(); }();
         }
     }
     size_t calc_length() {
-        auto result = 0;
-        this->visit_nodes_in_order([&](auto&& pos) { return [&]() { auto&& _m = pos; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { static_cast<void>(rusty::detail::deref_if_pointer_like(result) += rusty::len(node)); return std::make_tuple(); }(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& node = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { static_cast<void>(rusty::detail::deref_if_pointer_like(result) += rusty::len(node)); return std::make_tuple(); }(); } if (rusty::detail::deref_if_pointer(_m).index() == 2) { return std::make_tuple(); } rusty::intrinsics::unreachable(); }(); });
-        return std::move(result);
+        // btree_port hand-port: bypass the transpiled visit_nodes_in_order
+        // entirely. The Internal arm of that helper has return-type-deduction
+        // failures inside its nested lambdas (one branch returns void, the
+        // other returns an Edge handle) that even leaf-only instantiations
+        // trip when the closure type is determined. We just recurse directly
+        // over the tree shape, mirroring libcore's invariant:
+        //   total = sum of leaf node.len() + count of internal kvs
+        size_t result = 0;
+        // Walk: stack-based DFS over edges. At each NodeRef:
+        //   - leaf (height == 0): add node.len()
+        //   - internal: add node.len() (internal kvs) and descend into each child
+        auto __recurse = [&](this auto&& self_, NodeRef<marker::Immut, K, V, marker::LeafOrInternal> node) -> void {
+            auto __f = node.force();
+            if (__f.index() == 0) {
+                auto& __leaf = std::get<0>(__f)._0;
+                result += rusty::len(__leaf);
+                return;
+            }
+            auto& __internal = std::get<1>(__f)._0;
+            const auto __n = rusty::len(__internal);
+            result += __n;  // internal kvs
+            // Children: edges 0..n inclusive (n+1 children).
+            for (size_t i = 0; i <= __n; ++i) {
+                auto __child = Handle<NodeRef<marker::Immut, K, V, marker::Internal>, marker::Edge>::new_edge(__internal, i).descend();
+                self_(std::move(__child));
+            }
+        };
+        __recurse(this->reborrow());
+        return result;
     }
     // Range-path hand-port: take SearchBound<K> by value (matches the
     // rest of the bound-walk chain). The transpiled body used
@@ -5149,40 +5175,56 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
     template<typename Q, typename A>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
     NodeRef<BorrowType, K, V, Type> split_off(const Q& key, A alloc) {
+        // btree_port hand-port: the transpiler-emitted body had three
+        // separate bugs that all blocked compilation:
+        //   (1) `auto* left_node = &(left_root.borrow_mut())` took the
+        //       address of a temporary (borrow_mut returns by value).
+        //   (2) The bottom match arm matched on tuple-of-variants with
+        //       bare-glob markers (`Internal && Internal`), and destructured
+        //       via `std::get<0>(_m_tuple)._0` — `_0` doesn't exist on
+        //       `std::variant<ForceResult_Leaf, ForceResult_Internal>`;
+        //       you must pick the alternative first via std::get<N>(variant)._0.
+        //   (3) `__rusty_alias_Root_fix_{right,left}_border` calls had
+        //       non-deducible <K, V> template parameters at the call site.
+        //
+        // Replacement mirrors libcore alloc/src/collections/btree/node.rs's
+        // Root::split_off:
+        //   - keep left_node / right_node as VALUES (NodeRef<Mut, K, V, LeafOrInternal>)
+        //     and re-assign each loop iteration with descend().
+        //   - explicit `if (variant.index() == N)` over the (split_edge.force(),
+        //     right_node.force()) pair so the Internal / Leaf arms compile.
+        //   - call the member fix_right_border / fix_left_border directly
+        //     instead of the broken free-function aliases.
         NodeRef<BorrowType, K, V, Type>& left_root = (*this);
-        // split_off fix: __rusty_alias_Root_new_pillar's template
-        // parameters K, V can't be deduced from arguments (only A can);
-        // pass them explicitly so the function is instantiable.
-        auto right_root = __rusty_alias_Root_new_pillar<A, K, V>(left_root.height(), rusty::clone(alloc));
-        auto* left_node = &(left_root.borrow_mut());
-        auto* right_node = &(right_root.borrow_mut());
+        auto right_root = NodeRef<BorrowType, K, V, Type>::new_pillar(left_root.height(), rusty::clone(alloc));
+        auto left_node = left_root.borrow_mut();
+        auto right_node = right_root.borrow_mut();
         while (true) {
-            auto split_edge = [&]() { auto&& _m = (*left_node).search_node(key); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& kv = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return kv.left_edge(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& edge = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return edge; } rusty::intrinsics::unreachable(); }();
-            split_edge.move_suffix(*right_node);
-            {
-                auto&& _m0 = split_edge.force();
-                auto&& _m1 = (*right_node).force();
-                auto _m_tuple = std::forward_as_tuple(_m0, _m1);
-                bool _m_matched = false;
-                if (!_m_matched && ((/* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true && /* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true))) {
-                    auto&& edge = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
-                    auto&& node = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple)))._0);
-                    left_node = edge.descend();
-                    right_node = node.first_edge().descend();
-                    _m_matched = true;
-                }
-                if (!_m_matched && ((/* TODO transpiler: unresolved bare-glob variant `Leaf` (no enum decl visible in this TU; patch arm manually) */ true && /* TODO transpiler: unresolved bare-glob variant `Leaf` (no enum decl visible in this TU; patch arm manually) */ true))) {
-                    break;
-                    _m_matched = true;
-                }
-                if (!_m_matched && (true)) {
-                    rusty::intrinsics::unreachable();
-                    _m_matched = true;
-                }
+            // search_node → SearchResult_Found(KV-handle) | SearchResult_GoDown(Edge-handle)
+            auto __sr = left_node.search_node(key);
+            using __EdgeH = Handle<NodeRef<marker::Mut, K, V, marker::LeafOrInternal>, marker::Edge>;
+            __EdgeH split_edge = (__sr.index() == 0)
+                ? std::get<0>(std::move(__sr))._0.left_edge()
+                : std::get<1>(std::move(__sr))._0;
+            split_edge.move_suffix(right_node);
+            // Handle::force() and NodeRef::force() both return ForceResult variants;
+            // alternative 0 = Leaf, alternative 1 = Internal.
+            auto __lf = split_edge.force();
+            auto __rf = right_node.force();
+            if (__lf.index() == 1 && __rf.index() == 1) {
+                auto edge = std::move(std::get<1>(std::move(__lf))._0);   // Handle<NodeRef<Mut,K,V,Internal>, Edge>
+                auto node = std::move(std::get<1>(std::move(__rf))._0);   // NodeRef<Mut, K, V, Internal>
+                left_node = edge.descend();
+                right_node = node.first_edge().descend();
+                continue;
             }
+            if (__lf.index() == 0 && __rf.index() == 0) {
+                break;
+            }
+            rusty::intrinsics::unreachable();
         }
-        __rusty_alias_Root_fix_right_border(left_root, rusty::clone(alloc));
-        __rusty_alias_Root_fix_left_border(right_root, std::move(alloc));
+        left_root.fix_right_border(rusty::clone(alloc));
+        right_root.fix_left_border(std::move(alloc));
         return std::move(right_root);
     }
     template<typename A>
@@ -5787,13 +5829,20 @@ struct Handle {
         return Handle<NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::Leaf>, Type>(std::move(node), std::move(this->idx_field), rusty::PhantomData<Type>{});
     }
     void move_suffix(NodeRef<marker::Mut, typename __TemplateArgs<Node>::arg_1, typename __TemplateArgs<Node>::arg_2, marker::LeafOrInternal>& right) {
+        // btree_port hand-port: original emit had `auto& right_node =
+        // right.reborrow_mut();` — reborrow_mut() returns by value, so the
+        // lvalue ref bind doesn't compile. Mirrors Rust source:
+        //   let mut right_node = right.reborrow_mut();
+        // Also fixes the tuple-of-variants match-arm destructure that used
+        // `std::get<N>(_m_tuple)._0` directly (the variant alternative has
+        // to be selected first with std::get<INDEX>(variant)._0).
         // @unsafe
         {
             const auto new_left_len = this->idx_field;
             Node left_node = this->reborrow_mut().into_node();
             const auto old_left_len = rusty::len(left_node);
             const auto new_right_len = rusty::detail::deref_if_pointer_like(old_left_len) - rusty::detail::deref_if_pointer_like(new_left_len);
-            auto& right_node = right.reborrow_mut();
+            auto right_node = right.reborrow_mut();
             assert((rusty::len(right_node) == 0));
             assert((rusty::detail::deref_if_pointer_like(left_node.height_field) == rusty::detail::deref_if_pointer_like(right_node.height_field)));
             if (rusty::detail::deref_if_pointer_like(new_right_len) > 0) {
@@ -5801,25 +5850,19 @@ struct Handle {
                 rusty::detail::deref_if_pointer_like(right_node.len_mut()) = static_cast<uint16_t>(new_right_len);
                 move_to_slice(rusty::deref_call(left_node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range(new_left_len, old_left_len))) { return std::forward<decltype(__recv)>(__recv).key_area_mut(rusty::range(new_left_len, old_left_len)); }), right_node.key_area_mut(rusty::range_to(new_right_len)));
                 move_to_slice(rusty::deref_call(left_node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range(new_left_len, old_left_len))) { return std::forward<decltype(__recv)>(__recv).val_area_mut(rusty::range(new_left_len, old_left_len)); }), right_node.val_area_mut(rusty::range_to(new_right_len)));
-                {
-                    auto&& _m0 = rusty::deref_call(left_node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).force()) { return std::forward<decltype(__recv)>(__recv).force(); });
-                    auto&& _m1 = right_node.force();
-                    auto _m_tuple = std::forward_as_tuple(_m0, _m1);
-                    bool _m_matched = false;
-                    if (!_m_matched && ((rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1 && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 1))) {
-                        auto&& left = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
-                        auto&& right = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))))._0);
-                        move_to_slice(left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, rusty::detail::deref_if_pointer_like(old_left_len) + 1)), right.edge_area_mut(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1)));
-                        right.correct_childrens_parent_links(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1));
-                        _m_matched = true;
-                    }
-                    if (!_m_matched && ((rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 0 && rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m_tuple))).index() == 0))) {
-                        _m_matched = true;
-                    }
-                    if (!_m_matched && (true)) {
-                        rusty::intrinsics::unreachable();
-                        _m_matched = true;
-                    }
+                // Tuple match: (left_node.force(), right_node.force()).
+                // Both ForceResult<...Leaf, ...Internal> variants. Index 0 = Leaf, 1 = Internal.
+                auto __lf = rusty::deref_call(left_node, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).force()) { return std::forward<decltype(__recv)>(__recv).force(); });
+                auto __rf = right_node.force();
+                if (__lf.index() == 1 && __rf.index() == 1) {
+                    auto& __left  = std::get<1>(__lf)._0;   // NodeRef<Mut, K, V, Internal>
+                    auto& __right = std::get<1>(__rf)._0;   // NodeRef<Mut, K, V, Internal>
+                    move_to_slice(__left.edge_area_mut(rusty::range(rusty::detail::deref_if_pointer_like(new_left_len) + 1, rusty::detail::deref_if_pointer_like(old_left_len) + 1)), __right.edge_area_mut(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1)));
+                    __right.correct_childrens_parent_links(rusty::range(1, rusty::detail::deref_if_pointer_like(new_right_len) + 1));
+                } else if (__lf.index() == 0 && __rf.index() == 0) {
+                    // both leaves; nothing else to do beyond keys/vals copy above.
+                } else {
+                    rusty::intrinsics::unreachable();
                 }
             }
         }
