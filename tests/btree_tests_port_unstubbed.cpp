@@ -5526,3 +5526,20 @@ TEST_CASE("set_test_iter_min_max_unstubbed") {
 // of `this->height_field` and `this->node`. Marking that const would
 // require either const_cast or a deeper rework of the move semantics.
 // Held until the deeper cascade is unwound.
+
+// ─────────────────────────────────────────────────────────────────────
+// catch_unwind + Panic::InQuery test — exercises the panic-recovery path
+// (rusty::panic::catch_unwind is exception-based; testing-helpers'
+// Instance::query() now throws on InQuery instead of std::abort()).
+// ─────────────────────────────────────────────────────────────────────
+#include <rusty/panic.hpp>
+
+TEST_CASE("crash_test_dummy_query_panic_catch_unwrap_unstubbed") {
+    using namespace btree_testing;
+    CrashTestDummy a(0);
+    auto inst = a.spawn(Panic::InQuery);
+    // catch_unwind captures the runtime_error thrown by query()
+    auto r = rusty::panic::catch_unwind([&] { return inst.query(42); });
+    assert(r.is_err());
+    assert(a.queried() == 1);
+}

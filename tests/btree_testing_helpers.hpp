@@ -5,11 +5,12 @@
 // Used by the rustc-translated btree tests in btree_tests_port_unstubbed.cpp.
 //
 // Differences from the Rust originals:
-//   - No `catch_unwind` / panic recovery available in the codebase, so the
-//     `Panic::InClone / InDrop / InQuery` variants call `std::abort()` rather
-//     than unwinding. Tests that rely on observing post-panic state are NOT
-//     translatable yet; tests that only need drop/clone/query counting with
-//     `Panic::Never` work.
+//   - `Panic::InClone / InDrop / InQuery` variants throw `std::runtime_error`,
+//     which rusty::panic::catch_unwind() can recover. Tests that observe
+//     post-panic state work as long as they use AssertUnwindSafe + catch_unwind.
+//     Note: throwing from a destructor (Panic::InDrop) during stack
+//     unwinding is UB in C++; we throw only when no exception is already
+//     in flight to avoid that.
 //   - Atomics use `std::atomic<size_t>` (Rust's `AtomicUsize` semantics).
 //   - `Governed` and `Cyclic3` expose both `operator<` and `cmp()` so they
 //     interop with whichever path the BTreeMap implementation takes.
@@ -79,7 +80,7 @@ public:
         origin_->cloned_.fetch_add(1, std::memory_order_seq_cst);
         if (other.panic_ == Panic::InClone) {
             // Rust would panic here; we don't have catch_unwind so abort.
-            std::abort();
+            throw std::runtime_error("CrashTestDummy panic");
         }
     }
 
@@ -94,7 +95,7 @@ public:
         panic_ = Panic::Never;
         origin_->cloned_.fetch_add(1, std::memory_order_seq_cst);
         if (other.panic_ == Panic::InClone) {
-            std::abort();
+            throw std::runtime_error("CrashTestDummy panic");
         }
         return *this;
     }
@@ -108,12 +109,16 @@ public:
         return *this;
     }
 
-    ~Instance() {
+    ~Instance() noexcept(false) {
         if (origin_ != nullptr) {
             origin_->dropped_.fetch_add(1, std::memory_order_seq_cst);
             if (panic_ == Panic::InDrop) {
-                // Rust would panic; C++ in a dtor must not throw, so abort.
-                std::abort();
+                // Rust would panic. C++ rule: throwing during stack
+                // unwinding == std::terminate. Use uncaught_exceptions()
+                // to skip the throw if we'd be the secondary exception.
+                if (std::uncaught_exceptions() == 0) {
+                    throw std::runtime_error("CrashTestDummy panic in drop");
+                }
             }
         }
     }
@@ -124,7 +129,7 @@ public:
     R query(R result) const {
         origin_->queried_.fetch_add(1, std::memory_order_seq_cst);
         if (panic_ == Panic::InQuery) {
-            std::abort();
+            throw std::runtime_error("CrashTestDummy panic");
         }
         return result;
     }
