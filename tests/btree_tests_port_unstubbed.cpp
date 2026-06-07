@@ -3886,3 +3886,108 @@ TEST_CASE("set_smoke_union_empty_unstubbed") {
     assert(upper.unwrap() == 0u);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: symm_diff with one empty + one populated set.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_symm_diff_one_empty_unstubbed") {
+    auto a = make_set<int>();
+    for (int v : {1, 2, 3}) a.insert(v);
+    auto b = make_set<int>();
+    auto iter = a.symmetric_difference(b);
+    auto sh = iter.size_hint();
+    assert(std::get<0>(sh) == 0u);
+    auto upper = std::get<1>(sh);
+    assert(upper.is_some());
+    assert(upper.unwrap() == 3u);  // a.len() + b.len()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: union of one empty + one populated.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_union_one_empty_unstubbed") {
+    auto a = make_set<int>();
+    for (int v : {1, 2, 3}) a.insert(v);
+    auto b = make_set<int>();
+    auto iter = a.union_(b);
+    auto sh = iter.size_hint();
+    assert(std::get<0>(sh) == 3u);  // max(3, 0)
+    auto upper = std::get<1>(sh);
+    assert(upper.is_some());
+    assert(upper.unwrap() == 3u);  // 3 + 0
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap clear sequence — clear at each size from 0 to 5.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_clear_at_each_size_unstubbed") {
+    for (int size = 0; size <= 5; ++size) {
+        auto m = make_map<int, int>();
+        for (int i = 0; i < size; ++i) m.insert(i, i * 10);
+        assert(m.len() == static_cast<size_t>(size));
+        m.clear();
+        assert(m.is_empty());
+        assert(m.len() == 0u);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet clear at each size.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_clear_at_each_size_unstubbed") {
+    for (int size = 0; size <= 5; ++size) {
+        auto s = make_set<int>();
+        for (int i = 0; i < size; ++i) s.insert(i);
+        assert(s.len() == static_cast<size_t>(size));
+        s.clear();
+        assert(s.is_empty());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() on growing map size keeps order monotone.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_monotone_at_grow_unstubbed") {
+    for (int size = 1; size <= 8; ++size) {
+        auto m = make_map<int, int>();
+        // Random insertion order using a simple rotation.
+        for (int i = 0; i < size; ++i) {
+            const int k = (i * 7 + 3) % size;
+            m.insert(k, k);
+        }
+        auto it = m.iter();
+        int last_k = -1;
+        while (true) {
+            auto n = it.next();
+            if (!n.is_some()) break;
+            auto t = std::move(n).unwrap();
+            int k = std::get<0>(t);
+            assert(k > last_k);
+            last_k = k;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet operator== on equal sets.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_eq_self_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 1; i <= 5; ++i) s.insert(i);
+    assert(s == s);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet.insert(...) returns true for each new key in order.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_insert_true_per_new_unstubbed") {
+    auto s = make_set<int>();
+    for (int v : {10, 5, 20, 1, 15}) {
+        assert(s.insert(v) == true);
+    }
+    // Re-inserting any returns false.
+    for (int v : {10, 5, 20, 1, 15}) {
+        assert(s.insert(v) == false);
+    }
+    assert(s.len() == 5u);
+}
+
