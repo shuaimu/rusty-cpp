@@ -1256,6 +1256,15 @@ TEST_CASE("set_test_ord_absence_unstubbed") {
     assert(s.is_empty());
 }
 
+// Sanity: insert returns true on novel keys, false on duplicates.
+TEST_CASE("set_test_insert_returns_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.insert(1) == true);
+    assert(s.insert(2) == true);
+    assert(s.insert(1) == false);  // duplicate
+    assert(s.len() == 2u);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_borrow (trimmed)
 // Original verifies that map[Box<T>] indexing accepts &T (via Borrow).
