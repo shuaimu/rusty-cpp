@@ -4123,7 +4123,20 @@ struct SearchBound : std::variant<SearchBound_Included<T>, SearchBound_Excluded<
 
 
     static SearchBound<T> from_range(rusty::Bound<T> range_bound) {
-        return [&]() -> SearchBound<T> { auto&& _m = range_bound; if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& t = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return SearchBound<T>{SearchBound_Included<T>{t}}; } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& t = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return SearchBound<T>{SearchBound_Excluded<T>{t}}; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { return AllIncluded; } return [&]() -> SearchBound<T> { rusty::intrinsics::unreachable(); }(); }();
+        // Range-path fix: the transpiled body returned bare `AllIncluded`
+        // (the function template), not a SearchBound value. Hand-port
+        // the match on rusty::Bound<T> = variant<Unbounded, Included, Excluded>
+        // and emit explicit SearchBound<T> constructions for each arm.
+        if (range_bound.index() == 1) {
+            auto&& t = std::get<1>(range_bound)._0;
+            return SearchBound<T>{SearchBound_Included<T>{std::move(t)}};
+        }
+        if (range_bound.index() == 2) {
+            auto&& t = std::get<2>(range_bound)._0;
+            return SearchBound<T>{SearchBound_Excluded<T>{std::move(t)}};
+        }
+        // Bound_Unbounded → SearchBound_AllIncluded
+        return SearchBound<T>{SearchBound_AllIncluded<T>{}};
     }
 };
 template<typename T>
@@ -4682,59 +4695,82 @@ struct NodeRef {
             self_ = __internal.descend();
         }
     }
-    template<typename Q, typename R>
-    rusty::Result<std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, size_t, size_t, SearchBound<const Q&>, SearchBound<const Q&>>, Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>> search_tree_for_bifurcation(const R& range) {
-        const auto is_set = false;
-        auto [start, end] = rusty::detail::deref_if_pointer_like(std::make_tuple(rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).start_bound()) { return std::forward<decltype(__recv)>(__recv).start_bound(); }), rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).end_bound()) { return std::forward<decltype(__recv)>(__recv).end_bound(); })));
-        {
-            auto&& _m = std::make_tuple(std::move(start), std::move(end));
-            std::visit(overloaded {
-                // TODO: unhandled match pattern
-                [&](const auto&) {},
-                // TODO: unhandled match pattern
-                [&](const auto&) {},
-                [&](const auto&) {
-                },
-            }, _m);
-        }
-        auto lower_bound = SearchBound<Q>::from_range(std::move(start));
-        auto upper_bound = SearchBound<Q>::from_range(std::move(end));
+    // Range-path hand-port: the transpiler emitted SearchBound<const Q&>
+    // throughout this chain, but a variant<...<const Q&>...> isn't copy/
+    // move-assignable in C++, which broke essentially every constructor
+    // along the way. The original Rust uses Borrow<Q> for K, but C++ has
+    // no Borrow trait — for the keyed lookup we just need Q=K, so the
+    // ported signatures take SearchBound<K> by value.
+    template<typename R>
+    rusty::Result<
+        std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
+                   size_t, size_t,
+                   SearchBound<K>, SearchBound<K>>,
+        Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>
+    search_tree_for_bifurcation(const R& range) {
+        using __OkTuple = std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
+                                     size_t, size_t,
+                                     SearchBound<K>, SearchBound<K>>;
+        using __Ret = rusty::Result<__OkTuple,
+                                    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>;
+        // start_bound() / end_bound() return Bound<K> by value
+        // (see rusty::range<T> in include/rusty/array.hpp).
+        auto start = range.start_bound();
+        auto end = range.end_bound();
+        auto lower_bound = SearchBound<K>::from_range(std::move(start));
+        auto upper_bound = SearchBound<K>::from_range(std::move(end));
         while (true) {
-            auto [lower_edge_idx, lower_child_bound] = rusty::detail::deref_if_pointer_like(this->find_lower_bound_index(std::move(lower_bound)));
-            auto [upper_edge_idx, upper_child_bound] = rusty::detail::deref_if_pointer_like(this->find_upper_bound_index(std::move(upper_bound), std::move(lower_edge_idx)));
-            if (rusty::detail::deref_if_pointer_like(lower_edge_idx) < rusty::detail::deref_if_pointer_like(upper_edge_idx)) {
-                return rusty::Result<std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, size_t, size_t, SearchBound<const Q&>, SearchBound<const Q&>>, Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>::Ok(std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, size_t, size_t, SearchBound<const Q&>, SearchBound<const Q&>>{std::move((*this)), std::move(lower_edge_idx), std::move(upper_edge_idx), std::move(lower_child_bound), std::move(upper_child_bound)});
+            auto __lo = this->find_lower_bound_index(std::move(lower_bound));
+            size_t lower_edge_idx = std::get<0>(__lo);
+            SearchBound<K> lower_child_bound = std::move(std::get<1>(__lo));
+            auto __hi = this->find_upper_bound_index(std::move(upper_bound),
+                                                    lower_edge_idx);
+            size_t upper_edge_idx = std::get<0>(__hi);
+            SearchBound<K> upper_child_bound = std::move(std::get<1>(__hi));
+            if (lower_edge_idx < upper_edge_idx) {
+                return __Ret::Ok(__OkTuple{std::move(*this),
+                                            lower_edge_idx,
+                                            upper_edge_idx,
+                                            std::move(lower_child_bound),
+                                            std::move(upper_child_bound)});
             }
-            assert((lower_edge_idx == upper_edge_idx));
-            auto common_edge = std::conditional_t<true, Handle<std::remove_cvref_t<decltype(((*this)))>, marker::Edge>, Q>::new_edge(std::move((*this)), std::move(lower_edge_idx));
-            {
-                auto&& _m = common_edge.force();
-                std::visit(overloaded {
-                    [&](const std::variant_alternative_t<0, rusty::detail::variant_underlying_type_t<decltype(rusty::detail::deref_if_pointer(_m))>>& _v) {
-                        auto&& common_edge = rusty::detail::deref_if_pointer(_v._0);
-                        return rusty::Result<std::tuple<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, size_t, size_t, SearchBound<const Q&>, SearchBound<const Q&>>, Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>::Err(std::move(common_edge));
-                    },
-                    [&](const std::variant_alternative_t<1, rusty::detail::variant_underlying_type_t<decltype(rusty::detail::deref_if_pointer(_m))>>& _v) {
-                        auto&& common_edge = rusty::detail::deref_if_pointer(_v._0);
-                        (*this) = common_edge.descend();
-                        lower_bound = std::move(lower_child_bound);
-                        upper_bound = std::move(upper_child_bound);
-                    },
-                }, _m);
+            assert(lower_edge_idx == upper_edge_idx);
+            using __EdgeHandle = Handle<NodeRef<BorrowType, K, V, marker::LeafOrInternal>,
+                                        marker::Edge>;
+            auto common_edge = __EdgeHandle::new_edge(std::move(*this), lower_edge_idx);
+            auto __forced = common_edge.force();
+            if (__forced.index() == 0) {
+                // Leaf: return the edge as the empty-range error.
+                auto&& leaf_edge = std::get<0>(__forced)._0;
+                return __Ret::Err(std::move(leaf_edge));
             }
+            // Internal: descend and reseat *this, then loop with the
+            // updated child bounds.
+            auto&& internal_edge = std::get<1>(__forced)._0;
+            *this = internal_edge.descend();
+            lower_bound = std::move(lower_child_bound);
+            upper_bound = std::move(upper_child_bound);
         }
     }
-    template<typename Q>
-    std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>> find_lower_bound_edge(SearchBound<const Q&> bound) {
-        auto [edge_idx, bound_shadow1] = rusty::detail::deref_if_pointer_like(this->find_lower_bound_index(std::move(bound)));
-        auto edge = std::conditional_t<true, Handle<std::remove_cvref_t<decltype(((*this)))>, marker::Edge>, Q>::new_edge(std::move((*this)), std::move(edge_idx));
-        return std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>>{std::move(edge), std::move(bound_shadow1)};
+    std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<K>>
+    find_lower_bound_edge(SearchBound<K> bound) {
+        auto __r = this->find_lower_bound_index(std::move(bound));
+        size_t edge_idx = std::get<0>(__r);
+        SearchBound<K> bound_shadow = std::move(std::get<1>(__r));
+        using __EdgeHandle = Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>;
+        auto edge = __EdgeHandle::new_edge(std::move(*this), edge_idx);
+        return std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<K>>{
+            std::move(edge), std::move(bound_shadow)};
     }
-    template<typename Q>
-    std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>> find_upper_bound_edge(SearchBound<const Q&> bound) {
-        auto [edge_idx, bound_shadow1] = rusty::detail::deref_if_pointer_like(this->find_upper_bound_index(std::move(bound), static_cast<size_t>(0)));
-        auto edge = std::conditional_t<true, Handle<std::remove_cvref_t<decltype(((*this)))>, marker::Edge>, Q>::new_edge(std::move((*this)), std::move(edge_idx));
-        return std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<const Q&>>{std::move(edge), std::move(bound_shadow1)};
+    std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<K>>
+    find_upper_bound_edge(SearchBound<K> bound) {
+        auto __r = this->find_upper_bound_index(std::move(bound), static_cast<size_t>(0));
+        size_t edge_idx = std::get<0>(__r);
+        SearchBound<K> bound_shadow = std::move(std::get<1>(__r));
+        using __EdgeHandle = Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>;
+        auto edge = __EdgeHandle::new_edge(std::move(*this), edge_idx);
+        return std::tuple<Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge>, SearchBound<K>>{
+            std::move(edge), std::move(bound_shadow)};
     }
     template<typename Q>
     SearchResult<BorrowType, K, V, Type, Type> search_node(const Q& key) {
@@ -4767,90 +4803,141 @@ struct NodeRef {
         }
         return IndexResult{IndexResult_Edge{rusty::len(keys)}};
     }
-    template<typename Q>
-    std::tuple<size_t, SearchBound<const Q&>> find_lower_bound_index(SearchBound<const Q&> bound) const {
-        return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = bound; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& key = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = this->find_key_index(rusty::detail::deref_if_pointer_like(key), static_cast<size_t>(0)); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, AllExcluded}; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, std::move(bound)}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& key = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = this->find_key_index(rusty::detail::deref_if_pointer_like(key), static_cast<size_t>(0)); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{rusty::detail::deref_if_pointer_like(idx) + static_cast<size_t>(1), AllIncluded}; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, std::move(bound)}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }(); } if (_m == AllIncluded) { return std::tuple<size_t, SearchBound<const Q&>>{static_cast<size_t>(0), AllIncluded}; } if (_m == AllExcluded) { return std::tuple<size_t, SearchBound<const Q&>>{rusty::len((*this)), AllExcluded}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }();
+    // Range-path hand-port: see search_tree_for_bifurcation rationale.
+    // Body mirrors the Rust match on SearchBound. Returns the new index
+    // plus the bound that the next-deeper search should use.
+    std::tuple<size_t, SearchBound<K>>
+    find_lower_bound_index(SearchBound<K> bound) const {
+        using __Ret = std::tuple<size_t, SearchBound<K>>;
+        if (bound.index() == 0) {
+            // Included(key)
+            const auto& key = std::get<0>(bound)._0;
+            auto __r = this->find_key_index(key, static_cast<size_t>(0));
+            if (__r.index() == 0) {
+                // KV: key matched exactly → return the matching index and
+                // narrow the search to "everything strictly greater".
+                size_t idx = std::get<0>(__r)._0;
+                return __Ret{idx, SearchBound<K>{SearchBound_AllExcluded<K>{}}};
+            }
+            // Edge: pass the original bound through unchanged.
+            size_t idx = std::get<1>(__r)._0;
+            return __Ret{idx, std::move(bound)};
+        }
+        if (bound.index() == 1) {
+            // Excluded(key)
+            const auto& key = std::get<1>(bound)._0;
+            auto __r = this->find_key_index(key, static_cast<size_t>(0));
+            if (__r.index() == 0) {
+                size_t idx = std::get<0>(__r)._0;
+                return __Ret{idx + static_cast<size_t>(1),
+                             SearchBound<K>{SearchBound_AllIncluded<K>{}}};
+            }
+            size_t idx = std::get<1>(__r)._0;
+            return __Ret{idx, std::move(bound)};
+        }
+        if (bound.index() == 2) {
+            // AllIncluded
+            return __Ret{static_cast<size_t>(0),
+                         SearchBound<K>{SearchBound_AllIncluded<K>{}}};
+        }
+        // AllExcluded (index == 3)
+        return __Ret{rusty::len(*this), SearchBound<K>{SearchBound_AllExcluded<K>{}}};
     }
-    template<typename Q>
-    std::tuple<size_t, SearchBound<const Q&>> find_upper_bound_index(SearchBound<const Q&> bound, size_t start_index) const {
-        return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = bound; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& key = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = this->find_key_index(rusty::detail::deref_if_pointer_like(key), std::move(start_index)); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{rusty::detail::deref_if_pointer_like(idx) + static_cast<size_t>(1), AllExcluded}; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, std::move(bound)}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& key = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { auto&& _m = this->find_key_index(rusty::detail::deref_if_pointer_like(key), std::move(start_index)); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& idx = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, AllIncluded}; } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return std::tuple<size_t, SearchBound<const Q&>>{idx, std::move(bound)}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }(); } if (_m == AllIncluded) { return std::tuple<size_t, SearchBound<const Q&>>{rusty::len((*this)), AllIncluded}; } if (_m == AllExcluded) { return std::tuple<size_t, SearchBound<const Q&>>{std::move(start_index), AllExcluded}; } return [&]() -> std::tuple<size_t, SearchBound<const Q&>> { rusty::intrinsics::unreachable(); }(); }();
+    std::tuple<size_t, SearchBound<K>>
+    find_upper_bound_index(SearchBound<K> bound, size_t start_index) const {
+        using __Ret = std::tuple<size_t, SearchBound<K>>;
+        if (bound.index() == 0) {
+            // Included(key) → step past the matching key.
+            const auto& key = std::get<0>(bound)._0;
+            auto __r = this->find_key_index(key, start_index);
+            if (__r.index() == 0) {
+                size_t idx = std::get<0>(__r)._0;
+                return __Ret{idx + static_cast<size_t>(1),
+                             SearchBound<K>{SearchBound_AllExcluded<K>{}}};
+            }
+            size_t idx = std::get<1>(__r)._0;
+            return __Ret{idx, std::move(bound)};
+        }
+        if (bound.index() == 1) {
+            // Excluded(key) → stop at the matching key.
+            const auto& key = std::get<1>(bound)._0;
+            auto __r = this->find_key_index(key, start_index);
+            if (__r.index() == 0) {
+                size_t idx = std::get<0>(__r)._0;
+                return __Ret{idx, SearchBound<K>{SearchBound_AllIncluded<K>{}}};
+            }
+            size_t idx = std::get<1>(__r)._0;
+            return __Ret{idx, std::move(bound)};
+        }
+        if (bound.index() == 2) {
+            // AllIncluded → upper edge is past the last key.
+            return __Ret{rusty::len(*this),
+                         SearchBound<K>{SearchBound_AllIncluded<K>{}}};
+        }
+        // AllExcluded (index == 3) → upper edge is the start of this slice.
+        return __Ret{start_index, SearchBound<K>{SearchBound_AllExcluded<K>{}}};
     }
-    template<typename Q, typename R>
+    template<typename R>
     LeafRange<BorrowType, K, V> find_leaf_edges_spanning_range(R range) {
-        {
-            auto&& _m = this->search_tree_for_bifurcation(range);
-            bool _m_matched = false;
-            if (!_m_matched) {
-                if (_m.is_err()) {
-                    LeafRange<BorrowType, K, V>::none();
-                    _m_matched = true;
-                }
+        // Range-path hand-port: drop the Q template (Q=K for the typed
+        // BTreeMap lookup) and propagate the SearchBound<K> chain.
+        auto __sr = this->search_tree_for_bifurcation(range);
+        if (__sr.is_err()) {
+            // The Rust source returns LeafRange::none() when the bifurcation
+            // collapses to a single leaf edge (empty range). The previously
+            // transpiled body dropped this return entirely, which made the
+            // function fall off the end (UB).
+            return LeafRange<BorrowType, K, V>::none();
+        }
+        auto __ok = std::move(__sr).unwrap();
+        auto node = std::move(std::get<0>(__ok));
+        size_t lower_edge_idx = std::get<1>(__ok);
+        size_t upper_edge_idx = std::get<2>(__ok);
+        SearchBound<K> lower_child_bound = std::move(std::get<3>(__ok));
+        SearchBound<K> upper_child_bound = std::move(std::get<4>(__ok));
+        // We need two handles into the same node; clone it (NodeRef is
+        // just a pointer + size_t + PhantomData, cheap to copy).
+        using __EdgeHandle = Handle<NodeRef<BorrowType, K, V, marker::LeafOrInternal>, marker::Edge>;
+        auto node_for_upper = node;
+        auto lower_edge = __EdgeHandle::new_edge(std::move(node), lower_edge_idx);
+        auto upper_edge = __EdgeHandle::new_edge(std::move(node_for_upper), upper_edge_idx);
+        // match (lower_edge.force(), upper_edge.force()):
+        //   (Leaf(f), Leaf(b))           → return LeafRange{f, b}
+        //   (Internal(f), Internal(b))   → descend and find_*_bound_edge
+        //   _                            → unreachable (depths must match)
+        while (true) {
+            auto _m0 = lower_edge.force();
+            auto _m1 = upper_edge.force();
+            if (_m0.index() == 0 && _m1.index() == 0) {
+                auto f = std::move(std::get<0>(_m0)._0);
+                auto b = std::move(std::get<0>(_m1)._0);
+                return LeafRange<BorrowType, K, V>(
+                    rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(f)),
+                    rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(b)));
             }
-            if (!_m_matched) {
-                if (_m.is_ok()) {
-                    auto&& _mv1 = _m.unwrap();
-                    auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv1)));
-                    auto&& lower_edge_idx = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1)));
-                    auto&& upper_edge_idx = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_mv1)));
-                    auto&& lower_child_bound = rusty::detail::deref_if_pointer(std::get<3>(rusty::detail::deref_if_pointer(_mv1)));
-                    auto&& upper_child_bound = rusty::detail::deref_if_pointer(std::get<4>(rusty::detail::deref_if_pointer(_mv1)));
-                    auto lower_edge_self_ref_tmp = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((rusty::ptr::read(&node)))>, marker::Edge>, Q>::new_edge(rusty::ptr::read(&node), lower_edge_idx);
-                    auto lower_edge = std::move(lower_edge_self_ref_tmp);
-                    auto upper_edge_self_ref_tmp = std::conditional_t<true, Handle<std::remove_cvref_t<decltype((node))>, marker::Edge>, Q>::new_edge(std::move(node), upper_edge_idx);
-                    auto upper_edge = std::move(upper_edge_self_ref_tmp);
-                    // Range-path manual rewrite: the transpiled body
-                    // had `_0` accessors on a std::variant and used
-                    // `(true && true)` guards on the match arms because
-                    // the bare-glob variant names `Leaf` / `Internal`
-                    // weren't visible at emit time. The Rust source is:
-                    //   match (lower_edge.force(), upper_edge.force()) {
-                    //     (Leaf(f), Leaf(b)) => return LeafRange{front: Some(f), back: Some(b)},
-                    //     (Internal(f), Internal(b)) => {
-                    //         (lower_edge, lower_child_bound) =
-                    //             f.descend().find_lower_bound_edge(lower_child_bound);
-                    //         (upper_edge, upper_child_bound) =
-                    //             b.descend().find_upper_bound_edge(upper_child_bound);
-                    //     }
-                    //     _ => unreachable!("BTreeMap has different depths"),
-                    //   }
-                    while (true) {
-                        auto _m0 = lower_edge.force();
-                        auto _m1 = upper_edge.force();
-                        // Both Leaf — terminate, return the leaf range.
-                        if (_m0.index() == 0 && _m1.index() == 0) {
-                            auto f = std::move(std::get<0>(_m0)._0);
-                            auto b = std::move(std::get<0>(_m1)._0);
-                            return LeafRange<BorrowType, K, V>(
-                                rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(f)),
-                                rusty::Option<Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>>(std::move(b)));
-                        }
-                        // Both Internal — descend.
-                        if (_m0.index() == 1 && _m1.index() == 1) {
-                            auto f = std::move(std::get<1>(_m0)._0);
-                            auto b = std::move(std::get<1>(_m1)._0);
-                            auto lower_pair = f.descend().find_lower_bound_edge(lower_child_bound);
-                            lower_edge = std::move(std::get<0>(lower_pair));
-                            lower_child_bound = std::move(std::get<1>(lower_pair));
-                            auto upper_pair = b.descend().find_upper_bound_edge(upper_child_bound);
-                            upper_edge = std::move(std::get<0>(upper_pair));
-                            upper_child_bound = std::move(std::get<1>(upper_pair));
-                            continue;
-                        }
-                        // Mixed depth: unreachable.
-                        std::println(stderr, "BTreeMap has different depths");
-                        rusty::intrinsics::unreachable();
-                    }
-                    _m_matched = true;
-                }
+            if (_m0.index() == 1 && _m1.index() == 1) {
+                auto f = std::move(std::get<1>(_m0)._0);
+                auto b = std::move(std::get<1>(_m1)._0);
+                auto lower_pair = f.descend().find_lower_bound_edge(std::move(lower_child_bound));
+                lower_edge = std::move(std::get<0>(lower_pair));
+                lower_child_bound = std::move(std::get<1>(lower_pair));
+                auto upper_pair = b.descend().find_upper_bound_edge(std::move(upper_child_bound));
+                upper_edge = std::move(std::get<0>(upper_pair));
+                upper_child_bound = std::move(std::get<1>(upper_pair));
+                continue;
             }
+            std::println(stderr, "BTreeMap has different depths");
+            rusty::intrinsics::unreachable();
         }
     }
-    template<typename Q, typename R>
-    LeafRange<marker::Immut, K, V> range_search(R range) {
-        // @unsafe
-        {
-            return this->find_leaf_edges_spanning_range(std::move(range));
-        }
+    template<typename R>
+    LeafRange<BorrowType, K, V> range_search(R range) {
+        // Range-path hand-port: drop the Q template parameter (un-deducible
+        // at call site since R doesn't expose Q). The hardcoded
+        // marker::Immut return was also wrong for range_mut paths, but
+        // BTreeMap::range_mut currently doesn't call us; preserve the
+        // BorrowType-following return so we compose with both.
+        return this->find_leaf_edges_spanning_range(std::move(range));
     }
     LazyLeafRange<BorrowType, K, V> full_range() const {
         // B-into-iter fix: was hardcoded as LazyLeafRange<marker::Immut, K, V>
@@ -4923,46 +5010,40 @@ return internal.first_edge(); }(); } rusty::intrinsics::unreachable(); }();
         this->visit_nodes_in_order([&](auto&& pos) { return [&]() { auto&& _m = pos; if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& node = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { static_cast<void>(rusty::detail::deref_if_pointer_like(result) += rusty::len(node)); return std::make_tuple(); }(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& node = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() { static_cast<void>(rusty::detail::deref_if_pointer_like(result) += rusty::len(node)); return std::make_tuple(); }(); } if (rusty::detail::deref_if_pointer(_m).index() == 2) { return std::make_tuple(); } rusty::intrinsics::unreachable(); }(); });
         return std::move(result);
     }
-    template<typename Q>
-    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> lower_bound(SearchBound<const Q&> bound) const {
-        auto node = std::move((*this));
+    // Range-path hand-port: take SearchBound<K> by value (matches the
+    // rest of the bound-walk chain). The transpiled body used
+    // std::visit + match-arm shape that doesn't compile cleanly under
+    // the new signature.
+    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>
+    lower_bound(SearchBound<K> bound) const {
+        auto node = *this;
         while (true) {
-            auto [edge, new_bound] = rusty::detail::deref_if_pointer_like(node.find_lower_bound_edge(std::move(bound)));
-            {
-                auto&& _m = edge.force();
-                std::visit(overloaded {
-                    [&](const std::variant_alternative_t<0, rusty::detail::variant_underlying_type_t<decltype(rusty::detail::deref_if_pointer(_m))>>& _v) {
-                        auto&& edge = rusty::detail::deref_if_pointer(_v._0);
-                        return std::move(edge);
-                    },
-                    [&](const std::variant_alternative_t<1, rusty::detail::variant_underlying_type_t<decltype(rusty::detail::deref_if_pointer(_m))>>& _v) {
-                        auto&& edge = rusty::detail::deref_if_pointer(_v._0);
-                        node = edge.descend();
-                        bound = std::move(new_bound);
-                    },
-                }, _m);
+            auto __p = node.find_lower_bound_edge(std::move(bound));
+            auto edge = std::move(std::get<0>(__p));
+            auto new_bound = std::move(std::get<1>(__p));
+            auto __forced = edge.force();
+            if (__forced.index() == 0) {
+                return std::move(std::get<0>(__forced)._0);
             }
+            auto&& internal_edge = std::get<1>(__forced)._0;
+            node = internal_edge.descend();
+            bound = std::move(new_bound);
         }
     }
-    template<typename Q>
-    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge> upper_bound(SearchBound<const Q&> bound) const {
-        auto node = std::move((*this));
+    Handle<NodeRef<BorrowType, K, V, marker::Leaf>, marker::Edge>
+    upper_bound(SearchBound<K> bound) const {
+        auto node = *this;
         while (true) {
-            auto [edge, new_bound] = rusty::detail::deref_if_pointer_like(node.find_upper_bound_edge(std::move(bound)));
-            {
-                auto&& _m = edge.force();
-                std::visit(overloaded {
-                    [&](const std::variant_alternative_t<0, rusty::detail::variant_underlying_type_t<decltype(rusty::detail::deref_if_pointer(_m))>>& _v) {
-                        auto&& edge = rusty::detail::deref_if_pointer(_v._0);
-                        return std::move(edge);
-                    },
-                    [&](const std::variant_alternative_t<1, rusty::detail::variant_underlying_type_t<decltype(rusty::detail::deref_if_pointer(_m))>>& _v) {
-                        auto&& edge = rusty::detail::deref_if_pointer(_v._0);
-                        node = edge.descend();
-                        bound = std::move(new_bound);
-                    },
-                }, _m);
+            auto __p = node.find_upper_bound_edge(std::move(bound));
+            auto edge = std::move(std::get<0>(__p));
+            auto new_bound = std::move(std::get<1>(__p));
+            auto __forced = edge.force();
+            if (__forced.index() == 0) {
+                return std::move(std::get<0>(__forced)._0);
             }
+            auto&& internal_edge = std::get<1>(__forced)._0;
+            node = internal_edge.descend();
+            bound = std::move(new_bound);
         }
     }
     template<typename A>

@@ -5694,14 +5694,64 @@ TEST_CASE("set_smoke_iter_len_unstubbed") {
     assert(it.len() == 3u);
 }
 
-// test_range: find_leaf_edges_spanning_range() body is hand-rewritten
-// (the transpiler emitted `_0` accessors on a std::variant + bogus
-// `(true && true)` match arm guards). BUT range() is STILL blocked
-// because instantiating it pulls in search_tree_for_bifurcation,
-// which has its own emit bugs (std::visit on tuple-of-Bound match,
-// SearchBound<const Q&> with non-assignable reference type breaks
-// many constructors). Held until search_tree_for_bifurcation is
-// hand-rewritten the same way find_leaf_edges_spanning_range was.
+// test_range: BTreeMap::range() chain is now hand-ported (the transpiled
+// chain used SearchBound<const Q&>, which makes std::variant<...&...>
+// non-assignable and broke essentially every constructor; we re-typed
+// the bound chain to SearchBound<K> by value and dropped the un-deducible
+// Q template parameter from range_search /
+// find_leaf_edges_spanning_range / find_*_bound_index / find_*_bound_edge
+// / lower_bound / upper_bound).
+
+// Half-open range [3, 7) over a tiny map: expect 3,4,5,6.
+TEST_CASE("test_range_small_unstubbed") {
+    auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+    for (int i = 0; i < 10; ++i) m.insert(i, i * 10);
+    int expected = 3;
+    int count = 0;
+    auto r = m.range(rusty::range<int>(3, 7));
+    for (auto v = r.next(); v.is_some(); v = r.next()) {
+        auto kv = v.unwrap();
+        assert(std::get<0>(kv) == expected);
+        ++expected;
+        ++count;
+    }
+    assert(count == 4);
+}
+
+// Height-1 case: 30 entries forces at least one internal node; pick a
+// window in the middle to exercise the bifurcation + descend loop.
+TEST_CASE("test_range_h1_unstubbed") {
+    auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+    for (int i = 0; i < 30; ++i) m.insert(i, i * 10);
+    int expected = 10;
+    int count = 0;
+    auto r = m.range(rusty::range<int>(10, 20));
+    for (auto v = r.next(); v.is_some(); v = r.next()) {
+        auto kv = v.unwrap();
+        assert(std::get<0>(kv) == expected);
+        assert(std::get<1>(kv) == expected * 10);
+        ++expected;
+        ++count;
+    }
+    assert(count == 10);
+}
+
+// Empty range (start == end → half-open is empty): should yield nothing.
+TEST_CASE("test_range_empty_unstubbed") {
+    auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+    for (int i = 0; i < 10; ++i) m.insert(i, i * 10);
+    auto r = m.range(rusty::range<int>(5, 5));
+    auto v = r.next();
+    assert(v.is_none());
+}
+
+// Range on an empty map: short-circuit in BTreeMap::range — root is None,
+// so LeafRange::none() is returned without touching the bound chain.
+TEST_CASE("test_range_on_empty_map_unstubbed") {
+    auto m = BTreeMap<int, int>::new_in(rusty::alloc::Global{});
+    auto r = m.range(rusty::range<int>(0, 100));
+    assert(r.next().is_none());
+}
 
 // test_split_off: deeper-than-expected blockers. The
 // __rusty_alias_Root_new_pillar template-arg fix lands but exposes a
