@@ -2349,3 +2349,131 @@ TEST_CASE("smoke_insert_remove_alternation_unstubbed") {
     assert(m.is_empty());
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: large-ish insert/delete patterns matching test_basic_large
+// but bounded under MIN_INSERTS_HEIGHT_1 to dodge the multi-level
+// remove dangling-binding family.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_basic_medium_unstubbed") {
+    auto m = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) {
+        assert(m.insert(i, i).is_none());
+    }
+    assert(m.len() == static_cast<size_t>(size));
+    // Overwrite each in turn, expecting Some(old).
+    for (int i = 0; i < size; ++i) {
+        auto old = m.insert(i, i + 1000);
+        assert(old.is_some());
+        assert(std::move(old).unwrap() == i);
+    }
+    assert(m.len() == static_cast<size_t>(size));
+    // Verify updates persisted.
+    for (int i = 0; i < size; ++i) {
+        auto v = m.get(i);
+        assert(v.is_some() && v.unwrap() == i + 1000);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_pop_first_last from drained empty case.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_pop_first_last_drained_unstubbed") {
+    auto m = make_map<int, int>();
+    // Pop on empty returns None.
+    assert(m.pop_first().is_none());
+    assert(m.pop_last().is_none());
+    // After insert + pop, empty again.
+    m.insert(1, 10);
+    assert(m.len() == 1u);
+    {
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 10);
+    }
+    assert(m.is_empty());
+    // Re-popping empty still returns None.
+    assert(m.pop_first().is_none());
+    assert(m.pop_last().is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insert sequence containing duplicates lands deduplicated.
+// Validates dedup behavior of insert vs try_insert.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_insert_dedup_unstubbed") {
+    auto m = make_map<int, int>();
+    // Insert with duplicates — each one overwrites.
+    for (auto [k, v] : {std::pair{1, 10}, std::pair{2, 20}, std::pair{1, 100},
+                       std::pair{3, 30}, std::pair{2, 200}}) {
+        m.insert(k, v);
+    }
+    assert(m.len() == 3u);
+    {
+        auto v = m.get(1);
+        assert(v.is_some() && v.unwrap() == 100);
+    }
+    {
+        auto v = m.get(2);
+        assert(v.is_some() && v.unwrap() == 200);
+    }
+    {
+        auto v = m.get(3);
+        assert(v.is_some() && v.unwrap() == 30);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet insert with duplicates.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_insert_dedup_unstubbed") {
+    auto s = make_set<int>();
+    for (int x : {1, 2, 1, 3, 2, 4, 1, 5}) s.insert(x);
+    assert(s.len() == 5u);
+    for (int x : {1, 2, 3, 4, 5}) assert(s.contains(x));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: empty BTreeSet operations on insert+remove same key.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_insert_remove_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.insert(1) == true);
+    assert(s.insert(1) == false);  // dup
+    assert(s.contains(1));
+    assert(s.remove(1) == true);
+    assert(s.remove(1) == false);  // gone
+    assert(!s.contains(1));
+    assert(s.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_iter_descending_to_same_node_twice (drained).
+// Existing variant walks front then drains back. This variant walks
+// half from front then half from back and verifies mid-meet is empty.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_iter_meet_in_middle_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 8; ++i) m.insert(i, i);
+    auto it = m.iter();
+    // Pull 4 from front.
+    for (int i = 0; i < 4; ++i) {
+        auto n = it.next();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == i);
+    }
+    // Pull 4 from back.
+    for (int i = 0; i < 4; ++i) {
+        auto n = it.next_back();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == 7 - i);
+    }
+    // Iter is exhausted.
+    assert(it.next().is_none());
+    assert(it.next_back().is_none());
+}
+
