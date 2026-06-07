@@ -4233,11 +4233,14 @@ auto&& val = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if
 return std::move(val);
 })).finish();
     }
+    // btree_port: explicit V& lambda return so Option<V&> map() result
+    // preserves the mut-reference shape from IterMut::next (otherwise
+    // the deduced auto return strips the reference to V, yielding
+    // Option<V> which won't convert to Option<V&>).
     rusty::Option<V&> next() {
-        return this->inner.next().map([&](auto&& _destruct_param0) {
-auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(v);
-});
+        return this->inner.next().map([&](auto&& _destruct_param0) -> V& {
+            return std::get<1>(_destruct_param0);
+        });
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
@@ -4246,10 +4249,9 @@ return std::move(v);
         return this->next_back();
     }
     rusty::Option<V&> next_back() {
-        return this->inner.next_back().map([&](auto&& _destruct_param0) {
-auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_destruct_param0)));
-return std::move(v);
-});
+        return this->inner.next_back().map([&](auto&& _destruct_param0) -> V& {
+            return std::get<1>(_destruct_param0);
+        });
     }
     size_t len() const {
         return rusty::len(this->inner);

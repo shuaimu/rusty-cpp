@@ -8405,3 +8405,128 @@ TEST_CASE("set_test_range_next_back_unstubbed") {
     }
     assert(count == 4);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// iter_mut() / values_mut() — unblocked by BorrowType-aware
+// next_unchecked. Handle::next_unchecked now branches on the BorrowType
+// template arg: Mut/ValMut routes through into_kv_valmut and returns
+// tuple<const K&, V&>; Immut keeps the original into_kv path returning
+// tuple<const K&, const V&>. LazyLeafRange::next_unchecked is `auto` so
+// the deduced tuple shape flows through to IterMut::next.
+// ─────────────────────────────────────────────────────────────────────
+
+TEST_CASE("test_iter_mut_basic_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 10; ++i) m.insert(i, i * 10);
+    auto it = m.iter_mut();
+    int seen_keys = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto t = v.unwrap();
+        int k = std::get<0>(t);
+        int& slot = std::get<1>(t);
+        // Ordered iteration → keys come out 0..10.
+        assert(k == seen_keys);
+        slot += 1;
+        ++seen_keys;
+    }
+    assert(seen_keys == 10);
+    for (int i = 0; i < 10; ++i) {
+        auto g = m.get(i);
+        assert(g.is_some());
+        assert(g.unwrap() == i * 10 + 1);
+    }
+}
+
+TEST_CASE("test_values_mut_basic_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 10; ++i) m.insert(i, i * 10);
+    auto vs = m.values_mut();
+    int count = 0;
+    for (auto v = vs.next(); v.is_some(); v = vs.next()) {
+        int& slot = v.unwrap();
+        slot *= 2;
+        ++count;
+    }
+    assert(count == 10);
+    for (int i = 0; i < 10; ++i) {
+        auto g = m.get(i);
+        assert(g.is_some());
+        assert(g.unwrap() == i * 20);
+    }
+}
+
+// Empty map: iter_mut.next() yields None immediately.
+TEST_CASE("test_iter_mut_empty_unstubbed") {
+    auto m = make_map<int, int>();
+    auto it = m.iter_mut();
+    auto v = it.next();
+    assert(v.is_none());
+    auto vs = m.values_mut();
+    auto vv = vs.next();
+    assert(vv.is_none());
+}
+
+// Single-leaf tree (size < NODE_CAPACITY): iter_mut traverses just one
+// leaf, no internal-node descent. Exercises the leaf-only navigate path.
+TEST_CASE("test_iter_mut_single_leaf_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i + 100);
+    auto it = m.iter_mut();
+    int sum_keys = 0;
+    int count = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto t = v.unwrap();
+        sum_keys += std::get<0>(t);
+        std::get<1>(t) = -std::get<1>(t);
+        ++count;
+    }
+    assert(count == 5);
+    assert(sum_keys == 0 + 1 + 2 + 3 + 4);
+    for (int i = 0; i < 5; ++i) {
+        assert(m.get(i).unwrap() == -(i + 100));
+    }
+}
+
+// Height-1 tree: exercises ascend / next_kv across internal node.
+TEST_CASE("test_iter_mut_height_1_unstubbed") {
+    auto m = make_map<int, int>();
+    constexpr int N = static_cast<int>(MIN_INSERTS_HEIGHT_1);  // 12
+    for (int i = 0; i < N; ++i) m.insert(i, i);
+    auto it = m.iter_mut();
+    int prev_key = -1;
+    int count = 0;
+    for (auto v = it.next(); v.is_some(); v = it.next()) {
+        auto t = v.unwrap();
+        int k = std::get<0>(t);
+        // Ordered traversal.
+        assert(k > prev_key);
+        prev_key = k;
+        std::get<1>(t) += 1000;
+        ++count;
+    }
+    assert(count == N);
+    for (int i = 0; i < N; ++i) {
+        assert(m.get(i).unwrap() == i + 1000);
+    }
+}
+
+// iter_mut().next_back() — exercises the back-iteration mut path.
+TEST_CASE("test_iter_mut_next_back_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 6; ++i) m.insert(i, i);
+    auto it = m.iter_mut();
+    // Walk from the back: 5, 4, 3, ...
+    int expected_key = 5;
+    int count = 0;
+    for (auto v = it.next_back(); v.is_some(); v = it.next_back()) {
+        auto t = v.unwrap();
+        assert(std::get<0>(t) == expected_key);
+        std::get<1>(t) += 100;
+        --expected_key;
+        ++count;
+    }
+    assert(count == 6);
+    for (int i = 0; i < 6; ++i) {
+        assert(m.get(i).unwrap() == i + 100);
+    }
+}
