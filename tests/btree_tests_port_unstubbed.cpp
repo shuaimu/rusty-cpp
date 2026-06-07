@@ -1281,6 +1281,41 @@ TEST_CASE("set_test_insert_returns_unstubbed") {
     assert(s.len() == 2u);
 }
 
+// Set pop_first/pop_last drain through alternating push/pop
+TEST_CASE("set_test_pop_alternating_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 1; i <= 6; ++i) s.insert(i);
+    assert(s.len() == 6u);
+    // Alternating drain: pop_first, pop_last, pop_first, ...
+    {
+        auto v = s.pop_first();
+        assert(v.is_some() && std::move(v).unwrap() == 1);
+    }
+    {
+        auto v = s.pop_last();
+        assert(v.is_some() && std::move(v).unwrap() == 6);
+    }
+    {
+        auto v = s.pop_first();
+        assert(v.is_some() && std::move(v).unwrap() == 2);
+    }
+    {
+        auto v = s.pop_last();
+        assert(v.is_some() && std::move(v).unwrap() == 5);
+    }
+    {
+        auto v = s.pop_first();
+        assert(v.is_some() && std::move(v).unwrap() == 3);
+    }
+    {
+        auto v = s.pop_last();
+        assert(v.is_some() && std::move(v).unwrap() == 4);
+    }
+    assert(s.is_empty());
+    assert(s.pop_first().is_none());
+    assert(s.pop_last().is_none());
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // rustc map/tests.rs::test_borrow (trimmed)
 // Original verifies that map[Box<T>] indexing accepts &T (via Borrow).
