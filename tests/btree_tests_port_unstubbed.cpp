@@ -1308,6 +1308,32 @@ TEST_CASE("smoke_iter_min_max_drain_unstubbed") {
     }
 }
 
+// Set first()/last() round-trip across grow path.
+TEST_CASE("set_test_first_last_smoke_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.first().is_none());
+    assert(s.last().is_none());
+    s.insert(5);
+    assert(s.first().is_some() && s.first().unwrap() == 5);
+    assert(s.last().is_some() && s.last().unwrap() == 5);
+    s.insert(3);
+    assert(s.first().unwrap() == 3);
+    assert(s.last().unwrap() == 5);
+    s.insert(7);
+    assert(s.first().unwrap() == 3);
+    assert(s.last().unwrap() == 7);
+    s.insert(1);
+    assert(s.first().unwrap() == 1);
+    s.insert(9);
+    assert(s.last().unwrap() == 9);
+    // Verify contains for several keys.
+    for (int k : {1, 3, 5, 7, 9}) assert(s.contains(k));
+    assert(!s.contains(0));
+    assert(!s.contains(4));
+    assert(!s.contains(8));
+    assert(s.len() == 5u);
+}
+
 // Set pop_first/pop_last drain through alternating push/pop
 TEST_CASE("set_test_pop_alternating_unstubbed") {
     auto s = make_set<int>();
