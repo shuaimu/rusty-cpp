@@ -3991,3 +3991,139 @@ TEST_CASE("set_smoke_insert_true_per_new_unstubbed") {
     assert(s.len() == 5u);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_iter_min_max (full, with iter only).
+// The map's Iter::min/max return Option<tuple<const K&, const V&>>
+// directly without the .map() conversion bug. So we can do the full
+// shape, not just empty cases.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_iter_min_max_full_unstubbed") {
+    auto a = make_map<int, int>();
+    // Empty.
+    assert(a.iter().min().is_none());
+    assert(a.iter().max().is_none());
+
+    a.insert(1, 42);
+    a.insert(2, 24);
+
+    // iter().min() == (1, 42)
+    {
+        auto m = a.iter().min();
+        assert(m.is_some());
+        auto t = std::move(m).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 42);
+    }
+    // iter().max() == (2, 24)
+    {
+        auto m = a.iter().max();
+        assert(m.is_some());
+        auto t = std::move(m).unwrap();
+        assert(std::get<0>(t) == 2);
+        assert(std::get<1>(t) == 24);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap iter().min/max on three-element map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_min_max_three_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(2, 20);
+    m.insert(1, 10);
+    m.insert(3, 30);
+    {
+        auto mi = m.iter().min();
+        assert(mi.is_some());
+        auto t = std::move(mi).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 10);
+    }
+    {
+        auto mx = m.iter().max();
+        assert(mx.is_some());
+        auto t = std::move(mx).unwrap();
+        assert(std::get<0>(t) == 3);
+        assert(std::get<1>(t) == 30);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: insert produces None for novel keys, Some(old) for duplicates.
+// Mixed case.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_insert_novel_vs_dup_unstubbed") {
+    auto m = make_map<int, int>();
+    // Novel.
+    assert(m.insert(1, 10).is_none());
+    assert(m.insert(2, 20).is_none());
+    // Duplicate (overwrites).
+    {
+        auto old = m.insert(1, 100);
+        assert(old.is_some());
+        assert(std::move(old).unwrap() == 10);
+    }
+    {
+        auto old = m.insert(2, 200);
+        assert(old.is_some());
+        assert(std::move(old).unwrap() == 20);
+    }
+    // Novel again.
+    assert(m.insert(3, 30).is_none());
+    assert(m.len() == 3u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: pop_first then re-insert with different value.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_pop_then_reinsert_diff_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 10);
+    m.insert(2, 20);
+    {
+        auto kv = m.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 10);
+    }
+    assert(m.len() == 1u);
+    // Re-insert with different value.
+    assert(m.insert(1, 999).is_none());
+    assert(m.len() == 2u);
+    auto v = m.get(1);
+    assert(v.is_some() && v.unwrap() == 999);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.remove_entry on absent key on growing map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_remove_entry_absent_unstubbed") {
+    auto m = make_map<int, int>();
+    assert(m.remove_entry(1).is_none());
+    m.insert(2, 20);
+    // Removing absent key 1 still None.
+    assert(m.remove_entry(1).is_none());
+    // 2 is still there.
+    assert(m.contains_key(2));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.get_key_value across populated map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_get_key_value_all_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 5; ++i) m.insert(i, i * 10);
+    for (int i = 1; i <= 5; ++i) {
+        auto kv = m.get_key_value(i);
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == i);
+        assert(std::get<1>(t) == i * 10);
+    }
+    // Absent keys.
+    for (int i : {0, 6, -1}) {
+        assert(m.get_key_value(i).is_none());
+    }
+}
+
