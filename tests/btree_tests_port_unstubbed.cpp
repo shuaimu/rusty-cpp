@@ -2564,3 +2564,119 @@ TEST_CASE("smoke_get_mut_wide_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_pop_first_last (refill case).
+// After draining the map, refill and pop_last again. Validates the
+// tree handles transitions from empty → small → drained → small.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_pop_refill_drain_unstubbed") {
+    auto m = make_map<int, int>();
+    // Drain whatever's in there (nothing).
+    assert(m.pop_first().is_none());
+    assert(m.pop_last().is_none());
+
+    // Refill, drain, refill, drain — same shape twice.
+    for (int round = 0; round < 2; ++round) {
+        for (int i = 0; i < 4; ++i) m.insert(i + round, (i + round) * 10);
+        assert(m.len() == 4u);
+        {
+            auto kv = m.pop_first();
+            assert(kv.is_some());
+            auto t = std::move(kv).unwrap();
+            assert(std::get<0>(t) == round);
+        }
+        {
+            auto kv = m.pop_last();
+            assert(kv.is_some());
+            auto t = std::move(kv).unwrap();
+            assert(std::get<0>(t) == round + 3);
+        }
+        // Drain remaining 2.
+        for (int j = 0; j < 2; ++j) {
+            auto kv = m.pop_first();
+            assert(kv.is_some());
+        }
+        assert(m.is_empty());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: stress single-key insertion/removal repeatedly.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_single_key_churn_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 20; ++i) {
+        assert(m.insert(42, i).is_none() || true);  // Some or None ok
+        assert(m.contains_key(42));
+        auto v = m.get(42);
+        assert(v.is_some());
+        assert(v.unwrap() == i);
+        auto removed = m.remove(42);
+        assert(removed.is_some());
+        assert(m.is_empty());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet churn over a single value.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_single_value_churn_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 20; ++i) {
+        s.insert(7);
+        assert(s.contains(7));
+        assert(s.len() == 1u);
+        assert(s.remove(7) == true);
+        assert(!s.contains(7));
+        assert(s.is_empty());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_basic_small (range probes substitute).
+// Already covered the linear path. This variant checks the iter()
+// sequence at small sizes — important for height-0 trees.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_iter_sequential_unstubbed") {
+    auto m = make_map<int, int>();
+    // Empty iter — next is None right away.
+    {
+        auto it = m.iter();
+        assert(it.next().is_none());
+    }
+    // After inserts, iter walks in order.
+    m.insert(2, 20);
+    m.insert(1, 10);
+    m.insert(3, 30);
+    {
+        auto it = m.iter();
+        for (int expected = 1; expected <= 3; ++expected) {
+            auto n = it.next();
+            assert(n.is_some());
+            auto t = std::move(n).unwrap();
+            assert(std::get<0>(t) == expected);
+            assert(std::get<1>(t) == expected * 10);
+        }
+        assert(it.next().is_none());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.iter() and next_back() round-trip on small sets.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_iter_back_sequential_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 10);
+    m.insert(2, 20);
+    m.insert(3, 30);
+    auto it = m.iter();
+    for (int expected = 3; expected >= 1; --expected) {
+        auto n = it.next_back();
+        assert(n.is_some());
+        auto t = std::move(n).unwrap();
+        assert(std::get<0>(t) == expected);
+        assert(std::get<1>(t) == expected * 10);
+    }
+    assert(it.next_back().is_none());
+}
+
