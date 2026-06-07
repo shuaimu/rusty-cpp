@@ -6022,3 +6022,73 @@ TEST_CASE("test_into_iter_drop_leak_kv_panic_in_key_unstubbed") {
         assert(c.dropped() == 1);
     }
 }
+
+// rustc map/tests.rs::test_into_iter_drop_leak_kv_panic_in_val.
+// Similar to panic_in_key but mark the val for drop-panic.
+// In our port keys and values are both Instance, so the test still
+// exercises the same drop path.
+TEST_CASE("test_into_iter_drop_leak_kv_panic_in_val_unstubbed") {
+    using namespace btree_testing;
+    CrashTestDummy a(0);
+    CrashTestDummy b(1);
+    {
+        // Use a map where the *value* is the panic-in-drop Instance.
+        auto map = BTreeMap<int, Instance>::new_in(::rusty::alloc::Global{});
+        map.insert(0, a.spawn(Panic::Never));
+        map.insert(1, b.spawn(Panic::InDrop));
+        auto r = rusty::panic::catch_unwind(rusty::panic::AssertUnwindSafe([&] {
+            auto into_iter = std::move(map).into_iter();
+        }));
+        assert(r.is_err());
+        assert(a.dropped() == 1);
+        assert(b.dropped() == 1);
+    }
+}
+
+// rustc map/tests.rs::test_into_iter_drop_leak_height_1.
+// Insert enough keys to force a height-1 tree before dropping.
+TEST_CASE("test_into_iter_drop_leak_height_1_unstubbed") {
+    using namespace btree_testing;
+    constexpr size_t N = 30;
+    // CrashTestDummy has deleted copy/move. Heap-allocate so we don't
+    // need to relocate stable references handed to BTreeMap.
+    CrashTestDummy* dummies[N];
+    for (size_t i = 0; i < N; ++i) dummies[i] = new CrashTestDummy(i);
+    {
+        auto map = BTreeMap<Instance, Unit>::new_in(::rusty::alloc::Global{});
+        for (size_t i = 0; i < N; ++i) {
+            map.insert(dummies[i]->spawn(i == 15 ? Panic::InDrop : Panic::Never), kUnit);
+        }
+        auto r = rusty::panic::catch_unwind(rusty::panic::AssertUnwindSafe([&] {
+            auto into_iter = std::move(map).into_iter();
+        }));
+        assert(r.is_err());
+        for (size_t i = 0; i < N; ++i) {
+            assert(dummies[i]->dropped() == 1);
+        }
+    }
+    for (size_t i = 0; i < N; ++i) delete dummies[i];
+}
+
+// Smoke: BTreeMap::first_entry and last_entry — entry-via-first/last
+// access patterns.
+TEST_CASE("smoke_first_last_entry_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 100);
+    m.insert(5, 500);
+    m.insert(3, 300);
+    {
+        auto e = m.first_entry();
+        assert(e.is_some());
+        auto oe = std::move(e).unwrap();
+        assert(oe.key() == 1);
+    }
+    {
+        auto e = m.last_entry();
+        assert(e.is_some());
+        auto oe = std::move(e).unwrap();
+        assert(oe.key() == 5);
+    }
+    // Map unchanged.
+    assert(m.len() == 3u);
+}
