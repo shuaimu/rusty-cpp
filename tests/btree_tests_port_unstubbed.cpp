@@ -3786,3 +3786,103 @@ TEST_CASE("smoke_isolation_round2_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// rustc set/tests.rs::test_symmetric_difference_size_hint (initial only).
+// Probes size_hint on SymmetricDifference iter without calling next()
+// (which is stubbed to throw).
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_test_symmetric_difference_size_hint_initial_unstubbed") {
+    auto x = make_set<int>();
+    for (int v : {2, 4}) x.insert(v);
+    auto y = make_set<int>();
+    for (int v : {1, 2, 3}) y.insert(v);
+    auto iter = x.symmetric_difference(y);
+    auto sh = iter.size_hint();
+    // Lower bound is 0 per the rustc test.
+    assert(std::get<0>(sh) == 0u);
+    // Upper bound is sum of lens = 5.
+    auto upper = std::get<1>(sh);
+    assert(upper.is_some());
+    assert(upper.unwrap() == 5u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc set/tests.rs::test_union_size_hint (initial only).
+// Same shape as symm_diff but with Union which also stubs next().
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_test_union_size_hint_initial_unstubbed") {
+    auto x = make_set<int>();
+    for (int v : {2, 4}) x.insert(v);
+    auto y = make_set<int>();
+    for (int v : {1, 2, 3}) y.insert(v);
+    auto iter = x.union_(y);
+    auto sh = iter.size_hint();
+    // Lower bound is max(2, 3) = 3.
+    assert(std::get<0>(sh) == 3u);
+    // Upper bound is 5.
+    auto upper = std::get<1>(sh);
+    assert(upper.is_some());
+    assert(upper.unwrap() == 5u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: union iter on two disjoint sets — size_hint reports
+// lower=max(lens), upper=sum.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_union_size_hint_disjoint_unstubbed") {
+    auto a = make_set<int>();
+    for (int v : {1, 2, 3, 4}) a.insert(v);
+    auto b = make_set<int>();
+    for (int v : {10, 20}) b.insert(v);
+    auto iter = a.union_(b);
+    auto sh = iter.size_hint();
+    assert(std::get<0>(sh) == 4u);
+    auto upper = std::get<1>(sh);
+    assert(upper.is_some());
+    assert(upper.unwrap() == 6u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: union iter on identical sets — size_hint upper is 2*len.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_union_size_hint_identical_unstubbed") {
+    auto a = make_set<int>();
+    for (int v : {1, 2, 3}) a.insert(v);
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3}) b.insert(v);
+    auto iter = a.union_(b);
+    auto sh = iter.size_hint();
+    assert(std::get<0>(sh) == 3u);
+    auto upper = std::get<1>(sh);
+    assert(upper.is_some());
+    assert(upper.unwrap() == 6u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: symm_diff iter on two empty sets — lower=0, upper=0.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_symm_diff_empty_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    auto iter = a.symmetric_difference(b);
+    auto sh = iter.size_hint();
+    assert(std::get<0>(sh) == 0u);
+    auto upper = std::get<1>(sh);
+    assert(upper.is_some());
+    assert(upper.unwrap() == 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: union iter on two empty sets — lower=0, upper=0.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_union_empty_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    auto iter = a.union_(b);
+    auto sh = iter.size_hint();
+    assert(std::get<0>(sh) == 0u);
+    auto upper = std::get<1>(sh);
+    assert(upper.is_some());
+    assert(upper.unwrap() == 0u);
+}
+
