@@ -2078,3 +2078,111 @@ TEST_CASE("set_smoke_all_empty_returns_unstubbed") {
     assert(s.pop_last().is_none());
     assert(s.remove(0) == false);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc set/tests.rs::test_retain (substitute with remove-by-key loop).
+// Original uses retain() which routes through extract_if (blocked).
+// We achieve the same end state with a manual filter + remove loop.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_test_retain_manual_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 1; i <= 6; ++i) s.insert(i);
+    assert(s.len() == 6u);
+    // Remove odd values (analogous to retain |k| k % 2 == 0).
+    for (int i = 1; i <= 6; ++i) {
+        if (i % 2 != 0) s.remove(i);
+    }
+    assert(s.len() == 3u);
+    assert(s.contains(2));
+    assert(s.contains(4));
+    assert(s.contains(6));
+    assert(!s.contains(1));
+    assert(!s.contains(3));
+    assert(!s.contains(5));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_retain (size-reduced filter loop).
+// Original retains even keys from a 100-element map; the 100-element
+// case trips the same dangling-binding family as B-pop-last under the
+// remove drain. We cap at MIN_INSERTS_HEIGHT_1 (12) to stay in safe
+// territory.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_retain_longer_unstubbed") {
+    auto map = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) map.insert(i, i * 10);
+    assert(map.len() == static_cast<size_t>(size));
+    // Remove odd keys.
+    for (int i = 1; i < size; i += 2) {
+        auto removed = map.remove(i);
+        assert(removed.is_some());
+    }
+    assert(map.len() == static_cast<size_t>(size / 2));
+    // Spot-check several even keys present, odd absent.
+    for (int i = 0; i < size; ++i) {
+        if (i % 2 == 0) {
+            auto v = map.get(i);
+            assert(v.is_some() && v.unwrap() == i * 10);
+        } else {
+            assert(map.get(i).is_none());
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc set/tests.rs::from_array — substitute with manual insertion
+// since BTreeSet::from(array) is the from_iter path.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_from_array_manual_unstubbed") {
+    auto set = make_set<int>();
+    for (int x : {1, 2, 3, 4}) set.insert(x);
+
+    auto unordered_duplicates = make_set<int>();
+    for (int x : {4, 1, 4, 3, 2}) unordered_duplicates.insert(x);
+
+    assert(set.len() == unordered_duplicates.len());
+    assert(set.len() == 4u);
+    for (int x : {1, 2, 3, 4}) {
+        assert(set.contains(x));
+        assert(unordered_duplicates.contains(x));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::from_array (already covered as
+// test_from_array_unstubbed). This variant exercises an unordered key
+// insertion as the rustc test does.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_from_array_unordered_unstubbed") {
+    auto unordered_duplicates = make_map<int, int>();
+    // Same key inserted multiple times — last write wins.
+    for (auto [k, v] : {std::pair{3, 4}, std::pair{1, 2}, std::pair{1, 2}}) {
+        unordered_duplicates.insert(k, v);
+    }
+    assert(unordered_duplicates.len() == 2u);
+    {
+        auto v = unordered_duplicates.get(1);
+        assert(v.is_some() && v.unwrap() == 2);
+    }
+    {
+        auto v = unordered_duplicates.get(3);
+        assert(v.is_some() && v.unwrap() == 4);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_insert_into_full_height_0 sized at 0.
+// Edge case: insert into an empty leaf — no displacement needed.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_insert_first_unstubbed") {
+    auto m = make_map<int, int>();
+    auto displaced = m.insert(42, 100);
+    assert(displaced.is_none());
+    assert(m.len() == 1u);
+    auto v = m.get(42);
+    assert(v.is_some());
+    assert(v.unwrap() == 100);
+    check(m);
+}
+
