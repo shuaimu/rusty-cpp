@@ -8530,3 +8530,54 @@ TEST_CASE("test_iter_mut_next_back_unstubbed") {
         assert(m.get(i).unwrap() == i + 100);
     }
 }
+
+// rustc map/tests.rs::test_range_mut — now unblocked by LeafRange<ValMut>
+// next_checked BorrowType branching.
+TEST_CASE("test_range_mut_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 10; ++i) m.insert(i, i * 10);
+    {
+        // Mutate values in [3, 7) by doubling.
+        auto rm = m.range_mut(rusty::range<int>(3, 7));
+        for (auto v = rm.next(); v.is_some(); v = rm.next()) {
+            auto t = v.unwrap();
+            int& slot = std::get<1>(t);
+            slot *= 2;
+        }
+    }
+    // Verify side effects.
+    for (int i = 0; i < 10; ++i) {
+        auto g = m.get(i);
+        assert(g.is_some());
+        if (i >= 3 && i < 7) {
+            assert(g.unwrap() == i * 20);
+        } else {
+            assert(g.unwrap() == i * 10);
+        }
+    }
+}
+
+// range_mut on h1 tree
+TEST_CASE("test_range_mut_h1_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 30; ++i) m.insert(i, i);
+    {
+        auto rm = m.range_mut(rusty::range<int>(10, 20));
+        int count = 0;
+        for (auto v = rm.next(); v.is_some(); v = rm.next()) {
+            auto t = v.unwrap();
+            std::get<1>(t) += 1000;
+            ++count;
+        }
+        assert(count == 10);
+    }
+    for (int i = 0; i < 30; ++i) {
+        auto g = m.get(i);
+        assert(g.is_some());
+        if (i >= 10 && i < 20) {
+            assert(g.unwrap() == i + 1000);
+        } else {
+            assert(g.unwrap() == i);
+        }
+    }
+}

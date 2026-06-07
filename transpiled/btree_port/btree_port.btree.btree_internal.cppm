@@ -6375,11 +6375,48 @@ struct LeafRange {
     LeafRange<marker::Immut, K, V> reborrow() const {
         return LeafRange<marker::Immut, K, V>{.front = this->front.as_ref().map([&](auto&& f) -> Handle<NodeRef<marker::Immut, K, V, marker::Leaf>, marker::Edge> { return f.reborrow(); }), .back = this->back.as_ref().map([&](auto&& b) -> Handle<NodeRef<marker::Immut, K, V, marker::Leaf>, marker::Edge> { return b.reborrow(); })};
     }
-    rusty::Option<std::tuple<const K&, const V&>> next_checked() {
-        return this->perform_next_checked([&](auto&& kv) { return kv.into_kv(); });
+    // Parallel-impl branching: for Mut/ValMut, project to (const K&, V&)
+    // via into_kv() (for the const K&) + into_val_mut (for the V&).
+    // For Immut and other read-only borrows, use into_kv() which gives
+    // (const K&, const V&). perform_next_checked passes `const kv` so
+    // mut variant must use a mutable copy.
+    auto next_checked() {
+        if constexpr (std::is_same_v<BorrowType, marker::Mut>
+                      || std::is_same_v<BorrowType, marker::ValMut>) {
+            using R = std::tuple<const K&, V&>;
+            if (rusty::is_empty((*this))) {
+                return rusty::Option<R>{rusty::None};
+            }
+            return replace(this->front.as_mut().unwrap(), [&](auto&& front) {
+                auto kv = front.next_kv().ok().unwrap();
+                auto& k = std::get<0>(kv.into_kv());
+                auto& v = kv.into_val_mut();
+                auto next_edge = kv.next_leaf_edge();
+                return std::make_tuple(std::move(next_edge),
+                    rusty::Some(R{k, v}));
+            });
+        } else {
+            return this->perform_next_checked([&](auto&& kv) { return kv.into_kv(); });
+        }
     }
-    rusty::Option<std::tuple<const K&, const V&>> next_back_checked() {
-        return this->perform_next_back_checked([&](auto&& kv) { return kv.into_kv(); });
+    auto next_back_checked() {
+        if constexpr (std::is_same_v<BorrowType, marker::Mut>
+                      || std::is_same_v<BorrowType, marker::ValMut>) {
+            using R = std::tuple<const K&, V&>;
+            if (rusty::is_empty((*this))) {
+                return rusty::Option<R>{rusty::None};
+            }
+            return replace(this->back.as_mut().unwrap(), [&](auto&& back) {
+                auto kv = back.next_back_kv().ok().unwrap();
+                auto& k = std::get<0>(kv.into_kv());
+                auto& v = kv.into_val_mut();
+                auto next_edge = kv.next_back_leaf_edge();
+                return std::make_tuple(std::move(next_edge),
+                    rusty::Some(R{k, v}));
+            });
+        } else {
+            return this->perform_next_back_checked([&](auto&& kv) { return kv.into_kv(); });
+        }
     }
     template<typename F>
     auto perform_next_checked(F f) {
