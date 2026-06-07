@@ -2477,3 +2477,90 @@ TEST_CASE("test_iter_meet_in_middle_unstubbed") {
     assert(it.next_back().is_none());
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap::remove_entry returns Option<(K, V)>. The plain
+// remove returns Option<V>, but remove_entry returns the key too.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_remove_entry_unstubbed") {
+    auto m = make_map<int, int>();
+    // Empty: remove_entry returns None.
+    assert(m.remove_entry(1).is_none());
+    m.insert(1, 10);
+    m.insert(2, 20);
+    {
+        auto kv = m.remove_entry(1);
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 10);
+    }
+    assert(!m.contains_key(1));
+    // Remove of absent key returns None.
+    assert(m.remove_entry(1).is_none());
+    // The remaining 2 is intact.
+    assert(m.len() == 1u);
+    auto v = m.get(2);
+    assert(v.is_some() && v.unwrap() == 20);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet::take returns Option<T>.
+// Set.take(&v) removes and returns the value if present.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_take_unstubbed") {
+    auto s = make_set<int>();
+    assert(s.take(1).is_none());
+    s.insert(1);
+    s.insert(2);
+    {
+        auto t = s.take(1);
+        assert(t.is_some());
+        assert(std::move(t).unwrap() == 1);
+    }
+    assert(!s.contains(1));
+    assert(s.contains(2));
+    assert(s.take(1).is_none());  // already taken
+}
+
+// BLOCKED: set_smoke_get. BTreeSet::get(value) chains map.get_key_value
+// followed by Option<tuple<K&,V&>>::map → Option<const T&>, which trips
+// the same return-type conversion bug as Keys::next (set.cppm:4723).
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap::contains_key on a longer key range. Walks past the
+// single-leaf cap to verify lookup still works across splits.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_contains_key_large_unstubbed") {
+    auto m = make_map<int, int>();
+    const int size = static_cast<int>(MIN_INSERTS_HEIGHT_1);
+    for (int i = 0; i < size; ++i) m.insert(i * 2, i);  // even keys only
+    for (int i = 0; i < size; ++i) {
+        assert(m.contains_key(i * 2));    // even present
+        assert(!m.contains_key(i * 2 + 1));  // odd absent
+    }
+}
+
+// BLOCKED: set_smoke_first_last_wide. BTreeSet::first/last each map a
+// (k, v) tuple to just k, hitting the same Option<tuple<K&,V&>> →
+// Option<const T&> conversion bug at set.cppm:4737/4743.
+// (The existing set_test_first_last works only because NDEBUG hides
+// every actual call inside assert().)
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap::get_mut Some/None for a wider range.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_get_mut_wide_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        m.insert(i, i);
+    }
+    // All inserted keys produce Some.
+    for (int i = 0; i < static_cast<int>(MIN_INSERTS_HEIGHT_1); ++i) {
+        assert(m.get_mut(i).is_some());
+    }
+    // Absent keys produce None.
+    for (int i : {-1, 100, 1000}) {
+        assert(m.get_mut(i).is_none());
+    }
+}
+
