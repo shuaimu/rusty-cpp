@@ -3668,3 +3668,121 @@ TEST_CASE("smoke_get_returns_latest_unstubbed") {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.first/last_entry on a single-element map produces
+// the same key.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_first_last_entry_single_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(42, 100);
+    {
+        auto fe = m.first_entry();
+        assert(fe.is_some());
+        assert(std::move(fe).unwrap().key() == 42);
+    }
+    {
+        auto le = m.last_entry();
+        assert(le.is_some());
+        assert(std::move(le).unwrap().key() == 42);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap.first/last_entry on growing map.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_first_last_entry_growing_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 1; i <= 10; ++i) {
+        m.insert(i, i);
+        {
+            auto fe = m.first_entry();
+            assert(fe.is_some());
+            assert(std::move(fe).unwrap().key() == 1);
+        }
+        {
+            auto le = m.last_entry();
+            assert(le.is_some());
+            assert(std::move(le).unwrap().key() == i);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap key-only patterns are fast.
+// Verifies contains_key is the same as get(_).is_some().
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_contains_key_eq_get_some_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 6; ++i) m.insert(i, i);
+    for (int i = -1; i <= 7; ++i) {
+        assert(m.contains_key(i) == m.get(i).is_some());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeSet contains is consistent.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_smoke_contains_consistency_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 6; ++i) s.insert(i);
+    for (int i = -2; i <= 8; ++i) {
+        if (i >= 0 && i < 6) assert(s.contains(i));
+        else assert(!s.contains(i));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap remove returns Some on first call, None thereafter.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_remove_idempotent_after_first_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 100);
+    // First remove returns Some.
+    {
+        auto v = m.remove(1);
+        assert(v.is_some());
+        assert(std::move(v).unwrap() == 100);
+    }
+    // Subsequent removes return None.
+    for (int round = 0; round < 5; ++round) {
+        assert(m.remove(1).is_none());
+    }
+    assert(m.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap insert+remove cycles preserve final state.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_insert_remove_idempotent_state_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int round = 0; round < 10; ++round) {
+        m.insert(1, round);
+        m.remove(1);
+    }
+    // After all rounds, map is empty.
+    assert(m.is_empty());
+    assert(m.len() == 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Smoke: BTreeMap stable behavior across multiple TEST_CASE runs.
+// (Sanity that test invocations don't share state via globals.)
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("smoke_isolation_round1_unstubbed") {
+    auto m = make_map<int, int>();
+    assert(m.is_empty());
+    m.insert(42, 100);
+    assert(m.len() == 1u);
+}
+
+TEST_CASE("smoke_isolation_round2_unstubbed") {
+    auto m = make_map<int, int>();
+    assert(m.is_empty());  // Fresh map.
+    m.insert(99, 200);
+    assert(m.len() == 1u);
+    {
+        auto v = m.get(99);
+        assert(v.is_some() && v.unwrap() == 200);
+    }
+}
+
