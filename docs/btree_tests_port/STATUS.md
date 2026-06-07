@@ -8,120 +8,82 @@ Living log of which rustc tests are un-stubbed vs why others aren't.
   `TEST_CASE("…")` stubs (115 from map/tests.rs, 31 from set/tests.rs
   prefixed with `set_`).
 - `tests/btree_tests_port_unstubbed.cpp` — hand-translated test bodies
-  that actually exercise btree_port. Lives in a separate TU because of
-  the "ManuallyDrop instantiation" bug (see below).
+  that actually exercise btree_port. Lives in a separate TU because
+  some BTreeMap instantiations triggered earlier-discovered
+  in-module-purview bugs.
 - `tests/btree_tests_port_module_test.cpp` — runner driver.
 
 Un-stubbed tests use `_unstubbed` suffix on their name so the
 test-runner registry doesn't collide with the stub of the same Rust
 test name. Both run on each invocation.
 
-## Un-stubbed so far
+## Un-stubbed so far (5 real tests + the synthetic smoke)
 
 | Rust test | C++ TEST_CASE | Status |
 |---|---|---|
-| `map/tests.rs::test_get_key_value` | `test_get_key_value_unstubbed` | passing (trimmed: removed `map.remove()` tail — blocked by clear() bug below) |
+| `map/tests.rs::test_get_key_value` | `test_get_key_value_unstubbed` | passing (trimmed: skipped `.remove()` tail) |
+| `map/tests.rs::test_try_insert` | `test_try_insert_unstubbed` | passing (re-enabled by fix_btreemap_try_insert_arm_swap) |
+| `map/tests.rs::test_pop_first_last` (pop_first half) | `test_pop_first_only_unstubbed` | passing for pop_first; pop_last still hits B-pop-last |
+| `set/tests.rs::test_clear` | `set_test_clear_unstubbed` | passing (re-enabled by fix_btreemap_clear_manuallydrop) |
 | (synthetic smoke) | `smoke_insert_lookup_unstubbed` | passing — covers insert/contains_key/len/get/first/last_key_value |
 
 ## Helpers wired up
 
 - **`check(M)` shim** in `btree_tests_port_unstubbed.cpp` — no-op `template<typename M> void check(const M&) {}`. Translated tests that hit `map.check()` route through it. We lose internal-invariant checking but keep the test's own public-API assertions.
 
-## Attempted but blocked (new findings)
+## Patcher rules added in the consolidated bug-fix pass
 
-These tests were translated and the build compiles, but they trigger
-runtime aborts or hit additional transpile bugs. Each is one more
-latent btree_port issue surfaced:
+| Rule | Fixes |
+|---|---|
+| `fix_btreemap_try_insert_arm_swap` | B-try-insert: `try_insert()` had same Vacant/Occupied arm-swap as the old `insert()` did. Hand-port the function body to match Rust semantics. |
+| `fix_btreemap_clear_manuallydrop` | B-clear: `clear()` emit's `rusty::clone(this->alloc)` where alloc is `ManuallyDrop<A>` (copy ctor deleted). Rewrite to `manually_drop_new(rusty::clone(*this->alloc))` to unwrap-clone-rewrap. |
 
-### B-try-insert: try_insert Vacant/Occupied arm-swap (same shape as the old BTreeMap::insert bug)
+## Remaining latent bugs (documented for future fixes)
 
-**Symptom:** `try_insert` at map.cppm:5667 takes the Vacant arm at
-`index() == 0` but constructs `OccupiedError{.entry = vacant_entry,
-.value = …}`, which fails compile with "no viable conversion from
-VacantEntry to size_t". Same root cause as
-`fix_btreemap_insert_arm_swap` in the patcher — needs a sibling
-patcher rule for try_insert.
+### B-pop-last: pop_last() runtime abort on non-empty map
 
-**Tests blocked:** `test_try_insert` and anything else that calls
-`.try_insert()`.
+**Symptom:** `pop_last()` causes the test process to abort partway
+through execution. Specifically: with a map of size 2, calling
+`pop_last()` never returns. Verified that `last_key_value()` on the
+same map at the same point works correctly. The asymmetric failure
+(pop_first works, pop_last doesn't) suggests the bug is in
+`last_entry()` / `last_leaf_edge()` / `left_kv()` /
+`OccupiedEntry::remove_entry()` on the rightmost-walk path —
+likely a navigation or remove-side mirror of a fix that was made
+on the leftmost side.
 
-### B-pop: pop_first / pop_last runtime abort
+**Tests blocked:** the full `test_pop_first_last` (only the
+pop_first half is un-stubbed), and anything that exercises
+`.pop_last()` more than once on a non-trivial map.
 
-**Symptom:** `test_pop_first_last_unstubbed` compiled cleanly but the
-test process aborts mid-execution at the first `map.pop_first()`
-unwrap on a non-empty map. Likely a related move-semantics or
-destructor bug in pop's emit path.
+### B-into-iter: into_keys / into_values bypass ManuallyDrop auto-deref
 
-**Tests blocked:** `test_pop_first_last` plus any test that
-exercises `.pop_first()` / `.pop_last()` on non-empty maps.
+**Symptom:** map.cppm:5922 (in the IntoKeys/IntoValues instantiation
+path) emits `this->root` and `this->length` where `this` has type
+`ManuallyDrop<BTreeMap>`. The transpiler's ManuallyDrop auto-deref
+handling missed these field accesses — should emit `(*this).root`,
+`(*this).length`.
 
-## Known blockers found while un-stubbing
+**Tests blocked:** anything using `into_keys()`, `into_values()`.
 
-These each block a small cluster of tests. Each can be fixed
-independently in btree_port.
+### B-purview: BTreeMap instantiation inside .cppm module purview
 
-### B-clear: `BTreeMap::clear()` clones ManuallyDrop directly
-
-**Symptom:** `map.cppm:5579` emits
-```cpp
-rusty::mem::drop(BTreeMap<K, V, A>(
-    rusty::mem::replace(this->root, …),
-    rusty::mem::replace(this->length, 0),
-    rusty::clone(this->alloc),   // ← this->alloc is ManuallyDrop<A>
-    …));
-```
-`rusty::clone<ManuallyDrop<Global>>` triggers a `static_assert` on
-`is_copy_constructible_v<ManuallyDrop<Global>>` (ManuallyDrop has a
-deleted copy ctor by design).
-
-**Fix:** rewrite the clear() emit (or hand-patch in
-post_transpile_patch.py) to unwrap, clone, re-wrap:
-```cpp
-rusty::mem::manually_drop_new(rusty::clone(*this->alloc))
-```
-
-**Tests blocked:** `set_test_clear`, `test_clear` (map), and anything
-else that calls `.clear()`. Indirectly blocks `into_keys()`,
-`into_values()`, and any other method whose destructor reaches the
-same code path.
-
-### B-into-iter: into_keys/into_values destructor reaches B-clear
-
-**Symptom:** `into_keys()` / `into_values()` instantiate the BTreeMap
-destructor in a context that also hits the B-clear emit. Same
-underlying bug, surfaces differently.
-
-**Tests blocked:** `test_into_keys`, `test_into_values`, anything else
-exercising `into_*()` consuming iterators.
-
-### B-purview: in-module-purview instantiation
-
-**Symptom:** TEST_CASE bodies that instantiate BTreeMap inside
-`btree_tests_port.cppm`'s module purview hit the B-clear destructor
-chain at module-build time, even if the body itself doesn't touch
-`.clear()` (because the destructor is implicitly instantiated). The
-same body in a separate `.cpp` TU compiles fine if it doesn't
-explicitly call `.clear()`.
-
-**Workaround:** un-stubbed test bodies live in
-`tests/btree_tests_port_unstubbed.cpp`, not in the module. This is
-purely a workaround until B-clear is fixed (then both paths work).
+**Symptom:** Putting a TEST_CASE body inside `btree_tests_port.cppm`
+that instantiates BTreeMap triggered the (now-fixed) B-clear path
+at module-build time. Workaround was to put un-stubbed test bodies
+in `tests/btree_tests_port_unstubbed.cpp` (separate TU). Now that
+B-clear is fixed, in-purview instantiation may work — not retested.
 
 ## Roadmap
 
-Fixing B-clear unblocks roughly 20-30 of the 146 tests in one shot
-(everything that hits `.clear()`, `into_keys()`, `into_values()`,
-`pop_first()`/`pop_last()` destructor paths, etc.).
-
-After that, the remaining blockers are the ones flagged in
-`post_transpile_patch.py`'s docstring:
-- `crate::testing::{crash_test, ord_chaos}` helpers (not in
-  transpiled/testing_port — would need to vendor them).
-- Private BTreeMap invariant-check methods (`check_invariants`,
-  `assert_back_pointers`, `calc_length`, `assert_min_len`).
-- `catch_unwind` / `AssertUnwindSafe` (Rust panic-unwinding has no
-  C++ equivalent in this codebase).
-
-Tests that only need basic CRUD + iteration with `_unstubbed` suffix
-can keep being added to `btree_tests_port_unstubbed.cpp` without
-waiting for any of the above.
+After this consolidated pass, remaining work to un-stub more tests:
+1. Fix **B-pop-last** — adds `test_pop_first_last` plus any test that
+   uses `.pop_last()` repeatedly.
+2. Fix **B-into-iter** — adds `test_into_keys`, `test_into_values`,
+   plus tests that consume the map.
+3. Translate the remaining ~30 "truly clean" tests (per the analysis
+   in the parent README) — each one a small hand-translation now that
+   the worst blockers are gone.
+4. Eventually: port `crate::testing::{crash_test, ord_chaos}` helpers
+   (unblocks ~10 more tests), and implement `catch_unwind`/`should_panic`
+   equivalents for the panic tests.

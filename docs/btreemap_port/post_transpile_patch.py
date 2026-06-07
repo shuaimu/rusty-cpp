@@ -4542,6 +4542,114 @@ def fix_lazy_leaf_range_init(path: Path) -> None:
         print(f"  fixed LazyLeafRange::init_front/back emit in: {path.name}")
 
 
+def fix_btreemap_try_insert_arm_swap(path: Path) -> None:
+    """Same Vacant/Occupied arm-swap bug as BTreeMap::insert, but for
+    BTreeMap::try_insert. Rust source:
+        match self.entry(key) {
+            Occupied(entry) => Err(OccupiedError { entry, value }),
+            Vacant(entry) => Ok(entry.insert(value)),
+        }
+    Entry variants are Vacant=index 0, Occupied=index 1. The emit
+    treats index 0 as Occupied, so it tries to construct
+    `OccupiedError{ .entry = vacant_entry, .value = … }` — compile
+    fails with "no viable conversion from VacantEntry to …".
+
+    Hand-port to match Rust semantics. Idempotent."""
+    src = path.read_text()
+    sentinel = "// btree_port port: BTreeMap::try_insert hand-port (arm swap fix)"
+    if sentinel in src:
+        return
+    sig = ("rusty::Result<V&, entry::OccupiedError<K, V, A>> "
+           "try_insert(K key, V value) {")
+    sig_pos = src.find(sig)
+    if sig_pos == -1:
+        return
+    brace_open = src.find("{", sig_pos + len(sig) - 1)
+    depth = 0
+    brace_close = -1
+    for k in range(brace_open, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                brace_close = k
+                break
+    if brace_close == -1:
+        return
+    body = (
+        "{\n"
+        f"        {sentinel}\n"
+        "        auto _entry = this->entry(std::move(key));\n"
+        "        // Entry variants: Vacant=0, Occupied=1.\n"
+        "        if (_entry.index() == 1) {\n"
+        "            auto&& occ = std::get<1>(_entry)._0;\n"
+        "            return rusty::Result<V&, entry::OccupiedError<K, V, A>>::Err(\n"
+        "                entry::OccupiedError<K, V, A>{.entry = std::move(occ), .value = std::move(value)});\n"
+        "        }\n"
+        "        auto&& vac = std::get<0>(_entry)._0;\n"
+        "        // VacantEntry::insert returns V&; route through a thread_local\n"
+        "        // optional to provide an lvalue we can return by reference\n"
+        "        // (mirrors the original emit's _result_ref_tmp pattern).\n"
+        "        return rusty::Result<V&, entry::OccupiedError<K, V, A>>::Ok([&]() -> V& {\n"
+        "            auto _val_ref = vac.insert(std::move(value));\n"
+        "            thread_local std::optional<V> _ref_tmp;\n"
+        "            _ref_tmp.reset();\n"
+        "            _ref_tmp.emplace(std::move(_val_ref));\n"
+        "            return *_ref_tmp;\n"
+        "        }());\n"
+        "    }"
+    )
+    new_src = src[:brace_open] + body + src[brace_close + 1:]
+    path.write_text(new_src)
+    print(f"  hand-ported BTreeMap::try_insert arm-swap in: {path.name}")
+
+
+def fix_btreemap_clear_manuallydrop(path: Path) -> None:
+    """BTreeMap::clear() emits `rusty::clone(this->alloc)` where
+    `this->alloc` has type `ManuallyDrop<A>`. The clone fails because
+    ManuallyDrop's copy ctor is deleted by design (it owns the value
+    and doesn't tickle the destructor).
+
+    Rust source for clear() is essentially:
+        pub fn clear(&mut self) {
+            drop(mem::replace(self, BTreeMap::new_in(self.alloc.clone())));
+        }
+    where `self.alloc.clone()` is `ManuallyDrop<A>::clone()` — in Rust
+    that delegates to `A::clone()` and re-wraps in ManuallyDrop. We
+    need the same shape in C++: unwrap → clone A → re-wrap.
+
+    Original transpiled emit:
+        void clear() {
+            rusty::mem::drop(BTreeMap<K, V, A>(
+                rusty::mem::replace(this->root, …),
+                rusty::mem::replace(this->length, 0),
+                rusty::clone(this->alloc),  // ← broken
+                rusty::PhantomData<…>{}));
+        }
+    Replace `rusty::clone(this->alloc)` with
+    `rusty::mem::manually_drop_new(rusty::clone(*this->alloc))`.
+
+    Idempotent."""
+    src = path.read_text()
+    needle = "void clear() {\n        rusty::mem::drop(BTreeMap<K, V, A>("
+    if needle not in src:
+        return
+    # Already patched if sentinel comment is present.
+    sentinel_marker = "rusty::mem::manually_drop_new(rusty::clone(*this->alloc))"
+    if sentinel_marker in src:
+        return
+    new_src = src.replace(
+        "rusty::clone(this->alloc), "
+        "rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{}));",
+        "rusty::mem::manually_drop_new(rusty::clone(*this->alloc)), "
+        "rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{}));",
+    )
+    if new_src != src:
+        path.write_text(new_src)
+        print(f"  fixed BTreeMap::clear ManuallyDrop clone in: {path.name}")
+
+
 def fix_btreemap_insert_arm_swap(path: Path) -> None:
     """The transpiler emit of BTreeMap::insert(K, V) has its Entry arms
     swapped. Rust source:
@@ -6076,6 +6184,13 @@ def main() -> int:
         # The transpiler swapped the Vacant/Occupied arms of
         # BTreeMap::insert. Hand-port to match Rust semantics.
         fix_btreemap_insert_arm_swap(map_mod)
+        # Same arm-swap bug in BTreeMap::try_insert — different return
+        # shape (Result<&mut V, OccupiedError>) but same root cause.
+        fix_btreemap_try_insert_arm_swap(map_mod)
+        # BTreeMap::clear() emits `rusty::clone(this->alloc)` where
+        # alloc is ManuallyDrop<A>; ManuallyDrop's copy ctor is deleted.
+        # Rewrite to unwrap-then-clone-then-rewrap.
+        fix_btreemap_clear_manuallydrop(map_mod)
     else:
         print(f"  [skip] {map_mod.name} not present")
     print(f"[6/6] patching {set_mod.name}")

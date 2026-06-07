@@ -82,18 +82,90 @@ TEST_CASE("test_get_key_value_unstubbed") {
     assert(map.get_key_value(4).is_none());
 }
 
-// rustc map/tests.rs::test_pop_first_last BLOCKED: pop_first/pop_last
-// runtime-crash when called on a non-empty map. Verified locally —
-// the test aborts inside the first map.pop_first().is_some() unwrap.
-// Likely a related move-semantics bug in btree_port's pop emit.
-// Hold un-stub until investigated.
+// rustc map/tests.rs::test_pop_first_last partially un-stubbed: only
+// the pop_first path. pop_last hits B-pop-last — runtime aborts inside
+// `last_entry()` / `OccupiedEntry::remove_entry()` chain. `last_key_value`
+// works (purely const, no dormant_map). `pop_first` works (calls into
+// `first_entry`/`first_leaf_edge`/`right_kv`). The asymmetric failure
+// makes it look like a bug in `last_entry` / `last_leaf_edge` /
+// `left_kv` / `remove_entry` somewhere on the rightmost-walk path.
+// Deferred — needs deeper investigation.
+TEST_CASE("test_pop_first_only_unstubbed") {
+    auto map = make_map<int, int>();
+    assert(map.pop_first().is_none());
 
-// rustc map/tests.rs::test_try_insert BLOCKED: try_insert has the
-// same Vacant/Occupied arm-swap transpile bug that BTreeMap::insert
-// did. Whichever arm it picks for index 0, the struct init for
-// OccupiedError mixes up entry vs value types. Needs a patcher rule
-// similar to fix_btreemap_insert_arm_swap. See
-// transpiled/btree_port/btree_port.btree.map.cppm:5667.
+    map.insert(1, 10);
+    map.insert(2, 20);
+    map.insert(3, 30);
+    map.insert(4, 40);
+    assert(map.len() == 4);
+
+    {
+        auto kv = map.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 1);
+        assert(std::get<1>(t) == 10);
+        assert(map.len() == 3);
+    }
+    {
+        auto kv = map.pop_first();
+        assert(kv.is_some());
+        auto t = std::move(kv).unwrap();
+        assert(std::get<0>(t) == 2);
+        assert(std::get<1>(t) == 20);
+        assert(map.len() == 2);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc map/tests.rs::test_try_insert
+// Re-enabled by fix_btreemap_try_insert_arm_swap patcher rule.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("test_try_insert_unstubbed") {
+    auto map = make_map<int, int>();
+    assert(map.is_empty());
+
+    {
+        auto r = map.try_insert(1, 10);
+        assert(r.is_ok());
+        assert(std::move(r).unwrap() == 10);
+    }
+    {
+        auto r = map.try_insert(2, 20);
+        assert(r.is_ok());
+        assert(std::move(r).unwrap() == 20);
+    }
+    {
+        // Already-occupied → Err with the value we tried to insert.
+        auto r = map.try_insert(2, 200);
+        assert(r.is_err());
+        auto err = std::move(r).unwrap_err();
+        assert(err.value == 200);
+    }
+    // Verify the original (2, 20) entry was not overwritten.
+    auto v = map.get(2);
+    assert(v.is_some());
+    assert(v.unwrap() == 20);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// rustc set/tests.rs::test_clear
+// Re-enabled by fix_btreemap_clear_manuallydrop patcher rule.
+// ─────────────────────────────────────────────────────────────────────
+TEST_CASE("set_test_clear_unstubbed") {
+    auto x = make_set<int>();
+    x.insert(1);
+    x.clear();
+    assert(x.is_empty());
+}
+
+// test_into_keys / test_into_values still BLOCKED. B-clear is fixed
+// (which made BTreeMap::clear work), but into_keys/into_values hit a
+// SEPARATE ManuallyDrop bug: at map.cppm:5922 the emit accesses
+// `this->root` / `this->length` on a `ManuallyDrop<BTreeMap>` directly,
+// without dereferencing through the ManuallyDrop wrapper. Needs an
+// auto-deref fix in the transpiler's emit-side ManuallyDrop handling.
 
 // ─────────────────────────────────────────────────────────────────────
 // Basic smoke test combining insert / contains_key / get / len.

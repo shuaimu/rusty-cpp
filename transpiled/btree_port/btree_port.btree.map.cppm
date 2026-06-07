@@ -5576,7 +5576,7 @@ return VacantEntry{.key = std::move(key), .handle = rusty::Some(handle), .dorman
         return BTreeMap<K, V, rusty::alloc::Global>(rusty::Option<btree_internal::Root<K, V>>{rusty::None}, static_cast<size_t>(0), rusty::mem::manually_drop_new(rusty::alloc::Global{}), rusty::PhantomData<rusty::Box<std::tuple<K, V>, rusty::alloc::Global>>{});
     }
     void clear() {
-        rusty::mem::drop(BTreeMap<K, V, A>(rusty::mem::replace(this->root, rusty::Option<btree_internal::Root<K, V>>{rusty::None}), rusty::mem::replace(this->length, static_cast<size_t>(0)), rusty::clone(this->alloc), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{}));
+        rusty::mem::drop(BTreeMap<K, V, A>(rusty::mem::replace(this->root, rusty::Option<btree_internal::Root<K, V>>{rusty::None}), rusty::mem::replace(this->length, static_cast<size_t>(0)), rusty::mem::manually_drop_new(rusty::clone(*this->alloc)), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{}));
     }
     static BTreeMap<K, V, A> new_in(A alloc) {
         return BTreeMap<K, V, A>(rusty::Option<btree_internal::Root<K, V>>{rusty::None}, static_cast<size_t>(0), rusty::mem::manually_drop_new(std::move(alloc)), rusty::PhantomData<rusty::Box<std::tuple<K, V>, A>>{});
@@ -5664,7 +5664,25 @@ return VacantEntry{.key = std::move(key), .handle = rusty::Some(handle), .dorman
         return rusty::Option<V>{rusty::None};
     }
     rusty::Result<V&, entry::OccupiedError<K, V, A>> try_insert(K key, V value) {
-        return [&]() -> rusty::Result<V&, entry::OccupiedError<K, V, A>> { auto&& _m = this->entry(std::move(key)); if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Result<V&, entry::OccupiedError<K, V, A>>::Err(entry::OccupiedError<K, V, A>{.entry = entry_shadow1, .value = std::move(value)}); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry_shadow1 = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return rusty::Result<V&, entry::OccupiedError<K, V, A>>::Ok([&]() -> auto& { auto _result_ref_value = (entry_shadow1.insert(std::move(value))); thread_local std::optional<V> _result_ref_tmp; _result_ref_tmp.reset(); _result_ref_tmp.emplace(std::move(_result_ref_value)); return *_result_ref_tmp; }()); } return [&]() -> rusty::Result<V&, entry::OccupiedError<K, V, A>> { rusty::intrinsics::unreachable(); }(); }();
+        // btree_port port: BTreeMap::try_insert hand-port (arm swap fix)
+        auto _entry = this->entry(std::move(key));
+        // Entry variants: Vacant=0, Occupied=1.
+        if (_entry.index() == 1) {
+            auto&& occ = std::get<1>(_entry)._0;
+            return rusty::Result<V&, entry::OccupiedError<K, V, A>>::Err(
+                entry::OccupiedError<K, V, A>{.entry = std::move(occ), .value = std::move(value)});
+        }
+        auto&& vac = std::get<0>(_entry)._0;
+        // VacantEntry::insert returns V&; route through a thread_local
+        // optional to provide an lvalue we can return by reference
+        // (mirrors the original emit's _result_ref_tmp pattern).
+        return rusty::Result<V&, entry::OccupiedError<K, V, A>>::Ok([&]() -> V& {
+            auto _val_ref = vac.insert(std::move(value));
+            thread_local std::optional<V> _ref_tmp;
+            _ref_tmp.reset();
+            _ref_tmp.emplace(std::move(_val_ref));
+            return *_ref_tmp;
+        }());
     }
     template<typename Q>
     rusty::Option<V> remove(const Q& key) {
