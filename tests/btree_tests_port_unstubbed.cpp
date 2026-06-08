@@ -9090,3 +9090,28 @@ TEST_CASE("test_entry_unstubbed") {
     }
     assert(m.get(1).unwrap() == 110);
 }
+
+// Cursor API: BLOCKED. Two cascading bugs:
+//   1. Bound<int> vs Bound<const int&> type incompatibility at the
+//      Cursor construction site (map's lower_bound expects const-ref).
+//   2. Handle<Immut>::next_kv not const-qualified, blocks Cursor body.
+// Held until both are hand-ported. Test bodies commented out.
+#if 0
+TEST_CASE("test_cursor_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 10; ++i) m.insert(i, i * 10);
+    auto cur = m.lower_bound(rusty::Bound<const int&>(rusty::Bound_Included<const int&>{5}));
+    {
+        auto p = cur.peek_next();
+        assert(p.is_some());
+        auto t = p.unwrap();
+        assert(std::get<0>(t) == 5);
+    }
+}
+TEST_CASE("test_cursor_empty_unstubbed") {
+    auto m = make_map<int, int>();
+    auto cur = m.lower_bound(rusty::Bound<const int&>(rusty::Bound_Unbounded<const int&>{}));
+    assert(!cur.peek_next().is_some());
+    assert(!cur.peek_prev().is_some());
+}
+#endif
