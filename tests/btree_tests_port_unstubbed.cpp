@@ -9115,3 +9115,8 @@ TEST_CASE("test_cursor_empty_unstubbed") {
     assert(!cur.peek_prev().is_some());
 }
 #endif
+
+// test_extend_ref: BLOCKED. BTreeMap::extend(I iter) at map.cppm:5974
+// is infinite-recursive — calls this->extend(rusty::map(...)) which
+// dispatches to the same template. Correct impl exists at line 5960
+// inside #if 0. Held until the active impl is replaced.
