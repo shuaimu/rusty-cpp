@@ -8773,3 +8773,73 @@ TEST_CASE("set_test_is_subset_disjoint_unstubbed") {
     assert(!a.is_subset(b));
     assert(!b.is_subset(a));
 }
+
+// Set difference / intersection — now hand-ported via Search variant.
+TEST_CASE("set_test_difference_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3, 4}) a.insert(v);
+    for (int v : {3, 4, 5, 6}) b.insert(v);
+    auto d = a.difference(b);
+    int expected[] = {1, 2};
+    int count = 0;
+    for (auto v = d.next(); v.is_some(); v = d.next()) {
+        assert(count < 2);
+        assert(v.unwrap() == expected[count]);
+        ++count;
+    }
+    assert(count == 2);
+}
+
+TEST_CASE("set_test_intersection_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3, 4}) a.insert(v);
+    for (int v : {3, 4, 5, 6}) b.insert(v);
+    auto x = a.intersection(b);
+    int expected[] = {3, 4};
+    int count = 0;
+    for (auto v = x.next(); v.is_some(); v = x.next()) {
+        assert(count < 2);
+        assert(v.unwrap() == expected[count]);
+        ++count;
+    }
+    assert(count == 2);
+}
+
+TEST_CASE("set_test_difference_size_hint_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3, 4, 5}) a.insert(v);
+    for (int v : {3, 4}) b.insert(v);
+    auto d = a.difference(b);
+    auto hint = d.size_hint();
+    // Lower = max(0, 5-2) = 3, upper = 5.
+    assert(std::get<0>(hint) == 3u);
+    assert(std::get<1>(hint).is_some());
+    assert(std::get<1>(hint).unwrap() == 5u);
+}
+
+TEST_CASE("set_test_intersection_size_hint_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3}) a.insert(v);
+    for (int v : {2, 3, 4}) b.insert(v);
+    auto x = a.intersection(b);
+    auto hint = x.size_hint();
+    assert(std::get<0>(hint) == 0u);
+    assert(std::get<1>(hint).is_some());
+}
+
+// is_disjoint uses intersection internally.
+TEST_CASE("set_test_is_disjoint_unstubbed") {
+    auto a = make_set<int>();
+    auto b = make_set<int>();
+    for (int v : {1, 2, 3}) a.insert(v);
+    for (int v : {4, 5, 6}) b.insert(v);
+    assert(a.is_disjoint(b));
+    assert(b.is_disjoint(a));
+    auto c = make_set<int>();
+    c.insert(3);
+    assert(!a.is_disjoint(c));
+}

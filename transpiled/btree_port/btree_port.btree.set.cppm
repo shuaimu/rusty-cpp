@@ -4773,14 +4773,33 @@ struct BTreeSet {
     Range<T> range(R range) const {
         return Range<T>{.iter = this->map.range(std::move(range))};
     }
+    // Hand-port: skip the stitch-optimization choice from rustc (which
+    // depends on relative set sizes — irrelevant for correctness).
+    // Always pick the Search variant: iterate self, filter by
+    // other.contains. Same complexity in the worst case as Stitch on
+    // sorted inputs.
     Difference<T, A> difference(const BTreeSet<T, A>& other) const {
-        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
+        return Difference<T, A>{
+            .inner = DifferenceInner<T, A>{
+                DifferenceInner_Search<T, A>{
+                    .self_iter = this->iter(),
+                    .other_set = other
+                }
+            }
+        };
     }
     SymmetricDifference<T> symmetric_difference(const BTreeSet<T, A>& other) const {
         return SymmetricDifference(btree_internal::MergeIterInner<Iter<T>>::new_(rusty::iter((*this)), rusty::iter(other)));
     }
     Intersection<T, A> intersection(const BTreeSet<T, A>& other) const {
-        throw ::std::runtime_error("rusty-cpp-transpiler: set.cppm method stub (broken <T as Ord>::cmp emit); see docs/btreemap_port/STATUS.md");
+        return Intersection<T, A>{
+            .inner = IntersectionInner<T, A>{
+                IntersectionInner_Search<T, A>{
+                    .small_iter = this->iter(),
+                    .large_set = other
+                }
+            }
+        };
     }
     Union<T> union_(const BTreeSet<T, A>& other) const {
         return Union(btree_internal::MergeIterInner<Iter<T>>::new_(rusty::iter((*this)), rusty::iter(other)));
@@ -4975,66 +4994,36 @@ struct Difference {
     Difference<T, A> clone() const {
         return Difference<T, A>{.inner = [&]() -> DifferenceInner<T, A> { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).other_iter); return DifferenceInner<T, A>{DifferenceInner_Stitch<T, A>{.self_iter = rusty::clone(self_iter), .other_iter = rusty::clone(other_iter)}}; } if (_m.index() == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(_m).other_set); return DifferenceInner<T, A>{DifferenceInner_Search<T, A>{.self_iter = rusty::clone(self_iter), .other_set = other_set}}; } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& iter = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return DifferenceInner<T, A>{DifferenceInner_Iterate<T, A>{rusty::clone(iter)}}; } return [&]() -> DifferenceInner<T, A> { rusty::intrinsics::unreachable(); }(); }()};
     }
+    // Hand-port: bypass the broken std::visit emit (transpiler used
+    // `if (true)` guards on match-arm bodies, all eval true). Since
+    // difference() always constructs the Search variant, simplify
+    // and dispatch directly via .index().
     rusty::Option<const T&> next() {
-        {
-            auto&& _m = this->inner;
-            std::visit(overloaded {
-                [&](DifferenceInner_Stitch<T, A>& _v) {
-                    const auto& self_iter = _v.self_iter;
-                    const auto& other_iter = _v.other_iter;
-                    [&]() {
-                        auto self_next = RUSTY_TRY_OPT(self_iter.next());
-                        while (true) {
-                            {
-                                auto&& _m = other_iter.peek().map_or(Ordering::Less, [&](auto&& other_next) { return rusty::cmp::cmp(self_next, other_next); });
-                                bool _m_matched = false;
-                                if (!_m_matched) {
-                                    if (true) {
-                                        const auto& Less = _m;
-                                        return rusty::Option<const T&>(std::move(self_next));
-                                        _m_matched = true;
-                                    }
-                                }
-                                if (!_m_matched) {
-                                    if (true) {
-                                        const auto& Equal = _m;
-                                        self_next = RUSTY_TRY_OPT(self_iter.next());
-                                        other_iter.next();
-                                        _m_matched = true;
-                                    }
-                                }
-                                if (!_m_matched) {
-                                    if (true) {
-                                        const auto& Greater = _m;
-                                        other_iter.next();
-                                        _m_matched = true;
-                                    }
-                                }
-                            }
-                        }
-                        return decltype(self_iter.next()){};
-                    }();
-                },
-                [&](DifferenceInner_Search<T, A>& _v) {
-                    const auto& self_iter = _v.self_iter;
-                    const auto& other_set = _v.other_set;
-                    while (true) {
-                        auto self_next = RUSTY_TRY_OPT(self_iter.next());
-                        if (!rusty::contains(other_set, &self_next)) {
-                            return rusty::Option<const T&>(std::move(self_next));
-                        }
-                    }
-                },
-                [&](DifferenceInner_Iterate<T, A>& _v) {
-                    auto&& iter = rusty::detail::deref_if_pointer(_v._0);
-                    iter.next();
-                },
-            }, _m);
+        if (this->inner.index() == 1) {
+            auto& v = std::get<1>(this->inner);
+            while (true) {
+                auto self_next = v.self_iter.next();
+                if (!self_next.is_some()) return rusty::Option<const T&>{rusty::None};
+                if (!v.other_set.contains(self_next.unwrap())) {
+                    return self_next;
+                }
+            }
         }
+        // Stitch and Iterate variants are no longer constructed; reach
+        // here only if someone built a Difference manually.
+        return rusty::Option<const T&>{rusty::None};
     }
+    // Hand-port: bypass broken pointer-to-variant emit (`&this->inner`).
+    // Compute from the Search variant (the only one we construct).
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        auto [self_len, other_len] = rusty::detail::deref_if_pointer_like([&]() { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).self_iter); auto&& other_iter = rusty::detail::deref_if_pointer(std::get<0>(_m).other_iter); return std::make_tuple(rusty::len(self_iter), rusty::len(other_iter)); } if (_m.index() == 1) { auto&& self_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).self_iter); auto&& other_set = rusty::detail::deref_if_pointer(std::get<1>(_m).other_set); return std::make_tuple(rusty::len(self_iter), rusty::len(other_set)); } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& iter = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return std::make_tuple(rusty::len(iter), 0); } rusty::intrinsics::unreachable(); }());
-        return std::make_tuple(rusty::saturating_sub(self_len, rusty::detail::deref_if_pointer(std::move(other_len))), rusty::Option<size_t>(std::move(self_len)));
+        if (this->inner.index() == 1) {
+            const auto& v = std::get<1>(this->inner);
+            const size_t self_len = rusty::len(v.self_iter);
+            const size_t other_len = rusty::len(v.other_set);
+            return std::make_tuple(rusty::saturating_sub(self_len, other_len),
+                                   rusty::Option<size_t>(self_len));
+        }
+        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0)));
     }
     rusty::Option<const T&> min() {
         return this->next();
@@ -5042,10 +5031,14 @@ struct Difference {
 };
 
 // Algebraic data type
+// Stitch was the "sorted merge" optimization variant. Iter<T> doesn't
+// have a peekable() method ported, so use a plain Iter for the field
+// type. Since difference()/intersection() always construct the Search
+// variant, this struct is dead code, but it must still compile.
 template<typename T, typename A>
 struct DifferenceInner_Stitch {
     Iter<T> self_iter;
-    decltype(std::declval<Iter<T>>().peekable()) other_iter;
+    Iter<T> other_iter;
 };
 template<typename T, typename A>
 struct DifferenceInner_Search {
@@ -5067,7 +5060,7 @@ template<typename T, typename A>
 struct DifferenceInner : std::variant<DifferenceInner_Stitch<T, A>, DifferenceInner_Search<T, A>, DifferenceInner_Iterate<T, A>> {
     using variant = std::variant<DifferenceInner_Stitch<T, A>, DifferenceInner_Search<T, A>, DifferenceInner_Iterate<T, A>>;
     using variant::variant;
-    static DifferenceInner<T, A> Stitch(Iter<T> self_iter, decltype(std::declval<Iter<T>>().peekable()) other_iter) { return DifferenceInner<T, A>{DifferenceInner_Stitch<T, A>{.self_iter = std::forward<decltype(self_iter)>(self_iter), .other_iter = std::forward<decltype(other_iter)>(other_iter)}}; }
+    static DifferenceInner<T, A> Stitch(Iter<T> self_iter, Iter<T> other_iter) { return DifferenceInner<T, A>{DifferenceInner_Stitch<T, A>{.self_iter = std::forward<decltype(self_iter)>(self_iter), .other_iter = std::forward<decltype(other_iter)>(other_iter)}}; }
     static DifferenceInner<T, A> Search(Iter<T> self_iter, const BTreeSet<T, A>& other_set) { return DifferenceInner<T, A>{DifferenceInner_Search<T, A>{.self_iter = std::forward<decltype(self_iter)>(self_iter), .other_set = std::forward<decltype(other_set)>(other_set)}}; }
     static DifferenceInner<T, A> Iterate(Iter<T> _0) { return DifferenceInner<T, A>{DifferenceInner_Iterate<T, A>{std::forward<decltype(_0)>(_0)}}; }
 
@@ -5101,65 +5094,30 @@ struct Intersection {
     Intersection<T, A> clone() const {
         return Intersection<T, A>{.inner = [&]() -> IntersectionInner<T, A> { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& a = rusty::detail::deref_if_pointer(std::get<0>(_m).a); auto&& b = rusty::detail::deref_if_pointer(std::get<0>(_m).b); return IntersectionInner<T, A>{IntersectionInner_Stitch<T, A>{.a = rusty::clone(a), .b = rusty::clone(b)}}; } if (_m.index() == 1) { auto&& small_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).small_iter); auto&& large_set = rusty::detail::deref_if_pointer(std::get<1>(_m).large_set); return IntersectionInner<T, A>{IntersectionInner_Search<T, A>{.small_iter = rusty::clone(small_iter), .large_set = large_set}}; } if (rusty::detail::deref_if_pointer(_m).index() == 2) { auto&& answer = rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0); return IntersectionInner<T, A>{IntersectionInner_Answer<T, A>{std::move(rusty::detail::deref_if_pointer_like(answer))}}; } return [&]() -> IntersectionInner<T, A> { rusty::intrinsics::unreachable(); }(); }()};
     }
+    // Hand-port: same as Difference::next — dispatch via .index() on
+    // the IntersectionInner variant. intersection() now always
+    // constructs the Search variant. Stitch/Answer kept as dead code.
     rusty::Option<const T&> next() {
-        {
-            auto&& _m = this->inner;
-            std::visit(overloaded {
-                [&](IntersectionInner_Stitch<T, A>& _v) {
-                    const auto& a = _v.a;
-                    const auto& b = _v.b;
-                    [&]() {
-                        auto a_next = RUSTY_TRY_OPT(a.next());
-                        auto b_next = RUSTY_TRY_OPT(b.next());
-                        while (true) {
-                            {
-                                auto&& _m = rusty::cmp::cmp(a_next, b_next);
-                                bool _m_matched = false;
-                                if (!_m_matched) {
-                                    if (true) {
-                                        const auto& Less = _m;
-                                        a_next = RUSTY_TRY_OPT(a.next());
-                                        _m_matched = true;
-                                    }
-                                }
-                                if (!_m_matched) {
-                                    if (true) {
-                                        const auto& Greater = _m;
-                                        b_next = RUSTY_TRY_OPT(b.next());
-                                        _m_matched = true;
-                                    }
-                                }
-                                if (!_m_matched) {
-                                    if (true) {
-                                        const auto& Equal = _m;
-                                        return rusty::Option<const T&>(std::move(a_next));
-                                        _m_matched = true;
-                                    }
-                                }
-                            }
-                        }
-                        return decltype(a.next()){};
-                    }();
-                },
-                [&](IntersectionInner_Search<T, A>& _v) {
-                    const auto& small_iter = _v.small_iter;
-                    const auto& large_set = _v.large_set;
-                    while (true) {
-                        auto small_next = RUSTY_TRY_OPT(small_iter.next());
-                        if (rusty::contains(large_set, &small_next)) {
-                            return rusty::Option<const T&>(std::move(small_next));
-                        }
-                    }
-                },
-                [&](IntersectionInner_Answer<T, A>& _v) {
-                    auto&& answer = rusty::detail::deref_if_pointer(_v._0);
-                    answer.take();
-                },
-            }, _m);
+        if (this->inner.index() == 1) {
+            auto& v = std::get<1>(this->inner);
+            while (true) {
+                auto small_next = v.small_iter.next();
+                if (!small_next.is_some()) return rusty::Option<const T&>{rusty::None};
+                if (v.large_set.contains(small_next.unwrap())) {
+                    return small_next;
+                }
+            }
         }
+        return rusty::Option<const T&>{rusty::None};
     }
+    // Hand-port: bypass broken &this->inner pointer-to-variant emit.
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return [&]() -> std::tuple<size_t, rusty::Option<size_t>> { auto&& _m = &this->inner; if (_m.index() == 0) { auto&& a = rusty::detail::deref_if_pointer(std::get<0>(_m).a); auto&& b = rusty::detail::deref_if_pointer(std::get<0>(_m).b); return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(min(rusty::len(a), rusty::len(b)))); } if (_m.index() == 1) { auto&& small_iter = rusty::detail::deref_if_pointer(std::get<1>(_m).small_iter); return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::len(small_iter))); } if ((rusty::detail::deref_if_pointer(_m).index() == 2 && std::get<2>(rusty::detail::deref_if_pointer(_m))._0.is_none())) { return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0))); } if ((rusty::detail::deref_if_pointer(_m).index() == 2 && rusty::detail::deref_if_pointer(std::get<2>(rusty::detail::deref_if_pointer(_m))._0).is_some())) { return std::make_tuple(static_cast<size_t>(1), rusty::Option<size_t>(static_cast<size_t>(1))); } return [&]() -> std::tuple<size_t, rusty::Option<size_t>> { rusty::intrinsics::unreachable(); }(); }();
+        if (this->inner.index() == 1) {
+            const auto& v = std::get<1>(this->inner);
+            return std::make_tuple(static_cast<size_t>(0),
+                                   rusty::Option<size_t>(rusty::len(v.small_iter)));
+        }
+        return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(static_cast<size_t>(0)));
     }
     rusty::Option<const T&> min() {
         return this->next();
