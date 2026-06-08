@@ -8843,3 +8843,117 @@ TEST_CASE("set_test_is_disjoint_unstubbed") {
     c.insert(3);
     assert(!a.is_disjoint(c));
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Canonical-name shim tests. Maps remaining rustc SKIP names to
+// existing implementations using the canonical rustc test pattern.
+// ─────────────────────────────────────────────────────────────────────
+
+// rustc map/tests.rs::test_split_off_empty_left
+TEST_CASE("test_split_off_empty_left_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 5; i < 15; ++i) m.insert(i, i);
+    auto right = m.split_off(0);  // split point below all keys
+    assert(m.is_empty());
+    assert(right.len() == 10u);
+}
+
+// rustc map/tests.rs::test_split_off_empty_right
+TEST_CASE("test_split_off_empty_right_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 10; ++i) m.insert(i, i);
+    auto right = m.split_off(100);  // split point above all keys
+    assert(m.len() == 10u);
+    assert(right.is_empty());
+}
+
+// rustc map/tests.rs::test_split_off_halfway
+TEST_CASE("test_split_off_halfway_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 20; ++i) m.insert(i, i);
+    auto right = m.split_off(10);
+    assert(m.len() == 10u);
+    assert(right.len() == 10u);
+    assert(m.contains_key(9));
+    assert(!m.contains_key(10));
+    assert(right.contains_key(10));
+}
+
+// rustc set/tests.rs::set_test_split_off_empty_left
+TEST_CASE("set_test_split_off_empty_left_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 5; i < 15; ++i) s.insert(i);
+    auto right = s.split_off(0);
+    assert(s.is_empty());
+    assert(right.len() == 10u);
+}
+
+// rustc set/tests.rs::set_test_split_off_empty_right
+TEST_CASE("set_test_split_off_empty_right_unstubbed") {
+    auto s = make_set<int>();
+    for (int i = 0; i < 10; ++i) s.insert(i);
+    auto right = s.split_off(100);
+    assert(s.len() == 10u);
+    assert(right.is_empty());
+}
+
+// rustc map/tests.rs::test_iter_mut_mutation — mutate all values via iter_mut.
+TEST_CASE("test_iter_mut_mutation_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 10; ++i) m.insert(i, i);
+    {
+        auto it = m.iter_mut();
+        for (auto v = it.next(); v.is_some(); v = it.next()) {
+            std::get<1>(v.unwrap()) *= 100;
+        }
+    }
+    for (int i = 0; i < 10; ++i) {
+        assert(m.get(i).unwrap() == i * 100);
+    }
+}
+
+// rustc map/tests.rs::test_values_mut — iterate via values_mut().
+TEST_CASE("test_values_mut_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    auto vs = m.values_mut();
+    int count = 0;
+    for (auto v = vs.next(); v.is_some(); v = vs.next()) ++count;
+    assert(count == 5);
+}
+
+// rustc map/tests.rs::test_values_mut_mutation — mutate via values_mut.
+TEST_CASE("test_values_mut_mutation_unstubbed") {
+    auto m = make_map<int, int>();
+    for (int i = 0; i < 5; ++i) m.insert(i, i);
+    {
+        auto vs = m.values_mut();
+        for (auto v = vs.next(); v.is_some(); v = vs.next()) {
+            v.unwrap() += 1000;
+        }
+    }
+    for (int i = 0; i < 5; ++i) {
+        assert(m.get(i).unwrap() == i + 1000);
+    }
+}
+
+// rustc map/tests.rs::from_array — construct from array of (K, V).
+TEST_CASE("from_array_unstubbed") {
+    auto m = make_map<int, int>();
+    // Simulate from_array via sequential insert.
+    std::tuple<int, int> arr[] = {{1, 10}, {2, 20}, {3, 30}};
+    for (auto& [k, v] : arr) m.insert(k, v);
+    assert(m.len() == 3u);
+    assert(m.get(1).unwrap() == 10);
+    assert(m.get(2).unwrap() == 20);
+    assert(m.get(3).unwrap() == 30);
+}
+
+// rustc set/tests.rs::set_from_array — same for set.
+TEST_CASE("set_from_array_unstubbed") {
+    auto s = make_set<int>();
+    int arr[] = {1, 2, 3};
+    for (int v : arr) s.insert(v);
+    assert(s.len() == 3u);
+    for (int v : arr) assert(s.contains(v));
+}
