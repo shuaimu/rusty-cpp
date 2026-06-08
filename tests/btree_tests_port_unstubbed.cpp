@@ -9063,3 +9063,30 @@ TEST_CASE("test_range_finding_ill_order_in_range_ord_unstubbed") {
     }
     assert(expected == 10);
 }
+
+// rustc map/tests.rs::test_entry — Entry API smoke.
+TEST_CASE("test_entry_unstubbed") {
+    auto m = make_map<int, int>();
+    m.insert(1, 10);
+    // Occupied entry, or_insert returns existing.
+    {
+        auto e = m.entry(1);
+        auto& v = e.or_insert(99);
+        v += 1;  // mutate via ref
+    }
+    assert(m.get(1).unwrap() == 11);
+    // Vacant entry, or_insert sets new.
+    {
+        auto e = m.entry(2);
+        auto& v = e.or_insert(20);
+        v += 5;
+    }
+    assert(m.get(2).unwrap() == 25);
+    assert(m.len() == 2u);
+    // Modify via and_modify on occupied.
+    {
+        auto e = m.entry(1);
+        std::move(e).and_modify([](int& v) { v *= 10; }).or_insert(99);
+    }
+    assert(m.get(1).unwrap() == 110);
+}
