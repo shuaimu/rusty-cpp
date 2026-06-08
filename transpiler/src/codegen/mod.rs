@@ -4403,20 +4403,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn should_rewrite_by_value_cycle_field_declaration(
-        &self,
-        owner_type: &str,
-        field_name: &str,
-    ) -> bool {
-        let key = ByValueCycleRewriteFieldKey {
-            owner_type: owner_type.to_string(),
-            field_name: field_name.to_string(),
-        };
-        self.auto_cross_module_by_value_rewrite_fields
-            .contains(&key)
-            || (self.enable_by_value_cycle_breaking_prototype
-                && self.by_value_cycle_breaking_rewrite_fields.contains(&key))
-    }
 
     fn map_field_type_with_by_value_cycle_breaking_rewrite(
         &self,
@@ -4451,36 +4437,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    /// Helper: check if node `start` can reach any node in the cycle set via outgoing edges.
-    fn can_reach_cycle(
-        start: usize,
-        outgoing: &[HashSet<usize>],
-        _sorted_set: &std::collections::HashSet<usize>,
-        in_cycle: &[bool],
-    ) -> bool {
-        let mut visited = vec![false; outgoing.len()];
-        let mut stack = vec![start];
-        while let Some(pos) = stack.pop() {
-            if pos == start {
-                continue; // Skip self
-            }
-            if in_cycle[pos] {
-                return true;
-            }
-            if visited[pos] {
-                continue;
-            }
-            visited[pos] = true;
-            if let Some(nexts) = outgoing.get(pos) {
-                for &next in nexts {
-                    if !visited[next] {
-                        stack.push(next);
-                    }
-                }
-            }
-        }
-        false
-    }
 
     /// Topologically sort top-level struct and data-enum items so that types
     /// used as direct fields are emitted before the types that contain them.
@@ -5330,83 +5286,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         visited == component.len()
     }
 
-    fn find_deterministic_cycle_path_for_component(
-        component: &[usize],
-        edges: &[Vec<usize>],
-        pos_to_name: &[String],
-    ) -> Vec<String> {
-        if component.is_empty() {
-            return Vec::new();
-        }
-        if component.len() == 1 {
-            let node = component[0];
-            if edges.get(node).is_some_and(|nexts| nexts.contains(&node)) {
-                let name = pos_to_name
-                    .get(node)
-                    .cloned()
-                    .unwrap_or_else(|| format!("_node_{}", node));
-                return vec![name.clone(), name];
-            }
-            return vec![
-                pos_to_name
-                    .get(node)
-                    .cloned()
-                    .unwrap_or_else(|| format!("_node_{}", node)),
-            ];
-        }
-
-        let component_set: HashSet<usize> = component.iter().copied().collect();
-        let mut starts = component.to_vec();
-        starts.sort_by(|a, b| {
-            pos_to_name
-                .get(*a)
-                .map(|s| s.as_str())
-                .unwrap_or("")
-                .cmp(pos_to_name.get(*b).map(|s| s.as_str()).unwrap_or(""))
-                .then_with(|| a.cmp(b))
-        });
-
-        for start in starts {
-            let mut path = vec![start];
-            let mut in_path = HashSet::from([start]);
-            if let Some(found) = Self::dfs_cycle_path_within_component(
-                start,
-                start,
-                edges,
-                &component_set,
-                pos_to_name,
-                &mut path,
-                &mut in_path,
-            ) {
-                return found
-                    .into_iter()
-                    .map(|pos| {
-                        pos_to_name
-                            .get(pos)
-                            .cloned()
-                            .unwrap_or_else(|| format!("_node_{}", pos))
-                    })
-                    .collect();
-            }
-        }
-
-        // Fallback should be unreachable for true SCC cycles; keep deterministic anyway.
-        let mut names: Vec<String> = component
-            .iter()
-            .map(|&pos| {
-                pos_to_name
-                    .get(pos)
-                    .cloned()
-                    .unwrap_or_else(|| format!("_node_{}", pos))
-            })
-            .collect();
-        names.sort();
-        names.dedup();
-        if let Some(first) = names.first().cloned() {
-            names.push(first);
-        }
-        names
-    }
 
     fn dfs_cycle_path_within_component(
         start: usize,
@@ -5486,12 +5365,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
 
 
-    fn is_indirection_container_name(ident: &syn::Ident) -> bool {
-        matches!(
-            ident.to_string().as_str(),
-            "Box" | "Rc" | "Arc" | "Weak" | "NonNull" | "Unique" | "Pin" | "AtomicPtr"
-        )
-    }
 
     /// Reorder impl items so static const members that reference other consts
     /// come after their dependencies. E.g., `const ABC = A.bits() | B.bits()`
@@ -7118,83 +6991,10 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_forward_constexpr_literal_expr(expr: &syn::Expr) -> bool {
-        match expr {
-            syn::Expr::Lit(_) => true,
-            syn::Expr::Tuple(t) => t.elems.iter().all(Self::is_forward_constexpr_literal_expr),
-            syn::Expr::Array(a) => a.elems.iter().all(Self::is_forward_constexpr_literal_expr),
-            syn::Expr::Paren(p) => Self::is_forward_constexpr_literal_expr(&p.expr),
-            syn::Expr::Group(g) => Self::is_forward_constexpr_literal_expr(&g.expr),
-            syn::Expr::Unary(u) => Self::is_forward_constexpr_literal_expr(&u.expr),
-            syn::Expr::Cast(c) => Self::is_forward_constexpr_literal_expr(&c.expr),
-            // Primitive associated constants (`i32::MAX`, `f32::MIN`, `u8::MIN`,
-            // etc.) lower to `std::numeric_limits<T>::{max,min,lowest,…}()`,
-            // all of which are `constexpr` in the C++14+ standard library.
-            // Treat them as forward-emittable so we don't fall back to a
-            // redundant `extern const T NAME;` declaration ahead of the
-            // `constexpr T NAME = …;` definition.
-            syn::Expr::Path(p) => Self::is_primitive_assoc_constexpr_path(&p.path),
-            _ => false,
-        }
-    }
 
-    fn is_primitive_assoc_constexpr_path(path: &syn::Path) -> bool {
-        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        let (primitive, member) = match segments.as_slice() {
-            [primitive, member] => (primitive.as_str(), member.as_str()),
-            [root, primitive, member] if matches!(root.as_str(), "std" | "core") => {
-                (primitive.as_str(), member.as_str())
-            }
-            [root, primitive_kw, primitive, member]
-                if matches!(root.as_str(), "std" | "core") && primitive_kw == "primitive" =>
-            {
-                (primitive.as_str(), member.as_str())
-            }
-            _ => return false,
-        };
-        if types::map_primitive_type(primitive).is_none() {
-            return false;
-        }
-        matches!(
-            member,
-            "MAX"
-                | "MIN"
-                | "MIN_POSITIVE"
-                | "EPSILON"
-                | "NAN"
-                | "INFINITY"
-                | "NEG_INFINITY"
-                | "BITS"
-        )
-    }
 
-    fn should_emit_internal_linkage_function(&self, f: &syn::ItemFn) -> bool {
-        self.is_non_root_expanded_test_module() && !matches!(f.vis, syn::Visibility::Public(_))
-    }
 
-    fn is_non_root_expanded_test_module(&self) -> bool {
-        if !self.expanded_libtest_mode {
-            return false;
-        }
-        let (Some(module_name), Some(crate_name)) =
-            (self.module_name.as_deref(), self.crate_name.as_deref())
-        else {
-            return false;
-        };
-        module_name != crate_name
-    }
 
-    fn should_force_export_private_root_module_function(&self, f: &syn::ItemFn) -> bool {
-        let (Some(module_name), Some(crate_name)) =
-            (self.module_name.as_deref(), self.crate_name.as_deref())
-        else {
-            return false;
-        };
-        module_name == crate_name
-            && self.module_stack.is_empty()
-            && !self.inside_hidden_private_module_scope()
-            && !matches!(f.vis, syn::Visibility::Public(_))
-    }
 
     fn libtest_internal_function_renamed_cpp_name(&self, rust_name: &str) -> Option<String> {
         if !self.is_non_root_expanded_test_module() {
@@ -7393,30 +7193,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         false
     }
 
-    fn extract_cpp_scoped_path_tokens(spelling: &str) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut cur = String::new();
-        let mut flush = |buf: &mut String, out: &mut Vec<String>| {
-            if buf.contains("::") {
-                let trimmed = buf.trim_matches(':');
-                if !trimmed.is_empty() {
-                    out.push(buf.clone());
-                }
-            }
-            buf.clear();
-        };
-        for ch in spelling.chars() {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' {
-                cur.push(ch);
-            } else {
-                flush(&mut cur, &mut out);
-            }
-        }
-        flush(&mut cur, &mut out);
-        out.sort();
-        out.dedup();
-        out
-    }
 
     fn type_tokens_contain_import_alias(&self, ty: &syn::Type) -> bool {
         if self.import_alias_names.is_empty() {
@@ -7539,19 +7315,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         })
     }
 
-    fn has_forward_decl_items(items: &[syn::Item]) -> bool {
-        items.iter().any(|item| match item {
-            syn::Item::Struct(_) => true,
-            syn::Item::Enum(_) => true,
-            syn::Item::Type(_) => true,
-            syn::Item::Fn(_) => true,
-            syn::Item::Mod(m) => m
-                .content
-                .as_ref()
-                .is_some_and(|(_, nested)| Self::has_forward_decl_items(nested)),
-            _ => false,
-        })
-    }
 
     fn emit_item(&mut self, item: &syn::Item) {
         let profile_item = std::env::var_os("RUSTY_CPP_PROFILE_ITEMS").is_some();
@@ -7821,23 +7584,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
 
 
-    fn should_strip_forced_global_for_private_alias_root(
-        &self,
-        scope_key: &str,
-        root: &str,
-    ) -> bool {
-        if !root.ends_with("_private") {
-            return false;
-        }
-        let Some(raw_bound_target) =
-            self.resolve_scope_import_binding_target_in_scope_chain(scope_key, root)
-        else {
-            return false;
-        };
-        let normalized_root = root.trim_start_matches("::");
-        let normalized_target = raw_bound_target.trim().trim_start_matches("::");
-        !normalized_target.is_empty() && normalized_target != normalized_root
-    }
 
     fn rewrite_forced_global_private_alias_root_for_scope(
         &self,
@@ -7921,29 +7667,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(p.path.segments.last()?.ident.to_string())
     }
 
-    /// Cluster C helper: extract the impl-block's host-type template args
-    /// as a vector of normalized strings (e.g. `["::marker::Immut", "K", "V"]`).
-    /// Returns None if not a `Path<...>` self-type.
-    fn extract_class_template_args(ty: &syn::Type) -> Option<Vec<String>> {
-        let syn::Type::Path(p) = ty else {
-            return None;
-        };
-        let last = p.path.segments.last()?;
-        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-            return Some(Vec::new());
-        };
-        let mut out = Vec::with_capacity(args.args.len());
-        for arg in &args.args {
-            match arg {
-                syn::GenericArgument::Type(t) => {
-                    out.push(Self::type_to_normalized_string(t));
-                }
-                syn::GenericArgument::Lifetime(_) => continue,
-                _ => out.push(arg.to_token_stream().to_string()),
-            }
-        }
-        Some(out)
-    }
 
     /// Cluster C helper: stringify a Type via tokens, collapsing whitespace
     /// so `marker :: Immut` and `marker::Immut` compare equal.
@@ -8477,31 +8200,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn lookup_owner_method_has_receiver(&self, owner: &str, method_name: &str) -> Option<bool> {
-        let mut keys = Vec::new();
-        keys.push(Self::owner_method_key(owner, method_name));
-        if let Some(last) = owner.rsplit("::").next() {
-            keys.push(Self::owner_method_key(last, method_name));
-        }
-        let mut dedup = HashSet::new();
-        keys.retain(|key| dedup.insert(key.clone()));
-
-        let mut merged: Option<bool> = None;
-        for key in keys {
-            let Some(entry) = self.owner_method_has_receiver.get(&key) else {
-                continue;
-            };
-            let Some(value) = *entry else {
-                return None;
-            };
-            match merged {
-                Some(existing) if existing != value => return None,
-                Some(_) => {}
-                None => merged = Some(value),
-            }
-        }
-        merged
-    }
 
     fn owner_impl_blocks_has_method_name(&self, owner: &str, method_name: &str) -> bool {
         let mut owner_keys = vec![owner.to_string()];
@@ -8522,87 +8220,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         })
     }
 
-    fn lookup_owner_method_has_receiver_for_owner_key(
-        &self,
-        owner_key: &str,
-        method_name: &str,
-    ) -> Option<Option<bool>> {
-        let key = Self::owner_method_key(owner_key, method_name);
-        self.owner_method_has_receiver.get(&key).copied()
-    }
 
-    fn lookup_alias_inherent_owner_method_has_receiver_for_owner_key(
-        &self,
-        owner_key: &str,
-        method_name: &str,
-    ) -> Option<Option<bool>> {
-        let key = Self::owner_method_key(owner_key, method_name);
-        self.alias_inherent_owner_method_has_receiver
-            .get(&key)
-            .copied()
-    }
 
-    fn lookup_owner_method_has_receiver_from_owner_path(
-        &self,
-        owner_path: Option<&syn::Path>,
-        owner_name: &str,
-        method_name: &str,
-    ) -> Option<bool> {
-        let owner_path = owner_path?;
-        let owner_keys = self.owner_path_to_candidate_owner_keys(owner_path, owner_name);
-        if owner_keys.is_empty() {
-            return None;
-        }
 
-        let mut ordered_keys: Vec<String> = Vec::new();
-        if owner_path.segments.len() == 1 && !self.module_stack.is_empty() {
-            let current_prefix = format!("{}::", self.module_stack.join("::"));
-            for key in owner_keys
-                .iter()
-                .filter(|key| key.starts_with(&current_prefix))
-            {
-                ordered_keys.push(key.clone());
-            }
-        }
-        ordered_keys.extend(owner_keys);
-        let mut dedup = HashSet::new();
-        ordered_keys.retain(|key| dedup.insert(key.clone()));
-
-        let mut merged: Option<bool> = None;
-        let mut saw_any = false;
-        for owner_key in ordered_keys {
-            let Some(entry) =
-                self.lookup_owner_method_has_receiver_for_owner_key(&owner_key, method_name)
-            else {
-                continue;
-            };
-            saw_any = true;
-            let Some(value) = entry else {
-                return None;
-            };
-            match merged {
-                Some(existing) if existing != value => return None,
-                Some(_) => {}
-                None => merged = Some(value),
-            }
-        }
-        if saw_any { merged } else { None }
-    }
-
-    fn lookup_owner_method_type_param_names<'a>(
-        &'a self,
-        owner: &str,
-        method_name: &str,
-    ) -> Option<&'a Vec<String>> {
-        for key in self.owner_method_lookup_keys(owner, method_name) {
-            if let Some(params) = self.function_type_param_names.get(&key)
-                && !params.is_empty()
-            {
-                return Some(params);
-            }
-        }
-        None
-    }
 
     fn owner_method_lookup_keys(&self, owner: &str, method_name: &str) -> Vec<String> {
         let mut keys = Vec::new();
@@ -8615,31 +8235,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         keys
     }
 
-    fn lookup_owner_method_arg_expected_types_for_template_inference<'a>(
-        &'a self,
-        owner: &str,
-        method_name: &str,
-    ) -> Option<&'a Vec<Option<syn::Type>>> {
-        for key in self.owner_method_lookup_keys(owner, method_name) {
-            if let Some(expected_types) = self.function_arg_expected_types.get(&key) {
-                return Some(expected_types);
-            }
-        }
-        None
-    }
 
-    fn lookup_owner_method_return_type_for_template_inference<'a>(
-        &'a self,
-        owner: &str,
-        method_name: &str,
-    ) -> Option<&'a syn::Type> {
-        for key in self.owner_method_lookup_keys(owner, method_name) {
-            if let Some(Some(ret_ty)) = self.function_return_types.get(&key) {
-                return Some(ret_ty);
-            }
-        }
-        None
-    }
 
 
     fn call_path_candidates(&self, path: &syn::Path) -> Vec<String> {
@@ -8727,12 +8323,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         out
     }
 
-    fn is_known_free_function_path(&self, key: &str) -> bool {
-        self.function_arg_pass_styles.contains_key(key)
-            || self.function_arg_expected_types.contains_key(key)
-            || self.function_type_param_names.contains_key(key)
-            || self.function_return_types.contains_key(key)
-    }
 
     fn looks_like_function_path(path: &syn::Path) -> bool {
         let Some(last) = path.segments.last() else {
@@ -8761,87 +8351,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
 
 
-    fn lookup_function_arg_pass_style(
-        &self,
-        func: &syn::Expr,
-        arg_idx: usize,
-    ) -> Option<ArgPassStyle> {
-        let syn::Expr::Path(path_expr) = func else {
-            return None;
-        };
-        for key in self.call_path_candidates(&path_expr.path) {
-            if let Some(styles) = self.function_arg_pass_styles.get(&key) {
-                if let Some(style) = styles.get(arg_idx).copied() {
-                    return Some(style);
-                }
-            }
-        }
-        let func_name = path_expr
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
-        if func_name.is_empty() {
-            return None;
-        }
-        let suffix = format!("::{}", func_name);
-        let mut fallback_keys: Vec<&String> = self
-            .function_arg_pass_styles
-            .keys()
-            .filter(|key| key.as_str() == func_name || key.ends_with(&suffix))
-            .collect();
-        fallback_keys.sort();
-        fallback_keys.dedup();
-        if fallback_keys.len() == 1
-            && let Some(styles) = self.function_arg_pass_styles.get(fallback_keys[0])
-            && let Some(style) = styles.get(arg_idx).copied()
-        {
-            return Some(style);
-        }
-        None
-    }
 
-    fn lookup_function_arg_expected_type<'a>(
-        &'a self,
-        func: &syn::Expr,
-        arg_idx: usize,
-    ) -> Option<&'a syn::Type> {
-        let syn::Expr::Path(path_expr) = func else {
-            return None;
-        };
-        for key in self.call_path_candidates(&path_expr.path) {
-            if let Some(expected) = self.function_arg_expected_types.get(&key) {
-                if let Some(Some(ty)) = expected.get(arg_idx) {
-                    return Some(ty);
-                }
-            }
-        }
-        let func_name = path_expr
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
-        if func_name.is_empty() {
-            return None;
-        }
-        let suffix = format!("::{}", func_name);
-        let mut fallback_keys: Vec<&String> = self
-            .function_arg_expected_types
-            .keys()
-            .filter(|key| key.as_str() == func_name || key.ends_with(&suffix))
-            .collect();
-        fallback_keys.sort();
-        fallback_keys.dedup();
-        if fallback_keys.len() == 1
-            && let Some(expected) = self.function_arg_expected_types.get(fallback_keys[0])
-            && let Some(Some(ty)) = expected.get(arg_idx)
-        {
-            return Some(ty);
-        }
-        None
-    }
 
     fn substitute_type_params_in_type(
         &self,
@@ -9247,56 +8757,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn lookup_function_arg_expected_type_for_call(
-        &self,
-        call: &syn::ExprCall,
-        arg_idx: usize,
-        substitutions: Option<&HashMap<String, syn::Type>>,
-    ) -> Option<syn::Type> {
-        let expected = self.lookup_function_arg_expected_type(call.func.as_ref(), arg_idx)?;
-        match substitutions {
-            Some(substitutions) if !substitutions.is_empty() => {
-                Some(self.substitute_type_params_in_type(expected, substitutions))
-            }
-            _ => Some(expected.clone()),
-        }
-    }
 
-    fn lookup_function_type_param_names<'a>(&'a self, func: &syn::Expr) -> Option<&'a Vec<String>> {
-        let syn::Expr::Path(path_expr) = func else {
-            return None;
-        };
-        for key in self.call_path_candidates(&path_expr.path) {
-            if let Some(params) = self.function_type_param_names.get(&key) {
-                if !params.is_empty() {
-                    return Some(params);
-                }
-            }
-        }
-        None
-    }
 
-    fn lookup_function_return_type<'a>(&'a self, func: &syn::Expr) -> Option<&'a syn::Type> {
-        let syn::Expr::Path(path_expr) = func else {
-            return None;
-        };
-        for key in self.call_path_candidates(&path_expr.path) {
-            if let Some(Some(ty)) = self.function_return_types.get(&key) {
-                return Some(ty);
-            }
-        }
-        None
-    }
 
-    fn lookup_method_arg_pass_style(
-        &self,
-        method_name: &str,
-        arg_idx: usize,
-    ) -> Option<ArgPassStyle> {
-        self.method_arg_pass_styles
-            .get(method_name)
-            .and_then(|styles| styles.get(arg_idx).copied())
-    }
 
     fn associated_receiver_style_first_arg_pass_style(
         &self,
@@ -9346,16 +8809,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(ArgPassStyle::Reference)
     }
 
-    fn lookup_method_arg_expected_type<'a>(
-        &'a self,
-        method_name: &str,
-        arg_idx: usize,
-    ) -> Option<&'a syn::Type> {
-        self.method_arg_expected_types
-            .get(method_name)
-            .and_then(|expected| expected.get(arg_idx))
-            .and_then(|ty| ty.as_ref())
-    }
 
     fn type_is_vec_like_expected_type(&self, ty: &syn::Type) -> bool {
         let mapped = self.map_type(self.peel_reference_paren_group_type(ty));
@@ -9490,57 +8943,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .find_map(|variant| variant.get(arg_idx).and_then(|ty| ty.clone()))
     }
 
-    fn lookup_owner_method_arg_expected_type(
-        &self,
-        owner: &str,
-        method_name: &str,
-        arg_idx: usize,
-        arg_expr: Option<&syn::Expr>,
-    ) -> Option<syn::Type> {
-        let mut keys = Vec::new();
-        keys.push(Self::owner_method_key(owner, method_name));
-        if let Some(last) = owner.rsplit("::").next() {
-            keys.push(Self::owner_method_key(last, method_name));
-        }
-        let mut dedup = HashSet::new();
-        keys.retain(|key| dedup.insert(key.clone()));
-        for key in keys {
-            if let Some(variants) = self.owner_method_arg_expected_type_variants.get(&key)
-                && let Some(ty) =
-                    self.select_owner_method_arg_expected_type_variant(variants, arg_idx, arg_expr)
-            {
-                return Some(ty);
-            }
-            if let Some(expected) = self.owner_method_arg_expected_types.get(&key)
-                && let Some(Some(ty)) = expected.get(arg_idx)
-            {
-                return Some(ty.clone());
-            }
-        }
-        None
-    }
 
-    fn lookup_owner_method_arg_expected_type_for_owner_key(
-        &self,
-        owner_key: &str,
-        method_name: &str,
-        arg_idx: usize,
-        arg_expr: Option<&syn::Expr>,
-    ) -> Option<syn::Type> {
-        let key = Self::owner_method_key(owner_key, method_name);
-        if let Some(variants) = self.owner_method_arg_expected_type_variants.get(&key)
-            && let Some(ty) =
-                self.select_owner_method_arg_expected_type_variant(variants, arg_idx, arg_expr)
-        {
-            return Some(ty);
-        }
-        if let Some(expected) = self.owner_method_arg_expected_types.get(&key)
-            && let Some(Some(ty)) = expected.get(arg_idx)
-        {
-            return Some(ty.clone());
-        }
-        None
-    }
 
     fn owner_path_to_candidate_owner_keys(
         &self,
@@ -9818,171 +9221,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         )
     }
 
-    fn lookup_owner_method_arg_expected_type_from_owner_path(
-        &self,
-        owner_path: Option<&syn::Path>,
-        owner_name: &str,
-        method_name: &str,
-        arg_idx: usize,
-        arg_expr: Option<&syn::Expr>,
-    ) -> Option<syn::Type> {
-        let owner_path = owner_path?;
-        let owner_keys = self.owner_path_to_candidate_owner_keys(owner_path, owner_name);
-        if owner_path.segments.len() == 1 && !self.module_stack.is_empty() {
-            let current_prefix = format!("{}::", self.module_stack.join("::"));
-            for owner_key in owner_keys
-                .iter()
-                .filter(|key| key.starts_with(&current_prefix))
-            {
-                if let Some(expected) = self.lookup_owner_method_arg_expected_type_for_owner_key(
-                    owner_key,
-                    method_name,
-                    arg_idx,
-                    arg_expr,
-                ) {
-                    return Some(expected);
-                }
-            }
-        }
-        for owner_key in owner_keys {
-            if let Some(expected) = self.lookup_owner_method_arg_expected_type_for_owner_key(
-                &owner_key,
-                method_name,
-                arg_idx,
-                arg_expr,
-            ) {
-                return Some(expected);
-            }
-        }
-        None
-    }
 
-    fn lookup_associated_call_return_type(&self, call: &syn::ExprCall) -> Option<syn::Type> {
-        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
-            return None;
-        };
-        if path_expr.path.segments.len() < 2 {
-            return None;
-        }
-        let owner_seg_idx = path_expr.path.segments.len().saturating_sub(2);
-        let owner_tail = path_expr
-            .path
-            .segments
-            .iter()
-            .nth(owner_seg_idx)
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
-        let owner_full = path_expr
-            .path
-            .segments
-            .iter()
-            .take(owner_seg_idx + 1)
-            .map(|seg| seg.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        let method = path_expr
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
-        if owner_tail.is_empty() || method.is_empty() {
-            return None;
-        }
-        let mut owner_candidates = Vec::new();
-        if !owner_full.is_empty() {
-            owner_candidates.push(owner_full.clone());
-            owner_candidates.push(self.scoped_type_key(&owner_full));
-        }
-        owner_candidates.push(owner_tail.clone());
-        owner_candidates.push(self.scoped_type_key(&owner_tail));
-        let mut dedup = HashSet::new();
-        owner_candidates.retain(|candidate| dedup.insert(candidate.clone()));
-
-        let mut ret_ty: Option<syn::Type> = None;
-        for owner in owner_candidates {
-            if let Some(found) = self.lookup_method_return_type_for_owner_key(&owner, &method) {
-                ret_ty = Some(found);
-                break;
-            }
-        }
-        let receiver_info = call.args.first().and_then(|receiver_expr| {
-            self.receiver_owner_name_and_type_substitutions(receiver_expr)
-        });
-        if ret_ty.is_none()
-            && let Some((receiver_owner, _)) = receiver_info.as_ref()
-        {
-            let mut receiver_candidates = Vec::new();
-            receiver_candidates.push(receiver_owner.clone());
-            receiver_candidates.push(self.scoped_type_key(receiver_owner));
-            if let Some(receiver_tail) = receiver_owner.rsplit("::").next() {
-                receiver_candidates.push(receiver_tail.to_string());
-                receiver_candidates.push(self.scoped_type_key(receiver_tail));
-            }
-            let mut receiver_dedup = HashSet::new();
-            receiver_candidates.retain(|candidate| receiver_dedup.insert(candidate.clone()));
-            for owner in receiver_candidates {
-                if let Some(found) = self.lookup_method_return_type_for_owner_key(&owner, &method) {
-                    ret_ty = Some(found);
-                    break;
-                }
-            }
-        }
-        let mut ret_ty = ret_ty?;
-
-        // Resolve `Self` in the return type to the *defining* owner's impl Self
-        // type when the call crosses impl boundaries. Without this, `Self`
-        // propagates out of this lookup and gets resolved against the *calling*
-        // context's `current_struct` by downstream `map_type`. Concretely, for
-        // `Node::new(elt) -> Self` called from inside `impl LinkedList<T, A>`,
-        // we want `Self` → `Node<T>`, not `LinkedList<T, A>` (the
-        // linked_list_port Box::new_in regression). Limited to cross-impl
-        // calls (owner_tail != current_struct) so in-impl `Self::method(...)`
-        // shapes that downstream code expects to see as `Self` are unaffected.
-        // Runs before owner-segment substitutions so explicit generic args at
-        // the call site (e.g. `Node::<i32>::new(...)`) still propagate through.
-        let cross_impl_call = self
-            .current_struct
-            .as_deref()
-            .is_some_and(|cs| cs.rsplit("::").next() != Some(owner_tail.as_str()));
-        if cross_impl_call
-            && let Some(owner_self_ty) = self.compose_owner_self_type_for_lookup(&owner_tail)
-        {
-            let mut self_subs: HashMap<String, syn::Type> = HashMap::new();
-            self_subs.insert("Self".to_string(), owner_self_ty);
-            ret_ty = self.substitute_type_params_in_type(&ret_ty, &self_subs);
-        }
-
-        if let Some(substitutions) =
-            self.owner_segment_type_arg_substitutions(&path_expr.path, owner_seg_idx)
-        {
-            ret_ty = self.substitute_type_params_in_type(&ret_ty, &substitutions);
-        }
-
-        // Associated functions that model receiver methods (`Type::method(self, ...)`)
-        // should specialize owner type params from the first argument's concrete type.
-        // This avoids incorrect fallback substitutions such as `T -> Lazy<T>` for
-        // calls like `Lazy::force_mut(&mut lazy)`.
-        let receiver_matches_owner = receiver_info
-            .as_ref()
-            .and_then(|(receiver_owner, _)| receiver_owner.rsplit("::").next())
-            .is_some_and(|tail| tail == owner_tail);
-        if receiver_matches_owner
-            && let Some((_, receiver_substitutions)) = receiver_info.as_ref()
-            && !receiver_substitutions.is_empty()
-        {
-            return Some(self.substitute_type_params_in_type(&ret_ty, receiver_substitutions));
-        }
-
-        if receiver_matches_owner {
-            // Keep receiver-style associated return shape when owner substitutions
-            // are unresolved. This preserves reference-ness (`T&`) and avoids
-            // incorrect fallback substitutions like `T -> Lazy<T>`.
-            return Some(ret_ty);
-        }
-
-        Some(self.substitute_single_unbound_return_type_param_from_call_args(ret_ty, &call.args))
-    }
 
     fn type_is_reference_to_slice(&self, ty: &syn::Type) -> bool {
         match ty {
@@ -10060,25 +9299,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
     }
 
-    fn lookup_callable_param_bound_arg_intent(
-        &self,
-        func: &syn::Expr,
-        arg_idx: usize,
-    ) -> Option<CallableArgPassIntent> {
-        let syn::Expr::Path(path_expr) = func else {
-            return None;
-        };
-        if path_expr.path.segments.len() != 1 {
-            return None;
-        }
-        let name = path_expr.path.segments[0].ident.to_string();
-        for scope in self.callable_param_bound_scopes.iter().rev() {
-            if let Some(meta) = scope.get(&name) {
-                return meta.arg_pass_intents.get(arg_idx).copied();
-            }
-        }
-        None
-    }
 
     fn emit_explicit_reference_call_arg(
         &self,
@@ -10529,19 +9749,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         ))
     }
 
-    fn is_pointer_like_autoderef_owner_name(name: &str) -> bool {
-        matches!(
-            name,
-            "Box"
-                | "Rc"
-                | "Arc"
-                | "Ref"
-                | "RefMut"
-                | "MutexGuard"
-                | "RwLockReadGuard"
-                | "RwLockWriteGuard"
-        )
-    }
 
     fn type_is_pointer_like_owner_type(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
@@ -10586,124 +9793,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn should_insert_move_for_deref_expected_value(
-        &self,
-        expr: &syn::Expr,
-        expected_ty: Option<&syn::Type>,
-    ) -> bool {
-        let Some(expected_ty) = expected_ty else {
-            return false;
-        };
-        if matches!(
-            self.peel_reference_paren_group_type(expected_ty),
-            syn::Type::Reference(_) | syn::Type::Ptr(_)
-        ) {
-            return false;
-        }
-        let syn::Expr::Unary(unary) = self.peel_paren_group_expr(expr) else {
-            return false;
-        };
-        if !matches!(unary.op, syn::UnOp::Deref(_)) {
-            return false;
-        }
-        let base = self.peel_paren_group_expr(&unary.expr);
-        if !self.should_insert_move(base) {
-            return false;
-        }
-        if let Some(base_ty) = self.infer_simple_expr_type(base) {
-            match self.peel_paren_group_type(&base_ty) {
-                syn::Type::Reference(_) | syn::Type::Ptr(_) => return false,
-                _ => {}
-            }
-        }
-        true
-    }
 
-    fn should_move_reference_binding_for_expected_value(
-        &self,
-        expr: &syn::Expr,
-        expected_ty: Option<&syn::Type>,
-    ) -> bool {
-        let Some(expected_ty) = expected_ty else {
-            return false;
-        };
-        if matches!(
-            self.peel_reference_paren_group_type(expected_ty),
-            syn::Type::Reference(_) | syn::Type::Ptr(_)
-        ) || self.is_known_scalar_like_type(expected_ty)
-        {
-            return false;
-        }
-        let syn::Expr::Path(path) = self.peel_paren_group_expr(expr) else {
-            return false;
-        };
-        if path.path.segments.len() != 1 {
-            return false;
-        }
-        let name = path.path.segments[0].ident.to_string();
-        if self.is_pattern_ref_binding_in_scope(&name)
-            && !self.is_local_reference_binding_in_scope(&name)
-        {
-            return true;
-        }
-        self.lookup_local_binding_type(&name).is_some_and(|ty| {
-            matches!(
-                self.peel_reference_paren_group_type(&ty),
-                syn::Type::Reference(_)
-            )
-        })
-    }
 
-    fn should_move_local_binding_for_owned_expected_value(
-        &self,
-        expr: &syn::Expr,
-        expected_ty: Option<&syn::Type>,
-    ) -> bool {
-        let Some(expected_ty) = expected_ty else {
-            return false;
-        };
-        if matches!(
-            self.peel_reference_paren_group_type(expected_ty),
-            syn::Type::Reference(_) | syn::Type::Ptr(_)
-        ) || self.is_known_scalar_like_type(expected_ty)
-        {
-            return false;
-        }
-        let syn::Expr::Path(path) = self.peel_paren_group_expr(expr) else {
-            return false;
-        };
-        if path.path.segments.len() != 1 {
-            return false;
-        }
-        let name = path.path.segments[0].ident.to_string();
-        if matches!(
-            name.as_str(),
-            "Self" | "self" | "true" | "false" | "None" | "Some" | "Ok" | "Err"
-        ) || name.starts_with(|c: char| c.is_uppercase())
-            || (name.len() > 1 && name.chars().all(|c| c.is_uppercase() || c == '_'))
-            || self.is_const_local_binding_in_scope(&name)
-            || matches!(name.as_str(), "formatter" | "f")
-        {
-            return false;
-        }
-        if let Some(local_ty) = self.lookup_local_binding_type(&name) {
-            if matches!(
-                self.peel_paren_group_type(&local_ty),
-                syn::Type::Reference(_) | syn::Type::Ptr(_)
-            ) || self.reference_type_lowers_to_value_cpp(&local_ty)
-            {
-                return false;
-            }
-            let mapped_local_ty = self.map_type(&local_ty);
-            if mapped_local_ty.contains('&')
-                || mapped_local_ty.starts_with("std::span<")
-                || mapped_local_ty.starts_with("std::array<")
-            {
-                return false;
-            }
-        }
-        self.is_local_binding_in_scope(&name) || self.lookup_local_binding_cpp_name(&name).is_some()
-    }
 
     fn maybe_move_owned_pattern_binding_value(&self, expr: &syn::Expr, emitted: String) -> String {
         if emitted.trim_start().starts_with("std::move(") {
@@ -11144,11 +10235,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn has_impls_for_type(&self, type_name: &str) -> bool {
-        let scoped = self.scoped_type_key(type_name);
-        self.impl_blocks.contains_key(&scoped)
-            || (scoped != type_name && self.impl_blocks.contains_key(type_name))
-    }
 
     fn take_impls_for_type(&mut self, type_name: &str) -> Option<Vec<syn::ImplItem>> {
         let scoped = self.scoped_type_key(type_name);
@@ -11292,28 +10378,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    /// Returns true if the item should get a C++ `export` keyword in
-    /// module mode.
-    ///
-    /// C++ modules have a binary export/private split with no analogue
-    /// to Rust's intra-crate visibility tiers (`pub(crate)`,
-    /// `pub(super)`, `pub(in path)`). Items declared with any of those
-    /// restricted-public forms are designed to be visible across
-    /// sibling/parent files inside the same Rust crate — which in our
-    /// crate-mode lowering means crossing C++ module boundaries.
-    /// Without exporting them they're invisible to importers and
-    /// referenced types fail name lookup (see the BTreeMap port:
-    /// `pub(super) struct NodeRef<...>` in `node.rs` is imported by
-    /// `map.rs`, `search.rs`, etc.).
-    ///
-    /// We therefore treat every restricted-public visibility as
-    /// exported in module mode. Truly private items (no visibility
-    /// specifier, the implicit private form) remain non-exported.
-    fn is_exported(&self, vis: &syn::Visibility) -> bool {
-        self.module_name.is_some()
-            && Self::visibility_is_any_pub(vis)
-            && !self.inside_hidden_private_module_scope()
-    }
 
     /// Classifier shared by `is_exported` / `is_exported_at_module_depth`.
     /// Returns true for any `pub`/`pub(crate)`/`pub(super)`/`pub(in path)`
@@ -11322,14 +10386,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         matches!(vis, syn::Visibility::Public(_) | syn::Visibility::Restricted(_))
     }
 
-    /// Returns true if visibility is pub and we're in module mode.
-    /// `module_depth` is kept for call-site compatibility.
-    fn is_exported_at_module_depth(&self, vis: &syn::Visibility, module_depth: usize) -> bool {
-        let _ = module_depth;
-        self.module_name.is_some()
-            && Self::visibility_is_any_pub(vis)
-            && !self.inside_hidden_private_module_scope()
-    }
 
     fn inside_hidden_private_module_scope(&self) -> bool {
         self.module_stack
@@ -11337,34 +10393,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .any(|segment| segment.starts_with("__private"))
     }
 
-    fn is_force_exported_reexport_target(&self, item_name: &str) -> bool {
-        if self.module_name.is_none() {
-            return false;
-        }
-        if self.inside_hidden_private_module_scope() {
-            return false;
-        }
-        let scoped_name = self.scoped_type_key(item_name);
-        self.crate_pub_reexport_targets.contains(&scoped_name)
-    }
 
-    fn should_export_item(&self, vis: &syn::Visibility, item_name: &str) -> bool {
-        self.is_exported(vis) || self.is_force_exported_reexport_target(item_name)
-    }
 
-    fn should_export_item_at_module_depth(
-        &self,
-        vis: &syn::Visibility,
-        module_depth: usize,
-        item_name: &str,
-    ) -> bool {
-        self.is_exported_at_module_depth(vis, module_depth)
-            || self.is_force_exported_reexport_target(item_name)
-    }
 
-    fn should_prefix_named_module_root_type(type_name: &str) -> bool {
-        matches!(type_name, "Buffer")
-    }
 
     fn prefixed_named_module_root_type_name(module_name: &str, type_name: &str) -> String {
         format!(
@@ -11463,68 +10494,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    /// Check if attributes contain `#[test]`.
-    fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
-        attrs.iter().any(|a| a.path().is_ident("test"))
-    }
 
-    /// Check if attributes contain `#[cpp_ctor]`. When set on an
-    /// associated function inside an `impl Owner { ... }` block whose
-    /// body is a single `Self { field: expr, ... }` (or
-    /// `Owner { field: expr, ... }`) literal, the function is emitted as
-    /// a real C++ constructor:
-    ///
-    ///   * declaration: `Owner(args);` (no `static`, no return type)
-    ///   * definition:  `Owner::Owner(args) : field1(expr1), ... {}`
-    ///
-    /// Without the attribute, factory-style `fn new(...) -> Self`
-    /// continues to lower to `static Owner Owner::new_(args)`.
-    fn has_cpp_ctor_attr(attrs: &[syn::Attribute]) -> bool {
-        attrs.iter().any(|a| a.path().is_ident("cpp_ctor"))
-    }
 
-    /// If `block` consists of a single `Self { ... }` (or
-    /// `<owner> { ... }`) struct literal — either as a bare tail
-    /// expression or via an explicit `return ...;` — return the field
-    /// initializers in source order. Otherwise return None.
-    ///
-    /// Used by the `#[cpp_ctor]` lowering path to translate a Rust
-    /// "factory body" into a C++ ctor initializer list.
-    fn extract_cpp_ctor_struct_literal<'a>(
-        block: &'a syn::Block,
-        owner_name: &str,
-    ) -> Option<&'a syn::ExprStruct> {
-        if block.stmts.len() != 1 {
-            return None;
-        }
-        let lit = match &block.stmts[0] {
-            syn::Stmt::Expr(syn::Expr::Struct(s), _) => s,
-            syn::Stmt::Expr(syn::Expr::Return(r), _) => {
-                let Some(returned) = r.expr.as_deref() else {
-                    return None;
-                };
-                match returned {
-                    syn::Expr::Struct(s) => s,
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        let last_seg = lit.path.segments.last()?;
-        let lit_owner = last_seg.ident.to_string();
-        if lit_owner != "Self" && lit_owner != owner_name {
-            return None;
-        }
-        if lit.rest.is_some() {
-            // `Self { f: v, ..base }` — base-update syntax isn't
-            // expressible as a ctor init list.
-            return None;
-        }
-        if lit.qself.is_some() {
-            return None;
-        }
-        Some(lit)
-    }
 
     fn eval_cfg_meta(meta: &syn::Meta) -> CfgEval {
         match meta {
@@ -11606,53 +10577,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    /// Skip items behind `#[cfg(...)]` when the predicate is known-false in
-    /// transpiler mode. Unknown predicates are kept conservatively.
-    fn should_skip_cfg_attrs(attrs: &[syn::Attribute]) -> bool {
-        attrs
-            .iter()
-            .filter(|a| a.path().is_ident("cfg"))
-            .any(|a| matches!(Self::eval_cfg_meta(&a.meta), CfgEval::False))
-    }
 
-    fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
-        Self::should_skip_cfg_attrs(attrs)
-    }
 
-    fn is_rust_libtest_metadata_type(&self, ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Path(tp) => {
-                let parts: Vec<String> = tp
-                    .path
-                    .segments
-                    .iter()
-                    .map(|s| s.ident.to_string())
-                    .collect();
-                parts.len() >= 2
-                    && parts[0] == "test"
-                    && matches!(parts.last().map(|s| s.as_str()), Some("TestDescAndFn"))
-            }
-            syn::Type::Reference(r) => self.is_rust_libtest_metadata_type(&r.elem),
-            syn::Type::Ptr(p) => self.is_rust_libtest_metadata_type(&p.elem),
-            syn::Type::Paren(p) => self.is_rust_libtest_metadata_type(&p.elem),
-            syn::Type::Group(g) => self.is_rust_libtest_metadata_type(&g.elem),
-            syn::Type::Array(a) => self.is_rust_libtest_metadata_type(&a.elem),
-            syn::Type::Slice(s) => self.is_rust_libtest_metadata_type(&s.elem),
-            syn::Type::Tuple(t) => t
-                .elems
-                .iter()
-                .any(|elem| self.is_rust_libtest_metadata_type(elem)),
-            _ => false,
-        }
-    }
 
-    fn is_rust_libtest_main(&self, f: &syn::ItemFn) -> bool {
-        if f.sig.ident != "main" {
-            return false;
-        }
-        let body = normalize_token_text(f.block.to_token_stream().to_string());
-        body.contains("test :: test_main_static") || body.contains("test::test_main_static")
-    }
 
     fn rustc_test_marker_name(attrs: &[syn::Attribute]) -> Option<String> {
         for attr in attrs {
@@ -11670,64 +10597,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         None
     }
 
-    fn extract_libtest_should_panic_value(&self, expr: &syn::Expr) -> Option<bool> {
-        let expr = self.peel_paren_group_expr(expr);
-        match expr {
-            syn::Expr::Struct(struct_expr) => {
-                for field in &struct_expr.fields {
-                    if let syn::Member::Named(name) = &field.member {
-                        if name == "should_panic" {
-                            return self.extract_should_panic_flag_from_expr(&field.expr);
-                        }
-                    }
-                    if let Some(value) = self.extract_libtest_should_panic_value(&field.expr) {
-                        return Some(value);
-                    }
-                }
-                if let Some(rest) = &struct_expr.rest {
-                    return self.extract_libtest_should_panic_value(rest);
-                }
-                None
-            }
-            syn::Expr::Reference(r) => self.extract_libtest_should_panic_value(&r.expr),
-            syn::Expr::Array(arr) => arr
-                .elems
-                .iter()
-                .find_map(|elem| self.extract_libtest_should_panic_value(elem)),
-            syn::Expr::Tuple(tuple) => tuple
-                .elems
-                .iter()
-                .find_map(|elem| self.extract_libtest_should_panic_value(elem)),
-            _ => self.extract_should_panic_flag_from_expr(expr),
-        }
-    }
 
-    fn extract_should_panic_flag_from_expr(&self, expr: &syn::Expr) -> Option<bool> {
-        let expr = self.peel_paren_group_expr(expr);
-        match expr {
-            syn::Expr::Path(path_expr) => {
-                let last = path_expr.path.segments.last()?.ident.to_string();
-                match last.as_str() {
-                    "No" => Some(false),
-                    "Yes" => Some(true),
-                    _ => None,
-                }
-            }
-            syn::Expr::Call(call_expr) => {
-                let func_expr = self.peel_paren_group_expr(call_expr.func.as_ref());
-                let syn::Expr::Path(path_expr) = func_expr else {
-                    return None;
-                };
-                let last = path_expr.path.segments.last()?.ident.to_string();
-                match last.as_str() {
-                    "No" => Some(false),
-                    "Yes" | "YesWithMessage" => Some(true),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
 
     fn block_contains_async_expr(&self, block: &syn::Block) -> bool {
         let mut collector = AsyncExprCollector::default();
@@ -11735,24 +10605,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         collector.found
     }
 
-    fn is_expanded_test_marker_function(&self, fn_name: &str) -> bool {
-        if !self.expanded_libtest_mode {
-            return false;
-        }
-        let scoped = if self.module_stack.is_empty() {
-            fn_name.to_string()
-        } else {
-            format!("{}::{}", self.module_stack.join("::"), fn_name)
-        };
-        self.expanded_test_markers.iter().any(|marker| {
-            marker == fn_name
-                || marker == &scoped
-                || marker
-                    .rsplit("::")
-                    .next()
-                    .is_some_and(|tail| tail == fn_name)
-        })
-    }
 
     fn emit_expanded_test_wrappers(&mut self) {
         if self.expanded_test_markers.is_empty() {
@@ -11927,11 +10779,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         format!("{}{}", prefix, result.join("::"))
     }
 
-    fn has_rustc_test_marker_attr(attrs: &[syn::Attribute]) -> bool {
-        attrs
-            .iter()
-            .any(|attr| attr.path().is_ident("rustc_test_marker"))
-    }
 
     fn detect_expanded_libtest_mode(&self, items: &[syn::Item]) -> bool {
         for item in items {
@@ -11996,19 +10843,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         })
     }
 
-    fn is_local_function_name_in_scope(&self, name: &str) -> bool {
-        self.local_function_bindings
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-    }
 
-    fn is_local_type_name_in_scope(&self, name: &str) -> bool {
-        self.local_type_bindings
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-    }
 
     fn current_scope_declares_type_name(&self, name: &str) -> bool {
         if name.is_empty() {
@@ -12227,45 +11062,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn extract_pointer_like_expected_type_param_name(&self, ty: &syn::Type) -> Option<String> {
-        let ty = self.peel_reference_paren_group_type(ty);
-        match ty {
-            syn::Type::Ptr(ptr_ty) => self.extract_simple_type_param_name(&ptr_ty.elem),
-            syn::Type::Path(tp) => {
-                let outer_seg = tp.path.segments.last()?;
-                if outer_seg.ident != "add_pointer_t" {
-                    return None;
-                }
-                let syn::PathArguments::AngleBracketed(outer_args) = &outer_seg.arguments else {
-                    return None;
-                };
-                let outer_inner = outer_args.args.iter().find_map(|arg| match arg {
-                    syn::GenericArgument::Type(t) => Some(t),
-                    _ => None,
-                })?;
-                if let Some(name) = self.extract_simple_type_param_name(outer_inner) {
-                    return Some(name);
-                }
-                let outer_inner = self.peel_reference_paren_group_type(outer_inner);
-                let syn::Type::Path(inner_path) = outer_inner else {
-                    return None;
-                };
-                let inner_seg = inner_path.path.segments.last()?;
-                if inner_seg.ident != "add_const_t" {
-                    return None;
-                }
-                let syn::PathArguments::AngleBracketed(inner_args) = &inner_seg.arguments else {
-                    return None;
-                };
-                let inner_inner = inner_args.args.iter().find_map(|arg| match arg {
-                    syn::GenericArgument::Type(t) => Some(t),
-                    _ => None,
-                })?;
-                self.extract_simple_type_param_name(inner_inner)
-            }
-            _ => None,
-        }
-    }
 
 
     /// Emit a nested function definition as a local callable.
@@ -14246,25 +13042,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.pop_type_param_scope();
     }
 
-    /// Extract derive trait names from attributes.
-    fn extract_derives(&self, attrs: &[syn::Attribute]) -> Vec<String> {
-        let mut derives = Vec::new();
-        for attr in attrs {
-            if attr.path().is_ident("derive") {
-                if let syn::Meta::List(list) = &attr.meta {
-                    // Parse the token stream for ident names
-                    let tokens = list.tokens.to_string();
-                    for part in tokens.split(',') {
-                        let trimmed = part.trim();
-                        if !trimmed.is_empty() {
-                            derives.push(trimmed.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        derives
-    }
 
     fn render_c_like_enum_variants(&self, e: &syn::ItemEnum) -> Vec<String> {
         e.variants
@@ -14612,47 +13389,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 .is_some_and(|params| !params.is_empty())
     }
 
-    fn should_emit_data_enum_variant_ctor_helper(&self, ctor_name: &str) -> bool {
-        if ctor_name.is_empty() {
-            return false;
-        }
-        if matches!(ctor_name, "Left" | "Right") {
-            // `Either::Left/Right` helpers are widely referenced as bare
-            // constructors in expanded code paths; keep emitting them.
-            return true;
-        }
-        if self.current_scope_declares_type_name(ctor_name)
-            || self.is_type_param_in_scope(ctor_name)
-        {
-            return false;
-        }
-        let scope_key = self.module_stack.join("::");
-        let type_like_import = self
-            .resolve_scope_import_binding_path_for_scope(&scope_key, ctor_name)
-            .or_else(|| self.resolve_scope_import_binding_path_for_scope("", ctor_name))
-            .is_some_and(|target| {
-                let normalized = target.trim().trim_start_matches("::").to_string();
-                if normalized.is_empty() {
-                    return false;
-                }
-                let escaped = Self::escape_qualified_path_preserve_global(&normalized);
-                if self.is_known_free_function_path(&normalized)
-                    || self.is_known_free_function_path(&escaped)
-                {
-                    return false;
-                }
-                if self.local_declared_types.contains(&normalized)
-                    || self.local_declared_types.contains(&escaped)
-                {
-                    return true;
-                }
-                let tail = normalized.rsplit("::").next().unwrap_or("");
-                tail.chars()
-                    .next()
-                    .is_some_and(|ch| ch.is_ascii_uppercase())
-            });
-        !type_like_import
-    }
 
     fn emit_enum(&mut self, e: &syn::ItemEnum) {
         let name = &e.ident;
@@ -15980,37 +14716,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         let _ = self.emit_type_alias_once(t);
     }
 
-    fn is_local_new_const_constructor_call(&self, expr: &syn::Expr) -> bool {
-        if self.block_depth == 0 {
-            return false;
-        }
-        let syn::Expr::Call(call) = self.peel_paren_group_expr(expr) else {
-            return false;
-        };
-        if !call.args.is_empty() {
-            return false;
-        }
-        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
-            return false;
-        };
-        path_expr
-            .path
-            .segments
-            .last()
-            .is_some_and(|seg| seg.ident == "new_const")
-    }
 
-    fn is_thread_local_key_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_paren_group_type(ty);
-        let syn::Type::Path(type_path) = ty else {
-            return false;
-        };
-        type_path
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "LocalKey")
-    }
 
     fn emit_const(&mut self, c: &syn::ItemConst) {
         // Skip wildcard const bindings (`const _: () = ...;`) which are
@@ -17249,46 +15955,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.writeln("}");
     }
 
-    fn should_skip_generic_serialize_extension_overload(
-        &self,
-        method_name: &str,
-        self_cpp_ty: &str,
-        free_generics: &syn::Generics,
-        params: &[String],
-    ) -> bool {
-        if method_name != "serialize" {
-            return false;
-        }
-
-        let self_ident = self_cpp_ty.trim();
-        if self_ident.is_empty()
-            || !self_ident
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        {
-            return false;
-        }
-
-        let generic_names: HashSet<String> = free_generics
-            .params
-            .iter()
-            .filter_map(|param| match param {
-                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
-                _ => None,
-            })
-            .collect();
-        if !generic_names.contains(self_ident) {
-            return false;
-        }
-
-        let receiver_prefix = format!("const {}& ", self_ident);
-        let receiver_is_generic_const_ref = params
-            .first()
-            .is_some_and(|param| param.starts_with(&receiver_prefix));
-        let serializer_is_generic_s = params.get(1).is_some_and(|param| param.starts_with("S "));
-
-        receiver_is_generic_const_ref && serializer_is_generic_s
-    }
 
     fn emit_extension_trait_free_functions_for_scope(&mut self, module_path: &[String]) -> bool {
         let scope_key = Self::module_scope_key(module_path);
@@ -19316,9 +17982,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         mapped
     }
 
-    fn is_plain_self_type(ty: &syn::Type) -> bool {
-        matches!(ty, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 && tp.path.segments[0].ident == "Self")
-    }
 
     fn emit_mod(&mut self, m: &syn::ItemMod) {
         // Skip #[cfg(test)] modules — test code is not transpiled into production output
@@ -19937,22 +18600,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_local_import_alias_name(&self, name: &str) -> bool {
-        if self.import_alias_names.contains(name) {
-            return true;
-        }
-        self.import_alias_names
-            .iter()
-            .any(|alias| escape_cpp_keyword(alias) == name)
-    }
 
-    fn is_top_level_module_namespace_alias_name(&self, name: &str) -> bool {
-        self.module_namespace_renames.iter().any(|(raw, renamed)| {
-            !raw.contains("::")
-                && raw != renamed
-                && (raw == name || escape_cpp_keyword(raw) == name)
-        })
-    }
 
     fn rewrite_global_using_path_for_local_alias_root(&self, using_path: &str) -> String {
         let trimmed = using_path.trim();
@@ -20519,17 +19167,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(format!("namespace {} = ::{};", alias, target))
     }
 
-    fn should_skip_namespace_alias_statement(&self, alias: &str, target: &str) -> bool {
-        let alias = alias.trim().trim_start_matches("::");
-        let target = target.trim().trim_start_matches("::");
-        if alias.is_empty() || target.is_empty() {
-            return false;
-        }
-        if self.module_name.is_some() && alias == "fmt" && target == "rusty::fmt" {
-            return true;
-        }
-        target == alias
-    }
 
     fn matches_declared_module_path(&self, normalized_path: &str) -> bool {
         if self.declared_module_paths.contains(normalized_path) {
@@ -20709,13 +19346,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .insert(alias.to_string(), canonical.to_string());
     }
 
-    fn is_variant_constructor_alias_import(&self, path: &str) -> bool {
-        let normalized = normalize_use_import_path(path);
-        let Some((_, target)) = split_use_import_alias(normalized) else {
-            return false;
-        };
-        Self::canonical_constructor_name_for_import_target(target).is_some()
-    }
 
     fn canonical_variant_name<'a>(&'a self, name: &'a str) -> &'a str {
         self.variant_constructor_aliases
@@ -21036,41 +19666,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn should_rebind_owner_to_descendant(&self, owner_module: &str, owner_type: &str) -> bool {
-        if owner_module.is_empty() || owner_type.is_empty() {
-            return false;
-        }
-        let escaped_owner_module = owner_module
-            .split("::")
-            .filter(|seg| !seg.is_empty())
-            .map(escape_cpp_keyword)
-            .collect::<Vec<String>>()
-            .join("::");
-        let escaped_owner_type = escape_cpp_keyword(owner_type);
-        let direct_candidates = [
-            format!("{}::{}", owner_module, owner_type),
-            format!("{}::{}", owner_module, escaped_owner_type),
-            format!("{}::{}", escaped_owner_module, owner_type),
-            format!("{}::{}", escaped_owner_module, escaped_owner_type),
-        ];
-        if direct_candidates
-            .iter()
-            .any(|candidate| self.local_declared_types.contains(candidate))
-        {
-            return false;
-        }
-        if let Some(bound_owner_type) =
-            self.resolve_scope_import_binding_path_for_scope(owner_module, owner_type)
-        {
-            let normalized = bound_owner_type.trim_start_matches("::");
-            if !normalized.is_empty()
-                && !matches!(classify_use_import(normalized), UseImportAction::RustOnly)
-            {
-                return false;
-            }
-        }
-        true
-    }
 
     fn remap_forward_decl_qualified_type_path(&self, path: &str) -> Option<String> {
         if !self.in_forward_decl_signature {
@@ -21312,164 +19907,10 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_skipped_module_trait_import(&self, path: &str) -> bool {
-        let normalized = normalize_use_import_path(path).trim();
-        if normalized.is_empty() || normalized.starts_with("namespace ") {
-            return false;
-        }
-        let stripped = normalized.trim_start_matches("::");
-        let stripped_tail = stripped.rsplit("::").next().unwrap_or(stripped);
-        if self.skipped_module_traits.contains(stripped) {
-            return true;
-        }
-        if self.skipped_module_traits.contains(stripped_tail) {
-            return true;
-        }
-        if let Some((_, target)) = split_use_import_alias(stripped) {
-            let target = target.trim_start_matches("::");
-            let target_tail = target.rsplit("::").next().unwrap_or(target);
-            if self.skipped_module_traits.contains(target) {
-                return true;
-            }
-            if self.skipped_module_traits.contains(target_tail) {
-                return true;
-            }
-        }
-        if stripped.starts_with("de::")
-            && matches!(
-                stripped_tail,
-                "Deserialize"
-                    | "DeserializeSeed"
-                    | "Deserializer"
-                    | "EnumAccess"
-                    | "Error"
-                    | "Expected"
-                    | "IntoDeserializer"
-                    | "MapAccess"
-                    | "SeqAccess"
-                    | "VariantAccess"
-                    | "Visitor"
-            )
-        {
-            return true;
-        }
-        if stripped.starts_with("ser::")
-            && matches!(
-                stripped_tail,
-                "Serialize"
-                    | "Serializer"
-                    | "SerializeSeq"
-                    | "SerializeTuple"
-                    | "SerializeTupleStruct"
-                    | "SerializeTupleVariant"
-                    | "SerializeMap"
-                    | "SerializeStruct"
-                    | "SerializeStructVariant"
-            )
-        {
-            return true;
-        }
-        self.skipped_module_traits.iter().any(|scoped| {
-            let tail = scoped.rsplit("::").next().unwrap_or(scoped);
-            tail == stripped || tail == stripped_tail || scoped == stripped
-        })
-    }
 
-    fn is_macro_rules_import(&self, path: &str) -> bool {
-        let normalized = normalize_use_import_path(path);
-        let last = normalized.split("::").last().unwrap_or(normalized);
-        self.macro_rules_names.contains(last)
-    }
 
-    fn should_skip_unresolved_bare_import(&self, path: &str) -> bool {
-        if self.module_stack.is_empty() {
-            return false;
-        }
-        if path.trim_start().starts_with("namespace ") {
-            return false;
-        }
-        let normalized = normalize_use_import_path(path);
-        if normalized.is_empty()
-            || normalized.contains("::")
-            || normalized.contains(" = ")
-            || normalized.starts_with("namespace ")
-        {
-            return false;
-        }
-        if self.declared_item_names.contains(normalized) {
-            return false;
-        }
-        normalized
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_lowercase())
-    }
 
-    fn should_skip_unresolved_single_segment_type_import(&self, using_path: &str) -> bool {
-        if !(self.module_name.is_some() || self.expanded_libtest_mode) {
-            return false;
-        }
-        let normalized = using_path
-            .trim()
-            .trim_start_matches("::")
-            .trim_start_matches("typename ")
-            .trim();
-        if normalized.is_empty()
-            || normalized.contains("::")
-            || normalized.contains(" = ")
-            || normalized.starts_with("namespace ")
-        {
-            return false;
-        }
-        if !normalized
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_uppercase())
-        {
-            return false;
-        }
-        if self.declared_item_names.contains(normalized)
-            || self.local_declared_types.contains(normalized)
-            || self.import_alias_names.contains(normalized)
-            || self.is_local_type_name_in_scope(normalized)
-        {
-            return false;
-        }
-        true
-    }
 
-    fn should_skip_unresolved_function_using_import(&self, using_path: &str) -> bool {
-        let normalized = using_path
-            .trim()
-            .trim_start_matches("::")
-            .trim_start_matches("typename ")
-            .trim();
-        if normalized.is_empty()
-            || !normalized.contains("::")
-            || normalized.contains(" = ")
-            || normalized.starts_with("namespace ")
-        {
-            return false;
-        }
-        let tail = normalized.rsplit("::").next().unwrap_or(normalized);
-        if !tail
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
-        {
-            return false;
-        }
-        let normalized_variants = self.owner_key_spelling_variants(normalized);
-        let is_known_function_path = normalized_variants
-            .iter()
-            .any(|candidate| self.is_known_free_function_path(candidate));
-        if !is_known_function_path {
-            return false;
-        }
-        !normalized_variants
-            .iter()
-            .any(|candidate| self.forward_declared_function_paths.contains(candidate))
-    }
 
     fn emitted_method_conflict_key(
         &self,
@@ -21811,34 +20252,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn should_force_qualified_import_binding_name(&self, local_name: &str) -> bool {
-        if local_name.is_empty() || !(self.module_name.is_some() || self.expanded_libtest_mode) {
-            return false;
-        }
-        let escaped = escape_cpp_keyword(local_name);
-        let scope = self.module_stack.join("::");
-        let scoped_raw = if scope.is_empty() {
-            local_name.to_string()
-        } else {
-            format!("{}::{}", scope, local_name)
-        };
-        let scoped_escaped = if scope.is_empty() {
-            escaped.clone()
-        } else {
-            format!("{}::{}", scope, escaped)
-        };
-        self.module_runtime_helper_trait_type_names
-            .contains_key(local_name)
-            || self
-                .module_runtime_helper_trait_type_names
-                .contains_key(&escaped)
-            || self
-                .module_runtime_helper_trait_type_names
-                .contains_key(&scoped_raw)
-            || self
-                .module_runtime_helper_trait_type_names
-                .contains_key(&scoped_escaped)
-    }
 
     fn emit_type_alias_impl_free_function_decls_for_owner(&mut self, owner_key: &str) -> bool {
         if !self.type_key_is_declared_alias(owner_key) {
@@ -22369,28 +20782,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         is_numeric_cpp_scalar_type(normalized) || matches!(normalized, "bool" | "char32_t")
     }
 
-    /// Check if a const member's type is the enclosing struct (self-referential).
-    /// These need split declaration (inside struct) + definition (after struct).
-    fn is_self_referential_const_type(&self, ty_cpp: &str) -> bool {
-        if let Some(ref struct_name) = self.current_struct {
-            // Direct self-reference: const type IS the struct
-            if ty_cpp == *struct_name || ty_cpp.starts_with(&format!("{}<", struct_name)) {
-                return true;
-            }
-            // Indirect self-reference: const type contains the struct name
-            // in a template argument (e.g., `std::span<const Flag<TestFlags>>`)
-            // which requires the struct to be complete at instantiation.
-            if ty_cpp.contains(&format!("<{}>", struct_name))
-                || ty_cpp.contains(&format!("<{},", struct_name))
-                || ty_cpp.contains(&format!(", {}>", struct_name))
-            {
-                return true;
-            }
-            false
-        } else {
-            false
-        }
-    }
 
 
     fn emit_impl_const_expr(&self, c: &syn::ImplItemConst) -> String {
@@ -22497,16 +20888,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .is_some()
     }
 
-    fn is_view_like_cpp_type(ty: &str) -> bool {
-        let mut normalized = ty.trim();
-        if let Some(stripped) = normalized.strip_prefix("const ") {
-            normalized = stripped.trim();
-        }
-        if let Some(stripped) = normalized.strip_suffix('&') {
-            normalized = stripped.trim();
-        }
-        normalized.starts_with("std::span<") || normalized == "std::string_view"
-    }
 
     fn to_mutable_view_cpp_type(ty: &str) -> String {
         let normalized = ty.trim();
@@ -22516,15 +20897,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         normalized.to_string()
     }
 
-    fn extract_single_stmt_expr<'a>(&self, block: &'a syn::Block) -> Option<&'a syn::Expr> {
-        if block.stmts.len() != 1 {
-            return None;
-        }
-        match &block.stmts[0] {
-            syn::Stmt::Expr(expr, _) => Some(expr),
-            _ => None,
-        }
-    }
 
     fn strip_return_expr<'a>(&self, expr: &'a syn::Expr) -> &'a syn::Expr {
         let mut current = expr;
@@ -22655,23 +21027,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         )
     }
 
-    fn should_skip_recursive_bitflags_forwarder(
-        &self,
-        emitted_name: &str,
-        method: &syn::ImplItemFn,
-        is_static: bool,
-    ) -> bool {
-        if !self.current_struct_is_bitflags_like() {
-            return false;
-        }
-        match emitted_name {
-            "bits" if !is_static => self.method_is_direct_recursive_bits_forwarder(method),
-            "from_bits_retain" if is_static => {
-                self.method_is_direct_recursive_from_bits_retain_forwarder(method)
-            }
-            _ => false,
-        }
-    }
 
 
     fn try_rewrite_local_class_member_template_method(
@@ -24497,121 +22852,10 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
 
 
-    fn extract_candidate_local_name_for_hint_expr(&self, expr: &syn::Expr) -> Option<String> {
-        let expr = self.peel_paren_group_expr(expr);
-        if let syn::Expr::Reference(reference) = expr {
-            return self.extract_candidate_local_name_for_hint_expr(&reference.expr);
-        }
-        if let syn::Expr::Cast(cast_expr) = expr {
-            return self.extract_candidate_local_name_for_hint_expr(&cast_expr.expr);
-        }
-        if let Some(name) = extract_simple_local_ident(expr) {
-            return Some(name);
-        }
-        if let Some(name) = extract_index_base_ident(expr) {
-            return Some(name);
-        }
-        if let syn::Expr::Unary(unary) = expr {
-            return self.extract_candidate_local_name_for_hint_expr(&unary.expr);
-        }
-        None
-    }
 
 
 
 
-    fn lookup_associated_call_arg_expected_type_fallback(
-        &self,
-        call: &syn::ExprCall,
-        arg_idx: usize,
-        arg_expr: Option<&syn::Expr>,
-    ) -> Option<syn::Type> {
-        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
-            return None;
-        };
-        if path_expr.path.segments.len() < 2 {
-            return None;
-        }
-        let owner_seg_idx = path_expr.path.segments.len().saturating_sub(2);
-        let owner_seg = path_expr.path.segments.iter().nth(owner_seg_idx)?;
-        let owner = path_expr
-            .path
-            .segments
-            .iter()
-            .nth(owner_seg_idx)
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
-        let method = path_expr
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
-        let owner_looks_like_type = owner == "Self"
-            || owner
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_uppercase());
-        if !owner_looks_like_type {
-            return None;
-        }
-        let mut owner_path = syn::Path {
-            leading_colon: path_expr.path.leading_colon,
-            segments: syn::punctuated::Punctuated::new(),
-        };
-        for seg in path_expr.path.segments.iter().take(owner_seg_idx + 1) {
-            owner_path.segments.push(seg.clone());
-        }
-        // For explicit associated calls (`Type::method(...)`), avoid falling back
-        // to method-name-only signatures from unrelated owners. That fallback can
-        // cross-wire hints for common names like `new_unchecked` and trigger
-        // invalid coercions at call sites.
-        let mut expected = self.lookup_owner_method_arg_expected_type_from_owner_path(
-            Some(&owner_path),
-            &owner,
-            &method,
-            arg_idx,
-            arg_expr,
-        );
-        if expected.is_none() && owner_path.segments.len() > 1 {
-            expected =
-                self.lookup_owner_method_arg_expected_type(&owner, &method, arg_idx, arg_expr);
-        }
-        if expected.is_none() {
-            return self.infer_associated_call_arg_expected_type_from_owner(
-                owner_seg, &owner, &method, arg_idx, arg_expr,
-            );
-        }
-        let mut expected = expected?;
-        if let Some(substitutions) =
-            self.owner_segment_type_arg_substitutions(&path_expr.path, owner_seg_idx)
-        {
-            expected = self.substitute_type_params_in_type(&expected, &substitutions);
-        }
-        let expected_needs_owner_recovery = self.type_contains_infer(&expected)
-            || self.type_contains_in_scope_type_param(&expected)
-            || self.type_contains_unbound_single_letter_generic(&expected)
-            || matches!(
-                self.peel_reference_paren_group_type(&expected),
-                syn::Type::Path(tp)
-                    if tp.qself.is_none()
-                        && tp.path.segments.len() == 1
-                        && tp.path.segments[0]
-                            .ident
-                            .to_string()
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.is_ascii_uppercase())
-            );
-        if expected_needs_owner_recovery
-            && let Some(owner_expected) = self.infer_associated_call_arg_expected_type_from_owner(
-                owner_seg, &owner, &method, arg_idx, arg_expr,
-            )
-        {
-            return Some(owner_expected);
-        }
-        Some(expected)
-    }
 
 
 
@@ -24753,35 +22997,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
 
 
-    fn lookup_unique_method_return_type_by_name(&self, method_name: &str) -> Option<syn::Type> {
-        let mut unique: Option<syn::Type> = None;
-        for (key, ret_ty) in &self.function_return_types {
-            let Some(ret_ty) = ret_ty.as_ref() else {
-                continue;
-            };
-            let Some((_, tail)) = key.rsplit_once("::") else {
-                continue;
-            };
-            if tail != method_name {
-                continue;
-            }
-            if self.type_contains_infer(ret_ty)
-                || self.type_contains_in_scope_type_param(ret_ty)
-                || self.type_contains_unbound_single_letter_generic(ret_ty)
-                || self.type_contains_unresolved_placeholder_like(ret_ty)
-            {
-                continue;
-            }
-            if let Some(existing) = unique.as_ref() {
-                if existing != ret_ty {
-                    return None;
-                }
-            } else {
-                unique = Some(ret_ty.clone());
-            }
-        }
-        unique
-    }
 
     fn method_arg_prefers_value_move_heuristic(&self, method_name: &str, arg_idx: usize) -> bool {
         matches!(
@@ -24921,114 +23136,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn lookup_call_arg_pass_style_for_consumption(
-        &self,
-        call: &syn::ExprCall,
-        arg_idx: usize,
-        arg_expr: &syn::Expr,
-    ) -> Option<ArgPassStyle> {
-        let mut style = self.lookup_function_arg_pass_style(call.func.as_ref(), arg_idx);
-        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
-            return style;
-        };
-        let method_name = path_expr
-            .path
-            .segments
-            .last()
-            .map(|seg| seg.ident.to_string())
-            .unwrap_or_default();
-        if method_name.is_empty() {
-            return style;
-        }
 
-        if style.is_none() || matches!(style, Some(ArgPassStyle::Mixed)) {
-            if let Some(method_style) = self.lookup_method_arg_pass_style(&method_name, arg_idx) {
-                if style.is_none() || !matches!(method_style, ArgPassStyle::Mixed) {
-                    style = Some(method_style);
-                }
-            }
-        }
-
-        if (style.is_none() || matches!(style, Some(ArgPassStyle::Mixed)))
-            && path_expr.path.segments.len() >= 2
-        {
-            let owner = path_expr
-                .path
-                .segments
-                .iter()
-                .nth_back(1)
-                .map(|seg| seg.ident.to_string())
-                .unwrap_or_default();
-            if !owner.is_empty()
-                && let Some(expected_ty) = self.lookup_owner_method_arg_expected_type(
-                    &owner,
-                    &method_name,
-                    arg_idx,
-                    Some(arg_expr),
-                )
-            {
-                style = Some(self.arg_pass_style_for_type(&expected_ty));
-            }
-        }
-
-        if (style.is_none() || matches!(style, Some(ArgPassStyle::Mixed)))
-            && let Some(expected_ty) = self.lookup_method_arg_expected_type(&method_name, arg_idx)
-        {
-            style = Some(self.arg_pass_style_for_type(expected_ty));
-        }
-
-        if style.is_none() || matches!(style, Some(ArgPassStyle::Mixed)) {
-            if let Some(mapped_style) =
-                self.lookup_mapped_runtime_call_arg_pass_style_for_consumption(call, arg_idx)
-            {
-                style = Some(mapped_style);
-            }
-        }
-        if (style.is_none() || matches!(style, Some(ArgPassStyle::Mixed)))
-            && arg_idx == 0
-            && (method_name.starts_with("into_")
-                || matches!(method_name.as_str(), "into_value" | "into_inner" | "take"))
-        {
-            style = Some(ArgPassStyle::Value);
-        }
-
-        style
-    }
-
-    fn lookup_mapped_runtime_call_arg_pass_style_for_consumption(
-        &self,
-        call: &syn::ExprCall,
-        arg_idx: usize,
-    ) -> Option<ArgPassStyle> {
-        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
-            return None;
-        };
-        for candidate in self.call_path_candidates(&path_expr.path) {
-            let mapped = types::map_function_path(&candidate).unwrap_or(candidate.as_str());
-            let style = match mapped {
-                "rusty::ptr::read" => (arg_idx == 0).then_some(ArgPassStyle::Pointer),
-                "rusty::ptr::write" => match arg_idx {
-                    0 => Some(ArgPassStyle::Pointer),
-                    1 => Some(ArgPassStyle::Value),
-                    _ => None,
-                },
-                "rusty::ptr::copy" | "rusty::ptr::copy_nonoverlapping" => {
-                    if arg_idx <= 1 {
-                        Some(ArgPassStyle::Pointer)
-                    } else if arg_idx == 2 {
-                        Some(ArgPassStyle::Value)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            if style.is_some() {
-                return style;
-            }
-        }
-        None
-    }
 
     fn emit_block(&mut self, block: &syn::Block) {
         let profile_blocks = std::env::var_os("RUSTY_CPP_PROFILE_BLOCKS").is_some();
@@ -26686,76 +24794,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         format!("[&]() {{ {}; return std::make_tuple(); }}()", emitted_expr)
     }
 
-    fn is_binding_only_tuple_arm_pattern(&self, pat: &syn::Pat, arity: usize) -> bool {
-        match pat {
-            syn::Pat::Tuple(tuple_pat) => {
-                tuple_pat.elems.len() == arity
-                    && tuple_pat
-                        .elems
-                        .iter()
-                        .all(|elem| self.is_binding_only_pattern(elem))
-            }
-            syn::Pat::Wild(_) => true,
-            syn::Pat::Ident(pi) => {
-                pi.ident == "_" || !self.pattern_ident_is_const_value(&pi.ident.to_string())
-            }
-            _ => false,
-        }
-    }
 
-    fn is_binding_only_pattern(&self, pat: &syn::Pat) -> bool {
-        match pat {
-            syn::Pat::Ident(pi) => {
-                pi.ident == "_" || !self.pattern_ident_is_const_value(&pi.ident.to_string())
-            }
-            syn::Pat::Wild(_) => true,
-            syn::Pat::Tuple(tuple_pat) => tuple_pat
-                .elems
-                .iter()
-                .all(|elem| self.is_binding_only_pattern(elem)),
-            syn::Pat::Type(pt) => self.is_binding_only_pattern(&pt.pat),
-            syn::Pat::Reference(r) => self.is_binding_only_pattern(&r.pat),
-            syn::Pat::Paren(p) => self.is_binding_only_pattern(&p.pat),
-            _ => false,
-        }
-    }
 
-    fn is_stable_reference_lvalue_expr(&self, expr: &syn::Expr) -> bool {
-        match expr {
-            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
-                let name = path.path.segments[0].ident.to_string();
-                name == "self"
-                    || self.lookup_local_binding_type(&name).is_some()
-                    || self.is_local_binding_in_scope(&name)
-            }
-            syn::Expr::Field(field) => self.is_stable_reference_lvalue_expr(&field.base),
-            syn::Expr::Index(index) => self.is_stable_reference_lvalue_expr(&index.expr),
-            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
-                // `&*x` is stable for raw pointers/references. For value-like
-                // deref receivers (for example `SmallVec`/`Box` operator*), use
-                // temporary materialization at call sites instead of taking
-                // address directly from `*x`.
-                if self.is_expr_raw_pointer_like(&unary.expr) {
-                    return true;
-                }
-                if !self.is_stable_reference_lvalue_expr(&unary.expr) {
-                    return false;
-                }
-                self.infer_simple_expr_type(&unary.expr)
-                    .as_ref()
-                    .is_some_and(|ty| {
-                        matches!(
-                            self.peel_reference_paren_group_type(ty),
-                            syn::Type::Reference(_) | syn::Type::Ptr(_)
-                        )
-                    })
-            }
-            syn::Expr::Reference(r) => self.is_stable_reference_lvalue_expr(&r.expr),
-            syn::Expr::Paren(p) => self.is_stable_reference_lvalue_expr(&p.expr),
-            syn::Expr::Group(g) => self.is_stable_reference_lvalue_expr(&g.expr),
-            _ => false,
-        }
-    }
 
     fn reference_target_requires_owned_materialization_for_address(
         &self,
@@ -26799,13 +24839,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         current
     }
 
-    fn is_reference_to_slice_range_index_expr(&self, expr: &syn::Expr) -> bool {
-        let reference_target = match self.peel_paren_group_expr(expr) {
-            syn::Expr::Reference(r) => self.peel_reference_target_expr(&r.expr),
-            _ => return false,
-        };
-        self.is_slice_range_index_target_expr(reference_target)
-    }
 
     fn try_emit_tuple_reference_string_literal_deref_as_string_view(
         &self,
@@ -26840,24 +24873,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(format!("std::string_view({})", literal))
     }
 
-    fn is_slice_range_index_target_expr(&self, expr: &syn::Expr) -> bool {
-        match self.peel_paren_group_expr(expr) {
-            syn::Expr::Index(idx) => self.is_slice_range_index_expr(&idx.index),
-            _ => false,
-        }
-    }
 
-    fn should_normalize_tuple_reference_target_to_slice_full(&self, expr: &syn::Expr) -> bool {
-        match self.peel_paren_group_expr(expr) {
-            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
-                self.is_stable_reference_lvalue_expr(expr)
-            }
-            syn::Expr::Field(field) => {
-                self.should_normalize_tuple_reference_target_to_slice_full(&field.base)
-            }
-            _ => false,
-        }
-    }
 
     fn emit_match_as_switch(
         &mut self,
@@ -27234,19 +25250,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.writeln(&format!("return decltype({}){{}};", inner));
     }
 
-    fn extract_tuple_struct_bindings(
-        &self,
-        elems: &syn::punctuated::Punctuated<syn::Pat, syn::token::Comma>,
-    ) -> Vec<String> {
-        elems
-            .iter()
-            .map(|p| match p {
-                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
-                syn::Pat::Wild(_) => "_".to_string(),
-                _ => "_".to_string(),
-            })
-            .collect()
-    }
 
     fn tuple_struct_binding_stmts(
         &self,
@@ -27936,16 +25939,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_simple_ident(name: &str) -> bool {
-        let mut chars = name.chars();
-        let Some(first) = chars.next() else {
-            return false;
-        };
-        if !(first.is_ascii_alphabetic() || first == '_') {
-            return false;
-        }
-        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-    }
 
     /// Normalize Rust-only debug spec suffixes inside a format literal so C++ std::format
     /// can consume the same placeholder structure.
@@ -28954,28 +26947,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         format!("std::make_tuple({})", elems.join(", "))
     }
 
-    fn is_unsuffixed_int_literal_expr(expr: &syn::Expr) -> bool {
-        matches!(
-            expr,
-            syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Int(lit),
-                ..
-            }) if lit.suffix().is_empty()
-        )
-    }
 
-    fn is_plain_ident_path_expr(expr: &syn::Expr) -> bool {
-        match expr {
-            syn::Expr::Paren(paren) => Self::is_plain_ident_path_expr(&paren.expr),
-            syn::Expr::Group(group) => Self::is_plain_ident_path_expr(&group.expr),
-            syn::Expr::Path(path_expr) => {
-                path_expr.qself.is_none()
-                    && path_expr.path.leading_colon.is_none()
-                    && path_expr.path.segments.len() == 1
-            }
-            _ => false,
-        }
-    }
 
     fn stmt_contains_unsuffixed_int_literal(&self, stmt: &syn::Stmt) -> bool {
         match stmt {
@@ -32151,42 +30123,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         emitted
     }
 
-    fn extract_variant_pattern_enum_name(
-        &self,
-        path: &syn::Path,
-        resolved_cpp_type: &str,
-    ) -> Option<String> {
-        if path.segments.len() >= 2 {
-            let penultimate = path.segments.iter().nth_back(1)?.ident.to_string();
-            if penultimate == "Self" {
-                return self.current_struct.clone();
-            }
-            if self.data_enum_name_matches(&penultimate) {
-                return Some(penultimate);
-            }
-            // Keep explicit type-like owners (e.g. `Either::Left`) as the
-            // variant enum context even when the owner is imported from another
-            // crate and not pre-registered in local enum metadata.
-            if penultimate
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_uppercase())
-            {
-                return Some(penultimate);
-            }
-        }
-        if let Some(last_ident) = path.segments.last().map(|seg| seg.ident.to_string())
-            && let Some((enum_name, _)) = self.flattened_data_enum_variant_parts(&last_ident)
-        {
-            return Some(enum_name);
-        }
-        if let Some(struct_name) = &self.current_struct {
-            if resolved_cpp_type.starts_with(&format!("{}_", struct_name)) {
-                return Some(struct_name.clone());
-            }
-        }
-        None
-    }
 
     fn variant_pattern_template_args(
         &self,
@@ -33950,22 +31886,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn extract_for_loop_iterable_root_name(&self, iterable_expr: &syn::Expr) -> Option<String> {
-        let mut expr = self.peel_paren_group_expr(iterable_expr);
-        if let syn::Expr::Reference(r) = expr {
-            if self.is_expr_raw_pointer_like(&r.expr) {
-                return None;
-            }
-            expr = self.peel_paren_group_expr(&r.expr);
-        }
-
-        if let syn::Expr::Path(path_expr) = expr {
-            if path_expr.path.segments.len() == 1 {
-                return Some(path_expr.path.segments[0].ident.to_string());
-            }
-        }
-        None
-    }
 
     fn emit_pat_to_string(&self, pat: &syn::Pat) -> String {
         match pat {
@@ -36545,48 +34465,10 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         true
     }
 
-    fn is_mut_raw_pointer_type(ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Ptr(ptr) => ptr.mutability.is_some(),
-            syn::Type::Paren(p) => Self::is_mut_raw_pointer_type(&p.elem),
-            syn::Type::Group(g) => Self::is_mut_raw_pointer_type(&g.elem),
-            _ => false,
-        }
-    }
 
-    fn is_mut_reference_type(ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Reference(reference) => reference.mutability.is_some(),
-            syn::Type::Paren(p) => Self::is_mut_reference_type(&p.elem),
-            syn::Type::Group(g) => Self::is_mut_reference_type(&g.elem),
-            _ => false,
-        }
-    }
 
-    fn is_reference_binding_lowered_to_pointer_storage(&self, name: &str) -> bool {
-        // Immutable shadow bindings must not inherit pointer-lowered behavior
-        // from an earlier mutable binding with the same Rust name.
-        if self.is_const_local_binding_in_scope(name) {
-            return false;
-        }
-        if !self.is_rebind_reference_pointer_binding_in_scope(name) {
-            return false;
-        }
-        true
-    }
 
-    fn is_rebind_reference_binding(&self, name: &str) -> bool {
-        self.is_reference_binding_lowered_to_pointer_storage(name)
-    }
 
-    fn is_raw_pointer_type(ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Ptr(_) => true,
-            syn::Type::Paren(p) => Self::is_raw_pointer_type(&p.elem),
-            syn::Type::Group(g) => Self::is_raw_pointer_type(&g.elem),
-            _ => false,
-        }
-    }
 
     fn type_is_single_in_scope_type_param(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
@@ -36601,19 +34483,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             && self.is_type_param_in_scope(&seg.ident.to_string())
     }
 
-    fn should_materialize_slice_range_pointer_storage(
-        &self,
-        resolved_ty: &syn::Type,
-        init_expr: &syn::Expr,
-    ) -> bool {
-        if !Self::is_raw_pointer_type(resolved_ty) {
-            return false;
-        }
-        let syn::Expr::Reference(r) = self.peel_paren_group_expr(init_expr) else {
-            return false;
-        };
-        self.is_slice_range_index_target_expr(self.peel_reference_target_expr(&r.expr))
-    }
 
     fn emit_repeat_expr_with_element_hint(
         &self,
@@ -36683,20 +34552,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(self.emit_repeat_expr_with_fixed_array_hint(repeat, &elem_ty, &repeat.len))
     }
 
-    fn should_emit_repeat_seed_cast(elem_cpp: &str) -> bool {
-        let normalized = elem_cpp.trim();
-        if normalized.is_empty()
-            || normalized.contains("/* TODO")
-            || type_string_has_auto_placeholder(normalized)
-        {
-            return false;
-        }
-        is_numeric_cpp_scalar_type(normalized)
-            || matches!(
-                normalized,
-                "bool" | "char" | "char32_t" | "float" | "double"
-            )
-    }
 
     fn emit_repeat_seed_with_cast(seed_expr: &str, elem_cpp: &str) -> String {
         if Self::should_emit_repeat_seed_cast(elem_cpp) {
@@ -36747,12 +34602,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn should_use_optional_delayed_init_storage(&self, ty: &syn::Type) -> bool {
-        !matches!(
-            ty,
-            syn::Type::Reference(_) | syn::Type::ImplTrait(_) | syn::Type::Infer(_)
-        )
-    }
 
     fn mark_delayed_init_local(&mut self, name: &str) {
         if let Some(scope) = self.delayed_init_locals.last_mut() {
@@ -36760,12 +34609,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_delayed_init_local(&self, name: &str) -> bool {
-        self.delayed_init_locals
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-    }
 
     fn local_binding_name_conflicts_with_scope_function(&self, name: &str) -> bool {
         if self.is_local_function_name_in_scope(name) {
@@ -36911,26 +34754,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn lookup_local_binding_cpp_name(&self, rust_name: &str) -> Option<String> {
-        self.local_cpp_bindings
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(rust_name).cloned())
-            .or_else(|| {
-                self.param_bindings
-                    .iter()
-                    .rev()
-                    .find_map(|scope| scope.get(rust_name).map(|_| escape_cpp_keyword(rust_name)))
-            })
-    }
 
-    fn lookup_rust_binding_name_for_cpp_name(&self, cpp_name: &str) -> Option<String> {
-        self.local_cpp_bindings.iter().rev().find_map(|scope| {
-            scope.iter().find_map(|(rust_name, mapped_cpp)| {
-                (mapped_cpp == cpp_name).then_some(rust_name.clone())
-            })
-        })
-    }
 
     fn record_local_const_binding(&mut self, name: &str, is_const: bool) {
         if let Some(scope) = self.local_const_bindings.last_mut() {
@@ -36947,12 +34771,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_local_item_const_name_in_scope(&self, name: &str) -> bool {
-        self.local_item_const_names
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-    }
 
     fn record_local_reference_binding(&mut self, name: &str, is_reference: bool) {
         let Some(scope) = self.local_reference_bindings.last_mut() else {
@@ -36971,19 +34789,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_rebind_reference_pointer_binding_in_scope(&self, name: &str) -> bool {
-        self.rebind_reference_pointer_bindings
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-    }
 
-    fn is_local_reference_binding_in_scope(&self, name: &str) -> bool {
-        self.local_reference_bindings
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-    }
 
     fn mark_local_manually_drop_binding(&mut self, name: &str) {
         if let Some(scope) = self.local_manually_drop_bindings.last_mut() {
@@ -36991,12 +34797,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_local_manually_drop_binding_in_scope(&self, name: &str) -> bool {
-        self.local_manually_drop_bindings
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-    }
 
     fn expr_is_manually_drop_new_call(&self, expr: &syn::Expr) -> bool {
         let Some(expr) = self.extract_value_expr(expr) else {
@@ -37030,13 +34830,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         )
     }
 
-    fn is_const_local_binding_in_scope(&self, name: &str) -> bool {
-        self.local_const_bindings
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
-            .unwrap_or(false)
-    }
 
     fn pattern_ident_is_const_value(&self, name: &str) -> bool {
         if self.unit_struct_types.contains(name) {
@@ -37124,12 +34917,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn lookup_local_placeholder_type_hint(&self, name: &str) -> Option<&syn::Type> {
-        self.local_placeholder_type_hints
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name))
-    }
 
     fn type_contains_infer(&self, ty: &syn::Type) -> bool {
         match ty {
@@ -37281,21 +35068,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    /// Returns true if `name` is a type parameter of the current struct
-    /// (e.g., `A` in `impl<A: Array> SmallVec<A>` when emitting SmallVec methods).
-    fn is_struct_type_param(&self, name: &str) -> bool {
-        if let Some(struct_name) = &self.current_struct {
-            let key = self.scoped_type_key(struct_name);
-            if let Some(params) = self
-                .declared_type_params
-                .get(struct_name)
-                .or_else(|| self.declared_type_params.get(&key))
-            {
-                return params.iter().any(|p| p == name);
-            }
-        }
-        false
-    }
 
     fn substitute_owner_infer_with_hint(
         &self,
@@ -37525,66 +35297,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
 
 
-    fn lookup_owner_method_return_type_from_receiver_type(
-        &self,
-        receiver_ty: &syn::Type,
-        method_name: &str,
-    ) -> Option<syn::Type> {
-        let receiver_ty = self.peel_reference_paren_group_type(receiver_ty);
-        let syn::Type::Path(tp) = receiver_ty else {
-            return None;
-        };
 
-        let mut owner_candidates = Vec::new();
-        let full_owner = tp
-            .path
-            .segments
-            .iter()
-            .map(|seg| seg.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        if !full_owner.is_empty() {
-            owner_candidates.push(full_owner.clone());
-        }
-        if let Some(last) = tp.path.segments.last() {
-            owner_candidates.push(last.ident.to_string());
-        }
-        if !full_owner.is_empty() {
-            owner_candidates.push(self.scoped_type_key(&full_owner));
-        }
-        if let Some(last) = tp.path.segments.last() {
-            owner_candidates.push(self.scoped_type_key(&last.ident.to_string()));
-        }
-
-        let mut dedup = HashSet::new();
-        owner_candidates.retain(|candidate| dedup.insert(candidate.clone()));
-        for owner in owner_candidates {
-            if let Some(ret_ty) = self.lookup_method_return_type_for_owner_key(&owner, method_name)
-            {
-                return Some(ret_ty);
-            }
-        }
-
-        None
-    }
-
-    fn lookup_method_return_type_for_owner_key(
-        &self,
-        owner: &str,
-        method_name: &str,
-    ) -> Option<syn::Type> {
-        if let Some(items) = self.impl_blocks.get(owner)
-            && let Some(ret_ty) = Self::lookup_method_return_type_in_items(items, method_name)
-        {
-            return Some(ret_ty);
-        }
-        if let Some(items) = self.consumed_impl_blocks.get(owner)
-            && let Some(ret_ty) = Self::lookup_method_return_type_in_items(items, method_name)
-        {
-            return Some(ret_ty);
-        }
-        None
-    }
 
     /// Compose `Owner<param1, param2, ...>` for substituting `Self` in a
     /// return-type lookup. Used by `lookup_associated_call_return_type` to
@@ -37614,212 +35327,14 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         syn::parse_str::<syn::Type>(&ty_text).ok()
     }
 
-    fn lookup_method_return_type_in_items(
-        items: &[syn::ImplItem],
-        method_name: &str,
-    ) -> Option<syn::Type> {
-        for item in items {
-            let syn::ImplItem::Fn(method) = item else {
-                continue;
-            };
-            if method.sig.ident != method_name {
-                continue;
-            }
-            let syn::ReturnType::Type(_, ret_ty) = &method.sig.output else {
-                return None;
-            };
-            return Some((**ret_ty).clone());
-        }
-        None
-    }
-
-    fn lookup_method_arg_type_for_owner_key(
-        &self,
-        owner: &str,
-        method_name: &str,
-        arg_idx: usize,
-    ) -> Option<syn::Type> {
-        if let Some(items) = self.impl_blocks.get(owner)
-            && let Some(arg_ty) = Self::lookup_method_arg_type_in_items(items, method_name, arg_idx)
-        {
-            return Some(arg_ty);
-        }
-        if let Some(items) = self.consumed_impl_blocks.get(owner)
-            && let Some(arg_ty) = Self::lookup_method_arg_type_in_items(items, method_name, arg_idx)
-        {
-            return Some(arg_ty);
-        }
-        None
-    }
-
-    fn lookup_method_arg_type_in_items(
-        items: &[syn::ImplItem],
-        method_name: &str,
-        arg_idx: usize,
-    ) -> Option<syn::Type> {
-        for item in items {
-            let syn::ImplItem::Fn(method) = item else {
-                continue;
-            };
-            if method.sig.ident != method_name {
-                continue;
-            }
-            let typed_inputs: Vec<&syn::PatType> = method
-                .sig
-                .inputs
-                .iter()
-                .filter_map(|input| match input {
-                    syn::FnArg::Typed(pat_ty) => Some(pat_ty),
-                    _ => None,
-                })
-                .collect();
-            let arg_ty = typed_inputs.get(arg_idx)?;
-            return Some((*(arg_ty.ty)).clone());
-        }
-        None
-    }
-
-    fn lookup_method_arg_type_from_receiver_type(
-        &self,
-        receiver: &syn::Expr,
-        method_name: &str,
-        arg_idx: usize,
-    ) -> Option<syn::Type> {
-        let receiver_ty = self.infer_simple_expr_type(receiver)?;
-        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-        let syn::Type::Path(tp) = receiver_ty else {
-            return None;
-        };
-
-        let mut owner_candidates = Vec::new();
-        let full_owner = tp
-            .path
-            .segments
-            .iter()
-            .map(|seg| seg.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        if !full_owner.is_empty() {
-            owner_candidates.push(full_owner.clone());
-        }
-        if let Some(last) = tp.path.segments.last() {
-            owner_candidates.push(last.ident.to_string());
-        }
-        if !full_owner.is_empty() {
-            owner_candidates.push(self.scoped_type_key(&full_owner));
-        }
-        if let Some(last) = tp.path.segments.last() {
-            owner_candidates.push(self.scoped_type_key(&last.ident.to_string()));
-        }
-
-        let mut dedup = HashSet::new();
-        owner_candidates.retain(|candidate| dedup.insert(candidate.clone()));
-
-        let mut arg_ty = owner_candidates.into_iter().find_map(|owner| {
-            self.lookup_method_arg_type_for_owner_key(&owner, method_name, arg_idx)
-        })?;
-        if let Some((_, substitutions)) = self.receiver_owner_name_and_type_substitutions(receiver)
-            && !substitutions.is_empty()
-        {
-            arg_ty = self.substitute_type_params_in_type(&arg_ty, &substitutions);
-        }
-        Some(arg_ty)
-    }
-
-    fn extract_pointer_pointee_info_from_type(&self, ty: &syn::Type) -> Option<(syn::Type, bool)> {
-        let ty = self.peel_reference_paren_group_type(ty);
-        match ty {
-            syn::Type::Ptr(ptr) => Some(((*ptr.elem).clone(), ptr.mutability.is_some())),
-            syn::Type::Path(tp) => {
-                let last = tp.path.segments.last()?;
-                let owner = last.ident.to_string();
-                let is_mut_ptr = match owner.as_str() {
-                    "NonNull" | "Unique" | "MutPtr" => true,
-                    "ConstNonNull" | "Ptr" => false,
-                    // `std::add_pointer_t<T>` lowers Rust raw-pointer spellings in
-                    // some local contexts. Treat it as pointer-like for inference.
-                    "add_pointer_t" => true,
-                    _ => return None,
-                };
-                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-                    return None;
-                };
-                let pointee = args.args.iter().find_map(|arg| match arg {
-                    syn::GenericArgument::Type(t) => Some(t.clone()),
-                    _ => None,
-                })?;
-                Some((pointee, is_mut_ptr))
-            }
-            _ => None,
-        }
-    }
-
-    fn is_u8_raw_pointer_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Ptr(ptr) = ty else {
-            return false;
-        };
-        let elem = self.peel_reference_paren_group_type(&ptr.elem);
-        matches!(
-            elem,
-            syn::Type::Path(tp)
-                if tp.qself.is_none()
-                    && tp.path.segments.len() == 1
-                    && tp.path.segments[0].ident == "u8"
-        )
-    }
-
-    fn should_skip_expected_cast_for_inferred_as_ptr_u8_fallback(
-        &self,
-        expr: &syn::Expr,
-        inferred_ty: &syn::Type,
-    ) -> bool {
-        if !self.is_u8_raw_pointer_type(inferred_ty) {
-            return false;
-        }
-        let expr = self.peel_paren_group_expr(expr);
-        let syn::Expr::MethodCall(mc) = expr else {
-            return false;
-        };
-        if !mc.args.is_empty() {
-            return false;
-        }
-        let method = mc.method.to_string();
-        if method != "as_mut_ptr" {
-            return false;
-        }
-        // If pointee inference fails, the local binder currently falls back to `*mut u8`
-        // solely to keep pointer-flow analyses active. In that case, don't force a
-        // `u8*` cast in emitted initializer expression.
-        self.infer_array_element_type_from_expr(&mc.receiver)
-            .is_none()
-    }
 
 
-    fn is_manually_drop_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
-            return false;
-        };
-        if tp.path.segments.is_empty() {
-            return false;
-        }
-        let joined = tp
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        matches!(
-            joined.as_str(),
-            "ManuallyDrop"
-                | "mem::ManuallyDrop"
-                | "std::mem::ManuallyDrop"
-                | "core::mem::ManuallyDrop"
-                | "rusty::mem::ManuallyDrop"
-        )
-    }
+
+
+
+
+
+
 
     fn method_receiver_is_manually_drop_expr(&self, expr: &syn::Expr) -> bool {
         let receiver = self.peel_paren_group_expr(expr);
@@ -37836,68 +35351,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn should_emit_inferred_sum_type_for_local(
-        &self,
-        local: &syn::Local,
-        binding_name: &str,
-        inferred_binding_ty: Option<&syn::Type>,
-    ) -> bool {
-        if get_local_type(local).is_some() || inferred_binding_ty.is_none() {
-            return false;
-        }
-        if !self.reassigned_vars.contains(binding_name) {
-            return false;
-        }
 
-        let Some(init) = &local.init else {
-            return false;
-        };
-        let Some(expr) = self.extract_value_expr(&init.expr) else {
-            return false;
-        };
-
-        if expr_is_option_none_constructor(expr)
-            && inferred_binding_ty.is_some_and(|ty| self.is_option_like_syn_type(ty))
-        {
-            return true;
-        }
-
-        if self.extract_constructor_call_expr(expr).is_some() {
-            return true;
-        }
-
-        match expr {
-            syn::Expr::If(if_expr) => self.extract_constructor_pair_from_if(if_expr).is_some(),
-            syn::Expr::Match(match_expr) => self
-                .extract_constructor_pair_from_match(match_expr)
-                .is_some(),
-            _ => false,
-        }
-    }
-
-    fn should_emit_inferred_numeric_seed_type_for_local(
-        &self,
-        local: &syn::Local,
-        binding_name: &str,
-        inferred_binding_ty: Option<&syn::Type>,
-    ) -> bool {
-        if get_local_type(local).is_some() {
-            return false;
-        }
-        if !self.reassigned_vars.contains(binding_name) {
-            return false;
-        }
-        if !self.local_binding_is_mutable(local) {
-            return false;
-        }
-        let Some(init) = &local.init else {
-            return false;
-        };
-        if !Self::is_unsuffixed_int_literal_expr(self.peel_paren_group_expr(&init.expr)) {
-            return false;
-        }
-        inferred_binding_ty.is_some_and(|ty| self.type_is_concrete_hint_candidate(ty))
-    }
 
 
 
@@ -38078,171 +35532,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         })
     }
 
-    fn lookup_current_struct_method_return_type(&self, method_name: &str) -> Option<syn::Type> {
-        if let Some(scope) = self.current_struct_method_output_types.last() {
-            if let Some(ty) = scope.get(method_name) {
-                return Some(ty.clone());
-            }
-        }
-        let struct_name = self.current_struct.as_ref()?;
-        let candidates = [struct_name.clone(), self.scoped_type_key(struct_name)];
-        for key in candidates {
-            let Some(items) = self.impl_blocks.get(&key) else {
-                continue;
-            };
-            for item in items {
-                let syn::ImplItem::Fn(method) = item else {
-                    continue;
-                };
-                if method.sig.ident != method_name {
-                    continue;
-                }
-                let syn::ReturnType::Type(_, ret_ty) = &method.sig.output else {
-                    return None;
-                };
-                return Some((**ret_ty).clone());
-            }
-        }
-        None
-    }
 
-    fn extract_callable_return_type_from_type(&self, ty: &syn::Type) -> Option<syn::Type> {
-        let ty = self.peel_reference_paren_group_type(ty);
-        match ty {
-            syn::Type::Path(tp) => {
-                let seg = tp.path.segments.last()?;
-                // Function-like path surfaces can appear either as:
-                // - SafeFn<Ret(Args...)>
-                // - UnsafeFn<Ret(Args...)>
-                // - Function<Ret(Args...)>
-                // - Fn/FnMut/FnOnce(Args...) -> Ret
-                let seg_name = seg.ident.to_string();
-                if let syn::PathArguments::Parenthesized(args) = &seg.arguments {
-                    return match &args.output {
-                        syn::ReturnType::Type(_, ret_ty) => Some((**ret_ty).clone()),
-                        syn::ReturnType::Default => None,
-                    };
-                }
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if matches!(
-                        seg_name.as_str(),
-                        "SafeFn" | "UnsafeFn" | "Function" | "function"
-                    ) {
-                        let sig_ty = args.args.iter().find_map(|arg| match arg {
-                            syn::GenericArgument::Type(t) => Some(t),
-                            _ => None,
-                        })?;
-                        return self.extract_callable_return_type_from_type(sig_ty);
-                    }
-                }
-                if tp.qself.is_none()
-                    && tp.path.segments.len() == 1
-                    && matches!(seg.arguments, syn::PathArguments::None)
-                {
-                    let type_param = seg.ident.to_string();
-                    if self.is_type_param_in_scope(&type_param) {
-                        return self.lookup_callable_return_type_for_type_param(&type_param);
-                    }
-                }
-                None
-            }
-            syn::Type::TraitObject(trait_obj) => trait_obj.bounds.iter().find_map(|bound| {
-                let syn::TypeParamBound::Trait(trait_bound) = bound else {
-                    return None;
-                };
-                let seg = trait_bound.path.segments.last()?;
-                if !matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce") {
-                    return None;
-                }
-                let syn::PathArguments::Parenthesized(args) = &seg.arguments else {
-                    return None;
-                };
-                match &args.output {
-                    syn::ReturnType::Type(_, ret_ty) => Some((**ret_ty).clone()),
-                    syn::ReturnType::Default => None,
-                }
-            }),
-            syn::Type::ImplTrait(impl_trait) => impl_trait.bounds.iter().find_map(|bound| {
-                let syn::TypeParamBound::Trait(trait_bound) = bound else {
-                    return None;
-                };
-                let seg = trait_bound.path.segments.last()?;
-                if !matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce") {
-                    return None;
-                }
-                let syn::PathArguments::Parenthesized(args) = &seg.arguments else {
-                    return None;
-                };
-                match &args.output {
-                    syn::ReturnType::Type(_, ret_ty) => Some((**ret_ty).clone()),
-                    syn::ReturnType::Default => None,
-                }
-            }),
-            syn::Type::BareFn(bare_fn) => match &bare_fn.output {
-                syn::ReturnType::Type(_, ret_ty) => Some((**ret_ty).clone()),
-                syn::ReturnType::Default => None,
-            },
-            syn::Type::Paren(paren) => self.extract_callable_return_type_from_type(&paren.elem),
-            syn::Type::Group(group) => self.extract_callable_return_type_from_type(&group.elem),
-            _ => None,
-        }
-    }
 
-    fn extract_callable_param_count_from_type(&self, ty: &syn::Type) -> Option<usize> {
-        let ty = self.peel_reference_paren_group_type(ty);
-        match ty {
-            syn::Type::Path(tp) => {
-                let seg = tp.path.segments.last()?;
-                let seg_name = seg.ident.to_string();
-                if let syn::PathArguments::Parenthesized(args) = &seg.arguments {
-                    return Some(args.inputs.len());
-                }
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                    && matches!(
-                        seg_name.as_str(),
-                        "SafeFn" | "UnsafeFn" | "Function" | "function"
-                    )
-                {
-                    let sig_ty = args.args.iter().find_map(|arg| match arg {
-                        syn::GenericArgument::Type(t) => Some(t),
-                        _ => None,
-                    })?;
-                    return self.extract_callable_param_count_from_type(sig_ty);
-                }
-                None
-            }
-            syn::Type::TraitObject(trait_obj) => trait_obj.bounds.iter().find_map(|bound| {
-                let syn::TypeParamBound::Trait(trait_bound) = bound else {
-                    return None;
-                };
-                let seg = trait_bound.path.segments.last()?;
-                if !matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce") {
-                    return None;
-                }
-                let syn::PathArguments::Parenthesized(args) = &seg.arguments else {
-                    return None;
-                };
-                Some(args.inputs.len())
-            }),
-            syn::Type::ImplTrait(impl_trait) => impl_trait.bounds.iter().find_map(|bound| {
-                let syn::TypeParamBound::Trait(trait_bound) = bound else {
-                    return None;
-                };
-                let seg = trait_bound.path.segments.last()?;
-                if !matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce") {
-                    return None;
-                }
-                let syn::PathArguments::Parenthesized(args) = &seg.arguments else {
-                    return None;
-                };
-                Some(args.inputs.len())
-            }),
-            syn::Type::BareFn(bare_fn) => Some(bare_fn.inputs.len()),
-            syn::Type::Paren(paren) => self.extract_callable_param_count_from_type(&paren.elem),
-            syn::Type::Group(group) => self.extract_callable_param_count_from_type(&group.elem),
-            _ => None,
-        }
-    }
 
 
 
@@ -38345,48 +35636,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.emit_expr_maybe_move(arg)
     }
 
-    fn extract_constructor_pair_from_if<'a>(
-        &self,
-        if_expr: &'a syn::ExprIf,
-    ) -> Option<(String, &'a syn::Expr, String, &'a syn::Expr)> {
-        let then_expr = self.extract_single_expr_from_block(&if_expr.then_branch)?;
-        let (_, else_expr) = if_expr.else_branch.as_ref()?;
-        let else_expr = self.extract_value_expr(else_expr)?;
-        let (lhs_name, lhs_arg) = self.extract_constructor_call_expr(then_expr)?;
-        let (rhs_name, rhs_arg) = self.extract_constructor_call_expr(else_expr)?;
-        Some((lhs_name, lhs_arg, rhs_name, rhs_arg))
-    }
 
-    fn extract_constructor_pair_from_match<'a>(
-        &self,
-        match_expr: &'a syn::ExprMatch,
-    ) -> Option<(String, &'a syn::Expr, String, &'a syn::Expr)> {
-        let mut left: Option<(String, &'a syn::Expr)> = None;
-        let mut right: Option<(String, &'a syn::Expr)> = None;
-
-        for arm in &match_expr.arms {
-            let body_expr = self.extract_value_expr(&arm.body)?;
-            if let Some((ctor_name, ctor_arg)) = self.extract_constructor_call_expr(body_expr) {
-                match ctor_name.as_str() {
-                    "Left" | "Ok" => {
-                        if left.is_none() {
-                            left = Some((ctor_name, ctor_arg));
-                        }
-                    }
-                    "Right" | "Err" => {
-                        if right.is_none() {
-                            right = Some((ctor_name, ctor_arg));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let (left_name, left_arg) = left?;
-        let (right_name, right_arg) = right?;
-        Some((left_name, left_arg, right_name, right_arg))
-    }
 
     fn insert_constructor_pair_hints(
         &self,
@@ -38427,60 +35677,11 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn extract_value_expr<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
-        match expr {
-            syn::Expr::Group(g) => self.extract_value_expr(&g.expr),
-            syn::Expr::Paren(p) => self.extract_value_expr(&p.expr),
-            syn::Expr::Block(block_expr) => self.extract_single_expr_from_block(&block_expr.block),
-            _ => Some(expr),
-        }
-    }
 
-    fn extract_match_arm_value_expr<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
-        match expr {
-            syn::Expr::Group(g) => self.extract_match_arm_value_expr(&g.expr),
-            syn::Expr::Paren(p) => self.extract_match_arm_value_expr(&p.expr),
-            syn::Expr::Block(block_expr) => self
-                .extract_single_expr_from_block(&block_expr.block)
-                .or_else(|| self.extract_tail_expr_from_block(&block_expr.block)),
-            _ => Some(expr),
-        }
-    }
 
-    fn extract_single_expr_from_block<'a>(&self, block: &'a syn::Block) -> Option<&'a syn::Expr> {
-        if block.stmts.len() != 1 {
-            return None;
-        }
-        match &block.stmts[0] {
-            syn::Stmt::Expr(expr, None) => Some(expr),
-            _ => None,
-        }
-    }
 
-    fn extract_tail_expr_from_block<'a>(&self, block: &'a syn::Block) -> Option<&'a syn::Expr> {
-        match block.stmts.last()? {
-            syn::Stmt::Expr(expr, None) => Some(expr),
-            _ => None,
-        }
-    }
 
-    fn extract_single_value_expr<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
-        match expr {
-            syn::Expr::Block(block) => self.extract_single_expr_from_block(&block.block),
-            _ => self.extract_value_expr(expr),
-        }
-    }
 
-    fn extract_single_value_expr_deep<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
-        match expr {
-            syn::Expr::Group(group) => self.extract_single_value_expr_deep(&group.expr),
-            syn::Expr::Paren(paren) => self.extract_single_value_expr_deep(&paren.expr),
-            syn::Expr::Block(block) => self
-                .extract_single_expr_from_block(&block.block)
-                .and_then(|inner| self.extract_single_value_expr_deep(inner)),
-            _ => Some(expr),
-        }
-    }
 
 
 
@@ -38816,46 +36017,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn extract_option_some_call_arg<'a>(&self, expr: &'a syn::Expr) -> Option<&'a syn::Expr> {
-        let expr = self.peel_paren_group_expr(expr);
-        let syn::Expr::Call(call) = expr else {
-            return None;
-        };
-        if call.args.len() != 1 {
-            return None;
-        }
-        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
-            return None;
-        };
-        let joined = path_expr
-            .path
-            .segments
-            .iter()
-            .map(|seg| seg.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        if matches!(
-            joined.as_str(),
-            "Some" | "Option::Some" | "core::option::Option::Some"
-        ) {
-            return call.args.first();
-        }
-        None
-    }
 
-    fn is_option_like_syn_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
-            return false;
-        };
-        let Some(last) = tp.path.segments.last() else {
-            return false;
-        };
-        let last_name = last.ident.to_string();
-        last_name == "Option"
-            || last_name == "optional"
-            || self.option_type_aliases.contains(&last_name)
-    }
 
     fn merge_if_tuple_elem_types(
         &self,
@@ -38988,34 +36150,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             || cpp.contains("io::imp::Result<")
     }
 
-    fn extract_constructor_call_expr<'a>(
-        &self,
-        expr: &'a syn::Expr,
-    ) -> Option<(String, &'a syn::Expr)> {
-        let expr = self.extract_value_expr(expr)?;
-        let call = match expr {
-            syn::Expr::Call(call) => call,
-            _ => return None,
-        };
-        if call.args.len() != 1 {
-            return None;
-        }
-        let func_path = match call.func.as_ref() {
-            syn::Expr::Path(path) => &path.path,
-            _ => return None,
-        };
-        let ctor_name = if func_path.segments.len() == 1 {
-            func_path.segments[0].ident.to_string()
-        } else if let Some(ctor) = self.variant_ctor_name_from_path(func_path) {
-            ctor
-        } else {
-            return None;
-        };
-        if !matches!(ctor_name.as_str(), "Left" | "Right" | "Ok" | "Err") {
-            return None;
-        }
-        Some((ctor_name, &call.args[0]))
-    }
 
 
 
@@ -39075,54 +36209,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         format!("{}{{{}}}", expected_cpp_ty, emitted)
     }
 
-    /// Look up the nearest in-scope local binding type for a variable name.
-    fn lookup_local_binding_type(&self, name: &str) -> Option<syn::Type> {
-        let skip_current_scope_binding = self
-            .in_progress_local_initializers
-            .iter()
-            .rev()
-            .any(|current| current == name);
-        for (scope_idx, scope) in self.local_bindings.iter().rev().enumerate() {
-            if let Some(maybe_ty) = scope.get(name) {
-                if skip_current_scope_binding && scope_idx == 0 {
-                    if let Some(previous_ty) = self
-                        .local_shadowed_binding_types
-                        .last()
-                        .and_then(|shadow_scope| shadow_scope.get(name))
-                        .and_then(|stack| stack.last())
-                        .cloned()
-                    {
-                        return previous_ty;
-                    }
-                    continue;
-                }
-                return maybe_ty.clone();
-            }
-        }
-        for scope in self.param_bindings.iter().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some(ty.clone());
-            }
-        }
-        None
-    }
 
-    fn lookup_item_const_type(&self, name: &str) -> Option<syn::Type> {
-        for depth in (1..=self.module_stack.len()).rev() {
-            let scoped = format!("{}::{}", self.module_stack[..depth].join("::"), name);
-            if let Some(ty) = self.item_const_types.get(&scoped) {
-                return Some(ty.clone());
-            }
-        }
-        self.item_const_types.get(name).cloned()
-    }
 
-    fn is_local_binding_in_scope(&self, name: &str) -> bool {
-        self.local_bindings
-            .iter()
-            .rev()
-            .any(|scope| scope.contains_key(name))
-    }
 
     fn push_in_progress_local_initializer(&mut self, name: &str) {
         self.in_progress_local_initializers.push(name.to_string());
@@ -39132,239 +36220,12 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.in_progress_local_initializers.pop();
     }
 
-    fn lookup_field_type_for_expr_base(
-        &self,
-        base: &syn::Expr,
-        field_name: &str,
-    ) -> Option<syn::Type> {
-        match base {
-            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
-                let base_name = path.path.segments[0].ident.to_string();
-                if matches!(base_name.as_str(), "self" | "self_") {
-                    if let Some(struct_name) = &self.current_struct
-                        && let Some(field_ty) =
-                            self.lookup_struct_field_type(struct_name, field_name)
-                    {
-                        return Some(field_ty);
-                    }
-                    if let Some(self_ty) = self
-                        .lookup_local_binding_type(&base_name)
-                        .or_else(|| self.lookup_local_binding_type("self"))
-                        .or_else(|| self.lookup_local_binding_type("self_"))
-                        && let Some(field_ty) =
-                            self.lookup_field_type_from_type(&self_ty, field_name)
-                    {
-                        return Some(field_ty);
-                    }
-                    return None;
-                }
-                let base_ty = self.lookup_local_binding_type(&base_name)?;
-                self.lookup_field_type_from_type(&base_ty, field_name)
-            }
-            syn::Expr::Paren(p) => self.lookup_field_type_for_expr_base(&p.expr, field_name),
-            syn::Expr::Group(g) => self.lookup_field_type_for_expr_base(&g.expr, field_name),
-            syn::Expr::Reference(r) => self.lookup_field_type_for_expr_base(&r.expr, field_name),
-            syn::Expr::Field(field_expr) => {
-                // For chained field access like `self.comparators.iter()` where the base
-                // is itself a field (`self.comparators`), first resolve the base field,
-                // then look up the target field within that type.
-                let base_field_name = match &field_expr.member {
-                    syn::Member::Named(ident) => ident.to_string(),
-                    syn::Member::Unnamed(_) => return None,
-                };
-                if let Some(base_field_ty) =
-                    self.lookup_field_type_for_expr_base(&field_expr.base, &base_field_name)
-                {
-                    return self.lookup_field_type_from_type(&base_field_ty, field_name);
-                }
-                None
-            }
-            _ => None,
-        }
-    }
 
-    fn lookup_field_type_from_type(&self, ty: &syn::Type, field_name: &str) -> Option<syn::Type> {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
-            return None;
-        };
-        let struct_name = tp.path.segments.last()?.ident.to_string();
-        let struct_name = if struct_name == "Self" {
-            self.current_struct.clone()?
-        } else {
-            struct_name
-        };
-        self.lookup_struct_field_type(&struct_name, field_name)
-    }
 
-    fn lookup_struct_field_type(&self, struct_name: &str, field_name: &str) -> Option<syn::Type> {
-        let struct_name_tail = struct_name.rsplit("::").next().unwrap_or(struct_name);
-        let scoped = self.scoped_type_key(struct_name);
-        self.struct_field_types
-            .get(&scoped)
-            .and_then(|fields| fields.get(field_name).cloned())
-            .or_else(|| {
-                if struct_name.contains("::") {
-                    return None;
-                }
-                let mut qualified_tail_matches = self
-                    .struct_field_types
-                    .iter()
-                    .filter_map(|(key, fields)| {
-                        (key.contains("::")
-                            && key
-                                .rsplit("::")
-                                .next()
-                                .is_some_and(|tail| tail == struct_name_tail))
-                        .then_some(fields)
-                    })
-                    .collect::<Vec<_>>();
-                qualified_tail_matches.dedup_by(|a, b| std::ptr::eq(*a, *b));
-                if qualified_tail_matches.len() == 1 {
-                    qualified_tail_matches[0].get(field_name).cloned()
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                self.struct_field_types
-                    .get(struct_name)
-                    .and_then(|fields| fields.get(field_name).cloned())
-            })
-            .or_else(|| {
-                let mut tail_matches = self
-                    .struct_field_types
-                    .iter()
-                    .filter_map(|(key, fields)| {
-                        key.rsplit("::")
-                            .next()
-                            .is_some_and(|tail| tail == struct_name_tail)
-                            .then_some(fields)
-                    })
-                    .collect::<Vec<_>>();
-                tail_matches.dedup_by(|a, b| std::ptr::eq(*a, *b));
-                if tail_matches.len() == 1 {
-                    tail_matches[0].get(field_name).cloned()
-                } else {
-                    None
-                }
-            })
-    }
 
-    fn lookup_struct_field_cpp_name(&self, struct_name: &str, field_name: &str) -> Option<String> {
-        let struct_name_tail = struct_name.rsplit("::").next().unwrap_or(struct_name);
-        let scoped = self.scoped_type_key(struct_name);
-        self.struct_field_cpp_names
-            .get(&scoped)
-            .and_then(|fields| fields.get(field_name).cloned())
-            .or_else(|| {
-                if struct_name.contains("::") {
-                    return None;
-                }
-                let mut qualified_tail_matches = self
-                    .struct_field_cpp_names
-                    .iter()
-                    .filter_map(|(key, fields)| {
-                        (key.contains("::")
-                            && key
-                                .rsplit("::")
-                                .next()
-                                .is_some_and(|tail| tail == struct_name_tail))
-                        .then_some(fields)
-                    })
-                    .collect::<Vec<_>>();
-                qualified_tail_matches.dedup_by(|a, b| std::ptr::eq(*a, *b));
-                if qualified_tail_matches.len() == 1 {
-                    qualified_tail_matches[0].get(field_name).cloned()
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                self.struct_field_cpp_names
-                    .get(struct_name)
-                    .and_then(|fields| fields.get(field_name).cloned())
-            })
-            .or_else(|| {
-                let mut tail_matches = self
-                    .struct_field_cpp_names
-                    .iter()
-                    .filter_map(|(key, fields)| {
-                        key.rsplit("::")
-                            .next()
-                            .is_some_and(|tail| tail == struct_name_tail)
-                            .then_some(fields)
-                    })
-                    .collect::<Vec<_>>();
-                tail_matches.dedup_by(|a, b| std::ptr::eq(*a, *b));
-                if tail_matches.len() == 1 {
-                    tail_matches[0].get(field_name).cloned()
-                } else {
-                    None
-                }
-            })
-    }
 
-    fn lookup_field_cpp_name_from_type(&self, ty: &syn::Type, field_name: &str) -> Option<String> {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
-            return None;
-        };
-        let struct_name = tp.path.segments.last()?.ident.to_string();
-        let struct_name = if struct_name == "Self" {
-            self.current_struct.clone()?
-        } else {
-            struct_name
-        };
-        self.lookup_struct_field_cpp_name(&struct_name, field_name)
-    }
 
-    fn lookup_field_cpp_name_for_expr_base(
-        &self,
-        base: &syn::Expr,
-        field_name: &str,
-    ) -> Option<String> {
-        match base {
-            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
-                let base_name = path.path.segments[0].ident.to_string();
-                if base_name == "self" {
-                    if let Some(struct_name) = &self.current_struct {
-                        return self.lookup_struct_field_cpp_name(struct_name, field_name);
-                    }
-                    return None;
-                }
-                let base_ty = self.lookup_local_binding_type(&base_name)?;
-                self.lookup_field_cpp_name_from_type(&base_ty, field_name)
-            }
-            syn::Expr::Paren(p) => self.lookup_field_cpp_name_for_expr_base(&p.expr, field_name),
-            syn::Expr::Group(g) => self.lookup_field_cpp_name_for_expr_base(&g.expr, field_name),
-            syn::Expr::Reference(r) => {
-                self.lookup_field_cpp_name_for_expr_base(&r.expr, field_name)
-            }
-            syn::Expr::Field(field_expr) => {
-                let base_field_name = match &field_expr.member {
-                    syn::Member::Named(ident) => ident.to_string(),
-                    syn::Member::Unnamed(_) => return None,
-                };
-                if let Some(base_field_ty) =
-                    self.lookup_field_type_for_expr_base(&field_expr.base, &base_field_name)
-                {
-                    return self.lookup_field_cpp_name_from_type(&base_field_ty, field_name);
-                }
-                None
-            }
-            _ => self
-                .infer_simple_expr_type(base)
-                .and_then(|ty| self.lookup_field_cpp_name_from_type(&ty, field_name)),
-        }
-    }
 
-    fn lookup_struct_field_order(&self, struct_name: &str) -> Option<&Vec<String>> {
-        self.struct_field_order.get(struct_name).or_else(|| {
-            let scoped = self.scoped_type_key(struct_name);
-            self.struct_field_order.get(&scoped)
-        })
-    }
 
     fn push_param_bindings(
         &mut self,
@@ -39501,60 +36362,21 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.deref_mut_ref_fallback_scopes.pop();
     }
 
-    fn should_fallback_to_deref_ref_in_deref_mut_scope(&self) -> bool {
-        self.deref_mut_ref_fallback_scopes
-            .last()
-            .copied()
-            .unwrap_or(false)
-    }
 
     fn push_iterator_map_closure_param_scope(&mut self, names: HashSet<String>) {
         self.iterator_map_closure_param_scopes.push(names);
     }
 
-    fn should_collapse_untyped_iterator_map_param_deref(&self, name: &str) -> bool {
-        if !self
-            .iterator_map_closure_param_scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-        {
-            return false;
-        }
-        self.lookup_local_binding_type(name).is_none()
-    }
 
     fn push_untyped_closure_param_scope(&mut self, names: HashSet<String>) {
         self.untyped_closure_param_scopes.push(names);
     }
 
-    fn should_lower_untyped_closure_param_deref(&self, name: &str) -> bool {
-        if !self
-            .untyped_closure_param_scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-        {
-            return false;
-        }
-        self.lookup_local_binding_type(name).is_none()
-    }
 
     fn push_char_predicate_closure_param_scope(&mut self, names: HashSet<String>) {
         self.char_predicate_closure_param_scopes.push(names);
     }
 
-    fn should_lower_char_predicate_on_untyped_closure_param(&self, name: &str) -> bool {
-        if !self
-            .char_predicate_closure_param_scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-        {
-            return false;
-        }
-        self.lookup_local_binding_type(name).is_none()
-    }
 
     fn push_force_typed_option_ctor_scope(&mut self, enabled: bool) {
         self.force_typed_option_ctor_scopes.push(enabled);
@@ -39564,12 +36386,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.force_typed_option_ctor_scopes.pop();
     }
 
-    fn should_force_typed_option_ctor_in_current_scope(&self) -> bool {
-        self.force_typed_option_ctor_scopes
-            .last()
-            .copied()
-            .unwrap_or(false)
-    }
 
 
 
@@ -39583,70 +36399,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.pattern_ref_bindings.pop();
     }
 
-    fn is_pattern_ref_binding_in_scope(&self, name: &str) -> bool {
-        self.pattern_ref_bindings
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-    }
 
-    fn is_expr_reference_like(&self, expr: &syn::Expr) -> bool {
-        match expr {
-            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
-                let name = path.path.segments[0].ident.to_string();
-                if name == "self" {
-                    return self.current_self_receiver_is_reference();
-                }
-                if self.is_pattern_ref_binding_in_scope(&name) {
-                    return true;
-                }
-                if self.is_local_reference_binding_in_scope(&name) {
-                    return true;
-                }
-                self.lookup_local_binding_type(&name)
-                    .is_some_and(|ty| self.type_is_reference_like(&ty))
-            }
-            syn::Expr::Paren(p) => self.is_expr_reference_like(&p.expr),
-            syn::Expr::Group(g) => self.is_expr_reference_like(&g.expr),
-            syn::Expr::Reference(_) => true,
-            syn::Expr::Field(field_expr) => {
-                if self
-                    .infer_simple_expr_type(expr)
-                    .as_ref()
-                    .is_some_and(|ty| self.type_is_reference_like(ty))
-                {
-                    return true;
-                }
-                let member_name = match &field_expr.member {
-                    syn::Member::Named(ident) => ident.to_string(),
-                    syn::Member::Unnamed(index) => format!("_{}", index.index),
-                };
-                self.lookup_field_type_for_expr_base(&field_expr.base, &member_name)
-                    .is_some_and(|ty| {
-                        matches!(
-                            self.peel_reference_paren_group_type(&ty),
-                            syn::Type::Reference(_)
-                        )
-                    })
-            }
-            syn::Expr::MethodCall(mc) => {
-                self.infer_method_call_result_type_for_local(mc)
-                    .as_ref()
-                    .is_some_and(|ty| self.type_is_reference_like(ty))
-                    || self.method_call_is_reference_like_by_shape(mc)
-            }
-            syn::Expr::Call(call) => {
-                self.lookup_associated_call_return_type(call)
-                    .as_ref()
-                    .is_some_and(|ty| self.type_is_reference_like(ty))
-                    || self
-                        .lookup_function_return_type(call.func.as_ref())
-                        .is_some_and(|ty| self.type_is_reference_like(ty))
-                    || self.associated_call_is_reference_like_by_shape(call)
-            }
-            _ => false,
-        }
-    }
 
     fn method_call_is_reference_like_by_shape(&self, mc: &syn::ExprMethodCall) -> bool {
         let method = mc.method.to_string();
@@ -39808,43 +36561,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         )
     }
 
-    fn is_self_reference_field_access(&self, expr: &syn::Expr) -> bool {
-        let expr = self.peel_paren_group_expr(expr);
-        let syn::Expr::Field(field_expr) = expr else {
-            return false;
-        };
-        let syn::Expr::Path(base_path) = self.peel_paren_group_expr(&field_expr.base) else {
-            return false;
-        };
-        if base_path.path.segments.len() != 1 || base_path.path.segments[0].ident != "self" {
-            return false;
-        }
-        let field_name = match &field_expr.member {
-            syn::Member::Named(ident) => ident.to_string(),
-            syn::Member::Unnamed(idx) => format!("_{}", idx.index),
-        };
-        if let Some(struct_name) = self.current_struct.as_ref()
-            && (self
-                .struct_reference_fields
-                .get(struct_name)
-                .is_some_and(|fields| fields.contains(&field_name))
-                || self
-                    .struct_reference_fields
-                    .get(&self.scoped_type_key(struct_name))
-                    .is_some_and(|fields| fields.contains(&field_name)))
-        {
-            return true;
-        }
-        self.lookup_local_binding_type("self")
-            .or_else(|| self.lookup_local_binding_type("self_"))
-            .and_then(|self_ty| self.lookup_field_type_from_type(&self_ty, &field_name))
-            .is_some_and(|ty| {
-                matches!(
-                    self.peel_reference_paren_group_type(&ty),
-                    syn::Type::Reference(_)
-                )
-            })
-    }
 
     fn struct_field_is_reference(&self, struct_name: &str, field_name: &str) -> bool {
         self.struct_reference_fields
@@ -39886,63 +36602,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         })
     }
 
-    /// Detect whether a Rust expression is diverging (never returns), e.g. calls
-    /// to `panic!`, `unreachable!`, `unreachable_display`, `abort`, etc.
-    /// Used to avoid emitting `return <void-expr>` in match arm bodies.
-    fn is_expr_diverging(&self, expr: &syn::Expr) -> bool {
-        match expr {
-            syn::Expr::Return(_) | syn::Expr::Break(_) | syn::Expr::Continue(_) => true,
-            syn::Expr::Call(call) => {
-                let path_str = self.expr_path_string(&call.func);
-                Self::is_diverging_function_path(&path_str)
-            }
-            syn::Expr::Block(eb) => {
-                // Block is diverging if its last statement/expression is diverging
-                if let Some(syn::Stmt::Expr(e, _)) = eb.block.stmts.last() {
-                    self.is_expr_diverging(e)
-                } else {
-                    false
-                }
-            }
-            syn::Expr::Unsafe(unsafe_expr) => unsafe_expr.block.stmts.last().is_some_and(
-                |stmt| matches!(stmt, syn::Stmt::Expr(e, _) if self.is_expr_diverging(e)),
-            ),
-            syn::Expr::If(if_expr) => {
-                let then_diverges = self.is_expr_diverging(&syn::Expr::Block(syn::ExprBlock {
-                    attrs: Vec::new(),
-                    label: None,
-                    block: if_expr.then_branch.clone(),
-                }));
-                let else_diverges = if let Some((_, else_expr)) = &if_expr.else_branch {
-                    self.is_expr_diverging(else_expr)
-                } else {
-                    false
-                };
-                then_diverges && else_diverges
-            }
-            syn::Expr::Match(match_expr) => {
-                !match_expr.arms.is_empty()
-                    && match_expr
-                        .arms
-                        .iter()
-                        .all(|arm| self.is_expr_diverging(&arm.body))
-            }
-            syn::Expr::Macro(m) => {
-                let macro_name = m
-                    .mac
-                    .path
-                    .segments
-                    .last()
-                    .map(|s| s.ident.to_string())
-                    .unwrap_or_default();
-                matches!(
-                    macro_name.as_str(),
-                    "panic" | "unreachable" | "unimplemented" | "todo" | "abort"
-                )
-            }
-            _ => false,
-        }
-    }
 
     fn expr_path_string(&self, expr: &syn::Expr) -> String {
         match expr {
@@ -39957,154 +36616,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_diverging_function_path(path: &str) -> bool {
-        matches!(
-            path,
-            "panic"
-                | "panic_fmt"
-                | "unreachable"
-                | "unreachable_display"
-                | "abort"
-                | "std::process::abort"
-                | "std::abort"
-                | "core::panicking::panic"
-                | "core::panicking::panic_fmt"
-                | "core::panicking::unreachable_display"
-                | "core::intrinsics::unreachable"
-                | "core::hint::unreachable_unchecked"
-                | "std::hint::unreachable_unchecked"
-                | "alloc::alloc::handle_alloc_error"
-                | "alloc::handle_alloc_error"
-                | "core::alloc::handle_alloc_error"
-                | "std::alloc::handle_alloc_error"
-                | "panicking::panic"
-                | "panicking::panic_fmt"
-                | "panicking::unreachable_display"
-                | "intrinsics::unreachable"
-                | "hint::unreachable_unchecked"
-                | "unreachable_unchecked"
-        )
-    }
 
-    fn is_expr_raw_pointer_like(&self, expr: &syn::Expr) -> bool {
-        let peeled = self.peel_paren_group_expr(expr);
-        if self
-            .infer_simple_expr_type(peeled)
-            .is_some_and(|ty| self.is_type_raw_pointer_like(&ty))
-        {
-            return true;
-        }
 
-        match peeled {
-            syn::Expr::RawAddr(_) => true,
-            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
-                let name = path.path.segments[0].ident.to_string();
-                self.lookup_local_binding_type(&name)
-                    .is_some_and(|ty| self.is_type_raw_pointer_like(&ty))
-            }
-            syn::Expr::Cast(cast) => matches!(cast.ty.as_ref(), syn::Type::Ptr(_)),
-            syn::Expr::MethodCall(mc) => {
-                let method = mc.method.to_string();
-                if matches!(method.as_str(), "as_ptr" | "as_mut_ptr") {
-                    return true;
-                }
-                if method == "get" && mc.args.is_empty() {
-                    if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
-                        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-                        if let syn::Type::Path(tp) = receiver_ty
-                            && let Some(last) = tp.path.segments.last()
-                            && last.ident == "UnsafeCell"
-                        {
-                            return true;
-                        }
-                    }
-                }
-                if method == "load" && !mc.args.is_empty() {
-                    if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
-                        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-                        if let syn::Type::Path(tp) = receiver_ty
-                            && let Some(last) = tp.path.segments.last()
-                            && last.ident == "AtomicPtr"
-                        {
-                            return true;
-                        }
-                    }
-                }
-                if matches!(
-                    method.as_str(),
-                    "add" | "offset" | "sub" | "wrapping_add" | "wrapping_sub" | "wrapping_offset"
-                ) {
-                    return self.is_expr_raw_pointer_like(&mc.receiver);
-                }
-                false
-            }
-            syn::Expr::Call(call) => {
-                let syn::Expr::Path(path) = call.func.as_ref() else {
-                    return false;
-                };
-                Self::is_ptr_add_or_offset_call_path(&path.path)
-            }
-            _ => false,
-        }
-    }
 
-    fn is_type_raw_pointer_like(&self, ty: &syn::Type) -> bool {
-        if matches!(ty, syn::Type::Ptr(_)) {
-            return true;
-        }
-        let mapped = self.map_type(ty);
-        let canonical = self.canonical_into_target_cpp_type(&mapped);
-        let canonical = canonical.trim();
-        canonical.starts_with("std::add_pointer_t<") || canonical.ends_with('*')
-    }
-
-    fn is_ptr_add_or_offset_call_path(path: &syn::Path) -> bool {
-        let joined = path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        matches!(
-            joined.as_str(),
-            "rusty::ptr::add"
-                | "rusty::ptr::offset"
-                | "rusty::ptr::sub"
-                | "ptr::add"
-                | "ptr::offset"
-                | "ptr::sub"
-                | "core::ptr::add"
-                | "std::ptr::add"
-                | "core::ptr::offset"
-                | "std::ptr::offset"
-                | "core::ptr::sub"
-                | "std::ptr::sub"
-                | "core::ptr::mut_ptr::add"
-                | "std::ptr::mut_ptr::add"
-                | "ptr::mut_ptr::add"
-                | "core::ptr::mut_ptr::offset"
-                | "std::ptr::mut_ptr::offset"
-                | "ptr::mut_ptr::offset"
-                | "core::ptr::mut_ptr::wrapping_offset"
-                | "std::ptr::mut_ptr::wrapping_offset"
-                | "ptr::mut_ptr::wrapping_offset"
-                | "core::ptr::mut_ptr::sub"
-                | "std::ptr::mut_ptr::sub"
-                | "ptr::mut_ptr::sub"
-                | "core::ptr::const_ptr::add"
-                | "std::ptr::const_ptr::add"
-                | "ptr::const_ptr::add"
-                | "core::ptr::const_ptr::offset"
-                | "std::ptr::const_ptr::offset"
-                | "ptr::const_ptr::offset"
-                | "core::ptr::const_ptr::wrapping_offset"
-                | "std::ptr::const_ptr::wrapping_offset"
-                | "ptr::const_ptr::wrapping_offset"
-                | "core::ptr::const_ptr::sub"
-                | "std::ptr::const_ptr::sub"
-                | "ptr::const_ptr::sub"
-        )
-    }
 
     fn emitted_pointer_add_or_offset_call(receiver_cpp: &str) -> bool {
         let receiver_cpp = receiver_cpp.trim();
@@ -40149,22 +36663,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         )
     }
 
-    fn extract_add_pointer_inner_cpp_type(ty: &str) -> Option<String> {
-        let trimmed = ty.trim();
-        let prefix = "std::add_pointer_t<";
-        if !trimmed.starts_with(prefix) || !trimmed.ends_with('>') {
-            return None;
-        }
-        let inner = trimmed
-            .strip_prefix(prefix)?
-            .strip_suffix('>')?
-            .trim()
-            .to_string();
-        if inner.is_empty() {
-            return None;
-        }
-        Some(inner)
-    }
 
     fn pointer_const_cast_target_cpp_type(target_ptr_cpp: &str) -> Option<String> {
         if let Some(inner) = Self::extract_add_pointer_inner_cpp_type(target_ptr_cpp) {
@@ -40180,152 +36678,13 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(format!("const {}*", pointee))
     }
 
-    fn is_known_integer_like_type(&self, ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 => {
-                let name = tp.path.segments[0].ident.to_string();
-                matches!(
-                    name.as_str(),
-                    "i8" | "i16"
-                        | "i32"
-                        | "i64"
-                        | "i128"
-                        | "isize"
-                        | "u8"
-                        | "u16"
-                        | "u32"
-                        | "u64"
-                        | "u128"
-                        | "usize"
-                ) || self.numeric_type_aliases.keys().any(|candidate| {
-                    candidate == &name || candidate.ends_with(&format!("::{}", name))
-                })
-            }
-            _ => {
-                let mapped = self.map_type(ty);
-                let normalized = mapped
-                    .trim_start_matches("const ")
-                    .trim_end_matches('&')
-                    .trim_end_matches('*')
-                    .trim();
-                is_numeric_cpp_scalar_type(normalized)
-            }
-        }
-    }
 
-    fn should_lower_saturating_method_call(&self, receiver: &syn::Expr) -> bool {
-        let peeled = self.peel_paren_group_expr(receiver);
-        match self.infer_simple_expr_type(peeled) {
-            Some(ty) => self.is_known_integer_like_type(&ty),
-            // Pattern-bound temporaries in match lowering often have no explicit
-            // local binding type. Rust saturating arithmetic methods are numeric
-            // intrinsics, so unknown receiver type defaults to helper lowering.
-            None => true,
-        }
-    }
 
-    fn should_lower_integer_rotate_method_call(&self, receiver: &syn::Expr) -> bool {
-        let peeled = self.peel_paren_group_expr(receiver);
-        if let Some(ty) = self.infer_simple_expr_type(peeled) {
-            return self.is_known_integer_like_type(&ty);
-        }
-        matches!(
-            peeled,
-            syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Int(_),
-                ..
-            })
-        )
-    }
 
-    fn should_lower_integer_intrinsic_method_call(&self, receiver: &syn::Expr) -> bool {
-        let peeled = self.peel_paren_group_expr(receiver);
-        if let Some(ty) = self.infer_simple_expr_type(peeled) {
-            return self.is_known_integer_like_type(&ty);
-        }
-        if let syn::Expr::Path(path) = peeled
-            && path.path.segments.len() == 1
-        {
-            let name = path.path.segments[0].ident.to_string();
-            if self.lookup_local_binding_cpp_name(&name).is_some()
-                || self.lookup_local_binding_type(&name).is_some()
-                || self.lookup_local_placeholder_type_hint(&name).is_some()
-            {
-                return true;
-            }
-        }
-        matches!(
-            peeled,
-            syn::Expr::Binary(_)
-                | syn::Expr::Cast(_)
-                | syn::Expr::Paren(_)
-                | syn::Expr::Group(_)
-                | syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Int(_),
-                    ..
-                })
-        )
-    }
 
-    fn is_known_scalar_like_type(&self, ty: &syn::Type) -> bool {
-        if self.is_known_integer_like_type(ty) {
-            return true;
-        }
-        match ty {
-            syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 => {
-                let name = tp.path.segments[0].ident.to_string();
-                matches!(name.as_str(), "f32" | "f64" | "bool" | "char")
-            }
-            _ => {
-                let canonical = self.canonical_into_target_cpp_type(&self.map_type(ty));
-                Self::is_scalar_into_target_cpp_type(&canonical)
-            }
-        }
-    }
 
-    fn is_known_float_like_type(&self, ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 => {
-                let name = tp.path.segments[0].ident.to_string();
-                if matches!(name.as_str(), "f32" | "f64" | "float" | "double") {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-        let canonical = self.canonical_into_target_cpp_type(&self.map_type(ty));
-        matches!(canonical.as_str(), "float" | "double" | "long double")
-    }
 
-    fn is_known_string_like_type(&self, ty: &syn::Type) -> bool {
-        let canonical = self.canonical_into_target_cpp_type(&self.map_type(ty));
-        matches!(
-            canonical.as_str(),
-            "rusty::String" | "std::string" | "std::string_view" | "char*"
-        )
-    }
 
-    fn is_known_cow_like_type(&self, ty: &syn::Type) -> bool {
-        let mut current = self.peel_reference_paren_group_type(ty).clone();
-        for _ in 0..4 {
-            let canonical = self.canonical_into_target_cpp_type(&self.map_type(&current));
-            let compact = canonical.replace(' ', "");
-            if compact == "rusty::Cow"
-                || compact.contains("std::variant<rusty::Cow_Borrowed,rusty::Cow_Owned>")
-                || compact.contains("std::variant<Cow_Borrowed,Cow_Owned>")
-            {
-                return true;
-            }
-            let Some(next) = self.resolve_type_alias_once(&current) else {
-                break;
-            };
-            if next == current {
-                break;
-            }
-            current = next;
-        }
-        false
-    }
 
     fn owner_name_is_known_cow_like(&self, owner_name: &str) -> bool {
         if owner_name == "Cow" {
@@ -40455,30 +36814,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             })
     }
 
-    fn is_known_alloc_layout_type(&self, ty: &syn::Type) -> bool {
-        let canonical = self.canonical_into_target_cpp_type(&self.map_type(ty));
-        if canonical == "rusty::alloc::Layout" {
-            return true;
-        }
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
-            return false;
-        };
-        let segs: Vec<String> = tp
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect();
-        match segs.as_slice() {
-            [single] => single == "Layout",
-            [root, module, leaf, ..] => {
-                matches!(root.as_str(), "std" | "core") && module == "alloc" && leaf == "Layout"
-            }
-            [root, leaf] => root == "alloc" && leaf == "Layout",
-            _ => false,
-        }
-    }
 
     fn expected_type_is_string_view(&self, expected_ty: Option<&syn::Type>) -> bool {
         let Some(expected_ty) = expected_ty else {
@@ -40521,23 +36856,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_slice_view_constructor_path(path: &syn::Path) -> bool {
-        let joined = path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        matches!(
-            joined.as_str(),
-            "slice::from_raw_parts"
-                | "core::slice::from_raw_parts"
-                | "std::slice::from_raw_parts"
-                | "slice::from_raw_parts_mut"
-                | "core::slice::from_raw_parts_mut"
-                | "std::slice::from_raw_parts_mut"
-        )
-    }
 
     fn expr_lowers_to_slice_or_span_view(&self, expr: &syn::Expr) -> bool {
         let expr = self.peel_paren_group_expr(expr);
@@ -40591,263 +36909,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         })
     }
 
-    fn should_lower_slice_deref_method_call(&self, receiver: &syn::Expr) -> bool {
-        if self.expr_lowers_to_slice_or_span_view(receiver) {
-            return true;
-        }
-        if self.receiver_has_slice_like_view_method(receiver) {
-            return true;
-        }
 
-        if matches!(self.peel_paren_group_expr(receiver), syn::Expr::Path(path)
-            if path.path.segments.len() == 1 && path.path.segments[0].ident == "self")
-        {
-            if let Some(current_struct) = self.current_struct.as_ref() {
-                return matches!(current_struct.as_str(), "Vec" | "ArrayVec" | "SmallVec");
-            }
-        }
 
-        let Some(receiver_ty) = self
-            .infer_simple_expr_type(receiver)
-            .or_else(|| self.infer_local_binding_type_from_initializer(receiver))
-        else {
-            return false;
-        };
-        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-        if self.type_is_slice_or_span_like(receiver_ty) {
-            return true;
-        }
 
-        let syn::Type::Path(tp) = receiver_ty else {
-            return false;
-        };
-        let receiver_cpp = self.canonical_into_target_cpp_type(&self.map_type(receiver_ty));
-        if receiver_cpp.starts_with("rusty::Vec<")
-            || receiver_cpp.starts_with("rusty::VecDeque<")
-            || receiver_cpp.starts_with("rusty::slice::")
-            || receiver_cpp.starts_with("std::span<")
-        {
-            return true;
-        }
-        let Some(last) = tp.path.segments.last() else {
-            return false;
-        };
-        let receiver_name = if last.ident == "Self" {
-            self.current_struct
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| "Self".to_string())
-        } else {
-            last.ident.to_string()
-        };
-        matches!(receiver_name.as_str(), "Vec" | "ArrayVec" | "SmallVec")
-    }
-
-    fn should_lower_swap_method_call_to_index_swap(&self, receiver: &syn::Expr) -> bool {
-        if matches!(self.peel_paren_group_expr(receiver), syn::Expr::Path(path)
-            if path.path.segments.len() == 1 && path.path.segments[0].ident == "self")
-        {
-            if let Some(current_struct) = self.current_struct.as_ref() {
-                return matches!(
-                    current_struct.as_str(),
-                    "Vec" | "VecDeque" | "ArrayVec" | "SmallVec" | "DeArray"
-                );
-            }
-        }
-
-        if self.expr_lowers_to_slice_or_span_view(receiver) {
-            return true;
-        }
-
-        let Some(receiver_ty) = self
-            .infer_simple_expr_type(receiver)
-            .or_else(|| self.infer_local_binding_type_from_initializer(receiver))
-        else {
-            return false;
-        };
-        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-        if self.type_is_slice_or_span_like(receiver_ty) {
-            return true;
-        }
-
-        let syn::Type::Path(tp) = receiver_ty else {
-            return false;
-        };
-        let Some(last) = tp.path.segments.last() else {
-            return false;
-        };
-        let receiver_name = if last.ident == "Self" {
-            self.current_struct
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| "Self".to_string())
-        } else {
-            last.ident.to_string()
-        };
-        matches!(
-            receiver_name.as_str(),
-            "Vec" | "VecDeque" | "ArrayVec" | "SmallVec" | "DeArray"
-        )
-    }
-
-    fn should_lower_index_method_call_to_index_op(&self, receiver: &syn::Expr) -> bool {
-        if matches!(self.peel_paren_group_expr(receiver), syn::Expr::Path(path)
-            if path.path.segments.len() == 1 && path.path.segments[0].ident == "self")
-        {
-            if let Some(current_struct) = self.current_struct.as_ref() {
-                return matches!(
-                    current_struct.as_str(),
-                    "Vec" | "VecDeque" | "ArrayVec" | "SmallVec" | "DeArray"
-                );
-            }
-        }
-
-        if self.receiver_is_fixed_array_like_expr(receiver) {
-            return true;
-        }
-
-        if self.expr_lowers_to_slice_or_span_view(receiver) {
-            return true;
-        }
-
-        let Some(receiver_ty) = self
-            .infer_simple_expr_type(receiver)
-            .or_else(|| self.infer_local_binding_type_from_initializer(receiver))
-        else {
-            return false;
-        };
-        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-        if self.type_is_slice_or_span_like(receiver_ty) {
-            return true;
-        }
-
-        let syn::Type::Path(tp) = receiver_ty else {
-            return false;
-        };
-        let Some(last) = tp.path.segments.last() else {
-            return false;
-        };
-        let receiver_name = if last.ident == "Self" {
-            self.current_struct
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| "Self".to_string())
-        } else {
-            last.ident.to_string()
-        };
-        let mut receiver_name_candidates = vec![receiver_name.clone()];
-        if matches!(
-            receiver_name.as_str(),
-            "Box" | "Rc" | "Arc" | "Pin" | "Cow" | "Cell" | "RefCell" | "ManuallyDrop"
-        ) && let syn::PathArguments::AngleBracketed(args) = &last.arguments
-            && let Some(inner_ty) = args.args.iter().find_map(|arg| match arg {
-                syn::GenericArgument::Type(ty) => Some(ty),
-                _ => None,
-            })
-            && let syn::Type::Path(inner_tp) = self.peel_reference_paren_group_type(inner_ty)
-            && let Some(inner_last) = inner_tp.path.segments.last()
-        {
-            receiver_name_candidates.push(inner_last.ident.to_string());
-        }
-        receiver_name_candidates.iter().any(|name| {
-            matches!(
-                name.as_str(),
-                "Vec" | "VecDeque" | "ArrayVec" | "SmallVec" | "DeArray"
-            )
-        })
-    }
-
-    fn should_lower_unknown_local_index_method_call(
-        &self,
-        receiver: &syn::Expr,
-        arg: &syn::Expr,
-    ) -> bool {
-        let receiver = self.peel_paren_group_expr(receiver);
-        let syn::Expr::Path(path) = receiver else {
-            return false;
-        };
-        if path.path.segments.len() != 1 {
-            return false;
-        }
-        let local_name = path.path.segments[0].ident.to_string();
-        if !self.is_local_binding_in_scope(&local_name)
-            && !local_name
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
-        {
-            return false;
-        }
-
-        let arg = self.peel_paren_group_expr(arg);
-        if self.is_slice_range_index_expr(arg) {
-            return true;
-        }
-        if let syn::Expr::Unary(unary) = arg
-            && matches!(unary.op, syn::UnOp::Deref(_))
-        {
-            return true;
-        }
-        if matches!(
-            arg,
-            syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Int(_),
-                ..
-            })
-        ) {
-            return true;
-        }
-        if matches!(
-            arg,
-            syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Str(_),
-                ..
-            })
-        ) {
-            return false;
-        }
-        let Some(arg_ty) = self
-            .infer_simple_expr_type(arg)
-            .or_else(|| self.infer_local_binding_type_from_initializer(arg))
-            .or_else(|| {
-                let syn::Expr::Path(path_expr) = arg else {
-                    return None;
-                };
-                if path_expr.path.segments.len() != 1 {
-                    return None;
-                }
-                let raw = path_expr.path.segments[0].ident.to_string();
-                let candidate = raw.strip_suffix('_')?;
-                self.lookup_local_binding_type(candidate)
-            })
-        else {
-            if let syn::Expr::Path(path_expr) = arg
-                && path_expr.path.segments.len() == 1
-            {
-                let name = path_expr.path.segments[0].ident.to_string();
-                if name == "idx" || name == "index" || name.contains("index") {
-                    return true;
-                }
-            }
-            return false;
-        };
-        let arg_ty = self.peel_reference_paren_group_type(&arg_ty);
-        if self.is_known_string_like_type(arg_ty) {
-            return false;
-        }
-        if self.is_known_scalar_like_type(arg_ty) {
-            return true;
-        }
-        let mapped = self.map_type(arg_ty);
-        let canonical = mapped
-            .chars()
-            .filter(|c| !c.is_ascii_whitespace())
-            .collect::<String>();
-        canonical.starts_with("rusty::range<")
-            || canonical.starts_with("rusty::range_from<")
-            || canonical.starts_with("rusty::range_inclusive<")
-            || canonical.starts_with("rusty::range_to<")
-    }
 
     fn index_trait_arg_supports_bracket_access(&self, arg: &syn::Expr) -> bool {
         let arg = self.peel_paren_group_expr(arg);
@@ -40881,38 +36945,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             || canonical.starts_with("rusty::range_to<")
     }
 
-    fn should_lower_swap_method_call_via_deref_mut_view(&self, receiver: &syn::Expr) -> bool {
-        if matches!(self.peel_paren_group_expr(receiver), syn::Expr::Path(path)
-            if path.path.segments.len() == 1 && path.path.segments[0].ident == "self")
-        {
-            return self.current_struct.as_ref().is_some_and(|current_struct| {
-                current_struct
-                    .rsplit("::")
-                    .next()
-                    .is_some_and(|tail| tail == "SmallVec")
-            });
-        }
-
-        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
-            return false;
-        };
-        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-        let syn::Type::Path(tp) = receiver_ty else {
-            return false;
-        };
-        let Some(last) = tp.path.segments.last() else {
-            return false;
-        };
-        let receiver_name = if last.ident == "Self" {
-            self.current_struct
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| "Self".to_string())
-        } else {
-            last.ident.to_string()
-        };
-        receiver_name == "SmallVec"
-    }
 
     fn type_uses_as_str_string_view_coercion(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
@@ -41014,57 +37046,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .collect()
     }
 
-    fn is_scalar_into_target_cpp_type(canonical_cpp_ty: &str) -> bool {
-        matches!(
-            canonical_cpp_ty,
-            "int8_t"
-                | "int16_t"
-                | "int32_t"
-                | "int64_t"
-                | "__int128"
-                | "uint8_t"
-                | "uint16_t"
-                | "uint32_t"
-                | "uint64_t"
-                | "unsigned__int128"
-                | "size_t"
-                | "ptrdiff_t"
-                | "float"
-                | "double"
-                | "longdouble"
-                | "bool"
-                | "char"
-                | "char8_t"
-                | "char16_t"
-                | "char32_t"
-                | "wchar_t"
-        )
-    }
 
-    fn should_collapse_reborrow_of_deref_operand(&self, operand: &syn::Expr) -> bool {
-        if self.is_expr_reference_like(operand) {
-            return true;
-        }
-        if self.is_expr_raw_pointer_like(operand) {
-            return true;
-        }
-        match operand {
-            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
-                let name = path.path.segments[0].ident.to_string();
-                if let Some(ty) = self.lookup_local_binding_type(&name) {
-                    !matches!(ty, syn::Type::Ptr(_))
-                } else {
-                    false
-                }
-            }
-            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
-                self.should_collapse_reborrow_of_deref_operand(&unary.expr)
-            }
-            syn::Expr::Paren(p) => self.should_collapse_reborrow_of_deref_operand(&p.expr),
-            syn::Expr::Group(g) => self.should_collapse_reborrow_of_deref_operand(&g.expr),
-            _ => false,
-        }
-    }
 
     fn peel_paren_group_expr<'a>(&self, mut expr: &'a syn::Expr) -> &'a syn::Expr {
         loop {
@@ -41947,42 +37929,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         ))
     }
 
-    fn is_serde_json_formatter_default_method(method_name: &str) -> bool {
-        matches!(
-            method_name,
-            "write_null"
-                | "write_bool"
-                | "write_i8"
-                | "write_i16"
-                | "write_i32"
-                | "write_i64"
-                | "write_i128"
-                | "write_u8"
-                | "write_u16"
-                | "write_u32"
-                | "write_u64"
-                | "write_u128"
-                | "write_f32"
-                | "write_f64"
-                | "write_number_str"
-                | "begin_string"
-                | "end_string"
-                | "write_string_fragment"
-                | "write_char_escape"
-                | "write_byte_array"
-                | "begin_array"
-                | "end_array"
-                | "begin_array_value"
-                | "end_array_value"
-                | "begin_object"
-                | "end_object"
-                | "begin_object_key"
-                | "end_object_key"
-                | "begin_object_value"
-                | "end_object_value"
-                | "write_raw_fragment"
-        )
-    }
 
     fn receiver_expr_is_likely_serde_json_formatter(&self, expr: &syn::Expr) -> bool {
         match self.peel_paren_group_expr(expr) {
@@ -42313,15 +38259,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn should_lower_char_is_whitespace_method_call(&self, receiver: &syn::Expr) -> bool {
-        if self.expr_is_char_like(receiver) {
-            return true;
-        }
-        let Some(name) = extract_simple_local_ident(receiver) else {
-            return false;
-        };
-        self.should_lower_char_predicate_on_untyped_closure_param(&name)
-    }
 
     fn expr_is_char_like(&self, expr: &syn::Expr) -> bool {
         self.infer_simple_expr_type(expr)
@@ -46023,22 +41960,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn lookup_method_arg_expected_type_from_receiver_owner(
-        &self,
-        receiver: &syn::Expr,
-        method_name: &str,
-        arg_idx: usize,
-        arg_expr: Option<&syn::Expr>,
-    ) -> Option<syn::Type> {
-        let (owner, substitutions) = self.receiver_owner_name_and_type_substitutions(receiver)?;
-        let expected =
-            self.lookup_owner_method_arg_expected_type(&owner, method_name, arg_idx, arg_expr)?;
-        if substitutions.is_empty() {
-            Some(expected)
-        } else {
-            Some(self.substitute_type_params_in_type(&expected, &substitutions))
-        }
-    }
 
 
     fn inferred_try_init_error_type_or_unit(&self, arg_expr: Option<&syn::Expr>) -> syn::Type {
@@ -47107,32 +43028,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn lookup_unique_c_like_owner_with_method(&self, method_name: &str) -> Option<String> {
-        let mut owners: Vec<String> = self
-            .inherent_impl_method_names
-            .iter()
-            .filter_map(|(owner, methods)| {
-                if !methods.contains(method_name) {
-                    return None;
-                }
-                let owner_tail = owner.rsplit("::").next().unwrap_or(owner.as_str());
-                let is_c_like_owner = self.c_like_enum_types.contains(owner)
-                    || self.c_like_enum_types.contains(owner_tail)
-                    || self
-                        .c_like_enum_types
-                        .iter()
-                        .any(|name| name.ends_with(&format!("::{}", owner_tail)));
-                is_c_like_owner.then_some(owner.clone())
-            })
-            .collect();
-        owners.sort();
-        owners.dedup();
-        if owners.len() == 1 {
-            owners.into_iter().next()
-        } else {
-            None
-        }
-    }
 
     fn current_module_has_c_like_owner_with_method(&self, method_name: &str) -> bool {
         if method_name.is_empty() || self.module_stack.is_empty() {
@@ -48663,86 +44558,13 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some("this->clone()".to_string())
     }
 
-    fn should_coerce_self_path_to_deref_mut(
-        &self,
-        path: &syn::Path,
-        expected_ty: Option<&syn::Type>,
-    ) -> bool {
-        if !Self::path_is_simple_self(path) {
-            return false;
-        }
-        let expected_ty = match expected_ty {
-            Some(ty) => self.peel_paren_group_type(ty),
-            None => return false,
-        };
-        let syn::Type::Reference(expected_ref) = expected_ty else {
-            return false;
-        };
-        if expected_ref.mutability.is_none() {
-            return false;
-        }
-        if self.type_is_current_struct_self_type(&expected_ref.elem) {
-            return false;
-        }
-        self.lookup_current_struct_method_return_type("deref_mut")
-            .is_some()
-    }
 
-    fn should_coerce_self_path_to_deref(
-        &self,
-        path: &syn::Path,
-        expected_ty: Option<&syn::Type>,
-    ) -> bool {
-        if !Self::path_is_simple_self(path) {
-            return false;
-        }
-        let expected_ty = match expected_ty {
-            Some(ty) => self.peel_paren_group_type(ty),
-            None => return false,
-        };
-        let syn::Type::Reference(expected_ref) = expected_ty else {
-            return false;
-        };
-        if expected_ref.mutability.is_some() {
-            return false;
-        }
-        if self.type_is_current_struct_self_type(&expected_ref.elem) {
-            return false;
-        }
-        self.lookup_current_struct_method_return_type("deref")
-            .is_some()
-    }
 
     fn expected_tuple_type(&self, expected_ty: Option<&syn::Type>) -> Option<syn::TypeTuple> {
         let ty = expected_ty?;
         self.resolve_tuple_type_from_type(ty)
     }
 
-    fn extract_smallvec_owner_array_cpp_from_func(func: &str) -> Option<String> {
-        let marker = "SmallVec<";
-        let start = func.find(marker)? + marker.len();
-        let bytes = func.as_bytes();
-        let mut depth: i32 = 1;
-        let mut idx = start;
-        while idx < bytes.len() {
-            match bytes[idx] as char {
-                '<' => depth += 1,
-                '>' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let inner = func[start..idx].trim();
-                        if inner.is_empty() {
-                            return None;
-                        }
-                        return Some(inner.to_string());
-                    }
-                }
-                _ => {}
-            }
-            idx += 1;
-        }
-        None
-    }
 
     fn closure_expected_return_type_from_context(
         &self,
@@ -48907,150 +44729,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(self.map_type(&resolved))
     }
 
-    fn lookup_struct_literal_field_type(
-        &self,
-        struct_expr: &syn::ExprStruct,
-        field_name: &str,
-        expected_ty: Option<&syn::Type>,
-    ) -> Option<syn::Type> {
-        let struct_name = struct_expr.path.segments.last()?.ident.to_string();
-        let struct_name = if struct_name == "Self" {
-            self.current_struct.clone()?
-        } else {
-            struct_name
-        };
-        let base_field_ty = self.lookup_struct_field_type(&struct_name, field_name)?;
-
-        let mut substitutions = HashMap::new();
-        if let Some(last_idx) = struct_expr.path.segments.len().checked_sub(1) {
-            if let Some(owner_subs) =
-                self.owner_segment_type_arg_substitutions(&struct_expr.path, last_idx)
-            {
-                substitutions.extend(owner_subs);
-            }
-        }
-
-        let resolved_expected_ty =
-            self.resolve_expected_type_for_struct_literal(expected_ty, &struct_expr.path);
-        if substitutions.is_empty() {
-            if let Some(syn::Type::Path(tp)) = resolved_expected_ty.as_ref() {
-                if let Some(last_seg) = tp.path.segments.last() {
-                    if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments {
-                        let provided_type_args: Vec<syn::Type> = args
-                            .args
-                            .iter()
-                            .filter_map(|arg| match arg {
-                                syn::GenericArgument::Type(ty)
-                                    if !matches!(ty, syn::Type::Infer(_)) =>
-                                {
-                                    Some(ty.clone())
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        if !provided_type_args.is_empty() {
-                            let scoped_key = self.scoped_type_key(&struct_name);
-                            let params = self
-                                .declared_type_params
-                                .get(&struct_name)
-                                .or_else(|| self.declared_type_params.get(&scoped_key));
-                            let param_kinds = self
-                                .declared_type_param_kinds
-                                .get(&struct_name)
-                                .or_else(|| self.declared_type_param_kinds.get(&scoped_key));
-                            if let Some(params) = params {
-                                let mut provided_iter = provided_type_args.into_iter();
-                                for (idx, param) in params.iter().enumerate() {
-                                    let is_type_param = param_kinds
-                                        .and_then(|kinds| kinds.get(idx))
-                                        .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
-                                    if !is_type_param {
-                                        continue;
-                                    }
-                                    let Some(concrete_ty) = provided_iter.next() else {
-                                        break;
-                                    };
-                                    substitutions.insert(param.clone(), concrete_ty);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if substitutions.is_empty()
-            && struct_expr
-                .path
-                .segments
-                .last()
-                .is_some_and(|seg| matches!(seg.arguments, syn::PathArguments::None))
-        {
-            let mapped_path = self.emit_path_to_string(&struct_expr.path);
-            if let Some(recovered) = self
-                .recover_omitted_struct_literal_generic_type_args_from_fields(
-                    struct_expr,
-                    &mapped_path,
-                )
-                && let Ok(syn::Type::Path(tp)) = syn::parse_str::<syn::Type>(&recovered)
-                && let Some(last_seg) = tp.path.segments.last()
-                && let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments
-            {
-                let provided_type_args: Vec<syn::Type> = args
-                    .args
-                    .iter()
-                    .filter_map(|arg| match arg {
-                        syn::GenericArgument::Type(ty) if !matches!(ty, syn::Type::Infer(_)) => {
-                            Some(ty.clone())
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if !provided_type_args.is_empty() {
-                    if provided_type_args
-                        .iter()
-                        .any(|ty| self.type_arg_is_value_identifier_type(ty))
-                    {
-                        // Ignore leaked value-identifier recoveries (e.g. `<ptr>`) for
-                        // field substitution; leave unresolved params to normal scope flow.
-                        // This keeps `Self`-typed struct literals from back-propagating local
-                        // variable names into owner template arguments.
-                    } else {
-                        let scoped_key = self.scoped_type_key(&struct_name);
-                        let params = self
-                            .declared_type_params
-                            .get(&struct_name)
-                            .or_else(|| self.declared_type_params.get(&scoped_key));
-                        let param_kinds = self
-                            .declared_type_param_kinds
-                            .get(&struct_name)
-                            .or_else(|| self.declared_type_param_kinds.get(&scoped_key));
-                        if let Some(params) = params {
-                            let mut provided_iter = provided_type_args.into_iter();
-                            for (idx, param) in params.iter().enumerate() {
-                                let is_type_param = param_kinds
-                                    .and_then(|kinds| kinds.get(idx))
-                                    .is_none_or(|kind| matches!(kind, GenericParamKind::Type));
-                                if !is_type_param {
-                                    continue;
-                                }
-                                let Some(concrete_ty) = provided_iter.next() else {
-                                    break;
-                                };
-                                substitutions.insert(param.clone(), concrete_ty);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if substitutions.is_empty() {
-            Some(base_field_ty)
-        } else {
-            Some(self.substitute_type_params_in_type(&base_field_ty, &substitutions))
-        }
-    }
 
     fn type_arg_is_value_identifier_type(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
@@ -49068,38 +44746,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn should_suppress_inferred_expected_for_struct_literal(
-        &self,
-        expr: &syn::Expr,
-        inferred_ty: &syn::Type,
-    ) -> bool {
-        let syn::Expr::Struct(struct_expr) = self.peel_paren_group_expr(expr) else {
-            return false;
-        };
-        if !self.expected_type_matches_struct_literal_path(inferred_ty, &struct_expr.path) {
-            return false;
-        }
-        let inferred_ty = self.peel_reference_paren_group_type(inferred_ty);
-        let syn::Type::Path(tp) = inferred_ty else {
-            return false;
-        };
-        if tp.qself.is_some() {
-            return false;
-        }
-        let inferred_omits_all_args = tp
-            .path
-            .segments
-            .iter()
-            .all(|seg| matches!(seg.arguments, syn::PathArguments::None));
-        if !inferred_omits_all_args {
-            return false;
-        }
-        struct_expr
-            .path
-            .segments
-            .iter()
-            .all(|seg| matches!(seg.arguments, syn::PathArguments::None))
-    }
 
     fn alias_expansion_looks_self_wrapping(prev: &syn::Type, next: &syn::Type) -> bool {
         let (syn::Type::Path(prev_tp), syn::Type::Path(next_tp)) = (prev, next) else {
@@ -49137,23 +44783,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn lookup_struct_literal_field_cpp_name(
-        &self,
-        struct_expr: &syn::ExprStruct,
-        field_name: &str,
-    ) -> Option<String> {
-        let struct_name = if let Some(seg) = struct_expr.path.segments.last() {
-            let ident = seg.ident.to_string();
-            if ident == "Self" {
-                self.current_struct.clone()?
-            } else {
-                ident
-            }
-        } else {
-            self.current_struct.clone()?
-        };
-        self.lookup_struct_field_cpp_name(&struct_name, field_name)
-    }
 
     fn struct_member_name_conflicts_with_method(
         &self,
@@ -50206,43 +45835,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         None
     }
 
-    fn is_u8_syn_type(ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Path(tp) => {
-                if tp
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|seg| matches!(seg.ident.to_string().as_str(), "u8" | "uint8_t"))
-                {
-                    return true;
-                }
-                if tp
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|seg| seg.ident == "Item")
-                    && let Some(qself) = &tp.qself
-                {
-                    return Self::is_u8_assoc_item_owner(qself.ty.as_ref());
-                }
-                false
-            }
-            syn::Type::Paren(p) => Self::is_u8_syn_type(&p.elem),
-            syn::Type::Group(g) => Self::is_u8_syn_type(&g.elem),
-            _ => false,
-        }
-    }
 
-    fn is_u8_assoc_item_owner(ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Array(arr) => Self::is_u8_syn_type(&arr.elem),
-            syn::Type::Reference(r) => Self::is_u8_assoc_item_owner(&r.elem),
-            syn::Type::Paren(p) => Self::is_u8_assoc_item_owner(&p.elem),
-            syn::Type::Group(g) => Self::is_u8_assoc_item_owner(&g.elem),
-            _ => false,
-        }
-    }
 
     fn expected_fixed_array_type<'a>(
         &self,
@@ -50753,21 +46346,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         !self.is_type_raw_pointer_like(pointee)
     }
 
-    fn is_compound_assign_binop(op: &syn::BinOp) -> bool {
-        matches!(
-            op,
-            syn::BinOp::AddAssign(_)
-                | syn::BinOp::SubAssign(_)
-                | syn::BinOp::MulAssign(_)
-                | syn::BinOp::DivAssign(_)
-                | syn::BinOp::RemAssign(_)
-                | syn::BinOp::BitXorAssign(_)
-                | syn::BinOp::BitAndAssign(_)
-                | syn::BinOp::BitOrAssign(_)
-                | syn::BinOp::ShlAssign(_)
-                | syn::BinOp::ShrAssign(_)
-        )
-    }
 
     fn expr_is_range_inclusive_bound_ref_method(&self, expr: &syn::Expr) -> bool {
         let expr = self.peel_paren_group_expr(expr);
@@ -51122,65 +46700,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         collector.saw_both()
     }
 
-    fn is_option_none_path(&self, path: &syn::Path) -> bool {
-        if Self::path_is_option_none(path) {
-            return true;
-        }
-        if path.segments.len() >= 2
-            && let Some(owner) = path.segments.iter().nth_back(1)
-            && let Some(last) = path.segments.last()
-            && self.canonical_variant_name(&last.ident.to_string()) == "None"
-            && owner.ident.to_string().starts_with("__private")
-        {
-            return true;
-        }
-        if path.segments.len() != 1 {
-            return false;
-        }
-        let Some(last) = path.segments.last() else {
-            return false;
-        };
-        let raw = last.ident.to_string();
-        let canonical = self.canonical_variant_name(&raw).to_string();
-        if canonical != "None" {
-            return false;
-        }
-        let known_non_option_owner = self
-            .unique_data_enum_name_for_variant_name(&raw)
-            .or_else(|| self.unique_data_enum_name_for_variant_name(&canonical))
-            .is_some_and(|owner| owner != "Option");
-        !known_non_option_owner
-    }
 
-    fn is_option_some_path(&self, path: &syn::Path) -> bool {
-        if Self::path_is_option_some(path) {
-            return true;
-        }
-        if path.segments.len() >= 2
-            && let Some(owner) = path.segments.iter().nth_back(1)
-            && let Some(last) = path.segments.last()
-            && self.canonical_variant_name(&last.ident.to_string()) == "Some"
-            && owner.ident.to_string().starts_with("__private")
-        {
-            return true;
-        }
-        if path.segments.len() != 1 {
-            return false;
-        }
-        let Some(last) = path.segments.last() else {
-            return false;
-        };
-        let raw = last.ident.to_string();
-        let canonical = self.canonical_variant_name(&raw).to_string();
-        if canonical != "Some" {
-            return false;
-        }
-        let known_non_option_owner = self
-            .unique_data_enum_name_for_variant_name(&raw)
-            .or_else(|| self.unique_data_enum_name_for_variant_name(&canonical))
-            .is_some_and(|owner| owner != "Option");
-        !known_non_option_owner
-    }
 
     fn expected_result_type_arg<'a>(
         &self,
@@ -51820,28 +47340,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }) && has_alpha
     }
 
-    /// Returns true if `ty` looks like a type parameter (e.g., `T`, `F`, `E`).
-    /// These are single-segment paths with an uppercase-first-identifier — Rust's
-    /// convention for type parameter names. Type parameters are not valid C++
-    /// template arguments, so we skip them and fall through to decltype inference.
-    fn is_type_parameter(ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Path(tp) => {
-                tp.qself.is_none()
-                    && tp.path.segments.len() == 1
-                    && tp.path.segments[0]
-                        .ident
-                        .to_string()
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_uppercase())
-            }
-            syn::Type::Reference(r) => Self::is_type_parameter(&r.elem),
-            syn::Type::Paren(p) => Self::is_type_parameter(&p.elem),
-            syn::Type::Group(g) => Self::is_type_parameter(&g.elem),
-            _ => false,
-        }
-    }
 
 
 
@@ -52238,87 +47736,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(format!("{}({})", ctor, payload))
     }
 
-    fn extract_iter_item_type_from_type(&self, ty: &syn::Type) -> Option<syn::Type> {
-        match ty {
-            syn::Type::Reference(r) => self.extract_iter_item_type_from_type(&r.elem),
-            syn::Type::Slice(s) => Some((*s.elem).clone()),
-            syn::Type::Array(a) => Some((*a.elem).clone()),
-            syn::Type::ImplTrait(it) => self.extract_iter_item_type_from_trait_bounds(&it.bounds),
-            syn::Type::TraitObject(obj) => {
-                self.extract_iter_item_type_from_trait_bounds(&obj.bounds)
-            }
-            syn::Type::Path(tp) => {
-                let last = tp.path.segments.last()?;
-                match last.ident.to_string().as_str() {
-                    "IntoIter" | "Iter"
-                        if matches!(last.arguments, syn::PathArguments::None)
-                            && tp.path.segments.len() >= 2 =>
-                    {
-                        let mut owner_path = syn::Path {
-                            leading_colon: tp.path.leading_colon,
-                            segments: syn::punctuated::Punctuated::new(),
-                        };
-                        for seg in tp.path.segments.iter().take(tp.path.segments.len() - 1) {
-                            owner_path.segments.push(seg.clone());
-                        }
-                        let owner_ty = syn::Type::Path(syn::TypePath {
-                            qself: None,
-                            path: owner_path,
-                        });
-                        Some(parse_quote!(rusty::detail::associated_item_t<#owner_ty>))
-                    }
-                    "SmallVec" => {
-                        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-                            return None;
-                        };
-                        let owner_ty = args.args.iter().find_map(|arg| match arg {
-                            syn::GenericArgument::Type(t) => Some(t.clone()),
-                            _ => None,
-                        })?;
-                        Some(parse_quote!(rusty::detail::associated_item_t<#owner_ty>))
-                    }
-                    "ArrayVec" | "IntoIter" | "Iter" | "Vec" | "array" | "span" | "range"
-                    | "range_inclusive" | "range_from" | "range_to" | "range_to_inclusive"
-                    | "Range" | "RangeInclusive" | "RangeFrom" | "RangeTo" | "RangeToInclusive" => {
-                        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-                            return None;
-                        };
-                        args.args.iter().find_map(|arg| match arg {
-                            syn::GenericArgument::Type(t) => Some(t.clone()),
-                            _ => None,
-                        })
-                    }
-                    "SplitIter" => Some(parse_quote!(&str)),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
 
-    fn extract_iter_item_type_from_trait_bounds(
-        &self,
-        bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::token::Plus>,
-    ) -> Option<syn::Type> {
-        bounds.iter().find_map(|bound| {
-            let syn::TypeParamBound::Trait(trait_bound) = bound else {
-                return None;
-            };
-            let seg = trait_bound.path.segments.last()?;
-            if !matches!(seg.ident.to_string().as_str(), "Iterator" | "IntoIterator") {
-                return None;
-            }
-            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
-                return None;
-            };
-            args.args.iter().find_map(|arg| match arg {
-                syn::GenericArgument::AssocType(assoc) if assoc.ident == "Item" => {
-                    Some(assoc.ty.clone())
-                }
-                _ => None,
-            })
-        })
-    }
 
     fn type_has_iterator_surface(&self, ty: &syn::Type) -> bool {
         let ty = self.peel_reference_paren_group_type(ty);
@@ -52389,79 +47807,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn is_iterator_like_receiver_expr(&self, expr: &syn::Expr) -> bool {
-        self.infer_iter_item_type_from_expr(expr).is_some()
-    }
 
-    fn is_std_optional_like_receiver_expr(&self, expr: &syn::Expr) -> bool {
-        if self
-            .infer_simple_expr_type(expr)
-            .is_some_and(|ty| self.is_std_optional_syn_type(&ty))
-        {
-            return true;
-        }
-        let expr = self.peel_paren_group_expr(expr);
-        let syn::Expr::MethodCall(mc) = expr else {
-            return false;
-        };
-        if !matches!(mc.method.to_string().as_str(), "next" | "next_back") || !mc.args.is_empty() {
-            return false;
-        }
-        if self.is_iterator_like_receiver_expr(&mc.receiver) {
-            return true;
-        }
-        let receiver = self.peel_paren_group_expr(&mc.receiver);
-        if let syn::Expr::MethodCall(inner) = receiver {
-            return inner.method == "into_iter" && inner.args.is_empty();
-        }
-        if let syn::Expr::Path(path) = receiver {
-            if path.path.segments.len() == 1 {
-                let name = path.path.segments[0].ident.to_string();
-                if self.lookup_local_binding_cpp_name(&name).is_some()
-                    && self.lookup_local_binding_type(&name).is_none()
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    }
 
-    fn is_to_vec_runtime_receiver_expr(&self, expr: &syn::Expr) -> bool {
-        let expr = self.peel_paren_group_expr(expr);
-        if matches!(
-            expr,
-            syn::Expr::Array(_)
-                | syn::Expr::Repeat(_)
-                | syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::ByteStr(_),
-                    ..
-                })
-        ) {
-            return true;
-        }
-        if let syn::Expr::Reference(reference) = expr {
-            return self.is_to_vec_runtime_receiver_expr(&reference.expr);
-        }
-        if let syn::Expr::Cast(cast) = expr {
-            return self.is_to_vec_runtime_receiver_expr(&cast.expr);
-        }
-        self.infer_simple_expr_type(expr)
-            .is_some_and(|ty| self.is_to_vec_runtime_receiver_type(&ty))
-    }
 
-    fn is_to_vec_runtime_receiver_type(&self, ty: &syn::Type) -> bool {
-        let ty = self.peel_reference_paren_group_type(ty);
-        match ty {
-            syn::Type::Array(_) | syn::Type::Slice(_) => true,
-            syn::Type::Path(tp) => tp
-                .path
-                .segments
-                .last()
-                .is_some_and(|seg| seg.ident == "ArrayVec"),
-            _ => false,
-        }
-    }
 
 
 
@@ -58123,34 +53471,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(deref_expr)
     }
 
-    fn extract_deref_target_type_from_inner(&self, ty: &syn::Type) -> Option<syn::Type> {
-        let ty = self.peel_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
-            return None;
-        };
-        let last = tp.path.segments.last()?;
-        let owner = last.ident.to_string();
-        if !matches!(
-            owner.as_str(),
-            "Box"
-                | "Rc"
-                | "Arc"
-                | "Ref"
-                | "RefMut"
-                | "MutexGuard"
-                | "RwLockReadGuard"
-                | "RwLockWriteGuard"
-        ) {
-            return None;
-        }
-        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
-            return None;
-        };
-        args.args.iter().find_map(|arg| match arg {
-            syn::GenericArgument::Type(inner) => Some(inner.clone()),
-            _ => None,
-        })
-    }
 
     fn variant_ctor_name_from_path(&self, path: &syn::Path) -> Option<String> {
         if path.segments.is_empty() {
@@ -58416,43 +53736,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         variant_base
     }
 
-    fn lookup_data_enum_variant_arg_expected_type(
-        &self,
-        enum_path: &syn::Path,
-        enum_name: &str,
-        variant_name: &str,
-        arg_idx: usize,
-    ) -> Option<syn::Type> {
-        let mut owner_candidates = self.owner_path_to_candidate_owner_keys(enum_path, enum_name);
-        owner_candidates.push(enum_name.to_string());
-        owner_candidates.push(self.scoped_type_key(enum_name));
-        if let Some(owner_tail) = enum_name.rsplit("::").next() {
-            owner_candidates.push(owner_tail.to_string());
-            owner_candidates.push(self.scoped_type_key(owner_tail));
-        }
-        let mut dedup_owners = HashSet::new();
-        owner_candidates.retain(|owner| dedup_owners.insert(owner.clone()));
-
-        let mut variant_candidates = vec![variant_name.to_string()];
-        let canonical_variant = self.canonical_variant_name(variant_name).to_string();
-        if canonical_variant != variant_name {
-            variant_candidates.push(canonical_variant);
-        }
-        let mut dedup_variants = HashSet::new();
-        variant_candidates.retain(|variant| dedup_variants.insert(variant.clone()));
-
-        for owner in owner_candidates {
-            for variant in &variant_candidates {
-                let key = format!("{}::{}", owner, variant);
-                if let Some(field_types) = self.data_enum_variant_field_types.get(&key)
-                    && let Some(field_ty) = field_types.get(arg_idx)
-                {
-                    return Some(field_ty.clone());
-                }
-            }
-        }
-        None
-    }
 
     /// Detect and emit a general data enum variant constructor call.
     /// E.g., `ErrorKind::LeadingZero(pos)` → `ErrorKind_LeadingZero{pos}`
@@ -58603,82 +53886,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(self.emit_path_to_string(&path_expr.path))
     }
 
-    fn is_string_from_call_expr(&self, expr: &syn::Expr) -> bool {
-        let syn::Expr::Call(call) = expr else {
-            return false;
-        };
-        let syn::Expr::Path(path) = call.func.as_ref() else {
-            return false;
-        };
-        let joined = path
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        matches!(
-            joined.as_str(),
-            "String::from" | "std::string::String::from" | "alloc::string::String::from"
-        )
-    }
 
-    fn is_core_from_path_expr(&self, expr: &syn::Expr) -> bool {
-        let syn::Expr::Path(path) = expr else {
-            return false;
-        };
-        let joined = path
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        matches!(
-            joined.as_str(),
-            "From::from" | "core::convert::From::from" | "std::convert::From::from"
-        )
-    }
 
-    fn is_default_trait_default_path_expr(&self, expr: &syn::Expr) -> bool {
-        let syn::Expr::Path(path) = expr else {
-            return false;
-        };
-        let joined = path
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        matches!(
-            joined.as_str(),
-            "Default::default"
-                | "core::default::Default::default"
-                | "std::default::Default::default"
-        )
-    }
 
-    fn is_default_value_shorthand_path_expr(&self, expr: &syn::Expr) -> bool {
-        let syn::Expr::Path(path) = expr else {
-            return false;
-        };
-        if path.path.segments.len() != 1 {
-            return false;
-        }
-        let name = path.path.segments[0].ident.to_string();
-        if !matches!(name.as_str(), "default" | "default_") {
-            return false;
-        }
-        // Respect in-scope local bindings/functions when they exist.
-        if self.lookup_local_binding_cpp_name(&name).is_some() {
-            return false;
-        }
-        if self.is_local_function_name_in_scope(&name) {
-            return false;
-        }
-        true
-    }
 
     fn emit_callable_path_item_expr(&self, expr: &syn::Expr) -> Option<String> {
         let expr = self.peel_paren_group_expr(expr);
@@ -58725,15 +53935,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         ))
     }
 
-    fn is_noreturn_panic_like_call_path(&self, path: &str) -> bool {
-        matches!(
-            path,
-            "rusty::panicking::panic"
-                | "rusty::panicking::panic_fmt"
-                | "rusty::panicking::assert_failed"
-                | "rusty::intrinsics::unreachable"
-        )
-    }
 
     fn expr_is_noreturn_panic_like(&self, expr: &syn::Expr) -> bool {
         match self.peel_paren_group_expr(expr) {
@@ -58901,16 +54102,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         format!("{}({})", target_ctor, inner)
     }
 
-    fn lookup_constructor_template_args(&self, ctor_name: &str) -> Option<Vec<String>> {
-        for scope in self.constructor_template_hints.iter().rev() {
-            if let Some(args) = scope.get(ctor_name) {
-                if args.len() == 2 {
-                    return Some(args.clone());
-                }
-            }
-        }
-        None
-    }
 
     fn try_emit_variant_constructor_call_with_recovered_hints(
         &self,
@@ -59541,12 +54732,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         })
     }
 
-    fn is_ufcs_io_write_fmt_call_path(&self, function_path: &str) -> bool {
-        if !function_path.ends_with("::Write::write_fmt") {
-            return false;
-        }
-        function_path.starts_with("io::") || function_path.contains("::io::")
-    }
 
     /// If this is a variant-constructor call like `Left(2)` and the expected type
     /// is known (e.g., `Either<i32, i32>`), emit explicit template args:
@@ -60911,27 +56096,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_concrete_cpp_type_for_iflet_init(mapped: &str) -> bool {
-        mapped != "auto" && !type_string_has_auto_placeholder(mapped) && !mapped.contains("/* TODO")
-    }
 
-    fn find_local_binding_in_block_by_name<'a>(
-        &self,
-        block: &'a syn::Block,
-        name: &str,
-    ) -> Option<&'a syn::Local> {
-        block.stmts.iter().rev().find_map(|stmt| {
-            let syn::Stmt::Local(local) = stmt else {
-                return None;
-            };
-            let local_name = local_binding_name(local)?;
-            if local_name == name {
-                Some(local)
-            } else {
-                None
-            }
-        })
-    }
 
 
     fn push_transient_statement_scope(&mut self) {
@@ -61822,21 +56987,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         parts.join("\n")
     }
 
-    /// Extract the binding name from an if-let pattern like `Some(x)` → "x"
-    fn extract_if_let_binding_name(&self, pat: &syn::Pat) -> Option<String> {
-        match pat {
-            syn::Pat::TupleStruct(ts) => {
-                if let Some(inner) = ts.elems.first() {
-                    if let syn::Pat::Ident(pi) = inner {
-                        return Some(escape_cpp_keyword(&pi.ident.to_string()));
-                    }
-                }
-                None
-            }
-            syn::Pat::Ident(pi) => Some(escape_cpp_keyword(&pi.ident.to_string())),
-            _ => None,
-        }
-    }
 
     fn emit_stmt_to_string_with_expected(
         &self,
@@ -62299,188 +57449,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .is_some_and(|ty| self.unwrap_option_or_result_value_type(ty).is_some())
     }
 
-    fn is_probably_iterator_receiver_expr(&self, expr: &syn::Expr) -> bool {
-        let expr = self.peel_paren_group_expr(expr);
-        match expr {
-            syn::Expr::MethodCall(mc) => {
-                let method = mc.method.to_string();
-                matches!(
-                    method.as_str(),
-                    "iter"
-                        | "iter_mut"
-                        | "into_iter"
-                        | "drain"
-                        | "iter_names"
-                        | "bytes"
-                        | "as_bytes"
-                        | "chars"
-                        | "map"
-                        | "filter"
-                        | "filter_map"
-                        | "enumerate"
-                        | "rev"
-                        | "take"
-                        | "skip"
-                        | "scan"
-                        | "split"
-                ) || self.is_probably_iterator_receiver_expr(&mc.receiver)
-            }
-            syn::Expr::Call(call) => {
-                let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref())
-                else {
-                    return false;
-                };
-                let last = path_expr
-                    .path
-                    .segments
-                    .last()
-                    .map(|seg| seg.ident.to_string());
-                if matches!(
-                    last.as_deref(),
-                    Some(
-                        "iter"
-                            | "iter_mut"
-                            | "into_iter"
-                            | "drain"
-                            | "iter_names"
-                            | "bytes"
-                            | "as_bytes"
-                            | "chars"
-                            | "map"
-                            | "filter"
-                            | "filter_map"
-                            | "enumerate"
-                            | "rev"
-                            | "take"
-                            | "skip"
-                            | "scan"
-                            | "split"
-                    )
-                ) {
-                    return true;
-                }
-                if path_expr.path.segments.len() == 1 {
-                    let binding_name = path_expr.path.segments[0].ident.to_string();
-                    if let Some(callee_ty) = self.lookup_local_binding_type(&binding_name) {
-                        if let Some(return_ty) =
-                            self.extract_callable_return_type_from_type(&callee_ty)
-                        {
-                            if self.extract_iter_item_type_from_type(&return_ty).is_some()
-                                || self.type_has_iterator_surface(&return_ty)
-                            {
-                                return true;
-                            }
-                        }
-                    }
-                }
-                let joined = path_expr
-                    .path
-                    .segments
-                    .iter()
-                    .map(|s| s.ident.to_string())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                matches!(
-                    joined.as_str(),
-                    "iter"
-                        | "rusty::iter"
-                        | "iter_mut"
-                        | "rusty::iter_mut"
-                        | "map"
-                        | "rusty::map"
-                        | "filter"
-                        | "rusty::filter"
-                        | "filter_map"
-                        | "rusty::filter_map"
-                        | "enumerate"
-                        | "rusty::enumerate"
-                        | "rev"
-                        | "rusty::rev"
-                        | "take"
-                        | "rusty::take"
-                        | "skip"
-                        | "rusty::skip"
-                        | "scan"
-                        | "rusty::scan"
-                        | "split"
-                        | "str_runtime::split"
-                        | "rusty::str_runtime::split"
-                )
-            }
-            syn::Expr::Path(path) if path.path.segments.len() == 1 => {
-                let name = path.path.segments[0].ident.to_string();
-                self.lookup_local_binding_type(&name)
-                    .as_ref()
-                    .is_some_and(|ty| {
-                        self.extract_iter_item_type_from_type(ty).is_some()
-                            || self.type_has_iterator_surface(ty)
-                    })
-            }
-            _ => false,
-        }
-    }
 
-    fn should_bridge_into_iter_receiver_to_iter(&self, receiver: &syn::Expr) -> bool {
-        if self.receiver_is_fixed_array_like_expr(receiver) {
-            return true;
-        }
-        if let Some(receiver_ty) = self.infer_simple_expr_type(receiver) {
-            let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-            let receiver_cpp = self.map_type(receiver_ty);
-            if receiver_cpp.starts_with("rusty::Vec<") || receiver_cpp.starts_with("std::span<") {
-                return true;
-            }
-        }
-        if self.is_iterator_like_receiver_expr(receiver)
-            || self.is_probably_iterator_receiver_expr(receiver)
-        {
-            return false;
-        }
-        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
-            // Preserve historical fallback behavior for unresolved receiver shapes.
-            return true;
-        };
-        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-        let syn::Type::Path(tp) = receiver_ty else {
-            return false;
-        };
-        if tp.qself.is_some() || tp.path.segments.len() != 1 {
-            return false;
-        }
-        self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
-    }
 
-    fn should_bridge_direct_into_iter_receiver_to_iter(&self, receiver: &syn::Expr) -> bool {
-        if self.receiver_is_fixed_array_like_expr(receiver) {
-            return true;
-        }
-        if let Some(receiver_ty) = self.infer_simple_expr_type(receiver) {
-            let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-            let receiver_cpp = self.map_type(receiver_ty);
-            if receiver_cpp.starts_with("rusty::Vec<") || receiver_cpp.starts_with("std::span<") {
-                return true;
-            }
-        }
-        if self.is_iterator_like_receiver_expr(receiver)
-            || self.is_probably_iterator_receiver_expr(receiver)
-        {
-            return false;
-        }
-        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
-            // Unknown direct `.into_iter()` receiver types are usually generic or
-            // pattern-introduced values without a concrete member surface.
-            // Bridge through `rusty::iter(...)` to keep call sites compilable.
-            return true;
-        };
-        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
-        let syn::Type::Path(tp) = receiver_ty else {
-            return false;
-        };
-        if tp.qself.is_some() || tp.path.segments.len() != 1 {
-            return false;
-        }
-        self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
-    }
 
     fn expr_is_tuple_field_access(&self, expr: &syn::Expr) -> bool {
         let syn::Expr::Field(field_expr) = self.peel_paren_group_expr(expr) else {
@@ -62768,31 +57738,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(format!("rusty::for_each({}, {})", receiver, func))
     }
 
-    fn is_ordering_like_type(&self, ty: &syn::Type) -> bool {
-        let mapped = self.map_type(ty);
-        mapped == "Ordering" || mapped == "rusty::cmp::Ordering" || mapped.ends_with("::Ordering")
-    }
 
 
-    fn is_ordering_then_with_receiver_shape(&self, expr: &syn::Expr) -> bool {
-        match self.peel_paren_group_expr(expr) {
-            syn::Expr::MethodCall(inner) => {
-                (inner.method == "cmp" && inner.args.len() == 1)
-                    || (inner.method == "then_with" && inner.args.len() == 1)
-            }
-            syn::Expr::Call(call) => {
-                let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(&call.func) else {
-                    return false;
-                };
-                path_expr
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|seg| seg.ident == "cmp" || seg.ident == "then_with")
-            }
-            _ => false,
-        }
-    }
 
     fn try_emit_ordering_then_with_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
         if mc.method != "then_with" || mc.args.len() != 1 {
@@ -62904,9 +57851,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn is_slice_range_index_expr(&self, index: &syn::Expr) -> bool {
-        matches!(self.peel_paren_group_expr(index), syn::Expr::Range(_))
-    }
 
     fn try_emit_slice_index_expr_to_string(
         &self,
@@ -63033,13 +57977,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_range_expression(expr: &syn::Expr) -> bool {
-        match expr {
-            syn::Expr::Range(_) => true,
-            syn::Expr::Paren(p) => Self::is_range_expression(&p.expr),
-            _ => false,
-        }
-    }
 
     fn emit_match_expr_to_string(
         &self,
@@ -63355,19 +58292,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn should_force_size_t_visit_return_for_bound_match(
-        &self,
-        match_expr: &syn::ExprMatch,
-        expected_ty: Option<&syn::Type>,
-    ) -> bool {
-        if expected_ty.is_some() {
-            return false;
-        }
-        let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(&match_expr.expr) else {
-            return false;
-        };
-        matches!(mc.method.to_string().as_str(), "start_bound" | "end_bound")
-    }
 
     fn match_expr_has_explicit_return_arm(&self, match_expr: &syn::ExprMatch) -> bool {
         match_expr
@@ -67153,118 +62077,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         rewritten
     }
 
-    fn extract_simple_type_param_name(&self, ty: &syn::Type) -> Option<String> {
-        let ty = self.peel_reference_paren_group_type(ty);
-        let syn::Type::Path(tp) = ty else {
-            return None;
-        };
-        if tp.qself.is_some() || tp.path.segments.len() != 1 {
-            return None;
-        }
-        let seg = tp.path.segments.first()?;
-        if !matches!(seg.arguments, syn::PathArguments::None) {
-            return None;
-        }
-        Some(seg.ident.to_string())
-    }
 
-    fn extract_simple_const_param_name(&self, expr: &syn::Expr) -> Option<String> {
-        let expr = self.peel_paren_group_expr(expr);
-        let syn::Expr::Path(path_expr) = expr else {
-            return None;
-        };
-        if path_expr.path.segments.len() != 1 {
-            return None;
-        }
-        let seg = path_expr.path.segments.first()?;
-        if !matches!(seg.arguments, syn::PathArguments::None) {
-            return None;
-        }
-        Some(seg.ident.to_string())
-    }
 
-    fn should_elide_in_scope_local_alias_type_args(
-        &self,
-        path: &syn::Path,
-        args: &syn::AngleBracketedGenericArguments,
-    ) -> bool {
-        if path.leading_colon.is_some() || path.segments.len() != 1 || args.args.is_empty() {
-            return false;
-        }
-        if self.block_depth == 0 {
-            return false;
-        }
-        let Some(seg) = path.segments.first() else {
-            return false;
-        };
-        let local_name = seg.ident.to_string();
-        if !self.is_local_type_name_in_scope(&local_name) {
-            return false;
-        }
-        // Keep real struct/enum template instantiations intact.
-        if self.struct_field_order.contains_key(&local_name)
-            || self.tuple_struct_arities.contains_key(&local_name)
-            || self.data_enum_types.contains(&local_name)
-        {
-            return false;
-        }
-        if let Some(type_key) = self.declared_type_key_for_path(path)
-            && let Some(params) = self.declared_type_params.get(&type_key)
-        {
-            if params.is_empty() || params.len() != args.args.len() {
-                return false;
-            }
-            let param_kinds = self.declared_type_param_kinds.get(&type_key);
-            return args.args.iter().enumerate().all(|(idx, arg)| {
-                let param = &params[idx];
-                if !self.is_type_param_in_scope(param) {
-                    return false;
-                }
-                let expected_kind = param_kinds.and_then(|kinds| kinds.get(idx));
-                match (expected_kind, arg) {
-                    (Some(GenericParamKind::Type), syn::GenericArgument::Type(ty))
-                    | (None, syn::GenericArgument::Type(ty)) => self
-                        .extract_simple_type_param_name(ty)
-                        .is_some_and(|name| name == *param),
-                    (Some(GenericParamKind::Const), syn::GenericArgument::Const(expr))
-                    | (None, syn::GenericArgument::Const(expr)) => self
-                        .extract_simple_const_param_name(expr)
-                        .is_some_and(|name| name == *param),
-                    _ => false,
-                }
-            });
-        }
-        args.args.iter().all(|arg| match arg {
-            syn::GenericArgument::Type(ty) => self
-                .extract_simple_type_param_name(ty)
-                .is_some_and(|name| self.is_type_param_in_scope(&name)),
-            syn::GenericArgument::Const(expr) => self
-                .extract_simple_const_param_name(expr)
-                .is_some_and(|name| self.is_type_param_in_scope(&name)),
-            _ => false,
-        })
-    }
 
-    fn should_elide_shadowed_current_struct_local_type_args(
-        &self,
-        path: &syn::Path,
-        args: &syn::AngleBracketedGenericArguments,
-    ) -> bool {
-        // Inside a generic impl body, associated aliases emitted into the current
-        // struct (`using IntoIter = ...;`) can shadow single-segment generic spellings
-        // from Rust (`IntoIter<T, CAP>`). In C++, the alias itself is not a template,
-        // so keep only the alias name in this specific shape.
-        if path.leading_colon.is_some() || path.segments.len() != 1 {
-            return false;
-        }
-        if args.args.is_empty() {
-            return false;
-        }
-        let Some(seg) = path.segments.first() else {
-            return false;
-        };
-        self.current_struct_assoc_alias_exists(&seg.ident.to_string())
-    }
 
     fn emit_expr_path_template_args(&self, path: &syn::Path) -> Option<String> {
         let last = path.segments.last()?;
@@ -67318,55 +62133,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(format!("<{}>", mapped_args.join(", ")))
     }
 
-    fn lookup_declared_type_key_for_base(&self, scoped_base: &str, base: &str) -> Option<String> {
-        if self.declared_type_params.contains_key(scoped_base) {
-            return Some(scoped_base.to_string());
-        }
-        // For qualified paths (for example `format::Buf`), only accept an exact
-        // suffix-qualified match. Tail-only fallback can incorrectly bind to an
-        // unrelated same-tail generic type (`some::Buf<T>`), which then injects
-        // bogus template arguments into non-generic owners.
-        if scoped_base.contains("::") {
-            let qualified_suffix = format!("::{}", scoped_base);
-            let mut suffix_matches: Vec<&String> = self
-                .declared_type_params
-                .keys()
-                .filter(|key| *key == scoped_base || key.ends_with(&qualified_suffix))
-                .collect();
-            suffix_matches.sort();
-            suffix_matches.dedup();
-            if suffix_matches.len() == 1 {
-                return Some((*suffix_matches[0]).clone());
-            }
-            return None;
-        }
-        if self.declared_type_params.contains_key(base) {
-            return Some(base.to_string());
-        }
-
-        let mut tail_matches: Vec<&String> = self
-            .declared_type_params
-            .keys()
-            .filter(|key| key.rsplit("::").next().is_some_and(|tail| tail == base))
-            .collect();
-        tail_matches.sort();
-        tail_matches.dedup();
-        if tail_matches.len() == 1 {
-            return Some((*tail_matches[0]).clone());
-        }
-
-        let mut scoped_tail_matches: Vec<&String> = tail_matches
-            .into_iter()
-            .filter(|key| key.contains("::"))
-            .collect();
-        scoped_tail_matches.sort();
-        scoped_tail_matches.dedup();
-        if scoped_tail_matches.len() == 1 {
-            return Some((*scoped_tail_matches[0]).clone());
-        }
-
-        None
-    }
 
     fn owner_has_any_declared_generic_tail(&self, owner_name: &str) -> bool {
         self.declared_type_params.iter().any(|(key, params)| {
@@ -67439,33 +62205,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_unit_struct_path(&self, path: &syn::Path) -> bool {
-        let joined = path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        if self.unit_struct_types.contains(&joined) {
-            return true;
-        }
-        if let Some(last) = path.segments.last() {
-            if last.ident == "Self"
-                && let Some(current) = &self.current_struct
-            {
-                let scoped_current = self.scoped_type_key(current);
-                if self.unit_struct_types.contains(current)
-                    || self.unit_struct_types.contains(&scoped_current)
-                {
-                    return true;
-                }
-            }
-            if self.unit_struct_types.contains(&last.ident.to_string()) {
-                return true;
-            }
-        }
-        false
-    }
 
     fn declared_type_key_for_path(&self, path: &syn::Path) -> Option<String> {
         if path.segments.is_empty() {
@@ -67540,31 +62279,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.declared_type_param_defaults.get(&key)
     }
 
-    fn should_elide_shadowed_current_struct_local_recovered_args(
-        &self,
-        type_key: &str,
-        params: &[String],
-        recovered_args: &[String],
-    ) -> bool {
-        if params.is_empty() || params.len() != recovered_args.len() {
-            return false;
-        }
-        let Some(current_struct) = self.current_struct.as_ref() else {
-            return false;
-        };
-        let base = type_key.rsplit("::").next().unwrap_or(type_key);
-        let scoped_key = format!("{}::{}", current_struct, base);
-        let Some(scoped_params) = self.declared_type_params.get(&scoped_key) else {
-            return false;
-        };
-        if scoped_params != params {
-            return false;
-        }
-        params
-            .iter()
-            .zip(recovered_args.iter())
-            .all(|(param, recovered)| self.is_type_param_in_scope(param) && param == recovered)
-    }
 
     fn current_struct_declared_type_key_for_recovery(
         &self,
@@ -67919,28 +62633,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(emitted_segs.join("::"))
     }
 
-    fn should_sanitize_array_capacity_expr(&self, len_expr: &syn::Expr, len_cpp: &str) -> bool {
-        if self.should_sanitize_array_capacity_cpp_len(len_cpp) {
-            return true;
-        }
-        matches!(self.peel_paren_group_expr(len_expr), syn::Expr::Path(_))
-    }
 
-    fn should_sanitize_array_capacity_cpp_len(&self, len_cpp: &str) -> bool {
-        let trimmed = len_cpp.trim();
-        if trimmed.contains("rusty::sanitize_array_capacity<") {
-            return false;
-        }
-        if trimmed.contains("std::numeric_limits<size_t>::max()") {
-            return true;
-        }
-        if trimmed.is_empty() || trimmed.chars().all(|c| c.is_ascii_digit()) {
-            return false;
-        }
-        trimmed
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':'))
-    }
 
     fn maybe_sanitize_array_capacity_cpp_len(&self, len_cpp: &str) -> String {
         if self.should_sanitize_array_capacity_cpp_len(len_cpp) {
@@ -70775,32 +65468,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn should_force_move_consumed_local_initializer_expr(&self, expr: &syn::Expr) -> bool {
-        let Some(local_name) = extract_simple_local_ident(expr) else {
-            return false;
-        };
-        self.lookup_local_binding_type(&local_name)
-            .is_some_and(|ty| matches!(ty, syn::Type::Reference(_)))
-    }
 
-    fn is_associated_const_value_path(&self, path: &syn::Path) -> bool {
-        if path.segments.len() < 2 {
-            return false;
-        }
-        let Some(owner_seg) = path.segments.iter().nth_back(1) else {
-            return false;
-        };
-        let Some(last_seg) = path.segments.last() else {
-            return false;
-        };
-        let owner = owner_seg.ident.to_string();
-        let member = last_seg.ident.to_string();
-        owner.chars().next().is_some_and(|c| c.is_uppercase())
-            && !member.is_empty()
-            && member
-                .chars()
-                .all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_')
-    }
 
     fn associated_const_value_path_can_use_directly(
         &self,
@@ -70824,232 +65492,10 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .is_some_and(|ty| self.is_known_scalar_like_type(ty))
     }
 
-    fn lookup_associated_const_type(&self, path: &syn::Path) -> Option<syn::Type> {
-        if path.segments.len() < 2 {
-            return None;
-        }
-        let member = path.segments.last()?.ident.to_string();
-        let mut owner_segments: Vec<String> = path
-            .segments
-            .iter()
-            .take(path.segments.len() - 1)
-            .map(|seg| seg.ident.to_string())
-            .collect();
-        if owner_segments.first().is_some_and(|seg| seg == "Self") {
-            let current = self.current_struct.as_ref()?;
-            owner_segments[0] = current.clone();
-        }
-        while owner_segments
-            .first()
-            .is_some_and(|seg| matches!(seg.as_str(), "crate" | "self" | "super"))
-        {
-            owner_segments.remove(0);
-        }
-        if owner_segments.is_empty() {
-            return None;
-        }
 
-        let owner = owner_segments.join("::");
-        let owner_tail = owner_segments.last().cloned().unwrap_or_default();
-        let mut candidates = vec![
-            owner.clone(),
-            owner_tail.clone(),
-            self.scoped_type_key(&owner),
-        ];
-        if owner_tail != owner {
-            candidates.push(self.scoped_type_key(&owner_tail));
-        }
-        candidates.sort();
-        candidates.dedup();
 
-        let lookup = |items: &[syn::ImplItem]| -> Option<syn::Type> {
-            items.iter().find_map(|item| {
-                if let syn::ImplItem::Const(c) = item
-                    && c.ident == member
-                {
-                    return Some(c.ty.clone());
-                }
-                None
-            })
-        };
 
-        for key in &candidates {
-            if let Some(items) = self.impl_blocks.get(key)
-                && let Some(ty) = lookup(items)
-            {
-                return Some(ty);
-            }
-            if let Some(items) = self.consumed_impl_blocks.get(key)
-                && let Some(ty) = lookup(items)
-            {
-                return Some(ty);
-            }
-        }
 
-        let suffix = format!("::{}", owner_tail);
-        for (key, items) in &self.impl_blocks {
-            if (key == &owner || key.ends_with(&suffix))
-                && let Some(ty) = lookup(items)
-            {
-                return Some(ty);
-            }
-        }
-        for (key, items) in &self.consumed_impl_blocks {
-            if (key == &owner || key.ends_with(&suffix))
-                && let Some(ty) = lookup(items)
-            {
-                return Some(ty);
-            }
-        }
-        None
-    }
-
-    /// Determine whether an expression represents a local variable that should
-    /// be wrapped in std::move() when used by value.
-    fn should_insert_move(&self, expr: &syn::Expr) -> bool {
-        match expr {
-            syn::Expr::Path(path) => {
-                // Multi-segment associated const values are handled separately via
-                // `rusty::clone(...)` in `emit_expr_maybe_move(...)`.
-                if path.path.segments.len() > 1 {
-                    return false;
-                }
-
-                let name = path.path.segments[0].ident.to_string();
-
-                // By-value receiver methods treat `self` as a consumable value path.
-                // Keep reference receivers unchanged to avoid moving borrowed `self`.
-                if name == "self" {
-                    return !self.current_self_receiver_is_reference();
-                }
-
-                // Skip keywords and special names
-                if matches!(
-                    name.as_str(),
-                    "Self" | "true" | "false" | "None" | "Some" | "Ok" | "Err"
-                ) {
-                    return false;
-                }
-                if matches!(name.as_str(), "formatter") {
-                    return false;
-                }
-
-                // Skip ALL_CAPS names (likely constants)
-                if name.chars().all(|c| c.is_uppercase() || c == '_') && name.len() > 1 {
-                    return false;
-                }
-
-                // Skip names that start with uppercase (likely type names or enum variants)
-                if name.starts_with(|c: char| c.is_uppercase()) {
-                    return false;
-                }
-
-                // Borrowed bindings (`&T` / `&mut T`) should not be moved.
-                if let Some(local_ty) = self.lookup_local_binding_type(&name) {
-                    if matches!(
-                        self.peel_paren_group_type(&local_ty),
-                        syn::Type::Reference(_) | syn::Type::Ptr(_)
-                    ) || self.reference_type_lowers_to_value_cpp(&local_ty)
-                    {
-                        return false;
-                    }
-                    let mapped_local_ty = self.map_type(&local_ty);
-                    // The `'&' anywhere` heuristic catches type aliases that
-                    // lower to a reference, but it also falsely matches the
-                    // `&` inside a function-signature template arg, e.g.
-                    // `rusty::Function<void(BinaryWriteArchive&)>` — that's an
-                    // owned, move-only value type, not a reference, and the
-                    // caller should still be moved into a `Some(...)` /
-                    // constructor call. Restrict the check to a top-level
-                    // trailing `&` (`T&` / `T const&`), which is what a real
-                    // C++ reference type looks like.
-                    if mapped_local_ty.trim_end().ends_with('&')
-                        || mapped_local_ty.starts_with("std::span<")
-                        || mapped_local_ty.starts_with("std::array<")
-                        || (name == "f" && mapped_local_ty.contains("Formatter"))
-                    {
-                        return false;
-                    }
-                } else if name == "f" {
-                    return false;
-                }
-
-                // For non-Copy types (structs containing Vec, String, etc.), always insert
-                // std::move. In Rust, `let x = y` where y: T (Clone but not Copy) calls Clone,
-                // not a hypothetical copy operation. In C++, the copy constructor may be deleted
-                // or invalid (e.g., for structs containing Vec). Using std::move() calls the
-                // move constructor which is valid for all types and in C++ effectively calls
-                // the same clone/move semantics as Rust.
-
-                true
-            }
-            syn::Expr::Field(field) => {
-                if self
-                    .infer_simple_expr_type(&field.base)
-                    .is_some_and(|ty| matches!(ty, syn::Type::Reference(_)))
-                {
-                    return false;
-                }
-                self.should_insert_move(&field.base)
-            }
-            _ => false,
-        }
-    }
-
-    /// Check if an initializer expression is a reference (`&expr` or `&mut expr`).
-    fn is_ref_init(&self, expr: &syn::Expr) -> bool {
-        let expr = self.peel_paren_group_expr(expr);
-        let syn::Expr::Reference(reference_expr) = expr else {
-            return false;
-        };
-        if self
-            .infer_local_binding_type_from_initializer(expr)
-            .as_ref()
-            .is_some_and(|ty| self.reference_type_lowers_to_value_cpp(ty))
-        {
-            return false;
-        }
-        if let syn::Expr::Index(index_expr) = self.peel_paren_group_expr(&reference_expr.expr)
-            && matches!(
-                self.peel_paren_group_expr(&index_expr.index),
-                syn::Expr::Range(_)
-            )
-        {
-            return false;
-        }
-        // Rust slice borrows (`&arr[..n]`) lower to span-by-value in C++.
-        // Keep these as value locals, not C++ reference bindings to temporaries.
-        !self.expr_lowers_to_slice_or_span_view(&reference_expr.expr)
-    }
-
-    /// Check if an expression is an rvalue (temporary/function-call result)
-    /// rather than an lvalue (variable/field access).
-    fn is_rvalue_expr(&self, expr: &syn::Expr) -> bool {
-        matches!(
-            expr,
-            syn::Expr::Call(_)
-                | syn::Expr::MethodCall(_)
-                | syn::Expr::Lit(_)
-                | syn::Expr::Struct(_)
-                | syn::Expr::Tuple(_)
-                | syn::Expr::Array(_)
-                | syn::Expr::Binary(_)
-                | syn::Expr::Unary(_)
-                | syn::Expr::If(_)
-                | syn::Expr::Match(_)
-                | syn::Expr::Block(_)
-                | syn::Expr::Closure(_)
-        )
-    }
-
-    /// Extract the inner expression from a reference expression, as a string.
-    fn extract_ref_inner(&self, expr: &syn::Expr) -> String {
-        if let syn::Expr::Reference(r) = expr {
-            self.emit_expr_to_string(&r.expr)
-        } else {
-            self.emit_expr_to_string(expr)
-        }
-    }
 
     fn map_reference_type_to_pointer_cpp_type(&self, ty: &syn::Type) -> Option<String> {
         let ty = self.peel_paren_group_type(ty);
@@ -71139,64 +65585,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         false
     }
 
-    /// Search the `cross_file_impl_blocks` index for a method with this name
-    /// and return its return type if any matching impl-block has one. When
-    /// multiple impl-blocks define the same name, pick the first one with a
-    /// non-default return type. The lookup is by method name only (not by
-    /// fully-qualified path), so it's intentionally permissive — we only
-    /// trust references it returns, never values.
-    /// Walks every impl-block we know about (cross-file index plus the
-    /// current crate's `impl_blocks` / `consumed_impl_blocks` maps) and
-    /// returns a representative return type for `method` *only* when every
-    /// definition that uses this name returns a reference. When even one
-    /// impl returns a value, the name is ambiguous (e.g. `NodeRef::reborrow`
-    /// returns a value-typed wrapper, while `DormantMutRef::reborrow`
-    /// returns `&mut T`) and we can't safely treat it as ref-returning from
-    /// name alone.
-    fn lookup_known_method_return_type_by_name(&self, method: &str) -> Option<syn::Type> {
-        let mut representative: Option<syn::Type> = None;
-        let mut seen = false;
-        let mut visit_item = |item: &syn::ImplItem| -> Option<()> {
-            if let syn::ImplItem::Fn(f) = item {
-                if f.sig.ident == method {
-                    seen = true;
-                    let ty = match &f.sig.output {
-                        syn::ReturnType::Default => return None,
-                        syn::ReturnType::Type(_, ty) => (**ty).clone(),
-                    };
-                    if !self.type_is_reference_like(&ty) {
-                        return None;
-                    }
-                    if representative.is_none() {
-                        representative = Some(ty);
-                    }
-                }
-            }
-            Some(())
-        };
-        for impl_block in &self.cross_file_impl_blocks {
-            for item in &impl_block.items {
-                if visit_item(item).is_none() {
-                    return None;
-                }
-            }
-        }
-        for items in self.impl_blocks.values() {
-            for item in items {
-                if visit_item(item).is_none() {
-                    return None;
-                }
-            }
-        }
-        for items in self.consumed_impl_blocks.values() {
-            for item in items {
-                if visit_item(item).is_none() {
-                    return None;
-                }
-            }
-        }
-        if seen { representative } else { None }
-    }
 
     /// For a reference binding that will become a pointer, determine the pointer type.
     /// `let mut r = &x` where x: T → `const T*`
@@ -71357,24 +65745,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.return_type_hints.last().and_then(|hint| hint.as_ref())
     }
 
-    // In module mode, trait-object error surfaces like `Box<dyn Error>` are
-    // currently erased to `void*`. For closure lambdas with `auto` return type,
-    // forcing that erased Result hint breaks `?` lowering (`RUSTY_TRY_INTO` can
-    // no longer convert concrete errors into `void*`). In that case, keep the
-    // legacy inferred Result constructor path by skipping the explicit hint.
-    fn should_push_return_type_hint_for_closure(&self, output: &syn::ReturnType) -> bool {
-        let syn::ReturnType::Type(_, ty) = output else {
-            return true;
-        };
-        let Some(err_ty) = self.expected_result_type_arg(Some(ty), 1) else {
-            return true;
-        };
-        let mapped_err = self.map_type(err_ty);
-        if !matches!(mapped_err.as_str(), "void*" | "const void*") {
-            return true;
-        }
-        !type_contains_trait_object(err_ty)
-    }
 
     fn current_try_macro(&self) -> &'static str {
         let returns_option = self
@@ -71652,12 +66022,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
 
 
-    fn lookup_callable_return_type_for_type_param(&self, type_param: &str) -> Option<syn::Type> {
-        self.callable_type_param_return_scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(type_param).cloned())
-    }
 
     fn path_tail_looks_like_method_name(name: &str) -> bool {
         name.chars()
@@ -71813,33 +66177,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    fn is_serde_error_trait_static_call_path(path: &syn::Path, method_name: &str) -> bool {
-        if path
-            .segments
-            .last()
-            .map_or(true, |seg| seg.ident.to_string() != method_name)
-        {
-            return false;
-        }
-        let owner = path
-            .segments
-            .iter()
-            .take(path.segments.len().saturating_sub(1))
-            .map(|seg| seg.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::");
-        matches!(
-            owner.as_str(),
-            "de::Error" | "serde::de::Error" | "serde_core::de::Error" | "serde_json::de::Error"
-        )
-    }
 
-    fn has_concrete_error_module_type(&self) -> bool {
-        self.local_declared_types.contains("error::Error")
-            || self.local_declared_types.contains("::error::Error")
-            || self.declared_module_names.contains("error")
-            || self.declared_module_paths.contains("error")
-    }
 
     fn serde_error_trait_static_call_owner_cpp(&self, expected_ty: Option<&syn::Type>) -> String {
         let valid_owner = |mapped: &str| {
@@ -72110,12 +66448,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         Some(format!("{}<{}>", owner_cpp, mapped_err))
     }
 
-    fn is_type_param_in_scope(&self, name: &str) -> bool {
-        self.type_param_scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
-    }
 
     fn current_struct_is_hoisted_local_type(&self) -> bool {
         let Some(current_struct) = self.current_struct.as_ref() else {
@@ -72175,52 +66507,7 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_std_optional_syn_type(&self, ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Path(tp) if tp.qself.is_none() => {
-                let parts: Vec<String> = tp
-                    .path
-                    .segments
-                    .iter()
-                    .map(|seg| seg.ident.to_string())
-                    .collect();
-                match parts.as_slice() {
-                    [single] => single == "optional",
-                    [std, opt] => std == "std" && opt == "optional",
-                    _ => false,
-                }
-            }
-            syn::Type::Paren(p) => self.is_std_optional_syn_type(&p.elem),
-            syn::Type::Group(g) => self.is_std_optional_syn_type(&g.elem),
-            _ => false,
-        }
-    }
 
-    fn is_rust_option_syn_type(&self, ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Path(tp) if tp.qself.is_none() => {
-                let parts: Vec<String> = tp
-                    .path
-                    .segments
-                    .iter()
-                    .map(|seg| seg.ident.to_string())
-                    .collect();
-                match parts.as_slice() {
-                    [single] => single == "Option",
-                    [ns, opt] => (ns == "rusty" || ns == "core" || ns == "std") && opt == "Option",
-                    [prefix, option, opt] => {
-                        (prefix == "core" || prefix == "std")
-                            && option == "option"
-                            && opt == "Option"
-                    }
-                    _ => false,
-                }
-            }
-            syn::Type::Paren(p) => self.is_rust_option_syn_type(&p.elem),
-            syn::Type::Group(g) => self.is_rust_option_syn_type(&g.elem),
-            _ => false,
-        }
-    }
 
     fn normalize_qself_base_for_assoc(&self, self_type: &str) -> String {
         let mut base = self_type.trim().to_string();
@@ -72235,22 +66522,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
 
-    /// Phase 3b.2: if `assoc_name` is uniquely declared as an
-    /// associated type by exactly one trait in this translation unit,
-    /// return that trait's name. Returns `None` if no trait declares
-    /// it, or if multiple traits do (ambiguous — we'd need trait-bound
-    /// context to disambiguate, which we don't track yet).
-    fn lookup_unique_trait_for_assoc_name(&self, assoc_name: &str) -> Option<String> {
-        let mut matches = self
-            .trait_associated_type_names
-            .iter()
-            .filter(|(_, names)| names.iter().any(|n| n == assoc_name));
-        let first = matches.next()?;
-        if matches.next().is_some() {
-            return None; // ambiguous
-        }
-        Some(first.0.clone())
-    }
 
     fn maybe_prefix_typename_for_dependent_path(&self, path: String) -> String {
         let path = self.maybe_insert_template_keyword_for_dependent_member_path(path);
@@ -72622,9 +66893,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.emit_template_declaration(generics, false, export_prefix, declaration);
     }
 
-    fn should_soften_dependent_assoc_mode(&self) -> bool {
-        self.module_name.is_some() || self.expanded_libtest_mode
-    }
 
     fn return_type_contains_dependent_assoc(&self, output: &syn::ReturnType) -> bool {
         let syn::ReturnType::Type(_, ty) = output else {
@@ -73104,14 +67372,6 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
     }
 
-    fn is_explicit_unit_type(&self, ty: &syn::Type) -> bool {
-        match ty {
-            syn::Type::Tuple(t) => t.elems.is_empty(),
-            syn::Type::Paren(p) => self.is_explicit_unit_type(&p.elem),
-            syn::Type::Group(g) => self.is_explicit_unit_type(&g.elem),
-            _ => false,
-        }
-    }
 
     fn map_fn_params(
         &self,
@@ -82546,6 +76806,8 @@ fn get_local_type(local: &syn::Local) -> Option<&syn::Type> {
 
 mod collect_passes;
 mod inference;
+mod lookups;
+mod predicates;
 
 #[cfg(test)]
 mod tests;
