@@ -7491,17 +7491,28 @@ impl CodeGen {
             let receiver_ty = self
                 .infer_hint_type_from_expr(&mc.receiver)
                 .or_else(|| self.infer_simple_expr_type(&mc.receiver));
-            let receiver_is_stringish = receiver_ty
+            let mapped_receiver = receiver_ty.as_ref().map(|ty| self.map_type(ty));
+            let receiver_is_stringish = mapped_receiver
                 .as_ref()
-                .map(|ty| {
-                    let mapped = self.map_type(ty);
+                .map(|mapped| {
                     mapped.contains("string_view")
                         || mapped.contains("rusty::String")
                         || mapped.contains("StrView")
-                        || mapped == "std::string"
+                        || *mapped == "std::string"
                 })
                 .unwrap_or(false);
-            if receiver_is_stringish {
+            // When type inference can't resolve the receiver (`rhs.as_str()`
+            // on a struct type whose `as_str` impl isn't in the visible
+            // impl_blocks set), fall back to a syntactic check: a tail
+            // `.as_str()` method call almost always yields `&str` in Rust
+            // (string-port, semver Version, …). Without this, semver emits
+            // `rhs.as_str().split(U'.')` as a method call and clang errors
+            // "no member named 'split' in 'std::basic_string_view<char>'".
+            let receiver_chain_ends_in_as_str = matches!(
+                self.peel_paren_group_expr(&mc.receiver),
+                syn::Expr::MethodCall(inner) if inner.method == "as_str" && inner.args.is_empty()
+            );
+            if receiver_is_stringish || receiver_chain_ends_in_as_str {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
                 let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
                     format!("({})", raw_receiver)
