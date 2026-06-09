@@ -26558,7 +26558,47 @@ impl CodeGen {
                                         {
                                             recovered_args[0] = inferred;
                                         }
-                                        if owner_name == "Box" {
+                                        // Detect the "first arg is `&self`" shape:
+                                        // `Rc::strong_count(&one)` where `one: Rc<int>`.
+                                        // Wrapping the recovered arg as
+                                        // `Rc<Rc<int>>::strong_count(one)` is wrong — the
+                                        // owner type IS the receiver type. Use the
+                                        // recovered arg directly as seg_text and skip
+                                        // the wrapping step.
+                                        //
+                                        // Detection: inspect the *Rust* type of the
+                                        // first call arg (peeling `&`/`&mut` borrows
+                                        // and references). If its last path segment is
+                                        // the owner_name, the recovered "template arg"
+                                        // is actually the full receiver type already.
+                                        // Constructor calls like `Box::new_in(val, alloc)`
+                                        // aren't affected because `val`'s type is the
+                                        // *inner* T, not `Box<T>`.
+                                        let recovered_arg0_is_owner_instance = call
+                                            .args
+                                            .first()
+                                            .and_then(|arg| {
+                                                let peeled = match arg {
+                                                    syn::Expr::Reference(r) => r.expr.as_ref(),
+                                                    other => other,
+                                                };
+                                                self.infer_simple_expr_type(peeled)
+                                            })
+                                            .as_ref()
+                                            .is_some_and(|ty| {
+                                                let ty = self.peel_reference_paren_group_type(ty);
+                                                if let syn::Type::Path(tp) = ty {
+                                                    tp.path
+                                                        .segments
+                                                        .last()
+                                                        .is_some_and(|seg| seg.ident == owner_name)
+                                                } else {
+                                                    false
+                                                }
+                                            });
+                                        if recovered_arg0_is_owner_instance {
+                                            seg_text = recovered_args[0].clone();
+                                        } else if owner_name == "Box" {
                                             seg_text = format!(
                                                 "rusty::Box<{}>",
                                                 recovered_args.join(", ")
