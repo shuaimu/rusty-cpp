@@ -2579,7 +2579,13 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     return format!("{}.value()", mapped);
                 }
                 if self.is_rebind_reference_binding(&name) {
-                    return format!("*{}", mapped);
+                    // Parenthesize so field/method access on the surrounding
+                    // expression binds correctly: `(*ptr).field` rather than
+                    // `*ptr.field` (which parses as `*(ptr.field)` and fails
+                    // since ptr is a pointer). Without the parens, once_cell
+                    // emits `*this_shadow1.cell.get_mut().is_none()` for the
+                    // Rust source `this.cell.get_mut().is_none()`.
+                    return format!("(*{})", mapped);
                 }
                 return mapped;
             }

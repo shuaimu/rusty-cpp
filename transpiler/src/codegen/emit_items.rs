@@ -4556,10 +4556,19 @@ impl CodeGen {
                 "// host type's struct body, or rewrite `this`/`(*this)` to an explicit",
             );
             self.writeln("// `self_` parameter and qualify all call sites accordingly.");
+            // Wrap orphan-impl body in `#if 0` so the broken free-standing
+            // methods are visible for inspection but excluded from the build.
+            // Matches the manual `#if 0 ... #endif patcher` blocks the
+            // post-transpile patcher adds to maintained ports (rc_port,
+            // arc_port, …) when an impl block names a foreign host type.
+            self.writeln("#if 0  // patcher: orphan-impl block stubbed");
         }
         self.writeln(&format!("// Methods for {}", type_name));
         for item in &i.items {
             self.emit_impl_item(item);
+        }
+        if !host_is_local {
+            self.writeln("#endif  // patcher: end orphan-impl stub");
         }
     }
 
@@ -5012,7 +5021,9 @@ impl CodeGen {
                     // `fn split(mut self, alloc)` calling its own
                     // non-const `split_leaf_data`) typecheck.
                     ("".to_string(), false)
-                } else if Self::body_moves_out_self_field(&method.block) {
+                } else if Self::body_moves_out_self_field(&method.block)
+                    && !self.current_struct_is_bitflags_like()
+                {
                     // `fn foo(self)` whose body moves a non-Copy field
                     // out of `self` (e.g. `Foo { kv: self.kv, ... }`
                     // where `kv: (K, V)` is potentially non-Copy).
@@ -5027,6 +5038,14 @@ impl CodeGen {
                     // This is the right semantic anyway — the method
                     // consumes self in Rust, which more closely
                     // matches non-const C++ method behavior on `*this`.
+                    //
+                    // Bitflags-like types are exempt: their single
+                    // primitive field (`_0: uN`) is trivially Copy, so
+                    // `self.0` reads inside operator impls (`fn not(self)`
+                    // → `Self::from_bits_truncate(!self.0)`) are not
+                    // moves. Emitting these as const lets call sites
+                    // like `!TestFlags::A` (where A is `static const`)
+                    // type-check.
                     ("".to_string(), false)
                 } else {
                     // `fn foo(self)` (no `mut`, no field moves) →

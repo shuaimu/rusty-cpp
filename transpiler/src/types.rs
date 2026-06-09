@@ -80,12 +80,16 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Box" | "std::boxed::Box" => Some(("rusty::Box", true)),
         "Rc" | "std::rc::Rc" => Some(("rusty::Rc", true)),
         "Arc" | "std::sync::Arc" => Some(("rusty::Arc", true)),
-        "Weak" | "std::rc::Weak" | "alloc::rc::Weak" => Some(("rusty::Weak", true)),
+        // `Weak` is ambiguous in Rust — std::rc::Weak and std::sync::Weak
+        // share the bare name. The umbrella module deliberately does NOT
+        // declare a top-level `rusty::Weak` alias to keep the two distinct
+        // (see include/rusty/rusty.cppm). Map to the deep path instead.
+        "Weak" | "std::rc::Weak" | "alloc::rc::Weak" => Some(("rusty::rc::Weak", true)),
         "std::sync::Weak" | "core::sync::Weak" | "alloc::sync::Weak" => {
             Some(("rusty::sync::Weak", true))
         }
         // Common import aliases used by serde-style expanded crates.
-        "RcWeak" => Some(("rusty::Weak", true)),
+        "RcWeak" => Some(("rusty::rc::Weak", true)),
         "ArcWeak" => Some(("rusty::sync::Weak", true)),
 
         // Interior mutability
@@ -97,19 +101,17 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "Vec" | "std::vec::Vec" => Some(("rusty::Vec", true)),
         "HashMap" | "std::collections::HashMap" => Some(("rusty::HashMap", true)),
         "HashSet" | "std::collections::HashSet" => Some(("rusty::HashSet", true)),
-        // BTreeMap maps to bare `::BTreeMap` (consumer imports
-        // `btree_port.btree.map`). Previously mapped to `rusty::BTreeMap`,
-        // a std::map-backed facade in `include/rusty/btreemap.hpp` —
-        // that header was deleted (rusty-std-book §1 / btreemap_port
-        // STATUS Step 83) in favor of the transpiled module. The bare
-        // `::BTreeMap` resolves via unqualified lookup once the consumer
-        // (or another transpiled port like `set.rs`) imports
-        // `btree_port.btree.map`.
-        "BTreeMap" | "std::collections::BTreeMap" => Some(("::BTreeMap", true)),
-        // `rusty::BTreeSet` was dropped (the std::set facade is gone);
-        // BTreeSet now lives in the transpiled `btree_port.btree.set`
-        // module exported at file scope.
-        "BTreeSet" | "std::collections::BTreeSet" => Some(("::BTreeSet", true)),
+        // BTreeMap / BTreeSet live in the transpiled `btree_port`
+        // module (namespaces `btree_port::btree::map` / `…::set`).
+        // The `rusty` umbrella module aliases them under `rusty::` —
+        // `using BTreeMap = ::btree_port::btree::map::BTreeMap<…>;`
+        // and similarly for BTreeSet. Emit the umbrella spelling so
+        // consumers that `import rusty;` (auto-injected by codegen
+        // when the output references these types) see a name that
+        // actually exists. The previous `::BTreeMap` at global scope
+        // doesn't resolve — no top-level alias was ever introduced.
+        "BTreeMap" | "std::collections::BTreeMap" => Some(("rusty::BTreeMap", true)),
+        "BTreeSet" | "std::collections::BTreeSet" => Some(("rusty::BTreeSet", true)),
         "VecDeque" | "std::collections::VecDeque" => Some(("rusty::VecDeque", true)),
         "std::collections::hash_map::DefaultHasher" => Some(("DefaultHasher", false)),
         // BinaryHeap and LinkedList previously fell back to rusty::Vec as a
@@ -813,12 +815,12 @@ mod tests {
         assert_eq!(map_std_type("Box"), Some(("rusty::Box", true)));
         assert_eq!(map_std_type("Rc"), Some(("rusty::Rc", true)));
         assert_eq!(map_std_type("Arc"), Some(("rusty::Arc", true)));
-        assert_eq!(map_std_type("Weak"), Some(("rusty::Weak", true)));
+        assert_eq!(map_std_type("Weak"), Some(("rusty::rc::Weak", true)));
         assert_eq!(
             map_std_type("std::sync::Weak"),
             Some(("rusty::sync::Weak", true))
         );
-        assert_eq!(map_std_type("RcWeak"), Some(("rusty::Weak", true)));
+        assert_eq!(map_std_type("RcWeak"), Some(("rusty::rc::Weak", true)));
         assert_eq!(map_std_type("ArcWeak"), Some(("rusty::sync::Weak", true)));
     }
 
@@ -837,8 +839,8 @@ mod tests {
         assert_eq!(map_std_type("Vec"), Some(("rusty::Vec", true)));
         assert_eq!(map_std_type("HashMap"), Some(("rusty::HashMap", true)));
         assert_eq!(map_std_type("HashSet"), Some(("rusty::HashSet", true)));
-        assert_eq!(map_std_type("BTreeMap"), Some(("::BTreeMap", true)));
-        assert_eq!(map_std_type("BTreeSet"), Some(("::BTreeSet", true)));
+        assert_eq!(map_std_type("BTreeMap"), Some(("rusty::BTreeMap", true)));
+        assert_eq!(map_std_type("BTreeSet"), Some(("rusty::BTreeSet", true)));
         assert_eq!(map_std_type("VecDeque"), Some(("rusty::VecDeque", true)));
     }
 
