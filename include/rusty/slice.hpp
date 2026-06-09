@@ -709,6 +709,24 @@ public:
     skip_next_iter(Iter iter, size_t remaining)
         : iter_(std::forward<Iter>(iter)), remaining_(remaining) {}
 
+    // `rusty::clone(skip_iter)` must produce an independently-owning
+    // copy of the underlying iterator — Rust's `Skip::clone` recurses
+    // into the wrapped iterator's `Clone`. The implicit copy constructor
+    // does a shallow member-wise copy which, for iterators owning heap
+    // storage (e.g. SmallVec::into_iter holding a `SmallVec<A>` by
+    // value), aliases the same buffer pointer and triggers a double-free
+    // when both copies are destroyed. Surfaced by smallvec
+    // `test_into_iter_clone_partially_consumed_iterator`. Restrict to
+    // iterators that themselves expose a `.clone()` member so trivially
+    // copyable wrappers stay copy-elided through the implicit ctor.
+    skip_next_iter clone() const
+        requires requires(const std::remove_reference_t<Iter>& it) {
+            { it.clone() } -> std::same_as<std::remove_reference_t<Iter>>;
+        }
+    {
+        return skip_next_iter(iter_.clone(), remaining_);
+    }
+
     skip_next_iter into_iter() {
         return std::move(*this);
     }
