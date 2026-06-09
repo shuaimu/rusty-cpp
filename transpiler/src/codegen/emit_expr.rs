@@ -15488,7 +15488,27 @@ impl CodeGen {
         let method = func_path.segments.last()?.ident.to_string();
         let trait_seg = func_path.segments.iter().nth_back(1)?.ident.to_string();
 
-        if trait_seg == "Clone" && method == "clone" && call.args.len() == 1 {
+        // `Clone::clone(&x)` is the canonical UFCS form, but Rust also accepts
+        // the impl-anchored form `Rc::clone(&x)` / `Arc::clone(&x)` /
+        // `MyType::clone(&x)` (and the std reference docs actively recommend
+        // it as a readability convention for refcounted handles). Both forms
+        // resolve to the same `Clone::clone` trait method; we route both to
+        // `rusty::clone(arg)`, which SFINAE-dispatches to the member
+        // `.clone()` when one exists (the Rc/Arc port case) and falls back
+        // to copy-construction otherwise.
+        //
+        // Guard with `lookup_owner_method_has_receiver(trait_seg, "clone") ==
+        // Some(true)` so we only rewrite when the owner type has a `clone()`
+        // method that takes `&self` (otherwise this would clobber inherent
+        // static `clone` functions). Empty/unknown owners fall back to the
+        // Clone-trait form.
+        let owner_clone_takes_receiver = self
+            .lookup_owner_method_has_receiver(&trait_seg, "clone")
+            .unwrap_or(false);
+        let is_clone_ufcs = method == "clone"
+            && call.args.len() == 1
+            && (trait_seg == "Clone" || owner_clone_takes_receiver);
+        if is_clone_ufcs {
             let receiver_expr = match call.args.first() {
                 Some(syn::Expr::Reference(reference)) => reference.expr.as_ref(),
                 Some(other) => other,
