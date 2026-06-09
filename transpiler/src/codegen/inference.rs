@@ -3851,10 +3851,19 @@ impl CodeGen {
                                     }
                                 }
                             }
+                            // `T::new()` / `T::new_()` typically returns `Self = T`.
+                            // Accept both the angle-bracketed form (`Vec::<int>::new()`)
+                            // and the bare form (`OnceNonZeroUsize::new()`) so the
+                            // resulting local binding type can be looked up downstream
+                            // (e.g. for `method_call_receiver_owner_tail`). When the
+                            // owner is generic but no args are given, the recovered
+                            // owner type lacks the generics; that's OK because the
+                            // owner-tail-name extraction only needs the identifier.
                             if matches!(method_name.as_str(), "new" | "new_")
                                 && matches!(
                                     owner_seg.arguments,
                                     syn::PathArguments::AngleBracketed(_)
+                                        | syn::PathArguments::None
                                 )
                             {
                                 let owner_len = path_expr.path.segments.len().saturating_sub(1);
