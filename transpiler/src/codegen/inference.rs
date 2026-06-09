@@ -7708,7 +7708,20 @@ impl CodeGen {
     }
 
     pub(super) fn infer_remove_cvref_decltype_from_expr(&self, expr: &syn::Expr) -> Option<String> {
-        let expr_cpp = self.emit_expr_to_string(expr);
+        // Peel `&` / `&mut` from the source expr before taking decltype: in
+        // C++ `&x` evaluates to a *pointer* (e.g. `Rc<int>*`), so
+        // `std::remove_cvref_t<decltype(&x)>` recovers `Rc<int>*` — wrong
+        // for callers that want the pointee type (e.g. as a template arg
+        // for `Rc<T>::strong_count(&x)`). Rust `&x` is just a reference,
+        // and the call sites here use the recovered type as the template
+        // parameter of a wrapper owner, where the pointee is what's
+        // needed. `std::remove_cvref_t` would still leave a stray
+        // pointer; strip the reference syntactically first.
+        let peeled = match expr {
+            syn::Expr::Reference(reference) => reference.expr.as_ref(),
+            _ => expr,
+        };
+        let expr_cpp = self.emit_expr_to_string(peeled);
         // GNU statement-expression lowering produces `({ ...; ...; expr; })`
         // which is not a valid operand for `decltype((...))`. Reject those
         // specifically. Brace-initializer expressions like `rusty::Vec{1, 2}`
