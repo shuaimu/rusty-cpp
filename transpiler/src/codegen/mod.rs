@@ -33583,6 +33583,45 @@ fn merge_impl_type_generics_into_method(
 /// Cluster A variant: skip generics that structurally decompose into the
 /// host class's template args (those generics would be undeducible at the
 /// absorbed method's call site).
+/// Collect every single-segment identifier referenced inside a type's path.
+/// Used by `merge_impl_type_generics_into_method_with_decomp` to decide
+/// whether an impl-block generic ALSO appears in the method's return type
+/// (in which case structural-decomp recovery doesn't cover it and the
+/// generic must stay as an emitted method-level template param).
+fn collect_type_path_idents(ty: &syn::Type) -> HashSet<String> {
+    let mut out = HashSet::new();
+    fn visit(ty: &syn::Type, out: &mut HashSet<String>) {
+        match ty {
+            syn::Type::Path(tp) => {
+                for seg in &tp.path.segments {
+                    out.insert(seg.ident.to_string());
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        for arg in &args.args {
+                            if let syn::GenericArgument::Type(t) = arg {
+                                visit(t, out);
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Type::Reference(r) => visit(&r.elem, out),
+            syn::Type::Ptr(p) => visit(&p.elem, out),
+            syn::Type::Tuple(t) => {
+                for elem in &t.elems {
+                    visit(elem, out);
+                }
+            }
+            syn::Type::Array(a) => visit(&a.elem, out),
+            syn::Type::Slice(s) => visit(&s.elem, out),
+            syn::Type::Paren(p) => visit(&p.elem, out),
+            syn::Type::Group(g) => visit(&g.elem, out),
+            _ => {}
+        }
+    }
+    visit(ty, &mut out);
+    out
+}
+
 fn merge_impl_type_generics_into_method_with_decomp(
     method: &mut syn::ImplItemFn,
     impl_generics: &syn::Generics,
@@ -33600,6 +33639,32 @@ fn merge_impl_type_generics_into_method_with_decomp(
         })
         .collect();
 
+    // Collect generic names referenced in the method's return type. When a
+    // structural-decomp generic *also* appears in the return type (i.e.
+    // outside the receiver position whose `__TemplateArgs<HostParam>::arg_<N>`
+    // recovery covers it), the C++ method declaration would reference an
+    // undeclared identifier. Force-add such generics as method-level template
+    // params so the declaration compiles. The receiver position still resolves
+    // the same generic at the call site via type deduction; the method-level
+    // copy is just a fresh template binding.
+    //
+    // Example from `either` crate:
+    //   impl<L, R, E> Either<Result<L, E>, Result<R, E>> {
+    //       fn factor_err(self) -> Result<Either<L, R>, E> { ... }
+    //   }
+    // The decomp at host position 0 captures {L, E} from Result<L, E>; the
+    // merge below would skip E, but the return type `Result<Either<L, R>, E>`
+    // references E outside any __TemplateArgs recovery — without the
+    // exception, the emitted method has no `template<typename E>` and clang
+    // errors with "use of undeclared identifier 'E'".
+    let return_type_referenced_idents: HashSet<String> = if let syn::ReturnType::Type(_, ret_ty) =
+        &method.sig.output
+    {
+        collect_type_path_idents(ret_ty)
+    } else {
+        HashSet::new()
+    };
+
     for param in &impl_generics.params {
         match param {
             syn::GenericParam::Type(tp) => {
@@ -33610,6 +33675,7 @@ fn merge_impl_type_generics_into_method_with_decomp(
                 if let Some(decomp) = structural_decomp
                     && (decomp.contains_generic(&name)
                         || decomp.direct_param_mappings.contains_key(&name))
+                    && !return_type_referenced_idents.contains(&name)
                 {
                     continue;
                 }
