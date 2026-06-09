@@ -14258,9 +14258,22 @@ impl CodeGen {
             return false;
         };
         let scoped_name = self.scoped_type_key(struct_name);
+        // Require a bitwise operator (& | ^ ~) — derived `operator==` /
+        // `operator!=` alone (e.g. on OnceCell, Lazy, …) is not bitflags.
+        // Without this filter the bitflags-const-correctness exception in
+        // emit_items.rs (force `operator!()` const on bitflags-like types)
+        // also fires for OnceCell::into_inner, classifying it as const
+        // even though its body moves out `self.inner`.
         self.operator_renames
-            .keys()
-            .any(|(type_key, _)| *type_key == *struct_name || *type_key == scoped_name)
+            .iter()
+            .any(|((type_key, _), op)| {
+                (*type_key == *struct_name || *type_key == scoped_name)
+                    && matches!(
+                        op.as_str(),
+                        "operator&" | "operator|" | "operator^" | "operator!"
+                            | "operator&=" | "operator|=" | "operator^="
+                    )
+            })
     }
 
     fn method_is_direct_recursive_bits_forwarder(&self, method: &syn::ImplItemFn) -> bool {

@@ -5699,12 +5699,36 @@ export namespace rusty::boxed {
     template<typename T, std::size_t N>
     constexpr ::rusty::port::vec::Vec<std::remove_cv_t<T>>
     into_vec(std::array<T, N>&& arr) {
-        return ::rusty::port::vec::Vec<std::remove_cv_t<T>>::from_iter(std::move(arr));
+        // Move elements out one by one rather than `from_iter(arr)` —
+        // `rusty::iter(arr)` returns a slice_iter whose `next()` yields
+        // `const T&`, so `from_iter` ends up copy-constructing T. For
+        // move-only types (rusty::String, rusty::Box, OnceCell, …) the
+        // copy is deleted and clang errors with "call to deleted
+        // constructor". Reserve once and push moved elements.
+        using ElemT = std::remove_cv_t<T>;
+        ::rusty::port::vec::Vec<ElemT> out =
+            ::rusty::port::vec::Vec<ElemT>::with_capacity(N);
+        for (auto&& elem : arr) {
+            out.push(std::move(elem));
+        }
+        return out;
     }
     template<typename T, std::size_t N>
     constexpr ::rusty::port::vec::Vec<std::remove_cv_t<T>>
     into_vec(const std::array<T, N>& arr) {
-        return ::rusty::port::vec::Vec<std::remove_cv_t<T>>::from_iter(arr);
+        // Const lvalue path — element copy is unavoidable; constrain
+        // to copy-constructible T so move-only T+const-lvalue is a
+        // compile-time error rather than a silent copy-of-deleted.
+        static_assert(std::is_copy_constructible_v<T>,
+            "into_vec(const std::array&) requires copy-constructible T; "
+            "use std::move(arr) for move-only element types");
+        using ElemT = std::remove_cv_t<T>;
+        ::rusty::port::vec::Vec<ElemT> out =
+            ::rusty::port::vec::Vec<ElemT>::with_capacity(N);
+        for (const auto& elem : arr) {
+            out.push(elem);
+        }
+        return out;
     }
 }
 
