@@ -183,6 +183,75 @@ constexpr bool operator==(const L& lhs, const R& rhs) {
     return rusty::as_slice(lhs) == rusty::as_slice(rhs);
 }
 
+// std::array vs std::vector — bitflags' transpiled assertions wrap a
+// fixed-size literal as `std::array{…}` then compare it against the
+// `std::vector` returned by `rusty::collect_range`. Without these
+// overloads clang reports "invalid operands to binary expression".
+template<typename L, std::size_t N, typename R, typename Alloc>
+requires (
+    requires(const L& l, const R& r) { static_cast<bool>(l == r); } ||
+    requires(const L& l, const R& r) { static_cast<bool>(r == l); })
+constexpr bool operator==(const std::array<L, N>& lhs,
+                          const std::vector<R, Alloc>& rhs) {
+    if (lhs.size() != rhs.size()) return false;
+    if constexpr (requires(const L& l, const R& r) { static_cast<bool>(l == r); }) {
+        return std::equal(lhs.begin(), lhs.end(), rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(l == r); });
+    } else {
+        return std::equal(lhs.begin(), lhs.end(), rhs.begin(),
+            [](const L& l, const R& r) { return static_cast<bool>(r == l); });
+    }
+}
+
+template<typename L, typename Alloc, typename R, std::size_t N>
+requires (
+    requires(const L& l, const R& r) { static_cast<bool>(l == r); } ||
+    requires(const L& l, const R& r) { static_cast<bool>(r == l); })
+constexpr bool operator==(const std::vector<L, Alloc>& lhs,
+                          const std::array<R, N>& rhs) {
+    return rhs == lhs;
+}
+
+// rusty::Vec (has_member_as_slice) vs std::vector — after the
+// `into_vec(std::array<T,N>)` overload landed (vec_port.vec.cppm),
+// bitflags' `vec![…]` macro lowers to a rusty::Vec rather than a
+// std::array, so the previous std::array-vs-std::vector overloads
+// don't fire any more. Compare element-by-element via .data()/.size().
+template<typename L, typename R, typename Alloc>
+requires (
+    has_member_as_slice<L>::value &&
+    (requires(const decltype(*std::declval<L>().as_slice().begin())& l, const R& r) {
+        static_cast<bool>(l == r);
+     } ||
+     requires(const R& r, const decltype(*std::declval<L>().as_slice().begin())& l) {
+        static_cast<bool>(r == l);
+     }))
+constexpr bool operator==(const L& lhs, const std::vector<R, Alloc>& rhs) {
+    const auto slice = rusty::as_slice(lhs);
+    if (slice.size() != rhs.size()) return false;
+    using LElem = std::remove_cvref_t<decltype(*slice.begin())>;
+    if constexpr (requires(const LElem& l, const R& r) { static_cast<bool>(l == r); }) {
+        return std::equal(slice.begin(), slice.end(), rhs.begin(),
+            [](const LElem& l, const R& r) { return static_cast<bool>(l == r); });
+    } else {
+        return std::equal(slice.begin(), slice.end(), rhs.begin(),
+            [](const LElem& l, const R& r) { return static_cast<bool>(r == l); });
+    }
+}
+
+template<typename L, typename Alloc, typename R>
+requires (
+    has_member_as_slice<R>::value &&
+    (requires(const L& l, const decltype(*std::declval<R>().as_slice().begin())& r) {
+        static_cast<bool>(l == r);
+     } ||
+     requires(const decltype(*std::declval<R>().as_slice().begin())& r, const L& l) {
+        static_cast<bool>(r == l);
+     }))
+constexpr bool operator==(const std::vector<L, Alloc>& lhs, const R& rhs) {
+    return rhs == lhs;
+}
+
 namespace rusty {
 
 namespace detail {
