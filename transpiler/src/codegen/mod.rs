@@ -34306,15 +34306,10 @@ auto max(const A& lhs, const B& rhs) {\n\
     return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);\n\
 }\n\
 }\n\
-// Clone: dispatches to .clone() if available, otherwise copy-constructs.\n\
-template<typename T>\n\
-auto clone(const T& value) {\n\
-    if constexpr (requires { value.clone(); }) {\n\
-        return value.clone();\n\
-    } else {\n\
-        return value;\n\
-    }\n\
-}\n\
+// `rusty::clone` was previously defined here, but `<rusty/move.hpp>`\n\
+// (pulled in via `<rusty/rusty.hpp>`) already provides it. Emitting\n\
+// it again as a redundant duplicate makes call sites that pass a\n\
+// type accepted by both overloads ambiguous, so we omit it.\n\
 template<typename Iter>\n\
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {\n\
     return iter.size_hint();\n\
@@ -34543,8 +34538,8 @@ struct bytes_span_visitor {\n\
     }\n\
 \n\
     template<typename E>\n\
-    rusty::Result<Value, E> visit_byte_buf(rusty::Vec<uint8_t> value) {\n\
-        return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(value));\n\
+    rusty::Result<Value, E> visit_byte_buf(auto&& value) {\n\
+        return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(std::forward<decltype(value)>(value)));\n\
     }\n\
 \n\
     template<typename E>\n\
