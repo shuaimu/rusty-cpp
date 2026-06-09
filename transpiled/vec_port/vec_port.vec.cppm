@@ -4597,7 +4597,18 @@ struct Vec {
         new (this) Vec(std::move(other));
         return *this;
     }
-    void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }
+    // Forgetting a Vec must also forget its owning RawVec, otherwise
+    // RawVec's member destructor (which runs after Vec::~Vec returns
+    // early) still calls `deallocate`, freeing a buffer whose ownership
+    // was transferred elsewhere. Without this propagation, the
+    // `SmallVec::from_vec` heap path's `rusty::mem::forget(std::move(vec))`
+    // left the RawVec live and we got a double-free at the next owner
+    // (e.g. SmallVec's destructor reconstructing a Vec from raw parts).
+    // Surfaced by smallvec::tests::drain_forget.
+    void rusty_mark_forgotten() const noexcept {
+        _rusty_forgotten = true;
+        buf.rusty_mark_forgotten();
+    }
 
     // ── C++-ergonomic shortcuts (hand-added so that
     // `using rusty::Vec = Vec<T,A>` can become a drop-in replacement for
