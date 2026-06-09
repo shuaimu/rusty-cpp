@@ -4028,7 +4028,12 @@ struct RawVec {
     static RawVec<T, A> from_raw_parts_in(std::add_pointer_t<T> ptr, size_t capacity, A alloc) {
         // @unsafe
         {
-            const auto ptr_shadow1 = ptr->cast();
+            // `ptr.cast()` on a `*mut T` in Rust returns `*mut U` with `U`
+            // inferred from context. Here `RawVecInner::from_raw_parts_in`
+            // takes `uint8_t*`, so the cast must target `uint8_t*`. The
+            // transpiler can't propagate that expected-type context through
+            // a let-binding hoist, so write the cast explicitly.
+            auto ptr_shadow1 = reinterpret_cast<uint8_t*>(ptr);
             auto capacity_shadow1 = new_cap<T>(std::move(capacity));
             return RawVec<T, A>(RawVecInner<A>::from_raw_parts_in(std::move(ptr_shadow1), std::move(capacity_shadow1), std::move(alloc)), rusty::PhantomData<T>{});
         }

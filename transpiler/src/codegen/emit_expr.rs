@@ -7693,7 +7693,25 @@ impl CodeGen {
             return format!("({} == nullptr)", receiver);
         }
         if method_name == "cast" && args.is_empty() && self.is_expr_raw_pointer_like(&mc.receiver) {
-            if let Some(target_ty) = self.method_call_single_turbofish_type(mc) {
+            // Target type: explicit turbofish `ptr.cast::<U>()` first; otherwise
+            // try the expected_ty (Rust `let x: *mut U = ptr.cast()` and similar
+            // arg-position calls). When neither tells us U, the cast can't be
+            // emitted as `reinterpret_cast` — fall through to the bare-method
+            // emission, which will fail to compile but at least surface a
+            // clear error from the C++ compiler.
+            let target_ty: Option<syn::Type> = self
+                .method_call_single_turbofish_type(mc)
+                .map(|ty| ty.clone())
+                .or_else(|| {
+                    let ty = expected_ty?;
+                    let peeled = self.peel_reference_paren_group_type(ty);
+                    if let syn::Type::Ptr(ptr) = peeled {
+                        Some((*ptr.elem).clone())
+                    } else {
+                        None
+                    }
+                });
+            if let Some(target_ty) = target_ty {
                 let is_mut = self
                     .infer_raw_pointer_mutability_for_expr(&mc.receiver)
                     .or_else(|| {
