@@ -121,9 +121,15 @@ export using ::operator delete;
 // `#include <rusty/*.hpp>` chain.
 export namespace rusty {
 
-// VecLegacy retired — `rusty::Vec<T,A>` is the transpiled rustc Vec.
+// `rusty::Vec<T,A>` aliases the transpiled rustc Vec at its deep path.
+// The previous indirection through global `::Vec` (vec_port export)
+// was removed: importers' `using rusty::Vec;` saw `::Vec` already in
+// scope from the transitive vec_port import and clang rejected the
+// using-decl with a "target conflicts with declaration already in
+// scope" error. Routing directly to `::rusty::port::vec::Vec` keeps
+// `rusty::Vec` and the global namespace independent.
 template<typename T, typename A = ::rusty::alloc::Global>
-using Vec = ::Vec<T, A>;
+using Vec = ::rusty::port::vec::Vec<T, A>;
 
 // Legacy hand-written rusty::Rc retired — `rusty::Rc<T,A>` is now the
 // transpiled rustc Rc from `library/alloc/src/rc.rs`. API change:

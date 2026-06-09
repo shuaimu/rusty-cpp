@@ -3959,7 +3959,7 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct VecDeque {
     using Item = T;
-    using IntoIter = ::IntoIter<T, A>;
+    using IntoIter = ::rusty::port::vec::IntoIter<T, A>;
     size_t head;
     size_t len_field;
     ::RawVec<T, A> buf;
@@ -5090,7 +5090,7 @@ written += 1; }();
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return f.debug_list().entries(rusty::iter((*this))).finish();
     }
-    static VecDeque<T, A> from(::Vec<T, A> other) {
+    static VecDeque<T, A> from(::rusty::port::vec::Vec<T, A> other) {
         auto [ptr_shadow1, len, cap, alloc] = rusty::detail::deref_if_pointer_like(other.into_raw_parts_with_alloc());
         return VecDeque<T, A>(static_cast<size_t>(0), std::move(len), ::RawVec<T, A>::from_raw_parts_in(std::move(ptr_shadow1), std::move(cap), std::move(alloc)));
     }
@@ -5104,7 +5104,7 @@ written += 1; }();
     }
     template<typename A1, typename A2>
         requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
-    void spec_extend(::IntoIter<T, A2> iterator) {
+    void spec_extend(::rusty::port::vec::IntoIter<T, A2> iterator) {
         // patcher: stubbed (off smoke-test path)
         std::abort();
     }
@@ -5119,13 +5119,13 @@ written += 1; }();
     }
     template<typename A1, typename A2>
         requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
-    void spec_extend_front(::IntoIter<T, A2> iterator) {
+    void spec_extend_front(::rusty::port::vec::IntoIter<T, A2> iterator) {
         // patcher: stubbed (off smoke-test path)
         std::abort();
     }
     template<typename A1, typename A2>
         requires (rusty::alloc::Allocator<A1> && rusty::alloc::Allocator<A2>)
-    void spec_extend_front(decltype(std::declval<::IntoIter<T, A2>>().rev()) iterator) {
+    void spec_extend_front(decltype(std::declval<::rusty::port::vec::IntoIter<T, A2>>().rev()) iterator) {
         // patcher: stubbed (off smoke-test path)
         std::abort();
     }
@@ -5148,7 +5148,7 @@ written += 1; }();
         // patcher: stubbed (off smoke-test path)
         std::abort();
     }
-    static VecDeque<T, A> spec_from_iter(decltype(rusty::iter(std::declval<::Vec<T>>())) iterator) {
+    static VecDeque<T, A> spec_from_iter(decltype(rusty::iter(std::declval<::rusty::port::vec::Vec<T>>())) iterator) {
         // patcher: stubbed (off smoke-test path)
         std::abort();
     }
@@ -5684,7 +5684,7 @@ struct Splice {
                     return;
                 }
             }
-            auto collected = rusty::iter(::Vec<rusty::detail::associated_item_t<I>>::from_iter(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).by_ref(); }) { return std::forward<decltype(__recv)>(__recv).by_ref(); } else { return std::forward<decltype(__recv)>(__recv)->by_ref(); } }(this->replace_with))));
+            auto collected = rusty::iter(::rusty::port::vec::Vec<rusty::detail::associated_item_t<I>>::from_iter(([&](auto&& __recv) -> decltype(auto) { if constexpr (requires { std::forward<decltype(__recv)>(__recv).by_ref(); }) { return std::forward<decltype(__recv)>(__recv).by_ref(); } else { return std::forward<decltype(__recv)>(__recv)->by_ref(); } }(this->replace_with))));
             if (rusty::len(collected) > 0) {
                 this->drain.move_tail(rusty::len(collected));
                 const auto filled = this->drain.fill(rusty::detail::deref_if_pointer_like(collected));

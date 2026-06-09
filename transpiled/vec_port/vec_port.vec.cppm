@@ -5664,18 +5664,18 @@ static auto from(Vec<T, A> v) {
 
 } // namespace rusty::port::vec
 
-// Backward-compat global aliases: existing consumers using `::Vec<T,A>`
-// or `::Drain<T,A>` keep working. Canonical types live in
-// `rusty::port::vec::*`. Drain is defined in this file (line ~4101)
-// AND in the separate vec_port.vec.drain module (not currently built;
-// dropped during VecLegacy retirement due to cyclic dep). The alias
-// here surfaces this file's `rusty::port::vec::Drain`.
-export template<typename T, typename A = ::rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A>)
-using Vec = ::rusty::port::vec::Vec<T, A>;
-export template<typename T, typename A = ::rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A>)
-using Drain = ::rusty::port::vec::Drain<T, A>;
+// All top-level `::Vec` / `::Drain` / `::IntoIter` aliases removed.
+// They collided with importers' file-scope using-decls. Specifically,
+// transpiler-emitted `using rusty::Vec;` in user crates (smallvec,
+// arrayvec, …) creates a `Vec` in file scope. If `::Vec` exists at
+// file scope (via vec_port export), both decls compete for the same
+// unqualified name and clang errors with "target of using declaration
+// conflicts with declaration already in scope".
+//
+// Consumers use one of:
+//   * `::rusty::port::vec::Vec<T, A>` — internal port code (deepest)
+//   * `rusty::vec::Vec<T, A>` — mirrors Rust's `std::vec::Vec`
+//   * `rusty::Vec<T, A>` — short alias from the umbrella module
 
 // User-facing alias mirroring Rust's `std::vec::Vec`. End users write
 // `rusty::vec::Vec<T>` and don't observe the `rusty::port::*`
@@ -5684,5 +5684,27 @@ export namespace rusty::vec {
     template<typename T, typename A = ::rusty::alloc::Global>
         requires (rusty::alloc::Allocator<A>)
     using Vec = ::rusty::port::vec::Vec<T, A>;
+}
+
+// `rusty::boxed::into_vec(std::array<T, N>)` — module-purview overload
+// that converts a `std::array` to a `rusty::Vec<T>`. The header version
+// in `include/rusty/rusty.hpp` (GMF) can't reference `rusty::Vec` (which
+// is module-only), so it falls back to identity. The transpiler emits
+// `rusty::boxed::into_vec(rusty::boxed::box_new(std::array{…}))` for the
+// Rust `vec![…]` macro; without this overload the result stays a
+// `std::array` and call sites expecting `rusty::Vec<T>` (e.g.
+// `SmallVec::from_vec`, `assert_eq!(rusty::collect_range(...), vec![...])`)
+// fail with "no viable conversion from std::array<T, N> to rusty::Vec<T>".
+export namespace rusty::boxed {
+    template<typename T, std::size_t N>
+    constexpr ::rusty::port::vec::Vec<std::remove_cv_t<T>>
+    into_vec(std::array<T, N>&& arr) {
+        return ::rusty::port::vec::Vec<std::remove_cv_t<T>>::from_iter(std::move(arr));
+    }
+    template<typename T, std::size_t N>
+    constexpr ::rusty::port::vec::Vec<std::remove_cv_t<T>>
+    into_vec(const std::array<T, N>& arr) {
+        return ::rusty::port::vec::Vec<std::remove_cv_t<T>>::from_iter(arr);
+    }
 }
 

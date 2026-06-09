@@ -3644,9 +3644,13 @@ export module rc_port;
 import vec_port.vec;  // patcher-injected for ::Vec
 
 
-// Cluster A completion: __TemplateArgs primary template (specializations at file end)
-template<typename T> struct __TemplateArgs;
 namespace rusty::port::rc {
+// Cluster A completion: __TemplateArgs primary template (specializations at file end).
+// Kept inside `namespace rusty::port::rc` rather than at file scope so the
+// declaration attaches uniquely to this module — `::__TemplateArgs` at file
+// scope conflicts with the same forward-decl in arc_port / btree_port when
+// they're imported together (C++20 single-module-attachment rule).
+template<typename T> struct __TemplateArgs;
 namespace { inline constexpr auto cast_identity_stub = [](auto&& x) { return std::forward<decltype(x)>(x); }; }
 
 
@@ -3748,7 +3752,7 @@ using rusty::Box;
 
 using rusty::String;
 
-using ::Vec;
+using ::rusty::port::vec::Vec;
 
 template<typename T>
 struct RcInner {
@@ -4498,13 +4502,13 @@ return in_progress.into_rc(); }();
     static Rc<T, A> from(rusty::Box<T, A> v) {
         return Rc<T, A>::from_box_in(std::move(v));
     }
-    static Rc<std::span<const T>, A> from(::Vec<T, A> v) {
+    static Rc<std::span<const T>, A> from(::rusty::port::vec::Vec<T, A> v) {
         // @unsafe
         {
             auto [vec_ptr, len, cap, alloc] = rusty::detail::deref_if_pointer_like(v.into_raw_parts_with_alloc());
             const auto rc_ptr = Rc<T, A>::allocate_for_slice_in(std::move(len), rusty::detail::deref_if_pointer_like(alloc));
             rusty::ptr::copy_nonoverlapping(std::move(vec_ptr), const_cast<std::add_pointer_t<T>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<T>>>((&(rusty::detail::deref_if_pointer_like(rc_ptr)).value))), std::move(len));
-            static_cast<void>(::Vec<std::remove_pointer_t<std::remove_reference_t<decltype((vec_ptr))>>>::from_raw_parts_in(std::move(vec_ptr), 0, std::move(cap), alloc));
+            static_cast<void>(::rusty::port::vec::Vec<std::remove_pointer_t<std::remove_reference_t<decltype((vec_ptr))>>>::from_raw_parts_in(std::move(vec_ptr), 0, std::move(cap), alloc));
             return Rc<T, A>::from_ptr_in(std::move(rc_ptr), std::move(alloc));
         }
     }
@@ -5076,7 +5080,7 @@ static auto default_() {
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for I
 Rc<std::span<const T>, rusty::alloc::Global> to_rc_slice() {
-    return rusty::from_into<Rc<std::span<const T>>>(::Vec<T>::from_iter((*this)));
+    return rusty::from_into<Rc<std::span<const T>>>(::rusty::port::vec::Vec<T>::from_iter((*this)));
 }
 
 #endif  // patcher: end orphan-impl stub
@@ -5144,7 +5148,7 @@ namespace rusty_ext {
     export template<typename T, typename I>
     Rc<std::span<const T>, rusty::alloc::Global> to_rc_slice(I self_) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return rusty::from_into<Rc<std::span<const T>>>(::Vec<T>::from_iter(self_));
+        return rusty::from_into<Rc<std::span<const T>>>(::rusty::port::vec::Vec<T>::from_iter(self_));
     }
 
 }

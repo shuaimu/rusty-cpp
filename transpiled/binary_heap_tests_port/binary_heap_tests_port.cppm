@@ -3673,7 +3673,7 @@ template<typename I>
 void check_exact_size_iterator(size_t len, I it);
 template<typename I>
 void check_trusted_len(size_t len, I it);
-void check_to_vec(::Vec<int32_t> data);
+void check_to_vec(::rusty::port::vec::Vec<int32_t> data);
 void assert_covariance();
 
 using rusty::Box;
@@ -3691,7 +3691,7 @@ using rusty::panic::catch_unwind;
 // // using std::testing::crash_test::Panic;
 
 TEST_CASE("test_iterator") {
-    auto data = ::Vec{5 , 9 , 3};
+    auto data = ::rusty::port::vec::Vec{5 , 9 , 3};
     const auto iterout = std::array{9, 5, 3};
     const auto heap = _BinaryHeap_facade::from(std::move(data));
     auto i = 0;
@@ -3708,8 +3708,8 @@ TEST_CASE("test_iter_rev_cloned_collect") {
 }
 
 TEST_CASE("test_into_iter_collect") {
-    auto data = ::Vec{5 , 9 , 3};
-    auto iterout = ::Vec{9 , 5 , 3};
+    auto data = ::rusty::port::vec::Vec{5 , 9 , 3};
+    auto iterout = ::rusty::port::vec::Vec{9 , 5 , 3};
     auto pq = _BinaryHeap_facade::from(std::move(data));
     const auto v = rusty::collect_range(rusty::iter(std::move(pq)));
     assert((v == iterout));
@@ -3722,8 +3722,8 @@ TEST_CASE("test_into_iter_size_hint") {
 }
 
 TEST_CASE("test_into_iter_rev_collect") {
-    auto data = ::Vec{5 , 9 , 3};
-    auto iterout = ::Vec{3 , 5 , 9};
+    auto data = ::rusty::port::vec::Vec{5 , 9 , 3};
+    auto iterout = ::rusty::port::vec::Vec{3 , 5 , 9};
     auto pq = _BinaryHeap_facade::from(std::move(data));
     const auto v = rusty::collect_range(rusty::rev(rusty::iter(std::move(pq))));
     assert((v == iterout));
@@ -3811,7 +3811,7 @@ TEST_CASE("test_peek_mut_pop") {
 }
 
 TEST_CASE("test_push") {
-    auto heap = _BinaryHeap_facade::from(::Vec{2 , 4 , 9});
+    auto heap = _BinaryHeap_facade::from(::rusty::port::vec::Vec{2 , 4 , 9});
     assert((heap . len () == 3));
     assert((rusty::detail::deref_if_pointer_like(heap.peek().unwrap()) == 9));
     heap.push(11);
@@ -3837,7 +3837,7 @@ TEST_CASE("test_push_unique") {
     return;
 }
 
-void check_to_vec(::Vec<int32_t>) {
+void check_to_vec(::rusty::port::vec::Vec<int32_t>) {
     /* PATCHED: body stubbed — needs Vec::sort() (LIBRARY_GAP_BLOCKED) */
 }
 

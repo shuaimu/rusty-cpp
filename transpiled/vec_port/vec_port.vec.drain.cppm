@@ -3855,8 +3855,9 @@ struct Drain {
 
 } // namespace rusty::port::vec
 
-// Backward-compat global alias.
-export template<typename T, typename A>
-    requires (rusty::alloc::Allocator<A>)
-using Drain = ::rusty::port::vec::Drain<T, A>;
+// Global `::Drain` alias removed — collided with user types defined at
+// global scope (arrayvec/smallvec emit their own `struct Drain;` at
+// module scope). Internal consumers use `::rusty::port::vec::Drain<T,A>`
+// directly. User-facing alias is `rusty::vec::Drain<T,A>` (declared
+// elsewhere in the umbrella module).
 

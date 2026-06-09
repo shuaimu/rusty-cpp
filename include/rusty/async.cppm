@@ -28,12 +28,14 @@ export namespace rusty {
 
 // ── Executor: event loop ───────────────────────────────────────
 // MIGRATION: tasks_ was `rusty::VecLegacy<Task<void>>`. Now uses
-// vec_port::Vec (the transpiled rustc Vec, exported flat at global scope
-// as `::Vec<T, A>`). API surface: new_in (no parameterless new_ for now —
-// vec_port requires an allocator instance), push, len, operator[].
+// vec_port::Vec (the transpiled rustc Vec at `::rusty::port::vec::Vec`).
+// We name the deep path because the global `::Vec` alias was retired
+// to avoid colliding with importers' `using rusty::Vec;` decls. API
+// surface: new_in (no parameterless new_ for now — vec_port requires
+// an allocator instance), push, len, operator[].
 class Executor {
 public:
-    Executor() : tasks_(::Vec<Task<void>, ::rusty::alloc::Global>::new_in(::rusty::alloc::Global{})) {}
+    Executor() : tasks_(::rusty::port::vec::Vec<Task<void>, ::rusty::alloc::Global>::new_in(::rusty::alloc::Global{})) {}
 
     void spawn(Task<void> task) {
         tasks_.push(std::move(task));
@@ -57,7 +59,7 @@ public:
     }
 
 private:
-    ::Vec<Task<void>, ::rusty::alloc::Global> tasks_;
+    ::rusty::port::vec::Vec<Task<void>, ::rusty::alloc::Global> tasks_;
     std::queue<size_t> ready_queue_;
 };
 

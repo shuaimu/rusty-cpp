@@ -3644,9 +3644,13 @@ export module arc_port;
 import vec_port.vec;  // patcher-injected for ::Vec
 
 
-// Cluster A completion: __TemplateArgs primary template (specializations at file end)
-template<typename T> struct __TemplateArgs;
 namespace rusty::port::sync {
+// Cluster A completion: __TemplateArgs primary template (specializations at file end).
+// Wrapped in `namespace rusty::port::sync` so the declaration attaches uniquely
+// to this module — `::__TemplateArgs` at file scope conflicts with the same
+// forward-decl in rc_port / btree_port when imported together (C++20
+// single-module-attachment rule).
+template<typename T> struct __TemplateArgs;
 
 template<typename T>
 struct ArcInner;
@@ -5248,7 +5252,7 @@ static auto default_() {
 // `self_` parameter and qualify all call sites accordingly.
 // Methods for I
 rusty::Arc<std::span<const T>> to_arc_slice() {
-    return rusty::from_into<rusty::Arc<std::span<const T>>>(::Vec<T>::from_iter((*this)));
+    return rusty::from_into<rusty::Arc<std::span<const T>>>(::rusty::port::vec::Vec<T>::from_iter((*this)));
 }
 
 #endif  // patcher: orphan-impl block end
@@ -5308,7 +5312,7 @@ namespace rusty_ext {
     export template<typename T, typename I>
     rusty::Arc<std::span<const T>> to_arc_slice(I self_) {
         using Self = std::remove_reference_t<decltype(self_)>;
-        return rusty::from_into<rusty::Arc<std::span<const T>>>(::Vec<T>::from_iter(self_));
+        return rusty::from_into<rusty::Arc<std::span<const T>>>(::rusty::port::vec::Vec<T>::from_iter(self_));
     }
 
 }

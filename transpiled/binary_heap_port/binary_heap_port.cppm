@@ -3815,7 +3815,7 @@ struct IntoIter {
     using Source = IntoIter<T, A>;
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
-    ::IntoIter<T, A> iter;
+    ::rusty::port::vec::IntoIter<T, A> iter;
 
     const A& allocator() const {
         return this->iter.allocator();
@@ -3836,7 +3836,7 @@ struct IntoIter {
         return rusty::is_empty(this->iter);
     }
     static IntoIter<T, A> default_() {
-        return IntoIter<T, A>{.iter = rusty::default_value<::IntoIter<T, A>>()};
+        return IntoIter<T, A>{.iter = rusty::default_value<::rusty::port::vec::IntoIter<T, A>>()};
     }
     Source& as_inner() {
         return (*this);
@@ -3845,7 +3845,7 @@ struct IntoIter {
     inline static const rusty::Option<rusty::num::NonZero<size_t>> MERGE_BY = rusty::num::NonZero<size_t>::new_(1);
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
     template<typename I>
-    decltype(rusty::iter(std::declval<::Vec<Item>>()))& as_into_iter() {
+    decltype(rusty::iter(std::declval<::rusty::port::vec::Vec<Item>>()))& as_into_iter() {
         return this->iter;
     }
     // Rust-only associated type alias with unbound generic skipped in constrained mode: Item
@@ -3863,7 +3863,7 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct Drain {
     using Item = T;
-    ::Drain<T, A> iter;
+    ::rusty::port::vec::Drain<T, A> iter;
 
     const A& allocator() const {
         return this->iter.allocator();
@@ -4003,7 +4003,7 @@ export template<typename T, typename A = rusty::alloc::Global>
 struct BinaryHeap {
     using Item = T;
     using IntoIter = ::rusty::port::collections::binary_heap::IntoIter<T, A>;
-    ::Vec<T, A> data;
+    ::rusty::port::vec::Vec<T, A> data;
 
     BinaryHeap<T, A> clone() const {
         return BinaryHeap<T, A>{.data = this->data.clone()};
@@ -4018,18 +4018,18 @@ struct BinaryHeap {
         return f.debug_list().entries(rusty::iter((*this))).finish();
     }
     static BinaryHeap<T> new_() {
-        return BinaryHeap<T>{.data = ::Vec<T>{}};
+        return BinaryHeap<T>{.data = ::rusty::port::vec::Vec<T>{}};
     }
     static BinaryHeap<T> with_capacity(size_t capacity) {
-        return BinaryHeap<T>{.data = ::Vec<T, A>::with_capacity(std::move(capacity))};
+        return BinaryHeap<T>{.data = ::rusty::port::vec::Vec<T, A>::with_capacity(std::move(capacity))};
     }
     static BinaryHeap<T, A> new_in(A alloc) {
-        return BinaryHeap<T, A>{.data = ::Vec<T, A>::new_in(std::move(alloc))};
+        return BinaryHeap<T, A>{.data = ::rusty::port::vec::Vec<T, A>::new_in(std::move(alloc))};
     }
     static BinaryHeap<T, A> with_capacity_in(size_t capacity, A alloc) {
-        return BinaryHeap<T, A>{.data = ::Vec<T, A>::with_capacity_in(std::move(capacity), std::move(alloc))};
+        return BinaryHeap<T, A>{.data = ::rusty::port::vec::Vec<T, A>::with_capacity_in(std::move(capacity), std::move(alloc))};
     }
-    static BinaryHeap<T, A> from_raw_vec(::Vec<T, A> vec) {
+    static BinaryHeap<T, A> from_raw_vec(::rusty::port::vec::Vec<T, A> vec) {
         return BinaryHeap<T, A>{.data = std::move(vec)};
     }
     rusty::Option<PeekMut<T, A>> peek_mut() {
@@ -4068,7 +4068,7 @@ return std::move(item);
             this->sift_up(static_cast<size_t>(0), std::move(old_len));
         }
     }
-    ::Vec<T, A> into_sorted_vec() {
+    ::rusty::port::vec::Vec<T, A> into_sorted_vec() {
         auto end = rusty::len((*this));
         while (rusty::detail::deref_if_pointer_like(end) > 1) {
             end -= 1;
@@ -4240,8 +4240,8 @@ return std::move(keep);
     std::span<const T> as_slice() const {
         return rusty::as_slice(this->data);
     }
-    ::Vec<T, A> into_vec() {
-        return rusty::from_into<::Vec<T, A>>(std::move((*this)));
+    ::rusty::port::vec::Vec<T, A> into_vec() {
+        return rusty::from_into<::rusty::port::vec::Vec<T, A>>(std::move((*this)));
     }
     const A& allocator() const {
         return this->data.allocator();
@@ -4258,7 +4258,7 @@ return std::move(keep);
     void clear() {
         this->drain();
     }
-    static BinaryHeap<T, A> from(::Vec<T, A> vec) {
+    static BinaryHeap<T, A> from(::rusty::port::vec::Vec<T, A> vec) {
         auto heap = BinaryHeap<T, A>{.data = std::move(vec)};
         heap.rebuild();
         return std::move(heap);
@@ -4269,7 +4269,7 @@ return std::move(keep);
     }
     template<typename I>
     static BinaryHeap<T> from_iter(I iter) {
-        return BinaryHeap<T>::from(::Vec<T, A>::from_iter(rusty::iter(std::move(iter))));
+        return BinaryHeap<T>::from(::rusty::port::vec::Vec<T, A>::from_iter(rusty::iter(std::move(iter))));
     }
     IntoIter into_iter() {
         return IntoIter{.iter = std::move(this->data).into_iter()};

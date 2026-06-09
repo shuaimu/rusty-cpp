@@ -3965,8 +3965,8 @@ protected:
 
 } // namespace rusty::port::vec
 
-// Backward-compat global alias.
-export template<typename T, typename A = ::rusty::alloc::Global>
-    requires (rusty::alloc::Allocator<A>)
-using IntoIter = ::rusty::port::vec::IntoIter<T, A>;
+// Global `::IntoIter` alias removed — collided with user types defined
+// at global scope (smallvec/arrayvec emit their own `struct IntoIter;`
+// at module scope). Internal consumers use
+// `::rusty::port::vec::IntoIter<T,A>` directly.
 

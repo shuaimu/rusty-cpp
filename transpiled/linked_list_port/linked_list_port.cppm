@@ -3745,7 +3745,7 @@ export template<typename T, typename A = rusty::alloc::Global>
     requires (rusty::alloc::Allocator<A>)
 struct LinkedList {
     using Item = T;
-    using IntoIter = ::IntoIter<T, A>;
+    using IntoIter = ::rusty::port::vec::IntoIter<T, A>;
     rusty::Option<rusty::ptr::NonNull<Node<T>>> head;
     rusty::Option<rusty::ptr::NonNull<Node<T>>> tail;
     size_t len_field;
