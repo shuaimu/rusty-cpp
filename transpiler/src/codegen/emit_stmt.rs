@@ -2802,8 +2802,38 @@ impl CodeGen {
                             // require a copy ctor (btree_port B4). See
                             // notes at the sibling structured-binding
                             // emit site lower in this file.
+                            //
+                            // Exception: when the init is a Rust-rvalue
+                            // expression (function call, struct/tuple/array
+                            // literal, etc.), the source pair temp is
+                            // routed through `deref_if_pointer_like` which
+                            // collapses to `std::forward<T>(value)` and
+                            // returns an *xvalue*. `auto&&` binding to an
+                            // xvalue does NOT lifetime-extend the original
+                            // prvalue temp — it just records a reference.
+                            // The temp dies at the end of this full
+                            // expression, leaving `[tx, rx]` dangling.
+                            // (See e.g. once_cell::stampede_once where
+                            // `let (tx, rx) = channel()` produced a
+                            // dangling sender pair, and take_mut's
+                            // scope_based_take where the Hole inside a
+                            // returned tuple died before `.fill()` ran.)
+                            //
+                            // Use `auto` for rvalue inits: the invisible
+                            // binding variable becomes its own moved-out
+                            // copy of the pair, owning it for the
+                            // enclosing scope. Move-only element types
+                            // still flow through because the pair/tuple
+                            // is move-constructed (not copy-constructed)
+                            // from the rvalue.
+                            let init_is_rvalue = local
+                                .init
+                                .as_ref()
+                                .is_some_and(|init| self.is_rvalue_expr(&init.expr));
+                            let binding_kw = if init_is_rvalue { "auto" } else { "auto&&" };
                             self.writeln(&format!(
-                                "auto&& [{}] = {};",
+                                "{} [{}] = {};",
+                                binding_kw,
                                 tuple_binding_names.join(", "),
                                 tuple_source_expr
                             ));
@@ -2910,7 +2940,27 @@ impl CodeGen {
                         // collapse) while exposing the elements as bindable
                         // names. Matches btree_port B4 — see
                         // tests/btree_port_iter_remove_movonly_test.cpp.
-                        self.writeln(&format!("auto&& [{}] = {};", names.join(", "), expr_str));
+                        //
+                        // Exception (see sibling tuple-destructure site
+                        // above): for Rust-rvalue inits routed through
+                        // `deref_if_pointer_like`, `auto&&` does NOT
+                        // lifetime-extend the underlying prvalue temp —
+                        // the helper returns an xvalue and the temp dies
+                        // at end of the full expression, leaving the
+                        // bindings dangling. Emit `auto` for rvalues so
+                        // the invisible binding variable owns its own
+                        // moved-out value.
+                        let init_is_rvalue = local
+                            .init
+                            .as_ref()
+                            .is_some_and(|init| self.is_rvalue_expr(&init.expr));
+                        let binding_kw = if init_is_rvalue { "auto" } else { "auto&&" };
+                        self.writeln(&format!(
+                            "{} [{}] = {};",
+                            binding_kw,
+                            names.join(", "),
+                            expr_str
+                        ));
                     }
                 }
             }
