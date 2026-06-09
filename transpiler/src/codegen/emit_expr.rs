@@ -10301,6 +10301,24 @@ impl CodeGen {
         {
             return None;
         }
+        // `Rc::clone(&one)` (and friends) must NOT lower as
+        // `Rc<int32_t>::clone(one)` — Rc/Arc/Box/etc. expose `clone()` as a
+        // *member* in their C++ ports, so static-style dispatch fails to
+        // compile. Defer to the Clone-UFCS branch in
+        // `try_emit_known_trait_ufcs_call` (called later in the call
+        // pipeline) which routes to `rusty::clone(arg)`.
+        if rust_method_name == "clone" {
+            const KNOWN_CLONE_OWNERS: &[&str] = &[
+                "Rc", "Arc", "Weak", "Box", "RefCell", "Cell", "Mutex", "RwLock",
+            ];
+            let owner_ident = owner_seg.ident.to_string();
+            let owner_clone_takes_receiver = self
+                .lookup_owner_method_has_receiver(&owner_ident, "clone")
+                .unwrap_or_else(|| KNOWN_CLONE_OWNERS.contains(&owner_ident.as_str()));
+            if owner_clone_takes_receiver {
+                return None;
+            }
+        }
         let method = self.mapped_assoc_method_name_for_expected_owner(func_path, &owner_cpp)?;
         if self.owner_cpp_has_unusable_template_args(&owner_cpp)
             && matches!(owner_seg.arguments, syn::PathArguments::None)
@@ -15497,14 +15515,19 @@ impl CodeGen {
         // `.clone()` when one exists (the Rc/Arc port case) and falls back
         // to copy-construction otherwise.
         //
-        // Guard with `lookup_owner_method_has_receiver(trait_seg, "clone") ==
-        // Some(true)` so we only rewrite when the owner type has a `clone()`
-        // method that takes `&self` (otherwise this would clobber inherent
-        // static `clone` functions). Empty/unknown owners fall back to the
-        // Clone-trait form.
+        // First, query the local method-has-receiver map. When the owner is
+        // defined in another module (e.g. `Rc` from rc_port called from
+        // smallvec), the map is empty for that owner and the lookup returns
+        // None — fall back to a hardcoded allowlist of refcount/handle
+        // owners whose ports are known to expose `.clone()` as a member.
+        // This intentionally does NOT cover arbitrary user types; for those
+        // we keep the existing static-call shape.
+        const KNOWN_CLONE_OWNERS: &[&str] = &[
+            "Rc", "Arc", "Weak", "Box", "RefCell", "Cell", "Mutex", "RwLock",
+        ];
         let owner_clone_takes_receiver = self
             .lookup_owner_method_has_receiver(&trait_seg, "clone")
-            .unwrap_or(false);
+            .unwrap_or_else(|| KNOWN_CLONE_OWNERS.contains(&trait_seg.as_str()));
         let is_clone_ufcs = method == "clone"
             && call.args.len() == 1
             && (trait_seg == "Clone" || owner_clone_takes_receiver);
