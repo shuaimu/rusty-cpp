@@ -1894,6 +1894,30 @@ impl CodeGen {
                 // Detect method/function/branch expressions that propagate references.
                 // This keeps local binding shape as reference (`auto&`) instead of value copy.
                 let init_returns_reference = local.init.as_ref().is_some_and(|init| {
+                    // Guard: methods on the primitive-optimized once_cell
+                    // variants (OnceNonZeroUsize, OnceBool) return their
+                    // payload BY VALUE (`NonZeroUsize`, `bool`), unlike
+                    // `OnceCell<T>::get_unchecked() -> &T`. Without this
+                    // explicit shortcut, `lookup_known_method_return_type_by_name`
+                    // below sees one of the `OnceCell::get_unchecked() -> &T`
+                    // signatures, returns reference-like, and we emit
+                    // `auto& value = cell.get_unchecked()` which binds a
+                    // non-const lvalue ref to the by-value temporary.
+                    let peeled_for_guard = peel_to_tail_expr(&init.expr);
+                    if let Some(syn::Expr::MethodCall(mc)) = peeled_for_guard {
+                        let method = mc.method.to_string();
+                        if matches!(
+                            method.as_str(),
+                            "get_unchecked" | "get" | "get_or_init" | "get_or_try_init"
+                        ) && self
+                            .method_call_receiver_owner_tail(&mc.receiver)
+                            .is_some_and(|owner| {
+                                matches!(owner.as_str(), "OnceNonZeroUsize" | "OnceBool")
+                            })
+                        {
+                            return false;
+                        }
+                    }
                     if self
                         .infer_local_binding_type_from_initializer(&init.expr)
                         .as_ref()
@@ -1926,8 +1950,25 @@ impl CodeGen {
                         // `get_mut → &mut T` heuristic when the receiver is an `Arc`.
                         let receiver_is_arc_get_mut = matches!(method.as_str(), "get_mut")
                             && self.receiver_is_arc_wrapper_type(&mc.receiver);
+                        // `OnceNonZeroUsize::get_unchecked()` / `OnceBool::get_unchecked()`
+                        // — the primitive-optimized once_cell variants — return their
+                        // inner value BY VALUE (`NonZeroUsize` / `bool`), not by ref
+                        // like `OnceCell<T>::get_unchecked() -> &T`. Without this
+                        // filter once_cell's tests emit `auto& value =
+                        // OnceNonZeroUsize::get_unchecked()` which binds a non-const
+                        // lvalue ref to a temporary and fails to compile.
+                        let receiver_is_value_returning_once = matches!(
+                            method.as_str(),
+                            "get_unchecked" | "get" | "get_or_init" | "get_or_try_init"
+                        ) && self
+                            .method_call_receiver_owner_tail(&mc.receiver)
+                            .is_some_and(|owner| matches!(
+                                owner.as_str(),
+                                "OnceNonZeroUsize" | "OnceBool"
+                            ));
                         if !receiver_is_refcell_borrow
                             && !receiver_is_arc_get_mut
+                            && !receiver_is_value_returning_once
                             && (matches!(
                                 method.as_str(),
                                 "get_or_init"
