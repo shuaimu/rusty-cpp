@@ -15,11 +15,10 @@
 #include <type_traits>
 #include <utility>
 
-import vec_port.vec;            // ::Vec<T, A> — the transpiled rustc Vec.
-                                // After VecLegacy retirement, unqualified
-                                // `Vec<...>` here resolves to global ::Vec.
+import vec_port.vec;            // rusty::port::vec::Vec<T, A> — transpiled Vec.
 
 using namespace rusty;
+using rusty::port::vec::Vec;    // bring transpiled Vec into bare scope
 
 void test_range_next_and_count() {
     printf("test_range_next_and_count: ");

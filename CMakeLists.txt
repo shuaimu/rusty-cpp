@@ -634,9 +634,14 @@ foreach(test_source IN LISTS TEST_SOURCES)
     set(_vec_consuming_tests
         test_mutex test_thread rusty_vec_test rusty_array_test)
     list(FIND _vec_consuming_tests "${test_name}" _vec_consume_idx)
+    # Tests that `import rc_port` for the Send/Sync trait specializations
+    # on rusty::Rc (which lives in rc_port post-legacy-retirement).
+    set(_rc_consuming_tests test_traits)
+    list(FIND _rc_consuming_tests "${test_name}" _rc_consume_idx)
     if((test_name MATCHES "^(btree_port|vec_port|binary_heap_port|binary_heap_tests_port|linked_list_tests_port|eq_diff_len_tests_port|vec_deque_tests_port|vec_tests_port|arc_tests_port|rc_tests_port|string_tests_port|btree_set_hash_tests_port|btree_tests_port|cell_port|rc_port|arc_port|vec_deque_port|linked_list_port|string_port|borrow_port|ascii_port)_"
         OR test_name STREQUAL "async_module_test"
-        OR NOT _vec_consume_idx EQUAL -1)
+        OR NOT _vec_consume_idx EQUAL -1
+        OR NOT _rc_consume_idx EQUAL -1)
        AND NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
                 OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"))
         continue()
@@ -754,6 +759,13 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # VecLegacy retirement: link against vec_port and use cxx_std_23.
     if(NOT _vec_consume_idx EQUAL -1)
         target_link_libraries(${test_executable} PRIVATE vec_port)
+        target_compile_features(${test_executable} PRIVATE cxx_std_23)
+        target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
+        target_link_options(${test_executable} PRIVATE )
+    endif()
+    # Tests that `import rc_port` for rusty::Rc trait specializations.
+    if(NOT _rc_consume_idx EQUAL -1)
+        target_link_libraries(${test_executable} PRIVATE rc_port)
         target_compile_features(${test_executable} PRIVATE cxx_std_23)
         target_compile_options(${test_executable} PRIVATE -O3 -DNDEBUG -march=native )
         target_link_options(${test_executable} PRIVATE )

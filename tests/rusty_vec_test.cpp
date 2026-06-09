@@ -12,11 +12,12 @@
 #include <cstdio>
 #include <utility>
 
-import vec_port.vec;            // ::Vec<T, A> — the transpiled rustc Vec.
-                                // After VecLegacy retirement, unqualified
-                                // `Vec<...>` here resolves to global ::Vec.
+import vec_port.vec;            // rusty::port::vec::Vec<T, A> —
+                                // the transpiled rustc Vec after the
+                                // deep-namespace migration.
 
 using namespace rusty;
+using rusty::port::vec::Vec;    // bring transpiled Vec into bare scope
 
 // Test basic construction
 void test_vec_construction() {

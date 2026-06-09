@@ -6,7 +6,10 @@
 #include <rusty/mutex.hpp>
 #include <iostream>
 
+import rc_port;
+
 using namespace rusty;
+using rusty::rc::Rc;
 
 // ============================================================================
 // Test Rust Rule 1: &T is Send if T is Sync

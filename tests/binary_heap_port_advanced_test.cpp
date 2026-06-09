@@ -91,7 +91,7 @@ static void test_into_vec_consumes() {
 // in vec_port.vec.cppm (D3). Unblocks from(Vec), into_sorted_vec, and
 // drain_sorted.
 static void test_from_vec_bulk_builds() {
-    auto v = ::Vec<int32_t, ::rusty::alloc::Global>::new_in(
+    auto v = ::rusty::port::vec::Vec<int32_t, ::rusty::alloc::Global>::new_in(
         ::rusty::alloc::Global{});
     for (int x : {3, 1, 4, 1, 5, 9, 2, 6}) v.push(x);
     auto h = BinaryHeap<int32_t, ::rusty::alloc::Global>::from(std::move(v));

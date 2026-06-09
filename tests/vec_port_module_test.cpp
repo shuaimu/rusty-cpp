@@ -3,7 +3,8 @@
 // vendored module is consumable from regular .cpp.
 //
 // Companion to tests/btree_port_module_test.cpp / tests/btree_port_set_module_test.cpp.
-// Under flat-export, the transpiled Vec lives at global scope as `::Vec<T, A>`.
+// After the deep-namespace migration the transpiled Vec lives at
+// `::rusty::port::vec::Vec<T, A>` (previously `::Vec<T, A>` under flat-export).
 
 import vec_port.vec;
 
@@ -13,7 +14,7 @@ import vec_port.vec;
 #include <cstdio>
 
 int main() {
-    auto v = ::Vec<int32_t, ::rusty::alloc::Global>::new_();
+    auto v = ::rusty::port::vec::Vec<int32_t, ::rusty::alloc::Global>::new_();
     assert(v.len() == 0);
     assert(v.is_empty());
 
