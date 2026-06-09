@@ -2455,6 +2455,80 @@ def patch_set_stub(cpp_out: Path) -> int:
     return patch_set_facade(cpp_out)
 
 
+def patch_raw_table_clear_double_free(cpp_out: Path) -> int:
+    """RawTable<T,A>::clear() in raw.cppm has a double-free bug.
+
+    The Rust source takes &mut self and wraps it in a ScopeGuard whose
+    Drop calls clear_no_drop(). The transpiled body wraps *this in a
+    ScopeGuard<RawTable, F>; ScopeGuard takes T by value, so *this is
+    SHALLOW-COPIED into the guard. The copy shares ctrl_field/items
+    with the original. When the guard's drop runs (clear_no_drop on
+    the copy) and then ~ScopeGuard destructs the copy (~RawTable →
+    drop_inner_table → free_buckets), the original's ctrl_field is
+    left dangling and items > 0. The caller's next use (typically
+    ~HashMap) iterates the freed buffer and crashes.
+
+    Mirror the HashSet::clear() workaround in patch_set_facade: drop
+    via move-assignment to a fresh empty table. ~RawTable on *this
+    runs first (proper element drop + single free_buckets), then *this
+    becomes the empty-singleton state.
+
+    Bug originally reported with mako repo
+    test_load_balancer::ClientPoolLoadBalancerTest crashing in
+    ~PoolThreadWorker on freed HashMap buckets."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    buggy = (
+        "    void clear() {\n"
+        "        if (rusty::is_empty((*this))) {\n"
+        "            return;\n"
+        "        }\n"
+        "        auto self_ = guard((*this), [&](auto&& self_) { return self_.clear_no_drop(); });\n"
+    )
+    if buggy not in text:
+        return 0
+    # Find the closing of the function body and replace.
+    fixed = (
+        "    void clear() {\n"
+        "        // Patcher fix (RawTable double-free): the transpiled\n"
+        "        // body wrapped *this in a ScopeGuard that takes T by\n"
+        "        // value, copying the RawTable (same ctrl_field,\n"
+        "        // same items). The guard's drop then freed the shared\n"
+        "        // buffer while the caller's *this still pointed at it.\n"
+        "        // Move-assign a fresh empty table instead: ~RawTable\n"
+        "        // on *this runs first (proper element drop + single\n"
+        "        // free_buckets), then *this becomes empty-singleton.\n"
+        "        if (rusty::is_empty((*this))) {\n"
+        "            return;\n"
+        "        }\n"
+        "        (*this) = RawTable<T, A>::new_in(rusty::clone(this->alloc));\n"
+        "    }\n"
+    )
+    # Replace from the buggy header through the closing brace of the
+    # original (the body has the drop_elements call + closing braces).
+    # Use a regex to find the end of the function reliably.
+    pattern = re.compile(
+        r"    void clear\(\) \{\n"
+        r"        if \(rusty::is_empty\(\(\*this\)\)\) \{\n"
+        r"            return;\n"
+        r"        \}\n"
+        r"        auto self_ = guard\(\(\*this\), \[&\]\(auto&& self_\) \{ return self_\.clear_no_drop\(\); \}\);\n"
+        r"(?:        // [^\n]*\n)*"
+        r"        // @unsafe\n"
+        r"        \{\n"
+        r"            self_\.value\.table\.template drop_elements<T>\(\);\n"
+        r"        \}\n"
+        r"    \}\n"
+    )
+    if not pattern.search(text):
+        return 0
+    text = pattern.sub(fixed, text, count=1)
+    path.write_text(text)
+    return 1
+
+
 def patch_raw_entry_stub(cpp_out: Path) -> int:
     return 1 if _stub_module(
         cpp_out / "hashbrown_port.raw_entry.cppm", "raw_entry"
@@ -3351,6 +3425,7 @@ def main(cpp_out: Path):
         ("raw: std::{AllocError,Allocator,Layout,Global,handle_alloc_error} → rusty::alloc::*", patch_raw_std_alloc_namespace),
         ("raw: TryReserveError variant constructors → rusty tagged-struct ctor", patch_raw_tryreserveerror_constructors),
         ("raw: misc fixups (control::, invalid_mut, Rust-syntax assert!s)", patch_raw_misc_fixups),
+        ("raw: fix RawTable::clear() double-free (ScopeGuard takes T by value)", patch_raw_table_clear_double_free),
         ("scopeguard: dropfn arg by reference, not pointer", patch_scopeguard_dropfn_arg),
         ("table: hoist imports + std::* → rusty::* + drop raw:: qualifier", patch_table_module),
         ("map: same fixups as table", patch_map_module),

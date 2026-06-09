@@ -4306,17 +4306,28 @@ struct RawTable {
         this->table.clear_no_drop();
     }
     void clear() {
+        // PRE-EXISTING BUG (now fixed): the transpiled body wrapped
+        // `*this` in a ScopeGuard that takes T by value (see
+        // hashbrown_port.scopeguard.cppm: `T value;`). This made a
+        // shallow copy of the RawTable (same ctrl_field pointer, same
+        // items count). The ScopeGuard's drop then:
+        //   1. drop_elements<T>() destructed elements via shared ptr
+        //   2. clear_no_drop() updated only the copy's items count
+        //   3. ~RawTable on the guard's copy → free_buckets → freed
+        //      the buffer the ORIGINAL *this still pointed at
+        // Result: caller's *this had stale items>0 and a dangling
+        // ctrl_field — the next ~HashMap iterated freed memory and
+        // crashed (e.g. dereferencing 0x1).
+        //
+        // Fix mirrors patch_set_facade's HashSet::clear() workaround:
+        // move-assign a fresh empty table. Move-assign invokes
+        // ~RawTable on *this first, which runs drop_inner_table →
+        // proper drop of every element + single free_buckets call.
+        // Then *this becomes the empty-singleton state.
         if (rusty::is_empty((*this))) {
             return;
         }
-        auto self_ = guard((*this), [&](auto&& self_) { return self_.clear_no_drop(); });
-        // Patcher fix: transpiler emitted `self_.table` but ScopeGuard
-        // stores its wrapped value in `.value`, not via member-access
-        // pass-through. Reach the underlying RawTable explicitly.
-        // @unsafe
-        {
-            self_.value.table.template drop_elements<T>();
-        }
+        (*this) = RawTable<T, A>::new_in(rusty::clone(this->alloc));
     }
     void shrink_to(size_t min_size, const auto& hasher) {
         auto min_size_shadow1 = std::max<size_t>(this->table.items, std::move(min_size));
