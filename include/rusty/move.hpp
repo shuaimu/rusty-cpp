@@ -105,22 +105,25 @@ constexpr T copy(const T& t) noexcept(std::is_nothrow_copy_constructible_v<T>) {
 /// This is a thin alias for `rusty::copy` — same semantics, same codegen.
 /// Kept as a distinct name so generated code reads closer to the Rust source.
 ///
-/// @note Only works for types that are Copy / copy-constructible. For types
-///       like `Vec<T>` that have a defaulted shallow copy ctor, callers
-///       must call `t.clone()` directly to get a deep copy — see
-///       `binary_heap_port::BinaryHeap::clone()` for an example. Several
-///       transpiled ports (arc_port, rc_port, linked_list_port) emit
-///       their own `clone` template that dispatches to `.clone()` when
-///       available, so the safer rule is "prefer t.clone() at call
-///       sites that need it; reserve `rusty::clone(...)` for Copy types."
+/// @note Two-stage dispatch (signature kept as `constexpr T(const T&)` to
+///       coexist with the `auto clone(const T&)` helpers each transpiled
+///       port emits — clang accepts these as separate decls because
+///       return-type differs, but rejects identical `auto/auto` shapes).
+///   1. If `t.clone()` is well-formed AND returns a `T` (Rust Clone impl
+///      on OnceCell, Vec, String, BinaryHeap, …), delegate to it.
+///   2. Otherwise fall back to copy-construction.
 // @safe
 template<typename T>
-constexpr T clone(const T& t) noexcept(std::is_nothrow_copy_constructible_v<T>) {
-    static_assert(
-        std::is_copy_constructible_v<T>,
-        "rusty::clone requires a copyable type"
-    );
-    return t;
+constexpr T clone(const T& t) {
+    if constexpr (requires { { t.clone() } -> std::same_as<T>; }) {
+        return t.clone();
+    } else {
+        static_assert(
+            std::is_copy_constructible_v<T>,
+            "rusty::clone requires a copyable type or a .clone() member returning T"
+        );
+        return t;
+    }
 }
 
 } // namespace rusty
