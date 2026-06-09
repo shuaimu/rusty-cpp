@@ -415,6 +415,38 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
     target_link_libraries(rusty_async PUBLIC vec_port)
 endif()
 
+# ──────────────────────────────────────────────────────────────────────
+# rusty — umbrella C++20 module (include/rusty/rusty.cppm).
+# Re-exports the migrated transpiled ports so consumers can write
+# `import rusty;` and pick up `rusty::Vec`, `rusty::Rc`,
+# `rusty::BTreeMap`, etc. without naming each port module directly.
+# Mirrors how Rust's prelude auto-imports `std::*` types.
+# ──────────────────────────────────────────────────────────────────────
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    add_library(rusty STATIC)
+    target_sources(rusty
+        PUBLIC FILE_SET CXX_MODULES FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/rusty/rusty.cppm
+    )
+    target_include_directories(rusty PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(rusty PUBLIC cxx_std_23)
+    target_compile_options(rusty PRIVATE -O3 -DNDEBUG -march=native )
+    target_link_libraries(rusty PUBLIC
+        rusty_async
+        vec_port
+        btree_port
+        rc_port
+        binary_heap_port
+        hashbrown_port
+        vec_deque_port
+        linked_list_port
+        cell_port
+        string_port
+        arc_port
+    )
+endif()
+
 set(TEST_SOURCES
     # Basic Rusty types - ALL WORKING
     tests/rusty_arc_test.cpp

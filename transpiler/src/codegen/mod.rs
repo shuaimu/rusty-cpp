@@ -1554,6 +1554,7 @@ impl CodeGen {
             &self.output,
             &trait_names,
         );
+        self.output = inject_rusty_module_import_if_needed(&self.output);
         self.output
     }
 
@@ -2154,6 +2155,14 @@ impl CodeGen {
                 self.writeln("import std;");
                 self.newline();
             }
+            // `import rusty;` is appended at finalize time in
+            // `into_output` IF the emitted body references any
+            // module-only `rusty::*` type (Vec, Rc, BTreeMap, …).
+            // We don't always import — the rusty umbrella module
+            // exports many port-defined names (e.g. `Drain` from
+            // vec_port) that can collide with user types of the same
+            // name (e.g. arrayvec::Drain).  See
+            // `inject_rusty_module_import_if_needed`.
         }
         log_emit("emit_module_declaration");
 
@@ -32615,6 +32624,55 @@ fn dedup_consecutive_defaulted_operators(output: &str) -> String {
     }
     eprintln!("[dedup-trace] removed {} duplicates", dedup_count);
     out
+}
+
+/// Types whose `rusty::*` spelling now resolves only via `import rusty;`
+/// (the C++20 umbrella module re-exporting `vec_port`, `rc_port`,
+/// `btree_port`, `hashbrown_port`, `vec_deque_port`, `linked_list_port`,
+/// `binary_heap_port`).  Each entry is a substring we scan for in the
+/// finalized output — the trailing `<` rules out matches in alias
+/// definitions, comments, or namespace forwards.
+const RUSTY_MODULE_TRIGGERS: &[&str] = &[
+    "rusty::Vec<",
+    "rusty::Rc<",
+    "rusty::BTreeMap<",
+    "rusty::BTreeSet<",
+    "rusty::HashMap<",
+    "rusty::HashSet<",
+    "rusty::collections::VecDeque<",
+    "rusty::collections::LinkedList<",
+    "rusty::collections::BinaryHeap<",
+];
+
+/// If the output references any `rusty::*` type that lives only in the
+/// C++20 umbrella module `rusty`, inject `import rusty;` immediately
+/// after the `export module X;` line so the use-site resolves.  Skip
+/// the inject when no trigger types are referenced — `import rusty;`
+/// re-exports port-defined names (Drain, IntoIter, etc.) that can
+/// collide with user types of the same name (arrayvec::Drain, …).
+fn inject_rusty_module_import_if_needed(output: &str) -> String {
+    if output.contains("\nimport rusty;\n") {
+        return output.to_string();
+    }
+    let Some(export_module_line_start) = output.find("\nexport module ") else {
+        return output.to_string();
+    };
+    let after_line_start = export_module_line_start + 1;
+    let Some(rel_eol) = output[after_line_start..].find('\n') else {
+        return output.to_string();
+    };
+    let insert_at = after_line_start + rel_eol + 1;
+    let referenced = RUSTY_MODULE_TRIGGERS
+        .iter()
+        .any(|needle| output[insert_at..].contains(needle));
+    if !referenced {
+        return output.to_string();
+    }
+    let mut result = String::with_capacity(output.len() + 16);
+    result.push_str(&output[..insert_at]);
+    result.push_str("import rusty;\n\n");
+    result.push_str(&output[insert_at..]);
+    result
 }
 
 fn rewrite_interface_traits_smart_ptr_construction(output: &str, traits: &[String]) -> String {

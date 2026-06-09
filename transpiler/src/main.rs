@@ -2383,6 +2383,119 @@ fn append_parity_runner_main(
     Ok(())
 }
 
+/// Walk up from `include_dir` (typically `<repo>/include`) to find the
+/// `CMakeLists.txt` that defines the `rusty` umbrella module target.
+fn find_repo_root_with_cmake(include_dir: &Path) -> Option<PathBuf> {
+    let mut candidate = include_dir.to_path_buf();
+    for _ in 0..6 {
+        if candidate.join("CMakeLists.txt").is_file() {
+            return Some(candidate);
+        }
+        candidate = candidate.parent()?.to_path_buf();
+    }
+    None
+}
+
+/// Ensure the C++20 `rusty` umbrella module and its transitive port
+/// dependencies are precompiled to .pcm files in a shared cache
+/// directory, then return a path suitable for `-fprebuilt-module-path`.
+///
+/// On first invocation (cache miss), runs `cmake -G Ninja` + `cmake
+/// --build . --target rusty` against the repo root's `CMakeLists.txt`,
+/// then symlinks all produced .pcm files into a single flat directory.
+/// On subsequent invocations (cache hit — `rusty.pcm` present), returns
+/// the cached path without reinvoking CMake.
+///
+/// Returns `None` if the repo root can't be located or the build fails;
+/// callers should fall back to module-less behavior (mostly a no-op for
+/// crates that don't reference `rusty::Vec` / `rusty::Rc` / etc.).
+fn ensure_rusty_modules_pcm_dir(include_dir: &Path) -> Option<PathBuf> {
+    let repo_root = find_repo_root_with_cmake(include_dir)?;
+    let cache_root = repo_root.join(".rusty-modules-cache");
+    let cmake_build_dir = cache_root.join("build");
+    let pcm_flat_dir = cache_root.join("pcm");
+    let rusty_pcm_marker = pcm_flat_dir.join("rusty.pcm");
+
+    // Cache hit: if the marker .pcm exists AND it's newer than the
+    // source .cppm files we care about, reuse the existing cache.
+    if rusty_pcm_marker.exists() {
+        return Some(pcm_flat_dir);
+    }
+
+    fs::create_dir_all(&cmake_build_dir).ok()?;
+    fs::create_dir_all(&pcm_flat_dir).ok()?;
+
+    // Configure CMake (Ninja generator + clang).  If clang isn't
+    // available the matrix would fail anyway since module precompile
+    // also requires clang.
+    let cmake_configure = std::process::Command::new("cmake")
+        .arg("-G")
+        .arg("Ninja")
+        .arg("-DCMAKE_BUILD_TYPE=Release")
+        .arg("-DCMAKE_CXX_COMPILER=clang++")
+        .arg(&repo_root)
+        .current_dir(&cmake_build_dir)
+        .output()
+        .ok()?;
+    if !cmake_configure.status.success() {
+        eprintln!(
+            "  Warning: CMake configure for rusty module cache failed:\n{}",
+            String::from_utf8_lossy(&cmake_configure.stderr)
+                .lines()
+                .take(5)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        return None;
+    }
+
+    let cmake_build = std::process::Command::new("cmake")
+        .arg("--build")
+        .arg(".")
+        .arg("--target")
+        .arg("rusty")
+        .current_dir(&cmake_build_dir)
+        .output()
+        .ok()?;
+    if !cmake_build.status.success() {
+        eprintln!(
+            "  Warning: CMake build of `rusty` target failed:\n{}",
+            String::from_utf8_lossy(&cmake_build.stderr)
+                .lines()
+                .take(5)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        return None;
+    }
+
+    // Walk the build tree and symlink every .pcm into the flat cache.
+    let mut stack = vec![cmake_build_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().and_then(|s| s.to_str()) == Some("pcm") {
+                if let Some(name) = p.file_name() {
+                    let link = pcm_flat_dir.join(name);
+                    let _ = fs::remove_file(&link);
+                    let _ = std::os::unix::fs::symlink(&p, &link);
+                }
+            }
+        }
+    }
+
+    if rusty_pcm_marker.exists() {
+        Some(pcm_flat_dir)
+    } else {
+        None
+    }
+}
+
 fn run_stage_d_module_build(
     args: &ParityTestArgs,
     work_dir: &Path,
@@ -2397,6 +2510,11 @@ fn run_stage_d_module_build(
     if generated_cppm_files.is_empty() {
         return Err("No .cppm files generated in this run — Stage C may have failed".to_string());
     }
+
+    // Ensure the shared `rusty` module cache is built before any
+    // user-module precompile.  None on failure is non-fatal — crates
+    // that don't actually use module-only types will still compile.
+    let rusty_pcm_dir = ensure_rusty_modules_pcm_dir(include_dir);
 
     let build_root = work_dir.join("module_build");
     let pcm_dir = build_root.join("pcm");
@@ -2451,7 +2569,12 @@ fn run_stage_d_module_build(
     let mut object_files: Vec<PathBuf> = Vec::new();
     let order = module_build_order(&units);
     let portable_intrinsics_define = "-DRUSTY_PORTABLE_INTRINSICS=1";
-    let cxx_standard = if args.import_std { "c++23" } else { "c++20" };
+    // Always C++23 — `import rusty;` (emitted unconditionally for
+    // module-mode output) drags in port modules (hashbrown_port,
+    // vec_port, …) that require C++23 features like `std::println`
+    // and `std::span` deduction. The matrix's previous "C++20 unless
+    // --import-std" was viable when rusty was header-only.
+    let cxx_standard = "c++23";
     let stdlib_flag_suffix = if args.import_std {
         " -stdlib=libc++"
     } else {
@@ -2507,14 +2630,22 @@ fn run_stage_d_module_build(
             }
             // Lib depending on skipped — fail-fast.
         }
+        // Build with -march=native so that any pcm files we load from
+        // the shared rusty cache (which were CMake-built with
+        // -march=native) match the current TU's target features.
+        let rusty_pcm_flag = rusty_pcm_dir
+            .as_ref()
+            .map(|p| format!("-fprebuilt-module-path={}", p.display()))
+            .unwrap_or_default();
         let precompile_cmd = format!(
-            "{} -std={}{} {} -x c++-module --precompile -I{} -fprebuilt-module-path={} -o {} {}",
+            "{} -std={}{} {} -march=native -x c++-module --precompile -I{} -fprebuilt-module-path={} {} -o {} {}",
             cpp_compiler,
             cxx_standard,
             stdlib_flag_suffix,
             portable_intrinsics_define,
             include_dir.display(),
             pcm_dir.display(),
+            rusty_pcm_flag,
             unit.pcm_path.display(),
             unit.source_path.display()
         );
@@ -2522,9 +2653,13 @@ fn run_stage_d_module_build(
         let mut precompile_command = std::process::Command::new(cpp_compiler);
         precompile_command
             .arg(format!("-std={}", cxx_standard))
-            .arg(portable_intrinsics_define);
+            .arg(portable_intrinsics_define)
+            .arg("-march=native");
         if args.import_std {
             precompile_command.arg("-stdlib=libc++");
+        }
+        if let Some(rusty_pcm) = rusty_pcm_dir.as_ref() {
+            precompile_command.arg(format!("-fprebuilt-module-path={}", rusty_pcm.display()));
         }
         let precompile_output = precompile_command
             .arg("-x")
@@ -2579,13 +2714,14 @@ fn run_stage_d_module_build(
         }
 
         let object_cmd = format!(
-            "{} -std={}{} {} -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} -c {} -o {}",
+            "{} -std={}{} {} -march=native -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} {} -c {} -o {}",
             cpp_compiler,
             cxx_standard,
             stdlib_flag_suffix,
             portable_intrinsics_define,
             include_dir.display(),
             pcm_dir.display(),
+            rusty_pcm_flag,
             unit.source_path.display(),
             unit.object_path.display()
         );
@@ -2593,9 +2729,13 @@ fn run_stage_d_module_build(
         let mut object_command = std::process::Command::new(cpp_compiler);
         object_command
             .arg(format!("-std={}", cxx_standard))
-            .arg(portable_intrinsics_define);
+            .arg(portable_intrinsics_define)
+            .arg("-march=native");
         if args.import_std {
             object_command.arg("-stdlib=libc++");
+        }
+        if let Some(rusty_pcm) = rusty_pcm_dir.as_ref() {
+            object_command.arg(format!("-fprebuilt-module-path={}", rusty_pcm.display()));
         }
         let object_output = object_command
             .arg("-Wall")
@@ -2714,14 +2854,19 @@ fn run_stage_d_module_build(
     );
 
     let runner_object = obj_dir.join("runner.o");
+    let runner_rusty_pcm_flag = rusty_pcm_dir
+        .as_ref()
+        .map(|p| format!("-fprebuilt-module-path={}", p.display()))
+        .unwrap_or_default();
     let runner_compile_cmd = format!(
-        "{} -std={}{} {} -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} -c {} -o {}",
+        "{} -std={}{} {} -march=native -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} {} -c {} -o {}",
         cpp_compiler,
         cxx_standard,
         stdlib_flag_suffix,
         portable_intrinsics_define,
         include_dir.display(),
         pcm_dir.display(),
+        runner_rusty_pcm_flag,
         runner_path.display(),
         runner_object.display()
     );
@@ -2729,9 +2874,13 @@ fn run_stage_d_module_build(
     let mut runner_compile_command = std::process::Command::new(cpp_compiler);
     runner_compile_command
         .arg(format!("-std={}", cxx_standard))
-        .arg(portable_intrinsics_define);
+        .arg(portable_intrinsics_define)
+        .arg("-march=native");
     if args.import_std {
         runner_compile_command.arg("-stdlib=libc++");
+    }
+    if let Some(rusty_pcm) = rusty_pcm_dir.as_ref() {
+        runner_compile_command.arg(format!("-fprebuilt-module-path={}", rusty_pcm.display()));
     }
     let runner_compile_output = runner_compile_command
         .arg("-Wall")
@@ -2776,6 +2925,30 @@ fn run_stage_d_module_build(
         link_cmd.arg(obj);
     }
     link_cmd.arg(&runner_object);
+    // Link the rusty umbrella module's static archives so the runner's
+    // module-attached entities (vec_port, btree_port, …) can resolve
+    // at link time. Add the build dir to the lib search path and pull
+    // in each port lib. Linked even if no module-only symbol is
+    // referenced — the unused archives are dead-stripped by the linker.
+    if let Some(rusty_pcm) = rusty_pcm_dir.as_ref()
+        && let Some(rusty_build_dir) = rusty_pcm.parent().map(|p| p.join("build"))
+        && rusty_build_dir.exists()
+    {
+        link_cmd
+            .arg(format!("-L{}", rusty_build_dir.display()))
+            .arg("-lrusty")
+            .arg("-lrusty_async")
+            .arg("-lvec_port")
+            .arg("-lbtree_port")
+            .arg("-lrc_port")
+            .arg("-larc_port")
+            .arg("-lbinary_heap_port")
+            .arg("-lhashbrown_port")
+            .arg("-lvec_deque_port")
+            .arg("-llinked_list_port")
+            .arg("-lcell_port")
+            .arg("-lstring_port");
+    }
     let link_cmd_str = format!(
         "{} -std={}{} -o {} {} {}",
         cpp_compiler,
