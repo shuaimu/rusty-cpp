@@ -28,15 +28,33 @@ Data-enum variant tags are emitted as `template<typename L, typename R> struct E
 
 **Three possible fixes** (ordered by cleanness):
 
-### A. Per-variant trimmed template params (recommended)
+### A. Per-variant trimmed template params (recommended — partial)
 
-Emit `Either_Left<L>` / `Either_Right<R>`, and `using Either<L, R> = std::variant<Either_Left<L>, Either_Right<R>>`. CTAD works directly.
+Emit `Either_Left<L>` / `Either_Right<R>`, and `using Either<L, R> = std::variant<Either_Left<L>, Either_Right<R>>`. CTAD works for the variant tag — but **not for the type alias `Either<L, R>`** when only one variant is supplied in a brace-init.
 
-Touches the data-enum emission path in the transpiler; must also update:
+The failing case is the ternary:
+```cpp
+auto reader = (use_empty
+    ? Either{Either_Left{cursor1}}      // deduces L only
+    : Either{Either_Right{cursor2}});   // deduces R only
+```
+
+Even with trimmed variant params, `Either{Either_Left<L>{val}}` can deduce L but not R. C++20's alias-CTAD doesn't fill in the missing parameter — both branches need the same `Either<L, R>` type, and neither branch alone determines both.
+
+Approach A solves the *struct CTAD* problem (no more "no viable constructor or deduction guide of `Either_Left`") but is **not sufficient by itself** for the ternary case. Either also need one of:
+
+- A1. Transpiler emits `either::Left<L, R>(value)` / `either::Right<L, R>(value)` free-function calls (where L and R are inferred from both branches at the transpiler level, not C++'s CTAD).
+- A2. Transpiler wraps each ternary arm in a lambda with explicit return type (`[&] -> Either<L, R> { return ...; }()`) when it detects a unifying Either type from sibling branches.
+
+Both require the transpiler to (a) detect ternary/if-else with Either-typed branches and (b) infer the unified `<L, R>` from the union of arm types. Substantial design work.
+
+Touches the data-enum emission path; must also update:
 - All internal accesses (`std::get<0>(_m)._0`, etc.) to match the new variant types.
 - `Either_Left<L, R>{value}` call sites the transpiler emits elsewhere → `Either_Left<L>{value}`.
 
-Affects every data enum, not just Either. Need to verify on the bitflags / arrayvec / once_cell crates that don't use trimmed args today.
+Affects every data enum, not just Either — but most enums (Option, Result, ...) already have their CTAD shapes covered by the `rusty::` runtime types, so approach A's blast radius is mostly limited to Either and any user-defined enum that exhibits the ternary-unify pattern.
+
+**Status:** deferred. The win is real but the design needs to handle both per-variant trimming AND the ternary unification step. Item 4 (serde correctness) is now lower-risk and higher-value; recommend tackling 4 first.
 
 ### B. Conversion-proxy wrapper
 
@@ -157,7 +175,7 @@ This wouldn't run a real executor (we'd still need `Future::poll` machinery), bu
 | 1 | ~~Perf track for serde_core~~ | ✅ done (matrix `--release`) | ~0.5 day | 4 crates from "can't test" → "can test" |
 | 2a | ~~itertools `tee` ↔ POSIX `tee()` collision~~ | ✅ done (mod rename) | ~5 min | itertools' first build blocker |
 | 2b | itertools `PoolIndexTraits` qualification | ⏳ partial — needs design (see §2b) | ~1 day | second build blocker on itertools |
-| 3 | either approach A | ⏳ next | ~0.5 day | either + future data-enum cases |
+| 3 | either approach A | ⏳ deferred — see §A note (insufficient by itself) | ~1.5 day | either + future data-enum cases |
 | 4 | serde-family correctness | ⏳ (now reachable) | ~1 day | serde_bytes likely passes; serde_repr/serde_core/serde may pass or surface new issues |
 | 5 | itertools 2c | ⏳ | variable | itertools build complete |
 | 6 | pollster | ⏳ optional | ~1 day | pollster build (no runtime guarantee) |

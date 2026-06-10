@@ -119,16 +119,36 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         // before either had a dedicated transpiled port. Both now have one:
         // `binary_heap_port` (Phase C — see docs/binary_heap_port/STATUS.md)
         // and `linked_list_port` (Phase A2 with transpiler+patcher in
-        // progress — see docs/linked_list_port/STATUS.md). When transpiling
-        // either of these crates, the LinkedList/BinaryHeap names refer to
-        // the locally-declared struct in the same module; emitting
-        // `rusty::Vec` shadows the local definition (or in the case of
-        // `LinkedList { …field-init… }` literals, mis-types the literal
-        // entirely). Leave both unmapped so the local struct wins; consumers
-        // outside these ports can `import binary_heap_port;` or
-        // `import linked_list_port;`.
+        // progress — see docs/linked_list_port/STATUS.md).
+        //
+        // ONLY map the fully-qualified `std::collections::*` form to the
+        // umbrella alias. Bare `BinaryHeap` / `LinkedList` stay unmapped so
+        // local-scope name resolution wins in the ports themselves (the
+        // local `struct BinaryHeap;` declaration would otherwise be shadowed
+        // by the alias). External consumers (serde_core's blanket
+        // `serialize(const std::collections::BinaryHeap<T>&, S)` impls
+        // appear in expanded serde output) use the qualified form and
+        // benefit from the mapping.
+        //
         // Empty `BinaryHeap` / `LinkedList` arms intentionally omitted —
         // unmapped names fall through to local-scope name resolution.
+        // Map both the bare and fully-qualified forms — same pattern as
+        // BTreeMap/BTreeSet/HashMap/HashSet/VecDeque above. binary_heap_port
+        // and linked_list_port (which define the *local* `struct BinaryHeap;`
+        // / `struct LinkedList;` declarations) have their own type-resolution
+        // path: the inline `struct` declaration is registered in
+        // `local_declared_types` before type-path emission runs, so a bare
+        // name resolved through `local_declared_types` wins over this table
+        // and the alias-shadowing concern from the old fall-through comment
+        // doesn't apply. External crates (serde_core's blanket
+        // `impl Serialize for std::collections::BinaryHeap<T>` etc.) use the
+        // qualified form and benefit from the mapping.
+        "BinaryHeap" | "std::collections::BinaryHeap" | "alloc::collections::BinaryHeap" => {
+            Some(("rusty::collections::BinaryHeap", true))
+        }
+        "LinkedList" | "std::collections::LinkedList" | "alloc::collections::LinkedList" => {
+            Some(("rusty::collections::LinkedList", true))
+        }
 
         // Strings
         "String" | "std::string::String" | "alloc::string::String" => {
