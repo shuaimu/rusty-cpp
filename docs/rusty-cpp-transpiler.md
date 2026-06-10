@@ -6379,6 +6379,20 @@ The engine is "real" when:
 
 The engine has *failed cleanly* (i.e. fallen back, not crashed) when a constraint set has no solution — this should be observable via the debug dump and counted in the matrix telemetry. Frequent fallbacks are the next round's bug list.
 
+**Status as of Phase 5 validation (commits 8eb9a6d → e2986e8):**
+
+| Acceptance criterion | Status |
+| --- | --- |
+| Phases 1–4 in place (data model, collector, solver, CodeGen bridge) | ✅ landed |
+| Engine resolves the §13.3 Either ternary into `App("Either", [?L, ?R])` with distinct slots | ✅ verified by `infer_branch_merge_either_ternary_resolves_through_constructors` |
+| Engine never crashes on under-constrained input — returns `None` and lets emit fall back | ✅ verified by `try_infer_ternary_arm_type_*` |
+| `CodeGen::try_infer_ternary_arm_type` consumable from any emit site | ✅ landed |
+| Either / serde / serde_bytes flip to PASS on the matrix | ⏳ blocked on variant-template-trim (TODO §1 / approach A) — engine is ready, emit-side rewrite isn't |
+| `--print-inference` debug dump | ⏳ deferred to a follow-up; today's solver records errors but doesn't surface them |
+| No regression on the 11 PASS crates | ✅ Phase 5 matrix run confirmed 11/15 stable |
+
+The engine is "real-enough" for the criteria that don't require an emit-site rewrite. The remaining matrix flip needs the variant template trim plus a conditional emit consumer; both are emit-pipeline work, not engine work, so they're queued under the existing TODO-misc.md §1 / §4 entries rather than as new engine phases.
+
 ### 13.11 Relationship to existing local fixes
 
 Several commits already land local fixes for symptoms of this gap:
