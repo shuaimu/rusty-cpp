@@ -6213,3 +6213,187 @@ x += 2;
 ```
 
 This reduces noise without changing semantics, while value-position forms continue to use the unit wrapper.
+
+## 13. Type Inference Engine
+
+### 13.1 Why this chapter exists
+
+Repeatedly across the parity matrix we hit a single shape of failure: Rust code transpiles into C++ that asks the C++ compiler to do work it cannot do. The C++ deduction machinery looks at one expression at a time; Rust's idiomatic patterns expect the type checker to thread information across many. When the transpiler emits the literal shape of the Rust expression without resolving the threading, the result fails CTAD or template-argument deduction at the C++ side.
+
+This chapter is the architectural answer: the transpiler must contain a real inference engine, and it must run before emit. Emit then becomes type-direct, not type-hopeful.
+
+### 13.2 Root cause: Rust has inference, C++ has deduction
+
+These are not the same operation.
+
+**Rust's type checker is a constraint solver.** It walks an expression (often an entire function), assigns a fresh type variable to anything whose type isn't immediately known, collects equality constraints from every use, and runs unification to a fixpoint. Information flows in both directions: from arguments outward, *and* from later uses back into earlier expressions. The classic case:
+
+```rust
+let xs = Vec::new();   // xs: Vec<?T>
+xs.push(42_i32);       // constraint: ?T = i32
+                       // xs is solved as Vec<i32>
+```
+
+The `Vec::new()` call site by itself cannot determine `T`. The `push` call later contributes the constraint that pins it. Rust's inference engine sees both, unifies them, and the program type-checks.
+
+**C++'s template argument deduction is a per-call-site pattern match.** At each instantiation, the compiler looks at the actual argument types and tries to match them against the template's parameter signature. If a parameter doesn't appear in the signature, or appears only partially, deduction fails *immediately* at that site — there is no facility to leave an unknown and have a later expression supply it. There is no notion of "wait and see"; there are no type variables that span call sites.
+
+The four families of bug this produces:
+
+1. **Cross-arm unification** — ternary / `match` where each arm fixes a different subset of the parameters. Rust unifies across arms; C++ computes a common type per arm and fails when arms only see partial information. The canonical case is `either`: `cond ? Either{Left{a}} : Either{Right{b}}` — see §13.3.
+
+2. **Backward flow into earlier sites** — `let xs = collect()` whose element type comes from a later `.push()` or a downstream consumer. Rust gathers the constraint backward; C++ sees `collect<?>()` with no way to fill `?`.
+
+3. **Multi-return closure unification** — `|x| match x { A => None, B => Some(y) }` returning `Option<T>`. Rust unifies the two arms; C++ deduces the lambda's return from the *first* return (often `None_t`) and rejects the second. We hit a specific instance of this with `RUSTY_TRY_OPT`-inside-lambda; the commit annotating an explicit return type is the local-fix flavor of what a real engine would handle generically.
+
+4. **Target-driven deduction failure** — `Content_Bytes{rusty::to_owned(value)}` where the *field* type tells you what `to_owned` should produce, but C++ deduces `to_owned`'s return *first* and then asks if the resulting type fits. Rust uses the field type as a constraint that flows backward into `to_owned`'s return.
+
+All four are symptoms of one architectural gap. The transpiler emits Rust *syntax* on the assumption that the C++ compiler will reconstruct the inference. It won't.
+
+### 13.3 The canonical case in detail: `either`'s ternary
+
+The Rust:
+
+```rust
+let reader = if use_empty {
+    Either::Left(cursor_a)
+} else {
+    Either::Right(cursor_b)
+};
+```
+
+`Either<L, R>` is declared with two type parameters. `Left(L)` only mentions `L`; `Right(R)` only mentions `R`. Rust's solver assigns `?L` and `?R` as fresh variables, sees:
+
+- arm A's expression has type `Either<typeof(cursor_a), ?R>` — pins `?L`
+- arm B's expression has type `Either<?L, typeof(cursor_b)>` — pins `?R`
+- both arms must produce the same type (it's an `if/else`)
+
+Unification: `?L = typeof(cursor_a)`, `?R = typeof(cursor_b)`. Solved.
+
+The emit lowers each `Either::Left(a)` to `Either_Left<L, R>{a}` and the outer `if/else` to a ternary. With the original two-param emit, every `Either_Left{a}` fails CTAD individually (Layer 1: `R` doesn't appear in the constructor). Trimming the params (Approach A in §1 of `TODO-misc.md`) fixes Layer 1 but exposes Layer 2: the ternary's two arms each fix one param, and C++ has no machinery to unify them across the `?:`. Layer 3 is that `using` aliases don't accept user-provided deduction guides anyway.
+
+A proper inference engine in the transpiler solves Layer 2 directly: it runs Rust's unification at codegen time, computes `<L, R>` from the union of the arms, and emits `either::Left<L, R>(cursor_a)` and `either::Right<L, R>(cursor_b)` with explicit arguments. C++ now has no deduction left to do — the types are written out.
+
+### 13.4 Design goals
+
+The engine has to be:
+
+- **Sound** — never produce a substitution that contradicts a constraint. If the Rust source type-checks, the engine reaches the same solution Rust would; if it can't, it falls back cleanly to local deduction.
+- **Partial** — it does not need to be a full Rust type checker. It runs on already-type-checked Rust (we have `syn::Type` annotations from the source). Its job is to *propagate* known types across the expression graph, not to rediscover them from scratch.
+- **Localized** — confined to a single function body per run. Cross-function inference is what Rust handles via signatures; the transpiler already reads those signatures. We don't need whole-program inference.
+- **Decidable and fast** — the rule of thumb is one unification pass per function plus one occurs-check per constraint. No exotic features (HKTs, dependent types).
+- **Composable with current emit** — the engine runs *before* emit and decorates the AST with resolved types. Emit reads the decoration and produces concrete C++. We do not retrofit emit to be inference-aware on a case-by-case basis; we resolve once and emit type-directly.
+
+### 13.5 Architecture
+
+Three layers.
+
+**Term language.** A `TyTerm` is either:
+- a concrete type (`syn::Type`, but normalized — we strip `Box<…>`, `&`, parens, etc. into a canonical form),
+- a type variable `?n`,
+- or an applied constructor `Ctor(args…)` where `args` are themselves `TyTerm`s — this lets us represent partially-known types like `Vec<?T>` or `Either<i32, ?R>`.
+
+This is the standard ML/Rust inference shape; no novelty. Crucially, `Ctor` here covers Rust path types (including user-defined enums), tuple types, slice types, and reference types — anything the Rust source can write.
+
+**Constraint store.** A flat `Vec<Constraint>` where `Constraint::Eq(TyTerm, TyTerm)` is "these two terms must unify." We never need disjunctive constraints (subtyping in Rust is structural via lifetimes, which we handle separately; the C++ side doesn't model lifetimes anyway, so we elide them at this layer).
+
+**Substitution.** A `HashMap<VarId, TyTerm>` mapping type variables to their resolved terms. Applied transitively until fixpoint.
+
+The solver is textbook Robinson unification with occurs-check:
+
+```
+unify(σ, T, U):
+    T'  ← σ(T)
+    U'  ← σ(U)
+    case (T', U'):
+        (Var v, Var v')        if v == v' → σ
+        (Var v, _)             if v ∉ U'  → σ ∪ {v ↦ U'}
+        (_,     Var v')        if v' ∉ T' → σ ∪ {v' ↦ T'}
+        (Ctor c args, Ctor c' args') if c == c' and |args|==|args'|
+                               → fold unify over zip(args, args')
+        (Concrete A, Concrete B) if A == B → σ
+        otherwise              → fail (caller falls back)
+```
+
+Failure does not abort the transpile. The engine simply records "could not resolve" for that node, and emit reverts to the current best-effort local CTAD path. Over time, every fallback is a candidate bug to investigate.
+
+### 13.6 Constraint collection
+
+A single AST walk before emit. The walker visits each expression and adds constraints:
+
+- **`let x = e;`** — if `x` has an annotation, constrain `typeof(e) = annotation`. Otherwise allocate `?x_ty`, constrain `typeof(e) = ?x_ty`, and store `?x_ty` as the binding's pending type.
+- **Function return** — constrain the body's tail expression to the declared return type.
+- **`if … { a } else { b }` and `match`** — allocate `?merge`; constrain `typeof(a) = ?merge` and `typeof(b) = ?merge`. This is the case that solves Either.
+- **Closure return** — allocate `?ret`; constrain every `return e;` inside the closure and the tail expression to `?ret`. The closure's type becomes `Fn(…) -> ?ret`.
+- **Field/element/index access** — propagate the container's type to constrain the access result.
+- **`Vec::new()`-style calls with element from later use** — the call site allocates `?T` for each unbound type parameter of the function. Later `.push(x)` constrains `?T = typeof(x)`. This is the backward-flow case.
+- **Brace-init `Struct{field: e}`** — constrain `typeof(e) = field's declared type`. This is the target-driven case that fixes `Content_Bytes{to_owned(value)}`.
+
+Each constraint records the AST node it came from so the engine can attribute a failure if it occurs.
+
+The walker does *not* recompute types we already have: when `syn` already gives us a fully concrete type at a node (e.g. `42_i32`), the constraint is `Concrete(i32) = Concrete(i32)` — trivially satisfied. The engine only does real work where types are partial.
+
+### 13.7 Emit becomes type-directed
+
+After the solver finishes, every interesting AST node carries a resolved `TyTerm`. Emit then:
+
+- **For `Either::Left(a)` inside a ternary** — the parent expression's resolved type is `Either<L, R>` (concrete). Emit `either::Left<L, R>(a)` with explicit args. No CTAD needed.
+- **For `Vec::new()` whose `?T` was resolved to `i32`** — emit `rusty::Vec<int32_t>::new_()` instead of leaving `<T>` for C++ to figure out.
+- **For closure returning `Option<T>`** — emit `[&]() -> rusty::Option<T_cpp> { … }` directly.
+- **For `to_owned(value)` whose target field is `rusty::Vec<u8>`** — emit `rusty::Vec<u8>::from_iter(value)` directly.
+
+When the engine fails to resolve (genuinely under-constrained Rust, which Rust itself would reject, or a constraint pattern we haven't taught the engine), emit reverts to today's heuristics. This keeps the transpiler shipping while the engine grows.
+
+### 13.8 What the engine is *not*
+
+It is not a replacement for Rust's borrow checker or trait resolution. Those are upstream — by the time we run, the input has already type-checked under `rustc`. We are only re-running the *type variable propagation* layer to get the values Rust would have computed.
+
+It is not a region inference engine. Lifetimes don't survive into C++ in this codebase; the engine treats `&'a T` and `&'b T` as both `&T` for unification purposes.
+
+It is not a Hindley-Milner *let-generalization* engine. We don't need to generalize `let f = |x| x` into a polymorphic schema — Rust closures are monomorphic per use site, and the transpiler already handles monomorphization via per-instantiation emit.
+
+### 13.9 Scope and phasing
+
+Phase 1 — scaffolding. Add the `TyTerm` / `Constraint` / `Substitution` data model in `transpiler/src/codegen/inference.rs`. Construct an `InferenceContext` at the entry of every `emit_fn_body`. No new behavior; just plumbing and tests for the data model.
+
+Phase 2 — constraint collection. Walk the body once before emit and populate the constraint store. Record but don't yet act on the results. Add a debug mode that prints the collected constraints for golden-test inspection.
+
+Phase 3 — unification solver. Implement Robinson with occurs-check. Make it iterate to fixpoint on the collected constraints. Validate against hand-written examples (including the Either ternary, the Vec::new()+push pair, the `to_owned`-into-field pattern).
+
+Phase 4 — wire to emit. Three high-value sites first:
+  - the Either ternary path (§1 of TODO-misc.md),
+  - the `to_vec` / `to_owned` brace-init path (§4 of TODO-misc.md, line 8607),
+  - the multi-arm closure return type (we currently patch this site-by-site with explicit return annotations; replace with engine-driven).
+
+Phase 5 — validation. Run the parity matrix. Expected: `either` flips to PASS, `serde` / `serde_bytes` advance past their respective deduction errors. Regression check the 11 currently-passing crates. Any case still falling back to local CTAD becomes documented and prioritized.
+
+### 13.10 Acceptance criteria
+
+The engine is "real" when:
+
+- the Either ternary in §13.3 emits with explicit `<L, R>` and compiles,
+- the `Content_Bytes{to_owned(value)}` brace-init resolves backwards from the field type and compiles,
+- removing the manual `-> rusty::Option<…>` annotation from the checked-arithmetic lambda emit (the local fix landed in commit 5b6698f) still produces compiling code, because the engine derives the same annotation generically,
+- no regression on the 11 currently-passing matrix crates,
+- the engine's resolved types are visible in a `--print-inference` dump so reviewers can audit what it decided.
+
+The engine has *failed cleanly* (i.e. fallen back, not crashed) when a constraint set has no solution — this should be observable via the debug dump and counted in the matrix telemetry. Frequent fallbacks are the next round's bug list.
+
+### 13.11 Relationship to existing local fixes
+
+Several commits already land local fixes for symptoms of this gap:
+
+- 5b6698f — explicit `Option<T>` return on checked-arith lambdas
+- 2cc52b6 — `variant_holds<E_Tag>` via `variant_ctx.enum_name`
+- de9d340 — slice `to_owned` / `to_vec` routed through `Vec::from_iter`
+
+These are *not* wasted work. Each documents a specific constraint shape the engine will eventually handle generically. When the engine lands, each local fix becomes a regression test: "the engine on this AST should produce the same emit as the local fix did." Local fixes shouldn't be reverted aggressively — they're cheap insurance against the engine missing a case.
+
+### 13.12 Open questions deferred to implementation
+
+- Where to canonicalize `syn::Type` (during collection, lazily on lookup, or both).
+- Whether to model `Self` as a distinct constructor or as a substitution-on-entry.
+- How to integrate with the existing `infer_simple_expr_type` helper — replace it, or use it as the engine's "give me a starting point" oracle.
+- Whether constraint failures should warn during development builds even when the fallback succeeds (probably yes; gated by a flag).
+
+These are implementation choices, not design choices. The choices above lock the *architecture*: a single inference pass, runs before emit, talks to emit by decorating the AST with resolved types, falls back cleanly on failure.
