@@ -139,6 +139,12 @@ Verified no regression on cfg-if / once_cell / take_mut. See commit *(this commi
 From the post-Track-P serde_bytes build.log:
 
 - ~~`std::collections` not mapped to `rusty::collections`~~ ✅ done (commit f5f4361 added BinaryHeap/LinkedList rows mirroring BTreeMap/BTreeSet/HashMap/HashSet/VecDeque).
+- ~~Virtual `override` on non-virtual base methods~~ ✅ done (commit ffc3eea added `trait_class_skipped_method_keys` registry, populated when the trait class emits a TODO-skipped by-value `self` method; Adapter emitters consult it and skip the same methods).
+- ~~`if (_m == Unit)` for data-enum unit variant arms~~ ✅ done (commit 2cc52b6 — use `variant_ctx.enum_name` to construct the variant tag and emit `rusty::detail::variant_holds<Foo_Unit>(_m)`; tag is in scope inside impl blocks so no qualification needed).
+- ~~`no member named 'from_vec'` on OsString~~ ✅ done (commit f0cc6a4 — added `rusty::ffi::os_string_from_vec` template helper + mapping in types.rs).
+- ~~Adapter storage uses `Formatter& value_`~~ ✅ done (commit 856c190 — strip trailing `&` from self_cpp before applying kind-specific qualifier).
+- ~~`rusty::Weak` no longer exported~~ ✅ done (commit 6c27379 — route RcWeak alias / `use Weak` import / arity table all through `rusty::rc::Weak`).
+- **NEW BLOCKER (post-fix-chain):** `std::span<const unsigned char>` / `std::vector<unsigned char>` → `rusty::Vec<uint8_t>` conversion fails. Surfaces in serde / serde_bytes at `Content_Bytes{rusty::to_owned(value)}` and similar. `to_owned(span<u8>)` was deliberately removed during Vec retirement (header comment in `rusty/rusty.hpp:435` says "Callers should import rusty; and use rusty::Vec ctors directly"). The transpiler should detect when a `to_owned` target is `rusty::Vec<T>` and emit a `rusty::Vec<T>(value)` construction instead. Estimated ~half day in the codegen.
 - Virtual `override` on non-virtual base methods — **deep issue**, deferred.
   Concretely: `class Serializer { virtual bool is_human_readable() const; }` is the base, then the Adapter spec inherits as `class SerializerAdapter<…> final : public Serializer<…> { rusty::fmt::Result serialize_u8(uint8_t v) override { … } … };`.
   - Base class is emitted as `class Serializer` (non-templated, no `serialize_*` methods — all are commented `// TODO(interface_traits): by-value 'self' method '...' not yet supported`).
