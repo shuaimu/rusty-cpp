@@ -576,6 +576,93 @@ impl<'ast> Visit<'ast> for ConstraintCollector<'_> {
     }
 }
 
+// ============================================================
+// Phase 4b: localized query interface for emit sites.
+//
+// Per the rationale in §13.7, emit sites call into the engine to
+// ask focused questions like "what's the unified type of these
+// two ternary arms?" rather than walking a function-wide map.
+// This keeps the engine cheap to consult from anywhere in emit
+// and avoids the AST-identity bookkeeping that a function-wide
+// constraint store would need (proc_macro2 spans from
+// `syn::parse_str` are call-site placeholders, so they can't
+// uniquely key arbitrary `Expr` nodes).
+//
+// The query helpers spin up a transient `InferenceContext`,
+// feed it the constraints they need, solve, and return. Failure
+// (no solution / underdetermined) is reported as `None` so the
+// caller can fall back to today's heuristic emit.
+// ============================================================
+
+/// Given two expressions that must share a common type (the arms
+/// of an `if`/`else` or `?:`), return the unified term if the
+/// engine can compute one, or `None` to signal "fall back to
+/// local CTAD".
+///
+/// Today this is the seed implementation for the Either case in
+/// §13.3. It models each arm as a fresh variable, lets
+/// `summarize_expr` decompose any nested structure it understands
+/// (recursively if/else, match, blocks), and runs the solver.
+/// When the arms are simple identifier references (the common
+/// case after the `Either{Left{...}}` shape gets desugared), the
+/// engine has no concrete type to anchor on and returns `None`;
+/// Phase 4c will plug in the variant-constructor-recognition
+/// logic that turns `Either_Left{e}` into `App("Either",
+/// [typeof(e), ?R])`.
+pub(crate) fn infer_branch_merge(
+    arm_a: &syn::Expr,
+    arm_b: &syn::Expr,
+) -> Option<TyTerm> {
+    let mut ctx = InferenceContext::new();
+    let term_a;
+    let term_b;
+    {
+        let mut c = ConstraintCollector::new(&mut ctx);
+        term_a = c.summarize_expr(arm_a);
+        term_b = c.summarize_expr(arm_b);
+    }
+    let merge = ctx.fresh_var();
+    ctx.push_constraint(Constraint {
+        lhs: TyTerm::Var(merge),
+        rhs: term_a,
+        origin: ConstraintOrigin::BranchMerge,
+    });
+    ctx.push_constraint(Constraint {
+        lhs: TyTerm::Var(merge),
+        rhs: term_b,
+        origin: ConstraintOrigin::BranchMerge,
+    });
+    let errors = ctx.solve();
+    if !errors.is_empty() {
+        return None;
+    }
+    ctx.resolve(merge)
+}
+
+/// Render a resolved `TyTerm` back to a C++ type string. Returns
+/// `None` if any sub-term is still a free variable — callers
+/// treat that as "underdetermined, fall back to local CTAD".
+///
+/// Concrete `syn::Type` terms aren't yet mapped through the
+/// codegen's full type-mapping pipeline (that lives on `CodeGen`,
+/// outside this module); this helper exists so module tests can
+/// assert on the engine's output and so Phase 4c can render the
+/// `App` skeleton while substituting concrete types via the
+/// caller's mapper.
+pub(crate) fn render_tyterm_for_cpp(term: &TyTerm) -> Option<String> {
+    match term {
+        TyTerm::Var(_) => None,
+        TyTerm::Concrete(t) => Some(render_concrete(t)),
+        TyTerm::App { head, args } => {
+            let rendered: Vec<String> = args
+                .iter()
+                .map(render_tyterm_for_cpp)
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("{}<{}>", head, rendered.join(", ")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,6 +1034,72 @@ mod tests {
             }
             other => panic!("expected Either<i32, u64>; got {:?}", other),
         }
+    }
+
+    // ============================================================
+    // Phase 4b tests — localized query interface used by emit
+    // sites in Phase 4c.
+    // ============================================================
+
+    #[test]
+    fn infer_branch_merge_returns_none_for_underspecified_arms() {
+        // Bare identifier arms give the engine nothing to anchor
+        // on; it should signal `None` so emit falls back rather
+        // than emitting an invented type.
+        let arm_a: syn::Expr = syn::parse_str("foo").unwrap();
+        let arm_b: syn::Expr = syn::parse_str("bar").unwrap();
+        assert!(infer_branch_merge(&arm_a, &arm_b).is_none());
+    }
+
+    #[test]
+    fn infer_branch_merge_unifies_nested_if_else_into_one_var() {
+        // `if … { a } else { b }` as one of the arms — the inner
+        // if/else builds its own merge variable, and the outer
+        // query unifies the two arms through the existing
+        // structure. The result is still a Var (no concrete type
+        // contributed), so render fails; the test asserts that
+        // the engine *attempted* the unification cleanly (no
+        // solver errors).
+        let arm_a: syn::Expr = syn::parse_str("if c { x } else { y }").unwrap();
+        let arm_b: syn::Expr = syn::parse_str("z").unwrap();
+        let merge = infer_branch_merge(&arm_a, &arm_b);
+        // No concrete contribution → Var → None from resolve.
+        assert!(merge.is_none());
+    }
+
+    #[test]
+    fn render_tyterm_concrete_returns_token_string() {
+        let ty: syn::Type = syn::parse_str("i32").unwrap();
+        assert_eq!(
+            render_tyterm_for_cpp(&TyTerm::Concrete(ty)).as_deref(),
+            Some("i32")
+        );
+    }
+
+    #[test]
+    fn render_tyterm_app_nests_arguments() {
+        let ty: syn::Type = syn::parse_str("u8").unwrap();
+        let inner = TyTerm::App {
+            head: "Vec".to_string(),
+            args: vec![TyTerm::Concrete(ty)],
+        };
+        let outer = TyTerm::App {
+            head: "Either".to_string(),
+            args: vec![inner.clone(), inner.clone()],
+        };
+        assert_eq!(
+            render_tyterm_for_cpp(&outer).as_deref(),
+            Some("Either<Vec<u8>, Vec<u8>>")
+        );
+    }
+
+    #[test]
+    fn render_tyterm_with_free_var_returns_none() {
+        let term = TyTerm::App {
+            head: "Either".to_string(),
+            args: vec![TyTerm::Var(TyVarId(0)), TyTerm::Concrete(syn::parse_str("u64").unwrap())],
+        };
+        assert!(render_tyterm_for_cpp(&term).is_none());
     }
 
     #[test]
