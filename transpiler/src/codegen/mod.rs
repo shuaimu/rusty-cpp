@@ -11013,23 +11013,32 @@ impl CodeGen {
         kind: AdapterStorageKind,
         methods: &[&syn::ImplItemFn],
     ) {
+        // When the impl Self type itself is a reference (e.g.
+        // `impl Serializer for &mut fmt::Formatter`), `map_type`
+        // produces `rusty::fmt::Formatter&`. Subsequent formats
+        // like `{} value_` produce `Formatter& value_;` for Owning
+        // and `Formatter&& value_;` / `const Formatter&& value_;`
+        // for MutRef / ConstRef — neither is valid for storage. Strip
+        // the trailing `&` so the storage type is the pointee, then
+        // re-apply the kind-specific qualifier.
+        let self_storage_base = self_cpp.trim_end().trim_end_matches('&').trim_end();
         let storage_decl = match kind {
-            AdapterStorageKind::Owning => format!("{} value_;", self_cpp),
-            AdapterStorageKind::ConstRef => format!("const {}& value_;", self_cpp),
-            AdapterStorageKind::MutRef => format!("{}& value_;", self_cpp),
+            AdapterStorageKind::Owning => format!("{} value_;", self_storage_base),
+            AdapterStorageKind::ConstRef => format!("const {}& value_;", self_storage_base),
+            AdapterStorageKind::MutRef => format!("{}& value_;", self_storage_base),
         };
         let ctor_decl = match kind {
             AdapterStorageKind::Owning => format!(
                 "explicit {}{}({} v) : value_(std::move(v)) {{}}",
-                trait_name, suffix, self_cpp
+                trait_name, suffix, self_storage_base
             ),
             AdapterStorageKind::ConstRef => format!(
                 "explicit {}{}(const {}& u) : value_(u) {{}}",
-                trait_name, suffix, self_cpp
+                trait_name, suffix, self_storage_base
             ),
             AdapterStorageKind::MutRef => format!(
                 "explicit {}{}({}& u) : value_(u) {{}}",
-                trait_name, suffix, self_cpp
+                trait_name, suffix, self_storage_base
             ),
         };
 
@@ -11177,23 +11186,26 @@ impl CodeGen {
         kind: AdapterStorageKind,
         methods: &[syn::ImplItemFn],
     ) {
+        // See `emit_one_foreign_adapter` for rationale — strip the trailing
+        // `&` so impls on reference Self produce valid storage/ctor types.
+        let self_storage_base = self_cpp.trim_end().trim_end_matches('&').trim_end();
         let storage_decl = match kind {
-            AdapterStorageKind::Owning => format!("{} value_;", self_cpp),
-            AdapterStorageKind::ConstRef => format!("const {}& value_;", self_cpp),
-            AdapterStorageKind::MutRef => format!("{}& value_;", self_cpp),
+            AdapterStorageKind::Owning => format!("{} value_;", self_storage_base),
+            AdapterStorageKind::ConstRef => format!("const {}& value_;", self_storage_base),
+            AdapterStorageKind::MutRef => format!("{}& value_;", self_storage_base),
         };
         let ctor_decl = match kind {
             AdapterStorageKind::Owning => format!(
                 "explicit {}{}({} v) : value_(std::move(v)) {{}}",
-                trait_name, suffix, self_cpp
+                trait_name, suffix, self_storage_base
             ),
             AdapterStorageKind::ConstRef => format!(
                 "explicit {}{}(const {}& u) : value_(u) {{}}",
-                trait_name, suffix, self_cpp
+                trait_name, suffix, self_storage_base
             ),
             AdapterStorageKind::MutRef => format!(
                 "explicit {}{}({}& u) : value_(u) {{}}",
-                trait_name, suffix, self_cpp
+                trait_name, suffix, self_storage_base
             ),
         };
 
