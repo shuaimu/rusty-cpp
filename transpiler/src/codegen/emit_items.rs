@@ -2763,6 +2763,21 @@ impl CodeGen {
                 self.module_runtime_helper_traits
                     .insert(trait_name.to_string());
                 self.module_runtime_helper_traits.insert(scoped);
+                // The helper no longer emits a `using {trait_name} =
+                // {trait_name}RuntimeHelper;` alias unconditionally (it
+                // collides with the trait class in the common case).
+                // Emit it here, where the trait class was suppressed and
+                // the alias is the only thing letting `Trait::method(...)`
+                // call sites resolve to the helper.
+                let trait_name_str = trait_name.to_string();
+                let trait_cpp_name = escape_cpp_keyword(&trait_name_str);
+                let helper_name = format!("{}RuntimeHelper", trait_cpp_name);
+                if trait_cpp_name != helper_name && trait_cpp_name != "Serializer" {
+                    self.writeln(&format!(
+                        "using {} = {};",
+                        trait_cpp_name, helper_name
+                    ));
+                }
             }
             return;
         }
@@ -3506,12 +3521,33 @@ impl CodeGen {
         self.indent -= 1;
         self.writeln("};");
         let trait_cpp_name = escape_cpp_keyword(&trait_name);
-        if trait_cpp_name != helper_struct_name && trait_cpp_name != "Serializer" {
-            self.writeln(&format!(
-                "using {} = {};",
-                trait_cpp_name, helper_struct_name
-            ));
-        }
+        // The `using {trait_name} = {helper_struct_name};` alias is here so
+        // call sites like `Trait::method(self, ...)` can resolve to the
+        // helper's static dispatch when the trait itself wasn't emitted as
+        // a class (e.g. traits with associated constants are skipped via the
+        // `skipped_interface_traits` path — arrayvec's `ArrayVecImpl` is the
+        // canonical case). When the trait class IS emitted by
+        // `emit_trait_interface_pattern`, the alias collides with it
+        // (typedef-redefinition error — surfaced by either's `IntoEither`
+        // trait). Only emit the alias when the class wasn't already emitted.
+        // Skip the `using {trait_name} = {helper_struct_name};` alias
+        // unconditionally now. The alias was added so call sites like
+        // `Trait::method(self, ...)` resolve to the helper's static
+        // dispatch when the trait itself wasn't emitted as a class. But
+        // when the trait IS emitted as a class (the common case — both
+        // the marker-trait fallback at line ~2835 AND the regular
+        // interface emission below all produce a class with the trait's
+        // name), the alias collides ("typedef redefinition with
+        // different types"). The collision was surfaced by either's
+        // `IntoEither` trait and would block any trait with default
+        // methods whose class survives emission.
+        //
+        // The original callers that *needed* the alias (e.g. arrayvec's
+        // `ArrayVecImpl` — has associated constants, so its class is
+        // suppressed and only the helper is emitted) now do their own
+        // alias emission at the call site (see the assoc-const branch
+        // at line ~2748, which now writes the alias directly).
+        let _ = (trait_cpp_name, helper_struct_name);
         emitted_any
     }
 
