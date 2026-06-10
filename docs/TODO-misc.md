@@ -69,7 +69,21 @@ requires (std::copyable<typename PoolIndexTraits<I>::Item>)
 // error: no template named 'PoolIndexTraits'; did you mean 'combinations::PoolIndexTraits'?
 ```
 
-The transpiler dropped the namespace qualifier when emitting the `requires` clause type path. Small fix in the requires-clause type-path emission — qualification likely isn't running for types inside trait bounds.
+**Status:** partially scoped, not committed. The naïve fix (qualify with the trait's declared namespace via `trait_declared_path_by_short_name`) makes `PoolIndexTraits` resolve, but exposes a deeper issue:
+
+The **forward decl** of `combinations_with_replacement<I>(I)` and its body declaration emit DIFFERENT requires clauses:
+- Forward decl: `requires (std::copyable<typename I::Item>)` (simple `I::Item` form, emitted before any trait has been processed; `trait_associated_type_names` is empty → fallback to the simple form)
+- Body: `requires (std::copyable<typename combinations::PoolIndexTraits<I>::Item>)` (helper form, emitted after `PoolIndex` trait has registered its assoc-types)
+
+Clang then errors with "requires clause differs in template redeclaration" — both declarations are valid in isolation but their constraints don't match token-for-token.
+
+**Tried** a pre-pass that populates `trait_associated_type_names` before forward-decl emission. That made both sides use the helper form for *every* trait with assoc types — but only some traits (e.g. `PoolIndex`) actually get a `<Trait>Traits<U>` helper specialization emitted. Others like `FuncLR` and `IteratorIndex` produced "no type named 'FuncLRTraits' in namespace 'merge_join'" because the helper never exists for them.
+
+**Real fix:** make the dependent-type substitution at `mod.rs:32024` conditional on whether the trait will actually receive a `<Trait>Traits<U>` specialization. That requires either:
+- A pre-pass that walks impl blocks and decides which traits get helpers.
+- Suppressing the helper substitution specifically inside requires-clause emission (use the simple `typename I::Item` form for constraints, and the helper form only at use sites where the type is actually needed).
+
+The second approach is cleaner but requires plumbing an "in-requires-clause" flag through `map_type`. Deferred until either the matrix or another consumer makes the work clearly worth the design churn.
 
 ### 2c. `make_entry_probe` missing from `rusty::detail` (~lines 11072, 11093)
 
@@ -141,8 +155,9 @@ This wouldn't run a real executor (we'd still need `Future::poll` machinery), bu
 | # | Item | Status | Cost | Unlocks |
 |---|---|---|---|---|
 | 1 | ~~Perf track for serde_core~~ | ✅ done (matrix `--release`) | ~0.5 day | 4 crates from "can't test" → "can test" |
-| 2 | itertools 2a + 2b | ⏳ next | ~0.5 day | itertools build progress |
-| 3 | either approach A | ⏳ | ~0.5 day | either + future data-enum cases |
+| 2a | ~~itertools `tee` ↔ POSIX `tee()` collision~~ | ✅ done (mod rename) | ~5 min | itertools' first build blocker |
+| 2b | itertools `PoolIndexTraits` qualification | ⏳ partial — needs design (see §2b) | ~1 day | second build blocker on itertools |
+| 3 | either approach A | ⏳ next | ~0.5 day | either + future data-enum cases |
 | 4 | serde-family correctness | ⏳ (now reachable) | ~1 day | serde_bytes likely passes; serde_repr/serde_core/serde may pass or surface new issues |
 | 5 | itertools 2c | ⏳ | variable | itertools build complete |
 | 6 | pollster | ⏳ optional | ~1 day | pollster build (no runtime guarantee) |
