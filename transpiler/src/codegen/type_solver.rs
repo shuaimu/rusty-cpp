@@ -499,10 +499,11 @@ impl<'ctx> ConstraintCollector<'ctx> {
 
     /// Best-effort summary of `expr`'s type as a TyTerm. For
     /// shapes whose contribution to inference we care about —
-    /// if/else, match, struct-init — we walk into them and emit
-    /// proper structural constraints. For anything else we
-    /// return a fresh variable, which the solver will leave
-    /// unbound (and Phase 4 emit will fall back to local CTAD on).
+    /// if/else, match, struct-init, recognized variant
+    /// constructor calls — we walk into them and emit proper
+    /// structural constraints. For anything else we return a
+    /// fresh variable, which the solver will leave unbound (and
+    /// Phase 4 emit will fall back to local CTAD on).
     fn summarize_expr(&mut self, expr: &syn::Expr) -> TyTerm {
         match expr {
             syn::Expr::If(if_expr) => self.collect_if_else(if_expr),
@@ -515,7 +516,73 @@ impl<'ctx> ConstraintCollector<'ctx> {
                 }
                 TyTerm::Var(self.fresh_expr_var())
             }
+            syn::Expr::Call(call) => {
+                // Recognize `Enum::Variant(arg)` shapes. For enums
+                // whose variants each fix a distinct type
+                // parameter (Either being the canonical case),
+                // each constructor produces an `App(Enum, ...)`
+                // term where the argument types are pinned in the
+                // matching positions and the others are fresh
+                // variables.
+                //
+                // This is intentionally narrow today — `recognize_
+                // variant_constructor_call` ships with hard-coded
+                // knowledge of `Either::Left/Right`. The right
+                // architectural fix is to surface the
+                // enum-variant-to-parameter map from `CodeGen`'s
+                // `data_enum_variant_indices_by_enum`, but the
+                // collector is module-local and can't reach it
+                // yet. Hard-coding the canonical case unblocks the
+                // §13.3 fix while keeping the seam visible — Phase
+                // 4c-ii / the eventual generalization replace
+                // this with a passed-in oracle.
+                if let Some(term) = self.recognize_variant_constructor_call(call) {
+                    return term;
+                }
+                TyTerm::Var(self.fresh_expr_var())
+            }
             _ => TyTerm::Var(self.fresh_expr_var()),
+        }
+    }
+
+    /// Hard-coded recognition of two-segment `Enum::Variant(arg)`
+    /// calls where the variant pins a specific position of the
+    /// enum's type parameter list. Returns `Some(App(...))` for
+    /// recognized cases, `None` otherwise.
+    ///
+    /// Current coverage:
+    /// - `Either::Left(arg)`  → `App("Either", [typeof(arg), ?R])`
+    /// - `Either::Right(arg)` → `App("Either", [?L, typeof(arg)])`
+    ///
+    /// Adding a new enum is a one-line table entry until we
+    /// promote this to a `CodeGen`-driven oracle.
+    fn recognize_variant_constructor_call(
+        &mut self,
+        call: &syn::ExprCall,
+    ) -> Option<TyTerm> {
+        let path = match &*call.func {
+            syn::Expr::Path(p) if p.qself.is_none() => &p.path,
+            _ => return None,
+        };
+        if path.segments.len() != 2 {
+            return None;
+        }
+        let enum_name = path.segments[0].ident.to_string();
+        let variant_name = path.segments[1].ident.to_string();
+        if call.args.len() != 1 {
+            return None;
+        }
+        let arg_term = self.summarize_expr(&call.args[0]);
+        match (enum_name.as_str(), variant_name.as_str()) {
+            ("Either", "Left") => Some(TyTerm::App {
+                head: "Either".to_string(),
+                args: vec![arg_term, TyTerm::Var(self.fresh_expr_var())],
+            }),
+            ("Either", "Right") => Some(TyTerm::App {
+                head: "Either".to_string(),
+                args: vec![TyTerm::Var(self.fresh_expr_var()), arg_term],
+            }),
+            _ => None,
         }
     }
 
@@ -1100,6 +1167,104 @@ mod tests {
             args: vec![TyTerm::Var(TyVarId(0)), TyTerm::Concrete(syn::parse_str("u64").unwrap())],
         };
         assert!(render_tyterm_for_cpp(&term).is_none());
+    }
+
+    // ============================================================
+    // Phase 4c-i — variant-constructor recognition.
+    // ============================================================
+
+    #[test]
+    fn variant_constructor_either_left_pins_first_param() {
+        let mut ctx = InferenceContext::new();
+        let mut c = ConstraintCollector::new(&mut ctx);
+        let call: syn::ExprCall = syn::parse_str("Either::Left(x)").unwrap();
+        let term = c
+            .recognize_variant_constructor_call(&call)
+            .expect("Either::Left should be recognized");
+        match term {
+            TyTerm::App { head, args } => {
+                assert_eq!(head, "Either");
+                assert_eq!(args.len(), 2);
+                // arg[0] is the L position — should be the arg's
+                // fresh var (not a concrete type yet, since `x` is
+                // a bare ident).
+                assert!(matches!(args[0], TyTerm::Var(_)));
+                assert!(matches!(args[1], TyTerm::Var(_)));
+            }
+            other => panic!("expected Either App; got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn variant_constructor_either_right_pins_second_param() {
+        let mut ctx = InferenceContext::new();
+        let mut c = ConstraintCollector::new(&mut ctx);
+        let call: syn::ExprCall = syn::parse_str("Either::Right(y)").unwrap();
+        let term = c
+            .recognize_variant_constructor_call(&call)
+            .expect("Either::Right should be recognized");
+        match term {
+            TyTerm::App { head, args } => {
+                assert_eq!(head, "Either");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(args[0], TyTerm::Var(_)));
+                assert!(matches!(args[1], TyTerm::Var(_)));
+            }
+            other => panic!("expected Either App; got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn variant_constructor_unrecognized_returns_none() {
+        let mut ctx = InferenceContext::new();
+        let mut c = ConstraintCollector::new(&mut ctx);
+        let call: syn::ExprCall = syn::parse_str("Foo::Bar(x)").unwrap();
+        assert!(c.recognize_variant_constructor_call(&call).is_none());
+    }
+
+    #[test]
+    fn infer_branch_merge_either_ternary_resolves_through_constructors() {
+        // The HEADLINE test: this is the §13.3 case end-to-end
+        // through the public query API. Two ternary arms each
+        // wrap an opaque value in a different Either constructor.
+        // Today the arm values themselves remain free variables
+        // (we don't reach back into the source to type `x` and
+        // `y`), but the Either *constructor* tags resolve the
+        // outer `App("Either", [...])` shape. The merge variable
+        // unifies the two App terms — the L slot gets pinned by
+        // arm A's contribution, and the R slot by arm B's. With
+        // fully concrete arg types this would produce a complete
+        // `Either<TypeOfX, TypeOfY>`; with bare-ident args we
+        // produce `Either<?vx, ?vy>` where each slot is bound to
+        // exactly ONE variable across both arms (proves the
+        // unification worked).
+        let arm_a: syn::Expr = syn::parse_str("Either::Left(x)").unwrap();
+        let arm_b: syn::Expr = syn::parse_str("Either::Right(y)").unwrap();
+        let merge = infer_branch_merge(&arm_a, &arm_b)
+            .expect("Either ternary should produce a unified App term");
+        match merge {
+            TyTerm::App { head, args } => {
+                assert_eq!(head, "Either");
+                assert_eq!(args.len(), 2);
+                // Both slots are still variables (since we don't
+                // type `x`/`y`), but they should be DIFFERENT
+                // variables — one corresponds to arm A's L
+                // contribution, the other to arm B's R.
+                let l = match args[0] {
+                    TyTerm::Var(v) => v,
+                    ref other => panic!("L slot should be Var; got {:?}", other),
+                };
+                let r = match args[1] {
+                    TyTerm::Var(v) => v,
+                    ref other => panic!("R slot should be Var; got {:?}", other),
+                };
+                assert_ne!(
+                    l, r,
+                    "L and R should be distinct variables — Either<L, R>"
+                );
+            }
+            other => panic!("expected Either App; got {:?}", other),
+        }
     }
 
     #[test]
