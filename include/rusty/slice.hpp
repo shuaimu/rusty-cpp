@@ -1104,6 +1104,83 @@ decltype(auto) preserve_for_in_range(Range&& range) {
         return std::decay_t<Range>(std::forward<Range>(range));
     }
 }
+
+// `make_entry_probe(map, key)` mimics Rust's `map.entry(key)` API for the
+// HashMap/BTreeMap `if let Entry::Vacant(entry) = used.entry(v) { … }`
+// pattern that itertools' `unique_impl` and `kmerge` emit.
+//
+// In Rust the `Entry` is an enum with `Vacant(VacantEntry)` and
+// `Occupied(OccupiedEntry)` variants. We model it with a single probe
+// type that exposes `is_vacant()` / `is_occupied()` and corresponding
+// `vacant_entry()` / `occupied_entry()` accessors. The transpiler emits:
+//
+//   if (auto&& probe = make_entry_probe(used, std::move(v)); probe.is_vacant()) {
+//       auto&& entry = probe.vacant_entry();
+//       auto elt = rusty::clone(entry.key());
+//       entry.insert(rusty::Unit{});
+//       …
+//   }
+//
+// Backing storage: a `try_emplace` on the map. If the key wasn't present
+// the map gets a default-constructed value at that slot; the `VacantEntry`
+// then provides `key()` (reference to the stored key) and `insert(value)`
+// (overwrites that slot's value). Move-only / non-default-constructible
+// values are supported via `insert`.
+template<typename Map>
+class vacant_entry_probe {
+public:
+    using map_type = Map;
+    using iterator = typename Map::iterator;
+    using key_type = typename Map::key_type;
+    using mapped_type = typename Map::mapped_type;
+
+    vacant_entry_probe(Map& m, iterator it) : map_(&m), it_(it) {}
+
+    const key_type& key() const { return it_->first; }
+
+    template<typename V>
+    void insert(V&& value) {
+        it_->second = std::forward<V>(value);
+    }
+
+private:
+    Map* map_;
+    iterator it_;
+};
+
+template<typename Map>
+class entry_probe {
+public:
+    using map_type = Map;
+    using iterator = typename Map::iterator;
+
+    entry_probe(Map& m, iterator it, bool vacant)
+        : map_(&m), it_(it), vacant_(vacant) {}
+
+    bool is_vacant() const { return vacant_; }
+    bool is_occupied() const { return !vacant_; }
+
+    vacant_entry_probe<Map> vacant_entry() const {
+        return vacant_entry_probe<Map>(*map_, it_);
+    }
+
+    // Occupied accessor — currently a no-op for the itertools call sites
+    // (they only branch on `is_vacant`). Returns a reference for parity
+    // with the Vacant form.
+    auto& occupied_entry() const { return *it_; }
+
+private:
+    Map* map_;
+    iterator it_;
+    bool vacant_;
+};
+
+template<typename Map, typename Key>
+entry_probe<Map> make_entry_probe(Map& map, Key&& key) {
+    using mapped_type = typename Map::mapped_type;
+    auto result = map.try_emplace(std::forward<Key>(key), mapped_type{});
+    return entry_probe<Map>(map, result.first, result.second);
+}
 } // namespace detail
 
 template<typename Range>
