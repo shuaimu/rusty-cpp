@@ -990,6 +990,21 @@ pub struct CodeGen {
     /// `trait ToOwned { type Owned; … }`) are NOT in this set — their
     /// adapter specs emit assoc-type `using` decls per impl instead.
     pub(crate) interface_traits_with_generics: HashSet<String>,
+    /// (trait_name, method_name) pairs that `emit_trait_interface_pattern`
+    /// SKIPPED in the abstract base class (typically by-value `self`
+    /// methods, which can't be virtual in the current interface_traits
+    /// pipeline). The Adapter emitters consult this set to also skip the
+    /// same methods — emitting them with `override` would otherwise fail
+    /// to compile because the base class has no virtual counterpart.
+    ///
+    /// Surfaced by serde_core's `impl Serializer for &mut fmt::Formatter`:
+    /// the impl's Self is `&mut T`, so
+    /// `normalize_impl_method_receiver_for_reference_self` rewrites the
+    /// originally-by-value `self` into `&mut self` before the methods
+    /// reach the Adapter emit; without this set, the Adapter spec emits
+    /// `serialize_u8(uint8_t v) override` for a method the base class
+    /// only emitted as a TODO comment.
+    pub(crate) trait_class_skipped_method_keys: HashSet<(String, String)>,
     /// Traits → their declared associated type names (e.g.
     /// `"ToOwned" → ["Owned"]`). Populated when emitting a trait; read
     /// during Adapter emission so each `impl Trait for X { type Y = Z; }`
@@ -1432,6 +1447,7 @@ impl CodeGen {
             dyn_multi_combinations: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             skipped_interface_traits: HashSet::new(),
             interface_traits_with_generics: HashSet::new(),
+            trait_class_skipped_method_keys: HashSet::new(),
             trait_associated_type_names: HashMap::new(),
             trait_declared_path_by_short_name: HashMap::new(),
             emitted_foreign_adapter_specs: HashSet::new(),
@@ -1824,6 +1840,7 @@ impl CodeGen {
         self.dyn_multi_combinations.borrow_mut().clear();
         self.skipped_interface_traits.clear();
         self.interface_traits_with_generics.clear();
+        self.trait_class_skipped_method_keys.clear();
         self.trait_associated_type_names.clear();
         self.trait_declared_path_by_short_name.clear();
         self.emitted_foreign_adapter_specs.clear();
@@ -11038,6 +11055,25 @@ impl CodeGen {
         self.writeln(&ctor_decl);
 
         for method in methods {
+            // Mirror the trait class's skip for by-value `self` methods.
+            // The interface_traits pass writes only a TODO comment for
+            // such methods in the base class; the Adapter must not
+            // override them or clang errors "only virtual member
+            // functions can be marked 'override'". Surfaced by
+            // `impl<'a> Serializer for &mut fmt::Formatter<'a>` in
+            // serde_core (self is normalized to `&mut self` before the
+            // method reaches this loop).
+            let method_name = method.sig.ident.to_string();
+            if self
+                .trait_class_skipped_method_keys
+                .contains(&(trait_name.to_string(), method_name.clone()))
+            {
+                self.writeln(&format!(
+                    "// TODO(interface_traits): Adapter skipped method `{}` (base trait class also skipped)",
+                    method_name
+                ));
+                continue;
+            }
             self.emit_one_foreign_adapter_method(method, kind);
         }
 
@@ -11188,6 +11224,20 @@ impl CodeGen {
         self.writeln(&ctor_decl);
 
         for method in methods {
+            // See the matching skip in `emit_one_foreign_adapter` for
+            // rationale — base-class skipped methods must not surface
+            // as Adapter overrides.
+            let method_name = method.sig.ident.to_string();
+            if self
+                .trait_class_skipped_method_keys
+                .contains(&(trait_name.to_string(), method_name.clone()))
+            {
+                self.writeln(&format!(
+                    "// TODO(interface_traits): Adapter skipped method `{}` (base trait class also skipped)",
+                    method_name
+                ));
+                continue;
+            }
             self.emit_one_local_adapter_method(method, kind);
         }
 

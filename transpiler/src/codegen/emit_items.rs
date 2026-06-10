@@ -3099,6 +3099,16 @@ impl CodeGen {
                     "// TODO(interface_traits): by-value `self` method `{}` not yet supported",
                     m_name
                 ));
+                // Track so Adapter emit later also skips this method.
+                // Without tracking, an impl on `&T` / `&mut T` Self
+                // would rewrite `self` → `&self`/`&mut self` via
+                // `normalize_impl_method_receiver_for_reference_self`,
+                // and the Adapter spec would emit `override` for a base
+                // method the trait class never declared. Surfaced by
+                // serde_core's `impl Serializer for &mut fmt::Formatter`.
+                let raw_method_name = method.sig.ident.to_string();
+                self.trait_class_skipped_method_keys
+                    .insert((trait_name_str.clone(), raw_method_name));
                 continue;
             }
 
