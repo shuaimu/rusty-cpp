@@ -658,8 +658,39 @@ impl CodeGen {
                         // binding. With it the arm emits the equality check
                         // against the constant.
                         saw_runtime_pattern = true;
-                        let ident = escape_cpp_keyword(&pi.ident.to_string());
-                        out.push_str(&format!("if (_m == {}) {{ ", ident));
+                        let raw_ident = pi.ident.to_string();
+                        let ident = escape_cpp_keyword(&raw_ident);
+                        // For **data-enum** unit variants (`enum E { Unit }`
+                        // emitted as `struct E_Unit; using E = variant<…,
+                        // E_Unit, …>;` + factory `static E Unit() { … }`),
+                        // the bare `Unit` is a pointer-to-function, NOT a
+                        // value. Comparing `_m == Unit` resolves to
+                        // `E == E ()` and clang errors with "invalid
+                        // operands to binary expression". The match arm
+                        // typically sits inside an `impl ::fmt::Display for
+                        // E`, so the variant tag `E_Unit` is in scope at
+                        // the emission site — emit `variant_holds<E_Unit>`
+                        // using the bare tag from `variant_ctx.enum_name`.
+                        //
+                        // For C-like enum constants (`Less`, `Acquire`,
+                        // …) the bare name truly is a value, so keep the
+                        // equality form.
+                        let data_unit_emit = variant_ctx.and_then(|ctx| {
+                            let key = format!("{}_{}", ctx.enum_name, raw_ident);
+                            if self.data_enum_unit_variants.contains(&key) {
+                                Some(format!("{}_{}", ctx.enum_name, raw_ident))
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(tag) = data_unit_emit {
+                            out.push_str(&format!(
+                                "if (rusty::detail::variant_holds<{}>(_m)) {{ ",
+                                tag
+                            ));
+                        } else {
+                            out.push_str(&format!("if (_m == {}) {{ ", ident));
+                        }
                     } else {
                         let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
                         binding_map.insert(pi.ident.to_string(), cpp_name.clone());
