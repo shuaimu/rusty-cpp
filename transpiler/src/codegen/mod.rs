@@ -4815,7 +4815,13 @@ impl CodeGen {
     fn module_name_conflicts_with_global_symbol(name: &str) -> bool {
         // C global symbols that routinely conflict with namespace names in
         // generated translation units once system headers are included.
-        matches!(name, "free" | "sync" | "read" | "write")
+        // `tee` collides with the POSIX splice/tee syscall declared in
+        // `bits/fcntl-linux.h` (pulled in transitively by `<print>` or
+        // similar via the GMF); surfaced by the itertools crate where
+        // `mod tee` produced `namespace tee {}` at module purview and
+        // clang rejected it as "redefinition of 'tee' as different kind
+        // of symbol". Same shape as `read`/`write`/`free`/`sync`.
+        matches!(name, "free" | "sync" | "read" | "write" | "tee")
     }
 
 
