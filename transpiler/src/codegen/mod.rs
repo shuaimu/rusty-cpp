@@ -42146,6 +42146,7 @@ mod lookups;
 mod paths;
 mod predicates;
 mod type_mapping;
+mod type_solver;
 
 #[cfg(test)]
 mod tests;
