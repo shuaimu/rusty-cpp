@@ -138,8 +138,13 @@ Verified no regression on cfg-if / once_cell / take_mut. See commit *(this commi
 
 From the post-Track-P serde_bytes build.log:
 
-- `std::collections` not mapped to `rusty::collections` (a few entries to add in the std-mapping table). Lines: 4339, 4348, 12001, 12019 of `serde_core.cppm`.
-- Virtual `override` on non-virtual base methods (trait-class emission emits `virtual` only on some methods, but inheriting traits emit `override` on all). Lines: 12847, 12886, 12889 of `serde_core.cppm`.
+- ~~`std::collections` not mapped to `rusty::collections`~~ ✅ done (commit f5f4361 added BinaryHeap/LinkedList rows mirroring BTreeMap/BTreeSet/HashMap/HashSet/VecDeque).
+- Virtual `override` on non-virtual base methods — **deep issue**, deferred.
+  Concretely: `class Serializer { virtual bool is_human_readable() const; }` is the base, then the Adapter spec inherits as `class SerializerAdapter<…> final : public Serializer<…> { rusty::fmt::Result serialize_u8(uint8_t v) override { … } … };`.
+  - Base class is emitted as `class Serializer` (non-templated, no `serialize_*` methods — all are commented `// TODO(interface_traits): by-value 'self' method '...' not yet supported`).
+  - Adapter spec inherits from `Serializer<…>` (templated form — clang seems to accept this despite no template declaration; possibly substituted away through an import?) and provides `override` for the by-value `self` methods.
+  - The local-impl (`emit_one_local_adapter_method`, mod.rs:11219) and foreign-impl (`emit_one_foreign_adapter_method`, mod.rs:11067) paths both SKIP by-value self methods. So a THIRD emit path is producing the Adapter spec's overrides. Need to find and align it with the base's TODO-skip behavior.
+  - Estimated 0.5–1 day to track down the third emit path and skip by-value-self methods consistently. Item 4 is partially done; the remaining `override` fix is queued.
 - `SerializeMap` typedef redefinition (same shape as the `IntoEither` fix just landed — likely the helper-alias path needs the same gate widened, or it's a separate trait).
 
 **Recommendation:** Now that Track P unblocks iteration, Track C is the active workstream. The `std::collections` mapping is the smallest fix and likely cascades into others; do it first.
