@@ -1,11 +1,40 @@
 cmake_minimum_required(VERSION 3.28)  # C++20 modules need 3.28+
+
+# Prefer clang/LLVM as the default toolchain. The transpiled C++20 module
+# pipeline relies on clang-specific module support (BMI scanning, the
+# `import std;` PCM, etc.); gcc paths are not exercised. Pick clang++ if
+# the user hasn't pinned a compiler before `project()` locks one in.
+if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
+    find_program(CLANGXX_EXECUTABLE
+        NAMES clang++-19 clang++-18 clang++-17 clang++-16 clang++
+        DOC "Clang C++ compiler")
+    if(CLANGXX_EXECUTABLE)
+        set(CMAKE_CXX_COMPILER "${CLANGXX_EXECUTABLE}" CACHE FILEPATH
+            "C++ compiler (auto-selected clang++)")
+    endif()
+endif()
+
 project(rusty_cpp_tests LANGUAGES CXX)
 
 include(CTest)
 
-set(CMAKE_CXX_STANDARD 20)
+# Global standard: strict C++23 (no GNU extensions). Most transpiled-port
+# modules already required cxx_std_23 per-target via target_compile_features;
+# bump the global default so plain tests pick up the same standard without
+# falling back to C++20.
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_EXTENSIONS OFF)  # -std=c++23, not -std=gnu++23
+
+# Surface the chosen toolchain so misconfigurations are obvious.
+message(STATUS "rusty-cpp toolchain: ${CMAKE_CXX_COMPILER_ID} (${CMAKE_CXX_COMPILER})")
+if(NOT (CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+        OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"))
+    message(WARNING
+        "rusty-cpp is developed and tested against clang/LLVM. "
+        "The current compiler is ${CMAKE_CXX_COMPILER_ID}; transpiled "
+        "C++20 module targets and `import std;` paths will be skipped.")
+endif()
 
 option(RUSTY_PLATFORM_POSIX "Use POSIX backend for rusty::platform primitives" OFF)
 if(RUSTY_PLATFORM_POSIX)

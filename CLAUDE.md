@@ -4,7 +4,9 @@
 
 This is a Rust-based static analyzer that applies Rust's ownership and borrowing rules to C++ code. The goal is to catch memory safety issues at compile-time without runtime overhead.
 
-**Supported C++ Standard**: C++20 (parser configured with `-std=c++20`)
+**Supported C++ Standard**: C++23 strict (parser configured with `-std=c++23`; CMake sets `CMAKE_CXX_STANDARD 23` + `CMAKE_CXX_EXTENSIONS OFF`)
+
+**Default Toolchain**: clang/LLVM (CMake auto-selects `clang++-{19,18,17,16}` when `CMAKE_CXX_COMPILER` and `$CXX` are unset). gcc still builds the non-module subset but the transpiled C++20 module targets are clang-only.
 
 ## Current State (Updated: January 2026 - Chained Method Temporaries!)
 
