@@ -8082,8 +8082,18 @@ impl CodeGen {
             } else {
                 raw_receiver
             };
+            // Explicit return type `Option<T>` — without it, when the call
+            // site wraps the checked-arithmetic in another `RUSTY_TRY_OPT(
+            // [&]() { … }())` chain, the inner macro's early `return
+            // ::rusty::None;` makes C++ deduce the lambda's return type
+            // as `None_t`, then the actual `return rusty::checked_X(…)`
+            // — which yields `Option<T>` — triggers
+            // "return type 'Option<unsigned long>' must match previous
+            //  return type 'None_t' when lambda expression has unspecified
+            //  explicit return type". Surfaced by itertools' binomial /
+            //  mixed-radix counters in `combinations` / `cartesian_product`.
             return format!(
-                "[&]() {{ auto&& _checked_lhs = {}; return rusty::{}(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>({})); }}()",
+                "[&]() -> rusty::Option<std::remove_cvref_t<decltype(({0}))>> {{ auto&& _checked_lhs = {0}; return rusty::{1}(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>({2})); }}()",
                 receiver, method_name, args[0]
             );
         }
