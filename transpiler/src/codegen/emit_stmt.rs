@@ -3322,15 +3322,24 @@ impl CodeGen {
         let inferred_expected_cpp_ty = inferred_ctor_args
             .as_ref()
             .map(|args| format!("Either<{}, {}>", args[0], args[1]));
-        let expected_cpp_ty = expected_ty_for_branches
-            .and_then(|ty| {
+        // Prefer `inferred_expected_cpp_ty` when present — it carries the
+        // explicit template-arg form (`Either<decltype((cursor_a)),
+        // decltype((cursor_b))>`) that the outer ternary wrap needs to
+        // disambiguate alias-CTAD. `map_type` on a user-defined data
+        // enum like Either currently returns just the bare name
+        // (`Either` without args), which makes the wrap emit
+        // `Either(Left<...>(...))` — the alias has no template args
+        // and CTAD fails on `Either<L, R>`. See docs/rusty-cpp-
+        // transpiler.md §13.3 / TODO-misc.md §1.
+        let expected_cpp_ty = inferred_expected_cpp_ty.clone().or_else(|| {
+            expected_ty_for_branches.and_then(|ty| {
                 if self.expected_data_enum_name(ty).is_some() {
                     Some(self.map_type(ty))
                 } else {
                     None
                 }
             })
-            .or(inferred_expected_cpp_ty);
+        });
 
         let then_emitted = self.emit_if_ternary_branch_expr(
             then_expr,
@@ -4333,13 +4342,23 @@ impl CodeGen {
         ctor_template_args: Option<&[String]>,
     ) -> String {
         let value_expr = self.extract_value_expr(branch_expr).unwrap_or(branch_expr);
-        if expected_ty.is_none() {
-            if let (Some(args), syn::Expr::Call(call)) = (ctor_template_args, value_expr) {
-                if let Some(emitted) =
-                    self.try_emit_variant_constructor_call_with_template_args(call, args)
-                {
-                    return emitted;
-                }
+        // Prefer the explicit-template-args path whenever we have args
+        // available, regardless of whether `expected_ty` is Some. The
+        // expected-ty path emits `Either_Left{arg}` (bare brace-init),
+        // which fails CTAD because `Either_Left<L, R>` can't deduce
+        // `R` from a single brace-init element. The template-args path
+        // emits `rusty::either::Left<L, R>(arg)` — explicit args on a
+        // free-function factory — which has no deduction to do. The
+        // surrounding `inferred_expected_cpp_ty` wrap (`Either<L,
+        // R>(...)`) at the ternary-emit site handles the alias-CTAD
+        // case once both arms produce a known type. See
+        // docs/rusty-cpp-transpiler.md §13.3 for the architectural
+        // background.
+        if let (Some(args), syn::Expr::Call(call)) = (ctor_template_args, value_expr) {
+            if let Some(emitted) =
+                self.try_emit_variant_constructor_call_with_template_args(call, args)
+            {
+                return emitted;
             }
         }
         self.emit_expr_to_string_with_expected(value_expr, expected_ty)
