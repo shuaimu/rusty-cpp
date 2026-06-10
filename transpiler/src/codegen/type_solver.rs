@@ -273,7 +273,12 @@ fn render_term(t: &TyTerm) -> String {
 /// Constructed at the entry of `emit_fn_body` (Phase 2) and
 /// consulted from emit sites (Phase 4). Drops at the end of the
 /// function — inference does not span function boundaries (§13.4).
-#[derive(Debug)]
+///
+/// `Clone` is required by the enclosing `CodeGen` struct's
+/// snapshot-and-restore pattern; nothing inside the engine itself
+/// relies on cloning being cheap. Phase 4 will revisit if the
+/// snapshot path becomes hot.
+#[derive(Debug, Clone)]
 pub(crate) struct InferenceContext {
     next_var: usize,
     constraints: Vec<Constraint>,

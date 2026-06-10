@@ -534,6 +534,15 @@ impl<'ast> Visit<'ast> for OptionSomeNoneExprCollector {
 pub struct CodeGen {
     pub(crate) output: String,
     pub(crate) indent: usize,
+    /// Per-function type-inference state. Constructed at the entry
+    /// of `emit_function` (and equivalent entry points), populated by
+    /// the constraint collector in `type_solver`, then solved before
+    /// emit begins. Phase 4b will expose a per-AST-node lookup so
+    /// emit sites can consult the solver. Today it's a no-op (built
+    /// and then dropped) — wired up so the plumbing is in place
+    /// before any emit site consumes it. See
+    /// `docs/rusty-cpp-transpiler.md` §13.7 for the design.
+    pub(crate) inference: Option<type_solver::InferenceContext>,
     /// Collected impl blocks indexed by type name.
     /// Populated during the first pass of emit_file.
     pub(crate) impl_blocks: HashMap<String, Vec<syn::ImplItem>>,
@@ -1317,6 +1326,7 @@ impl CodeGen {
         Self {
             output: String::new(),
             indent: 0,
+            inference: None,
             impl_blocks: HashMap::new(),
             consumed_impl_blocks: HashMap::new(),
             impl_source_modules: HashMap::new(),

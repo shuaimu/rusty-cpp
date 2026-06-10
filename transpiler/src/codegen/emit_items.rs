@@ -150,6 +150,32 @@ impl CodeGen {
             return;
         }
 
+        // Phase 4a (inference engine plumbing — see
+        // docs/rusty-cpp-transpiler.md §13). Build a per-function
+        // inference context, populate it by walking the body, and
+        // solve. The resolved substitution is held on `self` for
+        // emit consumers (added in Phase 4b/4c). No emit site
+        // queries it yet — this commit just proves the construction
+        // is correct and side-effect-free on the existing emit path.
+        //
+        // We build the engine even for monomorphic functions to keep
+        // the contract uniform: emit always finds either Some(ctx)
+        // with a fixpoint-solved substitution, or None for callers
+        // (forward-decls, libtest main) that skipped this path.
+        {
+            use crate::codegen::type_solver::{
+                ConstraintCollector, InferenceContext,
+            };
+            use syn::visit::Visit;
+            let mut ctx = InferenceContext::new();
+            let mut collector = ConstraintCollector::new(&mut ctx);
+            collector.visit_block(&f.block);
+            let _errors = ctx.solve();
+            // Errors are collected for future telemetry (§13.10's
+            // "--print-inference" dump) but never abort emit.
+            self.inference = Some(ctx);
+        }
+
         let fn_name = f.sig.ident.to_string();
         let scoped_name = if self.module_stack.is_empty() {
             fn_name.clone()
