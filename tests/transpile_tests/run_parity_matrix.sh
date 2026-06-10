@@ -248,7 +248,7 @@ run_parity_for_crate() {
     if [[ "${DRY_RUN}" -eq 1 ]]; then
         echo "crate: ${crate}"
         echo "  manifest: ${manifest}"
-        local dry_cmd="cargo run -p rusty-cpp-transpiler -- parity-test --manifest-path ${manifest} --stop-after run --work-dir ${work_dir}"
+        local dry_cmd="cargo run --release -p rusty-cpp-transpiler -- parity-test --manifest-path ${manifest} --stop-after run --work-dir ${work_dir}"
         if [[ "${IMPORT_STD}" -eq 1 ]]; then
             dry_cmd="${dry_cmd} --import-std"
         fi
@@ -273,9 +273,14 @@ run_parity_for_crate() {
     fi
     mkdir -p "${work_dir}"
 
+    # `--release` cuts transpile-time by ~2.7× on the serde-family crates
+    # (debug serde_repr: 14m28s; release: 5m24s). The default 1800s matrix
+    # timeout couldn't fit the larger crates in debug mode and they were
+    # killed before Stage D; release lets them complete end-to-end.
     local -a cmd=(
         cargo
         run
+        --release
         -p
         rusty-cpp-transpiler
         --
