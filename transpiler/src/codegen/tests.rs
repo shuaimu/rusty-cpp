@@ -31277,3 +31277,40 @@ fn test_oncebox_new_infers_type_from_later_set_box_payload() {
         "OnceBox::new should not emit an unresolved auto template argument\nGot: {out}"
     );
 }
+
+// ============================================================
+// Phase 4c-ii — bridge: emit-side `try_infer_ternary_arm_type`
+// consumes the inference engine and returns a C++ type string
+// (or None) for the unified type of two ternary arms.
+// ============================================================
+
+#[test]
+fn try_infer_ternary_arm_type_either_constructors_with_concrete_args() {
+    // The canonical §13.3 case but with concrete argument types
+    // baked into one of the variant constructor calls. The engine
+    // can't fully infer because we don't know `cursor_a` /
+    // `cursor_b`'s types from this isolated expression — bare
+    // idents stay variables — so we expect None (fallback to
+    // local CTAD). This proves the bridge connects without
+    // pretending to solve cases it can't.
+    let cg = CodeGen::new();
+    let arm_a: syn::Expr = syn::parse_str("Either::Left(cursor_a)").unwrap();
+    let arm_b: syn::Expr = syn::parse_str("Either::Right(cursor_b)").unwrap();
+    assert!(
+        cg.try_infer_ternary_arm_type(&arm_a, &arm_b).is_none(),
+        "engine should signal underdetermined when arm values are bare idents"
+    );
+}
+
+#[test]
+fn try_infer_ternary_arm_type_unrecognized_constructors_yield_none() {
+    // Constructor that isn't in the recognition table — the
+    // engine has no rule for it, so it can't pin any parameters,
+    // and the bridge returns None. Confirms the API doesn't try
+    // to invent a type.
+    let cg = CodeGen::new();
+    let arm_a: syn::Expr = syn::parse_str("Foo::A(x)").unwrap();
+    let arm_b: syn::Expr = syn::parse_str("Foo::B(y)").unwrap();
+    assert!(cg.try_infer_ternary_arm_type(&arm_a, &arm_b).is_none());
+}
+

@@ -1,6 +1,40 @@
 use super::*;
 
 impl CodeGen {
+    // ============================================================
+    // Bridge between the type inference engine (`type_solver`) and
+    // the emit pipeline. Phase 4c-ii — see §13 of
+    // docs/rusty-cpp-transpiler.md.
+    //
+    // Emit sites that want to ask "given these two ternary arms,
+    // what's the unified type?" call into this method rather than
+    // reaching into `type_solver` directly. Centralizing the call
+    // here lets us layer caching, telemetry, and the eventual
+    // promotion of the hard-coded variant-constructor table
+    // (`type_solver::recognize_variant_constructor_call`) to a
+    // `CodeGen`-driven oracle without touching every consumer.
+    //
+    // Returns the rendered C++ string for the unified type, or
+    // `None` if the engine can't fully pin every parameter. `None`
+    // means "fall back to today's heuristic emit" — the caller
+    // never has to interpret `None` as anything else.
+    // ============================================================
+
+    /// Query the inference engine for the unified type of two
+    /// ternary (or match) arms. See `type_solver::infer_branch_merge`
+    /// for the semantics. Today this is a thin wrapper; later
+    /// commits will route through the per-function
+    /// `self.inference` cache populated in `emit_function`.
+    pub(crate) fn try_infer_ternary_arm_type(
+        &self,
+        arm_a: &syn::Expr,
+        arm_b: &syn::Expr,
+    ) -> Option<String> {
+        let merged = super::type_solver::infer_branch_merge(arm_a, arm_b)?;
+        super::type_solver::render_tyterm_for_cpp(&merged)
+    }
+
+
     /// Given a single Rust use-path segment (e.g. `node`, taken from
     /// `using ::node::Root;`), return the fully-qualified C++ module
     /// name iff that segment corresponds to an ancestor-sibling module
