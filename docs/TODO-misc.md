@@ -146,6 +146,8 @@ From the post-Track-P serde_bytes build.log:
   - The local-impl (`emit_one_local_adapter_method`, mod.rs:11219) and foreign-impl (`emit_one_foreign_adapter_method`, mod.rs:11067) paths both SKIP by-value self methods. So a THIRD emit path is producing the Adapter spec's overrides. Need to find and align it with the base's TODO-skip behavior.
   - Estimated 0.5–1 day to track down the third emit path and skip by-value-self methods consistently. Item 4 is partially done; the remaining `override` fix is queued.
 - `SerializeMap` typedef redefinition (same shape as the `IntoEither` fix just landed — likely the helper-alias path needs the same gate widened, or it's a separate trait).
+- `if (_m == Unit)` for **data-enum** unit variant arms — `Unit` is emitted as a static factory `static Unexpected Unit() { … }`, so `_m == Unit` becomes `Unexpected == Unexpected ()` and clang errors with "invalid operands to binary expression". Attempted fix: emit `rusty::detail::variant_holds<Foo_Unit>(_m)` instead, looking up the scoped key from `data_enum_unit_variants`. That works for the type name but the registry stores the *Rust* scope path (e.g. `__private::content::Content_Unit`) where the emitted C++ namespace is `__private228::content::*` and `private` is a C++ keyword. Needs a proper mapping from registry path to emitted scope. Deferred.
+- `no member named 'from_vec' in 'std::basic_string<char>'` — string literal/vec construction mismatch in serde_core; separate codegen issue.
 
 **Recommendation:** Now that Track P unblocks iteration, Track C is the active workstream. The `std::collections` mapping is the smallest fix and likely cascades into others; do it first.
 
