@@ -1,8 +1,8 @@
 # TODO: Plan for Remaining Parity-Matrix Failures
 
-Status at time of writing: **9 / 15 PASS** — arrayvec, bitflags, cfg-if, once_cell, semver, **serde_repr** (new — unlocked by std::collections mapping + override-on-non-virtual fix), smallvec, take_mut, tap.
+Status at time of writing: **10 / 15 PASS** — arrayvec, bitflags, cfg-if, once_cell, **pollster** (verified PASS via dedicated run — previously believed deferred/optional), semver, **serde_repr** (unlocked by std::collections mapping + override-on-non-virtual fix), smallvec, take_mut, tap.
 
-Remaining failures: `either`, `itertools`, `serde_bytes`, `serde_repr`, `serde_core`, `serde`, `pollster`.
+Remaining failures: `either`, `itertools`, `serde_bytes`, `serde_core`, `serde`.
 
 This document captures the per-crate failure analysis, fix proposals, and recommended ordering. Each item is sized in rough-day units; treat as a working plan rather than a contract.
 
