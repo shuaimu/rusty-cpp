@@ -38445,14 +38445,17 @@ fn parse_namespace_alias_name(statement: &str) -> Option<&str> {
 fn alias_target_requires_template_alias(target: &str) -> bool {
     let normalized = target.trim().trim_start_matches("::");
     let base = normalized.split('<').next().unwrap_or(normalized);
-    matches!(base, "rusty::Option" | "rusty::Weak" | "rusty::sync::Weak")
+    matches!(
+        base,
+        "rusty::Option" | "rusty::Weak" | "rusty::rc::Weak" | "rusty::sync::Weak"
+    )
 }
 
 fn alias_target_template_arity(target: &str) -> Option<usize> {
     let normalized = target.trim().trim_start_matches("::");
     let base = normalized.split('<').next().unwrap_or(normalized);
     match base {
-        "rusty::Option" | "rusty::Weak" | "rusty::sync::Weak" => Some(1),
+        "rusty::Option" | "rusty::Weak" | "rusty::rc::Weak" | "rusty::sync::Weak" => Some(1),
         _ => None,
     }
 }
@@ -39131,7 +39134,10 @@ fn rewrite_std_rc_import(path: &str) -> Option<UseImportAction> {
         .or_else(|| path.strip_prefix("alloc::rc::"))?;
     let action = match item {
         "Rc" => UseImportAction::Using("rusty::Rc".to_string()),
-        "Weak" => UseImportAction::Using("rusty::Weak".to_string()),
+        // After the `rusty::Weak` ambiguity fix the umbrella only
+        // exports `rc::Weak` and `sync::Weak` — `use alloc::rc::Weak`
+        // resolves to the `rc` form.
+        "Weak" => UseImportAction::Using("rusty::rc::Weak".to_string()),
         _ => UseImportAction::RustOnly,
     };
     Some(action)

@@ -1976,7 +1976,14 @@ impl CodeGen {
                     path_str = "rusty::Either".to_string();
                 }
                 if path_str == "RcWeak" || path_str.ends_with("::RcWeak") {
-                    path_str = "rusty::Weak".to_string();
+                    // rusty.cppm previously exposed `rusty::Weak` as an
+                    // ambiguous direct re-export of rc::Weak. After the
+                    // ambiguity fix (commit dcbf08…), the rusty umbrella
+                    // only exports `rusty::rc::Weak` and `rusty::sync::Weak`.
+                    // `RcWeak` (from `use alloc::rc::Weak as RcWeak`) must
+                    // map to the `rc` form. Mirrors `Rc` → `rusty::Rc`
+                    // (also under `rc`).
+                    path_str = "rusty::rc::Weak".to_string();
                 }
                 if path_str == "ArcWeak" || path_str.ends_with("::ArcWeak") {
                     path_str = "rusty::sync::Weak".to_string();

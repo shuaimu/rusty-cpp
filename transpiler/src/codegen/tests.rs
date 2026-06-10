@@ -5733,7 +5733,13 @@ fn test_rc_type() {
 #[test]
 fn test_weak_type() {
     let out = transpile_str("fn f(w: Weak<i32>) {}");
-    assert!(out.contains("rusty::Weak<int32_t>"));
+    // After the rusty::Weak ambiguity fix, the umbrella only exports
+    // `rc::Weak` and `sync::Weak`. Bare `Weak<i32>` resolves to the
+    // `rc` form (per `map_std_type("Weak")`).
+    assert!(
+        out.contains("rusty::rc::Weak<int32_t>"),
+        "expected rusty::rc::Weak<int32_t>, got: {out}"
+    );
 }
 
 #[test]
@@ -17801,7 +17807,10 @@ fn test_leaf512_use_rewrites_cover_boxed_and_rc_imports() {
     );
     assert!(out.contains("using rusty::Box;"));
     assert!(out.contains("using rusty::Rc;"));
-    assert!(out.contains("using rusty::Weak;"));
+    // After the rusty::Weak ambiguity fix, the umbrella exposes only
+    // `rc::Weak` / `sync::Weak`. `use alloc::rc::Weak` lowers to the
+    // qualified form.
+    assert!(out.contains("using rusty::rc::Weak;"));
     assert!(!out.contains("using std::boxed::Box;"));
     assert!(!out.contains("using std::rc::Rc;"));
 }
@@ -17814,13 +17823,15 @@ fn test_leaf512_weak_alias_import_emits_template_alias() {
         fn keep(v: RcWeak<i32>) -> RcWeak<i32> { v }
     "#,
     );
+    // RcWeak alias targets `rusty::rc::Weak` after the umbrella ambiguity fix.
     assert!(
-        out.contains("template<typename T0> using RcWeak = rusty::Weak<T0>;")
-            || out.contains("template<typename... Ts> using RcWeak = rusty::Weak<Ts...>;"),
+        out.contains("template<typename T0> using RcWeak = rusty::rc::Weak<T0>;")
+            || out.contains("template<typename... Ts> using RcWeak = rusty::rc::Weak<Ts...>;"),
         "Weak aliases should stay templated:\n{}",
         out
     );
-    assert!(!out.contains("using RcWeak = rusty::Weak;"));
+    assert!(!out.contains("using RcWeak = rusty::rc::Weak;"));
+    assert!(!out.contains("rusty::Weak<"));
 }
 
 #[test]
@@ -17850,7 +17861,7 @@ fn test_leaf512_forward_decl_emits_template_alias_before_alias_typed_fn_signatur
     "#,
     );
     assert!(
-        out.contains("void consume(rusty::Weak<T> value);"),
+        out.contains("void consume(rusty::rc::Weak<T> value);"),
         "forward declaration should use resolved Weak surface:\n{}",
         out
     );
