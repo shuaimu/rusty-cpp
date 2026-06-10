@@ -5524,10 +5524,17 @@ local_len.increment_len(1);
         return (*this);
     }
     static Vec<T> from(std::span<const T> s) {
-        return rusty::to_vec(s);
+        // `rusty::to_vec` returns `std::vector<T>`, which has no
+        // implicit conversion to `Vec<T>`. `Vec<T>::from_iter` is
+        // the right adapter — it accepts any iterable and produces
+        // a Vec. Surfaced by serde_bytes' deserialization path
+        // (transpiler emit at serde.cppm:8607 fixed; this
+        // downstream Vec::from(span) was previously masked by
+        // that compile failure).
+        return Vec<T>::from_iter(s);
     }
     static Vec<T> from(std::span<T> s) {
-        return rusty::to_vec(s);
+        return Vec<T>::from_iter(s);
     }
     template<size_t N>
     static Vec<T> from(const std::array<T, rusty::sanitize_array_capacity<N>()>& s) {

@@ -640,6 +640,39 @@ Box<std::span<T>> into_boxed_slice(std::vector<T, Alloc> values) {
     return Box<std::span<T>>::new_(std::span<T>(storage, len));
 }
 
+// Generic overload for any contiguous owning container with
+// `.data()` + `.size()` and move-constructible elements — notably
+// `rusty::Vec<T>` (which can't be named directly here because it's
+// module-only). Used by serde_bytes' `bytes::Bytes` lowering which
+// hands a `rusty::Vec<u8>` to `into_boxed_slice`. The `std::vector`
+// overload above is strictly more specific for std::vector callers,
+// so this generic form only catches the rusty::Vec / std::array
+// shapes.
+template<
+    typename Container,
+    typename = std::void_t<
+        decltype(std::declval<Container&>().data()),
+        decltype(std::declval<Container&>().size())
+    >,
+    typename = std::enable_if_t<
+        !std::is_same_v<
+            std::remove_cvref_t<Container>,
+            std::vector<std::remove_cvref_t<decltype(*std::declval<Container&>().data())>>
+        >
+    >
+>
+auto into_boxed_slice(Container values) {
+    using Elem = std::remove_cvref_t<decltype(*values.data())>;
+    const auto len = values.size();
+    Elem* storage =
+        (len == 0) ? nullptr : static_cast<Elem*>(::operator new(sizeof(Elem) * len));
+    auto* src = values.data();
+    for (size_t i = 0; i < len; ++i) {
+        new (storage + i) Elem(std::move(src[i]));
+    }
+    return Box<std::span<Elem>>::new_(std::span<Elem>(storage, len));
+}
+
 template<typename T>
 Box<std::span<T>> into_boxed_slice(ArrayRepeatResult<T> values) {
     return into_boxed_slice(static_cast<std::vector<T>>(values));
@@ -1453,6 +1486,17 @@ auto last_mut(Container& container) {
 
 // Collect a slice-like container into std::vector by value-cloning elements.
 // Used by transpiled Rust `.to_vec()` lowering for slice/array/ArrayVec shapes.
+//
+// Returns `std::vector<Elem>` because `rusty::Vec` is module-only (see the
+// comment at the top of `rusty/vec.hpp`) — its name `rusty::Vec` is
+// non-dependent in template-body lookup, so it can't be referenced from
+// this header even via `if constexpr (requires { … })`. Two-phase lookup
+// rejects `rusty::Vec` at template-definition time. Target-driven sites
+// like `Content_ByteBuf{ to_vec(value) }` need a different solution —
+// the transpiler should route those through `rusty::Vec<Elem>::from_iter`
+// at the emit layer where `rusty::Vec` IS in scope (because the cppm has
+// already `import rusty;`-ed). See `try_emit_to_vec_method_call` plus
+// target-type plumbing.
 template<typename Container>
 auto to_vec(const Container& container) {
     auto span = slice_full(container);

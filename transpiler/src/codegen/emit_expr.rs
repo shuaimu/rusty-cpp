@@ -5545,7 +5545,26 @@ impl CodeGen {
             {
                 return format!("rusty::Vec<{}>::from_iter({})", elem_cpp, receiver);
             }
-            return format!("rusty::to_vec({})", receiver);
+            // Codegen-time receiver-type inference can't always reach a
+            // parameter inside a generic visitor method (serde_core's
+            // `ContentVisitor::visit_bytes<E>(self, value: &[u8])` is the
+            // canonical case — `value` is a bare ident, infer returns
+            // None, and `expr_lowers_to_slice_or_span_view` also falls
+            // through). But we're already inside the to_vec block, which
+            // means the receiver is iterable at C++ level. Recover the
+            // element type via `decltype` so
+            // `rusty::Vec<T>::from_iter` still pins T at C++ compile
+            // time. The std::remove_cvref_t<decltype(*std::begin(value))>
+            // shape works for std::span, std::array, std::vector, and
+            // the transpiled slice views uniformly. Brace-init sites
+            // like `Content_ByteBuf{value.to_vec()}` in serde's content
+            // serialization path need a `rusty::Vec<u8>` directly —
+            // the old `rusty::to_vec` returned `std::vector<u8>` which
+            // doesn't convert.
+            return format!(
+                "rusty::Vec<std::remove_cvref_t<decltype(*std::begin({0}))>>::from_iter({0})",
+                receiver
+            );
         }
         if mc.method == "into_boxed_slice" && mc.args.is_empty() {
             let receiver = self.emit_expr_maybe_move(&mc.receiver);
@@ -11459,7 +11478,20 @@ impl CodeGen {
         }
         if expected_ty.is_none() && self.expr_lowers_to_slice_or_span_view(&mc.receiver) {
             let receiver = self.emit_expr_maybe_move(&mc.receiver);
-            return Some(format!("rusty::to_vec({})", receiver));
+            // `rusty::to_vec` returns `std::vector<Elem>`, which doesn't
+            // convert to `rusty::Vec<Elem>`. Brace-init / factory sites
+            // like `Content::ByteBuf(value.into())` in serde need a
+            // `rusty::Vec<u8>`. Pin the element type via `decltype` so
+            // `rusty::Vec<T>::from_iter` works at C++ compile time
+            // without depending on receiver-type inference reaching the
+            // value's declaration. See twin emit in
+            // `emit_method_call_expr_to_string` for the `.to_vec()`
+            // variant and `docs/rusty-cpp-transpiler.md` §13 for the
+            // general inference-architecture rationale.
+            return Some(format!(
+                "rusty::Vec<std::remove_cvref_t<decltype(*std::begin({0}))>>::from_iter({0})",
+                receiver
+            ));
         }
         let receiver_kind = self.classify_into_receiver_expr(&mc.receiver);
         let expected_was_none = expected_ty.is_none();
