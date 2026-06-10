@@ -5531,6 +5531,20 @@ impl CodeGen {
                     && !self.receiver_has_inherent_method_named(&mc.receiver, "to_vec")))
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
+            // Prefer `rusty::Vec<T>::from_iter(value)` when we can identify
+            // the element type from a slice/array receiver — the generic
+            // `rusty::to_vec` returns `std::vector<Elem>`, which doesn't
+            // implicitly convert to `rusty::Vec<Elem>` (the transpiled Vec
+            // doesn't expose a `std::vector` ctor). Brace-init sites like
+            // `Content_ByteBuf{value.to_vec()}` in serde's content
+            // serialization path need a `rusty::Vec<u8>` directly.
+            if let Some(elem_cpp) = self
+                .infer_simple_expr_type(&mc.receiver)
+                .as_ref()
+                .and_then(|ty| self.byte_slice_elem_cpp_type(ty))
+            {
+                return format!("rusty::Vec<{}>::from_iter({})", elem_cpp, receiver);
+            }
             return format!("rusty::to_vec({})", receiver);
         }
         if mc.method == "into_boxed_slice" && mc.args.is_empty() {
@@ -11648,8 +11662,46 @@ impl CodeGen {
         if receiver_is_string_like {
             return Some(format!("rusty::String::from({})", receiver));
         }
+        // Slice receiver (`&[T]` / `[T]`) — emit
+        // `rusty::Vec<T>::from_iter(value)`. `rusty::to_owned(span)` was
+        // removed from the runtime during Vec retirement (rusty/rusty.hpp:435
+        // comment: "Callers should import rusty; and use rusty::Vec ctors
+        // directly"), so the generic fallback below would return
+        // `std::span<T>` and fail to convert to the `rusty::Vec<T>` field
+        // type at brace-init sites like `Content_Bytes{rusty::to_owned(
+        // value)}` in serde's content serialization path. `from_iter` is
+        // the Vec API surface that accepts any iterable; the iterator-pair
+        // constructor isn't exposed on the transpiled `Vec` (only
+        // `Vec(std::initializer_list<T>)` and the typed `from_iter` static).
+        if let Some(elem_cpp) = self
+            .infer_simple_expr_type(&mc.receiver)
+            .as_ref()
+            .and_then(|ty| self.byte_slice_elem_cpp_type(ty))
+        {
+            return Some(format!(
+                "rusty::Vec<{}>::from_iter({})",
+                elem_cpp, receiver
+            ));
+        }
         // Generic ToOwned fallback: runtime helper dispatches to .clone() when available.
         Some(format!("rusty::to_owned({})", receiver))
+    }
+
+    /// If `ty` is a slice (`[T]`) or a reference to a slice (`&[T]`),
+    /// return the C++-mapped element type. Returns None for non-slice
+    /// types. Used by `try_emit_to_owned_method_call` to route byte-slice
+    /// (and other slice) `to_owned` through a direct `rusty::Vec<T>(it,
+    /// end)` construction instead of the generic runtime helper.
+    fn byte_slice_elem_cpp_type(&self, ty: &syn::Type) -> Option<String> {
+        let mut inner = ty;
+        // Strip leading `&` / `&mut`.
+        while let syn::Type::Reference(r) = inner {
+            inner = &r.elem;
+        }
+        if let syn::Type::Slice(s) = inner {
+            return Some(self.map_type(&s.elem));
+        }
+        None
     }
 
     pub(super) fn try_emit_into_owned_method_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
