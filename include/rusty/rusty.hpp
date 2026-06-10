@@ -45,6 +45,7 @@
 #include "rusty/vec.hpp"
 #include "rusty/vecdeque.hpp"
 #include "rusty/collections.hpp"  // TryReserveError (added for vec_port)
+#include "rusty/ffi.hpp"  // rusty::ffi::os_string_from_vec, etc.
 #include "rusty/option.hpp"
 #include "rusty/result.hpp"
 #include "rusty/marker.hpp"

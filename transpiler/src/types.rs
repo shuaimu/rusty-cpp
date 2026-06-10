@@ -411,6 +411,16 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "CString::new" | "CString::new_" | "std::ffi::CString::new" | "std::ffi::CString::new_" => {
             Some("rusty::ffi::cstring_new")
         }
+        // `OsString::from_vec` (Unix-only extension on `OsStringExt`) takes
+        // `Vec<u8>` and returns `OsString`. The C++ side maps `OsString`
+        // to `std::basic_string<char>` (no dedicated rusty type), and
+        // `std::basic_string<char>::from_vec` doesn't exist. Route to a
+        // free function in rusty/ffi.hpp that constructs the string from
+        // the byte vector's range. Surfaced by serde_core's
+        // `OsStringKind::Unix` deserialization path.
+        "OsString::from_vec"
+        | "std::ffi::OsString::from_vec"
+        | "std::os::unix::ffi::OsStringExt::from_vec" => Some("rusty::ffi::os_string_from_vec"),
         // Vec::new
         "Vec::new" | "std::vec::Vec::new" | "alloc::vec::Vec::new" => Some("rusty::Vec::new_"),
         "vec::from_elem" | "std::vec::from_elem" | "alloc::vec::from_elem" => {
