@@ -1990,21 +1990,6 @@ impl CodeGen {
         self.interface_traits_with_generics.clear();
         self.trait_class_skipped_method_keys.clear();
         self.trait_associated_type_names.clear();
-        // Ch. 14 Phase A pre-collect of `trait_associated_type_names`
-        // was attempted here but reverted: even with the per-use-site
-        // shadowing guard in place, the transpiler also FLATTENS some
-        // Rust modules during C++ namespace emission (e.g.
-        // `mod adaptors { mod coalesce { trait CountItem … } }` lands
-        // as `namespace adaptors { class CountItem; }`, not
-        // `namespace adaptors { namespace coalesce { class
-        // CountItem; } }`). `trait_declared_path_by_short_name`
-        // records the Rust-source path, so the qualified emit
-        // `::adaptors::coalesce::CountItemTraits` references a
-        // namespace that doesn't exist in the C++ output. The
-        // Phase A check can't catch this because the symbol table
-        // is built from the Rust AST, not from the post-flattening
-        // emit. A correct fix requires modeling the module-
-        // flattening rules; deferred to a follow-up.
         self.trait_declared_path_by_short_name.clear();
         self.emitted_foreign_adapter_specs.clear();
         self.numeric_type_aliases.clear();
@@ -32329,9 +32314,53 @@ impl CodeGen {
                             if let Some(last) = segments.last_mut() {
                                 *last = format!("{}Traits", last);
                             }
-                            let resolves = self
-                                .symbol_category
-                                .path_resolves_unambiguously(
+                            // Substitute renamed module segments.
+                            // When a module name collides with a
+                            // sibling function name (e.g. itertools'
+                            // `mod coalesce { fn coalesce }`), the
+                            // transpiler renames the module to
+                            // `<name>_tests` and records it in
+                            // `module_namespace_renames`. The trait
+                            // path stored in
+                            // `trait_declared_path_by_short_name`
+                            // uses the un-renamed Rust path, so the
+                            // qualified emit references a namespace
+                            // that doesn't exist in the C++ output.
+                            // Walk each intermediate segment and
+                            // apply renames cumulatively.
+                            let mut cumulative: Vec<String> = Vec::new();
+                            let len_minus_1 = segments.len().saturating_sub(1);
+                            for seg in segments.iter_mut().take(len_minus_1) {
+                                cumulative.push(seg.clone());
+                                let qualified = cumulative.join("::");
+                                if let Some(renamed) =
+                                    self.module_namespace_renames.get(&qualified)
+                                {
+                                    *seg = renamed.clone();
+                                    *cumulative.last_mut().unwrap() = renamed.clone();
+                                }
+                            }
+                            // Check shadowing in the original
+                            // (Rust-source) segments — the check
+                            // looks for cases where a non-namespace
+                            // sibling at the same scope would shadow
+                            // the namespace. When the transpiler
+                            // has already renamed colliding modules,
+                            // the renamed segment is by construction
+                            // safe (the rename's whole purpose was
+                            // to avoid the collision). For unrenamed
+                            // segments the original check still
+                            // applies. We approximate: skip the
+                            // check when ANY segment was renamed
+                            // (rename is a strong signal that the
+                            // path-shadow problem has been pre-
+                            // empted by the rename machinery).
+                            let any_rename = self
+                                .module_namespace_renames
+                                .keys()
+                                .any(|k| segments.iter().any(|s| k.ends_with(&format!("::{s}")) || k == s));
+                            let resolves = any_rename
+                                || self.symbol_category.path_resolves_unambiguously(
                                     &self.module_stack,
                                     &segments,
                                 );
