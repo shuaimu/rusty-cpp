@@ -504,6 +504,32 @@ public:
         return *this;
     }
 
+    // Accept any iterable (notably `rusty::Vec<T>` which the transpiler
+    // can hand us when `vec![…; N]` lowers to `array_repeat(…)` but a
+    // later assignment in the same scope produces a real `rusty::Vec`.
+    // Surfaced by itertools' `test_checked_binomial` where
+    // `let mut row = vec![Some(0); LIMIT+1]; … row = (1..=LIMIT).map(…)
+    // .collect::<Vec<_>>();` becomes
+    // `auto row = rusty::array_repeat(…); … row = rusty::Vec<…>::from_iter(…)`.
+    //
+    // Templated on the input container so we duck-type on `std::begin` /
+    // `std::end` without naming `rusty::Vec` (which is module-only and
+    // can't be referenced from a header — see the `rusty/vec.hpp`
+    // comment). SFINAE-guards: skip when `Iterable` is one of the
+    // already-overloaded `std::vector` types to avoid ambiguity.
+    template<typename Iterable,
+             typename = std::void_t<
+                 decltype(std::begin(std::declval<Iterable&>())),
+                 decltype(std::end(std::declval<Iterable&>()))
+             >,
+             typename = std::enable_if_t<
+                 !std::is_same_v<std::remove_cvref_t<Iterable>, std::vector<T>>
+             >>
+    ArrayRepeatResult& operator=(Iterable&& rhs) {
+        values_.assign(std::begin(rhs), std::end(rhs));
+        return *this;
+    }
+
     std::span<const T> as_slice() const noexcept {
         return std::span<const T>(values_.data(), values_.size());
     }
