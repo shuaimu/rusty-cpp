@@ -32225,9 +32225,31 @@ impl CodeGen {
                     if let Some(trait_name) =
                         self.lookup_unique_trait_for_assoc_name(assoc_name)
                     {
+                        // Qualify with the trait's home namespace path
+                        // when one is known. Without this the emitted
+                        // `typename PoolIndexTraits<I>::Item` is
+                        // unqualified, which fails to resolve from any
+                        // sibling namespace (e.g. itertools'
+                        // `combinations_with_replacement` referencing
+                        // `combinations::PoolIndexTraits<I>::Item`).
+                        // `trait_declared_path_by_short_name` holds the
+                        // qualified spelling of the trait itself; we
+                        // splice `Traits` onto the last segment to derive
+                        // the helper's qualified name.
+                        let helper_qualified = self
+                            .trait_declared_path_by_short_name
+                            .get(trait_name.as_str())
+                            .map(|qpath| {
+                                if let Some((parent, last)) = qpath.rsplit_once("::") {
+                                    format!("::{}::{}Traits", parent, last)
+                                } else {
+                                    format!("{}Traits", qpath)
+                                }
+                            })
+                            .unwrap_or_else(|| format!("{}Traits", trait_name));
                         return format!(
-                            "typename {}Traits<{}>::{}",
-                            trait_name, first, assoc_name
+                            "typename {}<{}>::{}",
+                            helper_qualified, first, assoc_name
                         );
                     }
                 }
