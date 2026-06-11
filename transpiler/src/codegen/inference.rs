@@ -9658,6 +9658,48 @@ impl CodeGen {
         ))
     }
 
+    /// Extract concrete C++ template args from an annotated
+    /// `Either<L, R>` type. Used by the if/else ternary emit to
+    /// prefer precise types (`Left<int32_t, int32_t>(1)`) over the
+    /// decltype-based fallback (`Left<decltype((1)), decltype((2))>
+    /// (decltype((1))(1))`) — the decltype form is correct but
+    /// noisy and was the only available signal for unannotated
+    /// ternaries.
+    pub(super) fn expected_either_concrete_template_args(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<Vec<String>> {
+        let ty = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        if tp.qself.is_some() {
+            return None;
+        }
+        let seg = tp.path.segments.last()?;
+        if seg.ident != "Either" {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+            return None;
+        };
+        let mut out = Vec::with_capacity(2);
+        for arg in &args.args {
+            let syn::GenericArgument::Type(arg_ty) = arg else {
+                return None;
+            };
+            out.push(self.map_type(arg_ty));
+            if out.len() == 2 {
+                break;
+            }
+        }
+        if out.len() == 2 {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn infer_variant_ctor_template_args_from_if(
         &self,
         if_expr: &syn::ExprIf,

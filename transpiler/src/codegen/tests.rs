@@ -3198,16 +3198,23 @@ fn test_leaf4296_typed_if_expr_constructor_pair_uses_expected_either_wrapper() {
         }
     "#,
     );
-    // Each arm may use the wrapped-variant-call form
-    // `Either<L, R>(Left<L, R>(1))` (legacy) or the expanded brace-init
-    // form `Either<L, R>{Either_Left<L, R>{...}}` (current).
+    // Each arm may use one of three forms:
+    //   - `Either<L, R>(Left<L, R>(1))` — legacy bare-arg call form
+    //   - `Either<L, R>{Either_Left<L, R>{...}}` — expanded brace-init
+    //   - `Either<L, R>(Left<L, R>(static_cast<L>(1)))` — current
+    //     (function-call form with static_cast for precision; landed
+    //     when the expected-type plumbing started passing concrete
+    //     template args to the variant constructor emit).
     let legacy = out.contains(
         "const Either<int32_t, int32_t> e = (c ? Either<int32_t, int32_t>(Left<int32_t, int32_t>(1)) : Either<int32_t, int32_t>(Right<int32_t, int32_t>(2)));"
     );
     let expanded = out.contains(
         "const Either<int32_t, int32_t> e = (c ? Either<int32_t, int32_t>{Either_Left<int32_t, int32_t>{static_cast<int32_t>(1)}} : Either<int32_t, int32_t>{Either_Right<int32_t, int32_t>{static_cast<int32_t>(2)}});"
     );
-    assert!(legacy || expanded, "{out}");
+    let cast_call = out.contains(
+        "const Either<int32_t, int32_t> e = (c ? Either<int32_t, int32_t>(Left<int32_t, int32_t>(static_cast<int32_t>(1))) : Either<int32_t, int32_t>(Right<int32_t, int32_t>(static_cast<int32_t>(2))));"
+    );
+    assert!(legacy || expanded || cast_call, "{out}");
 }
 
 #[test]

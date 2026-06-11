@@ -32761,6 +32761,14 @@ impl CodeGen {
         if !(self.module_name.is_some() || self.expanded_libtest_mode) {
             return None;
         }
+        // Preserve the original (unpeeled) shape so we know whether the
+        // Rust source passed by value or by reference. By-value Rust
+        // params (`x: SizeHint`) need to lower as `auto x` so destructured
+        // bindings like `auto&& [low, hi] = x;` get non-const-qualified
+        // tuple elements. Emitting `const auto&` would over-qualify the
+        // source and break later `low = …` assignments — surfaced by
+        // itertools' `sub_scalar` (itertools.cppm:6209).
+        let is_reference_param = matches!(ty, syn::Type::Reference(_));
         let ty = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = ty else {
             return None;
@@ -32799,7 +32807,16 @@ impl CodeGen {
         {
             return None;
         }
-        Some("const auto&".to_string())
+        if is_reference_param {
+            Some("const auto&".to_string())
+        } else {
+            // By-value Rust param. C++20 abbreviated function template
+            // syntax (`auto`) preserves the value semantics and defers
+            // type checking just like `const auto&` did — so the
+            // forward-decl/body interplay still works — but downstream
+            // destructured bindings see a mutable source.
+            Some("auto".to_string())
+        }
     }
 
     fn soften_dyn_trait_object_param_type(&self, ty: &syn::Type, mapped: &str) -> Option<String> {

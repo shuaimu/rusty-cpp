@@ -3318,28 +3318,52 @@ impl CodeGen {
             None
         };
         let expected_ty_for_branches = expected_ty.or(inferred_expected_ty.as_ref());
-        let inferred_ctor_args = self.infer_variant_ctor_template_args_from_if(if_expr);
+        // ctor_template_args feeds the inner-arm emit. When an
+        // annotation is present (`let e: Either<i32, i32> = …`) the
+        // expected_ty already carries concrete template args; prefer
+        // those for precision. Otherwise fall back to the decltype-
+        // based form from `infer_variant_ctor_template_args_from_if`.
+        let inferred_ctor_args = expected_ty_for_branches
+            .and_then(|ty| self.expected_either_concrete_template_args(ty))
+            .or_else(|| self.infer_variant_ctor_template_args_from_if(if_expr));
         let inferred_expected_cpp_ty = inferred_ctor_args
             .as_ref()
             .map(|args| format!("Either<{}, {}>", args[0], args[1]));
-        // Prefer `inferred_expected_cpp_ty` when present — it carries the
-        // explicit template-arg form (`Either<decltype((cursor_a)),
-        // decltype((cursor_b))>`) that the outer ternary wrap needs to
-        // disambiguate alias-CTAD. `map_type` on a user-defined data
-        // enum like Either currently returns just the bare name
-        // (`Either` without args), which makes the wrap emit
-        // `Either(Left<...>(...))` — the alias has no template args
-        // and CTAD fails on `Either<L, R>`. See docs/rusty-cpp-
-        // transpiler.md §13.3 / TODO-misc.md §1.
-        let expected_cpp_ty = inferred_expected_cpp_ty.clone().or_else(|| {
-            expected_ty_for_branches.and_then(|ty| {
-                if self.expected_data_enum_name(ty).is_some() {
-                    Some(self.map_type(ty))
-                } else {
-                    None
-                }
-            })
+        // Outer-wrap candidates, in priority order:
+        //   1. `map_type(expected_ty)` IF it produces an args-bearing
+        //      form (`Either<int32_t, int32_t>`). This is the
+        //      annotated case — `let e: Either<i32, i32> = …` — and
+        //      gives the most precise C++ type.
+        //   2. `inferred_expected_cpp_ty` from
+        //      `infer_variant_ctor_template_args_from_if` — the
+        //      decltype-based form (`Either<decltype((a)),
+        //      decltype((b))>`). Used when no annotation is present,
+        //      the engine inferred arms have a common enum, and we
+        //      need any non-bare wrap.
+        //   3. `map_type(expected_ty)` for the bare-name case
+        //      (`Either`) — last resort; the outer wrap will still
+        //      fail CTAD on this but at least we tried both inputs.
+        //
+        // The §13.3 reason `inferred_expected_cpp_ty` was promoted
+        // over `map_type` earlier was that `map_type` for an
+        // unannotated user-defined data enum returns the bare name.
+        // With the annotation, `map_type` IS args-bearing, so we
+        // prefer it for the precision win.
+        let mapped_expected_cpp_ty = expected_ty_for_branches.and_then(|ty| {
+            if self.expected_data_enum_name(ty).is_some() {
+                Some(self.map_type(ty))
+            } else {
+                None
+            }
         });
+        let mapped_has_template_args = mapped_expected_cpp_ty
+            .as_deref()
+            .is_some_and(|s| s.contains('<'));
+        let expected_cpp_ty = if mapped_has_template_args {
+            mapped_expected_cpp_ty
+        } else {
+            inferred_expected_cpp_ty.clone().or(mapped_expected_cpp_ty)
+        };
 
         let then_emitted = self.emit_if_ternary_branch_expr(
             then_expr,
