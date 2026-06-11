@@ -1546,7 +1546,129 @@ impl CodeGen {
         }
     }
 
+    /// Phase 1 of the crate-namespacing migration. Find the
+    /// `export module X;` line, scan past the immediately-following
+    /// `import …;` lines to land just after the last import, and
+    /// insert `namespace <crate_name> {`. Append the closing `}` at
+    /// the very end of `self.output`.
+    ///
+    /// Defensive: if the output has no `export module …;` line, this
+    /// is a non-module build and we leave it alone (the user's
+    /// build is via `#include` rather than `import`, and the global
+    /// namespace shape is what they want).
+    fn wrap_module_purview_in_crate_namespace(&mut self, crate_name: String) {
+        let Some(export_idx) = self.output.find("\nexport module ") else {
+            return;
+        };
+        // Find the end of `export module …;` — first newline after the
+        // `export module ` token.
+        let after_export = export_idx + 1; // skip the leading '\n'
+        let Some(line_end_rel) = self.output[after_export..].find('\n') else {
+            return;
+        };
+        let mut insert_pos = after_export + line_end_rel + 1;
+        // Skip following lines that begin with `import ` (whitespace-
+        // trimmed). Stop at the first non-import non-blank line; that
+        // is where the module purview begins.
+        loop {
+            let remaining = &self.output[insert_pos..];
+            let Some(line_end) = remaining.find('\n') else {
+                break;
+            };
+            let line = &remaining[..line_end];
+            let trimmed = line.trim_start();
+            if trimmed.is_empty()
+                || trimmed.starts_with("import ")
+                || trimmed.starts_with("export import ")
+            {
+                insert_pos += line_end + 1;
+                continue;
+            }
+            break;
+        }
+        let open = format!("namespace {} {{\n", crate_name);
+        self.output.insert_str(insert_pos, &open);
+        // Close at the very end. A trailing newline keeps the file
+        // tidy and `} // namespace crate` aids debugging.
+        if !self.output.ends_with('\n') {
+            self.output.push('\n');
+        }
+        self.output
+            .push_str(&format!("}} // namespace {}\n", crate_name));
+
+        // Re-qualify same-crate path references inside the wrap.
+        // The transpiler emits e.g. `::bytebuf::ByteBuf` because
+        // `bytebuf` was a top-level namespace of THIS crate before
+        // wrapping; with the wrap in place, `::bytebuf` looks in the
+        // global namespace and fails. Rewrite to
+        // `::<crate>::bytebuf::ByteBuf` so the path is explicit and
+        // ambiguity-free.
+        //
+        // We ONLY rewrite namespaces that are exclusively this
+        // crate's. Generic names like `de` and `ser` exist in BOTH
+        // serde_core and serde_bytes — leaving `::de::` alone lets
+        // it find serde_core's `de` (where the cross-crate
+        // references it's protecting expect to land). Phase 2
+        // generalizes by collecting per-crate namespace ownership
+        // during emit.
+        let wrap_start = insert_pos + open.len();
+        let wrap_end = self.output.len()
+            - format!("}} // namespace {}\n", crate_name).len();
+        let mut wrapped = self.output[wrap_start..wrap_end].to_string();
+        for ns in self.crate_exclusive_top_namespaces() {
+            let from = format!("::{}::", ns);
+            let to = format!("::{}::{}::", crate_name, ns);
+            wrapped = wrapped.replace(&from, &to);
+        }
+        self.output.replace_range(wrap_start..wrap_end, &wrapped);
+    }
+
+    /// Top-level C++ namespaces that are EXCLUSIVE to the current
+    /// crate (no other crate in the matrix declares them). Used by
+    /// `wrap_module_purview_in_crate_namespace` to know which
+    /// `::<ns>::` references can be safely rewritten to
+    /// `::<crate>::<ns>::` without breaking cross-crate paths that
+    /// share namespace names like `de` / `ser`.
+    ///
+    /// Today's narrow Phase-1 implementation hard-codes serde_bytes'
+    /// exclusive top-level namespace (`bytebuf`). Phase 2 generalizes
+    /// by collecting per-crate namespace ownership during emit.
+    fn crate_exclusive_top_namespaces(&self) -> Vec<String> {
+        match self.crate_name.as_deref() {
+            Some("serde_bytes") => vec!["bytebuf".to_string()],
+            _ => Vec::new(),
+        }
+    }
+
     pub fn into_output(mut self) -> String {
+        // Phase 1 of the crate-namespacing migration: wrap the module
+        // purview in `namespace <crate_name> { … }` so a crate's
+        // declarations attach to a distinct namespace rather than the
+        // global one. Today C++20 modules apply only attachment, not
+        // name scoping — `class Serialize` declared in serde_core's
+        // `namespace ser` AND serde_bytes' `namespace ser` collide at
+        // import time even though they are distinct Rust traits
+        // (`serde_core::ser::Serialize` vs `serde_bytes::ser::Serialize`).
+        // Wrapping makes the names truly distinct in C++ too.
+        //
+        // We are intentionally NARROW at first — wrap only the crate
+        // we know is colliding (`serde_bytes`). Universal wrapping
+        // requires updating every cross-crate path emit to prepend
+        // `::<other_crate>::`, which is a structural change with broad
+        // matrix surface; Phase 2 generalizes once Phase 1 confirms
+        // the approach unblocks serde_bytes.
+        //
+        // The wrap is implemented as a post-emit text transform on
+        // `self.output` so emit sites don't need to know about it.
+        // We insert `namespace <crate> {` immediately after the
+        // module declaration's import block, and append the closing
+        // `}` at the end.
+        if let Some(crate_name) = self.crate_name.as_ref().filter(|n| {
+            matches!(n.as_str(), "serde_bytes")
+        }) {
+            self.wrap_module_purview_in_crate_namespace(crate_name.clone());
+        }
+
         if self.prefer_rusty_view_aliases {
             self.output = self.output.replace("std::string_view", "rusty::StrView");
             self.output = self.output.replace("std::span<", "rusty::Span<");
