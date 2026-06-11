@@ -5869,6 +5869,7 @@ Required approach:
 - for expression-form enum `match` lowering, do not drop struct-variant arms to duplicate generic visit fallbacks (`[&](const auto&) ...`); emit typed variant lambdas with explicit field bindings to keep `std::visit` overload sets unambiguous
 - for empty block expressions (`{}`) in value position, do not fall back to `unreachable()`; lower to Rust unit value shape (`std::make_tuple()`)
 - for data-enum struct-literal constructors (`Enum::Variant { ... }`), do not preserve scoped variant member syntax in C++; lower to concrete generated variant-struct targets (`Enum_Variant{...}`)
+- for trait-associated-type helper qualification (`typename FooTraits<I>::AssocName`), do not pre-collect trait assoc-types into `trait_associated_type_names` ahead of the forward-decl pre-pass without per-use-site resolution; the qualified path can pass through namespace segments that are *also* function-template or type-alias names at the use site, and ambient lookup will shadow the namespace (surfaced by `'coalesce' is not a class, namespace, or enumeration` in itertools when a naive pre-collect was attempted). See **Chapter 14** for the full design.
 
 ### 11.4 No Rust-Only Namespace Emission as C++ Symbols
 
@@ -6411,3 +6412,341 @@ These are *not* wasted work. Each documents a specific constraint shape the engi
 - Whether constraint failures should warn during development builds even when the fallback succeeds (probably yes; gated by a flag).
 
 These are implementation choices, not design choices. The choices above lock the *architecture*: a single inference pass, runs before emit, talks to emit by decorating the AST with resolved types, falls back cleanly on failure.
+
+## 14. Name Resolution: Trait Helper Qualification and the Two-Pass Inconsistency Problem
+
+### 14.1 Why this chapter exists
+
+Chapter 13 was about *type inference* — bridging Rust's HM-style propagation and C++'s local deduction. This chapter is about *name resolution* — bridging Rust's path resolution (crate-wide, scope-aware, defers unresolved names to later passes) and C++'s lexical scope rules (definition-order, ambient-lookup-first, shadowed by any same-named symbol).
+
+The two problems sound similar but live in different machinery. Type inference asks "what is the concrete type of expression E?" Name resolution asks "where in C++'s namespace tree does this symbol live, and will the spelling I emit at this use site actually resolve to that location?"
+
+Today the transpiler does name resolution by ad-hoc hashmap lookups (`trait_declared_path_by_short_name`, `trait_associated_type_names`, `imported_use_paths`, …) plus string template formatting. That works for the simple cases. It breaks on two fronts:
+
+1. **Two-pass inconsistency**: the same symbol is emitted with different spellings in different passes because the hashmap is populated incrementally during the final pass.
+2. **Use-site shadowing**: a qualified path like `::a::b::c::Type` can fail when one of the middle segments (`b` or `c`) is *also* a function-template or type-alias name at the use site, and ambient lookup picks the non-namespace meaning first.
+
+Both produce real C++ compile errors in itertools. This chapter documents the problem, the failed attempts, and the design for a proper fix.
+
+### 14.2 The canonical case in detail: itertools' `CombinationsWithReplacement`
+
+Rust source (simplified from `itertools` `src/combinations_with_replacement.rs` after `cargo expand`):
+
+```rust
+mod combinations {
+    pub trait PoolIndex {
+        type Item;
+    }
+}
+
+mod combinations_with_replacement {
+    use super::combinations::PoolIndex;
+
+    pub struct CombinationsWithReplacement<I: PoolIndex>
+    where I::Item: Copy {
+        iter: I,
+    }
+}
+```
+
+The constraint `I::Item: Copy` is what becomes a C++ `requires` clause.
+
+C++ templates don't have associated types. To simulate `Self::Item`, the transpiler emits a separate template called `<Trait>Traits` and specializes it per-impl:
+
+```cpp
+namespace combinations {
+    template<typename I> struct PoolIndexTraits;       // primary
+
+    template<typename I> class PoolIndex { /* …interface… */ };
+
+    // For each `impl PoolIndex for Vec<usize> { type Item = usize; }`:
+    template<> struct PoolIndexTraits<Vec<usize>> { using Item = usize; };
+}
+```
+
+So `Self::Item` in Rust must lower to `typename PoolIndexTraits<Self>::Item` in C++. The transpiler does this rewrite by consulting `trait_associated_type_names: HashMap<TraitName, Vec<AssocName>>`, populated during the trait's emit pass.
+
+Now the actual emission. The transpiler runs **two passes** that both touch this constraint:
+
+```cpp
+// Pre-pass forward decl (itertools.cppm:4231):
+namespace combinations_with_replacement {
+    template<typename I>
+        requires (std::copyable<typename I::Item>)   // ← unqualified
+    struct CombinationsWithReplacement;
+}
+
+// Final-pass forward decl (itertools.cppm:9633) + struct body (9657):
+namespace combinations_with_replacement {
+    template<typename I>
+        requires (std::copyable<typename ::combinations::PoolIndexTraits<I>::Item>)   // ← qualified
+    struct CombinationsWithReplacement {
+        I iter;
+    };
+}
+```
+
+C++ rejects: `requires clause differs in template redeclaration` (clang) or the equivalent in gcc. Even though the two requires-clauses are *logically equivalent* for any `I` that has both `I::Item` and `PoolIndexTraits<I>::Item` defined the same way, **C++ does syntactic equivalence on requires clauses**, not semantic. The text has to match.
+
+### 14.3 Self-contained reproduction
+
+This compiles fine if you remove either declaration of `Foo`, but fails when both are present:
+
+```cpp
+// repro.cpp — clang++ -std=c++20 repro.cpp
+#include <concepts>
+
+template<typename I> struct PoolIndexTraits;
+
+// Forward decl — one spelling of the constraint
+template<typename I>
+    requires (std::copyable<typename I::Item>)
+struct Foo;
+
+// Body — different spelling of the same logical constraint
+template<typename I>
+    requires (std::copyable<typename PoolIndexTraits<I>::Item>)
+struct Foo {
+    I x;
+};
+
+int main() {}
+```
+
+Error:
+
+```
+repro.cpp:13:18: error: requires clause differs in template redeclaration
+    requires (std::copyable<typename PoolIndexTraits<I>::Item>)
+                 ^
+```
+
+The minimal isolated form makes the issue obvious: it isn't itertools-specific, it isn't even Rust-specific — it's a generic C++ rule about template redeclarations.
+
+### 14.4 Why the spelling differs
+
+Both passes call `map_type` to translate the Rust type. `map_type` consults `lookup_unique_trait_for_assoc_name(assoc_name) → Option<TraitName>`, which queries `trait_associated_type_names`. The two passes hit this lookup at different times:
+
+- **Pre-pass**: forward-declaration walk of the whole module. The trait `PoolIndex` hasn't been emitted yet, so `trait_associated_type_names` doesn't contain `"PoolIndex"`. Lookup returns `None`. `map_type` falls through to the literal `typename I::Item`.
+
+- **Final pass**: traits are emitted first in the final pass, populating the registry. When the constraint gets mapped later in the same pass, lookup returns `Some("PoolIndex")`. `map_type` rewrites to `typename ::combinations::PoolIndexTraits<I>::Item` (the leading `::` comes from `trait_declared_path_by_short_name`, the qualification fix landed at commit `2f9c570`).
+
+Same code path. Different outputs. Because the registry is populated incrementally during the final pass.
+
+### 14.5 The failed pre-collect attempt
+
+The obvious fix: walk all items recursively *before* the pre-pass runs and populate `trait_associated_type_names` for every trait. Then both passes see the same registry and produce the same qualified form.
+
+This was tried (this session, reverted in-place — no commit). The `requires clause differs` error cleared on `CombinationsWithReplacement`. But itertools then failed elsewhere:
+
+```cpp
+// itertools.cppm:6472 (after pre-collect):
+rusty::Option<rusty::Option<typename ::adaptors::coalesce::CountItemTraits<C>::CItem>> last;
+//                                  ^^^^^^^^
+// error: 'coalesce' is not a class, namespace, or enumeration
+```
+
+The shape of the regression:
+
+```rust
+mod adaptors {
+    pub mod coalesce {
+        pub trait CountItem { type CItem; }   // trait in `coalesce` submodule
+    }
+
+    pub fn coalesce<I, F>(iter: I, f: F) -> /* ... */ { /* ... */ }
+    //         ^^^^^^^^
+    // function ALSO named `coalesce`, in `adaptors` scope
+}
+```
+
+After pre-collect populated `trait_associated_type_names["CountItem"]`, the qualifier mechanism rewrote `C::CItem` to `::adaptors::coalesce::CountItemTraits<C>::CItem`. The path *exists* in the namespace tree. But at the use site, C++ name lookup walks left-to-right through the segments:
+
+1. `::adaptors` — finds `namespace adaptors`. OK.
+2. `coalesce` — looks for `coalesce` inside `adaptors`. Finds the **function template**, not the **submodule**. Reports error.
+
+In Rust, the function and the submodule occupy different name categories (value namespace vs type namespace). Rust's path resolver picks the type-category meaning when followed by `::Foo`. C++ has no such category — `coalesce::CountItemTraits` is one path, and ambient lookup of `coalesce` resolves uniquely to whatever the compiler finds first. Function name wins.
+
+The final pass somehow avoids this — it must be selectively gating which traits get registered, but I haven't traced the exact rule. Likely it's that the final pass emits the body of `class PoolIndex` (and `class CountItem`) inside the trait's home namespace, and only at that point does `trait_associated_type_names` get populated. Anything that references the assoc type **outside that namespace** but **before the registry gets populated** gets the unqualified fallback (`typename I::Item`). It just happens that the only "outside, before" emit path is the pre-pass forward decl, which is what produces the `requires clause differs` mismatch.
+
+### 14.6 What the proper fix needs to know
+
+Two pieces of information that the transpiler currently doesn't track per emit site:
+
+1. **The lexical scope of the use site**: where in C++'s namespace tree is the emit happening? Today the transpiler tracks `module_stack` (an ordered list of namespace names), but only uses it loosely for paths-to-`use`-aliased-imports. It doesn't ask "is `X` in this scope a namespace or a function template?"
+
+2. **The candidate qualified path for a symbol**: for `PoolIndex`, the candidate is `::combinations::PoolIndex`. For `CountItem`, the candidate is `::adaptors::coalesce::CountItem`. The transpiler tracks these via `trait_declared_path_by_short_name`. Good.
+
+What's missing: **a way to ask, at the use site, "does each segment of this qualified path resolve uniquely to a namespace (or class type for nested-class disambiguation) in the current scope?"** If yes, qualify. If no, fall back to the unqualified form.
+
+The same question applies to **all** cross-namespace qualified emission, not just trait helpers. The matrix has gotten away with bespoke handling so far because most cross-namespace references happen to use namespace names that aren't shadowed. Itertools is the first crate that hits the collision in earnest.
+
+### 14.7 Design: per-scope symbol category table
+
+Introduce a new emit-time data structure:
+
+```rust
+/// Records what category each top-level (or nested) name resolves to
+/// within a given C++ namespace scope. Populated during a pre-pass that
+/// walks all `syn::Item`s in dependency order and classifies each
+/// declared name by its C++ emission category.
+pub struct SymbolCategoryTable {
+    /// Keyed by (scope path, name). E.g. ("adaptors", "coalesce") →
+    /// {NamespaceSubmodule, FunctionTemplate}.
+    pub by_scope: HashMap<(Vec<String>, String), CategorySet>,
+}
+
+bitflags::bitflags! {
+    pub struct CategorySet: u8 {
+        const NAMESPACE       = 0b0000_0001;   // namespace X { … }
+        const CLASS_TYPE      = 0b0000_0010;   // class/struct
+        const TYPE_ALIAS      = 0b0000_0100;   // using X = …
+        const FUNCTION        = 0b0000_1000;   // free function (and templates)
+        const VARIABLE        = 0b0001_0000;   // global variable
+        const ENUM            = 0b0010_0000;   // enum class
+    }
+}
+```
+
+A name is **safely qualifiable as a namespace segment** if its category set at the lookup scope includes `NAMESPACE` and no `FUNCTION | TYPE_ALIAS | VARIABLE` — because those non-namespace categories live in the same lookup space and would shadow the namespace at ambient resolution time.
+
+### 14.8 The two-phase emit pipeline
+
+#### Phase A: Symbol classification (new)
+
+A new pre-pass walks every `syn::Item` recursively and populates `SymbolCategoryTable`. For each item:
+
+- `syn::Item::Mod(m)` → record `(parent_scope, m.ident)` with `NAMESPACE` flag. Recurse into `m.content`.
+- `syn::Item::Struct(s)` → `(parent_scope, s.ident)` with `CLASS_TYPE`.
+- `syn::Item::Enum(e)` → `(parent_scope, e.ident)` with `ENUM`.
+- `syn::Item::Trait(t)` → record:
+  - `(parent_scope, t.ident)` with `CLASS_TYPE` (the trait class itself).
+  - `(parent_scope, format!("{}Traits", t.ident))` with `CLASS_TYPE` (the helper template).
+  - Populate `trait_associated_type_names[t.ident.to_string()] = t.items.iter().filter_map(assoc_type_ident).collect()`.
+- `syn::Item::Fn(f)` → `(parent_scope, f.sig.ident)` with `FUNCTION`.
+- `syn::Item::Type(t)` → `(parent_scope, t.ident)` with `TYPE_ALIAS`.
+- `syn::Item::Use(u)` → recurse into use tree; record imports as aliases pointing at their resolved target.
+
+This pass runs **before any code emission**. It's pure data collection — no string output, no state mutation outside `SymbolCategoryTable` and `trait_associated_type_names`.
+
+#### Phase B: Scope-aware path qualification (replaces ad-hoc lookup)
+
+Replace the existing `lookup_unique_trait_for_assoc_name` + `trait_declared_path_by_short_name` + string format at `mod.rs:32228` with:
+
+```rust
+/// Given the current emit scope and a trait helper reference like
+/// (trait_name="PoolIndex", base_param="I", assoc_name="Item"),
+/// return either:
+///   - the safely-qualified form `::scope::PoolIndexTraits<I>::Item`,
+///     when every segment of the path resolves uniquely to a namespace
+///     at the current emit scope; or
+///   - the fallback unqualified form `typename I::Item`, when
+///     qualification would risk shadowing.
+fn emit_assoc_type_projection(
+    &self,
+    trait_name: &str,
+    base_param: &str,
+    assoc_name: &str,
+) -> String {
+    let Some(qualified_trait) = self.trait_declared_path_by_short_name.get(trait_name) else {
+        return format!("typename {}::{}", base_param, assoc_name);
+    };
+    let segments: Vec<&str> = qualified_trait.split("::").collect();
+    let helper_segments = {
+        let (parent, last) = segments.split_last().unwrap();
+        let mut s: Vec<String> = parent.iter().map(|s| s.to_string()).collect();
+        s.push(format!("{}Traits", last));
+        s
+    };
+    // Walk the path: each segment must resolve to NAMESPACE (or CLASS_TYPE
+    // for the helper's own segment) without conflicting non-namespace
+    // categories at the lookup scope.
+    if self.path_resolves_unambiguously(&helper_segments) {
+        format!(
+            "typename ::{}<{}>::{}",
+            helper_segments.join("::"),
+            base_param,
+            assoc_name
+        )
+    } else {
+        // Fall back to unqualified — `requires` clauses with `typename
+        // I::Item` are valid C++ when I genuinely exposes Item.
+        format!("typename {}::{}", base_param, assoc_name)
+    }
+}
+
+fn path_resolves_unambiguously(&self, segments: &[String]) -> bool {
+    let scope = &self.module_stack;
+    let mut scope_path: Vec<String> = scope.clone();
+    for (i, seg) in segments.iter().enumerate() {
+        let is_last = i == segments.len() - 1;
+        let required = if is_last {
+            CategorySet::CLASS_TYPE | CategorySet::NAMESPACE
+        } else {
+            CategorySet::NAMESPACE
+        };
+        let cats = self.symbol_category.lookup_with_ambient(&scope_path, seg);
+        if !cats.intersects(required) {
+            return false;
+        }
+        if !is_last && cats.intersects(
+            CategorySet::FUNCTION | CategorySet::TYPE_ALIAS | CategorySet::VARIABLE,
+        ) {
+            // shadowing risk — function/alias/variable with same name as
+            // a namespace at this scope. C++ ambient lookup wins for
+            // those, breaking the qualified path.
+            return false;
+        }
+        scope_path.push(seg.clone());
+    }
+    true
+}
+```
+
+`lookup_with_ambient` walks the scope stack the way C++ does — checks `scope_path::seg`, then `parent_scope::seg`, then `parent_of_parent::seg`, etc., until it finds a hit or runs out of scopes. This is the same algorithm C++ uses for unqualified lookup, so it correctly reports the *first* match — which is what the compiler will see.
+
+#### Phase C: Both passes call into the same `emit_assoc_type_projection`
+
+The pre-pass and the final pass both go through the same code path. The function returns the same string for the same input. The two requires clauses match.
+
+For itertools' `combinations_with_replacement`:
+- Lookup of `combinations` in scope `["combinations_with_replacement"]`: not found locally. Walk up to the crate root. Found as `NAMESPACE`. No `FUNCTION` overlap. OK.
+- Lookup of `PoolIndexTraits` in scope `["combinations"]`: found as `CLASS_TYPE`. Last segment, OK.
+- → emit `typename ::combinations::PoolIndexTraits<I>::Item` in both passes.
+
+For itertools' `adaptors::coalesce::CountItemTraits`:
+- Lookup of `adaptors` in current scope: found as `NAMESPACE`. OK.
+- Lookup of `coalesce` in scope `["adaptors"]`: found as `NAMESPACE | FUNCTION` (both the submodule and the function). **`FUNCTION` flag → shadowing risk → fallback.**
+- → emit `typename C::CItem` in both passes (unqualified, but consistent across passes).
+
+Both itertools sites compile.
+
+### 14.9 What about the existing `lookup_unique_trait_for_assoc_name`?
+
+The function still exists, still does the same lookup. The new logic *adds* a per-use-site validity check on top of the result. The change is additive — it doesn't remove machinery, it gates the qualification step with a name-resolution simulator.
+
+`trait_associated_type_names` is still populated lazily during final-pass trait emit. The new `SymbolCategoryTable` is populated eagerly during Phase A. The two registries serve different purposes:
+
+- `trait_associated_type_names` — "given an assoc name, which trait owns it?" Used to decide whether to attempt qualification.
+- `SymbolCategoryTable` — "given a path and a use site, does the path resolve unambiguously?" Used to decide whether to *commit* to the qualification.
+
+### 14.10 Open questions deferred to implementation
+
+- How aggressive should `SymbolCategoryTable` be about recording `use` aliases? A `use X::Y as Z;` brings `Z` into the current scope as an alias for `X::Y`. The `Y` end of the alias still lives in `X`, but `Z` becomes a new name in the current scope. Need to model this without double-counting.
+- How to handle anonymous-namespace traits (file-internal linkage). They shouldn't appear in cross-namespace qualification.
+- Whether to support qualification *through* a `using namespace X` directive (probably yes for completeness, but lower priority — the matrix doesn't use them).
+- The scan currently walks `syn::Item`s top-down; some items reference others before they're declared (recursive types, mutual recursion across modules). The scan needs to be order-insensitive — collect all declarations first, then build the category sets in one shot.
+
+### 14.11 Acceptance criteria
+
+- The C++ minimal repro from §14.3 compiles without modification when generated by the transpiler.
+- itertools' `requires clause differs in template redeclaration` clears.
+- itertools' `'coalesce' is not a class, namespace, or enumeration` does not regress.
+- 14 currently-passing crates remain passing (arrayvec, bitflags, cfg-if, either, once_cell, pollster, semver, serde, serde_bytes, serde_core, serde_repr, smallvec, take_mut, tap).
+- The unit-test suite remains at 1585 passing, 9 pre-existing failures unchanged.
+
+### 14.12 Relationship to Chapter 13
+
+Type inference (Ch. 13) and name resolution (Ch. 14) are complementary subsystems, not competing ones. Type inference figures out what `T` is. Name resolution figures out how to *spell* `T` at the use site. The two passes can run independently and are likely both correct simultaneously for any given AST node.
+
+The shared philosophy: stop relying on incremental-during-emit state, move to pre-collected tables consulted by emit. Chapter 13's engine collects type constraints; Chapter 14's table collects symbol categories. In both cases the emit code becomes a lookup against pre-computed data rather than a string template against a partially-populated state machine.
