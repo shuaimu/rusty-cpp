@@ -3018,6 +3018,27 @@ impl CodeGen {
                     if self.interface_traits_with_generics.contains(&name) {
                         return None;
                     }
+                    // Also skip when the supertrait has associated types
+                    // (which become C++ template params via the assoc-type
+                    // machinery). Without propagating matching params from
+                    // the child trait through to the parent, the emitted
+                    // inheritance `class Child : public Parent` rejects
+                    // with "expected class name" — Parent is a template
+                    // and can't appear without args. The Phase 3a comment
+                    // upstream says assoc-types-only traits "proceed
+                    // through adapter emit"; that's the right path for
+                    // the impl side, but the inheritance side has no
+                    // analogous machinery yet. Skip so the child trait
+                    // emits at least as a standalone class. Surfaced by
+                    // itertools' `trait HomogeneousTuple: TupleCollect`
+                    // (itertools.cppm:10969).
+                    if self
+                        .trait_associated_type_names
+                        .get(&name)
+                        .is_some_and(|v| !v.is_empty())
+                    {
+                        return None;
+                    }
                     // Find the qualified path for this trait among
                     // declared paths via the short-name index (built when
                     // each trait was declared).
