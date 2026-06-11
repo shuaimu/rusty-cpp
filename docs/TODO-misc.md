@@ -258,6 +258,18 @@ Both require building a per-scope symbol table — fundamentally a name-resoluti
 
 Itertools stays as the one matrix failure. The remaining error is genuine cross-pass divergence — not a regression and not a correctness issue with any of the 14 passing crates.
 
+### §2b-ii update (2026-06-11, late evening session)
+
+Implemented the Ch. 14 Phase A + B design (`SymbolCategoryTable` + per-use-site `path_resolves_unambiguously` check) in commits `c10ab0e` and `b3309f4` (rename-aware path qualification). These ARE the correct infrastructure for Option A above; they just don't move itertools' specific failure because the actual flattening + uniqueness behavior of the existing emit pipeline doesn't intersect with where the trait helper paths actually resolve.
+
+Also tried a **template_prefix_lines post-process** that rewrites `typename ::scope::FooTraits<X>::Y` → `typename X::Y` in requires clauses (since both forms are semantically equivalent in a requires clause and the pre-pass produces the unqualified form). The rewrite was syntactically correct — all 6 itertools requires clauses came out as `typename I::Item` — but **clang segfaulted in ASTReader during either.pcm precompile**, well before reaching itertools' own code. The crash reproduces consistently even after a fresh modules-cache wipe; standalone `either` precompile succeeds; only the itertools build context triggers it. This is a clang module-deserialization bug, not a transpiler issue. Reverted the post-process.
+
+**Status going forward:** the requires-clause-differs error remains the only blocker for itertools. Three options to investigate when this becomes priority again:
+
+1. **Clang version pin.** The segfault was on clang-19. Test on clang-20+ or other module-supporting toolchains.
+2. **Skip C++20 modules for itertools.** The matrix script's Stage D uses `-x c++-module --precompile`; a fallback to header-include compilation might bypass the ASTReader path but requires significant matrix-runner changes.
+3. **Bisect the post-process output.** Identify which specific change in the rewritten cppm triggers the clang crash. Could be a clang-specific quirk in how it deserializes certain template requires-clause shapes.
+
 ---
 
 ## Notes & risks
