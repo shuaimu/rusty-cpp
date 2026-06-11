@@ -1,10 +1,15 @@
 # TODO: Plan for Remaining Parity-Matrix Failures
 
-Status at time of writing: **11 / 15 PASS** — arrayvec, bitflags, cfg-if, once_cell, pollster, semver, **serde_core** (new — unlocked by the variant_holds-via-variant_ctx fix in commit 2cc52b6), serde_repr, smallvec, take_mut, tap.
+Status (as of 2026-06-11): **14 / 15 PASS** — arrayvec, bitflags, cfg-if, **either** (flipped, commit bb255fa), once_cell, pollster, semver, **serde** (flipped, commit 1ff08d7), **serde_bytes** (flipped, commit 064a6cc), serde_core, serde_repr, smallvec, take_mut, tap.
 
-Remaining failures: `either`, `itertools`, `serde_bytes`, `serde`.
+Remaining failure: **`itertools`** only.
 
 This document captures the per-crate failure analysis, fix proposals, and recommended ordering. Each item is sized in rough-day units; treat as a working plan rather than a contract.
+
+## Session log (newest first)
+
+- **2026-06-11**: Matrix advanced 13/15 → 14/15. serde_bytes flipped via crate-namespacing wrap (Phase 1, narrow — commit 064a6cc). itertools advanced 5 unique errors → 1 via four converging fixes: by-value `auto` for non-reference params, supertrait inheritance skip when parent has assoc types, `<Trait>Traits` helper qualification with home namespace, `ArrayRepeatResult` template `operator=`.
+- **2026-06-10**: Matrix advanced 11/15 → 13/15. either + serde flipped via inference engine end-to-end (Phases 1-5) + emit-site wiring + `value.into()` slice routing + `Vec::from(span)`.
 
 ---
 
@@ -187,17 +192,71 @@ This wouldn't run a real executor (we'd still need `Future::poll` machinery), bu
 
 | # | Item | Status | Cost | Unlocks |
 |---|---|---|---|---|
-| 1 | ~~Perf track for serde_core~~ | ✅ done (matrix `--release`) | ~0.5 day | 4 crates from "can't test" → "can test" |
-| 2a | ~~itertools `tee` ↔ POSIX `tee()` collision~~ | ✅ done (mod rename) | ~5 min | itertools' first build blocker |
-| 2b | itertools `PoolIndexTraits` qualification | ⏳ partial — needs design (see §2b) | ~1 day | second build blocker on itertools |
-| 3 | either approach A | ⏳ deferred — see §A note (insufficient by itself) | ~1.5 day | either + future data-enum cases |
-| 4 | serde-family correctness | ⏳ (now reachable) | ~1 day | serde_bytes likely passes; serde_repr/serde_core/serde may pass or surface new issues |
-| 5 | itertools 2c | ⏳ | variable | itertools build complete |
-| 6 | pollster | ⏳ optional | ~1 day | pollster build (no runtime guarantee) |
+| 1 | ~~Perf track for serde_core~~ | ✅ done (matrix `--release`) | — | — |
+| 2a | ~~itertools `tee` ↔ POSIX `tee()` collision~~ | ✅ done (mod rename) | — | — |
+| 2b-i | ~~itertools `PoolIndexTraits` qualification~~ | ✅ done (commit 2f9c570 — qualified emit at `mod.rs:32228` via `trait_declared_path_by_short_name`) | — | 6 "no template named" errors cleared |
+| 2b-ii | itertools requires-clause cross-pass alignment | ⏳ blocked — needs trait-uniqueness-by-use-context logic | ~2 days | last itertools error type clears |
+| 2c | ~~itertools `make_entry_probe`~~ | ✅ no longer surfacing | — | — |
+| 2d | ~~itertools const-binding mutability~~ | ✅ done (commit bb3887d — by-value Rust params lower as `auto`) | — | itertools `sub_scalar` compiles |
+| 2e | ~~itertools supertrait assoc-types inheritance~~ | ✅ done (commit 49ccd98 — supertrait skipped when parent has assoc types) | — | `HomogeneousTuple: TupleCollect` compiles |
+| 2f | ~~itertools `ArrayRepeatResult = Vec` assignment~~ | ✅ done (commit eb606e8 — templated `operator=` on any iterable) | — | itertools `test_checked_binomial` compiles |
+| 3 | ~~either approach A — emit-side wiring~~ | ✅ done (commit bb255fa — explicit template args on variant ctors via inference engine output) | — | either flips |
+| 4 | ~~serde-family correctness~~ | ✅ done (commit 1ff08d7 — slice routing + `Vec::from(span)` + `into_boxed_slice`) | — | serde flips |
+| 5 | ~~serde_bytes namespacing~~ | ✅ done (commit 064a6cc — Phase 1 narrow wrap) | — | serde_bytes flips |
+| 6 | Universal crate namespacing (Phase 2) | ⏳ optional — Phase 1 sufficient for current matrix | ~1.5 days | future cross-crate trait collisions |
+| 7 | ~~pollster~~ | ✅ passes (was never failing — earlier session) | — | — |
 
-**Expected outcome if 1–4 land:** ~11–12 / 15. either + itertools at least build; serde_bytes likely passes; the rest of serde-family is uncertain.
+**Achieved outcome:** 5 → 14 / 15 across two sessions. Only itertools' requires-clause-differs cross-pass alignment remains as a known blocker.
 
-**Validation gate at each step:** run the 8 currently-passing crates to confirm no regression before moving to the next item.
+**Validation gate at each step:** run the 14 currently-passing crates to confirm no regression before moving to the next item.
+
+## §2b-ii: requires-clause cross-pass alignment (remaining work)
+
+**Symptom**
+
+itertools' `CombinationsWithReplacement<I>` has two forward declarations and one struct body:
+
+```cpp
+// pre-pass forward decl (cppm:4231):
+export template<typename I>
+    requires (std::copyable<typename I::Item>)
+struct CombinationsWithReplacement;
+
+// final-pass forward decl + struct body (cppm:9633, 9657):
+export template<typename I>
+    requires (std::copyable<typename ::combinations::PoolIndexTraits<I>::Item>)
+struct CombinationsWithReplacement;
+```
+
+C++ rejects: `requires clause differs in template redeclaration`.
+
+**Root cause**
+
+`lookup_unique_trait_for_assoc_name("Item")` returns:
+- During pre-pass forward decl: `None` (the trait `PoolIndex` isn't yet registered in `trait_associated_type_names`).
+- During final pass: `Some("PoolIndex")` (the trait's body emit registered it before the requires clause is mapped).
+
+The pre-pass therefore falls through to bare `typename I::Item`, while the final pass uses the qualified `typename ::combinations::PoolIndexTraits<I>::Item` form.
+
+**Why a simple pre-collect doesn't work**
+
+Tried (this session, reverted): a recursive pre-collect that walks `Items` and populates `trait_associated_type_names` for every trait before the forward-decl pre-pass runs. This made the lookup succeed during pre-pass too — both passes produced the qualified form.
+
+**But** it regressed a different itertools site (`adaptors::coalesce::CountItemTraits<C>::CItem`). The pre-collect over-registered traits whose qualified path passes through a segment (`coalesce`) that is *also* a function template name at the use site. Ambient lookup at the use site finds the function first and shadows the namespace, producing `'coalesce' is not a class, namespace, or enumeration`.
+
+The final-pass machinery doesn't hit this bug because it selectively registers traits in a way that avoids these conflicts — exact selection rules not yet traced.
+
+**Path forward (estimated 2 days)**
+
+Option A: Per-use-site qualification check. At each `typename FooTraits<X>::Y` emit, verify that the qualified path resolves uniquely in the use site's lexical scope. Fall back to `typename X::Y` (unqualified) when the qualified form would be shadowed.
+
+Option B: Pre-collect with conflict detection. The pre-pass registers a trait's assoc types only if all segments of its qualified path are exclusively namespaces in the use site's reachable scope (i.e., no function-template or type-alias collisions).
+
+Both require building a per-scope symbol table — fundamentally a name-resolution pass that the transpiler currently doesn't have at this level of fidelity.
+
+**Workaround until then**
+
+Itertools stays as the one matrix failure. The remaining error is genuine cross-pass divergence — not a regression and not a correctness issue with any of the 14 passing crates.
 
 ---
 
