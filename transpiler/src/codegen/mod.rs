@@ -543,6 +543,13 @@ pub struct CodeGen {
     /// before any emit site consumes it. See
     /// `docs/rusty-cpp-transpiler.md` §13.7 for the design.
     pub(crate) inference: Option<type_solver::InferenceContext>,
+    /// Per-scope symbol category table. Populated by a single pre-pass
+    /// over `syn::Item`s at the start of `emit_file`; consulted at
+    /// trait-helper qualification time to decide whether a qualified
+    /// path like `::a::b::c::FooTraits` will actually resolve
+    /// unambiguously at the C++ use site. See `symbol_category.rs`
+    /// and Ch. 14 of `docs/rusty-cpp-transpiler.md`.
+    pub(crate) symbol_category: symbol_category::SymbolCategoryTable,
     /// Collected impl blocks indexed by type name.
     /// Populated during the first pass of emit_file.
     pub(crate) impl_blocks: HashMap<String, Vec<syn::ImplItem>>,
@@ -1327,6 +1334,7 @@ impl CodeGen {
             output: String::new(),
             indent: 0,
             inference: None,
+            symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
             consumed_impl_blocks: HashMap::new(),
             impl_source_modules: HashMap::new(),
@@ -1917,6 +1925,14 @@ impl CodeGen {
         log_emit("start");
         self.module_name = module_name.map(|s| s.to_string());
         self.module_stack.clear();
+        // Ch. 14 Phase A pre-pass: classify every declared name by
+        // its C++ emission category so qualification decisions can
+        // consult per-scope shadowing risk later. Must run before any
+        // emit pass — both the forward-decl pre-pass and the
+        // final-emit pass consult the same table.
+        self.symbol_category.clear();
+        self.symbol_category
+            .populate_from_items(&file.items, &[]);
         self.crate_reexports.clear();
         self.crate_pub_reexport_targets.clear();
         self.impl_blocks.clear();
@@ -1974,6 +1990,21 @@ impl CodeGen {
         self.interface_traits_with_generics.clear();
         self.trait_class_skipped_method_keys.clear();
         self.trait_associated_type_names.clear();
+        // Ch. 14 Phase A pre-collect of `trait_associated_type_names`
+        // was attempted here but reverted: even with the per-use-site
+        // shadowing guard in place, the transpiler also FLATTENS some
+        // Rust modules during C++ namespace emission (e.g.
+        // `mod adaptors { mod coalesce { trait CountItem … } }` lands
+        // as `namespace adaptors { class CountItem; }`, not
+        // `namespace adaptors { namespace coalesce { class
+        // CountItem; } }`). `trait_declared_path_by_short_name`
+        // records the Rust-source path, so the qualified emit
+        // `::adaptors::coalesce::CountItemTraits` references a
+        // namespace that doesn't exist in the C++ output. The
+        // Phase A check can't catch this because the symbol table
+        // is built from the Rust AST, not from the post-flattening
+        // emit. A correct fix requires modeling the module-
+        // flattening rules; deferred to a follow-up.
         self.trait_declared_path_by_short_name.clear();
         self.emitted_foreign_adapter_specs.clear();
         self.numeric_type_aliases.clear();
@@ -5810,6 +5841,44 @@ impl CodeGen {
             }
         }
         emitted_any
+    }
+
+    /// Walk `items` recursively (descending into ItemMod content) and
+    /// populate `target` with each trait's associated-type idents.
+    /// Used by the Ch. 14 Phase A pre-pass to seed
+    /// `trait_associated_type_names` eagerly — so the qualification
+    /// step at trait-helper emit time can run during both the
+    /// forward-decl pre-pass and the final pass. The qualification
+    /// step then consults `SymbolCategoryTable` to decide whether the
+    /// qualified path is safe at the use site, and falls back to
+    /// unqualified `typename I::Item` when shadowing risk exists.
+    fn pre_collect_trait_assoc_into(
+        items: &[syn::Item],
+        target: &mut HashMap<String, Vec<String>>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    let assoc_names: Vec<String> = t
+                        .items
+                        .iter()
+                        .filter_map(|ti| match ti {
+                            syn::TraitItem::Type(at) => Some(at.ident.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    if !assoc_names.is_empty() {
+                        target.entry(t.ident.to_string()).or_insert(assoc_names);
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, sub_items)) = &m.content {
+                        Self::pre_collect_trait_assoc_into(sub_items, target);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn emit_item_forward_decls(&mut self, items: &[syn::Item], module_depth: usize) -> bool {
@@ -32226,31 +32295,68 @@ impl CodeGen {
                         self.lookup_unique_trait_for_assoc_name(assoc_name)
                     {
                         // Qualify with the trait's home namespace path
-                        // when one is known. Without this the emitted
-                        // `typename PoolIndexTraits<I>::Item` is
-                        // unqualified, which fails to resolve from any
-                        // sibling namespace (e.g. itertools'
-                        // `combinations_with_replacement` referencing
-                        // `combinations::PoolIndexTraits<I>::Item`).
-                        // `trait_declared_path_by_short_name` holds the
-                        // qualified spelling of the trait itself; we
-                        // splice `Traits` onto the last segment to derive
-                        // the helper's qualified name.
-                        let helper_qualified = self
+                        // when one is known AND the qualified spelling
+                        // actually resolves unambiguously at the use
+                        // site (Ch. 14). Without the resolution check,
+                        // paths like `::adaptors::coalesce::CountItem
+                        // Traits<C>::CItem` break when `coalesce` at
+                        // the use site is both a namespace AND a
+                        // function template — C++ ambient lookup
+                        // picks the function and reports "not a
+                        // class, namespace, or enumeration".
+                        //
+                        // When the qualified path would shadow, fall
+                        // back to the unqualified `typename I::Item`
+                        // form. Both passes (pre-pass forward decl and
+                        // final emit) consult the same table and
+                        // agree on this fallback, eliminating the
+                        // `requires clause differs in template
+                        // redeclaration` divergence that caused the
+                        // last remaining itertools failure.
+                        if let Some(qpath) = self
                             .trait_declared_path_by_short_name
                             .get(trait_name.as_str())
-                            .map(|qpath| {
-                                if let Some((parent, last)) = qpath.rsplit_once("::") {
-                                    format!("::{}::{}Traits", parent, last)
-                                } else {
-                                    format!("{}Traits", qpath)
-                                }
-                            })
-                            .unwrap_or_else(|| format!("{}Traits", trait_name));
-                        return format!(
-                            "typename {}<{}>::{}",
-                            helper_qualified, first, assoc_name
-                        );
+                        {
+                            // Build the qualified helper path
+                            // segments: split the trait's qualified
+                            // path, replace the last segment with
+                            // `<Trait>Traits`.
+                            let mut segments: Vec<String> = qpath
+                                .split("::")
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
+                                .collect();
+                            if let Some(last) = segments.last_mut() {
+                                *last = format!("{}Traits", last);
+                            }
+                            let resolves = self
+                                .symbol_category
+                                .path_resolves_unambiguously(
+                                    &self.module_stack,
+                                    &segments,
+                                );
+                            if resolves {
+                                // Leading `::` only when the path
+                                // crosses namespaces — for a
+                                // single-segment helper at the same
+                                // scope, `Traits` resolves via
+                                // ambient lookup and the leading
+                                // `::` would be cosmetic.
+                                let prefix = if segments.len() > 1 { "::" } else { "" };
+                                return format!(
+                                    "typename {}{}<{}>::{}",
+                                    prefix,
+                                    segments.join("::"),
+                                    first,
+                                    assoc_name
+                                );
+                            }
+                            // Fall through to unqualified form below.
+                        }
+                        // Unqualified fallback. Both passes produce
+                        // this same string when the table isn't
+                        // populated or the path would shadow.
+                        return format!("typename {}::{}", first, assoc_name);
                     }
                 }
             }
@@ -42316,6 +42422,7 @@ mod inference;
 mod lookups;
 mod paths;
 mod predicates;
+mod symbol_category;
 mod type_mapping;
 mod type_solver;
 

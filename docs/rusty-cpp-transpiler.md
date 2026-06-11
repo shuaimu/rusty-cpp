@@ -6533,6 +6533,40 @@ Both passes call `map_type` to translate the Rust type. `map_type` consults `loo
 
 Same code path. Different outputs. Because the registry is populated incrementally during the final pass.
 
+### 14.4a Deeper finding: the transpiler flattens some Rust modules
+
+While implementing Phase A in `transpiler/src/codegen/symbol_category.rs`, a second-order issue surfaced that the original design didn't account for: **the transpiler doesn't always preserve Rust's module nesting in the C++ output**.
+
+itertools' Rust source:
+
+```rust
+mod adaptors {
+    mod coalesce {
+        pub trait CountItem { type CItem; }
+        pub fn coalesce<I, F>(iter: I, f: F) -> /* ... */ { /* ... */ }
+    }
+}
+```
+
+What ends up in the C++ output:
+
+```cpp
+namespace adaptors {
+    // coalesce module is FLATTENED — trait and function both land
+    // at adaptors:: directly, NOT under a nested namespace coalesce.
+    class CountItem;
+    template<typename I, typename F> auto coalesce(I iter, F f);
+}
+```
+
+So `adaptors::coalesce` as a namespace doesn't exist in the C++ output, but `trait_declared_path_by_short_name["CountItem"]` records the Rust-source path `adaptors::coalesce::CountItem`. The qualification step then emits `::adaptors::coalesce::CountItemTraits<C>::CItem` — referencing a namespace that was never declared.
+
+A `SymbolCategoryTable` populated from `syn::Item` walks records the Rust-source structure (`mod coalesce` → namespace in our table) and agrees with `trait_declared_path_by_short_name`. **Both registries are wrong in the same way.** The C++ emit pipeline silently flattens the intermediate `mod coalesce` and neither registry sees it.
+
+**Why flattening happens:** the transpiler's module-emission code has logic that lifts a module's contents into its parent under certain conditions (e.g. when the inner module has no visible items beyond the trait, or when the items collide with sibling-namespace names, or other heuristics that haven't been traced in detail).
+
+**Implication for Ch. 14:** the design as written can't fix the requires-clause-differs issue alone. Even if both passes consult the same `SymbolCategoryTable` and produce identical strings, the strings are correct relative to the Rust source but wrong relative to the actual C++ emit. The fix requires modeling the flattening rules — a third source of truth about "which namespaces actually exist in the C++ output".
+
 ### 14.5 The failed pre-collect attempt
 
 The obvious fix: walk all items recursively *before* the pre-pass runs and populate `trait_associated_type_names` for every trait. Then both passes see the same registry and produce the same qualified form.
