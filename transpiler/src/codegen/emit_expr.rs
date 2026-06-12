@@ -557,6 +557,18 @@ impl CodeGen {
                 &mut placeholder_hints,
             );
             block_profile_mark("augment_uninitialized_local_type_hints_from_usage");
+            // Two-parameter generic owners (HashMap, BTreeMap) need
+            // both K and V from their `insert(K, V)` usage. The
+            // single-inner pipeline above handles only Vec&lt;T&gt;-shaped
+            // owners; this pass writes fully resolved owner types
+            // (`HashMap&lt;K, V&gt;`) directly for the multi-parameter
+            // shapes. See `augment_two_param_local_type_hints_from_
+            // usage`.
+            self.augment_two_param_local_type_hints_from_usage(
+                &block.stmts,
+                &mut placeholder_hints,
+            );
+            block_profile_mark("augment_two_param_local_type_hints_from_usage");
             self.augment_option_none_placeholder_hints_from_return_context(
                 &block.stmts,
                 &mut placeholder_hints,

@@ -3283,6 +3283,33 @@ impl CodeGen {
         if Self::is_unsuffixed_int_literal_expr(init_expr) {
             return Some(hint.clone());
         }
+        // Two-parameter generic owner shape: when the hint is
+        // already a `HashMap<K, V>` (or `BTreeMap<K, V>`) and the
+        // init is the matching `Owner::new()` call, return the hint
+        // as-is. The two-param scan
+        // (`augment_two_param_local_type_hints_from_usage`) writes
+        // fully resolved owner types into the hint map rather than
+        // bare inner types, so the single-inner wrapping logic
+        // below doesn't apply. See Ch. 13 of
+        // `docs/rusty-cpp-transpiler.md` for the design.
+        if let syn::Type::Path(hint_tp) = hint
+            && let Some(hint_last) = hint_tp.path.segments.last()
+            && matches!(hint_last.ident.to_string().as_str(), "HashMap" | "BTreeMap")
+            && matches!(
+                hint_last.arguments,
+                syn::PathArguments::AngleBracketed(_)
+            )
+            && let syn::Expr::Call(call) = init_expr
+            && let syn::Expr::Path(init_path) = call.func.as_ref()
+            && let Some(init_owner_seg) = init_path
+                .path
+                .segments
+                .iter()
+                .nth_back(1)
+            && init_owner_seg.ident == hint_last.ident
+        {
+            return Some(hint.clone());
+        }
         if let Some(cap_expr) = self.infer_array_capacity_arg_for_expr(init_expr) {
             let elem_ty = extract_array_element_type_for_hint(hint)
                 .or_else(|| extract_sequence_element_type_for_hint(hint))
@@ -3614,6 +3641,63 @@ impl CodeGen {
             }),
             _ => None,
         }
+    }
+
+    /// True when `inferred` is a bare TWO-PARAMETER owner path
+    /// (`HashMap`, `BTreeMap`) with no template args AND `hint` is
+    /// the same owner with full template args (`HashMap<K, V>`).
+    /// Used by `emit_local` to decide whether the placeholder-hint
+    /// pipeline's fully-resolved type should override the initial
+    /// bare-owner inference from the initializer call.
+    ///
+    /// Restricted to HashMap/BTreeMap to avoid clashing with the
+    /// existing single-param owner machinery. For single-param
+    /// owners (`Cell<T>`, `Vec<T>`, `OnceCell<T>`, …), the
+    /// `recover_omitted_local_generic_type_args` mechanism at emit
+    /// time already infers `T` from `Cell::new(literal)` etc. via
+    /// the literal arg's type; overriding inferred_binding_ty here
+    /// with the placeholder hint can preempt that and emit a
+    /// doubly-wrapped type when another usage like
+    /// `cell.set(other_cell)` causes the hint to become
+    /// `Cell<Cell<i32>>` (the existing pipeline's wrap of the
+    /// inferred inner). Surfaced by smallvec's `let cell =
+    /// Cell::new(0); v.push(DropCounter(&cell));` shape where the
+    /// pre-this-fix flow correctly inferred `Cell<int32_t>` from
+    /// the literal arg.
+    pub(super) fn bare_owner_should_yield_to_specialized_hint(
+        &self,
+        inferred: &syn::Type,
+        hint: &syn::Type,
+    ) -> bool {
+        let syn::Type::Path(inferred_tp) = self.peel_reference_paren_group_type(inferred) else {
+            return false;
+        };
+        let syn::Type::Path(hint_tp) = self.peel_reference_paren_group_type(hint) else {
+            return false;
+        };
+        let Some(inferred_last) = inferred_tp.path.segments.last() else {
+            return false;
+        };
+        let Some(hint_last) = hint_tp.path.segments.last() else {
+            return false;
+        };
+        if inferred_last.ident != hint_last.ident {
+            return false;
+        }
+        // Restrict to TWO-PARAMETER owners only — see the doc
+        // comment above for why single-param Cell-style owners
+        // must be left to the existing machinery.
+        let ident_str = inferred_last.ident.to_string();
+        if !matches!(ident_str.as_str(), "HashMap" | "BTreeMap") {
+            return false;
+        }
+        if !matches!(inferred_last.arguments, syn::PathArguments::None) {
+            return false;
+        }
+        matches!(
+            hint_last.arguments,
+            syn::PathArguments::AngleBracketed(_)
+        )
     }
 
     pub(super) fn infer_local_binding_type_from_initializer(

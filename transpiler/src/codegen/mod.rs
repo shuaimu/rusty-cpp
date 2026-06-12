@@ -15254,6 +15254,228 @@ impl CodeGen {
         }
     }
 
+    /// Parallel forward-scan for two-parameter generic owners (HashMap,
+    /// BTreeMap, …). The existing
+    /// `augment_uninitialized_local_type_hints_from_usage` pipeline
+    /// handles only single-parameter owners (Vec&lt;T&gt;, OnceCell&lt;T&gt;, …)
+    /// because the hint mechanism stores a single `syn::Type` per
+    /// binding and the consumers wrap it as `Owner&lt;hint&gt;`. For
+    /// two-parameter owners we need both type parameters; this
+    /// function bypasses the single-inner intermediate and writes the
+    /// fully resolved owner type (`HashMap&lt;K, V&gt;`) directly into
+    /// `hints`. The matching consumer branch in
+    /// `infer_local_type_from_placeholder_hint` recognizes this shape
+    /// and returns the hint as-is rather than rewrapping.
+    ///
+    /// Coverage: HashMap and BTreeMap with `insert(K, V)`. Other
+    /// two-param shapes can be added as discrete arms — keep them
+    /// conservative (require both arg types to be statically known)
+    /// so the inferred hint never lands as `HashMap&lt;auto, …&gt;` and
+    /// the existing single-inner flow is never shadowed for the
+    /// same binding.
+    fn augment_two_param_local_type_hints_from_usage(
+        &self,
+        stmts: &[syn::Stmt],
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        // First pass: collect candidates — bindings whose init is a
+        // recognized two-parameter constructor call with no
+        // explicit template args. Store `name → owner_short_name`
+        // so the second pass knows which method to look for.
+        let mut candidates: HashMap<String, String> = HashMap::new();
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            if get_local_type(local).is_some() {
+                continue;
+            }
+            let Some(name) = local_binding_name(local) else {
+                continue;
+            };
+            if hints.contains_key(&name) {
+                continue;
+            }
+            let Some(init) = &local.init else {
+                continue;
+            };
+            let Some(owner) = call_owner_placeholder_target(&init.expr) else {
+                continue;
+            };
+            if !matches!(owner.as_str(), "HashMap" | "BTreeMap") {
+                continue;
+            }
+            // Skip if init already specifies template args (then the
+            // existing flow handles it correctly).
+            let syn::Expr::Call(call) = self.peel_paren_group_expr(&init.expr) else {
+                continue;
+            };
+            let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+                continue;
+            };
+            let init_has_template_args = path_expr.path.segments.iter().any(|seg| {
+                matches!(seg.arguments, syn::PathArguments::AngleBracketed(_))
+            });
+            if init_has_template_args {
+                continue;
+            }
+            candidates.insert(name, owner);
+        }
+        if candidates.is_empty() {
+            return;
+        }
+
+        // Second pass: walk stmts for `<binding>.insert(K, V)` method
+        // calls. Use first-write-wins on `hints` so an earlier
+        // resolved binding doesn't get clobbered by a later call.
+        for stmt in stmts {
+            self.collect_two_param_local_type_hints_in_stmt(stmt, &candidates, hints);
+        }
+    }
+
+    fn collect_two_param_local_type_hints_in_stmt(
+        &self,
+        stmt: &syn::Stmt,
+        candidates: &HashMap<String, String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        match stmt {
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    self.collect_two_param_local_type_hints_in_expr(
+                        &init.expr,
+                        candidates,
+                        hints,
+                    );
+                }
+            }
+            syn::Stmt::Expr(expr, _) => {
+                self.collect_two_param_local_type_hints_in_expr(expr, candidates, hints);
+            }
+            syn::Stmt::Item(_) | syn::Stmt::Macro(_) => {}
+        }
+    }
+
+    fn collect_two_param_local_type_hints_in_expr(
+        &self,
+        expr: &syn::Expr,
+        candidates: &HashMap<String, String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let expr = self.peel_paren_group_expr(expr);
+        match expr {
+            syn::Expr::MethodCall(method_call) => {
+                self.try_resolve_two_param_owner_from_method_call(
+                    method_call,
+                    candidates,
+                    hints,
+                );
+                self.collect_two_param_local_type_hints_in_expr(
+                    &method_call.receiver,
+                    candidates,
+                    hints,
+                );
+                for arg in &method_call.args {
+                    self.collect_two_param_local_type_hints_in_expr(arg, candidates, hints);
+                }
+            }
+            syn::Expr::Call(call) => {
+                self.collect_two_param_local_type_hints_in_expr(&call.func, candidates, hints);
+                for arg in &call.args {
+                    self.collect_two_param_local_type_hints_in_expr(arg, candidates, hints);
+                }
+            }
+            syn::Expr::Block(b) => {
+                for stmt in &b.block.stmts {
+                    self.collect_two_param_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+            }
+            syn::Expr::If(if_expr) => {
+                self.collect_two_param_local_type_hints_in_expr(&if_expr.cond, candidates, hints);
+                for stmt in &if_expr.then_branch.stmts {
+                    self.collect_two_param_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+                if let Some((_, else_expr)) = &if_expr.else_branch {
+                    self.collect_two_param_local_type_hints_in_expr(else_expr, candidates, hints);
+                }
+            }
+            syn::Expr::While(while_expr) => {
+                self.collect_two_param_local_type_hints_in_expr(&while_expr.cond, candidates, hints);
+                for stmt in &while_expr.body.stmts {
+                    self.collect_two_param_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+            }
+            syn::Expr::ForLoop(for_loop) => {
+                self.collect_two_param_local_type_hints_in_expr(&for_loop.expr, candidates, hints);
+                for stmt in &for_loop.body.stmts {
+                    self.collect_two_param_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+            }
+            syn::Expr::Loop(loop_expr) => {
+                for stmt in &loop_expr.body.stmts {
+                    self.collect_two_param_local_type_hints_in_stmt(stmt, candidates, hints);
+                }
+            }
+            syn::Expr::Assign(assign) => {
+                self.collect_two_param_local_type_hints_in_expr(&assign.left, candidates, hints);
+                self.collect_two_param_local_type_hints_in_expr(&assign.right, candidates, hints);
+            }
+            _ => {}
+        }
+    }
+
+    fn try_resolve_two_param_owner_from_method_call(
+        &self,
+        method_call: &syn::ExprMethodCall,
+        candidates: &HashMap<String, String>,
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        // Receiver must be a simple binding ident in `candidates`.
+        let Some(receiver_name) = extract_simple_local_ident(&method_call.receiver) else {
+            return;
+        };
+        let Some(owner) = candidates.get(&receiver_name) else {
+            return;
+        };
+        if hints.contains_key(&receiver_name) {
+            return;
+        }
+        let method_name = method_call.method.to_string();
+        // For HashMap/BTreeMap: `insert(K, V)` — two args, both types
+        // must be statically inferable. Mirror Vec's `insert(index,
+        // T)` shape via the owner-disambiguation above (Vec lives in
+        // a separate code path that doesn't reach this function
+        // because Vec was never a candidate here).
+        if !matches!(method_name.as_str(), "insert") {
+            return;
+        }
+        if !matches!(owner.as_str(), "HashMap" | "BTreeMap") {
+            return;
+        }
+        if method_call.args.len() != 2 {
+            return;
+        }
+        let key_expr = &method_call.args[0];
+        let val_expr = &method_call.args[1];
+        let key_ty = self.infer_simple_expr_type(key_expr);
+        let val_ty = self.infer_simple_expr_type(val_expr);
+        let (Some(key_ty), Some(val_ty)) = (key_ty, val_ty) else {
+            return;
+        };
+        if !self.type_is_concrete_hint_candidate(&key_ty) {
+            return;
+        }
+        if !self.type_is_concrete_hint_candidate(&val_ty) {
+            return;
+        }
+        // Build `Owner<K, V>` as a fresh syn::Type.
+        let owner_ident: syn::Ident = syn::parse_str(owner).ok().unwrap_or_else(|| {
+            syn::Ident::new(owner, proc_macro2::Span::call_site())
+        });
+        let resolved: syn::Type = parse_quote!(#owner_ident<#key_ty, #val_ty>);
+        hints.insert(receiver_name, resolved);
+    }
+
     fn inferred_type_is_omitted_generic_owner(
         &self,
         inferred: &syn::Type,

@@ -20920,10 +20920,10 @@ fn test_leaf415433333333271_hashmap_new_omitted_owner_recovers_from_insert_usage
         }
     "#,
     );
-    assert!(out.contains("ArrayString<16>::new_()"));
-    assert!(out.contains("HashMap<ArrayString<16>, int32_t>()"));
-    assert!(!out.contains("HashMap::new_()"));
-    assert!(!out.contains("rusty::HashMap<ArrayString<16>, int32_t>::new_()"));
+    assert!(out.contains("ArrayString<16>::new_()"), "{out}");
+    assert!(out.contains("HashMap<ArrayString<16>, int32_t>()"), "{out}");
+    assert!(!out.contains("HashMap::new_()"), "{out}");
+    assert!(!out.contains("rusty::HashMap<ArrayString<16>, int32_t>::new_()"), "{out}");
 }
 
 #[test]

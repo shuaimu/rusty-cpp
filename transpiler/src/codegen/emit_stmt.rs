@@ -1613,6 +1613,18 @@ impl CodeGen {
                         self.type_contains_infer(ty)
                             || self.type_contains_unresolved_placeholder_like(ty)
                             || self.type_contains_unbound_single_letter_generic(ty)
+                            // Two-parameter generic owner shape: when
+                            // the initializer-inferred type is a bare
+                            // owner (`HashMap`) but the hint has full
+                            // template args (`HashMap<K, V>`), the
+                            // hint is the more-specific answer from
+                            // the forward-scan pass and should win.
+                            // Without this, the bare-owner inference
+                            // satisfies `is_some()` and blocks the
+                            // override, leaving the emit as
+                            // `HashMap<auto, auto>::new_()`. See Ch.
+                            // 13 of `docs/rusty-cpp-transpiler.md`.
+                            || self.bare_owner_should_yield_to_specialized_hint(ty, &placeholder_ty)
                     });
                     if should_override_inferred {
                         inferred_binding_ty = Some(placeholder_ty);
