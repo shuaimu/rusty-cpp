@@ -20825,8 +20825,30 @@ fn test_leaf41543333333261_arrayvec_to_vec_method_uses_runtime_helper() {
         }
     "#,
     );
-    assert!(out.contains("rusty::to_vec(v)"));
-    assert!(!out.contains("v.to_vec()"));
+    // Two acceptable shapes:
+    //
+    // - Legacy: `rusty::to_vec(v)` — a generic runtime helper that
+    //   resolves the element type at C++ template-instantiation time.
+    //
+    // - Current (commit 1ff08d7, serde flip): `rusty::Vec<elem>::
+    //   from_iter(v)` where `elem` is recovered via
+    //   `decltype(*std::begin(v))` and stripped of cv-ref. This is
+    //   more precise — the result is unambiguously `rusty::Vec`
+    //   rather than depending on the helper's return type — and was
+    //   needed to fix serde's `into()`-chain conversions where the
+    //   target type was `rusty::Vec<T>` not the helper's std::vector.
+    //
+    // The test should accept either form because both lower the same
+    // Rust source correctly. The important assertion is that the
+    // un-lowered `v.to_vec()` method call is NOT emitted (would be
+    // ambiguous: ArrayVec doesn't have a `to_vec` method in our
+    // generated code; the call comes from a trait extension that
+    // doesn't translate directly).
+    let has_runtime_lower = out.contains("rusty::to_vec(v)")
+        || (out.contains("rusty::Vec<")
+            && out.contains("::from_iter(v)"));
+    assert!(has_runtime_lower, "{out}");
+    assert!(!out.contains("v.to_vec()"), "{out}");
 }
 
 #[test]
