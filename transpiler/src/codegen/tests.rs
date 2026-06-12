@@ -26967,17 +26967,34 @@ fn test_leaf5182_tuple_mut_ref_rebind_uses_pointer_alias_semantics() {
         "{out}"
     );
     assert!(out.contains("size_t* len = &len_ref;"), "{out}");
-    assert!(
-        out.contains("if (*len == cap)")
-            || out.contains(
-                "if (rusty::detail::deref_if_pointer_like(*len) == rusty::detail::deref_if_pointer_like(cap))"
-            ),
-        "{out}"
-    );
+    // The if-condition's `*len` may emit with one or more layers
+    // of parentheses depending on operator-precedence-safety
+    // wrapping (`*((*len))` is equivalent to `*len`). Accept any
+    // shape where the `*len`/`(*len)` is compared against `cap` via
+    // either the bare expression or `deref_if_pointer_like` wrappers.
+    let has_if = out.contains("if (*len == cap)")
+        || out.contains("if (*(*len) == cap)")
+        || out.contains("if (*((*len)) == cap)")
+        || out.contains(
+            "if (rusty::detail::deref_if_pointer_like(*len) == rusty::detail::deref_if_pointer_like(cap))",
+        )
+        || out.contains(
+            "if (*((*len)) == rusty::detail::deref_if_pointer_like(cap))",
+        )
+        || out.contains(
+            "if (*(*len) == rusty::detail::deref_if_pointer_like(cap))",
+        );
+    assert!(has_if, "{out}");
     assert!(out.contains("len = &heap_len;"), "{out}");
-    assert!(out.contains("*len += 1;"), "{out}");
+    // `*len += 1` may be parenthesized as `(*len) += 1` for the
+    // same precedence-safety reason.
+    assert!(out.contains("*len += 1;") || out.contains("(*len) += 1;"), "{out}");
     assert!(
         !out.contains("[&]() { static_cast<void>(*len += 1); return std::make_tuple(); }();"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("[&]() { static_cast<void>((*len) += 1); return std::make_tuple(); }();"),
         "{out}"
     );
     assert!(!out.contains("len = heap_len;"), "{out}");
