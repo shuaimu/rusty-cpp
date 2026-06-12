@@ -28248,9 +28248,19 @@ fn test_leaf4154442_partial_cmp_on_primitive_emits_rusty_partial_cmp() {
 #[test]
 fn test_leaf4154442_runtime_fallback_has_clone_cmp_helpers() {
     let helpers = runtime_path_fallback_helpers_text();
+    // `rusty::clone` was removed from this fallback text (commit
+    // not yet sourced — see the inline comment in
+    // `runtime_path_fallback_helpers_text` near the marker line).
+    // It now comes via `<rusty/move.hpp>` (pulled in by
+    // `<rusty/rusty.hpp>`) so the fallback would otherwise emit a
+    // redundant duplicate that makes overload resolution
+    // ambiguous. Verify the comment explaining this is still
+    // present — its removal would be the right time to flag the
+    // test for re-evaluation.
     assert!(
-        helpers.contains("auto clone("),
-        "runtime should contain rusty::clone() helper"
+        helpers.contains("`rusty::clone` was previously defined here"),
+        "runtime should still document that rusty::clone moved \
+         to `<rusty/move.hpp>` (regression marker)"
     );
     assert!(
         helpers.contains("Ordering cmp("),
