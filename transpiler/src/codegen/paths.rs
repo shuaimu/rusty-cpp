@@ -1027,6 +1027,18 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             return String::new();
         }
         self.rewrite_runtime_helper_trait_path_segments(&mut segments);
+        // Resolve itertools' `pub use std::iter as __std_iter` alias. Any path
+        // containing a `__std_iter` segment refers to `std::iter`, so collapse
+        // the defining-crate prefix and the alias down to `std::iter` and let
+        // the standard `std::iter::*` mappings apply (e.g. `once` →
+        // `rusty::once`). Iterator/IntoIterator UFCS forms are intercepted
+        // earlier as receiver-method calls and never reach here.
+        if let Some(pos) = segments.iter().position(|seg| seg == "__std_iter") {
+            let mut rewritten = vec!["std".to_string(), "iter".to_string()];
+            rewritten.extend(segments[pos + 1..].iter().cloned());
+            segments = rewritten;
+            force_leading_colon = false;
+        }
         joined = segments.join("::");
         if !force_leading_colon
             && segments.len() >= 2

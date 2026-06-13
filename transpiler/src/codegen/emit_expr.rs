@@ -12572,6 +12572,14 @@ impl CodeGen {
             return c_like_variant;
         }
 
+        // Lower fully-qualified std iterator-trait UFCS calls produced by
+        // itertools' macros (`$crate::__std_iter::Iterator::map(into_iter(x), f)`)
+        // into receiver-method form. These pass the receiver by value, so the
+        // `&receiver` UFCS handler below won't catch them.
+        if let Some(iter_call) = self.try_emit_std_iter_trait_ufcs_call(call) {
+            return iter_call;
+        }
+
         // Intercept derived-trait UFCS calls with arbitrary arg shapes
         // (including `std::move(arg)` from expanded derive code) that the
         // main UFCS handler below won't catch (it requires `&receiver`).
@@ -15619,6 +15627,65 @@ impl CodeGen {
     /// Intercept known derived-trait UFCS calls where args may not be
     /// references (e.g., `core::cmp::Ord::cmp(std::move(a), std::move(b))`).
     /// Returns `Some(emitted)` if the call matches a known trait method.
+    /// Lower the fully-qualified std iterator-trait UFCS calls that
+    /// itertools' macros emit (surfaced verbatim by `cargo expand`) into
+    /// receiver-method form, reusing the existing `.map()` / `.zip()` /
+    /// `.into_iter()` lowering:
+    ///
+    ///   `<..>::iter::Iterator::<method>(recv, args..)`  → `recv.<method>(args..)`
+    ///   `<..>::iter::IntoIterator::into_iter(recv)`      → `recv.into_iter()`
+    ///
+    /// The owning module is the std iterator module under any of its
+    /// spellings — `std::iter`, `core::iter`, or the `__std_iter` alias
+    /// (`pub use std::iter as __std_iter`) re-exported by itertools. The
+    /// trait segment must be immediately preceded by that module segment, so
+    /// user types named `Iterator`/`IntoIterator` are not affected.
+    pub(super) fn try_emit_std_iter_trait_ufcs_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(path_expr) = call.func.as_ref() else {
+            return None;
+        };
+        let segs: Vec<String> = path_expr
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect();
+        if segs.len() < 3 || call.args.is_empty() {
+            return None;
+        }
+        let method = &segs[segs.len() - 1];
+        let trait_seg = &segs[segs.len() - 2];
+        let module_seg = &segs[segs.len() - 3];
+        if module_seg != "iter" && module_seg != "__std_iter" {
+            return None;
+        }
+        let is_iterator_method = trait_seg == "Iterator"
+            && method
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase());
+        let is_into_iter = trait_seg == "IntoIterator" && method == "into_iter";
+        if !is_iterator_method && !is_into_iter {
+            return None;
+        }
+        // First argument is the receiver; the rest become method arguments.
+        let receiver = call.args.first()?.clone();
+        let mut method_args = syn::punctuated::Punctuated::new();
+        for arg in call.args.iter().skip(1) {
+            method_args.push(arg.clone());
+        }
+        let method_call = syn::ExprMethodCall {
+            attrs: Vec::new(),
+            receiver: Box::new(receiver),
+            dot_token: syn::token::Dot::default(),
+            method: syn::Ident::new(method, proc_macro2::Span::call_site()),
+            turbofish: None,
+            paren_token: syn::token::Paren::default(),
+            args: method_args,
+        };
+        Some(self.emit_expr_to_string(&syn::Expr::MethodCall(method_call)))
+    }
+
     pub(super) fn try_emit_known_trait_ufcs_call(&self, call: &syn::ExprCall) -> Option<String> {
         let func_path = match call.func.as_ref() {
             syn::Expr::Path(p) => &p.path,

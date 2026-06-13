@@ -1114,6 +1114,11 @@ pub struct CodeGen {
     /// Used to qualify single-segment type paths that depend on `use` aliases
     /// emitted later in the namespace body.
     pub(crate) in_forward_decl_signature: bool,
+    /// True while emitting a `requires (...)` constraint expression.
+    /// Suppresses the trait-helper qualification rewrite at the emit
+    /// site so both forward-decl and final-pass emissions produce the
+    /// same `typename I::AssocName` form. See Ch. 14 §2b-ii.
+    pub(crate) in_constraint_emit: std::cell::Cell<bool>,
     /// Top-level declared item names available as global `::Name` lookup targets.
     /// Used to avoid emitting invalid bare `using ::name;` imports in inline modules.
     pub(crate) declared_item_names: HashSet<String>,
@@ -1491,6 +1496,7 @@ impl CodeGen {
             cpp_module_import_path_keys: HashSet::new(),
             cpp_module_member_symbols: HashMap::new(),
             in_forward_decl_signature: false,
+            in_constraint_emit: std::cell::Cell::new(false),
             declared_item_names: HashSet::new(),
             item_const_types: HashMap::new(),
             declared_module_names: HashSet::new(),
@@ -1711,6 +1717,15 @@ impl CodeGen {
             &trait_names,
         );
         self.output = inject_rusty_module_import_if_needed(&self.output);
+        // `vec::IntoIter` (e.g. in itertools test return types) maps to
+        // `rusty::port::vec::IntoIter`, which the umbrella `rusty` module does
+        // not alias — its declaration must be imported directly from its
+        // owning module to be nameable.
+        self.output = inject_module_import_if_referenced(
+            &self.output,
+            "rusty::port::vec::IntoIter",
+            "import vec_port.vec.into_iter;",
+        );
         self.output
     }
 
@@ -7560,6 +7575,27 @@ impl CodeGen {
             }
         }
         out.extend(normalized_variants);
+
+        // itertools' macros expand to `$crate::__std_iter::<item>`, where
+        // `__std_iter` is the crate's `pub use std::iter as __std_iter` alias.
+        // Surface a `std::iter::<item>` candidate so the standard iterator
+        // function mappings (e.g. `std::iter::once` → `rusty::once`) apply
+        // regardless of the originating crate prefix.
+        let std_iter_aliased: Vec<String> = out
+            .iter()
+            .filter_map(|candidate| {
+                let segs: Vec<&str> =
+                    candidate.split("::").filter(|seg| !seg.is_empty()).collect();
+                let pos = segs.iter().position(|seg| *seg == "__std_iter")?;
+                let tail = &segs[pos + 1..];
+                if tail.is_empty() {
+                    None
+                } else {
+                    Some(format!("std::iter::{}", tail.join("::")))
+                }
+            })
+            .collect();
+        out.extend(std_iter_aliased);
 
         let mut dedup = HashSet::new();
         out.retain(|k| dedup.insert(k.clone()));
@@ -13602,6 +13638,59 @@ impl CodeGen {
         }
 
         path.to_string()
+    }
+
+    /// True when a flattened `use` import path is rooted at the crate being
+    /// transpiled and that crate is not also a locally declared module.
+    ///
+    /// Flat (libtest) targets import the crate as a single C++ module
+    /// (`import <crate>;`), so its public items are already visible at use
+    /// sites and macro-only names (`iproduct!`, `izip!`, …) have no C++ symbol
+    /// to bring in. Such own-crate `use` lines are redundant — and for macros,
+    /// ill-formed (`using <crate>::iproduct;` references a nonexistent
+    /// namespace) — so they are skipped. Handles both the directly resolved
+    /// form (`<crate>::chain`) and the crate-alias form
+    /// (`use itertools as it; use crate::it::chain;`).
+    fn import_path_root_is_current_crate(&self, path: &str) -> bool {
+        let Some(crate_name) = self.crate_name.as_deref() else {
+            return false;
+        };
+        if self.declared_module_names.contains(crate_name) {
+            return false;
+        }
+        let normalized = normalize_use_import_path(path);
+        let target = split_use_import_alias(normalized)
+            .map(|(_, target)| target)
+            .unwrap_or(normalized);
+        let mut segs = target
+            .trim_start_matches("::")
+            .split("::")
+            .filter(|seg| !seg.is_empty());
+        let Some(first) = segs.next() else {
+            return false;
+        };
+        if first == crate_name {
+            return true;
+        }
+        // `crate::<alias>::…` where `<alias>` rebinds to the current crate.
+        if first == "crate" {
+            if let Some(second) = segs.next() {
+                if second == crate_name {
+                    return true;
+                }
+                if let Some(bound) = self
+                    .resolve_scope_import_binding_path(second)
+                    .or_else(|| self.resolve_scope_import_binding_path_for_scope("", second))
+                {
+                    return bound
+                        .trim_start_matches("::")
+                        .split("::")
+                        .find(|seg| !seg.is_empty())
+                        == Some(crate_name);
+                }
+            }
+        }
+        false
     }
 
 
@@ -23844,19 +23933,67 @@ impl CodeGen {
         receiver_expr: &str,
         extra_args: &[String],
     ) -> String {
+        // Each `extra_arg` is passed as a lambda parameter (`__arg{i}`)
+        // rather than embedded textually in the IIFE body. This is
+        // critical when `extra_args[i]` is itself a lambda that
+        // captures a name from the enclosing function scope (e.g.
+        // `[&](auto&& r){ return f(r) && g(r); }` where `f` and `g`
+        // are local variables / parameters of the surrounding
+        // function). By passing the closure expression as an
+        // argument, it is constructed at the call site (where `f`
+        // and `g` are in scope) and bound to `__argN`; the IIFE body
+        // then references `__argN` without needing to capture `f`
+        // and `g` through nested generic-lambda + requires-
+        // expression contexts that clang doesn't always thread the
+        // capture chain through correctly. Surfaced by itertools'
+        // `peeking_take_while::PeekingTakeWhile::peeking_next` where
+        // clang 22 errored with "reference to local variable 'g'
+        // declared in enclosing function". Ch. 14 §2c in the
+        // transpiler book.
         let direct_receiver = "std::forward<decltype(__self)>(__self)";
         let deref_receiver =
             "rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))";
+        let arg_names: Vec<String> = (0..extra_args.len())
+            .map(|i| format!("__arg{}", i))
+            .collect();
+        let arg_param_decls: String = arg_names
+            .iter()
+            .map(|n| format!("auto&& {}", n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let arg_param_list = if arg_param_decls.is_empty() {
+            "auto&& __self".to_string()
+        } else {
+            format!("auto&& __self, {}", arg_param_decls)
+        };
+        let arg_call_list = if extra_args.is_empty() {
+            receiver_expr.to_string()
+        } else {
+            format!("{}, {}", receiver_expr, extra_args.join(", "))
+        };
+        // Inside the IIFE, forward each `__argN` (preserving its
+        // value category) for the direct-receiver branch; for the
+        // deref branch, wrap each in `deref_if_pointer_like` so
+        // pointer-like wrappers unbox uniformly.
+        let direct_arg_uses: Vec<String> = arg_names
+            .iter()
+            .map(|n| format!("std::forward<decltype({0})>({0})", n))
+            .collect();
+        let deref_arg_uses: Vec<String> = arg_names
+            .iter()
+            .map(|n| {
+                format!(
+                    "rusty::detail::deref_if_pointer_like(std::forward<decltype({0})>({0}))",
+                    n
+                )
+            })
+            .collect();
         let mut direct_args = Vec::with_capacity(extra_args.len() + 1);
         direct_args.push(direct_receiver.to_string());
-        direct_args.extend(extra_args.iter().cloned());
+        direct_args.extend(direct_arg_uses.iter().cloned());
         let mut deref_args = Vec::with_capacity(extra_args.len() + 1);
         deref_args.push(deref_receiver.to_string());
-        deref_args.extend(
-            extra_args
-                .iter()
-                .map(|arg| format!("rusty::detail::deref_if_pointer_like({})", arg)),
-        );
+        deref_args.extend(deref_arg_uses.iter().cloned());
         let direct_call = format!("{}({})", callee, direct_args.join(", "));
         let deref_call = format!("{}({})", callee, deref_args.join(", "));
         let callee_leaf = callee
@@ -23869,16 +24006,25 @@ impl CodeGen {
         if matches!(callee_leaf, "eq" | "ne") && extra_args.len() == 1 {
             let op = if callee_leaf == "eq" { "==" } else { "!=" };
             let lhs = deref_receiver;
-            let rhs = format!("rusty::detail::deref_if_pointer_like({})", extra_args[0]);
+            let rhs = format!(
+                "rusty::detail::deref_if_pointer_like(std::forward<decltype({0})>({0}))",
+                arg_names[0]
+            );
             let op_call = format!("({}) {} ({})", lhs, op, rhs);
             return format!(
-                "([&](auto&& __self) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-                direct_call, direct_call, deref_call, deref_call, op_call, receiver_expr
+                "([&]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                arg_param_list,
+                direct_call,
+                direct_call,
+                deref_call,
+                deref_call,
+                op_call,
+                arg_call_list
             );
         }
         format!(
-            "([&](auto&& __self) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-            direct_call, direct_call, deref_call, receiver_expr
+            "([&]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+            arg_param_list, direct_call, direct_call, deref_call, arg_call_list
         )
     }
 
@@ -32520,6 +32666,9 @@ impl CodeGen {
                         // `requires clause differs in template
                         // redeclaration` divergence that caused the
                         // last remaining itertools failure.
+                        if self.in_constraint_emit.get() {
+                            return format!("typename {}::{}", first, assoc_name);
+                        }
                         if let Some(qpath) = self
                             .trait_declared_path_by_short_name
                             .get(trait_name.as_str())
@@ -32786,8 +32935,11 @@ impl CodeGen {
         generics: &syn::Generics,
         include_type_defaults: bool,
     ) -> Vec<String> {
+        let prev = self.in_constraint_emit.get();
+        self.in_constraint_emit.set(true);
         let (params, constraints) =
             self.collect_emitted_template_parts(generics, include_type_defaults);
+        self.in_constraint_emit.set(prev);
         if params.is_empty() {
             return Vec::new();
         }
@@ -33320,6 +33472,34 @@ fn inject_rusty_module_import_if_needed(output: &str) -> String {
     let mut result = String::with_capacity(output.len() + 16);
     result.push_str(&output[..insert_at]);
     result.push_str("import rusty;\n\n");
+    result.push_str(&output[insert_at..]);
+    result
+}
+
+/// If the module purview references `needle`, inject `import_line` immediately
+/// after the `export module X;` line (the start of the module preamble) unless
+/// it is already imported. Used for runtime types that live in a specific
+/// transpiled std-port module and are not aliased by the umbrella `rusty`
+/// module (e.g. `rusty::port::vec::IntoIter` → `import vec_port.vec.into_iter;`).
+fn inject_module_import_if_referenced(output: &str, needle: &str, import_line: &str) -> String {
+    if output.contains(&format!("\n{}\n", import_line)) {
+        return output.to_string();
+    }
+    let Some(export_module_line_start) = output.find("\nexport module ") else {
+        return output.to_string();
+    };
+    let after_line_start = export_module_line_start + 1;
+    let Some(rel_eol) = output[after_line_start..].find('\n') else {
+        return output.to_string();
+    };
+    let insert_at = after_line_start + rel_eol + 1;
+    if !output[insert_at..].contains(needle) {
+        return output.to_string();
+    }
+    let mut result = String::with_capacity(output.len() + import_line.len() + 2);
+    result.push_str(&output[..insert_at]);
+    result.push_str(import_line);
+    result.push('\n');
     result.push_str(&output[insert_at..]);
     result
 }

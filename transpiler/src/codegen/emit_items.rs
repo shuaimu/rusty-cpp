@@ -4027,6 +4027,14 @@ impl CodeGen {
             let resolved_path = self.resolve_unqualified_local_import_path(&path);
             let resolved_path = self.strip_current_crate_prefix_from_import_path(&resolved_path);
             let resolved_path = self.resolve_nested_local_reexport_path(&resolved_path);
+            // Own-crate imports are redundant in flat libtest targets (the
+            // crate's items are visible via `import <crate>;`) and ill-formed
+            // for macro-only names; skip them rather than emit a `using`
+            // referencing a nonexistent `<crate>::` namespace.
+            if self.import_path_root_is_current_crate(&resolved_path) {
+                self.writeln(&format!("// Rust-only: using {};", resolved_path));
+                continue;
+            }
             let normalized_import = normalize_use_import_path(&resolved_path);
             if normalized_import.starts_with("std::os::")
                 || normalized_import.starts_with("core::os::")
@@ -4242,6 +4250,18 @@ impl CodeGen {
                         self.namespace_alias_statement_for_module_import(&using_path)
                     {
                         self.emit_namespace_alias_statement_once(&ns_alias_stmt, export_prefix);
+                        continue;
+                    }
+                    // Own-crate items are already visible via `import <crate>;`
+                    // in flat libtest targets. A private `using <crate>::item;`
+                    // then references a nonexistent `<crate>` namespace — and is
+                    // ill-formed for macro-only names (`iproduct!`, `izip!`).
+                    // The scope-import rewrites above resolve crate aliases
+                    // (`use itertools as it; use crate::it::chain;`) to this
+                    // `<crate>::…` form, so test it here on the final path. Pub
+                    // re-exports are intentionally left intact.
+                    if !is_pub && self.import_path_root_is_current_crate(&using_path) {
+                        self.writeln(&format!("// Rust-only: using {};", resolved_path));
                         continue;
                     }
                     let using_tail = using_path.trim_start_matches("::");

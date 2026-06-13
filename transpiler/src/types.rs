@@ -99,6 +99,18 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
 
         // Collections
         "Vec" | "std::vec::Vec" => Some(("rusty::Vec", true)),
+        // `vec::IntoIter` is the iterator type returned by
+        // `Vec::into_iter()`. The transpiled `vec_port` module emits
+        // it as `rusty::port::vec::IntoIter`. Emit through the
+        // fully-qualified port path because the `rusty` umbrella
+        // currently has no `vec::IntoIter` alias (only `Vec`).
+        // The literal `std::vec::IntoIter` form appears in
+        // itertools' test files' return-type signatures from
+        // `cargo expand` expanding the macro-generated test
+        // scaffolding.
+        "vec::IntoIter" | "std::vec::IntoIter" | "alloc::vec::IntoIter" => {
+            Some(("rusty::port::vec::IntoIter", true))
+        }
         "HashMap" | "std::collections::HashMap" => Some(("rusty::HashMap", true)),
         "HashSet" | "std::collections::HashSet" => Some(("rusty::HashSet", true)),
         // BTreeMap / BTreeSet live in the transpiled `btree_port`

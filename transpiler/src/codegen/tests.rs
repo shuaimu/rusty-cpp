@@ -31382,3 +31382,102 @@ fn try_infer_ternary_arm_type_unrecognized_constructors_yield_none() {
     assert!(cg.try_infer_ternary_arm_type(&arm_a, &arm_b).is_none());
 }
 
+// itertools' `iproduct!`/`izip!`/`chain!` macros expand (via cargo expand) to
+// `$crate::__std_iter::{once, Iterator::map, IntoIterator::into_iter, ...}`,
+// where `__std_iter` is the crate's `pub use std::iter as __std_iter` alias.
+// These must resolve to the standard iterator runtime, not leak `__std_iter`.
+#[test]
+fn test_std_iter_alias_and_ufcs_lowering() {
+    let out = transpile_str(
+        "fn f() { \
+            let _ = ::itertools::__std_iter::once(()); \
+            let _ = ::itertools::__std_iter::Iterator::map(\
+                ::itertools::__std_iter::IntoIterator::into_iter(0..6), |elt| (elt,)); \
+            let _ = ::itertools::__std_iter::Iterator::zip(\
+                ::itertools::__std_iter::IntoIterator::into_iter(0..6), 0..9); \
+        }",
+    );
+    assert!(!out.contains("__std_iter"), "leaked __std_iter alias:\n{out}");
+    assert!(out.contains("rusty::once("), "std::iter::once not mapped:\n{out}");
+    assert!(out.contains("rusty::map("), "Iterator::map UFCS not lowered:\n{out}");
+    assert!(out.contains("rusty::zip("), "Iterator::zip UFCS not lowered:\n{out}");
+    assert!(
+        out.contains(".into_iter()"),
+        "IntoIterator::into_iter UFCS not lowered:\n{out}"
+    );
+}
+
+// A flat (libtest) target that imports its own crate as one C++ module
+// (`use itertools as it; use crate::it::chain;`) must NOT emit
+// `using itertools::chain;` / `using it = itertools;` — the crate's public
+// items are already visible via `import itertools;`, and macro-only names
+// (`iproduct!`) have no C++ symbol to bring in. They're dropped to comments.
+#[test]
+fn test_own_crate_use_imports_skipped() {
+    let file: syn::File = syn::parse_str(
+        "use itertools as it; \
+         use crate::it::chain; \
+         use crate::it::iproduct; \
+         use crate::it::Itertools; \
+         fn f() {}",
+    )
+    .unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_crate_name("itertools");
+    cg.emit_file(&file, Some("test_core"));
+    let out = cg.into_output();
+    let emits_uncommented = |needle: &str| {
+        out.lines()
+            .any(|l| l.trim_start().starts_with(needle))
+    };
+    assert!(
+        !emits_uncommented("using itertools::"),
+        "emitted own-crate using referencing nonexistent `itertools` namespace:\n{out}"
+    );
+    assert!(
+        !emits_uncommented("using it::"),
+        "emitted own-crate using via unresolved crate alias:\n{out}"
+    );
+    assert!(
+        !emits_uncommented("using it ="),
+        "emitted crate self-alias:\n{out}"
+    );
+}
+
+// `std::vec::IntoIter<T>` (e.g. itertools test return types) maps to
+// `rusty::port::vec::IntoIter<T>`, whose declaration must be imported directly
+// from its owning C++ module — the umbrella `rusty` module does not alias it.
+// Exercise the injection directly: it fires only when the type is referenced,
+// places the import in the module preamble, and is idempotent.
+#[test]
+fn test_vec_into_iter_module_import_injection() {
+    let needle = "rusty::port::vec::IntoIter";
+    let import_line = "import vec_port.vec.into_iter;";
+
+    let referenced =
+        "module;\nexport module mymod;\n\nrusty::port::vec::IntoIter<int32_t> f();\n";
+    let out = inject_module_import_if_referenced(referenced, needle, import_line);
+    assert!(
+        out.contains(&format!("\n{}\n", import_line)),
+        "import not injected:\n{out}"
+    );
+    // Injected into the module preamble (after `export module …;`).
+    assert!(
+        out.find(import_line).unwrap() > out.find("export module mymod;").unwrap(),
+        "import not placed after module declaration:\n{out}"
+    );
+    // Idempotent — already-imported output is left untouched.
+    assert_eq!(
+        inject_module_import_if_referenced(&out, needle, import_line),
+        out,
+        "double-injected the import"
+    );
+    // No reference → no injection.
+    let unreferenced = "module;\nexport module mymod;\n\nint32_t f();\n";
+    assert_eq!(
+        inject_module_import_if_referenced(unreferenced, needle, import_line),
+        unreferenced,
+        "injected without any reference to the type"
+    );
+}
+
