@@ -15124,11 +15124,26 @@ impl CodeGen {
             inits.push(format!("{}()", base));
         }
         for field in &struct_lit.fields {
-            let field_name = match &field.member {
-                syn::Member::Named(ident) => escape_cpp_keyword(&ident.to_string()),
-                syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+            // Emit each field's init value WITH its declared type as the
+            // expected type — this qualifies constructor paths the same way the
+            // regular factory path does (e.g. `Cell::new(0)` -> `rusty::Cell<
+            // int32_t>::new_(0)`, `Mutex::new(x)` -> `rusty::Mutex<T>::new_(x)`).
+            // Without the expected type the path stays unqualified (`Cell<...>`)
+            // and fails to resolve. Fall back to the plain emitter for tuple
+            // fields (no name to look up).
+            let (field_name, value_cpp) = match &field.member {
+                syn::Member::Named(ident) => {
+                    let field_ty = self.lookup_struct_field_type(owner, &ident.to_string());
+                    (
+                        escape_cpp_keyword(&ident.to_string()),
+                        self.emit_expr_to_string_with_expected(&field.expr, field_ty.as_ref()),
+                    )
+                }
+                syn::Member::Unnamed(idx) => (
+                    format!("_{}", idx.index),
+                    self.emit_expr_to_string(&field.expr),
+                ),
             };
-            let value_cpp = self.emit_expr_to_string(&field.expr);
             inits.push(format!("{}({})", field_name, value_cpp));
         }
 
