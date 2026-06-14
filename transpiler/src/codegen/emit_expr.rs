@@ -8143,8 +8143,20 @@ impl CodeGen {
             //  return type 'None_t' when lambda expression has unspecified
             //  explicit return type". Surfaced by itertools' binomial /
             //  mixed-radix counters in `combinations` / `cartesian_product`.
+            //
+            // The lhs is passed as a forwarding PARAMETER rather than bound in
+            // the body, so the explicit return type can spell the element type
+            // as `decltype(_checked_lhs)` (a plain id-expression) instead of
+            // `decltype((<receiver>))`. When `<receiver>` is itself a
+            // statement-expression (e.g. a nested `RUSTY_TRY_OPT(...)`),
+            // embedding it inside a `decltype` that is then serialized into a
+            // C++23 module BMI crashes clang's lazy AST deserializer
+            // (StmtProfiler walks the not-yet-deserialized embedded DeclStmt →
+            // SIGSEGV). Referencing the parameter keeps the statement-
+            // expression out of every `decltype`. See memory
+            // `itertools-clang-crash-rootcause`.
             return format!(
-                "[&]() -> rusty::Option<std::remove_cvref_t<decltype(({0}))>> {{ auto&& _checked_lhs = {0}; return rusty::{1}(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>({2})); }}()",
+                "[&](auto&& _checked_lhs) -> rusty::Option<std::remove_cvref_t<decltype(_checked_lhs)>> {{ return rusty::{1}(_checked_lhs, static_cast<std::remove_cvref_t<decltype((_checked_lhs))>>({2})); }}({0})",
                 receiver, method_name, args[0]
             );
         }
