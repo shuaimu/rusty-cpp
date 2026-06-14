@@ -4710,15 +4710,24 @@ impl CodeGen {
                     if !self.local_declared_types.contains(&raw_self_name) {
                         continue;
                     }
-                    // The trait must be locally declared too — we need its
-                    // Interface class name to inherit from. Foreign-trait
-                    // impls (e.g. impl serde::Serialize for Local) are not
-                    // handled in Phase 3.
-                    if !self
+                    // We need the trait's Interface class name to inherit
+                    // from. For a locally-declared trait we have it. Under
+                    // inline-rust, each `#if RUSTYCPP_RUST` block is transpiled
+                    // independently, so a trait declared in a *different* block
+                    // won't be in `trait_declared_paths` even though its C++
+                    // class is emitted earlier in the same file. Accept such
+                    // cross-block traits — they are referenced by a bare
+                    // single-segment name and the Adapter inherits
+                    // `class <trait_name>` (emitted by the trait's block).
+                    // Still skip qualified foreign-trait impls
+                    // (e.g. `impl serde::Serialize for Local`), which have no
+                    // local Interface class to inherit from.
+                    let trait_locally_declared = self
                         .trait_declared_paths
                         .iter()
-                        .any(|p| p.ends_with(&trait_name))
-                    {
+                        .any(|p| p.ends_with(&trait_name));
+                    let trait_is_qualified = trait_path.segments.len() > 1;
+                    if !trait_locally_declared && trait_is_qualified {
                         continue;
                     }
 
