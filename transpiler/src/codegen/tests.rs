@@ -31481,3 +31481,35 @@ fn test_vec_into_iter_module_import_injection() {
     );
 }
 
+// `vec![Ok(..), Err(..)].into_iter()` returning `std::vec::IntoIter<Result<..>>`
+// must construct its elements as the Vec's element type (`Result<..>`), not
+// qualify them with the function's `IntoIter<..>` return type. The `vec!`
+// macro lowers to a slice/boxed `into_vec(..)` constructor whose `.into_iter()`
+// receiver must be typed `Vec<Result<..>>` so the element type propagates.
+#[test]
+fn test_vec_ok_err_into_iter_return_uses_result_element_owner() {
+    let out = transpile_str(
+        "pub fn mix_data() -> std::vec::IntoIter<Result<i32, bool>> { \
+            <[_]>::into_vec(::std::boxed::Box::new([Ok(1), Err(false), Ok(2)])).into_iter() \
+        }",
+    );
+    assert!(
+        out.contains("rusty::Result<int32_t, bool>::Ok("),
+        "Ok element should construct the Vec element Result type:\n{out}"
+    );
+    assert!(
+        out.contains("rusty::Result<int32_t, bool>::Err("),
+        "Err element should construct the Vec element Result type:\n{out}"
+    );
+    // The element ctor must NOT be qualified with the `IntoIter<..>` /
+    // `decltype(rusty::iter(..))` return type owner.
+    assert!(
+        !out.contains(")::Ok("),
+        "Ok wrongly qualified with a decltype/IntoIter owner:\n{out}"
+    );
+    assert!(
+        !out.contains("IntoIter<rusty::Result<int32_t, bool>>::Ok"),
+        "Ok wrongly qualified with the IntoIter return type:\n{out}"
+    );
+}
+

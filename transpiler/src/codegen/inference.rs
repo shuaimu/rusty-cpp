@@ -9355,6 +9355,22 @@ impl CodeGen {
         let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
             return None;
         };
+        // The `vec![..]` macro lowers (via `cargo expand`) to a slice/boxed
+        // constructor — `<[_]>::into_vec(..)` or
+        // `::alloc::boxed::box_assume_init_into_vec_unsafe(..)` — that yields a
+        // `Vec<T>`. Typing its `.into_iter()` receiver as `Vec<item>` lets the
+        // element type flow into the constructed elements; otherwise the
+        // receiver falls back to the function's `IntoIter<T>` return type and
+        // `vec![Ok(..), Err(..)]` elements wrongly qualify as
+        // `IntoIter<Result<..>>::Ok(..)`.
+        if path_expr
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident.to_string().contains("into_vec"))
+        {
+            return Some(parse_quote!(Vec<#item_ty>));
+        }
         if path_expr.path.segments.len() < 2 {
             return None;
         }
