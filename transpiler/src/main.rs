@@ -3618,6 +3618,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     }
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
+        is_dependency: false,
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
@@ -3696,6 +3697,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 continue;
             }
             let mut dep_options = transpile_options.clone();
+            dep_options.is_dependency = true;
             dep_options.external_crate_module_aliases = flattened_dependency_aliases
                 .iter()
                 .filter_map(|(crate_name, mapped)| {
@@ -4061,6 +4063,7 @@ fn main() {
     };
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: cli.by_value_cycle_breaking_prototype,
+        is_dependency: false,
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),

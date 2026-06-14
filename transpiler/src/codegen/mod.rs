@@ -541,6 +541,12 @@ pub struct CodeGen {
     /// chokepoint, with an accurate full-module line number — the embedded
     /// fragment text still flows up and is caught by the parent's `into_output`.
     pub(crate) is_sub_codegen: bool,
+    /// True when this module is a transpiled dependency (not the crate under
+    /// test). The strict-auto `<auto>` backstop in `into_output` is skipped for
+    /// dependencies: a leak in a *used* dep surfaces at the C++ compile stage,
+    /// and leaks in dependencies that aren't compiled are harmless — so a
+    /// transpile-time panic there would be a false failure.
+    pub(crate) is_dependency_module: bool,
     /// Per-function type-inference state. Constructed at the entry
     /// of `emit_function` (and equivalent entry points), populated by
     /// the constraint collector in `type_solver`, then solved before
@@ -1346,6 +1352,7 @@ impl CodeGen {
             output: String::new(),
             indent: 0,
             is_sub_codegen: false,
+            is_dependency_module: false,
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
@@ -1744,16 +1751,27 @@ impl CodeGen {
         // emit_method_call_template_args) resolve or drop earlier with finer
         // context; this catches every remaining path at the single output
         // chokepoint.
-        if !self.is_sub_codegen {
+        if !self.is_sub_codegen && !self.is_dependency_module {
             if let Some((line_no, text)) = find_invalid_auto_template_arg(&self.output) {
-                panic!(
-                    "rusty-cpp: invalid `auto` template argument leaked into emitted \
-                     C++ at output line {line_no}: `{text}`. An unresolved \
-                     type-inference placeholder (e.g. a `Vec<_>::new()` whose element \
-                     type could not be deduced) was emitted where C++ requires a \
-                     concrete type. Resolve the inference gap or guard the emission \
-                     site.",
-                );
+                // Debug aid for fixing leaks (default behavior unchanged): when
+                // `RUSTY_CPP_DUMP_AUTO` is set, emit the leak to stderr and let
+                // the (broken) output through so the surrounding context can be
+                // inspected, instead of panicking.
+                if std::env::var("RUSTY_CPP_DUMP_AUTO").is_ok() {
+                    eprintln!(
+                        "rusty-cpp DUMP_AUTO: invalid `auto` template argument at \
+                         output line {line_no}: `{text}`"
+                    );
+                } else {
+                    panic!(
+                        "rusty-cpp: invalid `auto` template argument leaked into emitted \
+                         C++ at output line {line_no}: `{text}`. An unresolved \
+                         type-inference placeholder (e.g. a `Vec<_>::new()` whose element \
+                         type could not be deduced) was emitted where C++ requires a \
+                         concrete type. Resolve the inference gap or guard the emission \
+                         site.",
+                    );
+                }
             }
         }
         self.output
@@ -1830,6 +1848,10 @@ impl CodeGen {
     /// candidate feedback edges selected by the prototype planner.
     pub fn set_by_value_cycle_breaking_prototype(&mut self, enabled: bool) {
         self.enable_by_value_cycle_breaking_prototype = enabled;
+    }
+
+    pub fn set_is_dependency_module(&mut self, is_dependency: bool) {
+        self.is_dependency_module = is_dependency;
     }
 
     pub fn set_cpp_module_member_symbols(
@@ -16543,8 +16565,7 @@ impl CodeGen {
         let syn::Expr::Call(call) = inner else {
             return None;
         };
-        // Recognize an empty owner constructor: a 2+ segment path ending in a
-        // nullary/empty constructor name.
+        // Recognize an associated constructor call: a 2+ segment path.
         let syn::Expr::Path(func_path) = call.func.as_ref() else {
             return None;
         };
@@ -16552,21 +16573,23 @@ impl CodeGen {
             return None;
         }
         let ctor = func_path.path.segments.last()?.ident.to_string();
-        if !matches!(
-            ctor.as_str(),
-            "new" | "new_" | "new_const" | "with_capacity" | "default" | "default_"
-        ) {
-            return None;
-        }
         // Emit the peer container directly (peeling its `&`/`*` wrappers) so the
         // decltype sees the underlying value rather than the assert scaffolding's
         // borrow form.
         let peer = self.emit_expr_to_string(self.peel_reference_deref_paren_expr(peer_expr));
         if had_deref {
+            // Deref shape (`&*vec` vs `&*Vec::new()`): the operands are slices;
+            // recover the empty `Vec`'s element from the peer container. Only the
+            // empty `Vec` constructors apply.
             let owner = func_path.path.segments[func_path.path.segments.len() - 2]
                 .ident
                 .to_string();
-            if owner != "Vec" {
+            if owner != "Vec"
+                || !matches!(
+                    ctor.as_str(),
+                    "new" | "new_" | "new_const" | "with_capacity" | "default" | "default_"
+                )
+            {
                 return None;
             }
             let elem = format!("std::remove_cvref_t<decltype(*std::begin({}))>", peer);
@@ -16575,7 +16598,19 @@ impl CodeGen {
                 elem
             ))
         } else {
-            Some(format!("std::remove_cvref_t<decltype({})>::new_()", peer))
+            // No-deref shape (`&var` vs `&Owner::ctor()`): the operands are the
+            // same owner type, so clone the peer's exact type and call the same
+            // *nullary* sentinel constructor (`Vec::new()`, `ArrayVec::new()`,
+            // `NonNull::dangling()`, `X::default()`). Constructors taking
+            // arguments are left alone (we don't re-derive the args here).
+            if !call.args.is_empty() {
+                return None;
+            }
+            let ctor_cpp = escape_cpp_keyword(&ctor);
+            Some(format!(
+                "std::remove_cvref_t<decltype({})>::{}()",
+                peer, ctor_cpp
+            ))
         }
     }
 
@@ -34782,11 +34817,57 @@ fn type_string_contains_auto_template_arg(ty: &str) -> bool {
 /// type. Deliberately EXCLUDES legitimate spellings: `template <auto N>` NTTP
 /// declarations (the `auto` is followed by a parameter identifier, not `,`/`>`)
 /// and abbreviated function-template parameters like `f(auto a)` (the `auto` is
-/// not inside `<...>`). Returns the 1-based line number and trimmed text of the
+/// not inside `<...>`).
+///
+/// Also skips text that is never compiled: `#if 0 … #endif` preprocessor
+/// blocks (e.g. the patcher's stubbed orphan-impl blocks) and `//` / `/* */`
+/// comments. `<auto>` there cannot cause a compile error, so flagging it would
+/// be a false positive. Returns the 1-based line number and trimmed text of the
 /// first offender, for the strict-auto backstop in `into_output`.
 fn find_invalid_auto_template_arg(output: &str) -> Option<(usize, String)> {
+    // `#if 0` dead-region tracking: `skip` > 0 means we're inside a stubbed
+    // block; `nest` counts nested `#if*` so the matching `#endif` exits.
+    let mut skip = false;
+    let mut nest = 0i32;
+    let mut in_block_comment = false;
     for (i, line) in output.lines().enumerate() {
-        let bytes = line.as_bytes();
+        let trimmed = line.trim_start();
+        // Preprocessor directives (ignored while inside a block comment).
+        if !in_block_comment && trimmed.starts_with('#') {
+            let directive = trimmed[1..].trim_start();
+            let first = directive.split(|c: char| c.is_whitespace()).next().unwrap_or("");
+            if skip {
+                if first.starts_with("if") {
+                    nest += 1;
+                } else if first == "endif" {
+                    if nest > 0 {
+                        nest -= 1;
+                    } else {
+                        skip = false;
+                    }
+                } else if nest == 0 && (first == "else" || first == "elif") {
+                    // The else/elif branch of a `#if 0` IS compiled.
+                    skip = false;
+                }
+                continue;
+            }
+            // `#if 0` (optionally followed by a comment) opens a dead region.
+            let rest = directive.strip_prefix("if").map(str::trim_start);
+            if let Some(rest) = rest {
+                let val = rest.split(|c: char| c.is_whitespace()).next().unwrap_or("");
+                if val == "0" {
+                    skip = true;
+                    nest = 0;
+                }
+            }
+            continue; // directives never contain a template argument
+        }
+        if skip {
+            continue;
+        }
+        // Scan the line with `//` and `/* */` comment content removed.
+        let code = strip_cpp_comments(line, &mut in_block_comment);
+        let bytes = code.as_bytes();
         let mut depth = 0i32;
         let mut j = 0usize;
         while j < bytes.len() {
@@ -34820,6 +34901,39 @@ fn find_invalid_auto_template_arg(output: &str) -> Option<(usize, String)> {
         }
     }
     None
+}
+
+/// Return `line` with `//` line-comment and `/* */` block-comment content
+/// removed (replaced by nothing), tracking multi-line block comments via
+/// `in_block_comment`. String-literal contents are not specially handled —
+/// acceptable for the emitted output, which doesn't place `<auto>`-shaped
+/// template args inside string literals.
+fn strip_cpp_comments(line: &str, in_block_comment: &mut bool) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut k = 0usize;
+    while k < bytes.len() {
+        if *in_block_comment {
+            if bytes[k] == b'*' && k + 1 < bytes.len() && bytes[k + 1] == b'/' {
+                *in_block_comment = false;
+                k += 2;
+            } else {
+                k += 1;
+            }
+            continue;
+        }
+        if bytes[k] == b'/' && k + 1 < bytes.len() && bytes[k + 1] == b'/' {
+            break; // rest of line is a comment
+        }
+        if bytes[k] == b'/' && k + 1 < bytes.len() && bytes[k + 1] == b'*' {
+            *in_block_comment = true;
+            k += 2;
+            continue;
+        }
+        out.push(bytes[k] as char);
+        k += 1;
+    }
+    out
 }
 
 fn collapse_redundant_typename_tokens(input: &str) -> String {

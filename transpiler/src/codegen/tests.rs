@@ -29467,17 +29467,14 @@ fn test_leaf105402_const_block_bitor_assign_emits_operator_or_assign() {
 }
 
 #[test]
-#[should_panic(expected = "invalid `auto` template argument leaked")]
 fn test_leaf105403_qself_parse_hex_call_lowers_to_runtime_helper_template() {
-    // The qself call `<u8>::parse_hex(flag)` lowers to `rusty::parse_hex<uint8_t>`,
-    // but the impl-for-u8 method's `Result<Self, ()>` return type currently leaks
-    // `rusty::Result<auto, std::tuple<>>` — `Self` is not substituted to `uint8_t`
-    // in this impl-method return position. That is a separate Self-substitution
-    // gap (distinct from the Vec-element inference gap), and the unconditional
-    // strict-auto backstop now rejects the invalid `<auto>` instead of emitting
-    // uncompilable C++. The generic helper's correct `Result<T, ...>` form is
-    // covered by test_leaf105403 sibling assertions.
-    let _ = transpile_str(
+    // The qself call `<u8>::parse_hex(flag)` lowers to `rusty::parse_hex<uint8_t>`.
+    // The impl-for-u8 method's `Result<Self, ()>` return type does leak
+    // `rusty::Result<auto, std::tuple<>>` (Self not substituted to uint8_t), but
+    // that method is emitted inside a `#if 0`-stubbed orphan-impl block (u8's host
+    // type lives elsewhere), so it is never compiled and the strict-auto backstop
+    // correctly ignores it. The live call lowering must still be emitted.
+    let out = transpile_str(
         r#"
         trait ParseHex {
             fn parse_hex(input: &str) -> Result<Self, ()> where Self: Sized;
@@ -29489,6 +29486,10 @@ fn test_leaf105403_qself_parse_hex_call_lowers_to_runtime_helper_template() {
             let _ = <u8>::parse_hex(flag);
         }
         "#,
+    );
+    assert!(
+        out.contains("rusty::parse_hex<uint8_t>("),
+        "qself parse_hex call should lower to rusty::parse_hex<T>(...)\nGot: {out}"
     );
 }
 
@@ -31531,6 +31532,28 @@ fn test_find_invalid_auto_template_arg_allows_legitimate_auto() {
     assert!(find_invalid_auto_template_arg("const auto& x = y;").is_none());
     assert!(find_invalid_auto_template_arg("auto&& v = make();").is_none());
     assert!(find_invalid_auto_template_arg("std::vector<int32_t> v;").is_none());
+}
+
+#[test]
+fn test_find_invalid_auto_template_arg_skips_dead_code_and_comments() {
+    // `<auto>` inside a `#if 0 ... #endif` block is never compiled (the
+    // patcher's stubbed orphan-impl blocks) — not a real leak.
+    let dead = "#if 0\nauto x = rusty::Vec<auto>::new_();\n#endif\nint y = 0;\n";
+    assert!(find_invalid_auto_template_arg(dead).is_none());
+    // Nested `#if` inside the dead region still resolves to the right `#endif`.
+    let nested = "#if 0\n#ifdef FOO\nrusty::Vec<auto>::new_();\n#endif\n#endif\nok();\n";
+    assert!(find_invalid_auto_template_arg(nested).is_none());
+    // `<auto>` in a line comment or block comment is not a leak.
+    assert!(find_invalid_auto_template_arg("int z = 0; // rusty::Vec<auto>::new_()").is_none());
+    assert!(find_invalid_auto_template_arg("/* rusty::Vec<auto> */ int w = 0;").is_none());
+    let multiline_comment = "/* leak here:\nrusty::Vec<auto>::new_()\nstill comment */ int q;\n";
+    assert!(find_invalid_auto_template_arg(multiline_comment).is_none());
+    // But a real `<auto>` in LIVE code after a closed `#if 0` is still caught.
+    let live = "#if 0\nrusty::Vec<auto>::new_();\n#endif\nrusty::Vec<auto>::new_();\n";
+    assert_eq!(find_invalid_auto_template_arg(live).map(|(n, _)| n), Some(4));
+    // The `#else` branch of a `#if 0` is live, so a leak there is caught.
+    let else_live = "#if 0\nok();\n#else\nrusty::Vec<auto>::new_();\n#endif\n";
+    assert_eq!(find_invalid_auto_template_arg(else_live).map(|(n, _)| n), Some(4));
 }
 
 #[test]

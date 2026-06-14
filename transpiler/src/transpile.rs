@@ -129,12 +129,20 @@ pub struct TranspileOptions {
     /// to the sibling's namespace. Option 2 in rusty-std-book §2.10's
     /// fix matrix — the spec-correct rendering of Rust's module tree.
     pub auto_namespace: bool,
+    /// True when transpiling a dependency crate (not the crate under test).
+    /// The strict-auto `<auto>` backstop is skipped for dependency output:
+    /// a leak in a *used* dependency surfaces at the C++ compile stage anyway,
+    /// while leaks in dependencies that aren't compiled (e.g. an unused
+    /// dev-dependency) are harmless — so a transpile-time panic there is a
+    /// false failure. The backstop still fires for the crate under test.
+    pub is_dependency: bool,
 }
 
 impl Default for TranspileOptions {
     fn default() -> Self {
         Self {
             by_value_cycle_breaking_prototype: false,
+            is_dependency: false,
             cpp_module_symbol_index: None,
             cpp_module_symbol_index_sources: Vec::new(),
             external_crate_module_aliases: HashMap::new(),
@@ -502,6 +510,7 @@ pub fn transpile_full_with_options(
         codegen.set_crate_name(name);
     }
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
+    codegen.set_is_dependency_module(options.is_dependency);
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
     codegen.set_cxx_namespace(options.cxx_namespace.clone());
