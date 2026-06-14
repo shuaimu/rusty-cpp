@@ -524,36 +524,21 @@ impl CodeGen {
         // `#[cpp_inherit] impl Trait for ThisType` (recorded in
         // cpp_inherit_trait during collection) → emit `struct ThisType :
         // public Trait { ... }` with direct C++ inheritance instead of the
-        // default TraitAdapter wrapper. Resolve the trait's absolute C++
-        // base-class spelling once, reused for the base clause and the
-        // synthesized ctors' base-init. Falls back to the bare trait name
-        // for cross-block inline-rust traits (declared in a sibling block,
-        // so absent from trait_declared_path_by_short_name).
-        let cpp_inherit_base: Option<String> = {
-            let scoped_key = self.scoped_type_key(&name_str);
-            let trait_short = self
-                .cpp_inherit_trait
-                .get(&name_str)
-                .or_else(|| self.cpp_inherit_trait.get(&scoped_key))
-                .cloned();
-            trait_short.map(|trait_short| {
-                match self
-                    .trait_declared_path_by_short_name
-                    .get(&trait_short)
-                    .cloned()
-                {
-                    Some(qualified) => {
-                        let escaped = self.escape_and_rename_qualified_name(&qualified);
-                        if escaped.contains("::") {
-                            format!("::{}", escaped)
-                        } else {
-                            escaped
-                        }
-                    }
-                    None => trait_short,
-                }
+        // default TraitAdapter wrapper. The base spelling is reused for the
+        // base clause and the synthesized/cpp_ctor base-init.
+        let cpp_inherit_base: Option<String> = self.cpp_inherit_base_name(&name_str);
+        // When a `#[cpp_inherit]` type ALSO has a `#[cpp_ctor]` factory, the
+        // custom ctor takes over construction: suppress the synthesized
+        // fieldwise + move ctor (a single fieldwise ctor can't supply the
+        // default/parametrized ctors that `make_shared<X>(args)` call sites
+        // need, and would collide with the custom one). The implicit move
+        // ctor then handles moves — and correctly moves a stateful base,
+        // unlike the synthesized reconstruct-the-base move ctor.
+        let has_cpp_ctor_method = merged_impl_items.as_ref().is_some_and(|items| {
+            items.iter().any(|it| {
+                matches!(it, syn::ImplItem::Fn(m) if Self::has_cpp_ctor_attr(&m.attrs))
             })
-        };
+        });
         let reserved_member_names: HashSet<String> = merged_impl_items
             .as_ref()
             .map(|items| {
@@ -1082,7 +1067,7 @@ impl CodeGen {
         // named-fields case is handled (the inheritance migrations are all
         // record-shaped); unit/tuple cpp_inherit types fall through unchanged.
         if let Some(base) = &cpp_inherit_base {
-            if !has_drop_impl {
+            if !has_drop_impl && !has_cpp_ctor_method {
                 if let syn::Fields::Named(fields) = &s.fields {
                     let member_of = |rust_name: &str| -> String {
                         named_field_cpp_names

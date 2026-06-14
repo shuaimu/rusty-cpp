@@ -15106,6 +15106,13 @@ impl CodeGen {
         }
 
         let mut inits: Vec<String> = Vec::new();
+        // For a `#[cpp_inherit]` owner the C++ ctor must construct its base
+        // subobject first: `Owner(args) : Base(), field(e)...`. Without this
+        // the base is value-initialized only when it happens to have an
+        // accessible default ctor — bases without one would fail to compile.
+        if let Some(base) = self.cpp_inherit_base_name(owner) {
+            inits.push(format!("{}()", base));
+        }
         for field in &struct_lit.fields {
             let field_name = match &field.member {
                 syn::Member::Named(ident) => escape_cpp_keyword(&ident.to_string()),
