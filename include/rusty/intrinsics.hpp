@@ -26,9 +26,29 @@ inline void assume(bool cond) noexcept {
 #endif
 }
 
-// `likely(b)` / `unlikely(b)` — branch hints. Pure pass-through.
-inline constexpr bool likely(bool b) noexcept { return b; }
-inline constexpr bool unlikely(bool b) noexcept { return b; }
+// `likely(b)` / `unlikely(b)` — branch hints.
+//
+// These names are commonly function-like macros (`__builtin_expect(!!(x), ...)`)
+// in lower-level headers that may be active in the same TU (eRPC's common.h,
+// Masstree's compiler.hh, Linux-kernel-style code). Such a macro textually
+// rewrites the definitions below into `__builtin_expect(...)` and breaks the
+// build ("expected ')'"). Fence the definitions: save and #undef any such
+// macro, define, then restore it so downstream macro users are unaffected.
+// push_macro/pop_macro are no-ops when no such macro is present. (Same guard
+// libc++ uses for std::min/std::max via _LIBCPP_PUSH_MACROS.)
+//
+// NOTE: since the macro is restored afterward, do not add a *qualified*
+// `rusty::intrinsics::likely(x)` call in a TU where such a macro is live.
+#pragma push_macro("likely")
+#pragma push_macro("unlikely")
+#undef likely
+#undef unlikely
+
+inline constexpr bool likely(bool b)   noexcept { return __builtin_expect(b, 1); }
+inline constexpr bool unlikely(bool b) noexcept { return __builtin_expect(b, 0); }
+
+#pragma pop_macro("unlikely")
+#pragma pop_macro("likely")
 
 } // namespace intrinsics
 } // namespace rusty
