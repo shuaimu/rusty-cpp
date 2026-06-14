@@ -391,6 +391,26 @@ impl CodeGen {
         attrs.iter().any(|a| a.path().is_ident("cpp_ctor"))
     }
 
+    /// `#[cpp_inherit]` on an `impl Trait for Type` opts that impl into
+    /// direct C++ inheritance: the concrete `Type` is emitted as
+    /// `struct Type : public Trait { ... override ... }` (with a synthesized
+    /// fieldwise + move ctor) instead of the default `TraitAdapter<Type>`
+    /// wrapper, so existing call sites that upcast `Arc<Type>` /
+    /// `shared_ptr<Type>` to the trait base keep compiling. Opt-in only.
+    pub(super) fn has_cpp_inherit_attr(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|a| a.path().is_ident("cpp_inherit"))
+    }
+
+    /// True when `type_name`'s simple name was recorded (via a
+    /// `#[cpp_inherit]` impl) as using direct-inheritance emission.
+    /// Checks both the bare name and the module-scoped key.
+    pub(super) fn is_cpp_inherit_type(&self, type_name: &str) -> bool {
+        self.cpp_inherit_trait.contains_key(type_name)
+            || self
+                .cpp_inherit_trait
+                .contains_key(&self.scoped_type_key(type_name))
+    }
+
     /// Skip items behind `#[cfg(...)]` when the predicate is known-false in
     /// transpiler mode. Unknown predicates are kept conservatively.
     pub(super) fn should_skip_cfg_attrs(attrs: &[syn::Attribute]) -> bool {

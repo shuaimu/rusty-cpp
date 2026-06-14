@@ -1046,6 +1046,13 @@ pub struct CodeGen {
     /// `trait_declared_paths` to avoid O(n_paths) scans per supertrait
     /// lookup. Invalidated when `trait_declared_paths` changes.
     pub(crate) trait_declared_path_by_short_name: HashMap<String, String>,
+    /// Maps a concrete type's simple name (e.g. `OneTimeJob`) to the short
+    /// name of a trait it implements via `#[cpp_inherit] impl Trait for Type`.
+    /// When present, `emit_struct` emits `struct Type : public Trait { ... }`
+    /// (direct C++ inheritance + override) plus a synthesized fieldwise/move
+    /// ctor, and the 3 `TraitAdapter<Type>` specializations are suppressed.
+    /// Opt-in only — absent types keep the default adapter-wrapper emission.
+    pub(crate) cpp_inherit_trait: HashMap<String, String>,
     /// Tracks `(trait_name, self_cpp)` pairs we've already emitted
     /// Adapter specs for under `--interface-traits`. Prevents duplicate
     /// `template <> class TraitAdapter<U>` definitions when the same
@@ -1488,6 +1495,7 @@ impl CodeGen {
             trait_class_skipped_method_keys: HashSet::new(),
             trait_associated_type_names: HashMap::new(),
             trait_declared_path_by_short_name: HashMap::new(),
+            cpp_inherit_trait: HashMap::new(),
             emitted_foreign_adapter_specs: HashSet::new(),
             crate_name: None,
             module_stack: Vec::new(),
@@ -2058,6 +2066,7 @@ impl CodeGen {
         self.trait_class_skipped_method_keys.clear();
         self.trait_associated_type_names.clear();
         self.trait_declared_path_by_short_name.clear();
+        self.cpp_inherit_trait.clear();
         self.emitted_foreign_adapter_specs.clear();
         self.numeric_type_aliases.clear();
         self.tuple_type_aliases.clear();
