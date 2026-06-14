@@ -9877,6 +9877,16 @@ impl CodeGen {
         {
             return Some(from_reducer_acc.clone());
         }
+        // When the accumulator is an element-less `Vec::new()` and the
+        // reducer pushes a typed value (`|mut acc, v: I::Item| { acc.push(v); acc }`),
+        // the accumulator param itself carries no annotation, so the
+        // check above misses it. Resolve the element type via the
+        // constraint solver from the reducer's body/params and return
+        // the recovered `Vec<Elem>` so the init emits a concrete owner
+        // instead of leaking `rusty::Vec<auto>`.
+        if let Some(vec_acc_ty) = self.infer_fold_vec_accumulator_expected_type(mc) {
+            return Some(vec_acc_ty);
+        }
         let contextual_expected_ty = call_expected_ty.or(self.current_return_type_hint());
         let from_call_expected = if is_try_fold {
             contextual_expected_ty
@@ -9909,6 +9919,82 @@ impl CodeGen {
             return Some(counting_hint);
         }
         None
+    }
+
+    /// Resolve the expected type of a `fold`/`rfold` accumulator that
+    /// is an element-less `Vec::new()` whose element type is revealed
+    /// only by the reducer (a typed param and/or `acc.push(x)` in the
+    /// body). Drives the constraint solver
+    /// (`type_solver::infer_owner_accumulator_element_from_reducer`)
+    /// and returns `Vec<Elem>` when the engine pins the element, else
+    /// `None`. The resulting type may legitimately reference an
+    /// in-scope type parameter (e.g. `Vec<I::Item>` →
+    /// `rusty::Vec<rusty::detail::associated_item_t<I>>`), so it is
+    /// validated with the scoped-generics-permitting candidate check
+    /// rather than the concrete-only one.
+    pub(super) fn infer_fold_vec_accumulator_expected_type(
+        &self,
+        mc: &syn::ExprMethodCall,
+    ) -> Option<syn::Type> {
+        if mc.args.len() != 2 {
+            return None;
+        }
+        let init = self.peel_paren_group_expr(&mc.args[0]);
+        let syn::Expr::Call(init_call) = init else {
+            return None;
+        };
+        let owner_head = super::type_solver::owner_constructor_head(init_call)?;
+        let reducer = self.peel_paren_group_expr(&mc.args[1]);
+        let syn::Expr::Closure(reducer) = reducer else {
+            return None;
+        };
+        let item_hint = self
+            .infer_iter_item_type_with_generic_fallback(&mc.receiver)
+            .filter(|t| self.type_is_placeholder_hint_candidate_allow_scoped_generics(t));
+        let elem = super::type_solver::infer_owner_accumulator_element_from_reducer(
+            reducer,
+            &owner_head,
+            item_hint.as_ref(),
+        )?;
+        if !self.type_is_placeholder_hint_candidate_allow_scoped_generics(&elem) {
+            return None;
+        }
+        Some(parse_quote!(Vec<#elem>))
+    }
+
+    /// Iterator item type of `expr`, falling back to `P::Item` when the
+    /// receiver is a bare local/param whose type is an in-scope generic
+    /// type parameter `P` (e.g. `fn f<I: Iterator>(i: I)` → `I::Item`,
+    /// which maps to `rusty::detail::associated_item_t<I>`).
+    /// `infer_iter_item_type_from_expr` handles concrete iterator types;
+    /// this adds the generic-iterator-parameter case that the structural
+    /// `extract_iter_item_type_from_type` can't see.
+    pub(super) fn infer_iter_item_type_with_generic_fallback(
+        &self,
+        expr: &syn::Expr,
+    ) -> Option<syn::Type> {
+        if let Some(item) = self.infer_iter_item_type_from_expr(expr) {
+            return Some(item);
+        }
+        let peeled = self.peel_paren_group_expr(expr);
+        let syn::Expr::Path(p) = peeled else {
+            return None;
+        };
+        if p.qself.is_some() || p.path.segments.len() != 1 {
+            return None;
+        }
+        let recv_ty = self.lookup_local_binding_type(&p.path.segments[0].ident.to_string())?;
+        let syn::Type::Path(tp) = &recv_ty else {
+            return None;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return None;
+        }
+        let param_name = tp.path.segments[0].ident.to_string();
+        if !self.is_type_param_in_scope(&param_name) {
+            return None;
+        }
+        Some(parse_quote!(#recv_ty::Item))
     }
 
     pub(super) fn infer_byte_write_expected_type_from_receiver_hint(

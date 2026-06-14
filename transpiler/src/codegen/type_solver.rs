@@ -40,6 +40,13 @@ use std::fmt;
 use syn::visit::Visit;
 use syn::Type;
 
+/// Callback supplying the element (item) type of a receiver iterator
+/// expression — backed by `CodeGen::infer_iter_item_type_from_expr`.
+/// Used by the block walk to pin closure item-parameters and `extend`
+/// element types that the pure-structural pass can't see. `None` when
+/// the item type can't be determined.
+pub(crate) type ItemResolver<'a> = dyn Fn(&syn::Expr) -> Option<Type> + 'a;
+
 /// Identifier for a free type variable allocated by the engine.
 ///
 /// Variables are dense, monotonically-issued `usize` keys. A
@@ -439,6 +446,13 @@ pub(crate) struct ConstraintCollector<'ctx> {
     /// the corresponding type variables instead of concrete
     /// types.
     binders: HashMap<String, TyVarId>,
+    /// Value bindings in scope (let locals, closure params) mapped to
+    /// the type variable representing each binding's type. Lets
+    /// `summarize_expr` lower a bare identifier reference to the same
+    /// variable other constraints pin, so e.g. `acc.push(v)` ties the
+    /// accumulator's element to `v`'s type. Empty for the original
+    /// if/else-merge callers; populated by the owner-usage queries.
+    env: HashMap<String, TyVarId>,
     /// Fresh variable used as a synthetic "anything" placeholder
     /// for expressions whose type we don't reconstruct yet. Reset
     /// per expression by `fresh_expr_var`.
@@ -450,6 +464,7 @@ impl<'ctx> ConstraintCollector<'ctx> {
         Self {
             ctx,
             binders: HashMap::new(),
+            env: HashMap::new(),
             expr_var_buffer: Vec::new(),
         }
     }
@@ -461,6 +476,7 @@ impl<'ctx> ConstraintCollector<'ctx> {
         Self {
             ctx,
             binders,
+            env: HashMap::new(),
             expr_var_buffer: Vec::new(),
         }
     }
@@ -516,6 +532,22 @@ impl<'ctx> ConstraintCollector<'ctx> {
                 }
                 TyTerm::Var(self.fresh_expr_var())
             }
+            syn::Expr::Path(p)
+                if p.qself.is_none()
+                    && p.path.segments.len() == 1
+                    && matches!(p.path.segments[0].arguments, syn::PathArguments::None) =>
+            {
+                // A bare identifier reference: lower to the variable
+                // representing that binding's type when it is in scope
+                // (a let local or closure param). This is what lets
+                // `acc.push(v)` tie the accumulator's element to `v`'s
+                // type. Unknown identifiers stay a fresh variable.
+                let name = p.path.segments[0].ident.to_string();
+                match self.env.get(&name) {
+                    Some(v) => TyTerm::Var(*v),
+                    None => TyTerm::Var(self.fresh_expr_var()),
+                }
+            }
             syn::Expr::Call(call) => {
                 // Recognize `Enum::Variant(arg)` shapes. For enums
                 // whose variants each fix a distinct type
@@ -539,7 +571,50 @@ impl<'ctx> ConstraintCollector<'ctx> {
                 if let Some(term) = self.recognize_variant_constructor_call(call) {
                     return term;
                 }
+                // A `Vec::new()` / `Vec::with_capacity(n)` /
+                // `Vec::default()` constructor with no element argument:
+                // an owner with a fresh, as-yet-unknown element.
+                if let Some(head) = owner_constructor_head(call) {
+                    return TyTerm::App {
+                        head,
+                        args: vec![TyTerm::Var(self.fresh_expr_var())],
+                    };
+                }
                 TyTerm::Var(self.fresh_expr_var())
+            }
+            syn::Expr::Reference(r) => {
+                // `&e` / `&mut e` — model as `App("&", [typeof(e)])`
+                // (lifetimes/mutability erased per §13.4) so an element
+                // pushed by reference resolves to a reference type
+                // rather than silently dropping the `&`.
+                let inner = self.summarize_expr(&r.expr);
+                TyTerm::App {
+                    head: "&".to_string(),
+                    args: vec![inner],
+                }
+            }
+            syn::Expr::Tuple(t) => {
+                // `(a, b, …)` — a tuple term so a pushed tuple resolves
+                // its element to `(typeof(a), typeof(b), …)`.
+                let args = t.elems.iter().map(|e| self.summarize_expr(e)).collect();
+                TyTerm::App {
+                    head: "tuple".to_string(),
+                    args,
+                }
+            }
+            syn::Expr::Paren(p) => self.summarize_expr(&p.expr),
+            syn::Expr::Group(g) => self.summarize_expr(&g.expr),
+            syn::Expr::Lit(lit) => {
+                lit_tyterm(&lit.lit).unwrap_or_else(|| TyTerm::Var(self.fresh_expr_var()))
+            }
+            syn::Expr::MethodCall(mc)
+                if mc.args.is_empty()
+                    && matches!(mc.method.to_string().as_str(), "clone" | "to_owned") =>
+            {
+                // `x.clone()` / `x.to_owned()` preserve the receiver's
+                // type for element-inference purposes (the engine erases
+                // the owned/borrowed distinction per §13.4).
+                self.summarize_expr(&mc.receiver)
             }
             _ => TyTerm::Var(self.fresh_expr_var()),
         }
@@ -626,6 +701,326 @@ impl<'ctx> ConstraintCollector<'ctx> {
         }
         TyTerm::Var(merge)
     }
+
+    /// Walk `expr` collecting element constraints from mutating method
+    /// calls on owner bindings in `env` — `recv.push(arg)` /
+    /// `recv.push_back(arg)` / `recv.push_front(arg)` pin the
+    /// receiver's element to `arg`'s type. Recurses through the
+    /// expression/statement shapes a reducer or block body uses.
+    /// Anything unrecognized is skipped (incomplete, never incorrect).
+    fn collect_owner_method_usage(&mut self, expr: &syn::Expr) {
+        match expr {
+            syn::Expr::Block(b) => self.collect_owner_method_usage_block(&b.block),
+            syn::Expr::MethodCall(mc) => {
+                self.collect_owner_method_usage(&mc.receiver);
+                for a in &mc.args {
+                    self.collect_owner_method_usage(a);
+                }
+                self.record_owner_push_constraint(mc);
+            }
+            syn::Expr::If(e) => {
+                self.collect_owner_method_usage(&e.cond);
+                self.collect_owner_method_usage_block(&e.then_branch);
+                if let Some((_, els)) = &e.else_branch {
+                    self.collect_owner_method_usage(els);
+                }
+            }
+            syn::Expr::Match(e) => {
+                self.collect_owner_method_usage(&e.expr);
+                for arm in &e.arms {
+                    self.collect_owner_method_usage(&arm.body);
+                }
+            }
+            syn::Expr::ForLoop(e) => {
+                self.collect_owner_method_usage(&e.expr);
+                self.collect_owner_method_usage_block(&e.body);
+            }
+            syn::Expr::While(e) => {
+                self.collect_owner_method_usage(&e.cond);
+                self.collect_owner_method_usage_block(&e.body);
+            }
+            syn::Expr::Loop(e) => self.collect_owner_method_usage_block(&e.body),
+            syn::Expr::Paren(e) => self.collect_owner_method_usage(&e.expr),
+            syn::Expr::Group(e) => self.collect_owner_method_usage(&e.expr),
+            syn::Expr::Reference(e) => self.collect_owner_method_usage(&e.expr),
+            syn::Expr::Call(c) => {
+                for a in &c.args {
+                    self.collect_owner_method_usage(a);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_owner_method_usage_block(&mut self, block: &syn::Block) {
+        for stmt in &block.stmts {
+            match stmt {
+                syn::Stmt::Expr(e, _) => self.collect_owner_method_usage(e),
+                syn::Stmt::Local(l) => {
+                    if let Some(init) = &l.init {
+                        self.collect_owner_method_usage(&init.expr);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// If `mc` is `recv.push(arg)` (or push_back/push_front) where
+    /// `recv` is a bare identifier bound in `env`, constrain the
+    /// receiver to `App("Vec", [typeof(arg)])` so its element type
+    /// unifies with the pushed value's type.
+    fn record_owner_push_constraint(&mut self, mc: &syn::ExprMethodCall) {
+        if mc.args.len() != 1 {
+            return;
+        }
+        let method = mc.method.to_string();
+        if !matches!(method.as_str(), "push" | "push_back" | "push_front") {
+            return;
+        }
+        let syn::Expr::Path(p) = &*mc.receiver else {
+            return;
+        };
+        if p.qself.is_some()
+            || p.path.segments.len() != 1
+            || !matches!(p.path.segments[0].arguments, syn::PathArguments::None)
+        {
+            return;
+        }
+        let recv_name = p.path.segments[0].ident.to_string();
+        let Some(&rv) = self.env.get(&recv_name) else {
+            return;
+        };
+        let arg_term = self.summarize_expr(&mc.args[0]);
+        self.ctx.push_constraint(Constraint {
+            lhs: TyTerm::Var(rv),
+            rhs: TyTerm::App {
+                head: "Vec".to_string(),
+                args: vec![arg_term],
+            },
+            origin: ConstraintOrigin::Synthetic("owner-push"),
+        });
+    }
+
+    /// Bind a closure's parameters into `env`, pinning any annotated
+    /// parameter to its declared type. Used by the block walk so that
+    /// references to the parameters inside the body resolve to the same
+    /// variables (e.g. the fold reducer's `acc`/`v`).
+    fn bind_closure_params(&mut self, cl: &syn::ExprClosure) {
+        for input in &cl.inputs {
+            let (name, ann) = closure_param_ident_and_type(input);
+            let Some(name) = name else { continue };
+            let v = self.ctx.fresh_var();
+            self.env.insert(name, v);
+            if let Some(ann) = ann {
+                let term = tyterm_from_syn(ann, &self.binders);
+                self.ctx.push_constraint(Constraint {
+                    lhs: TyTerm::Var(v),
+                    rhs: term,
+                    origin: ConstraintOrigin::Synthetic("closure-param-ann"),
+                });
+            }
+        }
+    }
+
+    /// Walk a block's statements registering `let`-binding variables and
+    /// collecting element/owner constraints from initializers and bodies.
+    /// This is the block-scoped driver behind
+    /// `infer_local_owner_element_from_block`: it must see every `let`
+    /// (to put owner locals in `env`), every closure (to bind params and
+    /// recurse), and every `recv.push(arg)` (to pin elements) — including
+    /// pushes nested inside fold/all reducer closures. `resolver` supplies
+    /// the receiver-iterator item type for closure item-params and
+    /// `extend` arguments (CodeGen's `infer_iter_item_type_from_expr`),
+    /// or `None` when unavailable.
+    fn collect_block_constraints(&mut self, stmts: &[syn::Stmt], resolver: &ItemResolver<'_>) {
+        for stmt in stmts {
+            match stmt {
+                syn::Stmt::Local(local) => self.collect_local_binding(local, resolver),
+                syn::Stmt::Expr(e, _) => self.collect_expr_constraints(e, resolver),
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_local_binding(&mut self, local: &syn::Local, resolver: &ItemResolver<'_>) {
+        let (name, ann) = closure_param_ident_and_type(&local.pat);
+        if let Some(name) = name {
+            let v = self.ctx.fresh_var();
+            self.env.insert(name, v);
+            if let Some(ann) = ann {
+                let term = tyterm_from_syn(ann, &self.binders);
+                self.ctx.push_constraint(Constraint {
+                    lhs: TyTerm::Var(v),
+                    rhs: term,
+                    origin: ConstraintOrigin::LetBinding,
+                });
+            }
+            if let Some(init) = &local.init {
+                let init_term = self.summarize_expr(&init.expr);
+                self.ctx.push_constraint(Constraint {
+                    lhs: TyTerm::Var(v),
+                    rhs: init_term,
+                    origin: ConstraintOrigin::LetBinding,
+                });
+                self.collect_expr_constraints(&init.expr, resolver);
+            }
+        } else if let Some(init) = &local.init {
+            self.collect_expr_constraints(&init.expr, resolver);
+        }
+    }
+
+    /// Pin a closure parameter that is the receiver iterator's element
+    /// (`.all(|x| …)`, `.fold(init, |acc, x| …)`) to that item type, when
+    /// the parameter carries no annotation and `resolver` can supply it.
+    fn pin_iter_item_param(
+        &mut self,
+        receiver: &syn::Expr,
+        closure: &syn::Expr,
+        param_idx: usize,
+        resolver: &ItemResolver<'_>,
+    ) {
+        let syn::Expr::Closure(cl) = peel_expr(closure) else {
+            return;
+        };
+        let Some(p) = cl.inputs.get(param_idx) else {
+            return;
+        };
+        let (Some(pname), ann) = closure_param_ident_and_type(p) else {
+            return;
+        };
+        if ann.is_some() {
+            return; // annotation already pins it
+        }
+        let Some(&pv) = self.env.get(&pname) else {
+            return;
+        };
+        if let Some(item) = resolver(receiver) {
+            self.ctx.push_constraint(Constraint {
+                lhs: TyTerm::Var(pv),
+                rhs: TyTerm::Concrete(item),
+                origin: ConstraintOrigin::Synthetic("iter-item-param"),
+            });
+        }
+    }
+
+    /// Recurse through an expression collecting constraints: bind closure
+    /// params, tie fold/rfold reducer accumulators to their init, pin
+    /// iterator item-params and `extend` element types from `resolver`,
+    /// and record `recv.push(arg)` element constraints. Conservative —
+    /// only the shapes that contribute to owner-element inference walked.
+    fn collect_expr_constraints(&mut self, expr: &syn::Expr, resolver: &ItemResolver<'_>) {
+        match expr {
+            syn::Expr::MethodCall(mc) => {
+                let method = mc.method.to_string();
+                self.collect_expr_constraints(&mc.receiver, resolver);
+                for a in &mc.args {
+                    self.collect_expr_constraints(a, resolver);
+                }
+                self.record_owner_push_constraint(mc);
+                // `recv.extend(it)` — the receiver owner's element type is
+                // the item type of the extended iterator.
+                if method == "extend"
+                    && mc.args.len() == 1
+                    && let Some(rv) = self.receiver_env_var(&mc.receiver)
+                    && let Some(item) = resolver(&mc.args[0])
+                {
+                    self.ctx.push_constraint(Constraint {
+                        lhs: TyTerm::Var(rv),
+                        rhs: TyTerm::App {
+                            head: "Vec".to_string(),
+                            args: vec![TyTerm::Concrete(item)],
+                        },
+                        origin: ConstraintOrigin::Synthetic("owner-extend"),
+                    });
+                }
+                // Iterator-consuming closures: pin the element parameter to
+                // the receiver's item type. `fold`/`rfold` take `|acc, x|`
+                // (item is param 1); `all`/`any`/`for_each` take `|x|`.
+                match method.as_str() {
+                    "fold" | "rfold" if mc.args.len() == 2 => {
+                        self.pin_iter_item_param(&mc.receiver, &mc.args[1], 1, resolver);
+                    }
+                    "all" | "any" | "for_each" if mc.args.len() == 1 => {
+                        self.pin_iter_item_param(&mc.receiver, &mc.args[0], 0, resolver);
+                    }
+                    _ => {}
+                }
+                // fold/rfold: the reducer's first parameter (accumulator)
+                // shares the init's type. The closure's params were bound
+                // when its arg was recursed above, so tie it now.
+                if matches!(method.as_str(), "fold" | "rfold")
+                    && mc.args.len() == 2
+                    && let syn::Expr::Closure(cl) = peel_expr(&mc.args[1])
+                    && let Some(p0) = cl.inputs.first()
+                    && let (Some(p0name), _) = closure_param_ident_and_type(p0)
+                    && let Some(&v0) = self.env.get(&p0name)
+                {
+                    let init_term = self.summarize_expr(&mc.args[0]);
+                    self.ctx.push_constraint(Constraint {
+                        lhs: TyTerm::Var(v0),
+                        rhs: init_term,
+                        origin: ConstraintOrigin::Synthetic("fold-acc-init"),
+                    });
+                }
+            }
+            syn::Expr::Closure(cl) => {
+                self.bind_closure_params(cl);
+                self.collect_expr_constraints(&cl.body, resolver);
+            }
+            syn::Expr::Block(b) => self.collect_block_constraints(&b.block.stmts, resolver),
+            syn::Expr::If(e) => {
+                self.collect_expr_constraints(&e.cond, resolver);
+                self.collect_block_constraints(&e.then_branch.stmts, resolver);
+                if let Some((_, els)) = &e.else_branch {
+                    self.collect_expr_constraints(els, resolver);
+                }
+            }
+            syn::Expr::Match(e) => {
+                self.collect_expr_constraints(&e.expr, resolver);
+                for arm in &e.arms {
+                    self.collect_expr_constraints(&arm.body, resolver);
+                }
+            }
+            syn::Expr::ForLoop(e) => {
+                self.collect_expr_constraints(&e.expr, resolver);
+                self.collect_block_constraints(&e.body.stmts, resolver);
+            }
+            syn::Expr::While(e) => {
+                self.collect_expr_constraints(&e.cond, resolver);
+                self.collect_block_constraints(&e.body.stmts, resolver);
+            }
+            syn::Expr::Loop(e) => self.collect_block_constraints(&e.body.stmts, resolver),
+            syn::Expr::Call(c) => {
+                for a in &c.args {
+                    self.collect_expr_constraints(a, resolver);
+                }
+            }
+            syn::Expr::Paren(e) => self.collect_expr_constraints(&e.expr, resolver),
+            syn::Expr::Group(e) => self.collect_expr_constraints(&e.expr, resolver),
+            syn::Expr::Reference(e) => self.collect_expr_constraints(&e.expr, resolver),
+            syn::Expr::Tuple(t) => {
+                for e in &t.elems {
+                    self.collect_expr_constraints(e, resolver);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The `env` variable for a bare-identifier receiver, if bound.
+    fn receiver_env_var(&self, receiver: &syn::Expr) -> Option<TyVarId> {
+        let syn::Expr::Path(p) = receiver else {
+            return None;
+        };
+        if p.qself.is_some()
+            || p.path.segments.len() != 1
+            || !matches!(p.path.segments[0].arguments, syn::PathArguments::None)
+        {
+            return None;
+        }
+        self.env.get(&p.path.segments[0].ident.to_string()).copied()
+    }
 }
 
 fn block_tail_expr(block: &syn::Block) -> Option<syn::Expr> {
@@ -634,6 +1029,235 @@ fn block_tail_expr(block: &syn::Block) -> Option<syn::Expr> {
         return Some(e.clone());
     }
     None
+}
+
+/// Recognize an owner constructor call with no element argument —
+/// `Vec::new()`, `Vec::with_capacity(n)`, `Vec::default()`, and their
+/// std/alloc-qualified spellings — returning the owner's canonical
+/// head (`"Vec"`). Only growable owners whose element type must be
+/// recovered from later usage are recognized; everything else is
+/// `None`. The element-bearing constructors (`vec![x]`, `Vec::from`)
+/// don't need recovery and are intentionally excluded.
+pub(crate) fn owner_constructor_head(call: &syn::ExprCall) -> Option<String> {
+    let syn::Expr::Path(p) = &*call.func else {
+        return None;
+    };
+    if p.qself.is_some() {
+        return None;
+    }
+    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    if segs.len() < 2 {
+        return None;
+    }
+    let ctor = segs.last().map(String::as_str)?;
+    if !matches!(ctor, "new" | "new_" | "with_capacity" | "default") {
+        return None;
+    }
+    match segs[segs.len() - 2].as_str() {
+        "Vec" => Some("Vec".to_string()),
+        _ => None,
+    }
+}
+
+/// Best-effort concrete type of a literal: suffixed integer/float
+/// literals (`1u8`, `2.0f64`) carry their type; `bool`/`char`/string
+/// literals are known. Unsuffixed numeric literals are ambiguous (Rust
+/// defaults them by context) so they return `None` — the solver leaves
+/// the variable free rather than guessing `i32`.
+fn lit_tyterm(lit: &syn::Lit) -> Option<TyTerm> {
+    let parsed: Type = match lit {
+        syn::Lit::Bool(_) => syn::parse_str("bool").ok()?,
+        syn::Lit::Char(_) => syn::parse_str("char").ok()?,
+        syn::Lit::Str(_) => syn::parse_str("& str").ok()?,
+        syn::Lit::Int(i) if !i.suffix().is_empty() => syn::parse_str(i.suffix()).ok()?,
+        syn::Lit::Float(f) if !f.suffix().is_empty() => syn::parse_str(f.suffix()).ok()?,
+        _ => return None,
+    };
+    Some(TyTerm::Concrete(parsed))
+}
+
+/// Strip `(…)` / `{ … }`-group wrappers from an expression so the
+/// inner closure / call is reachable.
+fn peel_expr(expr: &syn::Expr) -> &syn::Expr {
+    let mut e = expr;
+    loop {
+        match e {
+            syn::Expr::Paren(p) => e = &p.expr,
+            syn::Expr::Group(g) => e = &g.expr,
+            _ => return e,
+        }
+    }
+}
+
+/// Extract a binding pattern's name and optional type annotation. Used
+/// for both closure parameters and `let` patterns. `|mut acc, v: I::Item|`
+/// yields `("acc", None)` and `("v", Some(I::Item))`; `let x: T` yields
+/// `("x", Some(T))`.
+fn closure_param_ident_and_type(pat: &syn::Pat) -> (Option<String>, Option<&Type>) {
+    match pat {
+        syn::Pat::Ident(pi) => (Some(pi.ident.to_string()), None),
+        syn::Pat::Type(pt) => {
+            let name = match pt.pat.as_ref() {
+                syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                _ => None,
+            };
+            (name, Some(pt.ty.as_ref()))
+        }
+        _ => (None, None),
+    }
+}
+
+/// Render a fully-resolved `TyTerm` back to a `syn::Type`. `Concrete`
+/// passes through; `App("&", [t])` becomes `&t`; other `App`s rebuild
+/// `head<args…>`. Returns `None` if any sub-term is still a free
+/// variable (underdetermined) or can't be re-parsed — the caller then
+/// falls back to today's heuristic emit.
+fn tyterm_to_syn_type(term: &TyTerm) -> Option<Type> {
+    match term {
+        TyTerm::Var(_) => None,
+        TyTerm::Concrete(t) => Some(t.clone()),
+        TyTerm::App { head, args } => {
+            if head == "&" && args.len() == 1 {
+                let inner = tyterm_to_syn_type(&args[0])?;
+                return syn::parse2(quote::quote!(&#inner)).ok();
+            }
+            if head == "tuple" {
+                let elems: Vec<Type> = args
+                    .iter()
+                    .map(tyterm_to_syn_type)
+                    .collect::<Option<Vec<_>>>()?;
+                return syn::parse2(quote::quote!( ( #(#elems),* ) )).ok();
+            }
+            let arg_types: Vec<Type> = args
+                .iter()
+                .map(tyterm_to_syn_type)
+                .collect::<Option<Vec<_>>>()?;
+            // Reject heads that aren't a plain type-path identifier
+            // (e.g. structural heads like "tuple"/"&[]") — they don't
+            // re-render as `head<...>`.
+            if head.is_empty()
+                || !head
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+            {
+                return None;
+            }
+            let head_path: syn::Path = syn::parse_str(head).ok()?;
+            if arg_types.is_empty() {
+                return syn::parse2(quote::quote!(#head_path)).ok();
+            }
+            syn::parse2(quote::quote!(#head_path<#(#arg_types),*>)).ok()
+        }
+    }
+}
+
+/// Infer the element type of an owner accumulator threaded through a
+/// `fold`/`rfold` reducer closure `|acc, item| { … ; acc }`.
+///
+/// Models the accumulator (the reducer's first parameter) as
+/// `App(owner_head, [?elem])`, binds every parameter to a variable,
+/// pins typed parameters to their annotation, seeds the element
+/// parameter from `item_type_hint` (the receiver iterator's item type)
+/// when it carries no annotation, then collects `acc.push(x)`-style
+/// constraints from the body. After solving, returns the resolved
+/// element `syn::Type`, or `None` when the engine can't pin it.
+///
+/// This is the Vec-accumulator instance of the §13 inference plan:
+/// Rust resolves `fold(Vec::new(), |acc, v| { acc.push(v); acc })`
+/// by unifying the empty vec's element with the pushed value; we do
+/// the same so emit can produce `rusty::Vec<Elem>` with nothing left
+/// for the C++ compiler to deduce.
+pub(crate) fn infer_owner_accumulator_element_from_reducer(
+    reducer: &syn::ExprClosure,
+    owner_head: &str,
+    item_type_hint: Option<&Type>,
+) -> Option<Type> {
+    if reducer.inputs.is_empty() {
+        return None;
+    }
+    let mut ctx = InferenceContext::new();
+    let elem = ctx.fresh_var();
+    let mut have_acc = false;
+    {
+        let mut c = ConstraintCollector::new(&mut ctx);
+        for (idx, input) in reducer.inputs.iter().enumerate() {
+            let (name, ann) = closure_param_ident_and_type(input);
+            let Some(name) = name else {
+                continue;
+            };
+            let v = c.ctx.fresh_var();
+            c.env.insert(name, v);
+            if idx == 0 {
+                have_acc = true;
+                c.ctx.push_constraint(Constraint {
+                    lhs: TyTerm::Var(v),
+                    rhs: TyTerm::App {
+                        head: owner_head.to_string(),
+                        args: vec![TyTerm::Var(elem)],
+                    },
+                    origin: ConstraintOrigin::Synthetic("fold-acc"),
+                });
+            }
+            if let Some(ann) = ann {
+                let term = tyterm_from_syn(ann, &c.binders);
+                c.ctx.push_constraint(Constraint {
+                    lhs: TyTerm::Var(v),
+                    rhs: term,
+                    origin: ConstraintOrigin::Synthetic("param-ann"),
+                });
+            } else if idx == 1 {
+                if let Some(hint) = item_type_hint {
+                    c.ctx.push_constraint(Constraint {
+                        lhs: TyTerm::Var(v),
+                        rhs: TyTerm::Concrete(hint.clone()),
+                        origin: ConstraintOrigin::Synthetic("fold-item-hint"),
+                    });
+                }
+            }
+        }
+        if !have_acc {
+            return None;
+        }
+        c.collect_owner_method_usage(&reducer.body);
+    }
+    if !ctx.solve().is_empty() {
+        return None;
+    }
+    let term = ctx.resolve(elem)?;
+    tyterm_to_syn_type(&term)
+}
+
+/// Infer the element type of a `Vec`-owner local `target` declared in
+/// `stmts` (e.g. `let mut acc = Vec::new();`) from how it is used later
+/// in the same block — `acc.push(x)`, including pushes nested inside a
+/// fold/all reducer closure where the pushed value mentions other
+/// inferred bindings (`acc.push((other_acc.clone(), v.clone()))`).
+///
+/// Models the whole block as one constraint set so interdependent
+/// inferences resolve together (the sibling fold accumulator's element
+/// is pinned by its own `push`, then feeds this local's tuple element).
+/// Returns the resolved *element* `syn::Type`, or `None` when the engine
+/// can't pin it — the caller then leaves today's behavior in place.
+pub(crate) fn infer_local_owner_element_from_block(
+    stmts: &[syn::Stmt],
+    target: &str,
+    resolver: &ItemResolver<'_>,
+) -> Option<Type> {
+    let mut ctx = InferenceContext::new();
+    let target_var = {
+        let mut c = ConstraintCollector::new(&mut ctx);
+        c.collect_block_constraints(stmts, resolver);
+        c.env.get(target).copied()
+    }?;
+    if !ctx.solve().is_empty() {
+        return None;
+    }
+    match ctx.resolve(target_var)? {
+        TyTerm::App { head, args } if head == "Vec" && args.len() == 1 => {
+            tyterm_to_syn_type(&args[0])
+        }
+        _ => None,
+    }
 }
 
 impl<'ast> Visit<'ast> for ConstraintCollector<'_> {
@@ -752,6 +1376,80 @@ mod tests {
         let a = ctx.fresh_var();
         let b = ctx.fresh_var();
         assert_ne!(a, b);
+    }
+
+    fn norm(t: &Type) -> String {
+        use quote::ToTokens;
+        t.to_token_stream().to_string().replace(' ', "")
+    }
+
+    #[test]
+    fn fold_reducer_pins_vec_element_from_annotated_param() {
+        // `|mut acc, v: i32| { acc.push(v); acc }` — element is i32.
+        let reducer: syn::ExprClosure =
+            parse_quote!(|mut acc, v: i32| { acc.push(v); acc });
+        let elem = infer_owner_accumulator_element_from_reducer(&reducer, "Vec", None)
+            .expect("element should resolve from annotated param");
+        assert_eq!(norm(&elem), "i32");
+    }
+
+    #[test]
+    fn fold_reducer_pins_vec_element_from_item_hint_when_unannotated() {
+        // `|mut acc, n| { acc.push(n); acc }` — element comes from the
+        // supplied iterator item-type hint (the receiver's item type).
+        let reducer: syn::ExprClosure = parse_quote!(|mut acc, n| { acc.push(n); acc });
+        let hint: Type = parse_quote!(u64);
+        let elem = infer_owner_accumulator_element_from_reducer(&reducer, "Vec", Some(&hint))
+            .expect("element should resolve from item hint");
+        assert_eq!(norm(&elem), "u64");
+    }
+
+    #[test]
+    fn block_local_element_from_fold_push_tuple_of_clones() {
+        // The `parameters_from_fold` shape: a sibling local pushed inside
+        // the fold reducer with a tuple of clones of interdependent
+        // bindings resolves to `(Vec<i32>, i32)`.
+        let block: syn::Block = parse_quote!({
+            let mut params = Vec::new();
+            let _r = it.fold(Vec::new(), |mut acc, v: i32| {
+                params.push((acc.clone(), v.clone()));
+                acc.push(v);
+                acc
+            });
+        });
+        let resolver: &ItemResolver = &|_e: &syn::Expr| None;
+        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver)
+            .expect("params element should resolve");
+        assert_eq!(norm(&elem), "(Vec<i32>,i32)");
+    }
+
+    #[test]
+    fn block_local_element_from_all_closure_uses_item_resolver() {
+        // `.all(|x| { params.push(x.clone()); … })` — the closure param is
+        // unannotated, so the element comes from the item resolver.
+        let block: syn::Block = parse_quote!({
+            let mut params = Vec::new();
+            let _r = it.all(|x| {
+                params.push(x.clone());
+                true
+            });
+        });
+        let resolver: &ItemResolver = &|_e: &syn::Expr| Some(parse_quote!(u8));
+        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver)
+            .expect("params element should resolve from item resolver");
+        assert_eq!(norm(&elem), "u8");
+    }
+
+    #[test]
+    fn block_local_element_unresolved_without_usage_is_none() {
+        // A bare `Vec::new()` with no element-revealing usage stays None
+        // so the caller keeps today's (now hard-failing) behavior.
+        let block: syn::Block = parse_quote!({
+            let mut params = Vec::new();
+            let _ = params;
+        });
+        let resolver: &ItemResolver = &|_e: &syn::Expr| None;
+        assert!(infer_local_owner_element_from_block(&block.stmts, "params", resolver).is_none());
     }
 
     #[test]

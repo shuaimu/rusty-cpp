@@ -15373,6 +15373,62 @@ impl CodeGen {
         }
     }
 
+    /// Solver-backed seeding for `Vec`-owner locals whose element type
+    /// is revealed only by later usage the heuristic passes above can't
+    /// follow — `acc.push(x)` nested inside a fold/all reducer closure,
+    /// where the pushed value is built from other inferred bindings
+    /// (`parameters_from_fold.push((acc.clone(), v.clone()))`). For each
+    /// such still-unresolved `let x = Vec::new()` local, drive the
+    /// constraint solver over the whole block; when it pins the element
+    /// type, seed `Vec<Elem>` so the normal placeholder-hint emit path
+    /// produces a concrete owner instead of leaking `rusty::Vec<auto>`.
+    /// Only fills bindings not already resolved by an earlier pass, so it
+    /// never shadows a heuristic hint and only ever turns an otherwise
+    /// invalid `<auto>` into a concrete type.
+    fn augment_owner_local_type_hints_from_solver(
+        &self,
+        stmts: &[syn::Stmt],
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            if get_local_type(local).is_some() {
+                continue;
+            }
+            let Some(name) = local_binding_name(local) else {
+                continue;
+            };
+            if hints.contains_key(&name) {
+                continue;
+            }
+            let Some(init) = &local.init else {
+                continue;
+            };
+            let syn::Expr::Call(call) = self.peel_paren_group_expr(&init.expr) else {
+                continue;
+            };
+            if type_solver::owner_constructor_head(call).as_deref() != Some("Vec") {
+                continue;
+            }
+            // Supply receiver iterator item types (for `.all`/`.fold`
+            // item-params and `.extend` arguments) from the existing
+            // iterator-item inference, filtered to emit-safe candidates.
+            let item_resolver = |e: &syn::Expr| -> Option<syn::Type> {
+                self.infer_iter_item_type_with_generic_fallback(e)
+                    .filter(|t| self.type_is_placeholder_hint_candidate_allow_scoped_generics(t))
+            };
+            if let Some(elem) =
+                type_solver::infer_local_owner_element_from_block(stmts, &name, &item_resolver)
+                && self.type_is_placeholder_hint_candidate_allow_scoped_generics(&elem)
+            {
+                let vec_ty: syn::Type = syn::parse_quote!(Vec<#elem>);
+                hints.insert(name, vec_ty);
+            }
+        }
+    }
+
     /// Parallel forward-scan for two-parameter generic owners (HashMap,
     /// BTreeMap, …). The existing
     /// `augment_uninitialized_local_type_hints_from_usage` pipeline

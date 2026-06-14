@@ -557,6 +557,15 @@ impl CodeGen {
                 &mut placeholder_hints,
             );
             block_profile_mark("augment_uninitialized_local_type_hints_from_usage");
+            // Solver-backed pass for owner locals whose element type the
+            // heuristic scan above can't follow (pushes nested in fold/all
+            // reducer closures, tuple-of-clone elements). Fills only
+            // still-unresolved bindings.
+            self.augment_owner_local_type_hints_from_solver(
+                &block.stmts,
+                &mut placeholder_hints,
+            );
+            block_profile_mark("augment_owner_local_type_hints_from_solver");
             // Two-parameter generic owners (HashMap, BTreeMap) need
             // both K and V from their `insert(K, V)` usage. The
             // single-inner pipeline above handles only Vec&lt;T&gt;-shaped
