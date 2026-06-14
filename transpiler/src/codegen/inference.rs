@@ -3636,8 +3636,12 @@ impl CodeGen {
             syn::Expr::Call(_call) => self.infer_local_binding_type_from_initializer(&closure.body),
             syn::Expr::MethodCall(mc) => {
                 let method = mc.method.to_string();
-                if method == "to_string" || method == "to_owned" {
+                if method == "to_string" && mc.args.is_empty() {
                     Some(syn::parse_quote!(String))
+                } else if method == "to_owned" && mc.args.is_empty() {
+                    // `<Self as ToOwned>::Owned` from the receiver (str -> String,
+                    // [T] -> Vec<T>, Clone blanket -> Self), not a blanket String.
+                    self.infer_to_owned_result_type(&mc.receiver)
                 } else {
                     None
                 }
@@ -4554,6 +4558,53 @@ impl CodeGen {
         }
     }
 
+    /// Result type of `receiver.to_owned()` — `<Self as ToOwned>::Owned`, where
+    /// `Self` is the receiver type with AT MOST ONE reference peeled (the autoref
+    /// `to_owned` resolves through). Returns `None` when the receiver type can't
+    /// be determined, so callers defer to downstream deduction rather than
+    /// guessing `String` (a wrong concrete type poisons later C++ deduction).
+    pub(super) fn infer_to_owned_result_type(&self, receiver: &syn::Expr) -> Option<syn::Type> {
+        let recv_ty = self
+            .infer_simple_expr_type(receiver)
+            .or_else(|| self.infer_local_binding_type_from_initializer(receiver))?;
+        // ToOwned resolves `Self` by peeling at most one autoref: `&U`/`&mut U`
+        // -> `U`; a value receiver (String, i32, Box<str>, ...) peels zero.
+        let self_ty: syn::Type = match self.peel_paren_group_type(&recv_ty) {
+            syn::Type::Reference(r) => self.peel_paren_group_type(&r.elem).clone(),
+            other => other.clone(),
+        };
+        Some(self.to_owned_owned_type_from_self(&self_ty))
+    }
+
+    /// `<Self as ToOwned>::Owned` for the (already de-autoref'd) borrowed type
+    /// `self_ty`. Bespoke std impls: `str -> String`, `[E] -> Vec<E>`,
+    /// `Path -> PathBuf`. Everything else takes the blanket
+    /// `impl<T: Clone> ToOwned` so `Owned = Self` (`i32 -> i32`, `MyStruct ->
+    /// MyStruct`, generic `I -> I`, `&str -> &str` for the `&&str` case,
+    /// `Box<str>`/`Cow<str>` -> themselves). The `str` match is exact — never a
+    /// substring/"contains str" test — so str-family smart pointers are not
+    /// mis-mapped to `String`.
+    pub(super) fn to_owned_owned_type_from_self(&self, self_ty: &syn::Type) -> syn::Type {
+        match self_ty {
+            syn::Type::Slice(slice) => {
+                let elem = &slice.elem;
+                parse_quote!(Vec<#elem>)
+            }
+            syn::Type::Path(tp)
+                if tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && matches!(tp.path.segments[0].arguments, syn::PathArguments::None) =>
+            {
+                match tp.path.segments[0].ident.to_string().as_str() {
+                    "str" => parse_quote!(String),
+                    "Path" => parse_quote!(std::path::PathBuf),
+                    _ => self_ty.clone(),
+                }
+            }
+            _ => self_ty.clone(),
+        }
+    }
+
     pub(super) fn infer_method_call_result_type_for_local(
         &self,
         mc: &syn::ExprMethodCall,
@@ -4916,8 +4967,18 @@ impl CodeGen {
                 }
             }
         }
-        if matches!(method.as_str(), "to_string" | "to_owned") && mc.args.is_empty() {
+        if method == "to_string" && mc.args.is_empty() {
+            // ToString::to_string is `-> String` for every impl (specialization
+            // only changes strategy, never the return type).
             return Some(parse_quote!(rusty::String));
+        }
+        if method == "to_owned" && mc.args.is_empty() {
+            // `<Self as ToOwned>::Owned` from the receiver type. Fall through
+            // when unresolvable so the generic impl-block lookup below can still
+            // find a user `ToOwned` impl.
+            if let Some(owned) = self.infer_to_owned_result_type(&mc.receiver) {
+                return Some(owned);
+            }
         }
         if method == "split_at" && mc.args.len() == 1 {
             if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {

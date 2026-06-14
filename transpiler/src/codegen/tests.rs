@@ -31535,6 +31535,32 @@ fn test_find_invalid_auto_template_arg_allows_legitimate_auto() {
 }
 
 #[test]
+fn test_to_owned_owned_type_mapping() {
+    // `<Self as ToOwned>::Owned`: bespoke impls (str/[T]/Path) + Clone blanket.
+    let cg = CodeGen::new();
+    let norm = |t: &syn::Type| {
+        use quote::ToTokens;
+        t.to_token_stream().to_string().replace(' ', "")
+    };
+    let map = |s: &str| {
+        let ty: syn::Type = syn::parse_str(s).unwrap();
+        norm(&cg.to_owned_owned_type_from_self(&ty))
+    };
+    assert_eq!(map("str"), "String"); // bespoke: str -> String
+    assert_eq!(map("[u8]"), "Vec<u8>"); // bespoke: [T] -> Vec<T>
+    assert_eq!(map("Path"), "std::path::PathBuf"); // bespoke: Path -> PathBuf
+    assert_eq!(map("i32"), "i32"); // Clone blanket
+    assert_eq!(map("I"), "I"); // generic param, Clone blanket
+    assert_eq!(map("MyStruct"), "MyStruct"); // concrete, Clone blanket
+    assert_eq!(map("String"), "String"); // value receiver, blanket (not bespoke)
+    // The `&&str` case: Self is `&str`, blanket Clone -> `&str`, NOT String.
+    assert_eq!(map("&str"), "&str");
+    // str-family smart pointers must NOT collapse to String.
+    assert_eq!(map("Box<str>"), "Box<str>");
+    assert_eq!(map("Cow<str>"), "Cow<str>");
+}
+
+#[test]
 fn test_find_invalid_auto_template_arg_skips_dead_code_and_comments() {
     // `<auto>` inside a `#if 0 ... #endif` block is never compiled (the
     // patcher's stubbed orphan-impl blocks) — not a real leak.
