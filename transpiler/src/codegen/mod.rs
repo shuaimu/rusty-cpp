@@ -534,6 +534,13 @@ impl<'ast> Visit<'ast> for OptionSomeNoneExprCollector {
 pub struct CodeGen {
     pub(crate) output: String,
     pub(crate) indent: usize,
+    /// True for transient sub-codegens spun up to render a fragment (e.g. a
+    /// closure body in `new_inner_for_block`) whose output is then embedded
+    /// into a parent. The strict-auto backstop in `into_output` is skipped on
+    /// these so an `<auto>` leak is reported once, at the real top-level
+    /// chokepoint, with an accurate full-module line number — the embedded
+    /// fragment text still flows up and is caught by the parent's `into_output`.
+    pub(crate) is_sub_codegen: bool,
     /// Per-function type-inference state. Constructed at the entry
     /// of `emit_function` (and equivalent entry points), populated by
     /// the constraint collector in `type_solver`, then solved before
@@ -1338,6 +1345,7 @@ impl CodeGen {
         Self {
             output: String::new(),
             indent: 0,
+            is_sub_codegen: false,
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
@@ -1726,6 +1734,28 @@ impl CodeGen {
             "rusty::port::vec::IntoIter",
             "import vec_port.vec.into_iter;",
         );
+        // Strict-auto backstop (unconditional): if any `auto` placeholder leaked
+        // into a C++ template-argument position (e.g. `rusty::Vec<auto>::new_()`
+        // from a `Vec::new()` whose element type could not be inferred), fail
+        // loudly here rather than emit C++ that cannot compile. `<auto>` as a
+        // template argument is never valid C++, so this only ever fires on output
+        // that was already broken — currently-passing crates never trip it.
+        // Per-site handlers (e.g. the method-turbofish guard in
+        // emit_method_call_template_args) resolve or drop earlier with finer
+        // context; this catches every remaining path at the single output
+        // chokepoint.
+        if !self.is_sub_codegen {
+            if let Some((line_no, text)) = find_invalid_auto_template_arg(&self.output) {
+                panic!(
+                    "rusty-cpp: invalid `auto` template argument leaked into emitted \
+                     C++ at output line {line_no}: `{text}`. An unresolved \
+                     type-inference placeholder (e.g. a `Vec<_>::new()` whose element \
+                     type could not be deduced) was emitted where C++ requires a \
+                     concrete type. Resolve the inference gap or guard the emission \
+                     site.",
+                );
+            }
+        }
         self.output
     }
 
@@ -31705,6 +31735,10 @@ impl CodeGen {
         let mut inner = self.clone();
         inner.output.clear();
         inner.indent = 0;
+        // Fragment renderer: defer the strict-auto backstop to the parent's
+        // top-level `into_output` so any `<auto>` leak is reported with an
+        // accurate full-module line number rather than a fragment-relative one.
+        inner.is_sub_codegen = true;
         inner
     }
 
@@ -34599,6 +34633,54 @@ fn type_string_contains_auto_template_arg(ty: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// Scan finalized module output for an `auto` token used as a *complete*
+/// template argument — inside `<...>` brackets and immediately followed
+/// (ignoring whitespace) by `,` or `>`. Such spellings (`rusty::Vec<auto>`,
+/// `std::tuple<auto, auto>`) are invalid C++ and signal an unresolved
+/// type-inference placeholder that leaked into a position requiring a concrete
+/// type. Deliberately EXCLUDES legitimate spellings: `template <auto N>` NTTP
+/// declarations (the `auto` is followed by a parameter identifier, not `,`/`>`)
+/// and abbreviated function-template parameters like `f(auto a)` (the `auto` is
+/// not inside `<...>`). Returns the 1-based line number and trimmed text of the
+/// first offender, for the strict-auto backstop in `into_output`.
+fn find_invalid_auto_template_arg(output: &str) -> Option<(usize, String)> {
+    for (i, line) in output.lines().enumerate() {
+        let bytes = line.as_bytes();
+        let mut depth = 0i32;
+        let mut j = 0usize;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'<' => depth += 1,
+                b'>' => depth = depth.saturating_sub(1),
+                b'a' if depth > 0 && bytes[j..].starts_with(b"auto") => {
+                    let before_ok = j == 0 || {
+                        let p = bytes[j - 1];
+                        !((p as char).is_ascii_alphanumeric() || p == b'_')
+                    };
+                    let after = j + 4;
+                    let after_ok = after >= bytes.len() || {
+                        let n = bytes[after];
+                        !((n as char).is_ascii_alphanumeric() || n == b'_')
+                    };
+                    if before_ok && after_ok {
+                        let mut k = after;
+                        while k < bytes.len() && (bytes[k] as char).is_ascii_whitespace() {
+                            k += 1;
+                        }
+                        // A complete template argument is terminated by `,` or `>`.
+                        if matches!(bytes.get(k), Some(b',') | Some(b'>')) {
+                            return Some((i + 1, line.trim().to_string()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+    }
+    None
 }
 
 fn collapse_redundant_typename_tokens(input: &str) -> String {

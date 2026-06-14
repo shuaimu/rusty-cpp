@@ -6184,9 +6184,23 @@ impl CodeGen {
             }
         }
         if mapped_args.is_empty() {
-            None
-        } else {
-            Some(format!("<{}>", mapped_args.join(", ")))
+            return None;
         }
+        let joined = mapped_args.join(", ");
+        // A turbofish that maps to an invalid `<auto>` template argument cannot
+        // be emitted as an explicit C++ template-argument list. This happens for
+        // Rust placeholder turbofishes like `collect_tuple::<(_, _)>()` /
+        // `tuple_windows::<(_, _, _, _)>()`, where the `(_, _)` tuple is a
+        // `syn::Type::Tuple` of `Infer` elements that map to `std::tuple<auto,
+        // auto>`. Drop the turbofish entirely so the call deduces its type from
+        // context, exactly like the equivalent no-turbofish call (which the
+        // emitter already handles correctly). This is a faithful, valid
+        // translation — not an `auto` leak — so it always degrades here; any
+        // `<auto>` that still reaches the final output is caught unconditionally
+        // by the `into_output` strict-auto backstop.
+        if type_string_contains_auto_template_arg(&joined) {
+            return None;
+        }
+        Some(format!("<{}>", joined))
     }
 }
