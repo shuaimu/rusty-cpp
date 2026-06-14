@@ -81,6 +81,17 @@ pub struct TranspileOptions {
     /// (replaces `pro::proxy<...>` facade emission).
     /// See docs/rusty-cpp-transpiler.md § 3.2.9 for the design.
     pub interface_traits: bool,
+    /// True when transpiling a single inline-rust `#if RUSTYCPP_RUST` block
+    /// whose surrounding translation unit already does `import rusty;`.
+    /// Suppresses emission of the `runtime_path_fallback_helpers_text()`
+    /// preamble (`struct TokenTree; namespace rusty { ... }`): it is redundant
+    /// (the imported rusty module provides those helpers) and — because an
+    /// inline block is spliced into a consumer namespace (e.g. `namespace rrr`)
+    /// — it would otherwise create a shadowing `<ns>::rusty` and break every
+    /// emitted `rusty::*` reference (`rusty::detail::deref_if_pointer_like`,
+    /// `rusty::Option`, ...). Defaults to `false` (module / standalone mode
+    /// still emits the preamble).
+    pub inline_rust_block: bool,
     /// Cross-file enum declarations collected during a crate-mode pre-pass.
     /// Used to seed the per-file codegen's `data_enum_variants_by_enum` /
     /// `c_like_enum_variants` registries so that bare-glob variant patterns
@@ -158,6 +169,7 @@ impl Default for TranspileOptions {
             prefer_rusty_unit_alias: true,
             prefer_rusty_view_aliases: false,
             interface_traits: false,
+            inline_rust_block: false,
             cross_file_enums: Vec::new(),
             cross_file_impl_blocks: Vec::new(),
             cross_file_structs: Vec::new(),
@@ -518,6 +530,7 @@ pub fn transpile_full_with_options(
     codegen.set_prefer_rusty_unit_alias(options.prefer_rusty_unit_alias);
     codegen.set_prefer_rusty_view_aliases(options.prefer_rusty_view_aliases);
     codegen.set_interface_traits(options.interface_traits);
+    codegen.inline_rust_block = options.inline_rust_block;
     codegen.set_cross_file_enums(options.cross_file_enums.clone());
     codegen.set_cross_file_impl_blocks(options.cross_file_impl_blocks.clone());
     codegen.set_cross_file_structs(options.cross_file_structs.clone());

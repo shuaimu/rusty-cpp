@@ -1001,6 +1001,11 @@ pub struct CodeGen {
     /// (replaces `pro::proxy<...>` facade emission).
     /// See docs/rusty-cpp-transpiler.md § 3.2.9 for the design.
     pub(crate) interface_traits: bool,
+    /// See `TranspileOptions::inline_rust_block`. When true, suppress the
+    /// `runtime_path_fallback_helpers_text()` `namespace rusty {...}` preamble
+    /// (redundant under inline-rust where the rusty module is imported, and it
+    /// would shadow `::rusty` from inside the consumer namespace).
+    pub(crate) inline_rust_block: bool,
     /// Multi-bound `dyn A + B` combinations encountered during emission
     /// under `--interface-traits`. Each entry is a sorted Vec of trait names
     /// (so `dyn A + B` and `dyn B + A` collapse to the same combination).
@@ -1489,6 +1494,7 @@ impl CodeGen {
             // branches are still scattered through emission code; the
             // compiler dead-code-eliminates the false arms.
             interface_traits: true,
+            inline_rust_block: false,
             dyn_multi_combinations: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             skipped_interface_traits: HashSet::new(),
             interface_traits_with_generics: HashSet::new(),
@@ -2665,7 +2671,11 @@ impl CodeGen {
                         runtime_path_fallback_helpers_text_for_module(&self.output);
                     global_helper_text.push_str(&runtime_helpers);
                 }
-            } else {
+            } else if !self.inline_rust_block {
+                // Inline-rust blocks already `import rusty;`, so the preamble is
+                // redundant — and emitting its `namespace rusty {...}` inside the
+                // consumer's namespace would shadow `::rusty`. Skip it; the
+                // emitted `rusty::*` references resolve to the imported module.
                 helper_text.push_str(runtime_path_fallback_helpers_text());
             }
         }

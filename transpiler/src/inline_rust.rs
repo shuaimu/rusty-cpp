@@ -425,7 +425,13 @@ fn render_generated_region(block: &ParsedBlock) -> Result<String, String> {
 }
 
 fn transpile_payload_to_cpp(block: &ParsedBlock) -> Result<String, String> {
-    let options = transpile::TranspileOptions::default();
+    let options = transpile::TranspileOptions {
+        // Inline-rust blocks are spliced into a TU that `import rusty;`, and may
+        // sit inside a consumer namespace — suppress the redundant runtime
+        // preamble that would otherwise shadow `::rusty`.
+        inline_rust_block: true,
+        ..transpile::TranspileOptions::default()
+    };
     let generated = transpile::transpile_full_with_options(
         &block.rust_payload_normalized,
         None,
