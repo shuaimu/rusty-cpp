@@ -4890,6 +4890,32 @@ impl CodeGen {
             }
             return syn::parse_str::<syn::Type>("&[u8]").ok();
         }
+        // `x.clone()` preserves the receiver's type. Resolve it ONLY when the
+        // receiver is (a reference to) a bare in-scope generic type parameter —
+        // e.g. `let i = src.clone()` with `src: I` (`I: Iterator`). This is the
+        // clone-chain that otherwise leaves the iterator's item type unresolved
+        // (`.all`/`.fold`/`.extend` closure params leak `<auto>`); recording
+        // `i: I` lets `infer_iter_item_type_with_generic_fallback` recover
+        // `I::Item`. Restricting to type-parameter receivers keeps concrete-typed
+        // clones (Vec/RefCell/Mutex/OnceCell/...) at today's behavior so the
+        // wrapper/guard-detection paths that key off receiver types are
+        // unaffected.
+        if method == "clone" && mc.args.is_empty() {
+            if let Some(ty) = self
+                .infer_simple_expr_type(&mc.receiver)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&mc.receiver))
+            {
+                let peeled = self.peel_reference_paren_group_type(&ty);
+                if let syn::Type::Path(tp) = peeled
+                    && tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+                    && self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
+                {
+                    return Some(peeled.clone());
+                }
+            }
+        }
         if matches!(method.as_str(), "to_string" | "to_owned") && mc.args.is_empty() {
             return Some(parse_quote!(rusty::String));
         }
