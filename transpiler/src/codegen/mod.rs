@@ -16496,6 +16496,49 @@ impl CodeGen {
     }
 
 
+    /// Recover an empty `Vec::new()` operand's element type from its
+    /// comparison peer in the `assert_eq!`/`assert_ne!` desugar
+    /// (`match (&*v, &*Vec::new())`). Rust-side expected-type threading can't
+    /// reach the constructor through the `&*` deref, so deduce the element on
+    /// the C++ side from the peer container — the same `decltype((peer))`
+    /// strategy `emit_result_ctor_expr_with_peer_context` uses for Either/Result.
+    /// `expr` is the (possibly `*`-deref-wrapped) constructor operand. Returns
+    /// `None` for non-`Vec` owners (e.g. `ArrayVec`, which also needs capacity);
+    /// the caller only invokes this when the plain emit would leak `<auto>`.
+    fn emit_owner_ctor_expr_with_peer_context(
+        &self,
+        expr: &syn::Expr,
+        peer_expr: Option<&syn::Expr>,
+    ) -> Option<String> {
+        let peer_expr = peer_expr?;
+        let (inner, had_deref) = match self.peel_paren_group_expr(expr) {
+            syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                (self.peel_paren_group_expr(&u.expr), true)
+            }
+            other => (other, false),
+        };
+        let syn::Expr::Call(call) = inner else {
+            return None;
+        };
+        if type_solver::owner_constructor_head(call).as_deref() != Some("Vec") {
+            return None;
+        }
+        let peer = self.emit_expr_to_string(peer_expr);
+        // Element type = the peer container's iterator element, deduced at C++
+        // compile time. `deref_if_pointer_like` unwraps the borrow taken by the
+        // assert scaffolding so `std::begin` sees the underlying range.
+        let elem = format!(
+            "std::remove_cvref_t<decltype(*std::begin(rusty::detail::deref_if_pointer_like({})))>",
+            peer
+        );
+        let vec_new = format!("rusty::Vec<{}>::new_()", elem);
+        Some(if had_deref {
+            format!("rusty::detail::deref_if_pointer_like({})", vec_new)
+        } else {
+            vec_new
+        })
+    }
+
     fn emit_result_ctor_expr_with_peer_context(
         &self,
         expr: &syn::Expr,

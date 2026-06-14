@@ -1497,6 +1497,17 @@ impl CodeGen {
                     inner_raw =
                         self.materialize_unit_rvalue_expr_if_needed(reference_target, inner_raw);
 
+                    // An empty `Vec::new()` operand compared to a typed peer has
+                    // no element signal of its own; recover it from the peer via
+                    // C++ decltype so it doesn't leak `<auto>`. Guarded to the
+                    // already-broken case so working emits are untouched.
+                    if type_string_contains_auto_template_arg(&inner_raw)
+                        && let Some(peer_ctor) = self
+                            .emit_owner_ctor_expr_with_peer_context(reference_target, peer_expr)
+                    {
+                        inner_raw = peer_ctor;
+                    }
+
                     let reference_target_raw = self.emit_expr_to_string(reference_target);
                     let is_index_reference_target =
                         matches!(reference_target, syn::Expr::Index(_)) && !is_slice_range_target;
