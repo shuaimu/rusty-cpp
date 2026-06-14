@@ -2385,6 +2385,16 @@ impl CodeGen {
                                     base = format!("{}::template {}", owner, member);
                                 }
                             }
+                            // itertools' `enum EitherOrBoth<A, B = A>` carries a
+                            // defaulted second type parameter, but the generated C++
+                            // template declares both params with no default, so a
+                            // single-arg `EitherOrBoth<T>` (the common `MergeJoinBy`
+                            // shape where both sides share an item type) fails with
+                            // "too few template arguments". Rust's default is `B = A`,
+                            // so duplicating the sole argument reproduces it exactly.
+                            if generic_args.len() == 1 && base.ends_with("EitherOrBoth") {
+                                generic_args.push(generic_args[0].clone());
+                            }
                             return self.maybe_prefix_typename_for_dependent_type_path(
                                 tp,
                                 format!("{}<{}>", base, generic_args.join(", ")),
