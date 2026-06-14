@@ -520,6 +520,25 @@ impl CodeGen {
         let name = self.named_module_root_type_decl_cpp_name(&name_str);
         let has_drop_impl = self.type_has_drop_impl(&name_str);
         let merged_impl_items = self.take_impls_for_type(&name_str);
+
+        // `#[cpp_inherit] impl Trait for ThisType` (recorded in
+        // cpp_inherit_trait during collection) → emit `struct ThisType :
+        // public Trait { ... }` with direct C++ inheritance instead of the
+        // default TraitAdapter wrapper. The base spelling is reused for the
+        // base clause and the synthesized/cpp_ctor base-init.
+        let cpp_inherit_base: Option<String> = self.cpp_inherit_base_name(&name_str);
+        // When a `#[cpp_inherit]` type ALSO has a `#[cpp_ctor]` factory, the
+        // custom ctor takes over construction: suppress the synthesized
+        // fieldwise + move ctor (a single fieldwise ctor can't supply the
+        // default/parametrized ctors that `make_shared<X>(args)` call sites
+        // need, and would collide with the custom one). The implicit move
+        // ctor then handles moves — and correctly moves a stateful base,
+        // unlike the synthesized reconstruct-the-base move ctor.
+        let has_cpp_ctor_method = merged_impl_items.as_ref().is_some_and(|items| {
+            items.iter().any(|it| {
+                matches!(it, syn::ImplItem::Fn(m) if Self::has_cpp_ctor_attr(&m.attrs))
+            })
+        });
         let reserved_member_names: HashSet<String> = merged_impl_items
             .as_ref()
             .map(|items| {
@@ -562,10 +581,14 @@ impl CodeGen {
         } else {
             ""
         };
+        let base_clause = match &cpp_inherit_base {
+            Some(base) => format!(" : public {}", base),
+            None => String::new(),
+        };
         self.emit_template_declaration_with_type_defaults(
             &s.generics,
             export_prefix,
-            &format!("struct {} {{", name),
+            &format!("struct {}{} {{", name, base_clause),
         );
         self.push_type_param_scope(&s.generics);
         self.indent += 1;
@@ -1031,6 +1054,77 @@ impl CodeGen {
                 "void rusty_mark_forgotten() const noexcept { _rusty_forgotten = true; }",
             );
             self.newline();
+        }
+
+        // `#[cpp_inherit]` structs are polymorphic (virtual base + overrides),
+        // so they are NOT C++ aggregates — aggregate/designated init is
+        // illegal. Synthesize an explicit fieldwise ctor (the positional
+        // struct-literal lowering targets it) plus a move ctor that
+        // reconstructs a fresh base subobject. The interface base deletes its
+        // move ctor, which would implicitly delete the subclass move and break
+        // `Arc<Self>::new_(Self::new_(...))`; reconstructing the (stateless)
+        // base sidesteps that without touching the shared base class. Only the
+        // named-fields case is handled (the inheritance migrations are all
+        // record-shaped); unit/tuple cpp_inherit types fall through unchanged.
+        if let Some(base) = &cpp_inherit_base {
+            if !has_drop_impl && !has_cpp_ctor_method {
+                if let syn::Fields::Named(fields) = &s.fields {
+                    let member_of = |rust_name: &str| -> String {
+                        named_field_cpp_names
+                            .get(rust_name)
+                            .cloned()
+                            .unwrap_or_else(|| escape_cpp_keyword(rust_name))
+                    };
+                    // Fieldwise ctor: `Self(F0 f0_init, ...) : Base(), f0(...) {}`
+                    let ctor_params: Vec<String> = fields
+                        .named
+                        .iter()
+                        .filter_map(|field| {
+                            let fname = field.ident.as_ref()?.to_string();
+                            Some(format!("{} {}_init", self.map_type(&field.ty), fname))
+                        })
+                        .collect();
+                    let mut ctor_inits: Vec<String> = vec![format!("{}()", base)];
+                    for field in &fields.named {
+                        let Some(fname) = field.ident.as_ref().map(|i| i.to_string()) else {
+                            continue;
+                        };
+                        let member = member_of(&fname);
+                        let param = format!("{}_init", fname);
+                        if matches!(&field.ty, syn::Type::Reference(_)) {
+                            ctor_inits.push(format!("{}({})", member, param));
+                        } else {
+                            ctor_inits.push(format!("{}(std::move({}))", member, param));
+                        }
+                    }
+                    self.writeln(&format!(
+                        "{}({}) : {} {{}}",
+                        name,
+                        ctor_params.join(", "),
+                        ctor_inits.join(", ")
+                    ));
+                    // Move ctor: `Self(Self&& other) noexcept : Base(), f0(...) {}`
+                    let mut move_inits: Vec<String> = vec![format!("{}()", base)];
+                    for field in &fields.named {
+                        let Some(fname) = field.ident.as_ref().map(|i| i.to_string()) else {
+                            continue;
+                        };
+                        let member = member_of(&fname);
+                        if matches!(&field.ty, syn::Type::Reference(_)) {
+                            move_inits.push(format!("{}(other.{})", member, member));
+                        } else {
+                            move_inits.push(format!("{}(std::move(other.{}))", member, member));
+                        }
+                    }
+                    self.writeln(&format!(
+                        "{}({}&& other) noexcept : {} {{}}",
+                        name,
+                        name,
+                        move_inits.join(", ")
+                    ));
+                    self.newline();
+                }
+            }
         }
 
         // Emit methods from impl blocks (merged)
@@ -5797,7 +5891,11 @@ impl CodeGen {
         // Use positional constructor syntax (not designated initializers) when the
         // struct has impl blocks that make it non-aggregate in C++.
         let has_impl_methods = resolved_struct_name.as_ref().is_some_and(|name| {
-            self.type_has_drop_impl(name)
+            // cpp_inherit structs are non-aggregate; designated init is illegal,
+            // so always route them through the positional-ctor form (which
+            // targets the synthesized fieldwise ctor).
+            self.is_cpp_inherit_type(name)
+                || self.type_has_drop_impl(name)
                 || self
                     .impl_blocks
                     .get(name)

@@ -113,6 +113,33 @@ public:
     // @safe
     const T* operator->() const { return data_; }
 
+    // Transparent forwarding so the inline-Rust DSL's container operations on a
+    // guarded collection resolve through to the inner value: the DSL lowers
+    // `guard.len()` -> `rusty::len(guard)`, `guard.contains(k)` ->
+    // `rusty::contains(guard, k)`, and `guard[i]` -> `guard[i]`, none of which
+    // the bare guard otherwise satisfies. Each is SFINAE-gated on the inner T
+    // actually supporting the operation, so a MutexGuard over a non-container
+    // T is unaffected.
+    // @safe
+    template<typename U = T>
+    auto len() const -> decltype(std::declval<const U&>().len()) { return data_->len(); }
+    // @safe
+    template<typename U = T>
+    auto is_empty() const -> decltype(std::declval<const U&>().is_empty()) { return data_->is_empty(); }
+    // @safe
+    template<typename K, typename U = T>
+    auto contains(const K& key) const -> decltype(std::declval<const U&>().contains(key)) {
+        return data_->contains(key);
+    }
+    // @safe
+    template<typename I, typename U = T>
+    auto operator[](I index) -> decltype(std::declval<U&>()[index]) { return (*data_)[index]; }
+    // @safe
+    template<typename I, typename U = T>
+    auto operator[](I index) const -> decltype(std::declval<const U&>()[index]) {
+        return (*data_)[index];
+    }
+
     // @safe - Get raw pointer
     T* get() { return data_; }
     // @safe
@@ -168,6 +195,12 @@ public:
 
     // @safe - Constructor initializes mutex and data
     explicit Mutex(T value) : data_(std::move(value)) {}
+
+    // @safe - Rust-style factory matching `Mutex::new(value)`. The inline-Rust
+    // DSL lowers `Mutex::new(x)` to `Mutex<T>::new_(x)`; provide it here so the
+    // hand-written Mutex matches the `new_` convention used by Cell/SpinMutex
+    // and the transpiled container ports.
+    static Mutex new_(T value) { return Mutex(std::move(value)); }
 
     static Mutex default_()
     requires (requires { T::default_(); } || std::is_default_constructible_v<T>) {

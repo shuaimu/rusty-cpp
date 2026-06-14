@@ -8,6 +8,7 @@
 #include <utility>  // for std::move, std::forward
 #include <cstddef>  // for size_t
 #include <rusty/function.hpp>
+#include <rusty/option.hpp>
 
 // VecDeque<T> - A double-ended queue implemented with a growable ring buffer
 // Equivalent to Rust's VecDeque<T>
@@ -82,6 +83,30 @@ public:
     // @lifetime: owned
     static VecDeque<T> make() {
         return VecDeque<T>();
+    }
+
+    // Rust-style factory matching `VecDeque::new()` — the inline-Rust DSL
+    // lowers `VecDeque::new()` to `VecDeque<T>::new_()`. Mirrors `make()`.
+    // @lifetime: owned
+    static VecDeque<T> new_() {
+        return VecDeque<T>();
+    }
+
+    // Remove and return the element at logical `index`, shifting subsequent
+    // elements forward (order-preserving). Returns None if out of bounds.
+    // Matches Rust's `VecDeque::remove(index) -> Option<T>`.
+    // @lifetime: owned
+    rusty::Option<T> remove(size_t index) {
+        if (index >= size_) {
+            return rusty::Option<T>(rusty::None);
+        }
+        T result = std::move((*this)[index]);
+        for (size_t i = index; i + 1 < size_; ++i) {
+            (*this)[i] = std::move((*this)[i + 1]);
+        }
+        data_[to_physical_index(size_ - 1)].~T();
+        --size_;
+        return rusty::Option<T>(std::move(result));
     }
 
     // Factory with capacity - VecDeque::with_capacity()

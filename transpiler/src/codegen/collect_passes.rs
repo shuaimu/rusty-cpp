@@ -2449,6 +2449,27 @@ impl CodeGen {
                         .and_then(|path| path.segments.last())
                         .map(|seg| seg.ident.to_string());
                     let is_inherent_impl = trait_name.is_none();
+
+                    // `#[cpp_inherit] impl Trait for Type` → record that Type
+                    // uses direct-inheritance emission (see cpp_inherit_trait
+                    // doc in mod.rs). Keyed by the simple type name (matches
+                    // `emit_struct`'s `s.ident`) and the module-scoped key.
+                    if Self::has_cpp_inherit_attr(&impl_block.attrs) {
+                        if let Some(trait_short) = &trait_name {
+                            let simple_type_name = tp
+                                .path
+                                .segments
+                                .last()
+                                .map(|seg| seg.ident.to_string())
+                                .unwrap_or_else(|| raw_type_name.clone());
+                            self.cpp_inherit_trait
+                                .insert(simple_type_name.clone(), trait_short.clone());
+                            self.cpp_inherit_trait
+                                .insert(type_name.clone(), trait_short.clone());
+                            let scoped = self.scoped_type_key(&simple_type_name);
+                            self.cpp_inherit_trait.insert(scoped, trait_short.clone());
+                        }
+                    }
                     // Borrowed `IntoIterator` impls (`impl IntoIterator for &T` / `&mut T`)
                     // collide with owned `into_iter(self)` when merged into one C++ struct:
                     // C++ cannot distinguish both non-const receiver shapes.
@@ -4708,6 +4729,13 @@ impl CodeGen {
                     // Only handle local self types — foreign ones go via
                     // emit_trait_adapter_specializations (rusty_ext path).
                     if !self.local_declared_types.contains(&raw_self_name) {
+                        continue;
+                    }
+                    // `#[cpp_inherit]` impls emit the concrete self type as a
+                    // direct `struct Self : public Trait` subclass (handled in
+                    // emit_struct), so suppress the TraitAdapter<Self> spec that
+                    // would otherwise wrap it.
+                    if Self::has_cpp_inherit_attr(&impl_block.attrs) {
                         continue;
                     }
                     // We need the trait's Interface class name to inherit

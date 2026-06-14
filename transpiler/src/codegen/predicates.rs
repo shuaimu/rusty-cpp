@@ -391,6 +391,58 @@ impl CodeGen {
         attrs.iter().any(|a| a.path().is_ident("cpp_ctor"))
     }
 
+    /// `#[cpp_inherit]` on an `impl Trait for Type` opts that impl into
+    /// direct C++ inheritance: the concrete `Type` is emitted as
+    /// `struct Type : public Trait { ... override ... }` (with a synthesized
+    /// fieldwise + move ctor) instead of the default `TraitAdapter<Type>`
+    /// wrapper, so existing call sites that upcast `Arc<Type>` /
+    /// `shared_ptr<Type>` to the trait base keep compiling. Opt-in only.
+    pub(super) fn has_cpp_inherit_attr(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|a| a.path().is_ident("cpp_inherit"))
+    }
+
+    /// True when `type_name`'s simple name was recorded (via a
+    /// `#[cpp_inherit]` impl) as using direct-inheritance emission.
+    /// Checks both the bare name and the module-scoped key.
+    pub(super) fn is_cpp_inherit_type(&self, type_name: &str) -> bool {
+        self.cpp_inherit_trait.contains_key(type_name)
+            || self
+                .cpp_inherit_trait
+                .contains_key(&self.scoped_type_key(type_name))
+    }
+
+    /// For a `#[cpp_inherit]` type, resolve the absolute C++ base-class
+    /// spelling to inherit from (`::ns::Trait`), falling back to the bare
+    /// trait name for cross-block inline-rust traits (declared in a sibling
+    /// block, so absent from `trait_declared_path_by_short_name`). Returns
+    /// `None` for non-cpp_inherit types. Shared by `emit_struct` (the base
+    /// clause) and `emit_cpp_ctor` (the base-subobject init prefix).
+    pub(super) fn cpp_inherit_base_name(&self, type_name: &str) -> Option<String> {
+        let scoped_key = self.scoped_type_key(type_name);
+        let trait_short = self
+            .cpp_inherit_trait
+            .get(type_name)
+            .or_else(|| self.cpp_inherit_trait.get(&scoped_key))
+            .cloned()?;
+        Some(
+            match self
+                .trait_declared_path_by_short_name
+                .get(&trait_short)
+                .cloned()
+            {
+                Some(qualified) => {
+                    let escaped = self.escape_and_rename_qualified_name(&qualified);
+                    if escaped.contains("::") {
+                        format!("::{}", escaped)
+                    } else {
+                        escaped
+                    }
+                }
+                None => trait_short,
+            },
+        )
+    }
+
     /// Skip items behind `#[cfg(...)]` when the predicate is known-false in
     /// transpiler mode. Unknown predicates are kept conservatively.
     pub(super) fn should_skip_cfg_attrs(attrs: &[syn::Attribute]) -> bool {

@@ -1001,6 +1001,11 @@ pub struct CodeGen {
     /// (replaces `pro::proxy<...>` facade emission).
     /// See docs/rusty-cpp-transpiler.md § 3.2.9 for the design.
     pub(crate) interface_traits: bool,
+    /// See `TranspileOptions::inline_rust_block`. When true, suppress the
+    /// `runtime_path_fallback_helpers_text()` `namespace rusty {...}` preamble
+    /// (redundant under inline-rust where the rusty module is imported, and it
+    /// would shadow `::rusty` from inside the consumer namespace).
+    pub(crate) inline_rust_block: bool,
     /// Multi-bound `dyn A + B` combinations encountered during emission
     /// under `--interface-traits`. Each entry is a sorted Vec of trait names
     /// (so `dyn A + B` and `dyn B + A` collapse to the same combination).
@@ -1046,6 +1051,13 @@ pub struct CodeGen {
     /// `trait_declared_paths` to avoid O(n_paths) scans per supertrait
     /// lookup. Invalidated when `trait_declared_paths` changes.
     pub(crate) trait_declared_path_by_short_name: HashMap<String, String>,
+    /// Maps a concrete type's simple name (e.g. `OneTimeJob`) to the short
+    /// name of a trait it implements via `#[cpp_inherit] impl Trait for Type`.
+    /// When present, `emit_struct` emits `struct Type : public Trait { ... }`
+    /// (direct C++ inheritance + override) plus a synthesized fieldwise/move
+    /// ctor, and the 3 `TraitAdapter<Type>` specializations are suppressed.
+    /// Opt-in only — absent types keep the default adapter-wrapper emission.
+    pub(crate) cpp_inherit_trait: HashMap<String, String>,
     /// Tracks `(trait_name, self_cpp)` pairs we've already emitted
     /// Adapter specs for under `--interface-traits`. Prevents duplicate
     /// `template <> class TraitAdapter<U>` definitions when the same
@@ -1482,12 +1494,14 @@ impl CodeGen {
             // branches are still scattered through emission code; the
             // compiler dead-code-eliminates the false arms.
             interface_traits: true,
+            inline_rust_block: false,
             dyn_multi_combinations: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             skipped_interface_traits: HashSet::new(),
             interface_traits_with_generics: HashSet::new(),
             trait_class_skipped_method_keys: HashSet::new(),
             trait_associated_type_names: HashMap::new(),
             trait_declared_path_by_short_name: HashMap::new(),
+            cpp_inherit_trait: HashMap::new(),
             emitted_foreign_adapter_specs: HashSet::new(),
             crate_name: None,
             module_stack: Vec::new(),
@@ -2058,6 +2072,7 @@ impl CodeGen {
         self.trait_class_skipped_method_keys.clear();
         self.trait_associated_type_names.clear();
         self.trait_declared_path_by_short_name.clear();
+        self.cpp_inherit_trait.clear();
         self.emitted_foreign_adapter_specs.clear();
         self.numeric_type_aliases.clear();
         self.tuple_type_aliases.clear();
@@ -2656,7 +2671,11 @@ impl CodeGen {
                         runtime_path_fallback_helpers_text_for_module(&self.output);
                     global_helper_text.push_str(&runtime_helpers);
                 }
-            } else {
+            } else if !self.inline_rust_block {
+                // Inline-rust blocks already `import rusty;`, so the preamble is
+                // redundant — and emitting its `namespace rusty {...}` inside the
+                // consumer's namespace would shadow `::rusty`. Skip it; the
+                // emitted `rusty::*` references resolve to the imported module.
                 helper_text.push_str(runtime_path_fallback_helpers_text());
             }
         }
@@ -15097,12 +15116,34 @@ impl CodeGen {
         }
 
         let mut inits: Vec<String> = Vec::new();
+        // For a `#[cpp_inherit]` owner the C++ ctor must construct its base
+        // subobject first: `Owner(args) : Base(), field(e)...`. Without this
+        // the base is value-initialized only when it happens to have an
+        // accessible default ctor — bases without one would fail to compile.
+        if let Some(base) = self.cpp_inherit_base_name(owner) {
+            inits.push(format!("{}()", base));
+        }
         for field in &struct_lit.fields {
-            let field_name = match &field.member {
-                syn::Member::Named(ident) => escape_cpp_keyword(&ident.to_string()),
-                syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+            // Emit each field's init value WITH its declared type as the
+            // expected type — this qualifies constructor paths the same way the
+            // regular factory path does (e.g. `Cell::new(0)` -> `rusty::Cell<
+            // int32_t>::new_(0)`, `Mutex::new(x)` -> `rusty::Mutex<T>::new_(x)`).
+            // Without the expected type the path stays unqualified (`Cell<...>`)
+            // and fails to resolve. Fall back to the plain emitter for tuple
+            // fields (no name to look up).
+            let (field_name, value_cpp) = match &field.member {
+                syn::Member::Named(ident) => {
+                    let field_ty = self.lookup_struct_field_type(owner, &ident.to_string());
+                    (
+                        escape_cpp_keyword(&ident.to_string()),
+                        self.emit_expr_to_string_with_expected(&field.expr, field_ty.as_ref()),
+                    )
+                }
+                syn::Member::Unnamed(idx) => (
+                    format!("_{}", idx.index),
+                    self.emit_expr_to_string(&field.expr),
+                ),
             };
-            let value_cpp = self.emit_expr_to_string(&field.expr);
             inits.push(format!("{}({})", field_name, value_cpp));
         }
 
