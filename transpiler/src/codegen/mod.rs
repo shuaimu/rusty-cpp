@@ -16496,15 +16496,38 @@ impl CodeGen {
     }
 
 
-    /// Recover an empty `Vec::new()` operand's element type from its
-    /// comparison peer in the `assert_eq!`/`assert_ne!` desugar
-    /// (`match (&*v, &*Vec::new())`). Rust-side expected-type threading can't
-    /// reach the constructor through the `&*` deref, so deduce the element on
-    /// the C++ side from the peer container — the same `decltype((peer))`
-    /// strategy `emit_result_ctor_expr_with_peer_context` uses for Either/Result.
-    /// `expr` is the (possibly `*`-deref-wrapped) constructor operand. Returns
-    /// `None` for non-`Vec` owners (e.g. `ArrayVec`, which also needs capacity);
-    /// the caller only invokes this when the plain emit would leak `<auto>`.
+    /// Peel `&` / `*` / paren-group wrappers from an expression, returning the
+    /// inner value expression (e.g. `&*vec` → `vec`).
+    fn peel_reference_deref_paren_expr<'a>(&self, expr: &'a syn::Expr) -> &'a syn::Expr {
+        let mut e = self.peel_paren_group_expr(expr);
+        loop {
+            match e {
+                syn::Expr::Reference(r) => e = self.peel_paren_group_expr(&r.expr),
+                syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                    e = self.peel_paren_group_expr(&u.expr)
+                }
+                _ => return e,
+            }
+        }
+    }
+
+    /// Recover an empty owner constructor operand's type from its comparison
+    /// peer in the `assert_eq!`/`assert_ne!` desugar (`match (&L, &R)` / its
+    /// `&*` deref form). Rust-side expected-type threading can't reach the
+    /// constructor through the `&`/`*` wrappers, so deduce the type on the C++
+    /// side from the peer — the same `decltype((peer))` strategy
+    /// `emit_result_ctor_expr_with_peer_context` uses for Either/Result.
+    ///
+    /// Two shapes:
+    /// - No deref (`&var` vs `&Owner::new()`): the operands are the same owner
+    ///   type, so clone the peer's exact type —
+    ///   `std::remove_cvref_t<decltype(peer)>::new_()` (covers `ArrayVec`,
+    ///   element + capacity together).
+    /// - Deref (`&*vec` vs `&*Vec::new()`): the operands are slices; the empty
+    ///   `Vec`'s element is the peer container's element —
+    ///   `Vec<remove_cvref_t<decltype(*std::begin(peer))>>::new_()`.
+    ///
+    /// The caller only invokes this when the plain emit would leak `<auto>`.
     fn emit_owner_ctor_expr_with_peer_context(
         &self,
         expr: &syn::Expr,
@@ -16520,23 +16543,40 @@ impl CodeGen {
         let syn::Expr::Call(call) = inner else {
             return None;
         };
-        if type_solver::owner_constructor_head(call).as_deref() != Some("Vec") {
+        // Recognize an empty owner constructor: a 2+ segment path ending in a
+        // nullary/empty constructor name.
+        let syn::Expr::Path(func_path) = call.func.as_ref() else {
+            return None;
+        };
+        if func_path.qself.is_some() || func_path.path.segments.len() < 2 {
             return None;
         }
-        let peer = self.emit_expr_to_string(peer_expr);
-        // Element type = the peer container's iterator element, deduced at C++
-        // compile time. `deref_if_pointer_like` unwraps the borrow taken by the
-        // assert scaffolding so `std::begin` sees the underlying range.
-        let elem = format!(
-            "std::remove_cvref_t<decltype(*std::begin(rusty::detail::deref_if_pointer_like({})))>",
-            peer
-        );
-        let vec_new = format!("rusty::Vec<{}>::new_()", elem);
-        Some(if had_deref {
-            format!("rusty::detail::deref_if_pointer_like({})", vec_new)
+        let ctor = func_path.path.segments.last()?.ident.to_string();
+        if !matches!(
+            ctor.as_str(),
+            "new" | "new_" | "new_const" | "with_capacity" | "default" | "default_"
+        ) {
+            return None;
+        }
+        // Emit the peer container directly (peeling its `&`/`*` wrappers) so the
+        // decltype sees the underlying value rather than the assert scaffolding's
+        // borrow form.
+        let peer = self.emit_expr_to_string(self.peel_reference_deref_paren_expr(peer_expr));
+        if had_deref {
+            let owner = func_path.path.segments[func_path.path.segments.len() - 2]
+                .ident
+                .to_string();
+            if owner != "Vec" {
+                return None;
+            }
+            let elem = format!("std::remove_cvref_t<decltype(*std::begin({}))>", peer);
+            Some(format!(
+                "rusty::detail::deref_if_pointer_like(rusty::Vec<{}>::new_())",
+                elem
+            ))
         } else {
-            vec_new
-        })
+            Some(format!("std::remove_cvref_t<decltype({})>::new_()", peer))
+        }
     }
 
     fn emit_result_ctor_expr_with_peer_context(
