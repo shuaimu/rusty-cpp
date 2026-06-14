@@ -2820,7 +2820,13 @@ impl CodeGen {
         if let Some(receiver_ty) = self.infer_simple_expr_type(receiver) {
             let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
             let receiver_cpp = self.map_type(receiver_ty);
-            if receiver_cpp.starts_with("rusty::Vec<") || receiver_cpp.starts_with("std::span<") {
+            // `Vec::new()` whose element type is not resolvable context-free
+            // infers to a bare `rusty::Vec` (no args); its `.into_iter()` still
+            // bridges through `rusty::iter(...)` like any other Vec receiver.
+            if receiver_cpp.starts_with("rusty::Vec<")
+                || receiver_cpp == "rusty::Vec"
+                || receiver_cpp.starts_with("std::span<")
+            {
                 return true;
             }
         }

@@ -2980,6 +2980,25 @@ impl CodeGen {
                                     &receiver_ty,
                                 )
                                 .or_else(|| self.extract_iter_item_type_from_type(&receiver_ty))
+                                .or_else(|| {
+                                    // A `Vec::new()` receiver infers to a bare
+                                    // `Vec` (no element) context-free; collection
+                                    // locals instead carry their element type
+                                    // directly as a placeholder hint (`values` →
+                                    // `Value`). Recover the pushed element type
+                                    // from that hint — extracting if the hint is
+                                    // itself a full container, else using it as
+                                    // the element type.
+                                    extract_simple_local_ident(&mc.receiver).and_then(|name| {
+                                        self.lookup_local_placeholder_type_hint(&name).map(|hint| {
+                                            extract_sequence_element_type_for_hint(hint)
+                                                .or_else(|| {
+                                                    self.extract_iter_item_type_from_type(hint)
+                                                })
+                                                .unwrap_or_else(|| hint.clone())
+                                        })
+                                    })
+                                })
                                 {
                                     return Some(elem_ty);
                                 }
@@ -3698,6 +3717,32 @@ impl CodeGen {
             hint_last.arguments,
             syn::PathArguments::AngleBracketed(_)
         )
+    }
+
+    /// Like `bare_owner_should_yield_to_specialized_hint`, but for any owner
+    /// — including single-parameter `Vec`: true when `inferred` is a bare
+    /// owner (no template args) and `hint` is the same owner specialized with
+    /// args (`Vec` vs `Vec<i32>`). Used only by the impl-field-name fallback,
+    /// where `hint` is the authoritative declared field type.
+    pub(super) fn bare_owner_specialized_by_field_hint(
+        &self,
+        inferred: &syn::Type,
+        hint: &syn::Type,
+    ) -> bool {
+        let syn::Type::Path(inferred_tp) = self.peel_reference_paren_group_type(inferred) else {
+            return false;
+        };
+        let syn::Type::Path(hint_tp) = self.peel_reference_paren_group_type(hint) else {
+            return false;
+        };
+        let (Some(inferred_last), Some(hint_last)) =
+            (inferred_tp.path.segments.last(), hint_tp.path.segments.last())
+        else {
+            return false;
+        };
+        inferred_last.ident == hint_last.ident
+            && matches!(inferred_last.arguments, syn::PathArguments::None)
+            && matches!(hint_last.arguments, syn::PathArguments::AngleBracketed(_))
     }
 
     pub(super) fn infer_local_binding_type_from_initializer(

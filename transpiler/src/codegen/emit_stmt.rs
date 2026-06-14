@@ -1630,9 +1630,25 @@ impl CodeGen {
                         inferred_binding_ty = Some(placeholder_ty);
                     }
                 }
-                if inferred_binding_ty.is_none() {
-                    inferred_binding_ty =
-                        self.infer_local_binding_type_from_current_struct_field(local, &name_str);
+                // Fall back to a same-named field in the enclosing impl's
+                // struct for constructor inits whose element type is otherwise
+                // unresolved — `let comparators = Vec::new_();` inside an impl
+                // whose struct has `comparators: Vec<i32>`. Trigger not only
+                // when inference produced nothing, but also when it produced a
+                // bare/placeholder owner (`Vec` / `Vec<auto>`) that the field
+                // type can specialize.
+                if let Some(field_ty) =
+                    self.infer_local_binding_type_from_current_struct_field(local, &name_str)
+                {
+                    let should_use = inferred_binding_ty.as_ref().is_none_or(|ty| {
+                        self.type_contains_infer(ty)
+                            || self.type_contains_unresolved_placeholder_like(ty)
+                            || self.bare_owner_should_yield_to_specialized_hint(ty, &field_ty)
+                            || self.bare_owner_specialized_by_field_hint(ty, &field_ty)
+                    });
+                    if should_use {
+                        inferred_binding_ty = Some(field_ty);
+                    }
                 }
                 let has_generic_ctor_init = local
                     .init
