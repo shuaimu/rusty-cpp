@@ -34,6 +34,12 @@ pub(crate) struct ExtensionImplMethod {
     /// `impl<Idx, T, ...>`. Used by the Adapter spec emitter to detect
     /// generic impls (which need partial specializations) and skip them.
     impl_generic_names: Vec<String>,
+    /// UFCS Fix A part 2 (§ 3.2.4): an extra `requires`-clause to inject after
+    /// the template parameter list — used to CONSTRAIN a multi-owner default
+    /// method's template (`requires requires(const Self_& s){ Tr_::__ufcs_impls(s); }`)
+    /// so it matches only types implementing that trait. `None` for ordinary
+    /// methods.
+    extra_template_requires: Option<String>,
     /// True for a trait DEFAULT method (book § 3.2.13): `self_ty` is the bare
     /// `Self`, which must be emitted as a leading template parameter
     /// (`template <class Self> … (const Self& self_, …)`) rather than a concrete
@@ -11413,6 +11419,7 @@ impl CodeGen {
                 associated_type_bindings: associated_type_bindings.clone(),
                 impl_generic_names: impl_generic_names.clone(),
                 self_is_template_param: false,
+                extra_template_requires: None,
             });
         }
         if specs.is_empty() {
@@ -11479,6 +11486,21 @@ impl CodeGen {
         if !self.ufcs_declared_trait_names.contains(&trait_name) {
             return;
         }
+        // Fix A part 2: when this trait participates in a MULTI-OWNER method,
+        // emit a marker `<Tr>_::__ufcs_impls(const SelfType&)` witnessing that
+        // this concrete impl's self type implements <Tr>. The multi-owner
+        // default templates' `requires` clauses test this to disambiguate. Only
+        // for concrete impls (generic self types would need a template marker);
+        // emitted EARLY so it precedes the constrained default-template decls.
+        let trait_in_multi_owner = self
+            .ufcs_method_trait_owners
+            .values()
+            .any(|owners| owners.len() > 1 && owners.contains(&trait_name));
+        let impl_is_concrete = !impl_block
+            .generics
+            .params
+            .iter()
+            .any(|p| matches!(p, syn::GenericParam::Type(_)));
         self.writeln(&format!("namespace {}_ {{", trait_name));
         self.indent += 1;
         for spec in &specs {
@@ -11486,6 +11508,14 @@ impl CodeGen {
                 self.ufcs_emitted_trait_methods
                     .insert((trait_name.clone(), spec.method.sig.ident.to_string()));
             }
+        }
+        if trait_in_multi_owner && impl_is_concrete {
+            let self_cpp = self.qualify_nested_local_type_for_global_scope(
+                &self.rewrite_cpp_import_bound_type_spelling(
+                    &self.map_type(impl_block.self_ty.as_ref()),
+                ),
+            );
+            self.writeln(&format!("void __ufcs_impls(const {}&);", self_cpp));
         }
         self.indent -= 1;
         self.writeln("}");
@@ -11537,12 +11567,38 @@ impl CodeGen {
                 associated_type_bindings: HashMap::new(),
                 impl_generic_names: impl_generic_names.clone(),
                 self_is_template_param: true,
+                extra_template_requires: None,
             });
         }
         if specs.is_empty() {
             return None;
         }
         Some((trait_name, specs))
+    }
+
+    /// Fix A part 2: constrain a MULTI-OWNER default method's template so it
+    /// matches only types that implement THIS trait — `requires requires(const
+    /// Self_& s){ <Tr>_::__ufcs_impls(s); }` (the per-impl marker emitted by the
+    /// early decl emitter). Single-owner defaults are left unconstrained (no
+    /// ambiguity). No-op when the owner map isn't populated.
+    fn annotate_multi_owner_default_constraints(
+        &self,
+        trait_name: &str,
+        specs: &mut [ExtensionImplMethod],
+    ) {
+        for spec in specs.iter_mut() {
+            let m = spec.method.sig.ident.to_string();
+            if self
+                .ufcs_method_trait_owners
+                .get(&m)
+                .is_some_and(|o| o.len() > 1)
+            {
+                spec.extra_template_requires = Some(format!(
+                    "requires requires(const Self_& __ufcs_s) {{ {}_::__ufcs_impls(__ufcs_s); }}",
+                    trait_name
+                ));
+            }
+        }
     }
 
     /// Phase / § 3.2.13 (late): emit each trait's default methods as
@@ -11554,9 +11610,10 @@ impl CodeGen {
         for item in items {
             match item {
                 syn::Item::Trait(t) => {
-                    let Some((trait_name, specs)) = Self::ufcs_trait_default_specs(t) else {
+                    let Some((trait_name, mut specs)) = Self::ufcs_trait_default_specs(t) else {
                         continue;
                     };
+                    self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
                     self.writeln(&format!(
                         "// UFCS trait migration: default methods for trait `{}`",
                         trait_name
@@ -11589,11 +11646,23 @@ impl CodeGen {
         for item in items {
             match item {
                 syn::Item::Trait(t) => {
-                    let Some((trait_name, specs)) = Self::ufcs_trait_default_specs(t) else {
+                    let Some((trait_name, mut specs)) = Self::ufcs_trait_default_specs(t) else {
                         continue;
                     };
+                    self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
                     self.writeln(&format!("namespace {}_ {{", trait_name));
                     self.indent += 1;
+                    // Fix A part 2: if this trait has a constrained (multi-owner)
+                    // default, guarantee `<Tr>_::__ufcs_impls` EXISTS even when
+                    // the trait has no concrete impl (hence no per-impl marker) —
+                    // a 0-arg base declaration. Then the default template's
+                    // `requires { <Tr>_::__ufcs_impls(s) }` is SFINAE-FALSE (soft,
+                    // no matching 1-arg overload) instead of a hard "no member
+                    // named __ufcs_impls" error. Per-impl `__ufcs_impls(const X&)`
+                    // overloads (from the impl decls) are the real witnesses.
+                    if specs.iter().any(|s| s.extra_template_requires.is_some()) {
+                        self.writeln("void __ufcs_impls();");
+                    }
                     for spec in &specs {
                         if self.emit_extension_trait_free_function_declaration(spec) {
                             self.ufcs_emitted_trait_methods
@@ -12671,11 +12740,19 @@ impl CodeGen {
             return_type = self.qualify_nested_local_types_in_type_string(&return_type);
         }
         self.record_extension_free_function_symbol(&method_name);
+        // Fix A part 2: inject the multi-owner default's `requires` constraint
+        // after the template parameter list.
+        let requires_prefix = method_spec
+            .extra_template_requires
+            .as_deref()
+            .map(|r| format!("{} ", r))
+            .unwrap_or_default();
         self.emit_template_declaration_with_type_defaults(
             &free_generics,
             export_prefix,
             &format!(
-                "{} {}({});",
+                "{}{} {}({});",
+                requires_prefix,
                 return_type,
                 escaped_method_name,
                 params.join(", ")
@@ -12942,11 +13019,19 @@ impl CodeGen {
             return_type = self.qualify_nested_local_types_in_type_string(&return_type);
         }
         self.record_extension_free_function_symbol(&method_name);
+        // Fix A part 2: inject the multi-owner default's `requires` constraint
+        // after the template parameter list (must match the declaration).
+        let requires_prefix = method_spec
+            .extra_template_requires
+            .as_deref()
+            .map(|r| format!("{} ", r))
+            .unwrap_or_default();
         self.emit_template_declaration_with_type_defaults(
             &free_generics,
             export_prefix,
             &format!(
-                "{} {}({}) {{",
+                "{}{} {}({}) {{",
+                requires_prefix,
                 return_type,
                 escaped_method_name,
                 params.join(", ")
