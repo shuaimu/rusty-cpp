@@ -1014,7 +1014,9 @@ template-ness:
 
 C++ prefers a non-template over a template (inherent ▷ trait), and a more-constrained
 template over a less-constrained one (concrete ▷ blanket) — exactly Rust's order, derived
-entirely by the compiler.
+entirely by the compiler. The *same* tiebreak gives trait **default methods** override
+semantics for free (§3.2.13): the default is a template, an overriding impl is a non-template,
+and the non-template wins.
 
 **The one subtlety to get right:** the non-template tiebreaker only fires when the candidate
 conversions are *equally good*. If the trait template takes a forwarding ref `T&&` while the
@@ -1056,17 +1058,53 @@ definition (like Rust, where a type may impl both). Resolution then mirrors Rust
 The transpiler never resolves *which* trait; the source's `method` vs `path` syntax already
 encodes "resolve-for-me" vs "I-mean-this-one," and clang detects the genuine ambiguity.
 
-#### 3.2.7 Non-intrusive and cross-file impls
+#### 3.2.7 Non-intrusive impls — cross-file, cross-crate, and why not CRTP
 
 Free functions are the only non-intrusive, cross-boundary mechanism, so this design handles
 the cases inheritance cannot. `impl LocalTrait for ForeignType` (orphan-legal because the
 trait is local) is just another overload in a namespace; the foreign type's definition is
-untouched. Within a crate the cargo-expanded source is one unit, so a multi-pass scan sees
-every impl before emitting anything. Across crates, the impl's free function is in an
-imported module; the call site's `import` + `using` (from the `use`) make it visible. The
-only irreducible residue is **member-call syntax on a foreign type for a your-crate impl** —
-`foreign.your_method()` must be emitted as `your_method(foreign)`, because C++ cannot add a
-member to a foreign definition and has no UFCS fallback.
+**untouched**.
+
+**Why not CRTP.** The obvious C++ alternative for static trait dispatch is CRTP —
+`struct Person : Greet_<Person>`, with the base template supplying methods. It is rejected
+for two structural reasons, not taste: (1) it is **intrusive** — the base must be declared
+*at the type's definition*, but Rust `impl`s are routinely written in a different module or
+crate than the type, and C++ cannot retroactively add a base to an already-defined (or
+foreign) type; (2) it is **static-only** — `Greet_<Dog>` and `Greet_<Cat>` share no base, so
+it cannot back `Box<dyn Greet>`; you would *still* need the abstract interface of §3.2.10.
+CRTP would be a third mechanism bolted on, not a replacement. Free functions take the
+receiver by parameter, so they are non-intrusive by construction and compose with the
+interface for `dyn`. (CRTP's genuine wins — natural `p.name()` syntax, default methods, `Self`
+returns — are recovered other ways: members for local types, and §3.2.13 for defaults.)
+
+**Within a crate** the cargo-expanded source is one unit (all modules inlined as nested
+`mod`s), so a multi-pass scan sees every trait, type, and impl before emitting anything —
+cross-*file* is a non-issue.
+
+**Across crates** the boundary is the crate, and the problem is **name resolution, not type
+inference** — so it needs *metadata*, not a mini-rustc. Each crate's per-crate analysis
+(declared traits, method-name classes, the concrete-impl owner map, default methods,
+assoc-const-ness, and the crate's module name) is persisted as a **sidecar manifest** next to
+its `.cppm`. Because dependencies are transpiled before their dependents, a dependent loads
+its dependencies' manifests (through the existing cross-crate symbol-index channel) and folds
+them into its own classifier view. Then `iter.dedup()` against a foreign `itertools::Itertools`
+resolves: `dedup` classifies trait-only, owner `Itertools`, namespace `itertools::Itertools_`
+→ emit the module-qualified call (or `using namespace itertools::Itertools_;` from
+`use itertools::Itertools;`). Manifests must propagate **transitively** in dependency order.
+The free functions themselves are emitted with `export`, so they are visible cross-module via
+`import`. *(This is the itertools keystone; until the manifest pipeline lands, foreign-trait
+methods are simply not classified trait-only and fall through to member calls.)*
+
+**A foreign self type is the easy direction.** Because a free function takes the receiver by
+reference (`Tr_::foo(const S&)`), `S` being defined in another crate is irrelevant to
+dispatch — `S` is just an imported type passed as an argument, exactly the thing CRTP could
+not handle. The only refinement: the manifest is keyed by the **impl-emitting crate** (by the
+orphan rule, the trait's crate or the type's crate), since the `Tr_::foo(const S&)` overload
+lives in *that* crate's namespace, and the `using` / qualification must name it.
+
+The only irreducible residue is **member-call syntax on a foreign type for a your-crate
+impl** — `foreign.your_method()` must be emitted as `your_method(foreign)`, because C++ cannot
+add a member to a foreign definition and has no UFCS fallback.
 
 #### 3.2.8 Associated types
 
@@ -1286,6 +1324,58 @@ wins,"* it belongs to clang, not the transpiler.
   adapters already forward to the one `Tr_::m`); diagnostics quality for C++ overload
   ambiguity vs Rust `E0034`.
 
+#### 3.2.13 Default methods
+
+A default method lives in the *trait declaration*, is generic over `Self`, and calls the
+type's other methods through `self`. It lowers to **one** function template in the trait
+namespace — generic over the receiver — not a per-impl emission:
+
+```rust
+trait Greet {
+    fn hello(&self) -> i32;                          // required
+    fn describe(&self) -> String { format!("v={}", self.hello()) }   // default
+}
+```
+```cpp
+namespace Greet_ {
+    int hello(const Foo& self_);                     // required: per-impl, concrete
+
+    template <class Self>                             // default: ONE emission, generic
+    rusty::String describe(const Self& self_) {
+        return rusty::format("v={}", hello(self_));   // self.hello() lowered via UFCS
+    }
+}
+```
+
+Instantiated with `Self = Foo`, `hello(self_)` resolves to Foo's required impl — exactly
+Rust's "the default is monomorphized per `Self` and calls `Self`'s methods." The body's
+`self.other()` calls lower the same way any UFCS call does, recursively (defaults calling
+required methods, or other defaults, all work at instantiation).
+
+**Override semantics are free.** An impl that overrides the default emits a **non-template**
+`Greet_::describe(const Foo&)`. Now `Greet_::describe(foo)` has a concrete (non-template)
+candidate and the generic (template) default; C++ overload resolution prefers the
+non-template → the override wins for `Foo`, while every type without an override matches only
+the template → gets the default. That is precisely "an impl shadows the trait default," via
+the very §3.2.4 non-template-▷-template tiebreak — no special-case logic.
+
+**Composition.** *dyn:* the interface declares `describe()` and each adapter override forwards
+to `Greet_::describe(value_)`, so static and dynamic defaults bottom out in the same template.
+*Cross-crate:* a dependency emits its default templates into its own `Tr_` (with `export`); the
+manifest (§3.2.7) records the trait's defaults so the owner map includes them and the call
+qualifies to `dep::Tr_::describe`. *Assoc-const / runtime-helper traits* are excluded — that
+path already materializes defaults as `<Tr>RuntimeHelper` statics.
+
+**What needs wiring (the missing pass).** Today emission walks `impl Tr for U` blocks only, so
+an unoverridden default produces no `Tr_::m` and the call falls through to a member (a stopgap
+that works only when the older path materializes the default as a member). The proper fix:
+(1) also walk *trait declarations* and emit each default-bodied method as
+`template<class Self> ret m(<self-kind> Self self_, …)`; (2) early-declare them (§3.2.5
+ordering); (3) add defaults to the owner map so call sites qualify to `Tr_::m`. **Caveats**
+are about transpiling the body *generically*, not dispatch: `Self::Assoc` resolves through
+`TrTraits<Self>::Assoc` (§3.2.8's generic path, since `Self` is now a template param); bounds
+become template constraints; and a default that cannot be expressed generically falls back to
+per-impl materialization.
 
 ### 3.3 Pattern Matching ⚠️
 
