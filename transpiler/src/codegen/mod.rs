@@ -594,6 +594,15 @@ pub struct CodeGen {
     /// (matching the owner-map keys / call-site lookup).
     pub(crate) ufcs_emitted_trait_methods:
         std::collections::HashSet<(String, String)>,
+    /// UFCS concrete-impl free-function signature dedupe (per emission phase).
+    /// Distinct Rust types that map to the SAME C++ type (`isize`≡`i64`,
+    /// `usize`≡`u64`, `NonZero*`/`Atomic*` width variants, `CStr`/`CString`/
+    /// `OsStr`/… ≡ `rusty::String`) produce identical free-function signatures in
+    /// one `<module>::__ufcs_<Tr>` (or flat `<Tr>_`) namespace → C++ `redefinition`.
+    /// Keyed `<module>::<trait>@@<canonicalized-signature>` so dedupe is per
+    /// helper namespace; CLEARED at the start of each phase (decl, then def) so the
+    /// two phases dedupe identically and the bridge matches the definitions.
+    pub(crate) ufcs_def_dedupe_seen: std::collections::HashSet<String>,
     /// UFCS cross-crate (book § 3.2.7): dependency trait manifests, merged into
     /// the classifier maps in `emit_file` so calls to a dependency's trait
     /// methods classify + qualify. Empty in single-crate / flag-off mode.
@@ -1436,6 +1445,7 @@ impl CodeGen {
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             ufcs_method_trait_owners: HashMap::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
+            ufcs_def_dedupe_seen: std::collections::HashSet::new(),
             dependency_ufcs_trait_manifests: Vec::new(),
             ufcs_trait_module_prefix: HashMap::new(),
             inference: None,
@@ -2793,6 +2803,7 @@ impl CodeGen {
         // resolve the unqualified `m(recv)` form to the trait free function.
         // No-op when `ufcs_traits` is off. Definitions follow late, near the
         // adapter specializations.
+        self.ufcs_def_dedupe_seen.clear();
         self.emit_ufcs_trait_impl_free_function_decls(&file.items, &[]);
         log_emit("emit_ufcs_trait_impl_free_function_decls");
         // § 3.2.13: default-method templates (early declarations + `using`).
@@ -2895,6 +2906,7 @@ impl CodeGen {
         // UFCS trait migration, Phase 2 (book § 3.2.2): when `ufcs_traits` is
         // on, additionally emit `impl Tr for U` methods as free functions in
         // `namespace <Tr>_`. No-op when the flag is off.
+        self.ufcs_def_dedupe_seen.clear();
         self.emit_ufcs_trait_impl_free_functions(&file.items, &[]);
         log_emit("emit_ufcs_trait_impl_free_functions");
         // § 3.2.13: default-method template DEFINITIONS in `namespace <Tr>_`.
@@ -11460,6 +11472,9 @@ impl CodeGen {
             self.writeln(&format!("namespace {}_ {{", trait_name));
             self.indent += 1;
             for spec in &specs {
+                if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &trait_name) {
+                    continue;
+                }
                 self.emit_extension_trait_free_function(spec);
                 self.newline();
             }
@@ -11480,6 +11495,9 @@ impl CodeGen {
         self.writeln(&format!("namespace {} {{", helper));
         self.indent += 1;
         for spec in &specs {
+            if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &trait_name) {
+                continue;
+            }
             self.emit_extension_trait_free_function(spec);
             self.newline();
         }
@@ -11561,6 +11579,9 @@ impl CodeGen {
             self.writeln(&format!("namespace {}_ {{", trait_name));
             self.indent += 1;
             for spec in &specs {
+                if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &trait_name) {
+                    continue;
+                }
                 if self.emit_extension_trait_free_function_declaration(spec) {
                     self.ufcs_emitted_trait_methods
                         .insert((trait_name.clone(), spec.method.sig.ident.to_string()));
@@ -11598,6 +11619,9 @@ impl CodeGen {
         // using-declaration per name brings in all its overloads.
         let mut bridged: Vec<String> = Vec::new();
         for spec in &specs {
+            if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &trait_name) {
+                continue;
+            }
             if self.emit_extension_trait_free_function_declaration(spec) {
                 let method = spec.method.sig.ident.to_string();
                 self.ufcs_emitted_trait_methods
@@ -11646,6 +11670,31 @@ impl CodeGen {
     /// using-declarations.
     fn ufcs_impl_helper_namespace_name(trait_name: &str) -> String {
         format!("__ufcs_{}", trait_name)
+    }
+
+    /// True if this concrete-impl method's canonicalized C++ free-function
+    /// signature was ALREADY emitted into this (module, trait) helper namespace —
+    /// i.e. a distinct Rust type that lowers to the SAME C++ type as a prior impl
+    /// (`isize`≡`i64`, `usize`≡`u64`, `NonZero*`/`Atomic*` width variants,
+    /// `CStr`/`CString`/`OsStr`/… ≡ `rusty::String`). Emitting both definitions
+    /// would be a C++ `redefinition`; one definition serves both Rust types since
+    /// they are the same C++ type. Records the signature on first sight and
+    /// returns false. Returns false when no dedupe key is available (the spec is
+    /// internally skipped anyway). Scoped per (module, trait) so distinct helper
+    /// namespaces never dedupe against each other. `extension_free_function_dedupe_key`
+    /// already applies the alias canonicalization (see
+    /// `canonicalize_extension_overload_type_for_dedupe`).
+    fn ufcs_concrete_impl_signature_is_duplicate(
+        &mut self,
+        spec: &ExtensionImplMethod,
+        module_path: &[String],
+        trait_name: &str,
+    ) -> bool {
+        let Some(key) = self.extension_free_function_dedupe_key(spec) else {
+            return false;
+        };
+        let scoped = format!("{}::{}@@{}", module_path.join("::"), trait_name, key);
+        !self.ufcs_def_dedupe_seen.insert(scoped)
     }
 
     /// Build `(trait_name, specs)` for a trait's DEFAULT methods (book § 3.2.13):
