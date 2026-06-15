@@ -1410,7 +1410,20 @@ safety net, so every qualified name the transpiler emits must be guaranteed to e
   module did *this* impl mean?), so it is left bare. That guard is correct but incomplete — the
   residual ambiguous names (serde's `Error` in `de`/`ser`/`private_::doc`) need
   *impl-module-context* resolution (qualify relative to the impl's own module first), which the
-  current global map cannot do. This is the largest remaining serde_core gap.
+  current global map cannot do.
+
+  Fix B reaches *signatures* only. A free-function **body** still names impl-module entities
+  module-relative (`I32Deserializer::new_(…)`, `.map(private_::unit_only)`), which do not
+  resolve at global `Tr_` scope. A tempting `using namespace ::de::value;` inside `Tr_` is the
+  *wrong primitive*: flat using-directives place names at one scope level, so an injected nested
+  name (`de::value::private_`) collides with a global same-named one (`private_::doc`) →
+  `reference to 'private_' is ambiguous`, where real lexical nesting would have shadowed. The
+  body must instead be emitted **inside the impl's own module namespace** (a helper sub-namespace
+  where its relative paths resolve by lexical shadowing, exactly as the in-namespace `rusty_ext`
+  twin already does) and then bridged into `Tr_` with a `using`-declaration
+  (`namespace Tr_ { using ::de::value::__ufcs::m; }`). The bridge must reference only methods that
+  actually emitted (same hazard as owner-map pruning). This — plus impl-module-context
+  qualification for the ambiguous names — is the largest remaining serde_core gap.
 
 - **Multi-owner defaults need a constraint, not a guess (Fix A).** When a *default* method is
   owned by two traits (serde's `size_hint` ∈ MapAccess ∩ SeqAccess), first-owner qualification
