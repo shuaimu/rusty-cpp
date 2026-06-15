@@ -752,6 +752,14 @@ pub struct CodeGen {
     /// Local type names declared in this file (scoped and unscoped).
     /// Used to distinguish true extension impls from local-type impls.
     pub(crate) local_declared_types: HashSet<String>,
+    /// UFCS § 3.2.7 / serde_core Fix B: bare type name → its declaration module
+    /// path (e.g. `MapAsEnum` → `de::value::private_`), recorded ONLY for types
+    /// declared inside a nested module. UFCS free functions emit at GLOBAL
+    /// `<Tr>_` scope, so a nested-module self type written by the impl as the
+    /// bare `MapAsEnum<A>` does not resolve there — it must be qualified to
+    /// `de::value::private_::MapAsEnum<A>`. Global-scope types are absent (empty
+    /// path) → never qualified, so the passing flag-on crates are untouched.
+    pub(crate) local_type_module_path: HashMap<String, String>,
     /// Unit struct type names (scoped and unscoped) available for value-constructor
     /// lowering (`Foo` in value position -> `Foo{}`).
     pub(crate) unit_struct_types: HashSet<String>,
@@ -1463,6 +1471,7 @@ impl CodeGen {
             type_alias_targets: HashMap::new(),
             emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
+            local_type_module_path: HashMap::new(),
             unit_struct_types: HashSet::new(),
             extension_trait_impl_methods: HashMap::new(),
             extension_method_names: HashSet::new(),
@@ -1983,6 +1992,70 @@ impl CodeGen {
             Some(m) if !m.is_empty() => format!("{}::{}_", m, trait_name),
             _ => format!("{}_", trait_name),
         }
+    }
+
+    /// serde_core Fix B (§ 3.2.7): qualify a nested-module local type spelling
+    /// to its full declaration-module path, for a UFCS free function emitted at
+    /// GLOBAL `<Tr>_` scope. `MapAsEnum<A>` → `de::value::private_::MapAsEnum<A>`.
+    /// Only the leading base type name is qualified; a global-scope type (no
+    /// recorded nested module path) or an already-qualified / non-identifier
+    /// spelling is returned unchanged. Leaves the generic args / trailing tokens
+    /// intact (their own nested types, if any, are a follow-up).
+    fn qualify_nested_local_type_for_global_scope(&self, cpp_ty: &str) -> String {
+        let trimmed = cpp_ty.trim_start();
+        let lead_ws = &cpp_ty[..cpp_ty.len() - trimmed.len()];
+        let base_end = trimmed
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(trimmed.len());
+        let base = &trimmed[..base_end];
+        let rest = &trimmed[base_end..];
+        if base.is_empty() {
+            return cpp_ty.to_string();
+        }
+        match self.local_type_module_path.get(base) {
+            Some(path) if !path.is_empty() => format!("{}{}::{}{}", lead_ws, path, base, rest),
+            _ => cpp_ty.to_string(),
+        }
+    }
+
+    /// serde_core Fix B (param/return positions): qualify EVERY nested-module
+    /// local type name appearing anywhere in a type string — `Result<…,
+    /// I8Deserializer<E>>` → `…, de::value::I8Deserializer<E>>`. Tokenizes the
+    /// string and qualifies each identifier that is an unambiguous nested-module
+    /// type AND is not already preceded by `::` (so `typename A::Error` and
+    /// already-qualified spellings are left alone). No-op when the map is empty.
+    fn qualify_nested_local_types_in_type_string(&self, s: &str) -> String {
+        if self.local_type_module_path.is_empty() {
+            return s.to_string();
+        }
+        let bytes = s.as_bytes();
+        let mut out = String::with_capacity(s.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if c.is_alphabetic() || c == '_' {
+                let start = i;
+                while i < bytes.len()
+                    && ((bytes[i] as char).is_alphanumeric() || bytes[i] == b'_')
+                {
+                    i += 1;
+                }
+                let ident = &s[start..i];
+                let already_qualified = start >= 2 && &s[start - 2..start] == "::";
+                if !already_qualified
+                    && let Some(path) = self.local_type_module_path.get(ident)
+                    && !path.is_empty()
+                {
+                    out.push_str(path);
+                    out.push_str("::");
+                }
+                out.push_str(ident);
+            } else {
+                out.push(c);
+                i += 1;
+            }
+        }
+        out
     }
 
     /// Merge dependency UFCS trait manifests into the classifier maps. A
@@ -7253,6 +7326,28 @@ impl CodeGen {
     fn record_local_declared_type(&mut self, module_path: &[String], type_name: &str) {
         self.local_declared_types.insert(type_name.to_string());
         if !module_path.is_empty() {
+            // serde_core Fix B: record the (escaped) module path so UFCS free
+            // functions (emitted at global scope) can qualify this nested type.
+            // AMBIGUITY GUARD: if the same bare name is declared in TWO different
+            // modules (e.g. serde's `de::Error` vs `ser::Error`), we can't pick
+            // one syntactically — store an empty path so the qualifier leaves it
+            // bare rather than guessing wrong.
+            let escaped_path = module_path
+                .iter()
+                .map(|segment| escape_cpp_keyword(segment))
+                .collect::<Vec<_>>()
+                .join("::");
+            match self.local_type_module_path.get(type_name) {
+                Some(existing) if existing != &escaped_path => {
+                    self.local_type_module_path
+                        .insert(type_name.to_string(), String::new());
+                }
+                Some(_) => {}
+                None => {
+                    self.local_type_module_path
+                        .insert(type_name.to_string(), escaped_path);
+                }
+            }
             self.local_declared_types
                 .insert(format!("{}::{}", module_path.join("::"), type_name));
             let escaped_module_path = module_path
@@ -12475,7 +12570,17 @@ impl CodeGen {
         let self_cpp_ty = if method_spec.self_is_template_param {
             "Self_".to_string()
         } else {
-            self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty))
+            let mapped =
+                self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty));
+            // serde_core Fix B: a free function emitted at global `<Tr>_` scope
+            // must qualify a nested-module self type (`MapAsEnum<A>` →
+            // `de::value::private_::MapAsEnum<A>`). No-op for global-scope types
+            // and flag-off.
+            if self.ufcs_traits {
+                self.qualify_nested_local_type_for_global_scope(&mapped)
+            } else {
+                mapped
+            }
         };
         if method_name == "deserialize" && self_cpp_ty.contains("PhantomData<") {
             self.pop_type_param_scope();
@@ -12511,6 +12616,11 @@ impl CodeGen {
                 ),
             );
             ty = self.rewrite_extension_assoc_error_paths(&ty, &associated_type_cpp_bindings);
+            // serde_core Fix B: qualify nested-module types in param positions
+            // (the free fn is at global `<Tr>_` scope). No-op flag-off.
+            if self.ufcs_traits {
+                ty = self.qualify_nested_local_types_in_type_string(&ty);
+            }
             let param_name = match pat_type.pat.as_ref() {
                 syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 _ => format!("_arg{}", idx),
@@ -12556,6 +12666,10 @@ impl CodeGen {
         } else {
             ""
         };
+        // serde_core Fix B: qualify nested-module types in the return position.
+        if self.ufcs_traits {
+            return_type = self.qualify_nested_local_types_in_type_string(&return_type);
+        }
         self.record_extension_free_function_symbol(&method_name);
         self.emit_template_declaration_with_type_defaults(
             &free_generics,
@@ -12718,7 +12832,17 @@ impl CodeGen {
         let self_cpp_ty = if method_spec.self_is_template_param {
             "Self_".to_string()
         } else {
-            self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty))
+            let mapped =
+                self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty));
+            // serde_core Fix B: a free function emitted at global `<Tr>_` scope
+            // must qualify a nested-module self type (`MapAsEnum<A>` →
+            // `de::value::private_::MapAsEnum<A>`). No-op for global-scope types
+            // and flag-off.
+            if self.ufcs_traits {
+                self.qualify_nested_local_type_for_global_scope(&mapped)
+            } else {
+                mapped
+            }
         };
         if method_name == "deserialize" && self_cpp_ty.contains("PhantomData<") {
             self.in_forward_decl_signature = prev_forward_decl_signature;
@@ -12759,6 +12883,11 @@ impl CodeGen {
                 ),
             );
             ty = self.rewrite_extension_assoc_error_paths(&ty, &associated_type_cpp_bindings);
+            // serde_core Fix B: qualify nested-module types in param positions
+            // (the free fn is at global `<Tr>_` scope). No-op flag-off.
+            if self.ufcs_traits {
+                ty = self.qualify_nested_local_types_in_type_string(&ty);
+            }
             let param_name = match pat_type.pat.as_ref() {
                 syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 _ => format!("_arg{}", idx),
@@ -12808,6 +12937,10 @@ impl CodeGen {
         } else {
             ""
         };
+        // serde_core Fix B: qualify nested-module types in the return position.
+        if self.ufcs_traits {
+            return_type = self.qualify_nested_local_types_in_type_string(&return_type);
+        }
         self.record_extension_free_function_symbol(&method_name);
         self.emit_template_declaration_with_type_defaults(
             &free_generics,
