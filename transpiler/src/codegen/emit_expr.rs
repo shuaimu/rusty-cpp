@@ -5000,7 +5000,7 @@ impl CodeGen {
         }
         // UFCS Phase 3 (book § 3.2.3): a method whose name is a *trait-only*
         // method of one of THIS crate's traits lowers to a free call
-        // `m(recv, args)` (resolved via the `trait_<Tr>` namespace + `using`s in
+        // `m(recv, args)` (resolved via the `<Tr>_` namespace + `using`s in
         // phase 4). The classifier never sees std/inherent methods, so those
         // fall through to the existing member-call lowering unchanged. Guarded
         // by `ufcs_traits` (default off).
@@ -5011,7 +5011,7 @@ impl CodeGen {
                 Some(crate::transpile::MethodNameClass::TraitOnly)
             ) {
                 // Only intercept when a CONCRETE impl actually emits a
-                // `trait_<Tr>::m` free function (the owner map is built from
+                // `<Tr>_::m` free function (the owner map is built from
                 // concrete impls only). A TraitOnly name with no concrete owner
                 // is a default trait method or a generic/blanket-impl method —
                 // there is no free function to call, and the method is
@@ -5027,16 +5027,16 @@ impl CodeGen {
                         .iter()
                         .map(|a| self.emit_expr_to_string(a))
                         .collect();
-                    // Qualify the free call to `trait_<Tr>::m` when exactly ONE
+                    // Qualify the free call to `<Tr>_::m` when exactly ONE
                     // trait owns the name, so the unqualified `m(__self)` can't be
                     // shadowed by a local of the same name (`let bits = x.bits();`
                     // → `auto bits = (…bits(__self)…)` references the half-declared
                     // local). When several traits own it we can't pick one
                     // syntactically, so keep the unqualified shim (overload
-                    // resolution + the `using namespace trait_<Tr>` directives).
+                    // resolution + the `using namespace <Tr>_` directives).
                     let callee = if traits.len() == 1 {
                         format!(
-                            "trait_{}::{}",
+                            "{}_::{}",
                             traits.iter().next().unwrap(),
                             escape_cpp_keyword(&method_name)
                         )
@@ -12896,14 +12896,14 @@ impl CodeGen {
                 // UFCS qualified disambiguation (book § 3.2.3): a disambiguated
                 // trait call `Trait::method(&recv, …)` / `<T as Trait>::method(
                 // &recv, …)` lowers to the qualified free function
-                // `trait_<Trait>::method(recv, …)`. This is the ONLY correct
+                // `<Trait>_::method(recv, …)`. This is the ONLY correct
                 // route when one type implements two traits sharing a method
                 // name — the member call `recv.method()` collapses to whichever
                 // impl won the struct's single member slot. Gate on the owner
                 // map (a CONCRETE impl of THIS trait actually emits the free
                 // function), not just "crate-declared": default trait methods
                 // and runtime-helper (assoc-const) traits have no
-                // `trait_<Trait>::m`, so qualifying them is a HARD error — fall
+                // `<Trait>_::m`, so qualifying them is a HARD error — fall
                 // through to the member call instead.
                 if self.ufcs_traits
                     && let Some(trait_name) = ufcs.function_path.rsplit("::").nth(1)
@@ -12916,7 +12916,7 @@ impl CodeGen {
                     all_args.push(receiver.clone());
                     all_args.extend(args.iter().cloned());
                     return format!(
-                        "trait_{}::{}({})",
+                        "{}_::{}({})",
                         trait_name,
                         escape_cpp_keyword(&ufcs.method_name),
                         all_args.join(", ")
@@ -16207,10 +16207,10 @@ impl CodeGen {
 
         // UFCS qualified disambiguation (see the detect_ufcs_trait_method_call
         // handler): `Trait::method(recv, …)` / `<T as Trait>::method(recv, …)`
-        // lowers to the qualified free function `trait_<Trait>::method(recv, …)`.
+        // lowers to the qualified free function `<Trait>_::method(recv, …)`.
         // Gate on the owner map (a CONCRETE impl of THIS trait emits the free
         // function), not just "crate-declared" — default trait methods and
-        // runtime-helper (assoc-const) traits have no `trait_<Trait>::m`, so
+        // runtime-helper (assoc-const) traits have no `<Trait>_::m`, so
         // qualifying them is a HARD error; fall through to the member call.
         // Placed AFTER the serde/Display/Debug special-cases above.
         if self.ufcs_traits
@@ -16231,7 +16231,7 @@ impl CodeGen {
                 });
             }
             return Some(format!(
-                "trait_{}::{}({})",
+                "{}_::{}({})",
                 owner_leaf,
                 escape_cpp_keyword(&method_name),
                 all_args.join(", ")

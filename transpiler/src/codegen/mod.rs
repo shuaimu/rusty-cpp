@@ -549,7 +549,7 @@ pub struct CodeGen {
     pub(crate) is_dependency_module: bool,
     /// UFCS trait-lowering migration flag (book § 3.2; default false). When set,
     /// trait impls are additionally emitted as free functions in `namespace
-    /// trait_<Trait>` (Phase 2). Off → existing member/adapter lowering only.
+    /// <Trait>_` (Phase 2). Off → existing member/adapter lowering only.
     pub(crate) ufcs_traits: bool,
     /// UFCS Phase 3: per-method-name class (Inherent / TraitOnly / Both) over
     /// the whole file, populated in `emit_file` when `ufcs_traits` is on. Drives
@@ -564,11 +564,11 @@ pub struct CodeGen {
     /// `emit_file` when `ufcs_traits` is on; empty otherwise.
     pub(crate) ufcs_declared_trait_names: std::collections::HashSet<String>,
     /// UFCS Phase 7: method name → crate-declared traits whose CONCRETE
-    /// (non-generic) impls emit a `trait_<Tr>::m` free function. When exactly
+    /// (non-generic) impls emit a `<Tr>_::m` free function. When exactly
     /// one trait owns a name, the method-call shim qualifies its free call to
-    /// `trait_<Tr>::m` so an unqualified `m(recv)` can't be shadowed by a local
+    /// `<Tr>_::m` so an unqualified `m(recv)` can't be shadowed by a local
     /// variable of the same name (`let bits = x.bits()`). Excludes default
-    /// methods + generic/blanket impls (no resolvable `trait_<Tr>::m`).
+    /// methods + generic/blanket impls (no resolvable `<Tr>_::m`).
     /// Populated in `emit_file` when `ufcs_traits` is on; empty otherwise.
     pub(crate) ufcs_method_trait_owners:
         HashMap<String, std::collections::BTreeSet<String>>,
@@ -2238,7 +2238,7 @@ impl CodeGen {
             self.ufcs_declared_trait_names =
                 crate::transpile::collect_declared_trait_names(&file.items);
             // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
-            // emit a `trait_<Tr>::m` free function, for shim qualification.
+            // emit a `<Tr>_::m` free function, for shim qualification.
             self.ufcs_method_trait_owners =
                 crate::transpile::collect_concrete_trait_impl_method_owners(
                     &file.items,
@@ -2578,8 +2578,8 @@ impl CodeGen {
         }
         log_emit("emit_extension_trait_forward_decls_for_all_scopes");
 
-        // UFCS trait migration, Phase 4 (book § 3.2.5): emit `trait_<Tr>`
-        // free-function declarations + `using namespace trait_<Tr>;` here —
+        // UFCS trait migration, Phase 4 (book § 3.2.5): emit `<Tr>_`
+        // free-function declarations + `using namespace <Tr>_;` here —
         // after type forward-decls, before function bodies — so call sites can
         // resolve the unqualified `m(recv)` form to the trait free function.
         // No-op when `ufcs_traits` is off. Definitions follow late, near the
@@ -2665,7 +2665,7 @@ impl CodeGen {
 
         // UFCS trait migration, Phase 2 (book § 3.2.2): when `ufcs_traits` is
         // on, additionally emit `impl Tr for U` methods as free functions in
-        // `namespace trait_<Tr>`. No-op when the flag is off.
+        // `namespace <Tr>_`. No-op when the flag is off.
         self.emit_ufcs_trait_impl_free_functions(&file.items);
         log_emit("emit_ufcs_trait_impl_free_functions");
 
@@ -11090,7 +11090,7 @@ impl CodeGen {
 
     /// UFCS trait migration, Phase 2 (book § 3.2.2). When `ufcs_traits` is on,
     /// emit each `impl Tr for U` method as a free function in
-    /// `namespace trait_<Tr>`, reusing the extension free-function emitter
+    /// `namespace <Tr>_`, reusing the extension free-function emitter
     /// (which rewrites the `self` receiver to a `self_` parameter). **Additive**:
     /// the existing member/adapter lowering is untouched, so with the flag off
     /// nothing changes, and with it on these free functions are emitted
@@ -11173,7 +11173,7 @@ impl CodeGen {
     }
 
     /// Phase 2 (late): emit the trait-impl free-function DEFINITIONS in
-    /// `namespace trait_<Tr>`.
+    /// `namespace <Tr>_`.
     fn emit_ufcs_trait_impl_block_free_functions(&mut self, impl_block: &syn::ItemImpl) {
         let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
             return;
@@ -11187,7 +11187,7 @@ impl CodeGen {
             "// UFCS trait migration: free functions for `impl {} for ...`",
             trait_name
         ));
-        self.writeln(&format!("namespace trait_{} {{", trait_name));
+        self.writeln(&format!("namespace {}_ {{", trait_name));
         self.indent += 1;
         for spec in &specs {
             self.emit_extension_trait_free_function(spec);
@@ -11197,8 +11197,8 @@ impl CodeGen {
         self.writeln("}");
     }
 
-    /// Phase 4 (early): emit `namespace trait_<Tr>` free-function DECLARATIONS +
-    /// a `using namespace trait_<Tr>;`, *before* function bodies, so a call
+    /// Phase 4 (early): emit `namespace <Tr>_` free-function DECLARATIONS +
+    /// a `using namespace <Tr>_;`, *before* function bodies, so a call
     /// site's unqualified `m(recv)` resolves to the trait free function (whose
     /// definition is emitted late by `emit_ufcs_trait_impl_free_functions`).
     /// No-op when `ufcs_traits` is off; recurses into inline modules.
@@ -11230,7 +11230,7 @@ impl CodeGen {
         if !self.ufcs_declared_trait_names.contains(&trait_name) {
             return;
         }
-        self.writeln(&format!("namespace trait_{} {{", trait_name));
+        self.writeln(&format!("namespace {}_ {{", trait_name));
         self.indent += 1;
         for spec in &specs {
             self.emit_extension_trait_free_function_declaration(spec);
@@ -11239,7 +11239,7 @@ impl CodeGen {
         self.writeln("}");
         // Bring the trait free functions into the enclosing scope so an
         // unqualified `m(recv)` at a call site resolves to them (book § 3.2.5).
-        self.writeln(&format!("using namespace trait_{};", trait_name));
+        self.writeln(&format!("using namespace {}_;", trait_name));
     }
 
     fn emit_extension_trait_free_functions(
@@ -11843,18 +11843,18 @@ impl CodeGen {
             let prefix = if needs_return { "return " } else { "" };
             // Only forward to the static free fn when that free fn is actually
             // emitted — i.e. the trait is crate-declared (Phase 7). For a
-            // prelude/std-trait adapter (e.g. DisplayAdapter), `trait_Display::m`
+            // prelude/std-trait adapter (e.g. DisplayAdapter), `Display_::m`
             // does not exist, so keep the member call.
             if self.ufcs_traits && self.ufcs_declared_trait_names.contains(trait_name) {
                 // UFCS Phase 6 (book § 3.2.10): forward the vtable slot to the
-                // static free-function impl `trait_<Tr>::m(value_, args)` rather
+                // static free-function impl `<Tr>_::m(value_, args)` rather
                 // than the member `value_.m(args)`, so static and dynamic
                 // dispatch bottom out in the same implementation (and dyn keeps
                 // working once the redundant members are removed in phase 7).
                 let mut all_args = vec!["value_".to_string()];
                 all_args.extend(call_args.iter().cloned());
                 self.writeln(&format!(
-                    "{}trait_{}::{}({});",
+                    "{}{}_::{}({});",
                     prefix,
                     trait_name,
                     escaped,
@@ -24540,7 +24540,7 @@ impl CodeGen {
             // deref-free-call branch conditional and add a final MEMBER
             // fallback `deref(__self).m(args)`. For a `dyn` receiver that
             // resolves to the virtual member, which routes through the
-            // adapter override back to `trait_<Tr>::m(value_, args)` — the same
+            // adapter override back to `<Tr>_::m(value_, args)` — the same
             // static impl the direct branch would have called. Static and
             // dynamic dispatch thus bottom out in one implementation.
             let member_args = deref_arg_uses.join(", ");

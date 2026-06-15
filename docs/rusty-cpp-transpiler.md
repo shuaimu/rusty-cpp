@@ -930,8 +930,8 @@ static free-function impl, as the *dynamic-dispatch* realization in §3.2.10.)
 | blanket `impl<X: B> Tr for X { fn m }` | a **constrained free-function template** (`requires B<X>`) |
 | default method body | a free-function template emitted from the trait's default body |
 | `x.m(args)` (method syntax) | `m(x, args)` via UFCS (member-first), or native `x.m(args)` where `m` is purely inherent |
-| `Tr::m(x, args)` (path syntax) | qualified `trait_Tr::m(x, args)` — the trait name is copied from the source |
-| `use Tr;` | `using namespace trait_Tr;` (+ the module `import`) |
+| `Tr::m(x, args)` (path syntax) | qualified `Tr_::m(x, args)` — the trait name is copied from the source |
+| `use Tr;` | `using namespace Tr_;` (+ the module `import`) |
 | operator trait (`Add`, `Index`, `Deref`, …) | C++ operator overload (direct, §3.2.9) |
 | associated type `Self::Item` | a type-traits map `TrTraits<Self>::Item` (§3.2.8) |
 | `dyn Tr` / `Box<dyn Tr>` / `&dyn Tr` | interface `Tr` + `TrAdapter<U>` / `TrAdapterRef<U>` (§3.2.10) |
@@ -961,7 +961,7 @@ impl Greet for Foo { fn hello(&self) -> String { … } } // trait
 ```cpp
 struct Foo { int32_t x; int32_t bar() const { return x; } };   // inherent → member
 
-namespace trait_Greet {                                         // trait → free function
+namespace Greet_ {                                         // trait → free function
     rusty::String hello(const Foo& self) { … }
 }
 ```
@@ -970,7 +970,7 @@ A **blanket** impl has no single receiver type, so it becomes a *constrained tem
 the trait namespace:
 
 ```cpp
-namespace trait_Itertools {
+namespace Itertools_ {
     template<class T> requires Iterator<T>
     auto chunks(T self, std::size_t n) { return IntoChunks<T>{std::move(self), n}; }  // default body
 }
@@ -1029,7 +1029,7 @@ refs, so the conversions tie and the non-template tiebreaker decides.
   argument, with *no* `using` needed.
 - **Blanket-impl** methods have no receiver-type home, so they live in the **trait's
   namespace** and are brought into scope by translating `use Tr;` → `using namespace
-  trait_Tr;` (a lexical, per-import emission — independent of any call site). A tag
+  Tr_;` (a lexical, per-import emission — independent of any call site). A tag
   (`tag_invoke`) is the alternative that makes even blanket methods ADL-reachable via the
   tag's namespace; the `using` form is preferred for readability.
 
@@ -1043,14 +1043,14 @@ where clang reports a clash.
 
 #### 3.2.6 Two traits with the same method name
 
-Because each trait is its own namespace, `trait_A::foo` and `trait_B::foo` **coexist** at
+Because each trait is its own namespace, `A_::foo` and `B_::foo` **coexist** at
 definition (like Rust, where a type may impl both). Resolution then mirrors Rust exactly:
 
-- only A `use`d → only `trait_A` `using`'d → resolves to A;
+- only A `use`d → only `A_` `using`'d → resolves to A;
 - both `use`d, both impl'd, same signature → `foo(x)` is **ambiguous** → C++ error,
   reproducing Rust's `E0034 (multiple applicable items in scope)`;
 - different signatures → resolved by argument arity;
-- explicit disambiguation `A::foo(x)` in the source → emit qualified `trait_A::foo(x)` (the
+- explicit disambiguation `A::foo(x)` in the source → emit qualified `A_::foo(x)` (the
   trait name is copied from the source path, not computed).
 
 The transpiler never resolves *which* trait; the source's `method` vs `path` syntax already
@@ -1111,16 +1111,16 @@ free-function impl (so there is exactly one implementation of each method):
 1. **`T`** — a non-copyable, non-movable abstract base with one pure-virtual per
    object-safe method.
 2. **`TAdapter<U>`** — per `impl T for U`, holds `U` **by value**; used for owning `dyn`
-   (`Box<dyn T>`, `Rc<dyn T>`, `Arc<dyn T>`). Its overrides call `trait_T::m(value_, …)`.
+   (`Box<dyn T>`, `Rc<dyn T>`, `Arc<dyn T>`). Its overrides call `T_::m(value_, …)`.
 3. **`TAdapterRef<U>`** — per `impl T for U`, holds `const U&` (or `U&`) **by reference**;
    used for borrowed `dyn` (`&dyn T`, `&mut dyn T`). Same forwarding bodies.
 
 `&dyn T` → `const T&`, `&mut dyn T` → `T&`, `Box<dyn T>` → `rusty::Box<T>` — all shapes the
 existing borrow checker already understands. The key change from the older adapter proposal:
-the override bodies **forward to the static free-function impl** (`trait_T::m(value_, …)`)
+the override bodies **forward to the static free-function impl** (`T_::m(value_, …)`)
 rather than calling a member `value_.m(…)`, because under the static design `U` no longer
 carries the trait method as a member. This is what unifies static and dynamic: both paths
-bottom out in the same `trait_T::m`.
+bottom out in the same `T_::m`.
 
 ```cpp
 // === trait Animal ===
@@ -1136,19 +1136,19 @@ template <class U> class AnimalAdapter;
 template <class U> class AnimalAdapterRef;
 
 // === impl Animal for Dog → static free fn + two adapters forwarding to it ===
-namespace trait_Animal { rusty::String speak(const Dog& self) { return rusty::String::from("Woof"); } }
+namespace Animal_ { rusty::String speak(const Dog& self) { return rusty::String::from("Woof"); } }
 
 template <> class AnimalAdapter<Dog> final : public Animal {
     Dog value_;
 public:
     explicit AnimalAdapter(Dog v) : value_(std::move(v)) {}
-    rusty::String speak() const override { return trait_Animal::speak(value_); }  // forwards to static impl
+    rusty::String speak() const override { return Animal_::speak(value_); }  // forwards to static impl
 };
 template <> class AnimalAdapterRef<Dog> final : public Animal {
     const Dog& value_;
 public:
     explicit AnimalAdapterRef(const Dog& u) : value_(u) {}                        // explicit → StructBorrow fires
-    rusty::String speak() const override { return trait_Animal::speak(value_); }
+    rusty::String speak() const override { return Animal_::speak(value_); }
 };
 
 // &dyn use site:        void make_noise(const Animal& a) { rusty::println("{}", a.speak()); }
@@ -1175,13 +1175,13 @@ C++ resolves each branch by `x`'s static type, with no help from the transpiler:
 
 ```cpp
 // x: Dog           → branch 1: speak(const Dog&)      : DIRECT static call
-// x: const Animal& → branch 3: a.speak() (vtable) → AnimalAdapter<Dog>::speak() → trait_Animal::speak(const Dog&)
+// x: const Animal& → branch 3: a.speak() (vtable) → AnimalAdapter<Dog>::speak() → Animal_::speak(const Dog&)
 ```
 
-(An earlier design declared a separate forwarder overload `trait_Animal::speak(const Animal&)
+(An earlier design declared a separate forwarder overload `Animal_::speak(const Animal&)
 { return self.speak(); }` so calls stayed uniformly `speak(x)`. That was abandoned: the
 forwarder's parameter needs the interface type forward-declared, but declaring `class Animal;`
-*inside* `namespace trait_Animal` makes `using namespace trait_Animal` collide with the real
+*inside* `namespace Animal_` makes `using namespace Animal_` collide with the real
 `::Animal` (ambiguous). The member fallback lives entirely inside the call-site shim — a
 template resolved at instantiation — so there is no forward-declaration ordering to get wrong,
 and it reaches the same vtable hop.)
@@ -1193,26 +1193,26 @@ exists, and the thing static dispatch cannot express:
 rusty::Vec<rusty::Box<Animal>> zoo;
 zoo.push(rusty::make_box<AnimalAdapter<Dog>>(Dog{}));
 zoo.push(rusty::make_box<AnimalAdapter<Cat>>(Cat{}));   // different concrete type, same Box<dyn>
-for (auto& a : zoo) trait_Animal::speak(*a);            // dispatches per element at runtime
+for (auto& a : zoo) Animal_::speak(*a);            // dispatches per element at runtime
 ```
 
 The loop does not know which element is a `Dog` or a `Cat` — that is erased — so each call
-dispatches at runtime through the element's vtable to the correct `trait_Animal::speak(const
+dispatches at runtime through the element's vtable to the correct `Animal_::speak(const
 Dog&)` / `speak(const Cat&)`. Overload resolution alone could never do this; the vtable is
 what recovers the erased type at runtime.
 
 **One impl, two routes.** The unifying picture:
 
 ```
-                 trait_T::m(const U&)   ←──── the ONE impl body
+                 T_::m(const U&)   ←──── the ONE impl body
                   ▲                  ▲
    static route ──┘                  └── dynamic route
-   m(u) → trait_T::m(const U&)           shim member fallback: dyn.m() [vtable] → TAdapter<U>::m() → trait_T::m(const U&)
+   m(u) → T_::m(const U&)           shim member fallback: dyn.m() [vtable] → TAdapter<U>::m() → T_::m(const U&)
    (compile-time overload, direct)       (one runtime vtable hop, then the same impl)
 ```
 
 Dynamic dispatch is not a second implementation — it is the interface + adapter providing a
-*runtime route* (the vtable) to the very same `trait_T::m` that static UFCS reaches directly.
+*runtime route* (the vtable) to the very same `T_::m` that static UFCS reaches directly.
 The method is written once; `dyn` adds only the erasure wrapper and the single virtual hop
 needed to dispatch on a type the compiler was told to forget.
 
@@ -1254,7 +1254,7 @@ name-resolution / type-inference cliff:
 - classify `impl T {}` vs `impl Tr for T {}` → member vs free function;
 - classify method *names* globally → inherent / trait / both (drives §3.2.3);
 - emit method-call `x.m()` as `m(x)` (or native member, or the UFCS shim) and path-call
-  `Tr::m(x)` as qualified `trait_Tr::m(x)`;
+  `Tr::m(x)` as qualified `Tr_::m(x)`;
 - emit the type-traits map for associated types; a vtable per object-safe trait.
 
 **Does not (semantic — this is what would make it a mini-rustc, and clang does it instead):**
@@ -1273,7 +1273,7 @@ wins,"* it belongs to clang, not the transpiler.
 - **Transpiler codegen: to do.**
   - trait emission: emit the trait namespace (free-function declarations) + the interface
     `T` + primary `TAdapter`/`TAdapterRef` templates (replacing Proxy facade emission);
-  - impl emission: `impl Tr for U` → a `trait_Tr::m(const U&, …)` free function (or
+  - impl emission: `impl Tr for U` → a `Tr_::m(const U&, …)` free function (or
     constrained template for blanket) + the two adapter specializations forwarding to it;
     `impl U {}` → members on `U`;
   - call-site emission: method-name classification + the three UFCS shapes (§3.2.3);
@@ -1283,7 +1283,7 @@ wins,"* it belongs to clang, not the transpiler.
     `rusty::make_box<TAdapter<U>>(u)`, `&dyn T` from `Box` → deref.
 - **Open extensions:** `&mut dyn T` mutable `StructBorrowMut`; trait upcasting emission;
   shared-body free function vs duplicate-inline for adapter bodies (now subsumed — both
-  adapters already forward to the one `trait_Tr::m`); diagnostics quality for C++ overload
+  adapters already forward to the one `Tr_::m`); diagnostics quality for C++ overload
   ambiguity vs Rust `E0034`.
 
 

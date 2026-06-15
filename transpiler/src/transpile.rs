@@ -244,17 +244,17 @@ fn collect_declared_trait_names_into(
 /// Map each method name to the set of crate-declared traits that have a
 /// CONCRETE (non-generic) `impl Tr for U` providing it — i.e. exactly the
 /// methods for which `emit_ufcs_trait_impl_block_free_functions` emits (and
-/// `…_decls` early-declares) a `trait_<Tr>::m` free function. Used to QUALIFY
-/// the UFCS method-call shim to `trait_<Tr>::m(recv)` when exactly one trait
+/// `…_decls` early-declares) a `<Tr>_::m` free function. Used to QUALIFY
+/// the UFCS method-call shim to `<Tr>_::m(recv)` when exactly one trait
 /// owns a name, so the unqualified `m(recv)` can't be shadowed by a local of
 /// the same name (`let bits = x.bits();` → `auto bits = …bits(__self)…`).
 ///
 /// DELIBERATELY excludes (a) default trait methods with no concrete impl —
-/// those aren't emitted as free functions (`trait_Flags::is_empty` wouldn't
+/// those aren't emitted as free functions (`Flags_::is_empty` wouldn't
 /// exist) — and (b) generic/blanket impls like `impl<T> IntoEither for T` whose
-/// `trait_<Tr>` namespace isn't reliably available at the (earlier) call site.
+/// `<Tr>_` namespace isn't reliably available at the (earlier) call site.
 /// For those, the unqualified shim + member fallback is kept (the prior, safe
-/// behavior). Qualifying to a non-existent `trait_<Tr>::m` is a HARD error (not
+/// behavior). Qualifying to a non-existent `<Tr>_::m` is a HARD error (not
 /// SFINAE), so this set must contain only names that truly resolve.
 pub fn collect_concrete_trait_impl_method_owners(
     items: &[syn::Item],
@@ -262,12 +262,12 @@ pub fn collect_concrete_trait_impl_method_owners(
 ) -> HashMap<String, std::collections::BTreeSet<String>> {
     // Traits that declare an associated CONSTANT are emitted via the runtime-
     // helper path (`emit_trait_interface_pattern` skips them, `has_assoc_const`),
-    // so their methods live in `<Tr>RuntimeHelper`, NOT `namespace trait_<Tr>`.
-    // Qualifying to `trait_<Tr>::m` for those would name a non-existent member
+    // so their methods live in `<Tr>RuntimeHelper`, NOT `namespace <Tr>_`.
+    // Qualifying to `<Tr>_::m` for those would name a non-existent member
     // (a HARD error). Exclude them — their method calls fall through to the
     // member-call lowering (which is what works flag-off). Surfaced by bitflags'
     // `Flags` trait (`const FLAGS`, `type Bits`): `complement`/`contains`/`bits`
-    // are NOT in `trait_Flags`. (Assoc-TYPE-only traits like ToOwned DO use the
+    // are NOT in `Flags_`. (Assoc-TYPE-only traits like ToOwned DO use the
     // interface + free-function path, so they are NOT excluded.)
     let mut assoc_const_traits = std::collections::HashSet::new();
     collect_assoc_const_trait_names_into(items, &mut assoc_const_traits);
@@ -317,7 +317,7 @@ fn collect_concrete_trait_impl_method_owners_into(
                 // Only crate-declared traits (foreign-trait impls aren't UFCS-
                 // lowered), skip assoc-const (runtime-helper) traits, and only
                 // concrete impls (no type-param generics) — generic/blanket
-                // impls don't reliably emit an early-declared `trait_<Tr>`.
+                // impls don't reliably emit an early-declared `<Tr>_`.
                 if !declared_traits.contains(&trait_name)
                     || assoc_const_traits.contains(&trait_name)
                 {
@@ -2070,12 +2070,12 @@ mod tests {
         // Flag OFF (default): no UFCS trait namespace.
         let off = transpile(src, None).expect("default transpile should succeed");
         assert!(
-            !off.contains("namespace trait_Greet"),
+            !off.contains("namespace Greet_"),
             "flag-off output must not emit the UFCS trait namespace\nGot: {off}"
         );
 
         // Flag ON: `impl Greet for Foo` is additionally emitted as a free
-        // function in `namespace trait_Greet`, with `self` rewritten to `self_`.
+        // function in `namespace Greet_`, with `self` rewritten to `self_`.
         let options = TranspileOptions {
             ufcs_traits: true,
             ..TranspileOptions::default()
@@ -2090,7 +2090,7 @@ mod tests {
         )
         .expect("ufcs transpile should succeed");
         assert!(
-            on.contains("namespace trait_Greet"),
+            on.contains("namespace Greet_"),
             "flag-on output must emit the UFCS trait namespace\nGot: {on}"
         );
         assert!(
@@ -2131,7 +2131,7 @@ mod tests {
         )
         .expect("ufcs transpile should succeed");
         assert!(
-            on.contains("requires { trait_Greet::hello("),
+            on.contains("requires { Greet_::hello("),
             "flag-on must lower the trait call `f.hello()` to free dispatch \
              (qualified, since exactly one trait owns `hello`)\nGot: {on}"
         );
@@ -2159,18 +2159,18 @@ mod tests {
         )
         .expect("ufcs transpile should succeed");
 
-        // Phase 4: a `using namespace trait_Greet;` is emitted so the call
+        // Phase 4: a `using namespace Greet_;` is emitted so the call
         // site's unqualified `hello(__self)` resolves to the trait free
         // function, and it must appear BEFORE the call site (`use_it`) so
         // ordinary lookup at the body sees it.
         let using_pos = on
-            .find("using namespace trait_Greet;")
-            .expect("must emit `using namespace trait_Greet;`");
+            .find("using namespace Greet_;")
+            .expect("must emit `using namespace Greet_;`");
         // Anchor on the call-site dispatch (uniquely in the function body),
         // not `use_it`'s forward declaration (which precedes the using). The
-        // call is qualified (`trait_Greet::hello`) since one trait owns `hello`.
+        // call is qualified (`Greet_::hello`) since one trait owns `hello`.
         let call_pos = on
-            .find("requires { trait_Greet::hello(")
+            .find("requires { Greet_::hello(")
             .expect("must emit the trait-call dispatch in use_it");
         assert!(
             using_pos < call_pos,
@@ -2222,7 +2222,7 @@ mod tests {
         // interface `Tr&`, for which there is NO `m(const Tr&)` free function.
         // So under the flag the call-site shim gains a final MEMBER fallback
         // `deref(__self).m()` (which for a dyn receiver hits the virtual
-        // member → adapter override → the static `trait_<Tr>::m` impl, so
+        // member → adapter override → the static `<Tr>_::m` impl, so
         // static and dynamic dispatch bottom out in the same implementation).
         let src = r#"
             struct Foo { x: i32 }
@@ -2253,16 +2253,16 @@ mod tests {
             "flag-on shim must end in a member-call fallback `deref(__self).hello()`\nGot: {on}"
         );
         // And it must be reached only after the two free-function branches:
-        // both qualified `requires { trait_Greet::hello(` guards still present
+        // both qualified `requires { Greet_::hello(` guards still present
         // (`hello` is owned by exactly one trait, so the free call is qualified).
-        let guard_count = on.matches("requires { trait_Greet::hello(").count();
+        let guard_count = on.matches("requires { Greet_::hello(").count();
         assert!(
             guard_count >= 2,
             "flag-on shim must keep both free-call guards before the member fallback (got {guard_count})\nGot: {on}"
         );
 
         // Flag OFF: the shim is the original 2-branch form — no member-call
-        // fallback synthesized, and no qualified trait_Greet::hello calls
+        // fallback synthesized, and no qualified Greet_::hello calls
         // (flag-off keeps the native member call).
         let off = transpile(src, None).expect("default transpile should succeed");
         assert!(
@@ -2276,7 +2276,7 @@ mod tests {
         // Two crate-declared traits share the method name `name`, and `Person`
         // implements both. A disambiguated Rust call `Greet::name(p)` /
         // `Farewell::name(p)` / `<Person as Greet>::name(p)` must lower to the
-        // QUALIFIED free function `trait_<Trait>::name(p)` — not the member
+        // QUALIFIED free function `<Trait>_::name(p)` — not the member
         // `p.name()` (which collapses to whichever impl won the struct's single
         // member slot, silently picking the wrong body).
         let src = r#"
@@ -2304,19 +2304,19 @@ mod tests {
         .expect("ufcs transpile should succeed");
 
         assert!(
-            on.contains("trait_Greet::name(p)"),
-            "`Greet::name(p)` and `<Person as Greet>::name(p)` must qualify to trait_Greet::name\nGot: {on}"
+            on.contains("Greet_::name(p)"),
+            "`Greet::name(p)` and `<Person as Greet>::name(p)` must qualify to Greet_::name\nGot: {on}"
         );
         assert!(
-            on.contains("trait_Farewell::name(p)"),
-            "`Farewell::name(p)` must qualify to trait_Farewell::name (not collapse to p.name())\nGot: {on}"
+            on.contains("Farewell_::name(p)"),
+            "`Farewell::name(p)` must qualify to Farewell_::name (not collapse to p.name())\nGot: {on}"
         );
 
         // Flag OFF: the disambiguated calls stay on the member-collapse path
         // (no trait_ qualification synthesized).
         let off = transpile(src, None).expect("default transpile should succeed");
         assert!(
-            !off.contains("trait_Greet::name") && !off.contains("trait_Farewell::name"),
+            !off.contains("Greet_::name") && !off.contains("Farewell_::name"),
             "flag-off must not synthesize qualified trait_ calls\nGot: {off}"
         );
     }
@@ -2325,7 +2325,7 @@ mod tests {
     fn test_ufcs_traits_phase7_method_shim_qualified_avoids_local_shadow() {
         // Rust `let bits = x.bits();` binds a local named the same as the trait
         // method. The method-call shim must qualify its free call to
-        // `trait_Bits::bits(__self)` — an unqualified `bits(__self)` would bind
+        // `Bits_::bits(__self)` — an unqualified `bits(__self)` would bind
         // to the half-declared local `bits` ("variable 'bits' ... cannot appear
         // in its own initializer"). Qualification applies because exactly one
         // crate-declared trait (`Bits`) owns the name.
@@ -2349,8 +2349,8 @@ mod tests {
         )
         .expect("ufcs transpile should succeed");
         assert!(
-            on.contains("trait_Bits::bits("),
-            "single-owner trait method must qualify its shim free call to trait_Bits::bits\nGot: {on}"
+            on.contains("Bits_::bits("),
+            "single-owner trait method must qualify its shim free call to Bits_::bits\nGot: {on}"
         );
         assert!(
             !on.contains("requires { bits("),
