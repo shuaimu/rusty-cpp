@@ -111,6 +111,12 @@ public:
         }
     }
 
+    // @safe - Rust-style factory matching `Condvar::new()`. The inline-Rust
+    // DSL lowers `Condvar::new()` to `Condvar::new_()`; provide it so the
+    // hand-written Condvar matches the `new_` convention used by
+    // Mutex/SpinMutex/Cell/RefCell and the transpiled container ports.
+    static Condvar new_() { return Condvar(); }
+
     // @safe - Destroys and deallocates the owned pthread_cond_t. Moved-from
     // Condvars hold a null pointer and skip cleanup.
     ~Condvar() {
