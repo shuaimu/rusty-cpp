@@ -2011,6 +2011,44 @@ mod tests {
     }
 
     #[test]
+    fn test_ufcs_traits_phase5_associated_types_resolve() {
+        // Associated types are handled by the existing `<Trait>Traits<U>` map
+        // (orthogonal to dispatch), so they resolve in the UFCS static path:
+        //  - concrete `Self::Output` in the free function → the bound type,
+        //  - generic `T::Output` → `ProducerTraits<T>::Output`.
+        let src = r#"
+            struct Foo { x: i32 }
+            trait Producer { type Output; fn produce(&self) -> Self::Output; }
+            impl Producer for Foo { type Output = i32; fn produce(&self) -> Self::Output { self.x } }
+            fn use_generic<T: Producer>(t: &T) -> T::Output { t.produce() }
+        "#;
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+
+        // Concrete associated return type resolved in the trait free function.
+        assert!(
+            on.contains("int32_t produce(const Foo& self_)"),
+            "concrete `Self::Output` must resolve to int32_t in the free function\nGot: {on}"
+        );
+        // Generic associated type routed through the `<Trait>Traits<T>` map.
+        assert!(
+            on.contains("ProducerTraits<T>::Output"),
+            "generic `T::Output` must route through ProducerTraits<T>::Output\nGot: {on}"
+        );
+    }
+
+    #[test]
     fn test_transpile_options_prefer_rusty_view_aliases() {
         let src = r#"
             fn keep_views(s: &str, b: &[u8]) -> (&str, &[u8]) {
