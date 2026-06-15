@@ -241,6 +241,81 @@ fn collect_declared_trait_names_into(
     }
 }
 
+/// Map each method name to the set of crate-declared traits that have a
+/// CONCRETE (non-generic) `impl Tr for U` providing it — i.e. exactly the
+/// methods for which `emit_ufcs_trait_impl_block_free_functions` emits (and
+/// `…_decls` early-declares) a `trait_<Tr>::m` free function. Used to QUALIFY
+/// the UFCS method-call shim to `trait_<Tr>::m(recv)` when exactly one trait
+/// owns a name, so the unqualified `m(recv)` can't be shadowed by a local of
+/// the same name (`let bits = x.bits();` → `auto bits = …bits(__self)…`).
+///
+/// DELIBERATELY excludes (a) default trait methods with no concrete impl —
+/// those aren't emitted as free functions (`trait_Flags::is_empty` wouldn't
+/// exist) — and (b) generic/blanket impls like `impl<T> IntoEither for T` whose
+/// `trait_<Tr>` namespace isn't reliably available at the (earlier) call site.
+/// For those, the unqualified shim + member fallback is kept (the prior, safe
+/// behavior). Qualifying to a non-existent `trait_<Tr>::m` is a HARD error (not
+/// SFINAE), so this set must contain only names that truly resolve.
+pub fn collect_concrete_trait_impl_method_owners(
+    items: &[syn::Item],
+    declared_traits: &std::collections::HashSet<String>,
+) -> HashMap<String, std::collections::BTreeSet<String>> {
+    let mut out: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    collect_concrete_trait_impl_method_owners_into(items, declared_traits, &mut out);
+    out
+}
+
+fn collect_concrete_trait_impl_method_owners_into(
+    items: &[syn::Item],
+    declared_traits: &std::collections::HashSet<String>,
+    out: &mut HashMap<String, std::collections::BTreeSet<String>>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Impl(impl_block) => {
+                let Some((_, trait_path, _)) = &impl_block.trait_ else {
+                    continue;
+                };
+                let Some(trait_name) =
+                    trait_path.segments.last().map(|s| s.ident.to_string())
+                else {
+                    continue;
+                };
+                // Only crate-declared traits (foreign-trait impls aren't UFCS-
+                // lowered), and only concrete impls (no type-param generics) —
+                // generic/blanket impls don't reliably emit an early-declared
+                // `trait_<Tr>` namespace.
+                if !declared_traits.contains(&trait_name) {
+                    continue;
+                }
+                let has_type_generics = impl_block
+                    .generics
+                    .params
+                    .iter()
+                    .any(|p| matches!(p, syn::GenericParam::Type(_)));
+                if has_type_generics {
+                    continue;
+                }
+                for ii in &impl_block.items {
+                    if let syn::ImplItem::Fn(method) = ii
+                        && matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_)))
+                    {
+                        out.entry(method.sig.ident.to_string())
+                            .or_default()
+                            .insert(trait_name.clone());
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_concrete_trait_impl_method_owners_into(nested, declared_traits, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn collect_method_name_uses(
     items: &[syn::Item],
     declared_traits: &std::collections::HashSet<String>,
@@ -2016,8 +2091,9 @@ mod tests {
         )
         .expect("ufcs transpile should succeed");
         assert!(
-            on.contains("requires { hello("),
-            "flag-on must lower the trait call `f.hello()` to free dispatch\nGot: {on}"
+            on.contains("requires { trait_Greet::hello("),
+            "flag-on must lower the trait call `f.hello()` to free dispatch \
+             (qualified, since exactly one trait owns `hello`)\nGot: {on}"
         );
     }
 
@@ -2051,9 +2127,10 @@ mod tests {
             .find("using namespace trait_Greet;")
             .expect("must emit `using namespace trait_Greet;`");
         // Anchor on the call-site dispatch (uniquely in the function body),
-        // not `use_it`'s forward declaration (which precedes the using).
+        // not `use_it`'s forward declaration (which precedes the using). The
+        // call is qualified (`trait_Greet::hello`) since one trait owns `hello`.
         let call_pos = on
-            .find("requires { hello(")
+            .find("requires { trait_Greet::hello(")
             .expect("must emit the trait-call dispatch in use_it");
         assert!(
             using_pos < call_pos,
@@ -2136,16 +2213,17 @@ mod tests {
             "flag-on shim must end in a member-call fallback `deref(__self).hello()`\nGot: {on}"
         );
         // And it must be reached only after the two free-function branches:
-        // both `requires { hello(` guards still present.
-        let guard_count = on.matches("requires { hello(").count();
+        // both qualified `requires { trait_Greet::hello(` guards still present
+        // (`hello` is owned by exactly one trait, so the free call is qualified).
+        let guard_count = on.matches("requires { trait_Greet::hello(").count();
         assert!(
             guard_count >= 2,
             "flag-on shim must keep both free-call guards before the member fallback (got {guard_count})\nGot: {on}"
         );
 
         // Flag OFF: the shim is the original 2-branch form — no member-call
-        // fallback synthesized, and only one `requires { hello(` ... actually
-        // none, since flag-off keeps the native member call.
+        // fallback synthesized, and no qualified trait_Greet::hello calls
+        // (flag-off keeps the native member call).
         let off = transpile(src, None).expect("default transpile should succeed");
         assert!(
             !off.contains("requires { hello("),
@@ -2200,6 +2278,43 @@ mod tests {
         assert!(
             !off.contains("trait_Greet::name") && !off.contains("trait_Farewell::name"),
             "flag-off must not synthesize qualified trait_ calls\nGot: {off}"
+        );
+    }
+
+    #[test]
+    fn test_ufcs_traits_phase7_method_shim_qualified_avoids_local_shadow() {
+        // Rust `let bits = x.bits();` binds a local named the same as the trait
+        // method. The method-call shim must qualify its free call to
+        // `trait_Bits::bits(__self)` — an unqualified `bits(__self)` would bind
+        // to the half-declared local `bits` ("variable 'bits' ... cannot appear
+        // in its own initializer"). Qualification applies because exactly one
+        // crate-declared trait (`Bits`) owns the name.
+        let src = r#"
+            struct Flags { v: u32 }
+            trait Bits { fn bits(&self) -> u32; }
+            impl Bits for Flags { fn bits(&self) -> u32 { self.v } }
+            fn read(x: &Flags) -> u32 { let bits = x.bits(); bits }
+        "#;
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+        assert!(
+            on.contains("trait_Bits::bits("),
+            "single-owner trait method must qualify its shim free call to trait_Bits::bits\nGot: {on}"
+        );
+        assert!(
+            !on.contains("requires { bits("),
+            "the shim must NOT emit an unqualified `bits(` that shadows the local\nGot: {on}"
         );
     }
 

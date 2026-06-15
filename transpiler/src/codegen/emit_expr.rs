@@ -5016,8 +5016,27 @@ impl CodeGen {
                     .iter()
                     .map(|a| self.emit_expr_to_string(a))
                     .collect();
+                // Qualify the free call to `trait_<Tr>::m` when exactly ONE
+                // crate-declared trait owns this method name. The unqualified
+                // `m(__self)` is otherwise shadowed by a local variable of the
+                // same name — Rust `let bits = x.bits();` lowers to
+                // `auto bits = (…bits(__self)…)`, and inside that initializer the
+                // half-declared `bits` is in scope, so unqualified `bits` binds
+                // to the variable, not the free function ("variable 'bits'
+                // declared with deduced type 'auto' cannot appear in its own
+                // initializer"). When several traits own the name we can't pick
+                // one syntactically, so keep the unqualified shim (overload
+                // resolution + the `using namespace trait_<Tr>` directives).
+                let callee = match self.ufcs_method_trait_owners.get(&method_name) {
+                    Some(traits) if traits.len() == 1 => format!(
+                        "trait_{}::{}",
+                        traits.iter().next().unwrap(),
+                        escape_cpp_keyword(&method_name)
+                    ),
+                    _ => escape_cpp_keyword(&method_name),
+                };
                 return self.emit_extension_call_with_receiver_autoderef_fallback(
-                    &escape_cpp_keyword(&method_name),
+                    &callee,
                     &receiver,
                     &args,
                 );

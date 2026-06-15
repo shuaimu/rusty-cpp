@@ -563,6 +563,15 @@ pub struct CodeGen {
     /// (`Clone`, `Display`, …) keeps the non-UFCS lowering for it. Populated in
     /// `emit_file` when `ufcs_traits` is on; empty otherwise.
     pub(crate) ufcs_declared_trait_names: std::collections::HashSet<String>,
+    /// UFCS Phase 7: method name → crate-declared traits whose CONCRETE
+    /// (non-generic) impls emit a `trait_<Tr>::m` free function. When exactly
+    /// one trait owns a name, the method-call shim qualifies its free call to
+    /// `trait_<Tr>::m` so an unqualified `m(recv)` can't be shadowed by a local
+    /// variable of the same name (`let bits = x.bits()`). Excludes default
+    /// methods + generic/blanket impls (no resolvable `trait_<Tr>::m`).
+    /// Populated in `emit_file` when `ufcs_traits` is on; empty otherwise.
+    pub(crate) ufcs_method_trait_owners:
+        HashMap<String, std::collections::BTreeSet<String>>,
     /// Per-function type-inference state. Constructed at the entry
     /// of `emit_function` (and equivalent entry points), populated by
     /// the constraint collector in `type_solver`, then solved before
@@ -1384,6 +1393,7 @@ impl CodeGen {
             ufcs_traits: false,
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
+            ufcs_method_trait_owners: HashMap::new(),
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
@@ -2227,6 +2237,13 @@ impl CodeGen {
             // UFCS Phase 7: scope emission to crate-declared traits.
             self.ufcs_declared_trait_names =
                 crate::transpile::collect_declared_trait_names(&file.items);
+            // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
+            // emit a `trait_<Tr>::m` free function, for shim qualification.
+            self.ufcs_method_trait_owners =
+                crate::transpile::collect_concrete_trait_impl_method_owners(
+                    &file.items,
+                    &self.ufcs_declared_trait_names,
+                );
         }
         log_emit("collect_local_declared_types");
         // Pass 1b': Cluster C — detect parallel inherent impl blocks of the
