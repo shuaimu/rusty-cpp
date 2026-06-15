@@ -147,6 +147,95 @@ pub struct TranspileOptions {
     /// dev-dependency) are harmless — so a transpile-time panic there is a
     /// false failure. The backstop still fires for the crate under test.
     pub is_dependency: bool,
+    /// **Migration flag (default off).** Lower trait *method dispatch* via the
+    /// UFCS free-function design (book § 3.2): inherent methods stay members,
+    /// trait methods become free functions in trait namespaces reached by a
+    /// self-implemented member-first UFCS, with clang's overload resolution as
+    /// the trait solver. Off → the existing member/adapter lowering is used, so
+    /// the passing parity matrix is unaffected. Built incrementally; see the
+    /// phase roadmap in § 3.2.12. Env override: `RUSTY_CPP_UFCS_TRAITS=1`.
+    pub ufcs_traits: bool,
+}
+
+/// Classification of a method *name* across the whole crate, used by the UFCS
+/// call-site lowering (book § 3.2.3) to pick the emission shape **without any
+/// type inference**: a purely-inherent name stays native `x.m()`, a
+/// purely-trait name becomes `m(x)`, and a name that is *both* (inherent on one
+/// type, a trait method on another) needs the member-first UFCS shim.
+//
+// Phase 1 of the UFCS trait migration (book § 3.2): wired and tested here;
+// consumed by the call-site lowering in a later phase, hence `allow(dead_code)`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodNameClass {
+    /// Only ever appears in inherent `impl Type { fn m }` blocks.
+    Inherent,
+    /// Only ever appears as a trait method (`trait Tr { fn m }` /
+    /// `impl Tr for Type { fn m }`).
+    TraitOnly,
+    /// Appears as both an inherent method and a trait method somewhere.
+    Both,
+}
+
+/// Walk every `impl`/`trait` in the crate and classify each method *name* as
+/// inherent-only, trait-only, or both. Purely syntactic (no types): an `impl`
+/// with a `for Tr` clause contributes a *trait* use; an `impl` without one, an
+/// *inherent* use; a `trait` definition's methods (including defaults) are
+/// trait uses. Recurses into inline modules.
+#[allow(dead_code)]
+pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameClass> {
+    let mut inherent: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut trait_named: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_method_name_uses(items, &mut inherent, &mut trait_named);
+
+    let mut out = HashMap::new();
+    for name in inherent.union(&trait_named) {
+        let class = match (inherent.contains(name), trait_named.contains(name)) {
+            (true, true) => MethodNameClass::Both,
+            (true, false) => MethodNameClass::Inherent,
+            (false, true) => MethodNameClass::TraitOnly,
+            (false, false) => unreachable!("name came from the union of the two sets"),
+        };
+        out.insert(name.clone(), class);
+    }
+    out
+}
+
+fn collect_method_name_uses(
+    items: &[syn::Item],
+    inherent: &mut std::collections::HashSet<String>,
+    trait_named: &mut std::collections::HashSet<String>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Impl(impl_block) => {
+                let is_trait_impl = impl_block.trait_.is_some();
+                for impl_item in &impl_block.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        let name = method.sig.ident.to_string();
+                        if is_trait_impl {
+                            trait_named.insert(name);
+                        } else {
+                            inherent.insert(name);
+                        }
+                    }
+                }
+            }
+            syn::Item::Trait(t) => {
+                for trait_item in &t.items {
+                    if let syn::TraitItem::Fn(method) = trait_item {
+                        trait_named.insert(method.sig.ident.to_string());
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_method_name_uses(nested, inherent, trait_named);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Default for TranspileOptions {
@@ -154,6 +243,7 @@ impl Default for TranspileOptions {
         Self {
             by_value_cycle_breaking_prototype: false,
             is_dependency: false,
+            ufcs_traits: false,
             cpp_module_symbol_index: None,
             cpp_module_symbol_index_sources: Vec::new(),
             external_crate_module_aliases: HashMap::new(),
@@ -2362,5 +2452,53 @@ fn f() -> i32 {
         assert!(err.contains("`cpp::` macro imports are unsupported in MVP"));
         assert!(err.contains("symbol `max`"));
         assert!(err.contains("/tmp/cpp-index.toml"));
+    }
+
+    // --- UFCS trait migration (book § 3.2.3): method-name classifier ---
+
+    fn classify(src: &str) -> HashMap<String, MethodNameClass> {
+        let file = syn::parse_str::<syn::File>(src).expect("parse");
+        classify_method_names(&file.items)
+    }
+
+    #[test]
+    fn test_classify_method_names_inherent_only() {
+        let m = classify("struct Foo; impl Foo { fn bar(&self) {} }");
+        assert_eq!(m.get("bar"), Some(&MethodNameClass::Inherent));
+    }
+
+    #[test]
+    fn test_classify_method_names_trait_only() {
+        let m = classify(
+            "trait Tr { fn baz(&self); } struct Foo; impl Tr for Foo { fn baz(&self) {} }",
+        );
+        assert_eq!(m.get("baz"), Some(&MethodNameClass::TraitOnly));
+    }
+
+    #[test]
+    fn test_classify_method_names_both() {
+        // `len` is inherent on Foo AND a method of trait Sz → Both.
+        let m = classify(
+            "struct Foo; impl Foo { fn len(&self) -> usize { 0 } } \
+             trait Sz { fn len(&self) -> usize; }",
+        );
+        assert_eq!(m.get("len"), Some(&MethodNameClass::Both));
+    }
+
+    #[test]
+    fn test_classify_method_names_recurses_modules() {
+        let m = classify(
+            "mod a { trait Tr { fn m(&self); } } \
+             mod b { struct F; impl F { fn n(&self) {} } }",
+        );
+        assert_eq!(m.get("m"), Some(&MethodNameClass::TraitOnly));
+        assert_eq!(m.get("n"), Some(&MethodNameClass::Inherent));
+    }
+
+    #[test]
+    fn test_classify_method_names_trait_default_counts_as_trait() {
+        // A default-bodied trait method (no impl) is still a trait use.
+        let m = classify("trait Greet { fn hello(&self) -> u8 { 0 } }");
+        assert_eq!(m.get("hello"), Some(&MethodNameClass::TraitOnly));
     }
 }
