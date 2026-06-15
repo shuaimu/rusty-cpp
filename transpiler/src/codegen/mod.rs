@@ -34,6 +34,13 @@ pub(crate) struct ExtensionImplMethod {
     /// `impl<Idx, T, ...>`. Used by the Adapter spec emitter to detect
     /// generic impls (which need partial specializations) and skip them.
     impl_generic_names: Vec<String>,
+    /// True for a trait DEFAULT method (book § 3.2.13): `self_ty` is the bare
+    /// `Self`, which must be emitted as a leading template parameter
+    /// (`template <class Self> … (const Self& self_, …)`) rather than a concrete
+    /// receiver type. When set, the emitter prepends `class Self` to the
+    /// template header and skips the `using Self = decltype(self_);` alias
+    /// (which would be the ill-formed `using Self = Self;`).
+    self_is_template_param: bool,
 }
 
 /// Storage shape for a `--interface-traits` Adapter specialization.
@@ -572,6 +579,15 @@ pub struct CodeGen {
     /// Populated in `emit_file` when `ufcs_traits` is on; empty otherwise.
     pub(crate) ufcs_method_trait_owners:
         HashMap<String, std::collections::BTreeSet<String>>,
+    /// UFCS Phase 7 / § 3.2.13: `(trait, method)` pairs for which a
+    /// `<Tr>_::m` free function was ACTUALLY emitted (the declaration emitter
+    /// did not skip it — unsupported self-type mapping, unresolved placeholder,
+    /// etc.). Recorded during early-declaration emission and used to PRUNE
+    /// `ufcs_method_trait_owners` before call sites, so qualification never
+    /// names a non-existent `<Tr>_::m` (a hard error). Method name is raw
+    /// (matching the owner-map keys / call-site lookup).
+    pub(crate) ufcs_emitted_trait_methods:
+        std::collections::HashSet<(String, String)>,
     /// Per-function type-inference state. Constructed at the entry
     /// of `emit_function` (and equivalent entry points), populated by
     /// the constraint collector in `type_solver`, then solved before
@@ -1394,6 +1410,7 @@ impl CodeGen {
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             ufcs_method_trait_owners: HashMap::new(),
+            ufcs_emitted_trait_methods: std::collections::HashSet::new(),
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
@@ -2586,6 +2603,26 @@ impl CodeGen {
         // adapter specializations.
         self.emit_ufcs_trait_impl_free_function_decls(&file.items);
         log_emit("emit_ufcs_trait_impl_free_function_decls");
+        // § 3.2.13: default-method templates (early declarations + `using`).
+        self.emit_ufcs_trait_default_free_function_decls(&file.items);
+        log_emit("emit_ufcs_trait_default_free_function_decls");
+        // The declaration emitters above recorded which `<Tr>_::m` free
+        // functions were ACTUALLY emitted (some specs are skipped — unsupported
+        // self-type mapping, unresolved placeholders, etc.). Prune the
+        // qualification owner map to only those, so a call site never qualifies
+        // to a non-existent `<Tr>_::m` (a hard error, not SFINAE). Methods
+        // pruned out fall through to the member call.
+        if self.ufcs_traits {
+            let mut owners = std::mem::take(&mut self.ufcs_method_trait_owners);
+            owners.retain(|method, traits| {
+                traits.retain(|t| {
+                    self.ufcs_emitted_trait_methods
+                        .contains(&(t.clone(), method.clone()))
+                });
+                !traits.is_empty()
+            });
+            self.ufcs_method_trait_owners = owners;
+        }
 
         self.push_deferred_method_definition_scope();
         let mut pending_alias_impl_owner_defs: Vec<String> = Vec::new();
@@ -2668,6 +2705,9 @@ impl CodeGen {
         // `namespace <Tr>_`. No-op when the flag is off.
         self.emit_ufcs_trait_impl_free_functions(&file.items);
         log_emit("emit_ufcs_trait_impl_free_functions");
+        // § 3.2.13: default-method template DEFINITIONS in `namespace <Tr>_`.
+        self.emit_ufcs_trait_default_free_functions(&file.items);
+        log_emit("emit_ufcs_trait_default_free_functions");
 
         // Interface+adapter (§ 3.2.9): emit any synthesized combined
         // interface classes for multi-bound `dyn A + B` use sites.
@@ -11164,6 +11204,7 @@ impl CodeGen {
                 callable_param_metadata,
                 associated_type_bindings: associated_type_bindings.clone(),
                 impl_generic_names: impl_generic_names.clone(),
+                self_is_template_param: false,
             });
         }
         if specs.is_empty() {
@@ -11233,13 +11274,136 @@ impl CodeGen {
         self.writeln(&format!("namespace {}_ {{", trait_name));
         self.indent += 1;
         for spec in &specs {
-            self.emit_extension_trait_free_function_declaration(spec);
+            if self.emit_extension_trait_free_function_declaration(spec) {
+                self.ufcs_emitted_trait_methods
+                    .insert((trait_name.clone(), spec.method.sig.ident.to_string()));
+            }
         }
         self.indent -= 1;
         self.writeln("}");
         // Bring the trait free functions into the enclosing scope so an
         // unqualified `m(recv)` at a call site resolves to them (book § 3.2.5).
         self.writeln(&format!("using namespace {}_;", trait_name));
+    }
+
+    /// Build `(trait_name, specs)` for a trait's DEFAULT methods (book § 3.2.13):
+    /// each default-bodied method with a receiver becomes a `Self`-templated free
+    /// function in `<Tr>_`. `None` for assoc-const (runtime-helper) traits or
+    /// traits with no default methods.
+    fn ufcs_trait_default_specs(t: &syn::ItemTrait) -> Option<(String, Vec<ExtensionImplMethod>)> {
+        if t.items.iter().any(|i| matches!(i, syn::TraitItem::Const(_))) {
+            return None;
+        }
+        let trait_name = t.ident.to_string();
+        let impl_generic_names: Vec<String> = t
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut specs: Vec<ExtensionImplMethod> = Vec::new();
+        for item in &t.items {
+            let syn::TraitItem::Fn(m) = item else { continue };
+            let Some(block) = &m.default else { continue }; // default-bodied only
+            if !matches!(m.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
+                continue;
+            }
+            let method = syn::ImplItemFn {
+                attrs: m.attrs.clone(),
+                vis: syn::Visibility::Inherited,
+                defaultness: None,
+                sig: m.sig.clone(),
+                block: block.clone(),
+            };
+            let callable_param_metadata = Self::collect_callable_param_bound_metadata_from_generics(
+                &method.sig.generics,
+                &method.sig.inputs,
+            );
+            specs.push(ExtensionImplMethod {
+                self_ty: syn::parse_quote!(Self),
+                method,
+                callable_param_metadata,
+                associated_type_bindings: HashMap::new(),
+                impl_generic_names: impl_generic_names.clone(),
+                self_is_template_param: true,
+            });
+        }
+        if specs.is_empty() {
+            return None;
+        }
+        Some((trait_name, specs))
+    }
+
+    /// Phase / § 3.2.13 (late): emit each trait's default methods as
+    /// `Self`-templated free-function DEFINITIONS in `namespace <Tr>_`.
+    fn emit_ufcs_trait_default_free_functions(&mut self, items: &[syn::Item]) {
+        if !self.ufcs_traits {
+            return;
+        }
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    let Some((trait_name, specs)) = Self::ufcs_trait_default_specs(t) else {
+                        continue;
+                    };
+                    self.writeln(&format!(
+                        "// UFCS trait migration: default methods for trait `{}`",
+                        trait_name
+                    ));
+                    self.writeln(&format!("namespace {}_ {{", trait_name));
+                    self.indent += 1;
+                    for spec in &specs {
+                        self.emit_extension_trait_free_function(spec);
+                        self.newline();
+                    }
+                    self.indent -= 1;
+                    self.writeln("}");
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        self.emit_ufcs_trait_default_free_functions(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// § 3.2.13 (early): forward-declare each trait's default-method templates +
+    /// a `using namespace <Tr>_;`, before function bodies, so call sites resolve.
+    fn emit_ufcs_trait_default_free_function_decls(&mut self, items: &[syn::Item]) {
+        if !self.ufcs_traits {
+            return;
+        }
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    let Some((trait_name, specs)) = Self::ufcs_trait_default_specs(t) else {
+                        continue;
+                    };
+                    self.writeln(&format!("namespace {}_ {{", trait_name));
+                    self.indent += 1;
+                    for spec in &specs {
+                        if self.emit_extension_trait_free_function_declaration(spec) {
+                            self.ufcs_emitted_trait_methods
+                                .insert((trait_name.clone(), spec.method.sig.ident.to_string()));
+                        }
+                    }
+                    self.indent -= 1;
+                    self.writeln("}");
+                    self.writeln(&format!("using namespace {}_;", trait_name));
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        self.emit_ufcs_trait_default_free_function_decls(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn emit_extension_trait_free_functions(
@@ -12183,22 +12347,31 @@ impl CodeGen {
             return false;
         };
 
-        let free_generics = self.extension_free_function_generics(
+        let mut free_generics = self.extension_free_function_generics(
             method,
             &method_spec.self_ty,
             Some(&method_spec.associated_type_bindings),
         );
+        if method_spec.self_is_template_param {
+            // Default method (§ 3.2.13): `Self` is the leading template param.
+            free_generics.params.insert(0, syn::parse_quote!(Self_));
+        }
         let prev_forward_decl_signature = self.in_forward_decl_signature;
         self.in_forward_decl_signature = true;
         self.push_type_param_scope(&free_generics);
-        let self_cpp_ty =
-            self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty));
+        let self_cpp_ty = if method_spec.self_is_template_param {
+            "Self_".to_string()
+        } else {
+            self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty))
+        };
         if method_name == "deserialize" && self_cpp_ty.contains("PhantomData<") {
             self.pop_type_param_scope();
             self.in_forward_decl_signature = prev_forward_decl_signature;
             return false;
         }
-        if self.extension_self_type_mapping_is_unsupported(&self_cpp_ty) {
+        if !method_spec.self_is_template_param
+            && self.extension_self_type_mapping_is_unsupported(&self_cpp_ty)
+        {
             self.pop_type_param_scope();
             self.in_forward_decl_signature = prev_forward_decl_signature;
             return false;
@@ -12418,15 +12591,22 @@ impl CodeGen {
             return;
         };
 
-        let free_generics = self.extension_free_function_generics(
+        let mut free_generics = self.extension_free_function_generics(
             method,
             &method_spec.self_ty,
             Some(&method_spec.associated_type_bindings),
         );
+        if method_spec.self_is_template_param {
+            // Default method (§ 3.2.13): `Self` is the leading template param.
+            free_generics.params.insert(0, syn::parse_quote!(Self_));
+        }
         let prev_forward_decl_signature = self.in_forward_decl_signature;
         self.in_forward_decl_signature = true;
-        let self_cpp_ty =
-            self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty));
+        let self_cpp_ty = if method_spec.self_is_template_param {
+            "Self_".to_string()
+        } else {
+            self.rewrite_cpp_import_bound_type_spelling(&self.map_type(&method_spec.self_ty))
+        };
         if method_name == "deserialize" && self_cpp_ty.contains("PhantomData<") {
             self.in_forward_decl_signature = prev_forward_decl_signature;
             self.writeln(&format!(
@@ -12435,7 +12615,9 @@ impl CodeGen {
             ));
             return;
         }
-        if self.extension_self_type_mapping_is_unsupported(&self_cpp_ty) {
+        if !method_spec.self_is_template_param
+            && self.extension_self_type_mapping_is_unsupported(&self_cpp_ty)
+        {
             self.in_forward_decl_signature = prev_forward_decl_signature;
             self.writeln(&format!(
                 "// Rust-only extension method skipped (unsupported self type mapping): {} ({})",
@@ -12532,6 +12714,10 @@ impl CodeGen {
             .push(associated_type_cpp_bindings.clone());
         // Extension methods can mention `Self::Assoc` in bodies; define a local
         // alias so dependent associated paths remain valid in free-function form.
+        // For a default method the template parameter is `Self_` (the keyword
+        // `Self` can't be a C++/syn template-param name), so this becomes
+        // `using Self = Self_;` — bridging the body's `Self` to the real param
+        // exactly as it bridges to a concrete self type otherwise.
         self.writeln("using Self = std::remove_reference_t<decltype(self_)>;");
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&method.sig.output);

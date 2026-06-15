@@ -4438,6 +4438,7 @@ impl CodeGen {
                             callable_param_metadata,
                             associated_type_bindings: associated_type_bindings.clone(),
                             impl_generic_names,
+                            self_is_template_param: false,
                         });
                     }
                 }

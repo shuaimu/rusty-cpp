@@ -341,6 +341,25 @@ fn collect_concrete_trait_impl_method_owners_into(
                     }
                 }
             }
+            syn::Item::Trait(t) => {
+                // Default-bodied trait methods (§ 3.2.13) are emitted as
+                // `Self`-templated free functions in `<Tr>_`, so they own their
+                // name too. Skip assoc-const (runtime-helper) traits, matching
+                // the impl branch and the default-method emitter.
+                let trait_name = t.ident.to_string();
+                if !assoc_const_traits.contains(&trait_name) {
+                    for ti in &t.items {
+                        if let syn::TraitItem::Fn(m) = ti
+                            && m.default.is_some()
+                            && matches!(m.sig.inputs.first(), Some(syn::FnArg::Receiver(_)))
+                        {
+                            out.entry(m.sig.ident.to_string())
+                                .or_default()
+                                .insert(trait_name.clone());
+                        }
+                    }
+                }
+            }
             syn::Item::Mod(m) => {
                 if let Some((_, nested)) = &m.content {
                     collect_concrete_trait_impl_method_owners_into(
@@ -2355,6 +2374,66 @@ mod tests {
         assert!(
             !on.contains("requires { bits("),
             "the shim must NOT emit an unqualified `bits(` that shadows the local\nGot: {on}"
+        );
+    }
+
+    #[test]
+    fn test_ufcs_traits_default_method_emits_self_templated_free_function() {
+        // § 3.2.13: a default-bodied trait method is emitted ONCE as a
+        // `Self`-templated free function in `<Tr>_` (param named `Self_`, since
+        // `Self` can't be a template-param name); an overriding impl emits a
+        // non-template overload that wins by C++ overload resolution.
+        let src = r#"
+            struct Foo { id: i32 }
+            struct Bar { id: i32 }
+            trait Greet {
+                fn hello(&self) -> i32;
+                fn describe(&self) -> i32 { self.hello() + 1 }
+            }
+            impl Greet for Foo { fn hello(&self) -> i32 { self.id } }
+            impl Greet for Bar { fn hello(&self) -> i32 { self.id } fn describe(&self) -> i32 { 999 } }
+            fn d_foo(f: &Foo) -> i32 { f.describe() }
+        "#;
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+
+        // The default is one Self-templated free function in Greet_.
+        assert!(
+            on.contains("int32_t describe(const Self_& self_)"),
+            "default `describe` must emit a Self-templated free function\nGot: {on}"
+        );
+        // Bar overrides it → a non-template concrete overload (which wins).
+        assert!(
+            on.contains("int32_t describe(const Bar& self_)"),
+            "the Bar override must emit a concrete (non-template) describe overload\nGot: {on}"
+        );
+        // The default's body lowers `self.hello()` recursively via UFCS.
+        assert!(
+            on.contains("Greet_::hello("),
+            "default body must lower `self.hello()` to the qualified trait call\nGot: {on}"
+        );
+        // The call site qualifies to Greet_::describe (default is in the owner map).
+        assert!(
+            on.contains("Greet_::describe("),
+            "`f.describe()` must qualify to Greet_::describe\nGot: {on}"
+        );
+
+        // Flag OFF: no Self-templated default free function.
+        let off = transpile(src, None).expect("default transpile should succeed");
+        assert!(
+            !off.contains("describe(const Self_& self_)") && !off.contains("Greet_::describe"),
+            "flag-off must not emit the default free function or qualified call\nGot: {off}"
         );
     }
 
