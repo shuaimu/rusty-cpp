@@ -1377,6 +1377,59 @@ are about transpiling the body *generically*, not dispatch: `Self::Assoc` resolv
 become template constraints; and a default that cannot be expressed generically falls back to
 per-impl materialization.
 
+#### 3.2.14 Implementation realities (the long tail)
+
+The model above is clean; making real crates (serde, itertools) compile flag-on surfaced a
+set of invariants that are easy to violate and worth stating outright. Each is a consequence
+of one fact: **a qualified member access to a name C++ cannot find is a hard error, not a
+SFINAE soft failure.** Qualification buys precision but forfeits the "try the next candidate"
+safety net, so every qualified name the transpiler emits must be guaranteed to exist.
+
+- **Owner-map pruning — never qualify to a symbol you didn't emit.** Call-site qualification
+  reads an owner map (method name → owning trait). That map must be pruned to the methods
+  *actually emitted* (`ufcs_emitted_trait_methods`), not merely declared. The regression that
+  taught this: `into_either` was added to the owner map as a default, but the emitter skipped
+  it for the concrete impl, so `x.into_either()` qualified to a non-existent
+  `IntoEither_::into_either` → hard error. A method may be classified-and-routed only if its
+  `Tr_::m` will be there.
+
+- **The cross-crate manifest classifies; it does not qualify.** `ufcs-traits.json` (§3.2.7)
+  tells a downstream crate *which* bare names are trait methods and *which* trait owns each —
+  enough to classify a call and pick the `Tr_` to name. But the emitted call is **bare**
+  `Tr_::m`, never `dep::Tr_::m`. Every crate emits its `Tr_` namespaces at global scope
+  *inside its own C++ module*; a downstream `import` brings those names into scope unqualified.
+  A module-prefixed `dep::Tr_::m` names a namespace that does not exist. The manifest's module
+  field is for disambiguating *classification*, not for building a path.
+
+- **Free functions are global; impl-local types are not (Fix B).** A trait method that was a
+  member *inside its type's module* flag-off becomes a free function in `Tr_` at **global**
+  scope flag-on. Its self/param/return types must therefore be qualified to their declaring
+  module: `VariantAccess_::unit_variant(de::value::private_::MapAsEnum self_)`, not bare
+  `MapAsEnum`. A `local_type_module_path` map drives this, with an **ambiguity guard**: a bare
+  name declared in ≥2 modules cannot be qualified from a global name→module map alone (which
+  module did *this* impl mean?), so it is left bare. That guard is correct but incomplete — the
+  residual ambiguous names (serde's `Error` in `de`/`ser`/`private_::doc`) need
+  *impl-module-context* resolution (qualify relative to the impl's own module first), which the
+  current global map cannot do. This is the largest remaining serde_core gap.
+
+- **Multi-owner defaults need a constraint, not a guess (Fix A).** When a *default* method is
+  owned by two traits (serde's `size_hint` ∈ MapAccess ∩ SeqAccess), first-owner qualification
+  is wrong: both owners emit unconstrained `template<class Self_> … size_hint(const Self_&)`,
+  each matches every receiver, and the first always wins regardless of which trait the receiver
+  implements. The fix reuses the §3.2.4 priority idea at the *default* layer: each concrete
+  `impl Tr for U` emits a marker `Tr_::__ufcs_impls(const U&)`, the default template carries
+  `requires { Tr_::__ufcs_impls(s) }`, and a base `void __ufcs_impls();` is declared per
+  constrained trait so the `requires` is *SFINAE-false* (not a hard "no member") for a trait
+  that declares the default but has no concrete impl in this TU (`SerializeStructVariant`). A
+  multi-owner call then tries each `<Owner>_::m` qualified — no unqualified `size_hint` to
+  collide with the `de::size_hint` *module*.
+
+- **Open: interface-default-body instantiation.** An *object-safe* trait whose default body
+  **calls a required method** makes the interface's `virtual m()` body instantiate the free-fn
+  default on the *abstract interface class itself* (`Z_::rz<Z>` → "no member `v` in `Z`"). A
+  default whose body does not call a required method (serde's `size_hint` returns `{}`) dodges
+  this; the general case is unresolved and tracked as a dedicated follow-up.
+
 ### 3.3 Pattern Matching ⚠️
 
 ```rust
