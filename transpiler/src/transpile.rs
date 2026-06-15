@@ -613,6 +613,7 @@ pub fn transpile_full_with_options(
     }
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.set_is_dependency_module(options.is_dependency);
+    codegen.set_ufcs_traits(options.ufcs_traits);
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
     codegen.set_cxx_namespace(options.cxx_namespace.clone());
@@ -1885,6 +1886,50 @@ mod tests {
         assert!(
             opt_in_out.contains("// PROTOTYPE: by-value cycle-breaking flag enabled"),
             "opt-in mode should emit prototype cycle-breaking diagnostics\nGot: {opt_in_out}"
+        );
+    }
+
+    #[test]
+    fn test_ufcs_traits_phase2_emits_trait_namespace_free_functions() {
+        let src = r#"
+            struct Foo { x: i32 }
+            trait Greet {
+                fn hello(&self) -> i32;
+            }
+            impl Greet for Foo {
+                fn hello(&self) -> i32 { self.x }
+            }
+        "#;
+
+        // Flag OFF (default): no UFCS trait namespace.
+        let off = transpile(src, None).expect("default transpile should succeed");
+        assert!(
+            !off.contains("namespace trait_Greet"),
+            "flag-off output must not emit the UFCS trait namespace\nGot: {off}"
+        );
+
+        // Flag ON: `impl Greet for Foo` is additionally emitted as a free
+        // function in `namespace trait_Greet`, with `self` rewritten to `self_`.
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+        assert!(
+            on.contains("namespace trait_Greet"),
+            "flag-on output must emit the UFCS trait namespace\nGot: {on}"
+        );
+        assert!(
+            on.contains("hello(") && on.contains("self_"),
+            "flag-on output must emit the `hello` free function taking a self_ param\nGot: {on}"
         );
     }
 

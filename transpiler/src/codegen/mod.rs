@@ -547,6 +547,10 @@ pub struct CodeGen {
     /// and leaks in dependencies that aren't compiled are harmless — so a
     /// transpile-time panic there would be a false failure.
     pub(crate) is_dependency_module: bool,
+    /// UFCS trait-lowering migration flag (book § 3.2; default false). When set,
+    /// trait impls are additionally emitted as free functions in `namespace
+    /// trait_<Trait>` (Phase 2). Off → existing member/adapter lowering only.
+    pub(crate) ufcs_traits: bool,
     /// Per-function type-inference state. Constructed at the entry
     /// of `emit_function` (and equivalent entry points), populated by
     /// the constraint collector in `type_solver`, then solved before
@@ -1365,6 +1369,7 @@ impl CodeGen {
             indent: 0,
             is_sub_codegen: false,
             is_dependency_module: false,
+            ufcs_traits: false,
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
@@ -1866,6 +1871,10 @@ impl CodeGen {
 
     pub fn set_is_dependency_module(&mut self, is_dependency: bool) {
         self.is_dependency_module = is_dependency;
+    }
+
+    pub fn set_ufcs_traits(&mut self, ufcs_traits: bool) {
+        self.ufcs_traits = ufcs_traits;
     }
 
     pub fn set_cpp_module_member_symbols(
@@ -2606,6 +2615,12 @@ impl CodeGen {
         // so the Adapter delegates directly to value_.method(args...).
         self.emit_local_trait_adapter_specializations(&file.items);
         log_emit("emit_local_trait_adapter_specializations");
+
+        // UFCS trait migration, Phase 2 (book § 3.2.2): when `ufcs_traits` is
+        // on, additionally emit `impl Tr for U` methods as free functions in
+        // `namespace trait_<Tr>`. No-op when the flag is off.
+        self.emit_ufcs_trait_impl_free_functions(&file.items);
+        log_emit("emit_ufcs_trait_impl_free_functions");
 
         // Interface+adapter (§ 3.2.9): emit any synthesized combined
         // interface classes for multi-bound `dyn A + B` use sites.
@@ -11025,6 +11040,105 @@ impl CodeGen {
     }
 
 
+
+    /// UFCS trait migration, Phase 2 (book § 3.2.2). When `ufcs_traits` is on,
+    /// emit each `impl Tr for U` method as a free function in
+    /// `namespace trait_<Tr>`, reusing the extension free-function emitter
+    /// (which rewrites the `self` receiver to a `self_` parameter). **Additive**:
+    /// the existing member/adapter lowering is untouched, so with the flag off
+    /// nothing changes, and with it on these free functions are emitted
+    /// alongside the members (call sites switch to them in Phase 3). Recurses
+    /// into inline modules. Inherent impls (`impl U`) are skipped here.
+    fn emit_ufcs_trait_impl_free_functions(&mut self, items: &[syn::Item]) {
+        if !self.ufcs_traits {
+            return;
+        }
+        for item in items {
+            match item {
+                syn::Item::Impl(impl_block) => {
+                    self.emit_ufcs_trait_impl_block_free_functions(impl_block);
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        self.emit_ufcs_trait_impl_free_functions(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn emit_ufcs_trait_impl_block_free_functions(&mut self, impl_block: &syn::ItemImpl) {
+        // Only trait impls (`impl Tr for U`), not inherent (`impl U`).
+        let Some((_, trait_path, _)) = &impl_block.trait_ else {
+            return;
+        };
+        let Some(trait_name) = trait_path.segments.last().map(|s| s.ident.to_string()) else {
+            return;
+        };
+
+        // Associated type bindings (`type X = Y;`) declared in the impl.
+        let mut associated_type_bindings: HashMap<String, syn::Type> = HashMap::new();
+        for impl_item in &impl_block.items {
+            if let syn::ImplItem::Type(assoc) = impl_item {
+                associated_type_bindings.insert(assoc.ident.to_string(), assoc.ty.clone());
+            }
+        }
+        let impl_generic_names: Vec<String> = impl_block
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+
+        // Build a free-function spec per method that has a `self` receiver
+        // (static trait methods / assoc consts are out of Phase-2 scope).
+        let mut specs: Vec<ExtensionImplMethod> = Vec::new();
+        for impl_item in &impl_block.items {
+            let syn::ImplItem::Fn(method) = impl_item else {
+                continue;
+            };
+            if !matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
+                continue;
+            }
+            let mut merged = method.clone();
+            merge_impl_type_generics_into_method(&mut merged, &impl_block.generics);
+            Self::normalize_impl_method_receiver_for_reference_self(
+                &mut merged,
+                impl_block.self_ty.as_ref(),
+            );
+            let callable_param_metadata = Self::collect_callable_param_bound_metadata_from_generics(
+                &merged.sig.generics,
+                &merged.sig.inputs,
+            );
+            specs.push(ExtensionImplMethod {
+                self_ty: (*impl_block.self_ty).clone(),
+                method: merged,
+                callable_param_metadata,
+                associated_type_bindings: associated_type_bindings.clone(),
+                impl_generic_names: impl_generic_names.clone(),
+            });
+        }
+        if specs.is_empty() {
+            return;
+        }
+
+        self.writeln(&format!(
+            "// UFCS trait migration: free functions for `impl {} for ...`",
+            trait_name
+        ));
+        self.writeln(&format!("namespace trait_{} {{", trait_name));
+        self.indent += 1;
+        for spec in &specs {
+            self.emit_extension_trait_free_function(spec);
+            self.newline();
+        }
+        self.indent -= 1;
+        self.writeln("}");
+    }
 
     fn emit_extension_trait_free_functions(
         &mut self,
