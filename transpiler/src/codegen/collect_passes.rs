@@ -4747,15 +4747,22 @@ impl CodeGen {
                     // cross-block traits — they are referenced by a bare
                     // single-segment name and the Adapter inherits
                     // `class <trait_name>` (emitted by the trait's block).
-                    // Still skip qualified foreign-trait impls
-                    // (e.g. `impl serde::Serialize for Local`), which have no
-                    // local Interface class to inherit from.
+                    //
+                    // This cross-block relaxation applies ONLY in inline-rust
+                    // mode. In NORMAL transpilation every local trait is already
+                    // in `trait_declared_paths`, so a non-declared unqualified
+                    // trait is a FOREIGN/prelude trait (e.g. `impl Iterator for
+                    // BadIter`) with no local Interface class — emitting an
+                    // Adapter for it produces a broken `IteratorAdapter<…>`
+                    // (undeclared primary template + unresolved `Self::Item`).
+                    // Skip those (restores pre-1a4f2a8 behavior for real crates).
                     let trait_locally_declared = self
                         .trait_declared_paths
                         .iter()
                         .any(|p| p.ends_with(&trait_name));
-                    let trait_is_qualified = trait_path.segments.len() > 1;
-                    if !trait_locally_declared && trait_is_qualified {
+                    let accept_cross_block =
+                        self.inline_rust_block && trait_path.segments.len() == 1;
+                    if !trait_locally_declared && !accept_cross_block {
                         continue;
                     }
 
