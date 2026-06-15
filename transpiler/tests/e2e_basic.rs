@@ -823,7 +823,9 @@ impl Calc {
         "missing out-of-line ctor: {content}"
     );
     assert!(
-        content.contains(": limit(limit)"),
+        // A field initialized from a ctor param moves it (Rust struct-literal
+        // semantics): `field(std::move(param))`.
+        content.contains(": limit(std::move(limit))"),
         "missing init list head: {content}"
     );
     assert!(

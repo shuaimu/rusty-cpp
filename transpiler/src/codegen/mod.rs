@@ -15241,6 +15241,21 @@ impl CodeGen {
         }
 
         let mut inits: Vec<String> = Vec::new();
+        // Names of the ctor params. A field initialized directly from a param
+        // (`field_: param`) MOVES the param, matching Rust struct-literal move
+        // semantics — so we wrap such inits in `std::move(...)` below. This is
+        // required for move-only param types (e.g. `rusty::Box`, whose copy
+        // ctor is deleted) and is a free improvement (move instead of copy)
+        // for copyable ones. The param string is "Type name" (possibly with
+        // `&`/`*`/`const`), so the param name is the trailing identifier token.
+        let param_names: std::collections::HashSet<String> = params
+            .iter()
+            .filter_map(|p| {
+                p.rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .find(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            })
+            .collect();
         // For a `#[cpp_inherit]` owner the C++ ctor must construct its base
         // subobject first: `Owner(args) : Base(), field(e)...`. Without this
         // the base is value-initialized only when it happens to have an
@@ -15269,7 +15284,20 @@ impl CodeGen {
                     self.emit_expr_to_string(&field.expr),
                 ),
             };
-            inits.push(format!("{}({})", field_name, value_cpp));
+            // `field_: param` moves the param (Rust struct-literal semantics).
+            // Only a bare identifier that names a ctor param qualifies — not
+            // constants, calls (`Cell::new(..)`), or field references.
+            let is_param_move = matches!(&field.expr, syn::Expr::Path(p)
+                if p.qself.is_none()
+                && p.path.leading_colon.is_none()
+                && p.path.segments.len() == 1
+                && param_names.contains(&p.path.segments[0].ident.to_string()));
+            let value_final = if is_param_move {
+                format!("std::move({})", value_cpp)
+            } else {
+                value_cpp
+            };
+            inits.push(format!("{}({})", field_name, value_final));
         }
 
         if inits.is_empty() {
