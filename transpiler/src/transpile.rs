@@ -1971,6 +1971,46 @@ mod tests {
     }
 
     #[test]
+    fn test_ufcs_traits_phase4_emits_early_using_before_call_site() {
+        let src = r#"
+            struct Foo { x: i32 }
+            trait Greet { fn hello(&self) -> i32; }
+            impl Greet for Foo { fn hello(&self) -> i32 { self.x } }
+            fn use_it(f: &Foo) -> i32 { f.hello() }
+        "#;
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+
+        // Phase 4: a `using namespace trait_Greet;` is emitted so the call
+        // site's unqualified `hello(__self)` resolves to the trait free
+        // function, and it must appear BEFORE the call site (`use_it`) so
+        // ordinary lookup at the body sees it.
+        let using_pos = on
+            .find("using namespace trait_Greet;")
+            .expect("must emit `using namespace trait_Greet;`");
+        // Anchor on the call-site dispatch (uniquely in the function body),
+        // not `use_it`'s forward declaration (which precedes the using).
+        let call_pos = on
+            .find("requires { hello(")
+            .expect("must emit the trait-call dispatch in use_it");
+        assert!(
+            using_pos < call_pos,
+            "the trait `using` must precede the call site\nGot: {on}"
+        );
+    }
+
+    #[test]
     fn test_transpile_options_prefer_rusty_view_aliases() {
         let src = r#"
             fn keep_views(s: &str, b: &[u8]) -> (&str, &[u8]) {

@@ -2551,6 +2551,15 @@ impl CodeGen {
         }
         log_emit("emit_extension_trait_forward_decls_for_all_scopes");
 
+        // UFCS trait migration, Phase 4 (book § 3.2.5): emit `trait_<Tr>`
+        // free-function declarations + `using namespace trait_<Tr>;` here —
+        // after type forward-decls, before function bodies — so call sites can
+        // resolve the unqualified `m(recv)` form to the trait free function.
+        // No-op when `ufcs_traits` is off. Definitions follow late, near the
+        // adapter specializations.
+        self.emit_ufcs_trait_impl_free_function_decls(&file.items);
+        log_emit("emit_ufcs_trait_impl_free_function_decls");
+
         self.push_deferred_method_definition_scope();
         let mut pending_alias_impl_owner_defs: Vec<String> = Vec::new();
         for item in deferred_items {
@@ -11079,16 +11088,15 @@ impl CodeGen {
         }
     }
 
-    fn emit_ufcs_trait_impl_block_free_functions(&mut self, impl_block: &syn::ItemImpl) {
-        // Only trait impls (`impl Tr for U`), not inherent (`impl U`).
-        let Some((_, trait_path, _)) = &impl_block.trait_ else {
-            return;
-        };
-        let Some(trait_name) = trait_path.segments.last().map(|s| s.ident.to_string()) else {
-            return;
-        };
+    /// Build `(trait_name, free-function specs)` for a trait impl, or `None` for
+    /// an inherent impl / one with no `self`-receiver methods. Shared by the
+    /// declaration (early, Phase 4) and definition (late, Phase 2) emitters.
+    fn ufcs_trait_impl_specs(
+        impl_block: &syn::ItemImpl,
+    ) -> Option<(String, Vec<ExtensionImplMethod>)> {
+        let (_, trait_path, _) = impl_block.trait_.as_ref()?;
+        let trait_name = trait_path.segments.last().map(|s| s.ident.to_string())?;
 
-        // Associated type bindings (`type X = Y;`) declared in the impl.
         let mut associated_type_bindings: HashMap<String, syn::Type> = HashMap::new();
         for impl_item in &impl_block.items {
             if let syn::ImplItem::Type(assoc) = impl_item {
@@ -11105,8 +11113,6 @@ impl CodeGen {
             })
             .collect();
 
-        // Build a free-function spec per method that has a `self` receiver
-        // (static trait methods / assoc consts are out of Phase-2 scope).
         let mut specs: Vec<ExtensionImplMethod> = Vec::new();
         for impl_item in &impl_block.items {
             let syn::ImplItem::Fn(method) = impl_item else {
@@ -11134,9 +11140,17 @@ impl CodeGen {
             });
         }
         if specs.is_empty() {
-            return;
+            return None;
         }
+        Some((trait_name, specs))
+    }
 
+    /// Phase 2 (late): emit the trait-impl free-function DEFINITIONS in
+    /// `namespace trait_<Tr>`.
+    fn emit_ufcs_trait_impl_block_free_functions(&mut self, impl_block: &syn::ItemImpl) {
+        let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
+            return;
+        };
         self.writeln(&format!(
             "// UFCS trait migration: free functions for `impl {} for ...`",
             trait_name
@@ -11149,6 +11163,46 @@ impl CodeGen {
         }
         self.indent -= 1;
         self.writeln("}");
+    }
+
+    /// Phase 4 (early): emit `namespace trait_<Tr>` free-function DECLARATIONS +
+    /// a `using namespace trait_<Tr>;`, *before* function bodies, so a call
+    /// site's unqualified `m(recv)` resolves to the trait free function (whose
+    /// definition is emitted late by `emit_ufcs_trait_impl_free_functions`).
+    /// No-op when `ufcs_traits` is off; recurses into inline modules.
+    fn emit_ufcs_trait_impl_free_function_decls(&mut self, items: &[syn::Item]) {
+        if !self.ufcs_traits {
+            return;
+        }
+        for item in items {
+            match item {
+                syn::Item::Impl(impl_block) => {
+                    self.emit_ufcs_trait_impl_block_free_function_decls(impl_block);
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        self.emit_ufcs_trait_impl_free_function_decls(nested);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn emit_ufcs_trait_impl_block_free_function_decls(&mut self, impl_block: &syn::ItemImpl) {
+        let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
+            return;
+        };
+        self.writeln(&format!("namespace trait_{} {{", trait_name));
+        self.indent += 1;
+        for spec in &specs {
+            self.emit_extension_trait_free_function_declaration(spec);
+        }
+        self.indent -= 1;
+        self.writeln("}");
+        // Bring the trait free functions into the enclosing scope so an
+        // unqualified `m(recv)` at a call site resolves to them (book § 3.2.5).
+        self.writeln(&format!("using namespace trait_{};", trait_name));
     }
 
     fn emit_extension_trait_free_functions(
