@@ -2793,7 +2793,7 @@ impl CodeGen {
         // resolve the unqualified `m(recv)` form to the trait free function.
         // No-op when `ufcs_traits` is off. Definitions follow late, near the
         // adapter specializations.
-        self.emit_ufcs_trait_impl_free_function_decls(&file.items);
+        self.emit_ufcs_trait_impl_free_function_decls(&file.items, &[]);
         log_emit("emit_ufcs_trait_impl_free_function_decls");
         // § 3.2.13: default-method templates (early declarations + `using`).
         self.emit_ufcs_trait_default_free_function_decls(&file.items);
@@ -2895,7 +2895,7 @@ impl CodeGen {
         // UFCS trait migration, Phase 2 (book § 3.2.2): when `ufcs_traits` is
         // on, additionally emit `impl Tr for U` methods as free functions in
         // `namespace <Tr>_`. No-op when the flag is off.
-        self.emit_ufcs_trait_impl_free_functions(&file.items);
+        self.emit_ufcs_trait_impl_free_functions(&file.items, &[]);
         log_emit("emit_ufcs_trait_impl_free_functions");
         // § 3.2.13: default-method template DEFINITIONS in `namespace <Tr>_`.
         self.emit_ufcs_trait_default_free_functions(&file.items);
@@ -11350,18 +11350,20 @@ impl CodeGen {
     /// nothing changes, and with it on these free functions are emitted
     /// alongside the members (call sites switch to them in Phase 3). Recurses
     /// into inline modules. Inherent impls (`impl U`) are skipped here.
-    fn emit_ufcs_trait_impl_free_functions(&mut self, items: &[syn::Item]) {
+    fn emit_ufcs_trait_impl_free_functions(&mut self, items: &[syn::Item], module_path: &[String]) {
         if !self.ufcs_traits {
             return;
         }
         for item in items {
             match item {
                 syn::Item::Impl(impl_block) => {
-                    self.emit_ufcs_trait_impl_block_free_functions(impl_block);
+                    self.emit_ufcs_trait_impl_block_free_functions(impl_block, module_path);
                 }
                 syn::Item::Mod(m) => {
                     if let Some((_, nested)) = &m.content {
-                        self.emit_ufcs_trait_impl_free_functions(nested);
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.emit_ufcs_trait_impl_free_functions(nested, &nested_path);
                     }
                 }
                 _ => {}
@@ -11428,9 +11430,20 @@ impl CodeGen {
         Some((trait_name, specs))
     }
 
-    /// Phase 2 (late): emit the trait-impl free-function DEFINITIONS in
-    /// `namespace <Tr>_`.
-    fn emit_ufcs_trait_impl_block_free_functions(&mut self, impl_block: &syn::ItemImpl) {
+    /// Phase 2 (late): emit the trait-impl free-function DEFINITIONS. For a
+    /// crate-root impl (empty module path) they go directly in `namespace <Tr>_`.
+    /// For a nested-module impl they go in the per-module helper namespace
+    /// `<impl-module>::__ufcs_<Tr>` (forward-declared and bridged into `<Tr>_` by
+    /// emit_ufcs_trait_impl_block_free_function_decls), so the body's
+    /// module-relative paths resolve by lexical shadowing — serde_core Fix B
+    /// (body positions). The helper namespace name and module-segment spelling
+    /// MUST match the decl emitter exactly, since the bridge using-declarations
+    /// name `::<segments>::__ufcs_<Tr>::m`.
+    fn emit_ufcs_trait_impl_block_free_functions(
+        &mut self,
+        impl_block: &syn::ItemImpl,
+        module_path: &[String],
+    ) {
         let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
             return;
         };
@@ -11443,7 +11456,28 @@ impl CodeGen {
             "// UFCS trait migration: free functions for `impl {} for ...`",
             trait_name
         ));
-        self.writeln(&format!("namespace {}_ {{", trait_name));
+        if module_path.is_empty() {
+            self.writeln(&format!("namespace {}_ {{", trait_name));
+            self.indent += 1;
+            for spec in &specs {
+                self.emit_extension_trait_free_function(spec);
+                self.newline();
+            }
+            self.indent -= 1;
+            self.writeln("}");
+            return;
+        }
+        // Nested-module impl: emit the definitions into the per-module helper
+        // namespace. Do NOT push module_stack — the body must emit the SAME bytes
+        // it does at global scope (module-relative paths) so that, physically
+        // placed inside the impl's module, they resolve by lexical shadowing.
+        let helper = Self::ufcs_impl_helper_namespace_name(&trait_name);
+        let segments = self.renamed_module_scope_segments(module_path);
+        for seg in &segments {
+            self.writeln(&format!("namespace {} {{", seg));
+            self.indent += 1;
+        }
+        self.writeln(&format!("namespace {} {{", helper));
         self.indent += 1;
         for spec in &specs {
             self.emit_extension_trait_free_function(spec);
@@ -11451,6 +11485,10 @@ impl CodeGen {
         }
         self.indent -= 1;
         self.writeln("}");
+        for _ in &segments {
+            self.indent -= 1;
+            self.writeln("}");
+        }
     }
 
     /// Phase 4 (early): emit `namespace <Tr>_` free-function DECLARATIONS +
@@ -11458,18 +11496,20 @@ impl CodeGen {
     /// site's unqualified `m(recv)` resolves to the trait free function (whose
     /// definition is emitted late by `emit_ufcs_trait_impl_free_functions`).
     /// No-op when `ufcs_traits` is off; recurses into inline modules.
-    fn emit_ufcs_trait_impl_free_function_decls(&mut self, items: &[syn::Item]) {
+    fn emit_ufcs_trait_impl_free_function_decls(&mut self, items: &[syn::Item], module_path: &[String]) {
         if !self.ufcs_traits {
             return;
         }
         for item in items {
             match item {
                 syn::Item::Impl(impl_block) => {
-                    self.emit_ufcs_trait_impl_block_free_function_decls(impl_block);
+                    self.emit_ufcs_trait_impl_block_free_function_decls(impl_block, module_path);
                 }
                 syn::Item::Mod(m) => {
                     if let Some((_, nested)) = &m.content {
-                        self.emit_ufcs_trait_impl_free_function_decls(nested);
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.emit_ufcs_trait_impl_free_function_decls(nested, &nested_path);
                     }
                 }
                 _ => {}
@@ -11477,7 +11517,11 @@ impl CodeGen {
         }
     }
 
-    fn emit_ufcs_trait_impl_block_free_function_decls(&mut self, impl_block: &syn::ItemImpl) {
+    fn emit_ufcs_trait_impl_block_free_function_decls(
+        &mut self,
+        impl_block: &syn::ItemImpl,
+        module_path: &[String],
+    ) {
         let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
             return;
         };
@@ -11501,13 +11545,86 @@ impl CodeGen {
             .params
             .iter()
             .any(|p| matches!(p, syn::GenericParam::Type(_)));
-        self.writeln(&format!("namespace {}_ {{", trait_name));
+
+        // serde_core Fix B (body positions): a free function emitted at flat
+        // global `<Tr>_` scope has its SIGNATURE types qualified (Fix B), but its
+        // BODY names impl-module entities module-relative (`I32Deserializer::new_`,
+        // `private_::unit_only`) which do not resolve at `<Tr>_` scope — and a flat
+        // `using namespace ::de::value;` collides nested names with global ones
+        // (`de::value::private_` vs a global `private_::doc`). The fix: emit the
+        // function into a per-module helper namespace `<impl-module>::__ufcs_<Tr>`
+        // where its relative paths resolve by lexical shadowing (exactly as the
+        // member form did flag-off), then bridge into `<Tr>_` with a
+        // using-DECLARATION. For a crate-root impl (empty module path) the body
+        // already resolves at global scope, so keep the original flat shape.
+        if module_path.is_empty() {
+            self.writeln(&format!("namespace {}_ {{", trait_name));
+            self.indent += 1;
+            for spec in &specs {
+                if self.emit_extension_trait_free_function_declaration(spec) {
+                    self.ufcs_emitted_trait_methods
+                        .insert((trait_name.clone(), spec.method.sig.ident.to_string()));
+                }
+            }
+            if trait_in_multi_owner && impl_is_concrete {
+                let self_cpp = self.qualify_nested_local_type_for_global_scope(
+                    &self.rewrite_cpp_import_bound_type_spelling(
+                        &self.map_type(impl_block.self_ty.as_ref()),
+                    ),
+                );
+                self.writeln(&format!("void __ufcs_impls(const {}&);", self_cpp));
+            }
+            self.indent -= 1;
+            self.writeln("}");
+            // Bring the trait free functions into the enclosing scope so an
+            // unqualified `m(recv)` at a call site resolves to them (book § 3.2.5).
+            self.writeln(&format!("using namespace {}_;", trait_name));
+            return;
+        }
+
+        // Nested-module impl: forward-declare each free function inside the helper
+        // namespace (so the matching DEFINITION — emitted there too by
+        // emit_ufcs_trait_impl_block_free_functions — resolves its body paths), then
+        // bridge the declared names into `<Tr>_` with using-declarations.
+        let helper = Self::ufcs_impl_helper_namespace_name(&trait_name);
+        let segments = self.renamed_module_scope_segments(module_path);
+        for seg in &segments {
+            self.writeln(&format!("namespace {} {{", seg));
+            self.indent += 1;
+        }
+        self.writeln(&format!("namespace {} {{", helper));
         self.indent += 1;
+        // Distinct escaped method names that actually emitted — one
+        // using-declaration per name brings in all its overloads.
+        let mut bridged: Vec<String> = Vec::new();
         for spec in &specs {
             if self.emit_extension_trait_free_function_declaration(spec) {
+                let method = spec.method.sig.ident.to_string();
                 self.ufcs_emitted_trait_methods
-                    .insert((trait_name.clone(), spec.method.sig.ident.to_string()));
+                    .insert((trait_name.clone(), method.clone()));
+                let escaped = escape_cpp_keyword(&method);
+                if !bridged.contains(&escaped) {
+                    bridged.push(escaped);
+                }
             }
+        }
+        self.indent -= 1;
+        self.writeln("}");
+        for _ in &segments {
+            self.indent -= 1;
+            self.writeln("}");
+        }
+
+        // Bridge + Fix-A marker live in `<Tr>_` at global scope.
+        self.writeln(&format!("namespace {}_ {{", trait_name));
+        self.indent += 1;
+        let helper_path = {
+            let mut p = segments.clone();
+            p.push(helper.clone());
+            p.join("::")
+        };
+        for method in &bridged {
+            self.writeln(&format!("using ::{}::{};", helper_path, method));
         }
         if trait_in_multi_owner && impl_is_concrete {
             let self_cpp = self.qualify_nested_local_type_for_global_scope(
@@ -11519,9 +11636,16 @@ impl CodeGen {
         }
         self.indent -= 1;
         self.writeln("}");
-        // Bring the trait free functions into the enclosing scope so an
-        // unqualified `m(recv)` at a call site resolves to them (book § 3.2.5).
         self.writeln(&format!("using namespace {}_;", trait_name));
+    }
+
+    /// The per-module helper sub-namespace name that holds a nested-module trait
+    /// impl's UFCS free-function declarations + definitions (serde_core Fix B,
+    /// body positions). Emitted under the impl's own module so module-relative
+    /// body paths resolve by lexical shadowing; bridged into `<Tr>_` with
+    /// using-declarations.
+    fn ufcs_impl_helper_namespace_name(trait_name: &str) -> String {
+        format!("__ufcs_{}", trait_name)
     }
 
     /// Build `(trait_name, specs)` for a trait's DEFAULT methods (book § 3.2.13):

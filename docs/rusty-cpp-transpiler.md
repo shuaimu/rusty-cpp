@@ -1417,13 +1417,27 @@ safety net, so every qualified name the transpiler emits must be guaranteed to e
   resolve at global `Tr_` scope. A tempting `using namespace ::de::value;` inside `Tr_` is the
   *wrong primitive*: flat using-directives place names at one scope level, so an injected nested
   name (`de::value::private_`) collides with a global same-named one (`private_::doc`) →
-  `reference to 'private_' is ambiguous`, where real lexical nesting would have shadowed. The
-  body must instead be emitted **inside the impl's own module namespace** (a helper sub-namespace
-  where its relative paths resolve by lexical shadowing, exactly as the in-namespace `rusty_ext`
-  twin already does) and then bridged into `Tr_` with a `using`-declaration
-  (`namespace Tr_ { using ::de::value::__ufcs::m; }`). The bridge must reference only methods that
-  actually emitted (same hazard as owner-map pruning). This — plus impl-module-context
-  qualification for the ambiguous names — is the largest remaining serde_core gap.
+  `reference to 'private_' is ambiguous`, where real lexical nesting would have shadowed.
+
+  **Resolution (implemented).** A nested-module impl's free functions — both the forward
+  declaration and the definition — are emitted into a per-module helper namespace
+  `namespace <impl-module> { namespace __ufcs_<Tr> { … } }`, where the body's relative paths
+  resolve by lexical shadowing (`private_` finds `de::value::private_`, shadowing the global
+  `private_::doc` — exactly as the member form did flag-off). The names are then bridged into
+  `Tr_` with a `using`-**declaration** (`namespace Tr_ { using ::de::value::__ufcs_<Tr>::m; }`),
+  which is what every call site's qualified `Tr_::m` resolves against. Crate-root impls (empty
+  module path) keep the original flat `Tr_` shape. Three subtleties make this work: (1) the body
+  is emitted with `module_stack` *unchanged* — only literal namespace text is wrapped around it —
+  so the bytes are identical to the flat emission and merely *relocated*; (2) the bridge is driven
+  by the same actually-emitted ledger (`ufcs_emitted_trait_methods`) so it never names a
+  non-existent symbol; (3) the `using`-declaration is **re-emitted per impl block**, not deduped —
+  a using-declaration captures only the overloads declared *before* it, so re-emission after each
+  block is what makes every incrementally-added overload visible in `Tr_`. The `__ufcs_impls`
+  markers and `using namespace Tr_;` stay directly in `Tr_`. The remaining serde_core gap is now a
+  *different*, orthogonal layer: distinct Rust types collapsing to one C++ type (`isize`/`i64`,
+  `usize`/`u64`, `NonZero*`/`Atomic*` variants, `CStr`/`CString`) produce identical free-function
+  signatures → `redefinition`; impl-module-context qualification for the residual ambiguous names;
+  and a few STL-shape gaps.
 
 - **Multi-owner defaults need a constraint, not a guess (Fix A).** When a *default* method is
   owned by two traits (serde's `size_hint` ∈ MapAccess ∩ SeqAccess), first-owner qualification
