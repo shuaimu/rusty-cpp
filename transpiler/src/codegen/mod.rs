@@ -603,6 +603,15 @@ pub struct CodeGen {
     /// helper namespace; CLEARED at the start of each phase (decl, then def) so the
     /// two phases dedupe identically and the bridge matches the definitions.
     pub(crate) ufcs_def_dedupe_seen: std::collections::HashSet<String>,
+    /// True only while emitting the BODY of a UFCS DEFAULT-method free function
+    /// (§3.2.13), where `Self` is the leading template parameter `Self_`. In that
+    /// scope an associated-type path `Self::Assoc` must stay qualified as
+    /// `typename Self_::Assoc` (a dependent name) instead of being stripped to a
+    /// bare `Assoc` (which is only valid inside a concrete class with a member
+    /// typedef). Mirrors what the signature path already does via
+    /// `rewrite_extension_self_assoc_cpp_type`. Set on the template-`Self` body
+    /// only (NOT concrete-impl free functions, where `Self_` is not in scope).
+    pub(crate) ufcs_template_self_body: bool,
     /// UFCS cross-crate (book § 3.2.7): dependency trait manifests, merged into
     /// the classifier maps in `emit_file` so calls to a dependency's trait
     /// methods classify + qualify. Empty in single-crate / flag-off mode.
@@ -1446,6 +1455,7 @@ impl CodeGen {
             ufcs_method_trait_owners: HashMap::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
             ufcs_def_dedupe_seen: std::collections::HashSet::new(),
+            ufcs_template_self_body: false,
             dependency_ufcs_trait_manifests: Vec::new(),
             ufcs_trait_module_prefix: HashMap::new(),
             inference: None,
@@ -13213,6 +13223,12 @@ impl CodeGen {
         self.indent += 1;
         let prev_struct = self.current_struct.clone();
         self.current_struct = Some("Self".to_string());
+        // §3.2.13 body assoc-type resolution: for a DEFAULT method the body's
+        // `Self::Assoc` must qualify to `typename Self_::Assoc` (dependent name),
+        // not strip to a bare `Assoc`. Scope the flag to the template-`Self` body
+        // only — a concrete-impl free function has no `Self_` template param.
+        let prev_ufcs_template_self_body = self.ufcs_template_self_body;
+        self.ufcs_template_self_body = method_spec.self_is_template_param;
         self.push_type_param_scope(&free_generics);
         self.current_struct_assoc_cpp_types
             .push(associated_type_cpp_bindings.clone());
@@ -13416,6 +13432,7 @@ impl CodeGen {
         self.pop_return_value_scope();
         self.current_struct_assoc_cpp_types.pop();
         self.current_struct = prev_struct;
+        self.ufcs_template_self_body = prev_ufcs_template_self_body;
         self.indent -= 1;
         self.writeln("}");
         self.pop_type_param_scope();

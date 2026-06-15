@@ -1812,6 +1812,14 @@ impl CodeGen {
                     }
                 }
                 if self.current_struct.is_some() && path_str.starts_with("Self::") {
+                    if self.ufcs_template_self_body {
+                        // §3.2.13 default-method body: `Self` is the template param
+                        // `Self_`; keep `Self::Assoc` qualified as a dependent name
+                        // (`typename Self_::Assoc`) instead of stripping to bare.
+                        let tail = path_str.trim_start_matches("Self::").to_string();
+                        return self
+                            .maybe_prefix_typename_for_dependent_path(format!("Self_::{}", tail));
+                    }
                     path_str = path_str.trim_start_matches("Self::").to_string();
                 }
                 if let Some(mapped_primitive) = Self::map_qualified_primitive_alias_path(&path_str)
@@ -2347,7 +2355,14 @@ impl CodeGen {
                                 }
                             }
                             if self.current_struct.is_some() && base.starts_with("Self::") {
-                                base = base.trim_start_matches("Self::").to_string();
+                                if self.ufcs_template_self_body {
+                                    // §3.2.13 default-method body: qualify to the
+                                    // template param `Self_` (dependent name).
+                                    let tail = base.trim_start_matches("Self::").to_string();
+                                    base = format!("typename Self_::{}", tail);
+                                } else {
+                                    base = base.trim_start_matches("Self::").to_string();
+                                }
                             }
                             if !base.contains("::")
                                 && self.should_elide_shadowed_current_struct_local_type_args(
