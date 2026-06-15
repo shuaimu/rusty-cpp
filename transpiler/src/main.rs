@@ -3664,6 +3664,10 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             );
         }
     } else {
+        // UFCS cross-crate (book § 3.2.7): accumulate dependency trait-manifest
+        // paths as each dependency is transpiled, so later dependencies + the
+        // target can consume them. Each crate writes `<dir>/ufcs-traits.json`.
+        let mut ufcs_dep_manifest_paths: Vec<std::path::PathBuf> = Vec::new();
         for (dep, source) in &expanded_dependency_sources {
             let dep_dir = dependency_dirs.get(&dep.module_name).ok_or_else(|| {
                 format!(
@@ -3672,6 +3676,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 )
             })?;
             let cppm_path = cppm_artifact_path(dep_dir, &dep.module_name);
+            let ufcs_manifest_path = dep_dir.join("ufcs-traits.json");
             if args.incremental_transpile && cppm_path.exists() {
                 let reused = std::fs::read_to_string(&cppm_path).map_err(|e| {
                     format!(
@@ -3698,10 +3703,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                     is_dependency: true,
                     is_test_target: false,
                 });
+                // A reused dep was transpiled in a prior run, so its manifest
+                // is on disk — keep it visible to later crates.
+                if ufcs_manifest_path.exists() {
+                    ufcs_dep_manifest_paths.push(ufcs_manifest_path);
+                }
                 continue;
             }
             let mut dep_options = transpile_options.clone();
             dep_options.is_dependency = true;
+            dep_options.emit_ufcs_trait_manifest_path = Some(ufcs_manifest_path.clone());
+            dep_options.dependency_ufcs_trait_manifests = ufcs_dep_manifest_paths.clone();
             dep_options.external_crate_module_aliases = flattened_dependency_aliases
                 .iter()
                 .filter_map(|(crate_name, mapped)| {
@@ -3749,6 +3761,9 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 is_dependency: true,
                 is_test_target: false,
             });
+            if ufcs_manifest_path.exists() {
+                ufcs_dep_manifest_paths.push(ufcs_manifest_path);
+            }
         }
 
         for (target, source) in expanded_sources.iter() {
@@ -3813,6 +3828,12 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             }
             let mut target_options = transpile_options.clone();
             target_options.external_crate_module_aliases = flattened_dependency_aliases.clone();
+            // UFCS cross-crate (book § 3.2.7): the target consumes every
+            // dependency's trait manifest so calls to a dependency's trait
+            // methods classify + module-qualify (`<dep>::<Tr>_::m`).
+            target_options.dependency_ufcs_trait_manifests = ufcs_dep_manifest_paths.clone();
+            target_options.emit_ufcs_trait_manifest_path =
+                Some(target_dir.join("ufcs-traits.json"));
             let mut cpp = transpile::transpile_full_with_options(
                 source,
                 Some(&target.module_name),
