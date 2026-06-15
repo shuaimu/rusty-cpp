@@ -1,11 +1,52 @@
 use crate::codegen::CodeGen;
 use crate::types::UserTypeMap;
 use quote::ToTokens;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::{self, Visit};
+
+/// Cross-crate UFCS trait manifest (book § 3.2.7). Emitted as a sidecar JSON
+/// next to a crate's `.cppm` when `ufcs_traits` is on, and consumed when
+/// transpiling a dependent crate so it can classify + module-qualify calls to
+/// the dependency's trait methods (`<module>::<Tr>_::m`). Records ONLY methods
+/// for which an `<Tr>_::m` free function was ACTUALLY emitted (the pruned
+/// owner map), so a consumer never qualifies to a non-existent symbol.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+pub struct UfcsTraitManifest {
+    #[serde(default = "default_ufcs_trait_manifest_version")]
+    pub version: u32,
+    /// C++ module name the trait namespaces live in (e.g. "itertools").
+    pub module: String,
+    /// Trait names this crate DECLARES (for `use dep::Tr` recognition).
+    #[serde(default)]
+    pub declared_traits: Vec<String>,
+    /// Method name → owning trait names, restricted to actually-emitted
+    /// `<Tr>_::m` free functions.
+    #[serde(default)]
+    pub method_owners: BTreeMap<String, Vec<String>>,
+}
+
+fn default_ufcs_trait_manifest_version() -> u32 {
+    1
+}
+
+/// Load + merge dependency UFCS trait manifests (book § 3.2.7). Later entries
+/// don't conflict in practice (distinct crate modules); on the same method/trait
+/// the union is taken. Missing files are skipped (best-effort, like dep .cppm).
+pub fn load_ufcs_trait_manifests(paths: &[PathBuf]) -> Vec<UfcsTraitManifest> {
+    let mut out = Vec::new();
+    for p in paths {
+        let Ok(text) = fs::read_to_string(p) else {
+            continue;
+        };
+        if let Ok(m) = serde_json::from_str::<UfcsTraitManifest>(&text) {
+            out.push(m);
+        }
+    }
+    out
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CppModuleSymbolIndex {
@@ -65,6 +106,13 @@ pub struct TranspileOptions {
     /// Maps Rust external crate roots to transpiled C++ module namespaces available
     /// in the current compilation unit (for example `serde_core` -> `serde_core`).
     pub external_crate_module_aliases: HashMap<String, String>,
+    /// UFCS cross-crate (book § 3.2.7): when set, write a `UfcsTraitManifest`
+    /// JSON here after emission (records this crate's declared traits + the
+    /// actually-emitted `<Tr>_::m` owner map). No-op unless `ufcs_traits` is on.
+    pub emit_ufcs_trait_manifest_path: Option<PathBuf>,
+    /// UFCS cross-crate: dependency manifest paths to load + merge, so calls to
+    /// a dependency's trait methods classify and qualify to `<module>::<Tr>_::m`.
+    pub dependency_ufcs_trait_manifests: Vec<PathBuf>,
     /// In module mode, prefer `import std;` over explicit standard-header includes.
     /// Requires Stage D toolchain setup that provides a prebuilt `std` module.
     pub use_import_std_in_modules: bool,
@@ -432,6 +480,8 @@ impl Default for TranspileOptions {
             cpp_module_symbol_index: None,
             cpp_module_symbol_index_sources: Vec::new(),
             external_crate_module_aliases: HashMap::new(),
+            emit_ufcs_trait_manifest_path: None,
+            dependency_ufcs_trait_manifests: Vec::new(),
             use_import_std_in_modules: false,
             // Default to the `rusty::Unit` alias spelling (replacing
             // `std::tuple<>` post-emission). The two C++ types are
@@ -816,9 +866,27 @@ pub fn transpile_full_with_options(
         let member_symbols = collect_cpp_module_member_symbol_map(index);
         codegen.set_cpp_module_member_symbols(member_symbols);
     }
+    // UFCS cross-crate (book § 3.2.7): load dependency trait manifests so the
+    // classifier + call-site qualification know the dependency's trait methods
+    // and the module each lives in. Merged during emit_file.
+    if options.ufcs_traits && !options.dependency_ufcs_trait_manifests.is_empty() {
+        codegen.set_dependency_ufcs_trait_manifests(load_ufcs_trait_manifests(
+            &options.dependency_ufcs_trait_manifests,
+        ));
+    }
     log_profile("codegen_setup");
     codegen.emit_file(&file, module_name);
     log_profile("codegen_emit_file");
+    // UFCS cross-crate: emit this crate's trait manifest (declared traits +
+    // actually-emitted `<Tr>_::m` owner map) for dependents to consume.
+    if options.ufcs_traits
+        && let Some(path) = options.emit_ufcs_trait_manifest_path.as_ref()
+    {
+        let manifest = codegen.build_ufcs_trait_manifest(module_name.unwrap_or(""));
+        if let Ok(json) = serde_json::to_string_pretty(&manifest) {
+            let _ = fs::write(path, json);
+        }
+    }
     let mut output_str = codegen.into_output();
     println!("RUSTY_DEDUP_TRACE_X9Z called len={}", output_str.len());
     // Generic dedup of consecutive identical `= default;` operator lines.
@@ -2434,6 +2502,113 @@ mod tests {
         assert!(
             !off.contains("describe(const Self_& self_)") && !off.contains("Greet_::describe"),
             "flag-off must not emit the default free function or qualified call\nGot: {off}"
+        );
+    }
+
+    #[test]
+    fn test_ufcs_cross_crate_emits_trait_manifest() {
+        // § 3.2.7: transpiling a crate with `emit_ufcs_trait_manifest_path` set
+        // writes a manifest recording its module, declared traits, and the
+        // actually-emitted `<Tr>_::m` owner map.
+        let src = r#"
+            struct Foo { id: i32 }
+            trait Greet { fn hello(&self) -> i32; }
+            impl Greet for Foo { fn hello(&self) -> i32 { self.id } }
+        "#;
+        let path = std::env::temp_dir().join("rusty_ufcs_manifest_emit_test.json");
+        let _ = std::fs::remove_file(&path);
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            emit_ufcs_trait_manifest_path: Some(path.clone()),
+            ..TranspileOptions::default()
+        };
+        let _ = transpile_full_with_options(
+            src,
+            Some("depmod"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+
+        let text = std::fs::read_to_string(&path).expect("manifest must be written");
+        let manifest: UfcsTraitManifest =
+            serde_json::from_str(&text).expect("manifest must parse");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(manifest.module, "depmod");
+        assert!(
+            manifest.declared_traits.contains(&"Greet".to_string()),
+            "manifest must list declared trait Greet\nGot: {manifest:?}"
+        );
+        assert_eq!(
+            manifest.method_owners.get("hello").map(|v| v.as_slice()),
+            Some(["Greet".to_string()].as_slice()),
+            "manifest must record hello → Greet (the emitted owner)\nGot: {manifest:?}"
+        );
+    }
+
+    #[test]
+    fn test_ufcs_cross_crate_consumes_manifest_and_module_qualifies() {
+        // § 3.2.7: a dependent crate loads a dependency's manifest and qualifies
+        // calls to the dependency's trait method as `<module>::<Tr>_::m` — even
+        // though it never sees the dependency's trait declaration.
+        let manifest = UfcsTraitManifest {
+            version: 1,
+            module: "depmod".to_string(),
+            declared_traits: vec!["Greet".to_string()],
+            method_owners: std::collections::BTreeMap::from([(
+                "hello".to_string(),
+                vec!["Greet".to_string()],
+            )]),
+        };
+        let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
+        std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+        // Target calls `x.hello()` on a local type with no local Greet trait.
+        let src = r#"
+            struct Local { id: i32 }
+            fn use_it(x: &Local) -> i32 { x.hello() }
+        "#;
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            dependency_ufcs_trait_manifests: vec![path.clone()],
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            Some("target"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            on.contains("depmod::Greet_::hello("),
+            "`x.hello()` must qualify to the dependency module's trait namespace\nGot: {on}"
+        );
+
+        // Without the manifest, `hello` isn't a known trait method → no qualified
+        // dependency call (stays a plain member call).
+        let off_opts = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let without = transpile_full_with_options(
+            src,
+            Some("target"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &off_opts,
+        )
+        .expect("transpile should succeed");
+        assert!(
+            !without.contains("depmod::Greet_::hello"),
+            "without the manifest there must be no qualified dependency call\nGot: {without}"
         );
     }
 

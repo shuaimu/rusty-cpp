@@ -5035,9 +5035,11 @@ impl CodeGen {
                     // syntactically, so keep the unqualified shim (overload
                     // resolution + the `using namespace <Tr>_` directives).
                     let callee = if traits.len() == 1 {
+                        // `<module>::<Tr>_::m` for a dependency trait, bare
+                        // `<Tr>_::m` for a local one (book § 3.2.7).
                         format!(
-                            "{}_::{}",
-                            traits.iter().next().unwrap(),
+                            "{}::{}",
+                            self.ufcs_trait_namespace(traits.iter().next().unwrap()),
                             escape_cpp_keyword(&method_name)
                         )
                     } else {
@@ -12916,8 +12918,8 @@ impl CodeGen {
                     all_args.push(receiver.clone());
                     all_args.extend(args.iter().cloned());
                     return format!(
-                        "{}_::{}({})",
-                        trait_name,
+                        "{}::{}({})",
+                        self.ufcs_trait_namespace(trait_name),
                         escape_cpp_keyword(&ufcs.method_name),
                         all_args.join(", ")
                     );
@@ -16231,8 +16233,8 @@ impl CodeGen {
                 });
             }
             return Some(format!(
-                "{}_::{}({})",
-                owner_leaf,
+                "{}::{}({})",
+                self.ufcs_trait_namespace(&owner_leaf),
                 escape_cpp_keyword(&method_name),
                 all_args.join(", ")
             ));

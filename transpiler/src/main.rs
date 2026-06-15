@@ -3623,6 +3623,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
+        emit_ufcs_trait_manifest_path: None,
+        dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: args.import_std,
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)
@@ -4070,6 +4072,8 @@ fn main() {
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
+        emit_ufcs_trait_manifest_path: None,
+        dependency_ufcs_trait_manifests: Vec::new(),
         use_import_std_in_modules: false,
         // `rusty::Unit` is the default spelling; `--prefer-std-tuple-alias`
         // opts out and `--prefer-rusty-unit-alias` is accepted (no-op)

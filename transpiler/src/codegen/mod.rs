@@ -588,6 +588,15 @@ pub struct CodeGen {
     /// (matching the owner-map keys / call-site lookup).
     pub(crate) ufcs_emitted_trait_methods:
         std::collections::HashSet<(String, String)>,
+    /// UFCS cross-crate (book § 3.2.7): dependency trait manifests, merged into
+    /// the classifier maps in `emit_file` so calls to a dependency's trait
+    /// methods classify + qualify. Empty in single-crate / flag-off mode.
+    pub(crate) dependency_ufcs_trait_manifests:
+        Vec<crate::transpile::UfcsTraitManifest>,
+    /// UFCS cross-crate: trait short name → C++ module namespace it lives in
+    /// (only for traits imported from a dependency; local traits are absent →
+    /// bare `<Tr>_`). Call-site qualification prepends `<module>::` when present.
+    pub(crate) ufcs_trait_module_prefix: HashMap<String, String>,
     /// Per-function type-inference state. Constructed at the entry
     /// of `emit_function` (and equivalent entry points), populated by
     /// the constraint collector in `type_solver`, then solved before
@@ -1411,6 +1420,8 @@ impl CodeGen {
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             ufcs_method_trait_owners: HashMap::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
+            dependency_ufcs_trait_manifests: Vec::new(),
+            ufcs_trait_module_prefix: HashMap::new(),
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
@@ -1918,6 +1929,95 @@ impl CodeGen {
         self.ufcs_traits = ufcs_traits;
     }
 
+    /// UFCS cross-crate (book § 3.2.7): provide dependency trait manifests to be
+    /// merged into the classifier in `emit_file`.
+    pub fn set_dependency_ufcs_trait_manifests(
+        &mut self,
+        manifests: Vec<crate::transpile::UfcsTraitManifest>,
+    ) {
+        self.dependency_ufcs_trait_manifests = manifests;
+    }
+
+    /// Build this crate's UFCS trait manifest from post-emission state: the
+    /// declared trait names and the PRUNED owner map (only `<Tr>_::m` free
+    /// functions that were actually emitted). `module` is the crate's C++
+    /// module name. Local entries only — dependency-sourced owners (which carry
+    /// a module prefix) are excluded so a manifest describes just its own crate.
+    pub fn build_ufcs_trait_manifest(
+        &self,
+        module: &str,
+    ) -> crate::transpile::UfcsTraitManifest {
+        let mut declared_traits: Vec<String> =
+            self.ufcs_declared_trait_names.iter().cloned().collect();
+        declared_traits.sort();
+        let mut method_owners: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (method, traits) in &self.ufcs_method_trait_owners {
+            // Only local traits (no module prefix) belong in this crate's manifest.
+            let local: Vec<String> = traits
+                .iter()
+                .filter(|t| !self.ufcs_trait_module_prefix.contains_key(*t))
+                .cloned()
+                .collect();
+            if !local.is_empty() {
+                method_owners.insert(method.clone(), local);
+            }
+        }
+        crate::transpile::UfcsTraitManifest {
+            version: 1,
+            module: module.to_string(),
+            declared_traits,
+            method_owners,
+        }
+    }
+
+    /// UFCS call-site qualification: the C++ namespace for a trait's free
+    /// functions — `<module>::<Tr>_` for a dependency trait, bare `<Tr>_` for a
+    /// local one.
+    pub(crate) fn ufcs_trait_namespace(&self, trait_name: &str) -> String {
+        match self.ufcs_trait_module_prefix.get(trait_name) {
+            Some(m) if !m.is_empty() => format!("{}::{}_", m, trait_name),
+            _ => format!("{}_", trait_name),
+        }
+    }
+
+    /// Merge dependency UFCS trait manifests into the classifier maps. A
+    /// dependency trait method classifies as `TraitOnly` (unless the name is
+    /// already used locally — local wins), joins the owner map, records its
+    /// module prefix, and is seeded into the emitted set so owner-map pruning
+    /// keeps it (the dependency emitted it). Dependency traits are NOT added to
+    /// `ufcs_declared_trait_names` — this crate must not re-emit them.
+    fn merge_dependency_ufcs_trait_manifests(&mut self) {
+        let manifests = std::mem::take(&mut self.dependency_ufcs_trait_manifests);
+        for m in &manifests {
+            for (method, traits) in &m.method_owners {
+                if !self
+                    .ufcs_method_classes
+                    .contains_key(method)
+                {
+                    self.ufcs_method_classes.insert(
+                        method.clone(),
+                        crate::transpile::MethodNameClass::TraitOnly,
+                    );
+                }
+                let owners = self
+                    .ufcs_method_trait_owners
+                    .entry(method.clone())
+                    .or_default();
+                for t in traits {
+                    owners.insert(t.clone());
+                    if !m.module.is_empty() {
+                        self.ufcs_trait_module_prefix
+                            .insert(t.clone(), m.module.clone());
+                    }
+                    self.ufcs_emitted_trait_methods
+                        .insert((t.clone(), method.clone()));
+                }
+            }
+        }
+        self.dependency_ufcs_trait_manifests = manifests;
+    }
+
     pub fn set_cpp_module_member_symbols(
         &mut self,
         cpp_module_member_symbols: HashMap<String, HashSet<String>>,
@@ -2261,6 +2361,10 @@ impl CodeGen {
                     &file.items,
                     &self.ufcs_declared_trait_names,
                 );
+            // UFCS cross-crate (book § 3.2.7): fold dependency trait manifests
+            // into the classifier so calls to a dependency's trait methods
+            // classify + module-qualify.
+            self.merge_dependency_ufcs_trait_manifests();
         }
         log_emit("collect_local_declared_types");
         // Pass 1b': Cluster C — detect parallel inherent impl blocks of the
