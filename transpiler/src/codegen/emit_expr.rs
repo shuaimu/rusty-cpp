@@ -5027,28 +5027,29 @@ impl CodeGen {
                         .iter()
                         .map(|a| self.emit_expr_to_string(a))
                         .collect();
-                    // Qualify the free call to `<Tr>_::m` when exactly ONE
-                    // trait owns the name, so the unqualified `m(__self)` can't be
-                    // shadowed by a local of the same name (`let bits = x.bits();`
-                    // → `auto bits = (…bits(__self)…)` references the half-declared
-                    // local). When several traits own it we can't pick one
-                    // syntactically, so keep the unqualified shim (overload
-                    // resolution + the `using namespace <Tr>_` directives).
-                    let callee = if traits.len() == 1 {
-                        // `<module>::<Tr>_::m` for a dependency trait, bare
-                        // `<Tr>_::m` for a local one (book § 3.2.7).
-                        format!(
+                    // Single owner → qualify `<Tr>_::m` (or `<module>::<Tr>_::m`
+                    // for a dependency trait, § 3.2.7), so the unqualified
+                    // `m(__self)` can't be shadowed by a local of the same name.
+                    let escaped = escape_cpp_keyword(&method_name);
+                    if traits.len() == 1 {
+                        let callee = format!(
                             "{}::{}",
                             self.ufcs_trait_namespace(traits.iter().next().unwrap()),
-                            escape_cpp_keyword(&method_name)
-                        )
-                    } else {
-                        escape_cpp_keyword(&method_name)
-                    };
-                    return self.emit_extension_call_with_receiver_autoderef_fallback(
-                        &callee,
-                        &receiver,
-                        &args,
+                            escaped
+                        );
+                        return self.emit_extension_call_with_receiver_autoderef_fallback(
+                            &callee, &receiver, &args,
+                        );
+                    }
+                    // Multi-owner (Fix A): try each owner's qualified `<Tr>_::m`
+                    // rather than the unqualified `m`, which would clash with a
+                    // same-named module/namespace (serde's `de::size_hint`).
+                    let callees: Vec<String> = traits
+                        .iter()
+                        .map(|t| format!("{}::{}", self.ufcs_trait_namespace(t), escaped))
+                        .collect();
+                    return self.emit_multi_owner_ufcs_call(
+                        &callees, &receiver, &args, &escaped,
                     );
                 }
             }

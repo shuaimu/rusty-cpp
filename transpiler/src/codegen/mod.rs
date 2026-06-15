@@ -24999,6 +24999,89 @@ impl CodeGen {
         )
     }
 
+    /// UFCS Fix A (§ 3.2.4 / serde_core): dispatch shim for a MULTI-OWNER method
+    /// name — one owned by ≥2 crate traits (e.g. serde's `size_hint`, a default
+    /// of both `MapAccess` and `SeqAccess`). Tries each owner's QUALIFIED
+    /// `<Owner>_::m` in turn (direct, then deref'd), then a member fallback —
+    /// never the unqualified `m`, which would clash with a same-named
+    /// module/namespace (serde's `de::size_hint`). `callees` are the qualified
+    /// `<Owner>_::m` spellings in deterministic (sorted-trait) order; `member_leaf`
+    /// is the bare method for the final member fallback. (For full correctness on
+    /// multi-owner defaults whose BODIES call trait methods, these templates
+    /// additionally need per-trait `requires` constraints — the marker/constraint
+    /// completion; serde's `size_hint` body is `{ None }` so it needs only this.)
+    fn emit_multi_owner_ufcs_call(
+        &self,
+        callees: &[String],
+        receiver_expr: &str,
+        extra_args: &[String],
+        member_leaf: &str,
+    ) -> String {
+        let direct_receiver = "std::forward<decltype(__self)>(__self)";
+        let deref_receiver =
+            "rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))";
+        let arg_names: Vec<String> =
+            (0..extra_args.len()).map(|i| format!("__arg{}", i)).collect();
+        let arg_param_list = if arg_names.is_empty() {
+            "auto&& __self".to_string()
+        } else {
+            format!(
+                "auto&& __self, {}",
+                arg_names
+                    .iter()
+                    .map(|n| format!("auto&& {}", n))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let arg_call_list = if extra_args.is_empty() {
+            receiver_expr.to_string()
+        } else {
+            format!("{}, {}", receiver_expr, extra_args.join(", "))
+        };
+        let direct_arg_uses: Vec<String> = arg_names
+            .iter()
+            .map(|n| format!("std::forward<decltype({0})>({0})", n))
+            .collect();
+        let deref_arg_uses: Vec<String> = arg_names
+            .iter()
+            .map(|n| {
+                format!(
+                    "rusty::detail::deref_if_pointer_like(std::forward<decltype({0})>({0}))",
+                    n
+                )
+            })
+            .collect();
+        let join_args = |recv: &str, uses: &[String]| -> String {
+            let mut v = vec![recv.to_string()];
+            v.extend(uses.iter().cloned());
+            v.join(", ")
+        };
+        let direct_args = join_args(direct_receiver, &direct_arg_uses);
+        let deref_args = join_args(deref_receiver, &deref_arg_uses);
+        let mut branches = String::new();
+        for callee in callees {
+            let call = format!("{}({})", callee, direct_args);
+            branches.push_str(&format!(
+                "if constexpr (requires {{ {}; }}) {{ return {}; }} else ",
+                call, call
+            ));
+        }
+        for callee in callees {
+            let call = format!("{}({})", callee, deref_args);
+            branches.push_str(&format!(
+                "if constexpr (requires {{ {}; }}) {{ return {}; }} else ",
+                call, call
+            ));
+        }
+        let member_call =
+            format!("{}.{}({})", deref_receiver, member_leaf, deref_arg_uses.join(", "));
+        format!(
+            "([]({}) -> decltype(auto) {{ {}{{ return {}; }} }})({})",
+            arg_param_list, branches, member_call, arg_call_list
+        )
+    }
+
     fn emit_serialize_dispatch_call(&self, value_expr: &str, serializer_expr: &str) -> String {
         format!(
             "([&](auto&& __self, auto&& __serializer) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }}) {{ return std::forward<decltype(__self)>(__self).serialize(std::forward<decltype(__serializer)>(__serializer)); }} else if constexpr (requires {{ rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).serialize(std::forward<decltype(__serializer)>(__serializer)); }}) {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).serialize(std::forward<decltype(__serializer)>(__serializer)); }} else if constexpr (requires {{ rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))._0; }}) {{ return ::ser::rusty_ext::serialize_value(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self))._0, std::forward<decltype(__serializer)>(__serializer)); }} else if constexpr (::ser::rusty_ext::detail::is_std_span_v<decltype(__self)>) {{ return ::ser::rusty_ext::serialize_value(std::forward<decltype(__self)>(__self), std::forward<decltype(__serializer)>(__serializer)); }} else {{ return ::ser::rusty_ext::serialize(std::forward<decltype(__self)>(__self), std::forward<decltype(__serializer)>(__serializer)); }} }})({}, ::ser::rusty_ext::forward_serializer({}))",
