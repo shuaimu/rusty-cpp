@@ -1157,28 +1157,34 @@ public:
 ```
 
 **The UFCS bridge — uniform `m(x)` over static and `dyn`.** So a call site can emit the same
-`m(x)` shape whether the receiver is concrete or a `dyn` reference, the trait namespace also
-gets a forwarder overload taking the interface by reference, which performs the one virtual
-call:
+dispatch shape whether the receiver is concrete or a `dyn` reference, the call-site dispatch
+shim ends in a **member fallback** that performs the one virtual call. The shim (a generic
+lambda, so resolved per-instantiation) tries the free function first, then the deref'd free
+function, then — for a receiver whose deref is the abstract interface, where no
+`speak(const Animal&)` free function exists — the member call:
 
 ```cpp
-namespace trait_Animal {
-    rusty::String speak(const Dog& self);                              // static impl (per concrete type)
-    rusty::String speak(const Animal& self) { return self.speak(); }   // dyn forwarder → one virtual hop
-}
+([&](auto&& __self) -> decltype(auto) {
+    if constexpr (requires { speak(__self); })          return speak(__self);          // concrete value
+    else if constexpr (requires { speak(deref(__self)); }) return speak(deref(__self)); // concrete behind ptr
+    else                                                return deref(__self).speak();   // dyn: one virtual hop
+})(x)
 ```
 
-C++ overload resolution then routes `speak(x)` by `x`'s static type, with no help from the
-transpiler:
+C++ resolves each branch by `x`'s static type, with no help from the transpiler:
 
 ```cpp
-trait_Animal::speak(dog);   // x: Dog           → speak(const Dog&)    : DIRECT static call
-trait_Animal::speak(a);     // x: const Animal& → speak(const Animal&) : forwarder → a.speak() (vtable) → adapter → speak(const Dog&)
+// x: Dog           → branch 1: speak(const Dog&)      : DIRECT static call
+// x: const Animal& → branch 3: a.speak() (vtable) → AnimalAdapter<Dog>::speak() → trait_Animal::speak(const Dog&)
 ```
 
-(The forwarder is optional: when the receiver is *annotated* `&dyn Animal` — a type the
-transpiler can read without inference — it may emit `a.speak()` directly and skip the hop.
-The forwarder just lets every trait call stay uniformly `m(x)`.)
+(An earlier design declared a separate forwarder overload `trait_Animal::speak(const Animal&)
+{ return self.speak(); }` so calls stayed uniformly `speak(x)`. That was abandoned: the
+forwarder's parameter needs the interface type forward-declared, but declaring `class Animal;`
+*inside* `namespace trait_Animal` makes `using namespace trait_Animal` collide with the real
+`::Animal` (ambiguous). The member fallback lives entirely inside the call-site shim — a
+template resolved at instantiation — so there is no forward-declaration ordering to get wrong,
+and it reaches the same vtable hop.)
 
 **Heterogeneous collections — where the vtable earns its keep.** The whole reason `dyn`
 exists, and the thing static dispatch cannot express:
@@ -1201,7 +1207,7 @@ what recovers the erased type at runtime.
                  trait_T::m(const U&)   ←──── the ONE impl body
                   ▲                  ▲
    static route ──┘                  └── dynamic route
-   m(u)                                  m(dyn) → forwarder → dyn.m() [vtable] → TAdapter<U>::m() → trait_T::m(const U&)
+   m(u) → trait_T::m(const U&)           shim member fallback: dyn.m() [vtable] → TAdapter<U>::m() → trait_T::m(const U&)
    (compile-time overload, direct)       (one runtime vtable hop, then the same impl)
 ```
 
