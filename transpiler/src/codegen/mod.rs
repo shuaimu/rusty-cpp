@@ -24492,6 +24492,29 @@ impl CodeGen {
                 arg_call_list
             );
         }
+        if self.ufcs_traits {
+            // UFCS Phase 6 (book § 3.2.10): a `dyn Tr` receiver derefs to the
+            // abstract interface `Tr&`, for which there is NO `m(const Tr&)`
+            // free function — only `m(const ConcreteU&)` per impl. So make the
+            // deref-free-call branch conditional and add a final MEMBER
+            // fallback `deref(__self).m(args)`. For a `dyn` receiver that
+            // resolves to the virtual member, which routes through the
+            // adapter override back to `trait_<Tr>::m(value_, args)` — the same
+            // static impl the direct branch would have called. Static and
+            // dynamic dispatch thus bottom out in one implementation.
+            let member_args = deref_arg_uses.join(", ");
+            let member_call = format!("{}.{}({})", deref_receiver, callee_leaf, member_args);
+            return format!(
+                "([&]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                arg_param_list,
+                direct_call,
+                direct_call,
+                deref_call,
+                deref_call,
+                member_call,
+                arg_call_list
+            );
+        }
         format!(
             "([&]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
             arg_param_list, direct_call, direct_call, deref_call, arg_call_list

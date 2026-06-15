@@ -2049,6 +2049,60 @@ mod tests {
     }
 
     #[test]
+    fn test_ufcs_traits_phase6_call_shim_has_dyn_member_fallback() {
+        // Phase 6 (book § 3.2.10): a `dyn Tr` receiver derefs to the abstract
+        // interface `Tr&`, for which there is NO `m(const Tr&)` free function.
+        // So under the flag the call-site shim gains a final MEMBER fallback
+        // `deref(__self).m()` (which for a dyn receiver hits the virtual
+        // member → adapter override → the static `trait_<Tr>::m` impl, so
+        // static and dynamic dispatch bottom out in the same implementation).
+        let src = r#"
+            struct Foo { x: i32 }
+            trait Greet { fn hello(&self) -> i32; }
+            impl Greet for Foo { fn hello(&self) -> i32 { self.x } }
+            fn use_it(f: &Foo) -> i32 { f.hello() }
+        "#;
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+
+        // The shim is now 3-branch: a final `else` that calls the member
+        // `.hello()` on the dereferenced receiver (the dyn dispatch route).
+        assert!(
+            on.contains(".hello(); }")
+                || on.contains(".hello() ; }")
+                || on.contains(").hello();"),
+            "flag-on shim must end in a member-call fallback `deref(__self).hello()`\nGot: {on}"
+        );
+        // And it must be reached only after the two free-function branches:
+        // both `requires { hello(` guards still present.
+        let guard_count = on.matches("requires { hello(").count();
+        assert!(
+            guard_count >= 2,
+            "flag-on shim must keep both free-call guards before the member fallback (got {guard_count})\nGot: {on}"
+        );
+
+        // Flag OFF: the shim is the original 2-branch form — no member-call
+        // fallback synthesized, and only one `requires { hello(` ... actually
+        // none, since flag-off keeps the native member call.
+        let off = transpile(src, None).expect("default transpile should succeed");
+        assert!(
+            !off.contains("requires { hello("),
+            "flag-off must not emit the UFCS dispatch shim at all\nGot: {off}"
+        );
+    }
+
+    #[test]
     fn test_transpile_options_prefer_rusty_view_aliases() {
         let src = r#"
             fn keep_views(s: &str, b: &[u8]) -> (&str, &[u8]) {
