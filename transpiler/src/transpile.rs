@@ -184,9 +184,21 @@ pub enum MethodNameClass {
 /// trait uses. Recurses into inline modules.
 #[allow(dead_code)]
 pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameClass> {
+    // UFCS lowering applies ONLY to traits this crate DECLARES. Prelude/std
+    // traits a crate merely *implements* (`Clone`, `Display`, `Debug`,
+    // `PartialOrd`, `Iterator`, `Deref`, …) already have working dedicated
+    // lowering on the non-UFCS path — that's why those crates compile with the
+    // flag off. If we also lowered their method names (`clone`, `fmt`, `cmp`,
+    // `len`, `as_ref`, …), we'd intercept calls on *std and rusty-library*
+    // receivers that share the name but are not this crate's trait impls, and
+    // neither the free-call branches nor the member fallback would resolve
+    // (Phase-7 fallout category A). So `impl Tr for U` contributes a *trait*
+    // use only when `Tr` is crate-declared; otherwise it contributes nothing
+    // (the call stays whatever the non-UFCS path makes it).
+    let declared_traits = collect_declared_trait_names(items);
     let mut inherent: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut trait_named: std::collections::HashSet<String> = std::collections::HashSet::new();
-    collect_method_name_uses(items, &mut inherent, &mut trait_named);
+    collect_method_name_uses(items, &declared_traits, &mut inherent, &mut trait_named);
 
     let mut out = HashMap::new();
     for name in inherent.union(&trait_named) {
@@ -201,20 +213,59 @@ pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameC
     out
 }
 
+/// Short names of every trait this crate DECLARES (`trait Tr { … }`), recursing
+/// into inline modules. Used to scope UFCS lowering + emission to crate-declared
+/// traits (prelude/std-trait impls are left to the non-UFCS path).
+pub fn collect_declared_trait_names(items: &[syn::Item]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    collect_declared_trait_names_into(items, &mut out);
+    out
+}
+
+fn collect_declared_trait_names_into(
+    items: &[syn::Item],
+    out: &mut std::collections::HashSet<String>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Trait(t) => {
+                out.insert(t.ident.to_string());
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_declared_trait_names_into(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn collect_method_name_uses(
     items: &[syn::Item],
+    declared_traits: &std::collections::HashSet<String>,
     inherent: &mut std::collections::HashSet<String>,
     trait_named: &mut std::collections::HashSet<String>,
 ) {
     for item in items {
         match item {
             syn::Item::Impl(impl_block) => {
-                let is_trait_impl = impl_block.trait_.is_some();
+                // A trait impl counts as a *trait* use only when the implemented
+                // trait is crate-declared (see `classify_method_names`).
+                let impl_trait_name = impl_block.trait_.as_ref().and_then(|(_, path, _)| {
+                    path.segments.last().map(|s| s.ident.to_string())
+                });
+                let is_crate_trait_impl = impl_trait_name
+                    .as_ref()
+                    .is_some_and(|n| declared_traits.contains(n));
                 for impl_item in &impl_block.items {
                     if let syn::ImplItem::Fn(method) = impl_item {
                         let name = method.sig.ident.to_string();
-                        if is_trait_impl {
-                            trait_named.insert(name);
+                        if impl_block.trait_.is_some() {
+                            // foreign/prelude-trait impls contribute nothing
+                            if is_crate_trait_impl {
+                                trait_named.insert(name);
+                            }
                         } else {
                             inherent.insert(name);
                         }
@@ -230,7 +281,7 @@ fn collect_method_name_uses(
             }
             syn::Item::Mod(m) => {
                 if let Some((_, nested)) = &m.content {
-                    collect_method_name_uses(nested, inherent, trait_named);
+                    collect_method_name_uses(nested, declared_traits, inherent, trait_named);
                 }
             }
             _ => {}
@@ -2714,5 +2765,36 @@ fn f() -> i32 {
         // A default-bodied trait method (no impl) is still a trait use.
         let m = classify("trait Greet { fn hello(&self) -> u8 { 0 } }");
         assert_eq!(m.get("hello"), Some(&MethodNameClass::TraitOnly));
+    }
+
+    #[test]
+    fn test_classify_method_names_excludes_foreign_trait_impls() {
+        // Phase 7: UFCS lowering is scoped to traits the crate DECLARES. A
+        // prelude/foreign trait the crate only IMPLEMENTS (here `ForeignTr`)
+        // contributes NO trait use — so its method name is not classified and
+        // its calls stay on the non-UFCS path (otherwise `clone`/`fmt`/… would
+        // be intercepted on unrelated std/library receivers). The crate-declared
+        // `Mine` is still classified TraitOnly.
+        let m = classify(
+            "struct Foo; trait Mine { fn mine(&self); } \
+             impl Mine for Foo { fn mine(&self) {} } \
+             impl ForeignTr for Foo { fn ext(&self) {} }",
+        );
+        assert_eq!(m.get("mine"), Some(&MethodNameClass::TraitOnly));
+        assert!(
+            m.get("ext").is_none(),
+            "a foreign-trait impl method must not be classified as a trait use"
+        );
+    }
+
+    #[test]
+    fn test_classify_method_names_foreign_impl_does_not_make_inherent_name_both() {
+        // If a name is inherent on a type AND appears only in a foreign-trait
+        // impl, it stays Inherent (the foreign use is dropped), not Both.
+        let m = classify(
+            "struct Foo; impl Foo { fn clone(&self) -> Foo { Foo } } \
+             impl ForeignClone for Foo { fn clone(&self) -> Foo { Foo } }",
+        );
+        assert_eq!(m.get("clone"), Some(&MethodNameClass::Inherent));
     }
 }

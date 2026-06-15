@@ -557,6 +557,12 @@ pub struct CodeGen {
     /// otherwise. The classifier only sees this crate's traits/impls, so std
     /// methods (`into`, `next`, …) are absent → never intercepted.
     pub(crate) ufcs_method_classes: HashMap<String, crate::transpile::MethodNameClass>,
+    /// UFCS Phase 7: short names of traits THIS crate declares. UFCS free-fn
+    /// emission, early decls, and the dyn-adapter forward-to-static body are
+    /// scoped to these — a crate that merely *implements* a prelude/std trait
+    /// (`Clone`, `Display`, …) keeps the non-UFCS lowering for it. Populated in
+    /// `emit_file` when `ufcs_traits` is on; empty otherwise.
+    pub(crate) ufcs_declared_trait_names: std::collections::HashSet<String>,
     /// Per-function type-inference state. Constructed at the entry
     /// of `emit_function` (and equivalent entry points), populated by
     /// the constraint collector in `type_solver`, then solved before
@@ -1377,6 +1383,7 @@ impl CodeGen {
             is_dependency_module: false,
             ufcs_traits: false,
             ufcs_method_classes: HashMap::new(),
+            ufcs_declared_trait_names: std::collections::HashSet::new(),
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
@@ -2217,6 +2224,9 @@ impl CodeGen {
         if self.ufcs_traits {
             // UFCS Phase 3: classify method names for call-site lowering.
             self.ufcs_method_classes = crate::transpile::classify_method_names(&file.items);
+            // UFCS Phase 7: scope emission to crate-declared traits.
+            self.ufcs_declared_trait_names =
+                crate::transpile::collect_declared_trait_names(&file.items);
         }
         log_emit("collect_local_declared_types");
         // Pass 1b': Cluster C — detect parallel inherent impl blocks of the
@@ -11151,6 +11161,11 @@ impl CodeGen {
         let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
             return;
         };
+        // Phase 7: only crate-declared traits get UFCS free functions; a
+        // prelude/std-trait impl (Clone/Display/…) keeps the non-UFCS path.
+        if !self.ufcs_declared_trait_names.contains(&trait_name) {
+            return;
+        }
         self.writeln(&format!(
             "// UFCS trait migration: free functions for `impl {} for ...`",
             trait_name
@@ -11193,6 +11208,11 @@ impl CodeGen {
         let Some((trait_name, specs)) = Self::ufcs_trait_impl_specs(impl_block) else {
             return;
         };
+        // Phase 7: only crate-declared traits get UFCS decls (mirrors the
+        // definition emitter, so a foreign-trait impl emits neither).
+        if !self.ufcs_declared_trait_names.contains(&trait_name) {
+            return;
+        }
         self.writeln(&format!("namespace trait_{} {{", trait_name));
         self.indent += 1;
         for spec in &specs {
@@ -11804,7 +11824,11 @@ impl CodeGen {
         } else {
             let needs_return = !matches!(method.sig.output, syn::ReturnType::Default);
             let prefix = if needs_return { "return " } else { "" };
-            if self.ufcs_traits {
+            // Only forward to the static free fn when that free fn is actually
+            // emitted — i.e. the trait is crate-declared (Phase 7). For a
+            // prelude/std-trait adapter (e.g. DisplayAdapter), `trait_Display::m`
+            // does not exist, so keep the member call.
+            if self.ufcs_traits && self.ufcs_declared_trait_names.contains(trait_name) {
                 // UFCS Phase 6 (book § 3.2.10): forward the vtable slot to the
                 // static free-function impl `trait_<Tr>::m(value_, args)` rather
                 // than the member `value_.m(args)`, so static and dynamic
@@ -24504,8 +24528,13 @@ impl CodeGen {
             // dynamic dispatch thus bottom out in one implementation.
             let member_args = deref_arg_uses.join(", ");
             let member_call = format!("{}.{}({})", deref_receiver, callee_leaf, member_args);
+            // `[]` (no capture) not `[&]`: the receiver and every arg are passed
+            // as lambda *parameters*, so the body captures nothing — and a
+            // capturing lambda is illegal at namespace scope, where this shim
+            // lands inside `const` static-member initializers (Phase-7 fallout
+            // category B, e.g. bitflags `TestFlags::ABC = …`).
             return format!(
-                "([&]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
                 arg_param_list,
                 direct_call,
                 direct_call,
