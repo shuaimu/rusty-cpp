@@ -2154,6 +2154,56 @@ mod tests {
     }
 
     #[test]
+    fn test_ufcs_traits_phase7_qualified_call_disambiguates_two_traits() {
+        // Two crate-declared traits share the method name `name`, and `Person`
+        // implements both. A disambiguated Rust call `Greet::name(p)` /
+        // `Farewell::name(p)` / `<Person as Greet>::name(p)` must lower to the
+        // QUALIFIED free function `trait_<Trait>::name(p)` — not the member
+        // `p.name()` (which collapses to whichever impl won the struct's single
+        // member slot, silently picking the wrong body).
+        let src = r#"
+            struct Person { id: i32 }
+            trait Greet { fn name(&self) -> i32; }
+            trait Farewell { fn name(&self) -> i32; }
+            impl Greet for Person { fn name(&self) -> i32 { self.id } }
+            impl Farewell for Person { fn name(&self) -> i32 { self.id + 100 } }
+            fn via_greet(p: &Person) -> i32 { Greet::name(p) }
+            fn via_farewell(p: &Person) -> i32 { Farewell::name(p) }
+            fn via_qualified(p: &Person) -> i32 { <Person as Greet>::name(p) }
+        "#;
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+
+        assert!(
+            on.contains("trait_Greet::name(p)"),
+            "`Greet::name(p)` and `<Person as Greet>::name(p)` must qualify to trait_Greet::name\nGot: {on}"
+        );
+        assert!(
+            on.contains("trait_Farewell::name(p)"),
+            "`Farewell::name(p)` must qualify to trait_Farewell::name (not collapse to p.name())\nGot: {on}"
+        );
+
+        // Flag OFF: the disambiguated calls stay on the member-collapse path
+        // (no trait_ qualification synthesized).
+        let off = transpile(src, None).expect("default transpile should succeed");
+        assert!(
+            !off.contains("trait_Greet::name") && !off.contains("trait_Farewell::name"),
+            "flag-off must not synthesize qualified trait_ calls\nGot: {off}"
+        );
+    }
+
+    #[test]
     fn test_transpile_options_prefer_rusty_view_aliases() {
         let src = r#"
             fn keep_views(s: &str, b: &[u8]) -> (&str, &[u8]) {

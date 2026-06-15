@@ -12865,6 +12865,28 @@ impl CodeGen {
                     ("hash", 1) => return format!("rusty::hash::hash({}, {})", receiver, args[0]),
                     _ => {}
                 }
+                // UFCS qualified disambiguation (book § 3.2.3): a disambiguated
+                // trait call `Trait::method(&recv, …)` / `<T as Trait>::method(
+                // &recv, …)` lowers to the qualified free function
+                // `trait_<Trait>::method(recv, …)` when the flag is on and
+                // <Trait> is crate-declared. This is the ONLY correct route when
+                // one type implements two traits that share a method name — the
+                // member call `recv.method()` collapses to whichever impl won the
+                // struct's single member slot, silently picking the wrong body.
+                if self.ufcs_traits
+                    && let Some(trait_name) = ufcs.function_path.rsplit("::").nth(1)
+                    && self.ufcs_declared_trait_names.contains(trait_name)
+                {
+                    let mut all_args = Vec::with_capacity(args.len() + 1);
+                    all_args.push(receiver.clone());
+                    all_args.extend(args.iter().cloned());
+                    return format!(
+                        "trait_{}::{}({})",
+                        trait_name,
+                        escape_cpp_keyword(&ufcs.method_name),
+                        all_args.join(", ")
+                    );
+                }
                 let is_self = matches!(
                     receiver_ref.expr.as_ref(),
                     syn::Expr::Path(p)
@@ -16146,6 +16168,32 @@ impl CodeGen {
             let value = emit_receiver_arg(call.args.first()?);
             let serializer = self.emit_expr_maybe_move(call.args.iter().nth(1)?);
             return Some(self.emit_serialize_dispatch_call(&value, &serializer));
+        }
+
+        // UFCS qualified disambiguation (see the detect_ufcs_trait_method_call
+        // handler): `Trait::method(recv, …)` / `<T as Trait>::method(recv, …)`
+        // lowers to the qualified free function `trait_<Trait>::method(recv, …)`
+        // for crate-declared traits. Placed AFTER the serde/Display/Debug
+        // special-cases above so they keep their dedicated lowering; this only
+        // catches the remaining crate-declared trait methods.
+        if self.ufcs_traits && self.ufcs_declared_trait_names.contains(&owner_leaf) {
+            let recv = match self.peel_paren_group_expr(call.args.first()?) {
+                syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
+                other => self.emit_expr_to_string(other),
+            };
+            let mut all_args = vec![recv];
+            for arg in call.args.iter().skip(1) {
+                all_args.push(match arg {
+                    syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
+                    _ => self.emit_expr_maybe_move(arg),
+                });
+            }
+            return Some(format!(
+                "trait_{}::{}({})",
+                owner_leaf,
+                escape_cpp_keyword(&method_name),
+                all_args.join(", ")
+            ));
         }
 
         let receiver_expr = self.peel_paren_group_expr(call.args.first()?);
