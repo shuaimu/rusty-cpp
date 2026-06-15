@@ -2549,10 +2549,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ufcs_cross_crate_consumes_manifest_and_module_qualifies() {
-        // § 3.2.7: a dependent crate loads a dependency's manifest and qualifies
-        // calls to the dependency's trait method as `<module>::<Tr>_::m` — even
-        // though it never sees the dependency's trait declaration.
+    fn test_ufcs_cross_crate_consumes_manifest_and_classifies() {
+        // § 3.2.7: a dependent crate loads a dependency's manifest and lowers a
+        // call to the dependency's trait method to the UFCS free call `<Tr>_::m`
+        // — even though it never sees the dependency's trait declaration. The
+        // call is BARE (not `<module>::<Tr>_`): the transpiler emits each crate
+        // at global scope inside its C++ module and resolves cross-crate via
+        // `import`, so the dependency's `<Tr>_` is reached bare. The manifest's
+        // job is CLASSIFICATION (member-call → UFCS free call).
         let manifest = UfcsTraitManifest {
             version: 1,
             module: "depmod".to_string(),
@@ -2587,12 +2591,12 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert!(
-            on.contains("depmod::Greet_::hello("),
-            "`x.hello()` must qualify to the dependency module's trait namespace\nGot: {on}"
+            on.contains("Greet_::hello("),
+            "`x.hello()` must lower to the UFCS free call Greet_::hello (from the manifest)\nGot: {on}"
         );
 
-        // Without the manifest, `hello` isn't a known trait method → no qualified
-        // dependency call (stays a plain member call).
+        // Without the manifest, `hello` isn't a known trait method → not lowered
+        // to a UFCS free call (stays a plain member call).
         let off_opts = TranspileOptions {
             ufcs_traits: true,
             ..TranspileOptions::default()
@@ -2607,8 +2611,8 @@ mod tests {
         )
         .expect("transpile should succeed");
         assert!(
-            !without.contains("depmod::Greet_::hello"),
-            "without the manifest there must be no qualified dependency call\nGot: {without}"
+            !without.contains("Greet_::hello"),
+            "without the manifest there must be no UFCS free call for hello\nGot: {without}"
         );
     }
 

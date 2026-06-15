@@ -593,9 +593,11 @@ pub struct CodeGen {
     /// methods classify + qualify. Empty in single-crate / flag-off mode.
     pub(crate) dependency_ufcs_trait_manifests:
         Vec<crate::transpile::UfcsTraitManifest>,
-    /// UFCS cross-crate: trait short name → C++ module namespace it lives in
-    /// (only for traits imported from a dependency; local traits are absent →
-    /// bare `<Tr>_`). Call-site qualification prepends `<module>::` when present.
+    /// UFCS cross-crate: trait short name → C++ namespace prefix. Currently
+    /// always empty: the transpiler emits each crate at GLOBAL scope inside its
+    /// C++ module and resolves cross-crate references via `import`, so a
+    /// dependency's `<Tr>_` is reached BARE (no `<module>::` prefix). Reserved
+    /// for a future namespace-wrapped emission mode. See § 3.2.7.
     pub(crate) ufcs_trait_module_prefix: HashMap<String, String>,
     /// Per-function type-inference state. Constructed at the entry
     /// of `emit_function` (and equivalent entry points), populated by
@@ -1953,10 +1955,12 @@ impl CodeGen {
         let mut method_owners: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
         for (method, traits) in &self.ufcs_method_trait_owners {
-            // Only local traits (no module prefix) belong in this crate's manifest.
+            // Only traits THIS crate declares belong in its own manifest —
+            // dependency-merged owners (not in `ufcs_declared_trait_names`) are
+            // the dependency's to describe, not ours.
             let local: Vec<String> = traits
                 .iter()
-                .filter(|t| !self.ufcs_trait_module_prefix.contains_key(*t))
+                .filter(|t| self.ufcs_declared_trait_names.contains(*t))
                 .cloned()
                 .collect();
             if !local.is_empty() {
@@ -2006,10 +2010,15 @@ impl CodeGen {
                     .or_default();
                 for t in traits {
                     owners.insert(t.clone());
-                    if !m.module.is_empty() {
-                        self.ufcs_trait_module_prefix
-                            .insert(t.clone(), m.module.clone());
-                    }
+                    // NO module prefix: the transpiler emits each crate's
+                    // symbols at GLOBAL scope inside its C++ module and resolves
+                    // cross-crate references via `import` (the dependency-alias
+                    // map points crate roots at "" → `::`). So the dependency's
+                    // `<Tr>_` namespace is reached bare (via the dependency's
+                    // `import`), exactly like a local trait — the manifest's job
+                    // is CLASSIFICATION, not qualification. (`module` is kept in
+                    // the manifest for diagnostics / a future namespace-wrapped
+                    // mode.)
                     self.ufcs_emitted_trait_methods
                         .insert((t.clone(), method.clone()));
                 }
