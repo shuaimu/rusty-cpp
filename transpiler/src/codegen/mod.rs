@@ -11722,7 +11722,7 @@ impl CodeGen {
                 ));
                 continue;
             }
-            self.emit_one_local_adapter_method(method, kind);
+            self.emit_one_local_adapter_method(trait_name, method, kind);
         }
 
         self.indent -= 1;
@@ -11737,6 +11737,7 @@ impl CodeGen {
     /// are unreachable via `const TraitName&` access).
     fn emit_one_local_adapter_method(
         &mut self,
+        trait_name: &str,
         method: &syn::ImplItemFn,
         kind: AdapterStorageKind,
     ) {
@@ -11803,12 +11804,29 @@ impl CodeGen {
         } else {
             let needs_return = !matches!(method.sig.output, syn::ReturnType::Default);
             let prefix = if needs_return { "return " } else { "" };
-            self.writeln(&format!(
-                "{}value_.{}({});",
-                prefix,
-                escaped,
-                call_args.join(", ")
-            ));
+            if self.ufcs_traits {
+                // UFCS Phase 6 (book § 3.2.10): forward the vtable slot to the
+                // static free-function impl `trait_<Tr>::m(value_, args)` rather
+                // than the member `value_.m(args)`, so static and dynamic
+                // dispatch bottom out in the same implementation (and dyn keeps
+                // working once the redundant members are removed in phase 7).
+                let mut all_args = vec!["value_".to_string()];
+                all_args.extend(call_args.iter().cloned());
+                self.writeln(&format!(
+                    "{}trait_{}::{}({});",
+                    prefix,
+                    trait_name,
+                    escaped,
+                    all_args.join(", ")
+                ));
+            } else {
+                self.writeln(&format!(
+                    "{}value_.{}({});",
+                    prefix,
+                    escaped,
+                    call_args.join(", ")
+                ));
+            }
         }
 
         self.indent -= 1;
