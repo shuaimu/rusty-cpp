@@ -1451,6 +1451,28 @@ safety net, so every qualified name the transpiler emits must be guaranteed to e
   multi-owner call then tries each `<Owner>_::m` qualified — no unqualified `size_hint` to
   collide with the `de::size_hint` *module*.
 
+- **Distinct Rust types, one C++ type → dedupe by canonical signature (implemented).** serde
+  provides separate impls for `isize`/`i64`, `usize`/`u64`, `NonZero*`/`Atomic*` width variants,
+  and `CStr`/`CString`/`OsStr`/`OsString`/`Path` (all emitted as `std::string`). These lower to
+  identical C++ free-function signatures in one `<module>::__ufcs_<Tr>` (or flat `<Tr>_`)
+  namespace → C++ `redefinition`. The non-UFCS path already deduped via
+  `extension_free_function_dedupe_key` (whose `canonicalize_extension_overload_type_for_dedupe`
+  folds `ptrdiff_t→int64_t`, `size_t→uint64_t`, the rusty alias families, …); the UFCS decl/def
+  emitters now apply the same dedupe through a per-phase, per-`(module,trait)` seen-set
+  (`ufcs_def_dedupe_seen`, cleared at the start of *both* the decl and def phase so the two
+  dedupe identically and the bridge matches the definitions). One definition serves both Rust
+  types — they *are* the same C++ type, so the call site for either binds to it. (Validated:
+  serde_core's `redefinition` bucket → 0.)
+
+- **Open: associated-type / generic resolution in free-function *bodies*.** Fix B and §3.2.8
+  qualify a free function's *signature* (`rusty::Result<typename ::de::VisitorTraits<V>::Value,
+  E>`), but a generic/default body still names the trait's associated types unqualified
+  (`Result<Value, E>::Err(…)`, `Error::custom(…)`), which do not resolve at free-function scope —
+  and worse, a bare `Error` is captured by a `using namespace Error_;` for the *trait* `Error`
+  (→ "unexpected namespace name 'Error_'"). This is the body-side counterpart of the §3.2.13
+  default-body caveat and the dominant remaining serde_core layer; it needs the body emitter to
+  carry the same `Self::Assoc`→`TrTraits<Self>::Assoc` substitution the signature path uses.
+
 - **Open: interface-default-body instantiation.** An *object-safe* trait whose default body
   **calls a required method** makes the interface's `virtual m()` body instantiate the free-fn
   default on the *abstract interface class itself* (`Z_::rz<Z>` → "no member `v` in `Z`"). A
