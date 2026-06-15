@@ -551,6 +551,12 @@ pub struct CodeGen {
     /// trait impls are additionally emitted as free functions in `namespace
     /// trait_<Trait>` (Phase 2). Off → existing member/adapter lowering only.
     pub(crate) ufcs_traits: bool,
+    /// UFCS Phase 3: per-method-name class (Inherent / TraitOnly / Both) over
+    /// the whole file, populated in `emit_file` when `ufcs_traits` is on. Drives
+    /// call-site lowering (trait-only crate methods → free call). Empty
+    /// otherwise. The classifier only sees this crate's traits/impls, so std
+    /// methods (`into`, `next`, …) are absent → never intercepted.
+    pub(crate) ufcs_method_classes: HashMap<String, crate::transpile::MethodNameClass>,
     /// Per-function type-inference state. Constructed at the entry
     /// of `emit_function` (and equivalent entry points), populated by
     /// the constraint collector in `type_solver`, then solved before
@@ -1370,6 +1376,7 @@ impl CodeGen {
             is_sub_codegen: false,
             is_dependency_module: false,
             ufcs_traits: false,
+            ufcs_method_classes: HashMap::new(),
             inference: None,
             symbol_category: symbol_category::SymbolCategoryTable::new(),
             impl_blocks: HashMap::new(),
@@ -2207,6 +2214,10 @@ impl CodeGen {
         log_emit("seed_cross_file_enum_metadata");
         // Pass 1b: collect local declared type names for extension-impl detection.
         self.collect_local_declared_types(&file.items, &[]);
+        if self.ufcs_traits {
+            // UFCS Phase 3: classify method names for call-site lowering.
+            self.ufcs_method_classes = crate::transpile::classify_method_names(&file.items);
+        }
         log_emit("collect_local_declared_types");
         // Pass 1b': Cluster C — detect parallel inherent impl blocks of the
         // same host type whose self-type args differ at positions consumed

@@ -4998,6 +4998,31 @@ impl CodeGen {
         if let Some(seed_rewrite) = self.try_emit_deserialize_map_seed_rewrite(mc, expected_ty) {
             return seed_rewrite;
         }
+        // UFCS Phase 3 (book § 3.2.3): a method whose name is a *trait-only*
+        // method of one of THIS crate's traits lowers to a free call
+        // `m(recv, args)` (resolved via the `trait_<Tr>` namespace + `using`s in
+        // phase 4). The classifier never sees std/inherent methods, so those
+        // fall through to the existing member-call lowering unchanged. Guarded
+        // by `ufcs_traits` (default off).
+        if self.ufcs_traits {
+            let method_name = mc.method.to_string();
+            if matches!(
+                self.ufcs_method_classes.get(&method_name),
+                Some(crate::transpile::MethodNameClass::TraitOnly)
+            ) {
+                let receiver = self.emit_expr_to_string(&mc.receiver);
+                let args: Vec<String> = mc
+                    .args
+                    .iter()
+                    .map(|a| self.emit_expr_to_string(a))
+                    .collect();
+                return self.emit_extension_call_with_receiver_autoderef_fallback(
+                    &escape_cpp_keyword(&method_name),
+                    &receiver,
+                    &args,
+                );
+            }
+        }
         if matches!(mc.method.to_string().as_str(), "compact" | "readable") && mc.args.is_empty() {
             // serde_test::Configure extension helpers are test-only adapters.
             // Keep parity execution moving by treating them as identity.

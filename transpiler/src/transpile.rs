@@ -1934,6 +1934,43 @@ mod tests {
     }
 
     #[test]
+    fn test_ufcs_traits_phase3_lowers_trait_call_to_free_dispatch() {
+        let src = r#"
+            struct Foo { x: i32 }
+            trait Greet { fn hello(&self) -> i32; }
+            impl Greet for Foo { fn hello(&self) -> i32 { self.x } }
+            fn use_it(f: &Foo) -> i32 { f.hello() }
+        "#;
+
+        // Flag OFF (default): plain member call, no UFCS free dispatch.
+        let off = transpile(src, None).expect("default transpile should succeed");
+        assert!(
+            !off.contains("requires { hello("),
+            "flag-off must not lower `f.hello()` to UFCS free dispatch\nGot: {off}"
+        );
+
+        // Flag ON: `f.hello()` (a trait-only crate method) lowers to the
+        // free-function dispatch form `... requires { hello(__self) } ...`.
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+        assert!(
+            on.contains("requires { hello("),
+            "flag-on must lower the trait call `f.hello()` to free dispatch\nGot: {on}"
+        );
+    }
+
+    #[test]
     fn test_transpile_options_prefer_rusty_view_aliases() {
         let src = r#"
             fn keep_views(s: &str, b: &[u8]) -> (&str, &[u8]) {
