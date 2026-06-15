@@ -260,14 +260,47 @@ pub fn collect_concrete_trait_impl_method_owners(
     items: &[syn::Item],
     declared_traits: &std::collections::HashSet<String>,
 ) -> HashMap<String, std::collections::BTreeSet<String>> {
+    // Traits that declare an associated CONSTANT are emitted via the runtime-
+    // helper path (`emit_trait_interface_pattern` skips them, `has_assoc_const`),
+    // so their methods live in `<Tr>RuntimeHelper`, NOT `namespace trait_<Tr>`.
+    // Qualifying to `trait_<Tr>::m` for those would name a non-existent member
+    // (a HARD error). Exclude them — their method calls fall through to the
+    // member-call lowering (which is what works flag-off). Surfaced by bitflags'
+    // `Flags` trait (`const FLAGS`, `type Bits`): `complement`/`contains`/`bits`
+    // are NOT in `trait_Flags`. (Assoc-TYPE-only traits like ToOwned DO use the
+    // interface + free-function path, so they are NOT excluded.)
+    let mut assoc_const_traits = std::collections::HashSet::new();
+    collect_assoc_const_trait_names_into(items, &mut assoc_const_traits);
     let mut out: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
-    collect_concrete_trait_impl_method_owners_into(items, declared_traits, &mut out);
+    collect_concrete_trait_impl_method_owners_into(items, declared_traits, &assoc_const_traits, &mut out);
     out
+}
+
+fn collect_assoc_const_trait_names_into(
+    items: &[syn::Item],
+    out: &mut std::collections::HashSet<String>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Trait(t) => {
+                if t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Const(_))) {
+                    out.insert(t.ident.to_string());
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_assoc_const_trait_names_into(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn collect_concrete_trait_impl_method_owners_into(
     items: &[syn::Item],
     declared_traits: &std::collections::HashSet<String>,
+    assoc_const_traits: &std::collections::HashSet<String>,
     out: &mut HashMap<String, std::collections::BTreeSet<String>>,
 ) {
     for item in items {
@@ -282,10 +315,12 @@ fn collect_concrete_trait_impl_method_owners_into(
                     continue;
                 };
                 // Only crate-declared traits (foreign-trait impls aren't UFCS-
-                // lowered), and only concrete impls (no type-param generics) —
-                // generic/blanket impls don't reliably emit an early-declared
-                // `trait_<Tr>` namespace.
-                if !declared_traits.contains(&trait_name) {
+                // lowered), skip assoc-const (runtime-helper) traits, and only
+                // concrete impls (no type-param generics) — generic/blanket
+                // impls don't reliably emit an early-declared `trait_<Tr>`.
+                if !declared_traits.contains(&trait_name)
+                    || assoc_const_traits.contains(&trait_name)
+                {
                     continue;
                 }
                 let has_type_generics = impl_block
@@ -308,7 +343,12 @@ fn collect_concrete_trait_impl_method_owners_into(
             }
             syn::Item::Mod(m) => {
                 if let Some((_, nested)) = &m.content {
-                    collect_concrete_trait_impl_method_owners_into(nested, declared_traits, out);
+                    collect_concrete_trait_impl_method_owners_into(
+                        nested,
+                        declared_traits,
+                        assoc_const_traits,
+                        out,
+                    );
                 }
             }
             _ => {}
