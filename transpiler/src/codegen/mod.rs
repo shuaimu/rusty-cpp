@@ -13230,6 +13230,20 @@ impl CodeGen {
         let prev_ufcs_template_self_body = self.ufcs_template_self_body;
         self.ufcs_template_self_body = method_spec.self_is_template_param;
         self.push_type_param_scope(&free_generics);
+        // Trait-static call resolution (`Error::invalid_value(…)` → `E::invalid_value(…)`,
+        // where `E: Error` is inferred as `Self`) reads the trait→param bound map on the
+        // type-param scope. But `extension_free_function_generics` STRIPS the `E: Error`
+        // bound from `free_generics` (so the emitted `template<class E>` carries no
+        // constraint against the abstract interface class), leaving that map empty in the
+        // body → the rewrite can't fire and a bare trait name `Error::` leaks out. Restore
+        // the map from the ORIGINAL method generics (bounds intact), mirroring the member
+        // emitter which pushes the unstripped `method.sig.generics`. Body-scope state only —
+        // the emitted template prefix (already built from `free_generics`) is untouched.
+        if self.ufcs_traits
+            && let Some(top) = self.trait_bound_type_param_scopes.last_mut()
+        {
+            *top = Self::collect_trait_bound_type_param_map(&method_spec.method.sig.generics);
+        }
         self.current_struct_assoc_cpp_types
             .push(associated_type_cpp_bindings.clone());
         // Extension methods can mention `Self::Assoc` in bodies; define a local
