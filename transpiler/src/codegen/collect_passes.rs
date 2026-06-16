@@ -9178,6 +9178,14 @@ impl CodeGen {
                                 && !self.is_type_param_in_scope(&ident)
                                 && !self.is_local_type_name_in_scope(&ident)
                                 && !self.declared_item_names.contains(&ident)
+                                // A concrete crate-declared type (e.g. `IgnoredAny`, used
+                                // as a unit-struct assoc binding `type Value = IgnoredAny`)
+                                // is NOT a type param — the scope-sensitive guards above can
+                                // miss it; `local_declared_types` is the flat set of every
+                                // declared type. Without this, a spurious `typename
+                                // IgnoredAny` template param is added and a body local of the
+                                // same name shadows it.
+                                && !self.local_declared_types.contains(&ident)
                                 && types::map_primitive_type(&ident).is_none();
                         if looks_like_type_param {
                             out.insert(ident);
