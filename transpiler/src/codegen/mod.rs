@@ -1733,48 +1733,101 @@ impl CodeGen {
         self.output
             .push_str(&format!("}} // namespace {}\n", crate_name));
 
-        // Re-qualify same-crate path references inside the wrap.
-        // The transpiler emits e.g. `::bytebuf::ByteBuf` because
-        // `bytebuf` was a top-level namespace of THIS crate before
-        // wrapping; with the wrap in place, `::bytebuf` looks in the
-        // global namespace and fails. Rewrite to
-        // `::<crate>::bytebuf::ByteBuf` so the path is explicit and
-        // ambiguity-free.
+        // Re-qualify same-crate path references inside the wrap. Before
+        // wrapping, the transpiler emits a crate-own top namespace as a global
+        // path (`::bytes::Bytes`, `::ser::__ufcs_Serialize`); once wrapped, those
+        // bare `::ns::` paths look in the GLOBAL namespace and miss — the names
+        // now live under `::<crate>::ns`. We re-qualify per ownership:
         //
-        // We ONLY rewrite namespaces that are exclusively this
-        // crate's. Generic names like `de` and `ser` exist in BOTH
-        // serde_core and serde_bytes — leaving `::de::` alone lets
-        // it find serde_core's `de` (where the cross-crate
-        // references it's protecting expect to land). Phase 2
-        // generalizes by collecting per-crate namespace ownership
-        // during emit.
+        //   - Rule 1 (exclusive namespaces): a top-level namespace that holds a
+        //     type THIS crate declares is wholly the crate's — `::bytes::Bytes`
+        //     -> `::<crate>::bytes::Bytes`. A dependency that merely shares a
+        //     generic namespace name (`ser`/`de`) declares no type there, so it
+        //     never enters this set and keeps resolving to the (unwrapped) dep.
+        //   - Rule 2 (shared-namespace bridges): in a namespace declared by BOTH
+        //     this crate and a dependency (`ser`/`de`), only the crate's own UFCS
+        //     bridge sub-namespaces (`__ufcs_<Tr>`, emitted per-impl in the
+        //     impl's crate) belong here; `ser::Serializer` / `de::Visitor` are
+        //     the dependency's and must stay global. So re-qualify only
+        //     `::<ns>::__ufcs_…` for bridge namespaces NOT covered by Rule 1.
+        //
+        // The two namespace sets are disjoint, so the single-pass `replace`s
+        // cannot double-prefix one another.
         let wrap_start = insert_pos + open.len();
         let wrap_end = self.output.len()
             - format!("}} // namespace {}\n", crate_name).len();
         let mut wrapped = self.output[wrap_start..wrap_end].to_string();
-        for ns in self.crate_exclusive_top_namespaces() {
-            let from = format!("::{}::", ns);
-            let to = format!("::{}::{}::", crate_name, ns);
-            wrapped = wrapped.replace(&from, &to);
+        let exclusive = self.crate_exclusive_top_namespaces();
+        for ns in &exclusive {
+            wrapped = wrapped.replace(
+                &format!("::{}::", ns),
+                &format!("::{}::{}::", crate_name, ns),
+            );
+        }
+        let exclusive_set: HashSet<&String> = exclusive.iter().collect();
+        let shared_bridge_ns: Vec<String> = Self::ufcs_bridge_top_namespaces(&wrapped)
+            .into_iter()
+            .filter(|ns| !exclusive_set.contains(ns))
+            .collect();
+        for ns in &shared_bridge_ns {
+            wrapped = wrapped.replace(
+                &format!("::{}::__ufcs_", ns),
+                &format!("::{}::{}::__ufcs_", crate_name, ns),
+            );
         }
         self.output.replace_range(wrap_start..wrap_end, &wrapped);
     }
 
-    /// Top-level C++ namespaces that are EXCLUSIVE to the current
-    /// crate (no other crate in the matrix declares them). Used by
-    /// `wrap_module_purview_in_crate_namespace` to know which
-    /// `::<ns>::` references can be safely rewritten to
-    /// `::<crate>::<ns>::` without breaking cross-crate paths that
-    /// share namespace names like `de` / `ser`.
-    ///
-    /// Today's narrow Phase-1 implementation hard-codes serde_bytes'
-    /// exclusive top-level namespace (`bytebuf`). Phase 2 generalizes
-    /// by collecting per-crate namespace ownership during emit.
+    /// Top-level C++ namespaces EXCLUSIVE to the current crate: those that hold
+    /// a type this crate declares (`local_declared_types` keyed through its
+    /// module path). `wrap_module_purview_in_crate_namespace` fully re-qualifies
+    /// these to `::<crate>::<ns>::`. A namespace shared with a dependency by name
+    /// only (`ser`/`de`) holds no crate-declared type, so it is excluded here and
+    /// the dependency's symbols in it keep resolving globally; the crate's own
+    /// UFCS bridges in such a namespace are handled by the `__ufcs_` rule.
     fn crate_exclusive_top_namespaces(&self) -> Vec<String> {
-        match self.crate_name.as_deref() {
-            Some("serde_bytes") => vec!["bytebuf".to_string()],
-            _ => Vec::new(),
+        let mut set: HashSet<String> = HashSet::new();
+        for ty in &self.local_declared_types {
+            if let Some(path) = self.local_type_module_path.get(ty)
+                && let Some(first) = path.split("::").next()
+                && !first.is_empty()
+            {
+                set.insert(first.to_string());
+            }
         }
+        let mut v: Vec<String> = set.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    /// Top-level namespace segments that immediately precede a `::__ufcs_<Tr>`
+    /// bridge sub-namespace in `text` (e.g. `ser` in `::ser::__ufcs_Serialize`).
+    /// A UFCS bridge sub-namespace is always emitted by the impl's own crate, so
+    /// these mark the crate-owned references inside an otherwise-shared namespace.
+    fn ufcs_bridge_top_namespaces(text: &str) -> Vec<String> {
+        const PAT: &str = "::__ufcs_";
+        let bytes = text.as_bytes();
+        let mut set: HashSet<String> = HashSet::new();
+        let mut from = 0;
+        while let Some(rel) = text[from..].find(PAT) {
+            let pos = from + rel; // index of the leading "::" of "::__ufcs_"
+            let mut s = pos;
+            while s > 0 {
+                let c = bytes[s - 1];
+                if c.is_ascii_alphanumeric() || c == b'_' {
+                    s -= 1;
+                } else {
+                    break;
+                }
+            }
+            if s < pos && s >= 2 && &text[s - 2..s] == "::" {
+                set.insert(text[s..pos].to_string());
+            }
+            from = pos + PAT.len();
+        }
+        let mut v: Vec<String> = set.into_iter().collect();
+        v.sort();
+        v
     }
 
     pub fn into_output(mut self) -> String {
