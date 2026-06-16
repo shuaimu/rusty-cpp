@@ -1095,6 +1095,32 @@ The free functions themselves are emitted with `export`, so they are visible cro
 `import`. *(This is the itertools keystone; until the manifest pipeline lands, foreign-trait
 methods are simply not classified trait-only and fall through to member calls.)*
 
+**Cross-crate *type* metadata (not just traits).** Classification gets the *call* right, but the
+emitted free function's *signature and body still name types*, and a re-exported dependency type
+is where this bites. serde's facade crate re-exports serde_core through a `private_::de` module
+and emits a UFCS helper for it under `namespace private_::de::__ufcs_…`; the helper returns
+serde_core's `de::value::BytesDeserializer<E>`. Two failures follow, both because the facade
+crate's per-crate analysis **never saw that type declared** (it lives in the dependency): (1) the
+reference is written *relative* — `de::value::BytesDeserializer` — and inside `private_::de` that
+binds to the wrong `private_::de::value`; (2) the type is emitted *bare* — `BytesDeserializer`
+without `<E>` — because the arity is unknown. The trait manifest above carries *traits*, so it
+cannot fix either. The remedy is the symmetric one: the manifest also carries **`declared_types`
+— `{name, module_path, arity}` for every type the crate declares** (arity = generic *type*-param
+count). A dependent folds these into the *same* maps its own collect pass fills — the
+type→module-path map that drives Fix B (§3.2.14) and the type→params map that drives arity
+recovery — with **local declarations winning** (the collect pass runs before the merge). Now the
+downstream Fix B qualifier absolutizes the reference to `::de::value::BytesDeserializer` (the
+crate emits its namespaces at global scope, so `::` is the correct anchor and cannot be shadowed
+by an enclosing `private_::de`), and the arity heuristic completes it to `<E>`. The principle
+mirrors the trait side: cross-crate is **name resolution via metadata**, extended from "which
+names are trait methods" to "where each type lives and how many type params it takes." This makes
+`serde_core`, the `serde` facade, and `serde_repr` all compile flag-on. *(Known residual: the
+absolute `::` anchor is correct for a crate's **own** namespaces, but a downstream crate that
+`import`s a dependency whose module has the **same name** as one of its own — e.g. `serde_bytes`
+both declaring and importing a `ser`/`bytes` namespace — can still bind `::ser` to the imported
+one; making that fully robust needs collision-aware anchoring per emission scope, tracked
+separately.)*
+
 **A foreign self type is the easy direction.** Because a free function takes the receiver by
 reference (`Tr_::foo(const S&)`), `S` being defined in another crate is irrelevant to
 dispatch — `S` is just an imported type passed as an argument, exactly the thing CRTP could

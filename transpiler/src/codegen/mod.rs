@@ -2002,11 +2002,33 @@ impl CodeGen {
                 method_owners.insert(method.clone(), local);
             }
         }
+        // Cross-crate type metadata (§ 3.2.7): every crate-declared type with an
+        // unambiguous module path, plus its generic-TYPE-param arity, so a
+        // downstream crate can qualify + arity-complete a re-exported reference.
+        let mut declared_types: Vec<crate::transpile::UfcsDeclaredType> = self
+            .local_type_module_path
+            .iter()
+            .filter(|(_, module_path)| !module_path.is_empty())
+            .map(|(name, module_path)| {
+                let arity = self
+                    .declared_type_params
+                    .get(name)
+                    .map(|params| params.len())
+                    .unwrap_or(0);
+                crate::transpile::UfcsDeclaredType {
+                    name: name.clone(),
+                    module_path: module_path.clone(),
+                    arity,
+                }
+            })
+            .collect();
+        declared_types.sort_by(|a, b| a.name.cmp(&b.name).then(a.module_path.cmp(&b.module_path)));
         crate::transpile::UfcsTraitManifest {
             version: 1,
             module: module.to_string(),
             declared_traits,
             method_owners,
+            declared_types,
         }
     }
 
@@ -2039,7 +2061,13 @@ impl CodeGen {
             return cpp_ty.to_string();
         }
         match self.local_type_module_path.get(base) {
-            Some(path) if !path.is_empty() => format!("{}{}::{}{}", lead_ws, path, base, rest),
+            // Absolute (`::<path>`) so the qualified path can't bind to an enclosing
+            // same-named namespace — serde's facade emits UFCS helpers under
+            // `private_::de`, where a RELATIVE `de::value::X` resolves to the wrong
+            // `private_::de::value`. The module path is recorded from the crate root
+            // (or imported via the dependency manifest, § 3.2.7) and the crate emits
+            // its namespaces at global scope, so `::` is the right anchor.
+            Some(path) if !path.is_empty() => format!("{}::{}::{}{}", lead_ws, path, base, rest),
             _ => cpp_ty.to_string(),
         }
     }
@@ -2068,12 +2096,25 @@ impl CodeGen {
                 }
                 let ident = &s[start..i];
                 let already_qualified = start >= 2 && &s[start - 2..start] == "::";
-                if !already_qualified
-                    && let Some(path) = self.local_type_module_path.get(ident)
+                if let Some(path) = self.local_type_module_path.get(ident)
                     && !path.is_empty()
                 {
-                    out.push_str(path);
-                    out.push_str("::");
+                    let path_prefix = format!("{}::", path);
+                    if !already_qualified {
+                        // Bare local type → absolute `::<path>::ident`.
+                        out.push_str("::");
+                        out.push_str(path);
+                        out.push_str("::");
+                    } else if out.ends_with(&path_prefix) {
+                        // RELATIVE-qualified `<path>::ident` (e.g. map_type already
+                        // emitted `de::value::X`) → absolutize so it can't bind to
+                        // an enclosing same-named namespace (serde's `private_::de`).
+                        let cut = out.len() - path_prefix.len();
+                        let already_absolute = cut > 0 && out.as_bytes()[cut - 1] == b':';
+                        if !already_absolute {
+                            out.insert_str(cut, "::");
+                        }
+                    }
                 }
                 out.push_str(ident);
             } else {
@@ -2120,6 +2161,31 @@ impl CodeGen {
                     // mode.)
                     self.ufcs_emitted_trait_methods
                         .insert((t.clone(), method.clone()));
+                }
+            }
+            // Cross-crate TYPE metadata (§ 3.2.7): teach this crate the module
+            // path + arity of a dependency's declared types, so a re-exported
+            // reference (serde's `private_::de` re-export of serde_core's
+            // `de::value::BytesDeserializer`) is QUALIFIED absolutely by Fix B
+            // and arity-completed by the make-dependent-owner heuristic. A type
+            // THIS crate declares wins (collect ran first → it is in
+            // local_declared_types), and we never overwrite an existing entry.
+            for dt in &m.declared_types {
+                if dt.module_path.is_empty() || self.local_declared_types.contains(&dt.name) {
+                    continue;
+                }
+                self.local_type_module_path
+                    .entry(dt.name.clone())
+                    .or_insert_with(|| dt.module_path.clone());
+                if dt.arity > 0 {
+                    let placeholder: Vec<String> =
+                        (0..dt.arity).map(|i| format!("__dep_T{}", i)).collect();
+                    self.declared_type_params
+                        .entry(dt.name.clone())
+                        .or_insert_with(|| placeholder.clone());
+                    self.declared_type_params
+                        .entry(format!("{}::{}", dt.module_path, dt.name))
+                        .or_insert(placeholder);
                 }
             }
         }

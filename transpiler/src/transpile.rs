@@ -26,6 +26,28 @@ pub struct UfcsTraitManifest {
     /// `<Tr>_::m` free functions.
     #[serde(default)]
     pub method_owners: BTreeMap<String, Vec<String>>,
+    /// Types this crate declares, with the metadata a downstream crate needs to
+    /// reference them across the C++ module boundary (book § 3.2.7): the
+    /// declaration-module path (so a re-exported name can be QUALIFIED rather than
+    /// bound to a same-named enclosing namespace — e.g. serde's `private_::de`)
+    /// and the generic-TYPE-param arity (so `BytesDeserializer` is emitted as
+    /// `BytesDeserializer<E>`, not bare). Only types with an UNAMBIGUOUS module
+    /// path are listed.
+    #[serde(default)]
+    pub declared_types: Vec<UfcsDeclaredType>,
+}
+
+/// One entry of `UfcsTraitManifest::declared_types` (book § 3.2.7): cross-crate
+/// type metadata for a crate-declared type.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+pub struct UfcsDeclaredType {
+    /// Bare type name, e.g. `BytesDeserializer`.
+    pub name: String,
+    /// `::`-joined, C++-escaped declaration-module path, e.g. `de::value`.
+    pub module_path: String,
+    /// Number of generic TYPE params (lifetimes/consts excluded), e.g. 1 for
+    /// `BytesDeserializer<E>`.
+    pub arity: usize,
 }
 
 fn default_ufcs_trait_manifest_version() -> u32 {
@@ -2565,6 +2587,7 @@ mod tests {
                 "hello".to_string(),
                 vec!["Greet".to_string()],
             )]),
+            declared_types: Vec::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();
