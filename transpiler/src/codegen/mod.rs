@@ -1775,7 +1775,81 @@ impl CodeGen {
                 &format!("::{}::{}::__ufcs_", crate_name, ns),
             );
         }
+        // Rule 3 — crate-root re-exported types referenced bare. A `pub use
+        // bytes::Bytes;` re-export is a crate-root name (`::<crate>::Bytes`
+        // post-wrap). The lib emits `export using bytes::Bytes;`; a consumer
+        // target (also wrapped) does `use serde_bytes::{Bytes, …}`, which the
+        // import emitter drops as `// Rust-only unresolved import: using ::Bytes;`
+        // and references as bare `::Bytes`. Collect those crate-root type names
+        // from both shapes and re-qualify their bare references to
+        // `::<crate>::<Type>` (token-boundary aware: `mod::Type` and longer
+        // idents are left alone). `::<crate>::<Type>` resolves via the lib's
+        // exported re-export, which a consumer sees through `import <crate>`.
+        let mut crate_root_types: HashSet<String> = HashSet::new();
+        for line in wrapped.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("export using ")
+                && let Some(path) = rest.trim().strip_suffix(';')
+            {
+                let segs: Vec<&str> =
+                    path.trim().trim_start_matches("::").split("::").collect();
+                if segs.len() == 2
+                    && exclusive_set.iter().any(|e| e.as_str() == segs[0])
+                    && segs[1].chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                {
+                    crate_root_types.insert(segs[1].to_string());
+                }
+            }
+            if let Some(rest) =
+                trimmed.strip_prefix("// Rust-only unresolved import: using ")
+                && let Some(path) = rest.trim().strip_suffix(';')
+            {
+                let name = path.trim().trim_start_matches("::");
+                if !name.is_empty()
+                    && !name.contains("::")
+                    && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                {
+                    crate_root_types.insert(name.to_string());
+                }
+            }
+        }
+        let mut crate_root_types: Vec<String> = crate_root_types.into_iter().collect();
+        crate_root_types.sort();
+        for ty in &crate_root_types {
+            wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, ty);
+        }
         self.output.replace_range(wrap_start..wrap_end, &wrapped);
+    }
+
+    /// Re-qualify bare crate-root references `::<sym>` -> `::<crate>::<sym>`.
+    /// Skips `mod::<sym>` (the leading `::` follows an identifier or `:`) and
+    /// longer identifiers (`<sym>` must be a whole token). Single pass over the
+    /// original text (no re-scan), so it can't double-prefix its own output.
+    fn requalify_crate_root_symbol(text: &str, crate_name: &str, sym: &str) -> String {
+        let needle = format!("::{}", sym);
+        let repl = format!("::{}::{}", crate_name, sym);
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while let Some(rel) = text[i..].find(&needle) {
+            let pos = i + rel;
+            let after = pos + needle.len();
+            let before_ok = pos == 0
+                || !(bytes[pos - 1].is_ascii_alphanumeric()
+                    || bytes[pos - 1] == b'_'
+                    || bytes[pos - 1] == b':');
+            let after_ok = after >= text.len()
+                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+            out.push_str(&text[i..pos]);
+            if before_ok && after_ok {
+                out.push_str(&repl);
+            } else {
+                out.push_str(&needle);
+            }
+            i = after;
+        }
+        out.push_str(&text[i..]);
+        out
     }
 
     /// Top-level C++ namespaces EXCLUSIVE to the current crate: those that hold
@@ -1853,9 +1927,11 @@ impl CodeGen {
         // We insert `namespace <crate> {` immediately after the
         // module declaration's import block, and append the closing
         // `}` at the end.
-        if let Some(crate_name) = self.crate_name.as_ref().filter(|n| {
-            matches!(n.as_str(), "serde_bytes")
-        }) {
+        if let Some(crate_name) = self
+            .crate_name
+            .as_ref()
+            .filter(|n| crate::transpile::crate_is_namespace_wrapped(n))
+        {
             self.wrap_module_purview_in_crate_namespace(crate_name.clone());
         }
 

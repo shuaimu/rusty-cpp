@@ -283,6 +283,17 @@ pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameC
     out
 }
 
+/// Crates whose emitted module purview is wrapped in `namespace <crate> { … }`
+/// (so a `class ser::Serialize` etc. doesn't ODR-collide with the same-named
+/// namespace in an imported dependency — see
+/// `wrap_module_purview_in_crate_namespace`). Post-wrap, references to the
+/// crate's own items must be qualified to `::<crate>::…`. Currently narrow
+/// (Phase-1): serde_bytes only; widening this list also widens the wrap and its
+/// re-qualification in lockstep.
+pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
+    matches!(crate_name, "serde_bytes")
+}
+
 /// Short names of every trait this crate DECLARES (`trait Tr { … }`), recursing
 /// into inline modules. Used to scope UFCS lowering + emission to crate-declared
 /// traits (prelude/std-trait impls are left to the non-UFCS path).

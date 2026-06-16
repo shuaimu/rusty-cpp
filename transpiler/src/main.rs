@@ -3848,7 +3848,15 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             // Strip the redundant crate prefix so type-position uses
             // resolve. Only applied to test targets to avoid touching
             // dep/lib emissions where the prefix may be load-bearing.
-            if matches!(target.kind, metadata::TargetKind::Test) {
+            //
+            // EXCEPTION: a namespace-wrapped crate
+            // (`transpile::crate_is_namespace_wrapped`) genuinely lives under
+            // `namespace <crate>`, so `::<crate>::Type` is the *correct* path,
+            // not a redundant prefix — the wrap's own re-qualification emits it
+            // on purpose. Stripping it there would re-break the references.
+            if matches!(target.kind, metadata::TargetKind::Test)
+                && !transpile::crate_is_namespace_wrapped(crate_name)
+            {
                 let prefix = format!("::{}::", crate_name);
                 if cpp.contains(&prefix) {
                     cpp = cpp.replace(&prefix, "::");
