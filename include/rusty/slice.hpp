@@ -1732,6 +1732,43 @@ auto try_fold(Range&& range, Acc&& init, Func&& func) {
     }
 }
 
+// `Iterator::try_for_each`: apply `func` (returning a Try type — Result/Option
+// with `()` output) to each item, short-circuiting on the first Err/None.
+// Mirrors `try_fold` above but carries no accumulator; on full success it
+// returns the Try's unit success value (`Ok(())` / `Some(())`). `rusty::Unit`
+// is `std::tuple<>`, so `std::make_tuple()` is that `()` payload.
+template<typename Range, typename Func>
+auto try_for_each(Range&& range, Func&& func) {
+    using range_iter = decltype(for_in(std::forward<Range>(range)));
+    using item_ref = decltype(*std::begin(std::declval<range_iter&>()));
+    using step_type = std::remove_cvref_t<std::invoke_result_t<Func&, item_ref>>;
+    for (auto&& item : for_in(std::forward<Range>(range))) {
+        auto step = std::invoke(func, std::forward<decltype(item)>(item));
+        if constexpr (requires(const step_type& s) {
+                          s.is_ok();
+                          s.is_err();
+                      }) {
+            if (step.is_err()) {
+                return step;
+            }
+        } else if constexpr (requires(const step_type& s) {
+                                 s.is_some();
+                                 s.is_none();
+                             }) {
+            if (step.is_none()) {
+                return step;
+            }
+        }
+    }
+    if constexpr (requires { step_type::Ok(std::make_tuple()); }) {
+        return step_type::Ok(std::make_tuple());
+    } else if constexpr (requires { step_type::Some(std::make_tuple()); }) {
+        return step_type::Some(std::make_tuple());
+    } else {
+        return step_type{};
+    }
+}
+
 namespace ops {
 
 template<typename Lhs, typename Rhs>

@@ -27953,6 +27953,35 @@ fn test_leaf5153_iterator_for_each_without_inherent_method_lowers_to_runtime_hel
 }
 
 #[test]
+fn test_iterator_try_for_each_without_inherent_method_lowers_to_runtime_helper() {
+    let out = transpile_str(
+        r#"
+        struct Drain<T>;
+
+        impl<T> Drain<T> {
+            fn next(&mut self) -> Option<T> {
+                None
+            }
+            fn run(&mut self) -> Result<(), ()> {
+                self.try_for_each(|_x| Ok(()))
+            }
+        }
+        "#,
+    );
+
+    assert!(
+        out.contains("rusty::try_for_each("),
+        "iterator try_for_each without inherent method should lower to runtime helper, got:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("this->try_for_each("),
+        "missing inherent try_for_each should not emit unresolved receiver method call, got:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_leaf5153_nonnull_as_mut_local_binding_uses_mut_reference_type() {
     let out = transpile_str(
         r#"

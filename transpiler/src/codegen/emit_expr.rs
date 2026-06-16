@@ -6151,6 +6151,9 @@ impl CodeGen {
         if let Some(for_each_call) = self.try_emit_iter_for_each_call(mc) {
             return for_each_call;
         }
+        if let Some(try_for_each_call) = self.try_emit_iter_try_for_each_call(mc) {
+            return try_for_each_call;
+        }
         if mc.method == "as_ref" && mc.args.is_empty() {
             if self.expr_lowers_to_slice_or_span_view(&mc.receiver)
                 || self.is_to_vec_runtime_receiver_expr(&mc.receiver)
@@ -17417,6 +17420,33 @@ impl CodeGen {
         let receiver = self.emit_expr_to_string(&mc.receiver);
         let func = self.emit_call_arg_with_pass_style(mc.args.first()?, None, None, false, None);
         Some(format!("rusty::for_each({}, {})", receiver, func))
+    }
+
+    pub(super) fn try_emit_iter_try_for_each_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+    ) -> Option<String> {
+        if mc.method != "try_for_each" || mc.args.len() != 1 {
+            return None;
+        }
+        // `try_for_each` is an Iterator-trait method with no common non-iterator
+        // collision, and `rusty::try_for_each` accepts any range (via `for_in`),
+        // so lower broadly rather than gating on the receiver-iterator heuristic
+        // (unlike `for_each`). That heuristic can't confirm a *generic* iterator
+        // local — `let mut iter = x.into_iter(); iter.try_for_each(...)` in
+        // serde/itertools, whose binding type is `<I as IntoIterator>::IntoIter`
+        // — so a strict gate leaves the call as a member on a type with no such
+        // member. The guards below still bail for a user type that owns
+        // `try_for_each` and for Option/Result-like receivers.
+        if self.receiver_has_inherent_method_named(&mc.receiver, "try_for_each") {
+            return None;
+        }
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let func = self.emit_call_arg_with_pass_style(mc.args.first()?, None, None, false, None);
+        Some(format!("rusty::try_for_each({}, {})", receiver, func))
     }
 
     pub(super) fn try_emit_ordering_then_with_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
