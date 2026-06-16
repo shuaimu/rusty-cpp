@@ -16405,6 +16405,22 @@ impl CodeGen {
                 if let Some(lambda) = self.try_emit_method_reference_lambda(&path.path) {
                     return lambda;
                 }
+                // `PhantomData` as a VALUE expression (no expected type to drive
+                // the element — e.g. a UFCS member-fallback shim arg whose lambda
+                // param is `auto&&`). It must be a CONSTRUCTED value, never the
+                // bare class-template name `rusty::PhantomData` (a parse error in
+                // value position: "expected '(' for function-style cast"). Mirror
+                // the with-expected fallback in emit_expr_to_string_with_expected.
+                if path.path.segments.last().is_some_and(|seg| {
+                    seg.ident == "PhantomData"
+                        && (matches!(seg.arguments, syn::PathArguments::None)
+                            || matches!(
+                                seg.arguments,
+                                syn::PathArguments::AngleBracketed(ref ab) if ab.args.is_empty()
+                            ))
+                }) {
+                    return "rusty::PhantomData<std::tuple<>>{}".to_string();
+                }
                 self.emit_expr_path_to_string(&path.path)
             }
             syn::Expr::Group(group) => self.emit_expr_to_string(&group.expr),
