@@ -11657,8 +11657,18 @@ impl CodeGen {
             p.push(helper.clone());
             p.join("::")
         };
+        // In module mode the bridged name `<Tr>_::m` must be EXPORTED so a
+        // downstream crate can resolve its qualified `<Tr>_::m(recv)` call across
+        // the module boundary (otherwise: "declaration of 'm' must be imported
+        // from module 'X' before it is required"). The helper target is itself
+        // exported (export_prefix on the free fn), so `export using` is valid.
+        let bridge_export = if self.module_name.is_some() {
+            "export "
+        } else {
+            ""
+        };
         for method in &bridged {
-            self.writeln(&format!("using ::{}::{};", helper_path, method));
+            self.writeln(&format!("{}using ::{}::{};", bridge_export, helper_path, method));
         }
         if trait_in_multi_owner && impl_is_concrete {
             let self_cpp = self.qualify_nested_local_type_for_global_scope(
