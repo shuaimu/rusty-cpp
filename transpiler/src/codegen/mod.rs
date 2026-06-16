@@ -13336,6 +13336,71 @@ impl CodeGen {
         self.push_callable_param_bound_scope(method_spec.callable_param_metadata.clone());
         self.push_self_receiver_ref_scope(&method.sig.inputs);
         self.push_self_path_override(Some("self_".to_string()));
+        // UFCS free-function form replaces a destructuring parameter pattern
+        // with a synthetic `_arg{idx}` param (see the param emitter in
+        // emit_items.rs). The member emitter then emits the matching binding
+        // prelude (`auto&& a = ...std::get<0>(_arg1); ...`) via
+        // `collect_pattern_binding_stmts_with_cpp_name_map`; the free-function
+        // emitter previously omitted it, leaving the body's pattern names
+        // undeclared (itertools `coalesce_pair (c, t)`) or — when a binding name
+        // equals an in-scope type parameter (itertools `ConsTuplesFn ((K, L), X)`,
+        // legal in Rust: separate value/type namespaces) — silently bound to the
+        // TYPE → "K does not refer to a value". Emit the prelude here inside a
+        // transient statement scope (so the rust→cpp rename map covers the body),
+        // pre-seeding a collision-safe cpp name for any binding that shadows a
+        // template type parameter.
+        self.push_transient_statement_scope();
+        {
+            let type_param_names: HashSet<String> = free_generics
+                .params
+                .iter()
+                .filter_map(|p| match p {
+                    syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                    _ => None,
+                })
+                .collect();
+            for (idx, arg) in method.sig.inputs.iter().enumerate().skip(1) {
+                let syn::FnArg::Typed(pat_type) = arg else {
+                    continue;
+                };
+                if matches!(
+                    pat_type.pat.as_ref(),
+                    syn::Pat::Ident(_) | syn::Pat::Wild(_)
+                ) {
+                    continue;
+                }
+                let param_name = format!("_arg{}", idx);
+                let mut binding_map: HashMap<String, String> = HashMap::new();
+                if !type_param_names.is_empty() {
+                    let mut binding_names = HashSet::new();
+                    self.collect_pattern_binding_names(
+                        pat_type.pat.as_ref(),
+                        &mut binding_names,
+                    );
+                    for name in binding_names {
+                        if type_param_names.contains(&name) {
+                            let mut safe = format!("{}_pat", name);
+                            while type_param_names.contains(&safe) {
+                                safe.push('_');
+                            }
+                            binding_map.insert(name, safe);
+                        }
+                    }
+                }
+                let mut binding_stmts = Vec::new();
+                if self.collect_pattern_binding_stmts_with_cpp_name_map(
+                    pat_type.pat.as_ref(),
+                    &param_name,
+                    &mut binding_stmts,
+                    &mut binding_map,
+                ) {
+                    for stmt in binding_stmts {
+                        self.writeln(&stmt);
+                    }
+                    self.register_statement_scope_binding_map(&binding_map);
+                }
+            }
+        }
         let mut emitted_default_body_override = false;
         if method.sig.inputs.len() == 2
             && matches!(
@@ -13514,6 +13579,7 @@ impl CodeGen {
         if !emitted_default_body_override {
             self.emit_block(&method.block);
         }
+        self.pop_transient_statement_scope();
         self.pop_self_path_override();
         self.pop_self_receiver_ref_scope();
         self.pop_callable_param_bound_scope();
