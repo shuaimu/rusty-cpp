@@ -25499,13 +25499,19 @@ impl CodeGen {
         deref_args.extend(deref_arg_uses.iter().cloned());
         let direct_call = format!("{}({})", callee, direct_args.join(", "));
         let deref_call = format!("{}({})", callee, deref_args.join(", "));
-        let callee_leaf = callee
-            .rsplit("::")
-            .next()
-            .unwrap_or(callee)
-            .split('<')
-            .next()
-            .unwrap_or(callee);
+        // Split the callee into its path-with-method base and an optional
+        // turbofish suffix BEFORE taking the `::`-leaf. A turbofish type arg
+        // can itself contain `::` (e.g. `next_value<de::IgnoredAny>`), so
+        // `rsplit("::")` on the whole callee would slice inside the `<…>` and
+        // hand back `IgnoredAny>` as the "method name", producing a malformed
+        // member fallback `deref(__self).IgnoredAny>()`. Strip from the first
+        // `<` first, then rsplit the base for the bare method name, and keep
+        // the turbofish to re-attach on the member-call branch.
+        let (callee_base, callee_targs) = match callee.find('<') {
+            Some(pos) => (&callee[..pos], &callee[pos..]),
+            None => (callee, ""),
+        };
+        let callee_leaf = callee_base.rsplit("::").next().unwrap_or(callee_base);
         if matches!(callee_leaf, "eq" | "ne") && extra_args.len() == 1 {
             let op = if callee_leaf == "eq" { "==" } else { "!=" };
             let lhs = deref_receiver;
@@ -25536,7 +25542,19 @@ impl CodeGen {
             // static impl the direct branch would have called. Static and
             // dynamic dispatch thus bottom out in one implementation.
             let member_args = deref_arg_uses.join(", ");
-            let member_call = format!("{}.{}({})", deref_receiver, callee_leaf, member_args);
+            // Re-attach the turbofish on the member fallback. `__self` is a
+            // deduced `auto&&`, so the access is on a dependent type — a
+            // turbofish member call there needs the `.template` disambiguator
+            // (`deref(__self).template next_value<de::IgnoredAny>()`), else
+            // clang parses `<` as less-than.
+            let member_call = if callee_targs.is_empty() {
+                format!("{}.{}({})", deref_receiver, callee_leaf, member_args)
+            } else {
+                format!(
+                    "{}.template {}{}({})",
+                    deref_receiver, callee_leaf, callee_targs, member_args
+                )
+            };
             // `[]` (no capture) not `[&]`: the receiver and every arg are passed
             // as lambda *parameters*, so the body captures nothing — and a
             // capturing lambda is illegal at namespace scope, where this shim

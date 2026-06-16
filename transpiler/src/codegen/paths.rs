@@ -1040,6 +1040,32 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             force_leading_colon = false;
         }
         joined = segments.join("::");
+        // Self-crate path under the crate-namespace wrap. A wrapped crate's
+        // purview lives under `namespace <crate>` (see `into_output` /
+        // `wrap_module_purview_in_crate_namespace`), so an explicit self-crate
+        // reference like `serde_bytes::serialize` (emitted by
+        // `#[serde(with = "serde_bytes")]`) must resolve to `::<crate>::serialize`.
+        // The import-binding alias loop below otherwise strips the crate-name
+        // prefix to a bare `serialize`, which the call emitter then globalizes to
+        // `::serialize` — escaping the wrap and missing the crate-root free fn.
+        // Scope to a LOWERCASE tail (free functions): uppercase crate-root TYPES
+        // are already handled by the wrap's post-emit re-qualification (Rule 3),
+        // which keys off `export using`/import-comment signals that lowercase
+        // functions don't carry — so the only mechanism that reaches them is here.
+        if segments.len() >= 2
+            && self
+                .crate_name
+                .as_deref()
+                .is_some_and(|c| segments[0] == c && crate::transpile::crate_is_namespace_wrapped(c))
+            && segments
+                .last()
+                .and_then(|tail| tail.chars().next())
+                .is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
+        {
+            let crate_name = self.crate_name.as_deref().unwrap();
+            let rest: Vec<String> = segments[1..].iter().map(|s| escape_cpp_keyword(s)).collect();
+            return format!("::{}::{}", crate_name, rest.join("::"));
+        }
         if !force_leading_colon
             && segments.len() >= 2
             && matches!(segments.first().map(String::as_str), Some("de" | "ser"))
@@ -1977,6 +2003,8 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
         // Strip crate-name prefix from paths in test targets.
         // E.g., `semver::Version` → `Version` when the crate is `semver`.
+        // (Self-crate paths under the crate-namespace wrap are handled earlier,
+        // before the import-binding alias loop strips the prefix.)
         if segments.len() >= 2 {
             if let Some(ref crate_name) = self.crate_name {
                 if segments[0] == *crate_name {

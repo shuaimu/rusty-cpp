@@ -4,6 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# The transpiler binary the per-crate runs invoke. Defaults to the release
+# build; overridable via RUSTY_CPP_TRANSPILER_BIN so callers (e.g. the harness
+# test) can inject a stub. When overridden, the pre-build is skipped — the
+# caller supplies a ready binary.
+TRANSPILER_BIN="${RUSTY_CPP_TRANSPILER_BIN:-${REPO_ROOT}/target/release/rusty-cpp-transpiler}"
+
 declare -a MATRIX_CRATES=(
     "either"
     "tap"
@@ -71,6 +77,20 @@ IMPORT_STD=0
 PREFER_RUSTY_UNIT=0
 PREFER_RUSTY_VIEWS=0
 CONTINUE_ON_FAIL=0
+# Cross-crate parallelism. Crates are independent (separate work dirs + dep
+# graphs), so they can build concurrently. With JOBS>1 the binary is pre-built
+# once (so concurrent runs don't serialize on cargo's build lock), each crate
+# runs with TMPDIR under its own work dir, and all crates run regardless of
+# failures (parallel can't cleanly abort peers).
+#
+# Default ≈ 60% of cores. Note this is the *crate* concurrency, which is
+# MEMORY-binding: the serde-family crates precompile GB-scale modules, so on a
+# memory-constrained host the heavy crates can OOM at a high --jobs — lower it
+# (e.g. --jobs 3) if so. `--jobs 1` restores the exact sequential legacy path.
+# Keep --work-root on a roomy filesystem (not a small tmpfs).
+_matrix_cores="$(nproc 2>/dev/null || echo 4)"
+JOBS=$(( (_matrix_cores * 6 + 5) / 10 ))
+[[ "${JOBS}" -lt 1 ]] && JOBS=1
 FIRST_FAIL_CRATE=""
 FIRST_FAIL_WORK_DIR=""
 FIRST_FAIL_LOG=""
@@ -86,6 +106,12 @@ Options:
   --crate <name>      Run only one matrix crate
   --work-root <dir>   Root directory for per-crate parity work dirs
   --keep-work-dirs    Keep/reuse existing per-crate work dirs
+  --jobs <N>          Build N crates concurrently (default ≈60% of cores). N>1
+                      pre-builds the binary once and runs all crates (keep
+                      --work-root on a roomy filesystem; TMPDIR is under each
+                      crate's work dir). Crate concurrency is memory-binding —
+                      lower (e.g. --jobs 3) if the serde-family crates OOM;
+                      --jobs 1 is the sequential legacy path.
   --import-std       Use parity import-std mode (emit import std; and libc++ std module precompile)
   --prefer-rusty-unit  Prefer rusty::Unit spelling in generated output
   --prefer-rusty-views  Prefer rusty::StrView / rusty::Span spellings in generated output
@@ -168,6 +194,18 @@ while [[ $# -gt 0 ]]; do
         --keep-work-dirs)
             KEEP_WORK_DIRS=1
             shift
+            ;;
+        --jobs)
+            if [[ $# -lt 2 ]]; then
+                echo "error: --jobs requires a value" >&2
+                exit 2
+            fi
+            if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+                echo "error: --jobs requires a positive integer" >&2
+                exit 2
+            fi
+            JOBS="$2"
+            shift 2
             ;;
         --import-std)
             IMPORT_STD=1
@@ -277,13 +315,12 @@ run_parity_for_crate() {
     # (debug serde_repr: 14m28s; release: 5m24s). The default 1800s matrix
     # timeout couldn't fit the larger crates in debug mode and they were
     # killed before Stage D; release lets them complete end-to-end.
+    #
+    # Invoke the pre-built binary directly (not `cargo run`): with --jobs N>1,
+    # concurrent `cargo run` calls would serialize on cargo's build lock even
+    # when the binary is current. The binary is pre-built once before the loop.
     local -a cmd=(
-        cargo
-        run
-        --release
-        -p
-        rusty-cpp-transpiler
-        --
+        "${TRANSPILER_BIN}"
         parity-test
         --manifest-path
         "${manifest}"
@@ -309,7 +346,13 @@ run_parity_for_crate() {
     echo "  manifest: ${manifest}"
     echo "  command: ${cmd[*]}"
 
-    if "${cmd[@]}" >"${matrix_log}" 2>&1; then
+    # Keep each crate's intermediate/scratch files (clang temporaries, etc.)
+    # under its own work dir rather than the shared /tmp tmpfs, so concurrent
+    # crates (--jobs N>1) don't exhaust tmpfs.
+    local crate_tmp="${work_dir}/.tmp"
+    mkdir -p "${crate_tmp}"
+
+    if TMPDIR="${crate_tmp}" "${cmd[@]}" >"${matrix_log}" 2>&1; then
         echo "  PASS: ${crate}"
         return 0
     fi
@@ -334,29 +377,89 @@ fi
 if [[ "${CONTINUE_ON_FAIL}" -eq 1 ]]; then
     echo "  continue-on-fail: yes"
 fi
+if [[ "${JOBS}" -gt 1 ]]; then
+    echo "  jobs: ${JOBS} (parallel; runs every crate regardless of failures)"
+fi
 echo "═══════════════════════════════════════════════════════════════════════"
 
-for crate in "${CRATES_TO_RUN[@]}"; do
-    TOTAL=$((TOTAL + 1))
-    echo ""
-    echo "━━ ${crate} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# Pre-build the binary once so the per-crate runs invoke a ready binary
+# directly (run_parity_for_crate calls target/release/... not `cargo run`),
+# which is required for --jobs N>1 (concurrent `cargo run` would serialize on
+# cargo's build lock).
+if [[ "${DRY_RUN}" -eq 0 && -z "${RUSTY_CPP_TRANSPILER_BIN:-}" ]]; then
+    echo "Pre-building rusty-cpp-transpiler (release)..."
+    if ! cargo build --release -p rusty-cpp-transpiler; then
+        echo "error: pre-build of rusty-cpp-transpiler failed" >&2
+        exit 1
+    fi
+fi
 
-    if ! ensure_crate_checkout "${crate}"; then
-        FAIL=$((FAIL + 1))
-        if [[ "${CONTINUE_ON_FAIL}" -eq 0 ]]; then
-            break
+if [[ "${JOBS}" -gt 1 && "${DRY_RUN}" -eq 0 ]]; then
+    # Parallel: fan out crates behind a `wait -n` semaphore, record each
+    # crate's PASS/FAIL to a result file, then tally. Parallel mode always runs
+    # every crate (it can't cleanly abort in-flight peers), so it behaves as
+    # --continue-on-fail. Per-crate stdout interleaves; each crate's clean log
+    # is still at <work-dir>/matrix.log.
+    results_dir="${WORK_ROOT}/.matrix-results"
+    rm -rf "${results_dir}"
+    mkdir -p "${results_dir}"
+    running=0
+    for crate in "${CRATES_TO_RUN[@]}"; do
+        (
+            echo ""
+            echo "━━ ${crate} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            if ensure_crate_checkout "${crate}" && run_parity_for_crate "${crate}"; then
+                echo "PASS" >"${results_dir}/${crate}"
+            else
+                echo "FAIL" >"${results_dir}/${crate}"
+            fi
+        ) &
+        running=$((running + 1))
+        if [[ "${running}" -ge "${JOBS}" ]]; then
+            wait -n
+            running=$((running - 1))
         fi
-        continue
-    fi
-    if run_parity_for_crate "${crate}"; then
-        PASS=$((PASS + 1))
-    else
-        FAIL=$((FAIL + 1))
-        if [[ "${CONTINUE_ON_FAIL}" -eq 0 ]]; then
-            break
+    done
+    wait
+    for crate in "${CRATES_TO_RUN[@]}"; do
+        TOTAL=$((TOTAL + 1))
+        if [[ "$(cat "${results_dir}/${crate}" 2>/dev/null)" == "PASS" ]]; then
+            PASS=$((PASS + 1))
+        else
+            FAIL=$((FAIL + 1))
+            # run_parity_for_crate ran in a subshell, so its
+            # record_first_failure globals never reached us. Reconstruct the
+            # first failure (in crate order) from the result files so the
+            # final summary still reports artifact paths in parallel mode.
+            record_first_failure \
+                "${crate}" \
+                "${WORK_ROOT}/${crate}" \
+                "${WORK_ROOT}/${crate}/matrix.log"
         fi
-    fi
-done
+    done
+else
+    for crate in "${CRATES_TO_RUN[@]}"; do
+        TOTAL=$((TOTAL + 1))
+        echo ""
+        echo "━━ ${crate} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        if ! ensure_crate_checkout "${crate}"; then
+            FAIL=$((FAIL + 1))
+            if [[ "${CONTINUE_ON_FAIL}" -eq 0 ]]; then
+                break
+            fi
+            continue
+        fi
+        if run_parity_for_crate "${crate}"; then
+            PASS=$((PASS + 1))
+        else
+            FAIL=$((FAIL + 1))
+            if [[ "${CONTINUE_ON_FAIL}" -eq 0 ]]; then
+                break
+            fi
+        fi
+    done
+fi
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════"

@@ -2496,6 +2496,98 @@ fn ensure_rusty_modules_pcm_dir(include_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Outcome of one clang invocation for a module unit (precompile → .pcm, or
+/// object compile → .o). Pure/thread-safe: builds the command, runs it, and
+/// returns the captured log + success + first error line. No shared mutation,
+/// so it is safe to run for several units concurrently (Stage D object phase).
+struct ModuleStepOutcome {
+    ok: bool,
+    log: String,
+    first_err: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_module_step(
+    cpp_compiler: &str,
+    cxx_standard: &str,
+    import_std: bool,
+    portable_intrinsics_define: &str,
+    include_dir: &Path,
+    pcm_dir: &Path,
+    rusty_pcm_dir: Option<&Path>,
+    unit: &ModuleBuildUnit,
+    precompile: bool,
+) -> Result<ModuleStepOutcome, String> {
+    // Reconstruct the same command string the inline path logged, for build.log.
+    let rusty_pcm_flag = rusty_pcm_dir
+        .map(|p| format!("-fprebuilt-module-path={}", p.display()))
+        .unwrap_or_default();
+    let stdlib = if import_std { " -stdlib=libc++" } else { "" };
+    let cmd_str = if precompile {
+        format!(
+            "{} -std={}{} {} -march=native -x c++-module --precompile -I{} -fprebuilt-module-path={} {} -o {} {}",
+            cpp_compiler, cxx_standard, stdlib, portable_intrinsics_define,
+            include_dir.display(), pcm_dir.display(), rusty_pcm_flag,
+            unit.pcm_path.display(), unit.source_path.display()
+        )
+    } else {
+        format!(
+            "{} -std={}{} {} -march=native -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} {} -c {} -o {}",
+            cpp_compiler, cxx_standard, stdlib, portable_intrinsics_define,
+            include_dir.display(), pcm_dir.display(), rusty_pcm_flag,
+            unit.source_path.display(), unit.object_path.display()
+        )
+    };
+
+    let mut cmd = std::process::Command::new(cpp_compiler);
+    cmd.arg(format!("-std={}", cxx_standard))
+        .arg(portable_intrinsics_define)
+        .arg("-march=native");
+    if import_std {
+        cmd.arg("-stdlib=libc++");
+    }
+    if let Some(rusty_pcm) = rusty_pcm_dir {
+        cmd.arg(format!("-fprebuilt-module-path={}", rusty_pcm.display()));
+    }
+    if precompile {
+        cmd.arg("-x").arg("c++-module").arg("--precompile");
+    } else {
+        cmd.arg("-Wall")
+            .arg("-Wno-unused-variable")
+            .arg("-Wno-unused-but-set-variable");
+    }
+    cmd.arg(format!("-I{}", include_dir.display()))
+        .arg(format!("-fprebuilt-module-path={}", pcm_dir.display()));
+    if precompile {
+        cmd.arg("-o").arg(&unit.pcm_path).arg(&unit.source_path);
+    } else {
+        cmd.arg("-c")
+            .arg(&unit.source_path)
+            .arg("-o")
+            .arg(&unit.object_path);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run {}: {}", cpp_compiler, e))?;
+    let mut log = String::new();
+    log.push_str(&format!("$ {}\n", cmd_str));
+    log.push_str(&String::from_utf8_lossy(&output.stderr));
+    log.push_str(&String::from_utf8_lossy(&output.stdout));
+    log.push('\n');
+    let ok = output.status.success();
+    let first_err = if ok {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .find(|line| line.contains("error:"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "(no error line)".to_string())
+    };
+    Ok(ModuleStepOutcome { ok, log, first_err })
+}
+
 fn run_stage_d_module_build(
     args: &ParityTestArgs,
     work_dir: &Path,
@@ -2610,6 +2702,23 @@ fn run_stage_d_module_build(
     // targets and failed dev-dependencies that aren't reachable from
     // the lib target. The lib target itself is never skipped.
     let mut skipped_test_modules: HashSet<String> = HashSet::new();
+    // RUSTY_CPP_BUILD_JOBS (default 1 = sequential): parallelism for the
+    // object-compile phase only. The precompile phase carries the module DAG
+    // and stays sequential; objects have no inter-object dependency.
+    let build_jobs = std::env::var("RUSTY_CPP_BUILD_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let import_std = args.import_std;
+    let rusty_pcm_ref = rusty_pcm_dir.as_deref();
+    let pcm_dir_ref: &Path = pcm_dir.as_path();
+    let _ = &stdlib_flag_suffix; // command strings are now built in compile_module_step
+
+    // Phase 1 — precompile (.pcm), sequential in topological order. A unit's
+    // .pcm must exist before any dependent precompiles/compiles, so this phase
+    // carries the module DAG and the skip/fail logic.
+    let mut to_object: Vec<usize> = Vec::new();
     for idx in order {
         let unit = &units[idx];
         // Skip units whose deps were already skipped (they'd fail to find imports).
@@ -2628,70 +2737,31 @@ fn run_stage_d_module_build(
                 skipped_test_modules.insert(unit.module_name.clone());
                 continue;
             }
-            // Lib depending on skipped — fail-fast.
+            // Lib depending on skipped — fail-fast below (precompile will fail).
         }
-        // Build with -march=native so that any pcm files we load from
-        // the shared rusty cache (which were CMake-built with
-        // -march=native) match the current TU's target features.
-        let rusty_pcm_flag = rusty_pcm_dir
-            .as_ref()
-            .map(|p| format!("-fprebuilt-module-path={}", p.display()))
-            .unwrap_or_default();
-        let precompile_cmd = format!(
-            "{} -std={}{} {} -march=native -x c++-module --precompile -I{} -fprebuilt-module-path={} {} -o {} {}",
+        let outcome = compile_module_step(
             cpp_compiler,
             cxx_standard,
-            stdlib_flag_suffix,
+            import_std,
             portable_intrinsics_define,
-            include_dir.display(),
-            pcm_dir.display(),
-            rusty_pcm_flag,
-            unit.pcm_path.display(),
-            unit.source_path.display()
-        );
-        build_log.push_str(&format!("$ {}\n", precompile_cmd));
-        let mut precompile_command = std::process::Command::new(cpp_compiler);
-        precompile_command
-            .arg(format!("-std={}", cxx_standard))
-            .arg(portable_intrinsics_define)
-            .arg("-march=native");
-        if args.import_std {
-            precompile_command.arg("-stdlib=libc++");
-        }
-        if let Some(rusty_pcm) = rusty_pcm_dir.as_ref() {
-            precompile_command.arg(format!("-fprebuilt-module-path={}", rusty_pcm.display()));
-        }
-        let precompile_output = precompile_command
-            .arg("-x")
-            .arg("c++-module")
-            .arg("--precompile")
-            .arg(format!("-I{}", include_dir.display()))
-            .arg(format!("-fprebuilt-module-path={}", pcm_dir.display()))
-            .arg("-o")
-            .arg(&unit.pcm_path)
-            .arg(&unit.source_path)
-            .output()
-            .map_err(|e| format!("Failed to run {}: {}", cpp_compiler, e))?;
-        build_log.push_str(&String::from_utf8_lossy(&precompile_output.stderr));
-        build_log.push_str(&String::from_utf8_lossy(&precompile_output.stdout));
-        build_log.push('\n');
-        if !precompile_output.status.success() {
-            // Test targets and dev-dependencies that fail to precompile:
-            // skip them so other targets in the same crate can still
-            // produce a passing parity result. If a dep is skipped and
-            // the lib (essential) imports it, the lib's own precompile
-            // will fail — we fall through to the bail path below.
+            include_dir,
+            &pcm_dir,
+            rusty_pcm_ref,
+            unit,
+            true,
+        )?;
+        build_log.push_str(&outcome.log);
+        if !outcome.ok {
+            // Test targets and dev-dependencies that fail to precompile: skip
+            // them so other targets in the same crate can still produce a
+            // passing parity result. If a skipped dep is imported by the lib
+            // (essential), the lib's own precompile fails → the bail path.
             if unit.is_test_target || unit.is_dependency {
-                let first_err = String::from_utf8_lossy(&precompile_output.stderr)
-                    .lines()
-                    .find(|line| line.contains("error:"))
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_else(|| "(no error line)".to_string());
                 eprintln!(
                     "  Skipping {} '{}' (module): precompile failed — {}",
                     if unit.is_test_target { "test target" } else { "dependency" },
                     unit.module_name,
-                    first_err.chars().take(120).collect::<String>()
+                    outcome.first_err.chars().take(120).collect::<String>()
                 );
                 skipped_test_modules.insert(unit.module_name.clone());
                 continue;
@@ -2712,81 +2782,82 @@ fn run_stage_d_module_build(
             );
             return Err("C++ module precompile failed".to_string());
         }
+        to_object.push(idx);
+    }
 
-        let object_cmd = format!(
-            "{} -std={}{} {} -march=native -Wall -Wno-unused-variable -Wno-unused-but-set-variable -I{} -fprebuilt-module-path={} {} -c {} -o {}",
-            cpp_compiler,
-            cxx_standard,
-            stdlib_flag_suffix,
-            portable_intrinsics_define,
-            include_dir.display(),
-            pcm_dir.display(),
-            rusty_pcm_flag,
-            unit.source_path.display(),
-            unit.object_path.display()
-        );
-        build_log.push_str(&format!("$ {}\n", object_cmd));
-        let mut object_command = std::process::Command::new(cpp_compiler);
-        object_command
-            .arg(format!("-std={}", cxx_standard))
-            .arg(portable_intrinsics_define)
-            .arg("-march=native");
-        if args.import_std {
-            object_command.arg("-stdlib=libc++");
-        }
-        if let Some(rusty_pcm) = rusty_pcm_dir.as_ref() {
-            object_command.arg(format!("-fprebuilt-module-path={}", rusty_pcm.display()));
-        }
-        let object_output = object_command
-            .arg("-Wall")
-            .arg("-Wno-unused-variable")
-            .arg("-Wno-unused-but-set-variable")
-            .arg(format!("-I{}", include_dir.display()))
-            .arg(format!("-fprebuilt-module-path={}", pcm_dir.display()))
-            .arg("-c")
-            .arg(&unit.source_path)
-            .arg("-o")
-            .arg(&unit.object_path)
-            .output()
-            .map_err(|e| format!("Failed to run {}: {}", cpp_compiler, e))?;
-        build_log.push_str(&String::from_utf8_lossy(&object_output.stderr));
-        build_log.push_str(&String::from_utf8_lossy(&object_output.stdout));
-        build_log.push('\n');
-        if !object_output.status.success() {
-            // Same skip logic for the object-compile step.
-            if unit.is_test_target || unit.is_dependency {
-                let first_err = String::from_utf8_lossy(&object_output.stderr)
+    // Phase 2 — object compile (.o). Objects only feed the final link and have
+    // no inter-object dependency, so compile them concurrently (chunked by
+    // build_jobs; chunk size 1 = sequential). Results are consumed in
+    // submission order for a deterministic build.log and skip/fail handling.
+    for chunk in to_object.chunks(build_jobs) {
+        let outcomes: Vec<(usize, Result<ModuleStepOutcome, String>)> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|&idx| {
+                        let unit = &units[idx];
+                        let handle = scope.spawn(move || {
+                            compile_module_step(
+                                cpp_compiler,
+                                cxx_standard,
+                                import_std,
+                                portable_intrinsics_define,
+                                include_dir,
+                                pcm_dir_ref,
+                                rusty_pcm_ref,
+                                unit,
+                                false,
+                            )
+                        });
+                        (idx, handle)
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|(idx, handle)| {
+                        (
+                            idx,
+                            handle.join().unwrap_or_else(|_| {
+                                Err("object compile thread panicked".to_string())
+                            }),
+                        )
+                    })
+                    .collect()
+            });
+        for (idx, result) in outcomes {
+            let unit = &units[idx];
+            let outcome = result?;
+            build_log.push_str(&outcome.log);
+            if !outcome.ok {
+                // Same skip logic for the object-compile step.
+                if unit.is_test_target || unit.is_dependency {
+                    eprintln!(
+                        "  Skipping {} '{}' (object): compile failed — {}",
+                        if unit.is_test_target { "test target" } else { "dependency" },
+                        unit.module_name,
+                        outcome.first_err.chars().take(120).collect::<String>()
+                    );
+                    skipped_test_modules.insert(unit.module_name.clone());
+                    continue;
+                }
+                fs::write(&build_log_path, &build_log)
+                    .map_err(|e| format!("Failed to write build log: {}", e))?;
+                println!("  Build FAILED — see {}", build_log_path.display());
+                for line in build_log
                     .lines()
-                    .find(|line| line.contains("error:"))
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_else(|| "(no error line)".to_string());
-                eprintln!(
-                    "  Skipping {} '{}' (object): compile failed — {}",
-                    if unit.is_test_target { "test target" } else { "dependency" },
-                    unit.module_name,
-                    first_err.chars().take(120).collect::<String>()
+                    .filter(|line| line.contains("error:"))
+                    .take(20)
+                {
+                    println!("    {}", line);
+                }
+                println!(
+                    "  Build compile time (module, failed): {:.3}s",
+                    compile_start.elapsed().as_secs_f64()
                 );
-                skipped_test_modules.insert(unit.module_name.clone());
-                continue;
+                return Err("C++ module object compile failed".to_string());
             }
-            fs::write(&build_log_path, &build_log)
-                .map_err(|e| format!("Failed to write build log: {}", e))?;
-            println!("  Build FAILED — see {}", build_log_path.display());
-            for line in build_log
-                .lines()
-                .filter(|line| line.contains("error:"))
-                .take(20)
-            {
-                println!("    {}", line);
-            }
-            println!(
-                "  Build compile time (module, failed): {:.3}s",
-                compile_start.elapsed().as_secs_f64()
-            );
-            return Err("C++ module object compile failed".to_string());
+            object_files.push(unit.object_path.clone());
         }
-
-        object_files.push(unit.object_path.clone());
     }
 
     // Drop test wrappers from skipped modules so the runner doesn't

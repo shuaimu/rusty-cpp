@@ -215,14 +215,17 @@ fn test_parity_matrix_failure_reports_first_failing_crate_and_artifact_paths() {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    let cargo_shim = shim_dir.path().join("cargo");
-    fs::write(&cargo_shim, "#!/usr/bin/env bash\nexit 99\n").expect("failed to write cargo shim");
-    let mut perms = fs::metadata(&cargo_shim).unwrap().permissions();
+    // Inject a failing transpiler stub via RUSTY_CPP_TRANSPILER_BIN. The
+    // per-crate runs invoke this binary directly (not `cargo run`), so a stub
+    // that exits non-zero deterministically simulates a crate failure without
+    // depending on a real build. Setting the override also skips the script's
+    // pre-build step, so the test needs no cargo at all.
+    let transpiler_stub = shim_dir.path().join("rusty-cpp-transpiler-stub");
+    fs::write(&transpiler_stub, "#!/usr/bin/env bash\nexit 99\n")
+        .expect("failed to write transpiler stub");
+    let mut perms = fs::metadata(&transpiler_stub).unwrap().permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&cargo_shim, perms).unwrap();
-
-    let current_path = std::env::var("PATH").unwrap_or_default();
-    let shimmed_path = format!("{}:{}", shim_dir.path().display(), current_path);
+    fs::set_permissions(&transpiler_stub, perms).unwrap();
 
     let output = Command::new("bash")
         .arg(&script)
@@ -231,7 +234,7 @@ fn test_parity_matrix_failure_reports_first_failing_crate_and_artifact_paths() {
         .arg("--work-root")
         .arg(work_root.path())
         .current_dir(repo_root())
-        .env("PATH", shimmed_path)
+        .env("RUSTY_CPP_TRANSPILER_BIN", &transpiler_stub)
         .output()
         .expect("failed to run parity matrix script");
 
