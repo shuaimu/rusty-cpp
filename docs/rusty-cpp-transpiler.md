@@ -1308,17 +1308,16 @@ wins,"* it belongs to clang, not the transpiler.
 - **Analyzer prerequisite: complete.** `StructBorrow` IR node, `Assign`-handler check, and
   move-of-borrowed reuse are in place and pinned by six tests
   (`tests/test_struct_ref_member_borrows.rs`).
-- **Transpiler codegen: to do.**
-  - trait emission: emit the trait namespace (free-function declarations) + the interface
-    `T` + primary `TAdapter`/`TAdapterRef` templates (replacing Proxy facade emission);
-  - impl emission: `impl Tr for U` → a `Tr_::m(const U&, …)` free function (or
-    constrained template for blanket) + the two adapter specializations forwarding to it;
-    `impl U {}` → members on `U`;
-  - call-site emission: method-name classification + the three UFCS shapes (§3.2.3);
-  - `use`/scope → `using`/`import` translation (§3.2.5);
-  - associated-type traits map (§3.2.8); operator traits already direct (§3.2.9);
-  - `dyn` coercions: `&dyn T` from `U` → `TAdapterRef<U>(u)`, `Box<dyn T>` →
-    `rusty::make_box<TAdapter<U>>(u)`, `&dyn T` from `Box` → deref.
+- **Transpiler codegen: implemented behind `RUSTY_CPP_UFCS_TRAITS` (default off).** All of the
+  pieces below are in place: trait emission (free-function declarations + interface `T` +
+  `TAdapter`/`TAdapterRef`); impl emission (`impl Tr for U` → `Tr_::m(const U&, …)` + adapters);
+  call-site classification + the three UFCS shapes (§3.2.3); `use`→`using`/`import` (§3.2.5);
+  the associated-type traits map (§3.2.8); operator traits (§3.2.9); and the `dyn` coercions.
+  **Milestone (2026-06-16): `serde_core` compiles, builds, and runs flag-on (parity GREEN)**, as
+  do `serde_repr` and the smaller crates (either/tap/cfg-if/take_mut/arrayvec/semver/smallvec/
+  once_cell). Getting `serde_core` there required the §3.2.14 long-tail fixes. The flag stays off
+  pending the rest of the matrix (`serde_bytes`, `bitflags`, `itertools` have pre-existing,
+  non-UFCS blockers) before flipping the default.
 - **Open extensions:** `&mut dyn T` mutable `StructBorrowMut`; trait upcasting emission;
   shared-body free function vs duplicate-inline for adapter bodies (now subsumed — both
   adapters already forward to the one `Tr_::m`); diagnostics quality for C++ overload
@@ -1473,11 +1472,29 @@ safety net, so every qualified name the transpiler emits must be guaranteed to e
   default-body caveat and the dominant remaining serde_core layer; it needs the body emitter to
   carry the same `Self::Assoc`→`TrTraits<Self>::Assoc` substitution the signature path uses.
 
+- **Trait static methods (associated functions, no `self`) in free-fn bodies (implemented).** A
+  trait-name static call `Error::invalid_value(…)` (Rust infers `Self = E` from the method's
+  `E: Error` bound + the return type) must lower to `E::invalid_value(…)`. The member emitter does
+  this because it pushes the unstripped `method.sig.generics` (so the trait→param bound map has
+  `{Error: E}`); the free-function emitter pushed bound-*stripped* `free_generics` (the emitted
+  `template<class E>` must carry no constraint against the abstract interface), leaving the map
+  empty → a bare `Error::` leaked. Fix: re-populate the body scope's bound map from the original
+  generics after the push — resolver state only, emitted template unchanged.
+
+- **`PhantomData` as a value, and concrete-type-as-phantom-param (implemented).** Two small but
+  serde-blocking emission bugs: (1) a bare `PhantomData` value in the no-expected-type path (a UFCS
+  member-fallback shim's `auto&&` arg) emitted the bare class-template name `rusty::PhantomData`
+  (a parse error) instead of a constructed `rusty::PhantomData<…>{}`; (2) a unit-struct used as a
+  concrete associated binding (`impl Visitor for IgnoredAny { type Value = IgnoredAny }`) was
+  collected as a *spurious* `typename IgnoredAny` free-fn template param, which a body local of the
+  same name then shadowed — fixed by excluding `local_declared_types` from the type-param candidates.
+
 - **Open: interface-default-body instantiation.** An *object-safe* trait whose default body
   **calls a required method** makes the interface's `virtual m()` body instantiate the free-fn
   default on the *abstract interface class itself* (`Z_::rz<Z>` → "no member `v` in `Z`"). A
   default whose body does not call a required method (serde's `size_hint` returns `{}`) dodges
-  this; the general case is unresolved and tracked as a dedicated follow-up.
+  this; the general case is unresolved and tracked as a dedicated follow-up. (Not hit by
+  `serde_core`, which is GREEN flag-on as of 2026-06-16.)
 
 ### 3.3 Pattern Matching ⚠️
 
