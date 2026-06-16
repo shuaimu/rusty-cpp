@@ -36562,14 +36562,10 @@ std::string to_string(const T& value) {
         return "<value>";
     }
 }
-template<typename T>
-auto clone(const T& value) {
-    if constexpr (requires { value.clone(); }) {
-        return value.clone();
-    } else {
-        return value;
-    }
-}
+// `rusty::clone` is provided by `<rusty/move.hpp>` (via `<rusty/rusty.hpp>`);
+// emitting a duplicate here makes a qualified `rusty::clone(...)` call
+// ambiguous for any type both overloads accept (e.g. `rusty::String`), so we
+// omit it — mirroring the non-module helper text in `runtime_path_fallback_helpers_text`.
 template<typename T>
 std::string to_debug_string(const T& value) {
     return rusty::to_string(value);
