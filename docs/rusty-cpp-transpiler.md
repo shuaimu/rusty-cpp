@@ -1515,6 +1515,26 @@ safety net, so every qualified name the transpiler emits must be guaranteed to e
   collected as a *spurious* `typename IgnoredAny` free-fn template param, which a body local of the
   same name then shadowed — fixed by excluding `local_declared_types` from the type-param candidates.
 
+- **Don't intercept a runtime-helper method with UFCS (implemented, bitflags).** A handful of
+  trait-method names (`size_hint`, `left`, `right`, `write_hex`) are special-cased flag-off to
+  lower to a hand-written `rusty::<name>` runtime helper rather than a member call. Those helpers
+  take their writer/sink parameter by **forwarding reference** (`Writer&& writer`), so a move-only
+  lvalue argument binds without a copy. The UFCS per-type free function, faithful to Rust's owned
+  `fn write_hex<W: Write>(&self, mut writer: W)`, takes that parameter **by value** — and the
+  call-site shim forwards the argument as an *lvalue* (no move analysis at this layer). bitflags'
+  `remaining.write_hex(writer)` (where `remaining: B::Bits` is a primitive and `writer: rusty::String`
+  is non-copyable) therefore fails the dispatch `requires` on the by-value copy, falls through to the
+  member-fallback `remaining.write_hex(writer)` on a *primitive* receiver, and hard-errors
+  (`member reference base type 'const unsigned char' is not a structure or union`); `to_writer` is
+  then ill-formed and every caller reports `no matching function for call to 'to_writer'`. Fix: the
+  UFCS method-call interception skips exactly the names that prefer the runtime helper
+  (`method_prefers_runtime_helper_namespace`, shared with the flag-off
+  `should_prefer_runtime_namespace` set), so flag-on output for these names is byte-identical to
+  flag-off. The owned-by-value-param vs. lvalue-forward mismatch is general, but these four names
+  are the only ones with a forwarding-ref runtime helper that exposes it; a broader fix would need
+  move-insertion at the UFCS argument layer. (Validated: bitflags 0 errors, 39/39 tests pass
+  flag-on as of 2026-06-16.)
+
 - **Open: interface-default-body instantiation.** An *object-safe* trait whose default body
   **calls a required method** makes the interface's `virtual m()` body instantiate the free-fn
   default on the *abstract interface class itself* (`Z_::rz<Z>` → "no member `v` in `Z`"). A

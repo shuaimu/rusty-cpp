@@ -5009,7 +5009,8 @@ impl CodeGen {
             if matches!(
                 self.ufcs_method_classes.get(&method_name),
                 Some(crate::transpile::MethodNameClass::TraitOnly)
-            ) {
+            ) && !Self::method_prefers_runtime_helper_namespace(&method_name)
+            {
                 // Only intercept when a CONCRETE impl actually emits a
                 // `<Tr>_::m` free function (the owner map is built from
                 // concrete impls only). A TraitOnly name with no concrete owner
@@ -8932,6 +8933,21 @@ impl CodeGen {
         ))
     }
 
+    /// Method names that always lower to a hand-written `rusty::<name>`
+    /// runtime helper (forwarding-reference signatures that correctly handle
+    /// move-only and primitive receivers). These must NOT be intercepted by
+    /// UFCS trait-method lowering: a UFCS per-type trait free function takes
+    /// its owned parameters *by value* (faithful to Rust `mut writer: W`), so
+    /// passing a move-only lvalue argument (e.g. bitflags
+    /// `remaining.write_hex(writer)` where `writer: rusty::String` is
+    /// non-copyable) fails the dispatch `requires` and falls back to a member
+    /// call on a primitive — a hard error. The runtime helper takes
+    /// `Writer&& writer`, so the lvalue binds without a copy. Routing these
+    /// names to the helper keeps flag-on output identical to flag-off.
+    pub(super) fn method_prefers_runtime_helper_namespace(name: &str) -> bool {
+        matches!(name, "size_hint" | "left" | "right" | "write_hex")
+    }
+
     pub(super) fn try_emit_extension_method_call(
         &self,
         mc: &syn::ExprMethodCall,
@@ -9114,10 +9130,8 @@ impl CodeGen {
             // extension shim exists (e.g. delegating to Vec's Index impl).
             return Some(format!("{}[{}]", all_args[0], args[0]));
         }
-        let should_prefer_runtime_namespace = matches!(
-            method_name.as_str(),
-            "size_hint" | "left" | "right" | "write_hex"
-        );
+        let should_prefer_runtime_namespace =
+            Self::method_prefers_runtime_helper_namespace(&method_name);
         let is_cross_source_extension_hint =
             self.external_extension_method_hints.contains(&method_name);
         let extension_ns = if should_prefer_runtime_namespace {

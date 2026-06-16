@@ -2247,6 +2247,51 @@ mod tests {
     }
 
     #[test]
+    fn test_ufcs_traits_runtime_helper_method_not_intercepted_by_ufcs() {
+        // Regression (bitflags): `write_hex` is a TraitOnly crate method, but it
+        // also has a hand-written `rusty::write_hex` runtime helper with a
+        // forwarding-reference writer param. The UFCS per-type free function
+        // takes the writer *by value* (faithful to Rust `mut writer: W`), so a
+        // move-only lvalue argument (`rusty::String`) can't bind → the dispatch
+        // `requires` fails and falls back to a member call on a primitive
+        // receiver, a hard error. Flag-on must keep routing these names to the
+        // runtime helper, identical to flag-off.
+        let src = r#"
+            trait WriteHex {
+                fn write_hex<W: std::fmt::Write>(&self, writer: W) -> std::fmt::Result;
+            }
+            impl WriteHex for u8 {
+                fn write_hex<W: std::fmt::Write>(&self, writer: W) -> std::fmt::Result { Ok(()) }
+            }
+            fn to_writer(value: u8, mut out: String) {
+                let _ = value.write_hex(out);
+            }
+        "#;
+
+        let options = TranspileOptions {
+            ufcs_traits: true,
+            ..TranspileOptions::default()
+        };
+        let on = transpile_full_with_options(
+            src,
+            None,
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("ufcs transpile should succeed");
+        assert!(
+            on.contains("rusty::write_hex("),
+            "flag-on must route `write_hex` to the runtime helper, not UFCS\nGot: {on}"
+        );
+        assert!(
+            !on.contains("WriteHex_::write_hex("),
+            "flag-on must NOT intercept `write_hex` with the UFCS trait shim\nGot: {on}"
+        );
+    }
+
+    #[test]
     fn test_ufcs_traits_phase4_emits_early_using_before_call_site() {
         let src = r#"
             struct Foo { x: i32 }
