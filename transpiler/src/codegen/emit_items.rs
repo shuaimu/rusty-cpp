@@ -3449,10 +3449,27 @@ impl CodeGen {
         // which works even when B is foreign (no nested typedef).
         // Phase 3b.2 wires the rewrite at type-emit sites.
         if !trait_assoc_type_names.is_empty() {
-            self.writeln(&format!(
-                "template <class B> struct {}Traits;",
-                trait_name
-            ));
+            // Primary template: default each associated type to the nested
+            // typedef on the impl type B (`typename B::Assoc`). A concrete impl
+            // that materializes its assoc types as nested members — e.g.
+            // serde_test's `struct Serializer { using Ok = ...; using Error = ...;
+            // ... }` — then resolves `<Trait>Traits<B>` through this primary
+            // WITHOUT needing a full specialization. That matters cross-crate:
+            // the impl can live in a downstream crate (serde_test) that doesn't
+            // know this (foreign) trait's assoc-name list, so it can't emit the
+            // full spec, yet a generic `S: Trait` lowered in THIS crate still
+            // needs `<Trait>Traits<that impl type>::Ok` to resolve. The `S*`/`S&`
+            // partial specs below and any explicit full spec remain more
+            // specialized and still override this primary. (Previously this was
+            // an undefined forward-decl, so any unspecced `<Trait>Traits<B>` was
+            // a hard error — currently-passing code therefore never reached it,
+            // making this strictly additive.)
+            let mut primary = format!("template <class B> struct {}Traits {{ ", trait_name);
+            for name in &trait_assoc_type_names {
+                primary.push_str(&format!("using {0} = typename B::{0}; ", name));
+            }
+            primary.push_str("};");
+            self.writeln(&primary);
             // STEP B (task #39): reference/pointer forwarding partial specs —
             // the type-level analog of serde's blanket `impl Tr for &mut S`
             // (associated types forward to the pointee). When a generic
