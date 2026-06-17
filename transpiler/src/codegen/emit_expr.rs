@@ -16241,18 +16241,34 @@ impl CodeGen {
                 syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
                 other => self.emit_expr_to_string(other),
             };
-            let mut all_args = vec![recv];
-            for arg in call.args.iter().skip(1) {
-                all_args.push(match arg {
+            let extra_args: Vec<String> = call
+                .args
+                .iter()
+                .skip(1)
+                .map(|arg| match arg {
                     syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
                     _ => self.emit_expr_maybe_move(arg),
-                });
-            }
-            return Some(format!(
-                "{}::{}({})",
+                })
+                .collect();
+            // Route through the member-fallback shim rather than a bare
+            // `<Tr>_::m(recv, …)`: a FOREIGN trait (declared in another crate,
+            // e.g. serde_core's `Serializer`) implemented for a type whose impl
+            // is emitted only as a class MEMBER (serde_test's `ser::Serializer`)
+            // has no `<Tr>_::m` free-function overload for that self type — so a
+            // bare qualified call binds the WRONG overload (a sibling impl) and
+            // hard-errors. The 3-branch shim's `else { deref(__self).m(args) }`
+            // member branch resolves the member impl. (Unifies this by-value
+            // trait-static path with the method-syntax path, which already uses
+            // this shim.)
+            let callee = format!(
+                "{}::{}",
                 self.ufcs_trait_namespace(&owner_leaf),
                 escape_cpp_keyword(&method_name),
-                all_args.join(", ")
+            );
+            return Some(self.emit_extension_call_with_receiver_autoderef_fallback(
+                &callee,
+                &recv,
+                &extra_args,
             ));
         }
 
