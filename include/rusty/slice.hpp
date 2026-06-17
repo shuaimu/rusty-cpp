@@ -282,7 +282,14 @@ constexpr decltype(auto) deref_if_pointer_like(T&& value) {
         } else {
             return std::forward<T>(value);
         }
-    } else if constexpr (requires(value_type& v) { *v; }) {
+    } else if constexpr (!std::is_array_v<value_type> && requires(value_type& v) { *v; }) {
+        // NB: arrays are EXCLUDED — a C-array (e.g. a string literal
+        // `const char[N]`) satisfies `*v` via array-to-pointer decay, and
+        // dereferencing it would wrongly yield a single element (`const char`),
+        // breaking e.g. a `std::string_view` parameter. Real pointers are
+        // already handled by the `is_pointer_v` branch above; only genuine
+        // deref-wrapper *types* (ArrayVec/ArrayString/smart pointers) should
+        // unbox here.
         using deref_type = std::remove_cvref_t<decltype(*std::declval<value_type&>())>;
         // Deref-like value types (for example ArrayVec/ArrayString) should compare/hash
         // on their target view instead of recursing through self-comparisons.
