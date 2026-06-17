@@ -38869,8 +38869,24 @@ decltype(auto) forward_serializer(Serializer&& serializer) {\n\
         return std::forward<Serializer>(serializer);\n\
     }\n\
 }\n\
+// Explicit (non-deduced) result type for the recursive serialize dispatchers.\n\
+// serialize/serialize_value/serialize_bytes call each other, so a deduced\n\
+// `decltype(auto)` return makes the mutual recursion ill-formed (function with\n\
+// deduced return type cannot be used before it is defined) for any value that\n\
+// reaches the recursive fall-through edge. Every serde serialize path yields\n\
+// Result<S::Ok, S::Error>, so we can state it explicitly and break the cycle.\n\
+// deref_if_pointer_like handles serializers arriving as a raw pointer / ref /\n\
+// serializer_ref proxy; a serializer without Ok/Error makes this SFINAE-fail\n\
+// (return-type substitution), so `requires { serialize(...) }` stays well-behaved.\n\
+template<typename S>\n\
+using __ser_result_t = rusty::Result<\n\
+    typename std::remove_cv_t<std::remove_reference_t<decltype(\n\
+        rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Ok,\n\
+    typename std::remove_cv_t<std::remove_reference_t<decltype(\n\
+        rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Error>;\n\
 template<typename Serializer, typename BytesLike>\n\
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes);\n\
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)\n\
+    -> ::ser::rusty_ext::__ser_result_t<Serializer>;\n\
 struct fallback_error {\n\
     rusty::String message;\n\
 \n\
@@ -38879,7 +38895,8 @@ struct fallback_error {\n\
     }\n\
 };\n\
 template<typename Value, typename Serializer>\n\
-decltype(auto) serialize_value(Value&& value, Serializer&& serializer) {\n\
+auto serialize_value(Value&& value, Serializer&& serializer)\n\
+    -> ::ser::rusty_ext::__ser_result_t<Serializer> {\n\
     using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;\n\
     if constexpr (requires {\n\
         std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));\n\
@@ -38990,7 +39007,8 @@ decltype(auto) serialize_value(Value&& value, Serializer&& serializer) {\n\
     }\n\
 }\n\
 template<typename Value, typename Serializer>\n\
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {\n\
+auto serialize(Value&& value, Serializer&& serializer)\n\
+    -> ::ser::rusty_ext::__ser_result_t<Serializer> {\n\
     return ::ser::rusty_ext::serialize_value(\n\
         std::forward<Value>(value), std::forward<Serializer>(serializer));\n\
 }\n\
@@ -39011,7 +39029,8 @@ concept serialize_bytes_compatible =\n\
     });\n\
 template<typename Serializer, typename BytesLike>\n\
 requires serialize_bytes_compatible<Serializer, BytesLike>\n\
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes) {\n\
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)\n\
+    -> ::ser::rusty_ext::__ser_result_t<Serializer> {\n\
     if constexpr (requires {\n\
         std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));\n\
     }) {\n\
@@ -39105,7 +39124,8 @@ decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes) {\n\
 namespace impls {\n\
 namespace rusty_ext {\n\
 template<typename Value, typename Serializer>\n\
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {\n\
+auto serialize(Value&& value, Serializer&& serializer)\n\
+    -> ::ser::rusty_ext::__ser_result_t<Serializer> {\n\
     return ::ser::rusty_ext::serialize_value(\n\
         std::forward<Value>(value), std::forward<Serializer>(serializer));\n\
 }\n\
