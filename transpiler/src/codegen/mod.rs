@@ -3162,7 +3162,7 @@ impl CodeGen {
             if self.module_name.is_some() {
                 if output_defines_local_token_namespace(&self.output) {
                     helper_text
-                        .push_str(runtime_path_fallback_helpers_text_for_local_token_module());
+                        .push_str(&runtime_path_fallback_helpers_text_for_local_token_module());
                 } else {
                     let runtime_helpers =
                         runtime_path_fallback_helpers_text_for_module(&self.output);
@@ -36482,8 +36482,26 @@ fn runtime_path_fallback_helpers_text_for_module(output: &str) -> String {
         .to_string()
 }
 
-fn runtime_path_fallback_helpers_text_for_local_token_module() -> &'static str {
-    r#"extern "C++" {
+fn runtime_path_fallback_helpers_text_for_local_token_module() -> String {
+    // The token-OWNER module (e.g. serde_test) emits its runtime helpers in the
+    // module body inside `extern "C++"`, so they don't redefine the imported
+    // `rusty::*` types — the canonical text below. Historically this carried a
+    // hand-reduced, divergent copy of the
+    // `ser::rusty_ext::{serialize,serialize_value,serialize_bytes}` dispatchers:
+    // notably a value-first `serialize_bytes(Value, Serializer)` (vs the
+    // serializer-first `serialize_bytes(Serializer, BytesLike)` every other
+    // module emits). Two structurally different overload families named
+    // `ser::rusty_ext::*` then collided in downstream TUs (test_derive imports
+    // serde_test): the value-first overload, bound with arguments swapped,
+    // recursed into `serialize_value` and produced a deduced-return cycle on
+    // `Box<[u8]>` (`serialize_value<...> with deduced return type cannot be used
+    // before it is defined`). To keep exactly one structural definition of the
+    // ser dispatchers across the build, splice the SAME elaborate
+    // `namespace ser { ... }` block the other modules emit into this text
+    // (replacing the canonical ser block), while keeping everything else — the
+    // `extern "C++"` wrapper, the rusty helper functions, and the real-`::token::`
+    // `de::` block — unchanged.
+    let canonical: &str = r#"extern "C++" {
 namespace rusty {
 namespace cmp {
 enum class Ordering { Less, Equal, Greater };
@@ -36886,7 +36904,45 @@ decltype(auto) deserialize_in_place(
 
 } // extern "C++"
 
-"#
+"#;
+    splice_elaborate_ser_block_into_local_token_helpers(canonical)
+}
+
+/// Replace the `namespace ser { ... }` block in the local-token helper text with
+/// the elaborate one emitted by [`runtime_path_fallback_helpers_text`], so the
+/// token-owner module and every other module share one structural definition of
+/// `ser::rusty_ext::{serialize,serialize_value,serialize_bytes}`. A single shape
+/// prevents the value-first/serializer-first `serialize_bytes` overload collision
+/// that caused the `Box<[u8]>` deduced-return recursion cycle, and gives the owner
+/// the elaborate `serialize_value` byte branch so boxed byte slices terminate at
+/// `serializer.serialize_bytes(...)` instead of the cyclic `serialize` edge. The
+/// spliced block keeps real `::token::` references (the owner declares them); its
+/// `requires {}`-guarded token-fallback branches are SFINAE-inert where
+/// `::token::Token_Bytes` is not in scope.
+fn splice_elaborate_ser_block_into_local_token_helpers(canonical: &str) -> String {
+    let elaborate = runtime_path_fallback_helpers_text();
+    let e_start = elaborate
+        .find("namespace ser {\n")
+        .expect("elaborate runtime helpers: `namespace ser {` block not found");
+    let e_end = elaborate[e_start..]
+        .find("\n// DefaultHasher stub")
+        .map(|rel| e_start + rel + 1)
+        .expect("elaborate runtime helpers: end of `namespace ser` block not found");
+    let elaborate_ser_block = &elaborate[e_start..e_end];
+
+    let c_start = canonical
+        .find("namespace ser {\n")
+        .expect("local-token helpers: `namespace ser {` block not found");
+    let c_end = canonical[c_start..]
+        .find("namespace de {")
+        .map(|rel| c_start + rel)
+        .expect("local-token helpers: `namespace de {` block not found");
+
+    let mut out = String::with_capacity(canonical.len() + elaborate_ser_block.len());
+    out.push_str(&canonical[..c_start]);
+    out.push_str(elaborate_ser_block);
+    out.push_str(&canonical[c_end..]);
+    out
 }
 
 fn runtime_path_fallback_helpers_text() -> &'static str {
