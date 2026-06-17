@@ -3778,7 +3778,7 @@ struct TableLayout {
     size_t ctrl_align;
 
     template<typename T>
-    static TableLayout new_();
+    static constexpr TableLayout new_();
     rusty::Option<std::tuple<rusty::alloc::Layout, size_t>> calculate_layout_for(size_t buckets) const;
 
     // TODO: derive(Copy)
@@ -4221,14 +4221,14 @@ struct RawTable {
 
 
     static RawTable<T, A> new_() {
-        return RawTable<T, A>(rusty::clone(rusty::clone(RawTableInner::NEW)), rusty::alloc::Global{}, rusty::PhantomData<T>{});
+        return RawTable<T, A>(RawTableInner::new_(), rusty::alloc::Global{}, rusty::PhantomData<T>{});
     }
     static RawTable<T, A> with_capacity(size_t capacity) {
         return RawTable<T, A>::with_capacity_in(std::move(capacity), rusty::alloc::Global{});
     }
-    static inline const TableLayout TABLE_LAYOUT = TableLayout::new_<T>();
+    static constexpr TableLayout TABLE_LAYOUT = TableLayout::new_<T>();
     static RawTable<T, A> new_in(A alloc) {
-        return RawTable<T, A>(rusty::clone(rusty::clone(RawTableInner::NEW)), std::move(alloc), rusty::PhantomData<T>{});
+        return RawTable<T, A>(RawTableInner::new_(), std::move(alloc), rusty::PhantomData<T>{});
     }
     static rusty::Result<RawTable<T, A>, rusty::collections::TryReserveError> new_uninitialized(A alloc, size_t buckets, const auto& fallibility) {
         // debug_assert: ((buckets) != 0 && ((buckets) & ((buckets) - 1)) == 0)
@@ -4332,7 +4332,7 @@ struct RawTable {
     void shrink_to(size_t min_size, const auto& hasher) {
         auto min_size_shadow1 = std::max<size_t>(this->table.items, std::move(min_size));
         if (rusty::detail::deref_if_pointer_like(min_size_shadow1) == 0) {
-            auto old_inner = rusty::mem::replace(this->table, rusty::clone(rusty::clone(RawTableInner::NEW)));
+            auto old_inner = rusty::mem::replace(this->table, RawTableInner::new_());
             // @unsafe
             {
                 old_inner.template drop_inner_table<T, A>(this->alloc, rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)));
@@ -4583,7 +4583,7 @@ return this->find(hashes.at(i), [&](auto&& k) -> bool { return eq(std::move(i), 
     }
     RawDrain<T, A> drain_iter_from(RawIter<T> iter) {
         assert(true);  // assert((iter . len () == self . len ()));...
-        return RawDrain<T, A>(std::move(iter), rusty::mem::replace(this->table, rusty::clone(rusty::clone(RawTableInner::NEW))), rusty::ptr::NonNull<RawTableInner>::from(&this->table), rusty::PhantomData<const RawTable<T, A>&>{});
+        return RawDrain<T, A>(std::move(iter), rusty::mem::replace(this->table, RawTableInner::new_()), rusty::ptr::NonNull<RawTableInner>::from(&this->table), rusty::PhantomData<const RawTable<T, A>&>{});
     }
     RawIntoIter<T, A> into_iter_from(RawIter<T> iter) {
         assert(true);  // assert((iter . len () == self . len ()));...
@@ -4621,7 +4621,7 @@ return rusty::Some(std::make_tuple(NonNull<std::remove_pointer_t<std::remove_ref
     }
     void clone_from(const RawTable<T, A>& source) {
         if (source.table.is_empty_singleton()) {
-            auto old_inner = rusty::mem::replace(this->table, rusty::clone(rusty::clone(RawTableInner::NEW)));
+            auto old_inner = rusty::mem::replace(this->table, RawTableInner::new_());
             // @unsafe
             {
                 old_inner.template drop_inner_table<T, A>(this->alloc, rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT)));
@@ -4912,7 +4912,7 @@ void ProbeSeq::move_next(size_t bucket_mask) {
 }
 
 template<typename T>
-TableLayout TableLayout::new_() {
+constexpr TableLayout TableLayout::new_() {
     const auto layout = Layout::new_<T>();
     return TableLayout{.size = layout.size, .ctrl_align = (layout.align > rusty::clone(Group::WIDTH) ? layout.align : Group::WIDTH)};
 }
@@ -5015,7 +5015,7 @@ template<typename A>
     requires (rusty::alloc::Allocator<A>)
 auto RawTableInner::fallible_with_capacity(const A& alloc, const auto& table_layout, size_t capacity, const auto& fallibility) -> rusty::Result<RawTableInner, rusty::collections::TryReserveError> {
     if (rusty::detail::deref_if_pointer_like(capacity) == static_cast<size_t>(0)) {
-        return rusty::Result<RawTableInner, rusty::collections::TryReserveError>::Ok(rusty::clone(rusty::clone(RawTableInner::NEW)));
+        return rusty::Result<RawTableInner, rusty::collections::TryReserveError>::Ok(RawTableInner::new_());
     } else {
         // @unsafe
         {
@@ -5484,7 +5484,7 @@ RawIterHashIndices RawIterHashIndices::default_() {
     using Item = typename RawIterHashIndices::Item;
     // @unsafe
     {
-        return RawIterHashIndices::new_(rusty::detail::deref_if_pointer_like(RawTableInner::NEW), static_cast<uint64_t>(0));
+        return RawIterHashIndices::new_(rusty::detail::deref_if_pointer_like(RawTableInner::new_()), static_cast<uint64_t>(0));
     }
 }
 
