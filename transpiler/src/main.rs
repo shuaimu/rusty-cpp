@@ -2282,6 +2282,7 @@ fn append_parity_runner_main(
     allow_empty_tests: bool,
     work_dir: &Path,
     emit_runtime_clear: bool,
+    crate_name: &str,
 ) -> Result<(), String> {
     if test_entries.is_empty() {
         let baseline_ran_tests = if no_baseline {
@@ -2319,6 +2320,19 @@ fn append_parity_runner_main(
     }
 
     test_entries.sort_by(|a, b| a.fn_name.cmp(&b.fn_name));
+    // For a namespace-wrapped crate (e.g. serde_bytes, see
+    // `transpile::crate_is_namespace_wrapped`), the exported `rusty_test_*`
+    // wrappers live under `namespace <crate>` in the emitted module, so the
+    // runner — which imports the module and calls them from global scope — must
+    // qualify the CALL with that namespace. The bare wrapper name is still used
+    // as the `--rusty-single-test` string key; only the C++ call expression is
+    // prefixed. Non-wrapped crates emit wrappers at global scope → empty prefix
+    // → unchanged.
+    let wrapper_prefix = if transpile::crate_is_namespace_wrapped(crate_name) {
+        format!("{}::", crate_name)
+    } else {
+        String::new()
+    };
     runner_src.push_str("\n// ── Test runner ──\n");
     runner_src.push_str("int main(int argc, char** argv) {\n");
     runner_src
@@ -2330,8 +2344,8 @@ fn append_parity_runner_main(
     runner_src.push_str("        try {\n");
     for entry in test_entries.iter() {
         runner_src.push_str(&format!(
-            "            if (test_name == \"{}\") {{ {}(); return 0; }}\n",
-            entry.fn_name, entry.fn_name
+            "            if (test_name == \"{}\") {{ {}{}(); return 0; }}\n",
+            entry.fn_name, wrapper_prefix, entry.fn_name
         ));
     }
     runner_src.push_str(
@@ -2355,13 +2369,13 @@ fn append_parity_runner_main(
         } else {
             if emit_runtime_clear {
                 runner_src.push_str(&format!(
-                    "    rusty::mem::clear_all_forgotten_addresses();\n    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
-                    entry.fn_name, entry.label
+                    "    rusty::mem::clear_all_forgotten_addresses();\n    try {{ {}{}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
+                    wrapper_prefix, entry.fn_name, entry.label
                 ));
             } else {
                 runner_src.push_str(&format!(
-                    "    try {{ {}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
-                    entry.fn_name, entry.label
+                    "    try {{ {}{}(); std::cout << \"  {} PASSED\" << std::endl; pass++; }}\n",
+                    wrapper_prefix, entry.fn_name, entry.label
                 ));
             }
             runner_src.push_str(&format!(
@@ -2594,6 +2608,7 @@ fn run_stage_d_module_build(
     include_dir: &Path,
     cpp_compiler: &str,
     generated_cppm_files: &[GeneratedCppmArtifact],
+    crate_name: &str,
 ) -> Result<(), String> {
     let runner_path = work_dir.join("runner.cpp");
     let binary_path = work_dir.join("runner");
@@ -2915,6 +2930,7 @@ fn run_stage_d_module_build(
         args.allow_empty_tests || allow_empty_due_to_skip,
         work_dir,
         !args.import_std,
+        crate_name,
     )?;
 
     fs::write(&runner_path, &runner_src).map_err(|e| format!("Failed to write runner: {}", e))?;
@@ -4106,6 +4122,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             &include_dir,
             &cpp_compiler,
             &generated_cppm_files,
+            crate_name,
         )?;
     }
     if should_stop("build") {
