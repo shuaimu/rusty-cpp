@@ -3836,7 +3836,50 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             }
         }
 
-        for (target, source) in expanded_sources.iter() {
+        // Stage C target transpile. Each target is INDEPENDENT — it reads the
+        // (now-fixed) dependency manifests `ufcs_dep_manifest_paths` and the
+        // read-only context, and writes only its own cppm + manifest, never
+        // another target's. The codegen is pure (no global mutable state), so
+        // targets can transpile concurrently. (Deps above stay sequential —
+        // each consumes all prior deps' manifests, a strict chain.) Parallelism
+        // is opt-in via RUSTY_CPP_TRANSPILE_JOBS (default 1 = sequential): the
+        // parity matrix already parallelizes across crates, so intra-crate
+        // transpile parallelism is for single-crate runs and the matrix tail.
+        // Returns (Some(artifact)|None-if-skipped, progress-log) so output stays
+        // ordered after the concurrent join.
+        //
+        // `TranspileOptions` itself is !Send/!Sync — it carries `syn` AST in its
+        // `cross_file_*` fields (proc_macro2 spans are deliberately thread-
+        // hostile). Those fields are ALWAYS empty in the parity pipeline (built
+        // as `Vec::new()` above), so we capture only the Send-safe scalar
+        // option fields here and rebuild a fresh `TranspileOptions` per target
+        // inside the closure with `..Default::default()` (empty `cross_file_*`,
+        // constructed in-thread, never crossing the boundary). The other
+        // captures — type_map (HashMap), extension_method_hints (HashSet),
+        // the alias/import maps, crate_name — are all Send+Sync.
+        let opt_by_value = transpile_options.by_value_cycle_breaking_prototype;
+        let opt_cpp_index = transpile_options.cpp_module_symbol_index.clone();
+        let opt_cpp_index_sources = transpile_options.cpp_module_symbol_index_sources.clone();
+        let opt_import_std = transpile_options.use_import_std_in_modules;
+        let opt_prefer_unit = transpile_options.prefer_rusty_unit_alias;
+        let opt_prefer_views = transpile_options.prefer_rusty_view_aliases;
+        let opt_interface_traits = transpile_options.interface_traits;
+        let opt_inline_rust = transpile_options.inline_rust_block;
+        let opt_crate_module_names = transpile_options.crate_module_names.clone();
+        let opt_cxx_namespace = transpile_options.cxx_namespace.clone();
+        let opt_auto_namespace = transpile_options.auto_namespace;
+        let opt_incremental = args.incremental_transpile;
+        debug_assert!(
+            transpile_options.cross_file_enums.is_empty()
+                && transpile_options.cross_file_impl_blocks.is_empty()
+                && transpile_options.cross_file_structs.is_empty()
+                && transpile_options.cross_file_type_aliases.is_empty(),
+            "parity transpile assumes empty cross_file_* (syn) fields"
+        );
+        let transpile_one = |target: &metadata::CrateTarget,
+                             source: &str|
+         -> Result<(Option<GeneratedCppmArtifact>, String), String> {
+            let mut log = String::new();
             let target_dir = target_dirs.get(&target.module_name).ok_or_else(|| {
                 format!(
                     "Missing target artifact directory for module '{}'",
@@ -3848,9 +3891,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             // (quickcheck, rand, etc.) should be skipped, not fail the
             // whole parity test. The lib and dependency targets still
             // fail on unresolved externals because they're essential.
-            let is_skippable_target =
-                matches!(target.kind, metadata::TargetKind::Test);
-            if args.incremental_transpile && cppm_path.exists() {
+            let is_skippable_target = matches!(target.kind, metadata::TargetKind::Test);
+            if opt_incremental && cppm_path.exists() {
                 let reused = std::fs::read_to_string(&cppm_path).map_err(|e| {
                     format!(
                         "Failed to read transpiled output {}: {}",
@@ -3861,19 +3903,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 if is_skippable_target {
                     let unresolved = collect_external_crate_todo_markers(&reused);
                     if !unresolved.is_empty() {
-                        eprintln!(
-                            "  Skipping target '{}': unresolved external crates {} (no test wrappers from this target)",
+                        return Ok((None, format!(
+                            "  Skipping target '{}': unresolved external crates {} (no test wrappers from this target)\n",
                             target.module_name,
                             unresolved.join(", ")
-                        );
-                        continue;
+                        )));
                     }
                     if cpp_has_invalid_codegen_pattern(&reused) {
-                        eprintln!(
-                            "  Skipping target '{}': transpiled output contains invalid `<auto>` template arguments (no test wrappers from this target)",
+                        return Ok((None, format!(
+                            "  Skipping target '{}': transpiled output contains invalid `<auto>` template arguments (no test wrappers from this target)\n",
                             target.module_name
-                        );
-                        continue;
+                        )));
                     }
                 } else {
                     ensure_no_external_crate_todos(
@@ -3882,28 +3922,42 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                         &cppm_path,
                     )?;
                 }
-                println!(
-                    "  {}: reused {} lines ← {}",
+                log.push_str(&format!(
+                    "  {}: reused {} lines ← {}\n",
                     target.module_name,
                     reused.lines().count(),
                     cppm_path.display()
-                );
-                generated_cppm_files.push(GeneratedCppmArtifact {
+                ));
+                return Ok((Some(GeneratedCppmArtifact {
                     path: cppm_path,
                     module_name: target.module_name.clone(),
                     is_dependency: false,
                     is_test_target: matches!(target.kind, metadata::TargetKind::Test),
-                });
-                continue;
+                }), log));
             }
-            let mut target_options = transpile_options.clone();
-            target_options.external_crate_module_aliases = flattened_dependency_aliases.clone();
-            // UFCS cross-crate (book § 3.2.7): the target consumes every
-            // dependency's trait manifest so calls to a dependency's trait
-            // methods classify + module-qualify (`<dep>::<Tr>_::m`).
-            target_options.dependency_ufcs_trait_manifests = ufcs_dep_manifest_paths.clone();
-            target_options.emit_ufcs_trait_manifest_path =
-                Some(target_dir.join("ufcs-traits.json"));
+            // Rebuild from the Send-safe scalar captures (see note above);
+            // `..Default::default()` supplies is_dependency=false + empty
+            // cross_file_* (constructed in-thread). UFCS cross-crate
+            // (book § 3.2.7): the target consumes every dependency's trait
+            // manifest so calls to a dependency's trait methods classify +
+            // module-qualify (`<dep>::<Tr>_::m`).
+            let target_options = transpile::TranspileOptions {
+                by_value_cycle_breaking_prototype: opt_by_value,
+                cpp_module_symbol_index: opt_cpp_index.clone(),
+                cpp_module_symbol_index_sources: opt_cpp_index_sources.clone(),
+                external_crate_module_aliases: flattened_dependency_aliases.clone(),
+                dependency_ufcs_trait_manifests: ufcs_dep_manifest_paths.clone(),
+                emit_ufcs_trait_manifest_path: Some(target_dir.join("ufcs-traits.json")),
+                use_import_std_in_modules: opt_import_std,
+                prefer_rusty_unit_alias: opt_prefer_unit,
+                prefer_rusty_view_aliases: opt_prefer_views,
+                interface_traits: opt_interface_traits,
+                inline_rust_block: opt_inline_rust,
+                crate_module_names: opt_crate_module_names.clone(),
+                cxx_namespace: opt_cxx_namespace.clone(),
+                auto_namespace: opt_auto_namespace,
+                ..Default::default()
+            };
             let mut cpp = transpile::transpile_full_with_options(
                 source,
                 Some(&target.module_name),
@@ -3941,19 +3995,17 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             if is_skippable_target {
                 let unresolved = collect_external_crate_todo_markers(&cpp);
                 if !unresolved.is_empty() {
-                    eprintln!(
-                        "  Skipping target '{}': unresolved external crates {} (no test wrappers from this target)",
+                    return Ok((None, format!(
+                        "  Skipping target '{}': unresolved external crates {} (no test wrappers from this target)\n",
                         target.module_name,
                         unresolved.join(", ")
-                    );
-                    continue;
+                    )));
                 }
                 if cpp_has_invalid_codegen_pattern(&cpp) {
-                    eprintln!(
-                        "  Skipping target '{}': transpiled output contains invalid `<auto>` template arguments (no test wrappers from this target)",
+                    return Ok((None, format!(
+                        "  Skipping target '{}': transpiled output contains invalid `<auto>` template arguments (no test wrappers from this target)\n",
                         target.module_name
-                    );
-                    continue;
+                    )));
                 }
             } else {
                 ensure_no_external_crate_todos(
@@ -3964,18 +4016,62 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             }
             std::fs::write(&cppm_path, &cpp)
                 .map_err(|e| format!("Failed to write transpiled output: {}", e))?;
-            println!(
-                "  {}: {} lines → {}",
+            log.push_str(&format!(
+                "  {}: {} lines → {}\n",
                 target.module_name,
                 cpp.lines().count(),
                 cppm_path.display()
-            );
-            generated_cppm_files.push(GeneratedCppmArtifact {
+            ));
+            Ok((Some(GeneratedCppmArtifact {
                 path: cppm_path,
                 module_name: target.module_name.clone(),
                 is_dependency: false,
                 is_test_target: matches!(target.kind, metadata::TargetKind::Test),
-            });
+            }), log))
+        };
+
+        let transpile_jobs = std::env::var("RUSTY_CPP_TRANSPILE_JOBS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(1);
+        if transpile_jobs <= 1 {
+            for (target, source) in expanded_sources.iter() {
+                let (artifact, log) = transpile_one(target, source)?;
+                print!("{}", log);
+                if let Some(artifact) = artifact {
+                    generated_cppm_files.push(artifact);
+                }
+            }
+        } else {
+            // Fan out independent targets, bounded by `transpile_jobs`, joining
+            // each chunk before the next. Results are consumed in target order
+            // so the progress log and `generated_cppm_files` stay deterministic.
+            for chunk in expanded_sources.chunks(transpile_jobs) {
+                let results: Vec<Result<(Option<GeneratedCppmArtifact>, String), String>> =
+                    std::thread::scope(|scope| {
+                        chunk
+                            .iter()
+                            .map(|(target, source)| {
+                                scope.spawn(|| transpile_one(target, source.as_str()))
+                            })
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .map(|handle| {
+                                handle
+                                    .join()
+                                    .unwrap_or_else(|_| Err("transpile thread panicked".to_string()))
+                            })
+                            .collect()
+                    });
+                for result in results {
+                    let (artifact, log) = result?;
+                    print!("{}", log);
+                    if let Some(artifact) = artifact {
+                        generated_cppm_files.push(artifact);
+                    }
+                }
+            }
         }
     }
     if should_stop("transpile") {
