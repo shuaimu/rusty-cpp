@@ -3690,7 +3690,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: args.by_value_cycle_breaking_prototype,
         is_dependency: false,
-        ufcs_traits: std::env::var("RUSTY_CPP_UFCS_TRAITS").is_ok(),
+        ufcs_traits: transpile::ufcs_traits_enabled(),
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: args.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),
@@ -4168,7 +4168,7 @@ fn main() {
     let transpile_options = transpile::TranspileOptions {
         by_value_cycle_breaking_prototype: cli.by_value_cycle_breaking_prototype,
         is_dependency: false,
-        ufcs_traits: std::env::var("RUSTY_CPP_UFCS_TRAITS").is_ok(),
+        ufcs_traits: transpile::ufcs_traits_enabled(),
         cpp_module_symbol_index,
         cpp_module_symbol_index_sources: cli.cpp_module_index.clone(),
         external_crate_module_aliases: HashMap::new(),

@@ -1449,6 +1449,12 @@ impl CodeGen {
             indent: 0,
             is_sub_codegen: false,
             is_dependency_module: false,
+            // This CodeGen field default is ALWAYS overridden in the real
+            // transpile path via set_ufcs_traits(options.ufcs_traits)
+            // (transpile.rs), so it has no production effect — the binary/API
+            // default lives in main.rs (`ufcs_traits_enabled()`) and
+            // TranspileOptions::default(). Kept false so direct-`CodeGen::new()`
+            // unit tests of the legacy member/adapter path stay on that path.
             ufcs_traits: false,
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),

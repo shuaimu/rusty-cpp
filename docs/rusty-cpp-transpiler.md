@@ -1334,16 +1334,19 @@ wins,"* it belongs to clang, not the transpiler.
 - **Analyzer prerequisite: complete.** `StructBorrow` IR node, `Assign`-handler check, and
   move-of-borrowed reuse are in place and pinned by six tests
   (`tests/test_struct_ref_member_borrows.rs`).
-- **Transpiler codegen: implemented behind `RUSTY_CPP_UFCS_TRAITS` (default off).** All of the
+- **Transpiler codegen: DEFAULT ON (Phase-7 flip, 2026-06-16).** All of the
   pieces below are in place: trait emission (free-function declarations + interface `T` +
   `TAdapter`/`TAdapterRef`); impl emission (`impl Tr for U` → `Tr_::m(const U&, …)` + adapters);
   call-site classification + the three UFCS shapes (§3.2.3); `use`→`using`/`import` (§3.2.5);
   the associated-type traits map (§3.2.8); operator traits (§3.2.9); and the `dyn` coercions.
-  **Milestone (2026-06-16): `serde_core` compiles, builds, and runs flag-on (parity GREEN)**, as
-  do `serde_repr` and the smaller crates (either/tap/cfg-if/take_mut/arrayvec/semver/smallvec/
-  once_cell). Getting `serde_core` there required the §3.2.14 long-tail fixes. The flag stays off
-  pending the rest of the matrix (`serde_bytes`, `bitflags`, `itertools` have pre-existing,
-  non-UFCS blockers) before flipping the default.
+  UFCS trait lowering is now the production default; `RUSTY_CPP_UFCS_TRAITS=0/off/false/no` is an
+  opt-out escape hatch to the legacy member/adapter path (still compiled). The flip was authorized
+  by the parity matrix at **14/15** under the default: every crate green
+  (either/tap/cfg-if/take_mut/arrayvec/semver/smallvec/once_cell/pollster/`serde_bytes`/`serde_core`/
+  `serde`/`serde_repr`/`bitflags`) except `itertools`, which fails **flag-off too** (a pre-existing,
+  UFCS-independent transpile panic + multi-session default-body long tail) and is therefore carried
+  as a documented known-fail in `run_parity_matrix.sh` rather than a regression. Old member/adapter
+  path deletion is deferred to a separate post-flip cleanup (keeps the opt-out rollback trivial).
 - **Open extensions:** `&mut dyn T` mutable `StructBorrowMut`; trait upcasting emission;
   shared-body free function vs duplicate-inline for adapter bodies (now subsumed — both
   adapters already forward to the one `Tr_::m`); diagnostics quality for C++ overload
