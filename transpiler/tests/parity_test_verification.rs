@@ -877,7 +877,7 @@ fn test_stop_after_transpile_creates_cppm() {
     let cppm_path = cppm_artifact_path(work_dir.path(), "either");
     assert!(cppm_path.exists());
     let cppm = std::fs::read_to_string(cppm_path).expect("failed to read transpiled cppm");
-    assert!(cppm.contains("export void rusty_test_basic()"));
+    assert!(cppm.contains("export void rusty_test_either_basic()"));
 }
 
 #[test]
@@ -905,7 +905,7 @@ fn test_stop_after_transpile_collects_wrappers_from_libtests_and_test_targets() 
 
     let lib_cppm = std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "mixed_wrappers"))
         .expect("failed to read transpiled lib target");
-    assert!(lib_cppm.contains("rusty_test_tests_unit_add"));
+    assert!(lib_cppm.contains("rusty_test_mixed_wrappers_tests_unit_add"));
     assert!(lib_cppm.contains("tests::unit_add();"));
     assert!(
         !lib_cppm.contains("Rust-only libtest marker without emitted function: tests::unit_add")
@@ -913,7 +913,7 @@ fn test_stop_after_transpile_collects_wrappers_from_libtests_and_test_targets() 
 
     let integ_cppm = std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "integ"))
         .expect("failed to read transpiled integration target");
-    assert!(integ_cppm.contains("rusty_test_integ_add"));
+    assert!(integ_cppm.contains("rusty_test_integ_integ_add"));
 }
 
 #[test]
@@ -976,7 +976,7 @@ fn test_stop_after_transpile_collects_wrappers_for_unit_only_crate() {
     let lib_cppm =
         std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "unit_only_wrappers"))
             .expect("failed to read transpiled lib target");
-    assert!(lib_cppm.contains("rusty_test_tests_unit_add_only"));
+    assert!(lib_cppm.contains("rusty_test_unit_only_wrappers_tests_unit_add_only"));
     assert!(lib_cppm.contains("tests::unit_add_only();"));
 }
 
@@ -1015,7 +1015,7 @@ fn test_stop_after_transpile_collects_wrappers_for_integration_only_crate() {
 
     let integ_cppm = std::fs::read_to_string(cppm_artifact_path(work_dir.path(), "integ"))
         .expect("failed to read transpiled integration target");
-    assert!(integ_cppm.contains("rusty_test_integ_add_only"));
+    assert!(integ_cppm.contains("rusty_test_integ_integ_add_only"));
 }
 
 #[test]
@@ -1051,7 +1051,7 @@ fn test_stop_after_build_succeeds_for_integration_only_crate() {
 
     let runner_cpp =
         std::fs::read_to_string(runner_cpp_path(work_dir.path())).expect("failed to read runner");
-    assert!(runner_cpp.contains("rusty_test_integ_add_only();"));
+    assert!(runner_cpp.contains("rusty_test_integ_integ_add_only();"));
 }
 
 #[test]
@@ -1373,10 +1373,10 @@ fn test_stop_after_build_generates_runner_entries_from_discovered_wrappers() {
     let runner_cpp =
         std::fs::read_to_string(work_dir.path().join("runner.cpp")).expect("failed to read runner");
     let integ_pos = runner_cpp
-        .find("rusty_test_integ_add();")
+        .find("rusty_test_integ_integ_add();")
         .expect("runner should invoke integration wrapper");
     let unit_pos = runner_cpp
-        .find("rusty_test_tests_unit_add();")
+        .find("rusty_test_mixed_wrappers_tests_unit_add();")
         .expect("runner should invoke unit-test wrapper");
 
     assert!(
