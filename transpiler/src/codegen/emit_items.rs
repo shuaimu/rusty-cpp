@@ -3453,6 +3453,28 @@ impl CodeGen {
                 "template <class B> struct {}Traits;",
                 trait_name
             ));
+            // STEP B (task #39): reference/pointer forwarding partial specs —
+            // the type-level analog of serde's blanket `impl Tr for &mut S`
+            // (associated types forward to the pointee). When a generic
+            // `S: Tr` is instantiated with a `&mut`-derived C++ pointer `U*`
+            // (or reference `U&`), `<Tr>Traits<S>` must still resolve, so
+            // forward each assoc type to `<Tr>Traits<U>`. Inert unless something
+            // instantiates `<Tr>Traits<T*>`/`<T&>` (only the STEP-A routing of a
+            // pointer/reference-bound param does).
+            for ptr_or_ref in ["S*", "S&"] {
+                let mut spec = format!(
+                    "template <class S> struct {}Traits<{}> {{ ",
+                    trait_name, ptr_or_ref
+                );
+                for name in &trait_assoc_type_names {
+                    spec.push_str(&format!(
+                        "using {0} = typename {1}Traits<S>::{0}; ",
+                        name, trait_name
+                    ));
+                }
+                spec.push_str("};");
+                self.writeln(&spec);
+            }
         }
 
         self.pop_type_param_scope();

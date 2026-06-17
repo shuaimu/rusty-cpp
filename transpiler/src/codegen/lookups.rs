@@ -2656,4 +2656,46 @@ impl CodeGen {
         }
         Some(first.0.clone())
     }
+
+    /// Disambiguate a multiply-declared associated name via the OWNER type
+    /// param's trait bound. `lookup_unique_trait_for_assoc_name` returns `None`
+    /// when an assoc name (e.g. serde's `Ok`/`Error`) is declared by several
+    /// traits. But if the owner is a concrete type param `S` bound by exactly
+    /// one trait that declares the name (`fn serialize<S: Serializer>` →
+    /// `Serializer` is the only bound declaring `Ok`/`Error`), the projection
+    /// `S::Ok` is unambiguous and can route through `<Trait>Traits<S>`. Returns
+    /// the `trait_associated_type_names` key (short trait name) iff exactly one
+    /// of `type_param`'s bound traits declares `assoc_name`.
+    pub(super) fn lookup_trait_for_assoc_via_param_bound(
+        &self,
+        type_param: &str,
+        assoc_name: &str,
+    ) -> Option<String> {
+        let mut matched_keys: Vec<String> = Vec::new();
+        for scope in self.trait_bound_type_param_scopes.iter().rev() {
+            for (bound_trait, bound_param) in scope {
+                if bound_param != type_param {
+                    continue;
+                }
+                // `bound_trait` may be qualified (`a::b::Serializer`); the
+                // `trait_associated_type_names` keys are short names. Match on
+                // the last segment (mirrors `type_param_has_trait_bound`).
+                let bound_short = bound_trait.rsplit("::").next().unwrap_or(bound_trait);
+                for (trait_key, names) in &self.trait_associated_type_names {
+                    let key_short = trait_key.rsplit("::").next().unwrap_or(trait_key);
+                    if (key_short == bound_short || trait_key == bound_trait)
+                        && names.iter().any(|n| n == assoc_name)
+                        && !matched_keys.contains(trait_key)
+                    {
+                        matched_keys.push(trait_key.clone());
+                    }
+                }
+            }
+        }
+        if matched_keys.len() == 1 {
+            matched_keys.into_iter().next()
+        } else {
+            None
+        }
+    }
 }

@@ -34230,8 +34230,16 @@ impl CodeGen {
                 // Skip if the AssocName contains template args (already
                 // a complex form we shouldn't touch).
                 if !assoc_name.contains('<') && !assoc_name.is_empty() {
-                    if let Some(trait_name) =
-                        self.lookup_unique_trait_for_assoc_name(assoc_name)
+                    // When the assoc name is multiply-declared (serde's
+                    // `Ok`/`Error`), disambiguate via the owner param's trait
+                    // bound so `S::Ok` routes through `<Trait>Traits<S>` — which
+                    // (with the `<S*>`/`<S&>` forwarding specs, STEP B) resolves
+                    // even when S instantiates to a `&mut`-derived pointer.
+                    if let Some(trait_name) = self
+                        .lookup_unique_trait_for_assoc_name(assoc_name)
+                        .or_else(|| {
+                            self.lookup_trait_for_assoc_via_param_bound(first, assoc_name)
+                        })
                     {
                         // Qualify with the trait's home namespace path
                         // when one is known AND the qualified spelling
