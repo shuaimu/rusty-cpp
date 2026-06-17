@@ -1339,14 +1339,17 @@ wins,"* it belongs to clang, not the transpiler.
   `TAdapter`/`TAdapterRef`); impl emission (`impl Tr for U` → `Tr_::m(const U&, …)` + adapters);
   call-site classification + the three UFCS shapes (§3.2.3); `use`→`using`/`import` (§3.2.5);
   the associated-type traits map (§3.2.8); operator traits (§3.2.9); and the `dyn` coercions.
-  UFCS trait lowering is now the production default; `RUSTY_CPP_UFCS_TRAITS=0/off/false/no` is an
-  opt-out escape hatch to the legacy member/adapter path (still compiled). The flip was authorized
-  by the parity matrix at **14/15** under the default: every crate green
-  (either/tap/cfg-if/take_mut/arrayvec/semver/smallvec/once_cell/pollster/`serde_bytes`/`serde_core`/
-  `serde`/`serde_repr`/`bitflags`) except `itertools`, which fails **flag-off too** (a pre-existing,
-  UFCS-independent transpile panic + multi-session default-body long tail) and is therefore carried
-  as a documented known-fail in `run_parity_matrix.sh` rather than a regression. Old member/adapter
-  path deletion is deferred to a separate post-flip cleanup (keeps the opt-out rollback trivial).
+  UFCS trait lowering is now **unconditional** — the `RUSTY_CPP_UFCS_TRAITS` flag and its legacy
+  call-site routing were deleted post-flip (the flag field, the env opt-out, `set_ufcs_traits`, and
+  every `if self.ufcs_traits` gate are gone; UFCS emission always runs). The Interface+Adapter
+  emission STAYS — it is baseline `dyn Trait` dispatch infrastructure (the adapter vtable slot now
+  forwards to the static `Tr_::m(value_, …)` free function, so static and dynamic dispatch bottom out
+  together). The flip was authorized by the parity matrix at **14/15** under the default: every crate
+  green (either/tap/cfg-if/take_mut/arrayvec/semver/smallvec/once_cell/pollster/`serde_bytes`/
+  `serde_core`/`serde`/`serde_repr`/`bitflags`) except `itertools`, which fails the matrix for
+  pre-existing, UFCS-independent reasons (a transpile panic + multi-session default-body long tail)
+  and is carried as a documented known-fail in `run_parity_matrix.sh` (`KNOWN_FAIL_CRATES`) rather
+  than a regression.
 - **Open extensions:** `&mut dyn T` mutable `StructBorrowMut`; trait upcasting emission;
   shared-body free function vs duplicate-inline for adapter bodies (now subsumed — both
   adapters already forward to the one `Tr_::m`); diagnostics quality for C++ overload

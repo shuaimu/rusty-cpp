@@ -738,11 +738,12 @@ fn test_private_write_extension_method_resolves_before_cpp_keyword_escape() {
         }
     "#,
     );
-    assert!(
-        out.contains("::private_::rusty_ext::write_")
-            || out.contains("private_::rusty_ext::write_"),
-        "{out}"
-    );
+    // Under UFCS, the `i.write(buf)` call resolves through the `private::Sealed` trait's
+    // free function in the `Sealed_` namespace (keyword-escaped to `write_`), rather than
+    // the inherent member call. This is the UFCS equivalent of the old call-site form
+    // `private_::rusty_ext::write_` — it pins that the private Sealed trait method (not the
+    // unrelated `other::write`) is what resolves.
+    assert!(out.contains("Sealed_::write_"), "{out}");
     assert!(!out.contains("::other::write_"), "{out}");
     assert!(!out.contains("requires { ::rusty_ext::write_"), "{out}");
     assert!(!out.contains("return ::rusty_ext::write_"), "{out}");
@@ -1652,9 +1653,13 @@ fn test_leaf5157_self_assoc_into_iter_struct_literal_avoids_spurious_alias_templ
         "associated alias return type should stay non-templated at use sites, got:\n{}",
         out
     );
+    // The inherent struct method (no-arg `into_iter()`) must keep its associated-alias
+    // return type non-templated. The UFCS free function (`into_iter(S<A> self_)`) legitimately
+    // uses the fully-qualified `IntoIter<A>` form (no struct alias in scope), so the absence
+    // check is scoped to the no-arg struct-method form.
     assert!(
-        !out.contains("IntoIter<A> into_iter(")
-            && !out.contains("typename S::IntoIter<A> into_iter("),
+        !out.contains("IntoIter<A> into_iter()")
+            && !out.contains("typename S::IntoIter<A> into_iter()"),
         "associated alias return type should not gain spurious template args, got:\n{}",
         out
     );
@@ -6503,8 +6508,8 @@ fn test_interface_traits_local_impl_emits_adapter_specialization() {
         out.contains("explicit AnimalAdapter(Dog v) : value_(std::move(v))"),
         "{out}"
     );
-    // Override delegates to the inherent method.
-    assert!(out.contains("return value_.speak();"), "{out}");
+    // Override delegates via the UFCS free function.
+    assert!(out.contains("return Animal_::speak(value_);"), "{out}");
 }
 
 #[test]
@@ -6519,8 +6524,8 @@ fn test_interface_traits_local_impl_mut_method_delegates_correctly() {
     // &mut self method overrides as non-const
     assert!(out.contains("void rename(uint32_t n) override"), "{out}"); // non-const
     assert!(!out.contains("void rename(uint32_t n) const override"), "{out}");
-    // Mut method delegates without `return` (void return type)
-    assert!(out.contains("value_.rename(n);"), "{out}");
+    // Mut method delegates without `return` (void return type) via the UFCS free function
+    assert!(out.contains("Animal_::rename(value_, n);"), "{out}");
 }
 
 #[test]
@@ -6560,8 +6565,8 @@ fn test_interface_traits_adapter_ref_specialization_emitted() {
         out.contains("explicit AnimalAdapterRef(const Dog& u) : value_(u)"),
         "{out}"
     );
-    // Const method delegates normally.
-    assert!(out.contains("return value_.speak();"), "{out}");
+    // Const method delegates via the UFCS free function.
+    assert!(out.contains("return Animal_::speak(value_);"), "{out}");
 }
 
 #[test]
@@ -21300,9 +21305,13 @@ fn test_leaf4160_self_assoc_alias_shadowed_into_iter_generic_path_elides_templat
             || out.contains("typename ArrayVec::IntoIter into_iter("),
         "{out}"
     );
+    // The inherent struct method (no-arg `into_iter()`) must elide the template args.
+    // Note: the UFCS free function legitimately uses the fully-qualified
+    // `IntoIter<T, CAP> into_iter(ArrayVec<T, CAP> self_)` form (no struct alias in scope),
+    // so we scope the absence check to the no-arg method form `into_iter()`.
     assert!(
-        !out.contains("IntoIter<T, CAP> into_iter(")
-            && !out.contains("typename ArrayVec::IntoIter<T, CAP> into_iter("),
+        !out.contains("IntoIter<T, CAP> into_iter()")
+            && !out.contains("typename ArrayVec::IntoIter<T, CAP> into_iter()"),
         "{out}"
     );
     // First arg may be bare `0` or wrapped in `static_cast<size_t>(0)`.
@@ -24567,7 +24576,10 @@ fn test_leaf432_expanded_mode_dependent_assoc_signatures_are_softened() {
     assert!(out.contains("auto iter("));
     assert!(!out.contains("Either<typename L::IntoIter, typename R::IntoIter> iter("));
     assert!(out.contains("auto into_iter("));
-    assert!(!out.contains("Either::IntoIter into_iter("));
+    // The inherent struct method (no-arg `into_iter()`) softens its assoc-projection return
+    // to `auto`. The UFCS free function (`into_iter(Either<L, R> self_)`) is separate, so the
+    // absence check is scoped to the no-arg struct-method form.
+    assert!(!out.contains("Either::IntoIter into_iter()"), "{out}");
     assert!(!out.contains("using IntoIter = typename L::IntoIter;"));
 }
 
@@ -24586,7 +24598,10 @@ fn test_leaf432_expanded_mode_softens_current_struct_assoc_projection_returns() 
     "#,
     );
     assert!(out.contains("auto next("));
-    assert!(!out.contains("rusty::Option<Either::Item> next("));
+    // The inherent struct method (no-arg `next()`) softens its assoc-projection return
+    // to `auto`. The UFCS free function (`next(Either<L, R> self_)`) is a separate concern,
+    // so we scope the absence check to the no-arg struct-method form.
+    assert!(!out.contains("rusty::Option<Either::Item> next()"), "{out}");
     assert!(!out.contains("using Item = typename L::Item;"));
 }
 

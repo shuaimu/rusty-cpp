@@ -560,12 +560,8 @@ pub struct CodeGen {
     /// and leaks in dependencies that aren't compiled are harmless — so a
     /// transpile-time panic there would be a false failure.
     pub(crate) is_dependency_module: bool,
-    /// UFCS trait-lowering migration flag (book § 3.2; default false). When set,
-    /// trait impls are additionally emitted as free functions in `namespace
-    /// <Trait>_` (Phase 2). Off → existing member/adapter lowering only.
-    pub(crate) ufcs_traits: bool,
     /// UFCS Phase 3: per-method-name class (Inherent / TraitOnly / Both) over
-    /// the whole file, populated in `emit_file` when `ufcs_traits` is on. Drives
+    /// the whole file, populated in `emit_file`. Drives
     /// call-site lowering (trait-only crate methods → free call). Empty
     /// otherwise. The classifier only sees this crate's traits/impls, so std
     /// methods (`into`, `next`, …) are absent → never intercepted.
@@ -574,7 +570,7 @@ pub struct CodeGen {
     /// emission, early decls, and the dyn-adapter forward-to-static body are
     /// scoped to these — a crate that merely *implements* a prelude/std trait
     /// (`Clone`, `Display`, …) keeps the non-UFCS lowering for it. Populated in
-    /// `emit_file` when `ufcs_traits` is on; empty otherwise.
+    /// `emit_file`.
     pub(crate) ufcs_declared_trait_names: std::collections::HashSet<String>,
     /// UFCS Phase 7: method name → crate-declared traits whose CONCRETE
     /// (non-generic) impls emit a `<Tr>_::m` free function. When exactly
@@ -582,7 +578,7 @@ pub struct CodeGen {
     /// `<Tr>_::m` so an unqualified `m(recv)` can't be shadowed by a local
     /// variable of the same name (`let bits = x.bits()`). Excludes default
     /// methods + generic/blanket impls (no resolvable `<Tr>_::m`).
-    /// Populated in `emit_file` when `ufcs_traits` is on; empty otherwise.
+    /// Populated in `emit_file`.
     pub(crate) ufcs_method_trait_owners:
         HashMap<String, std::collections::BTreeSet<String>>,
     /// UFCS Phase 7 / § 3.2.13: `(trait, method)` pairs for which a
@@ -1449,13 +1445,6 @@ impl CodeGen {
             indent: 0,
             is_sub_codegen: false,
             is_dependency_module: false,
-            // This CodeGen field default is ALWAYS overridden in the real
-            // transpile path via set_ufcs_traits(options.ufcs_traits)
-            // (transpile.rs), so it has no production effect — the binary/API
-            // default lives in main.rs (`ufcs_traits_enabled()`) and
-            // TranspileOptions::default(). Kept false so direct-`CodeGen::new()`
-            // unit tests of the legacy member/adapter path stay on that path.
-            ufcs_traits: false,
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
             ufcs_method_trait_owners: HashMap::new(),
@@ -2097,10 +2086,6 @@ impl CodeGen {
         self.is_dependency_module = is_dependency;
     }
 
-    pub fn set_ufcs_traits(&mut self, ufcs_traits: bool) {
-        self.ufcs_traits = ufcs_traits;
-    }
-
     /// UFCS cross-crate (book § 3.2.7): provide dependency trait manifests to be
     /// merged into the classifier in `emit_file`.
     pub fn set_dependency_ufcs_trait_manifests(
@@ -2657,24 +2642,21 @@ impl CodeGen {
         log_emit("seed_cross_file_enum_metadata");
         // Pass 1b: collect local declared type names for extension-impl detection.
         self.collect_local_declared_types(&file.items, &[]);
-        if self.ufcs_traits {
-            // UFCS Phase 3: classify method names for call-site lowering.
-            self.ufcs_method_classes = crate::transpile::classify_method_names(&file.items);
-            // UFCS Phase 7: scope emission to crate-declared traits.
-            self.ufcs_declared_trait_names =
-                crate::transpile::collect_declared_trait_names(&file.items);
-            // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
-            // emit a `<Tr>_::m` free function, for shim qualification.
-            self.ufcs_method_trait_owners =
-                crate::transpile::collect_concrete_trait_impl_method_owners(
-                    &file.items,
-                    &self.ufcs_declared_trait_names,
-                );
-            // UFCS cross-crate (book § 3.2.7): fold dependency trait manifests
-            // into the classifier so calls to a dependency's trait methods
-            // classify + module-qualify.
-            self.merge_dependency_ufcs_trait_manifests();
-        }
+        // UFCS Phase 3: classify method names for call-site lowering.
+        self.ufcs_method_classes = crate::transpile::classify_method_names(&file.items);
+        // UFCS Phase 7: scope emission to crate-declared traits.
+        self.ufcs_declared_trait_names =
+            crate::transpile::collect_declared_trait_names(&file.items);
+        // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
+        // emit a `<Tr>_::m` free function, for shim qualification.
+        self.ufcs_method_trait_owners = crate::transpile::collect_concrete_trait_impl_method_owners(
+            &file.items,
+            &self.ufcs_declared_trait_names,
+        );
+        // UFCS cross-crate (book § 3.2.7): fold dependency trait manifests
+        // into the classifier so calls to a dependency's trait methods
+        // classify + module-qualify.
+        self.merge_dependency_ufcs_trait_manifests();
         log_emit("collect_local_declared_types");
         // Pass 1b': Cluster C — detect parallel inherent impl blocks of the
         // same host type whose self-type args differ at positions consumed
@@ -3012,7 +2994,7 @@ impl CodeGen {
         // free-function declarations + `using namespace <Tr>_;` here —
         // after type forward-decls, before function bodies — so call sites can
         // resolve the unqualified `m(recv)` form to the trait free function.
-        // No-op when `ufcs_traits` is off. Definitions follow late, near the
+        // Definitions follow late, near the
         // adapter specializations.
         self.ufcs_def_dedupe_seen.clear();
         self.emit_ufcs_trait_impl_free_function_decls(&file.items, &[]);
@@ -3026,17 +3008,15 @@ impl CodeGen {
         // qualification owner map to only those, so a call site never qualifies
         // to a non-existent `<Tr>_::m` (a hard error, not SFINAE). Methods
         // pruned out fall through to the member call.
-        if self.ufcs_traits {
-            let mut owners = std::mem::take(&mut self.ufcs_method_trait_owners);
-            owners.retain(|method, traits| {
-                traits.retain(|t| {
-                    self.ufcs_emitted_trait_methods
-                        .contains(&(t.clone(), method.clone()))
-                });
-                !traits.is_empty()
+        let mut owners = std::mem::take(&mut self.ufcs_method_trait_owners);
+        owners.retain(|method, traits| {
+            traits.retain(|t| {
+                self.ufcs_emitted_trait_methods
+                    .contains(&(t.clone(), method.clone()))
             });
-            self.ufcs_method_trait_owners = owners;
-        }
+            !traits.is_empty()
+        });
+        self.ufcs_method_trait_owners = owners;
 
         self.push_deferred_method_definition_scope();
         let mut pending_alias_impl_owner_defs: Vec<String> = Vec::new();
@@ -3114,8 +3094,8 @@ impl CodeGen {
         self.emit_local_trait_adapter_specializations(&file.items);
         log_emit("emit_local_trait_adapter_specializations");
 
-        // UFCS trait migration, Phase 2 (book § 3.2.2): when `ufcs_traits` is
-        // on, additionally emit `impl Tr for U` methods as free functions in
+        // UFCS trait migration, Phase 2 (book § 3.2.2): emit
+        // `impl Tr for U` methods as free functions in
         // `namespace <Tr>_`. No-op when the flag is off.
         self.ufcs_def_dedupe_seen.clear();
         self.emit_ufcs_trait_impl_free_functions(&file.items, &[]);
@@ -11565,8 +11545,8 @@ impl CodeGen {
 
 
 
-    /// UFCS trait migration, Phase 2 (book § 3.2.2). When `ufcs_traits` is on,
-    /// emit each `impl Tr for U` method as a free function in
+    /// UFCS trait migration, Phase 2 (book § 3.2.2). Emit each
+    /// `impl Tr for U` method as a free function in
     /// `namespace <Tr>_`, reusing the extension free-function emitter
     /// (which rewrites the `self` receiver to a `self_` parameter). **Additive**:
     /// the existing member/adapter lowering is untouched, so with the flag off
@@ -11574,9 +11554,6 @@ impl CodeGen {
     /// alongside the members (call sites switch to them in Phase 3). Recurses
     /// into inline modules. Inherent impls (`impl U`) are skipped here.
     fn emit_ufcs_trait_impl_free_functions(&mut self, items: &[syn::Item], module_path: &[String]) {
-        if !self.ufcs_traits {
-            return;
-        }
         for item in items {
             match item {
                 syn::Item::Impl(impl_block) => {
@@ -11724,11 +11701,8 @@ impl CodeGen {
     /// a `using namespace <Tr>_;`, *before* function bodies, so a call
     /// site's unqualified `m(recv)` resolves to the trait free function (whose
     /// definition is emitted late by `emit_ufcs_trait_impl_free_functions`).
-    /// No-op when `ufcs_traits` is off; recurses into inline modules.
+    /// Recurses into inline modules.
     fn emit_ufcs_trait_impl_free_function_decls(&mut self, items: &[syn::Item], module_path: &[String]) {
-        if !self.ufcs_traits {
-            return;
-        }
         for item in items {
             match item {
                 syn::Item::Impl(impl_block) => {
@@ -11998,9 +11972,6 @@ impl CodeGen {
     /// Phase / § 3.2.13 (late): emit each trait's default methods as
     /// `Self`-templated free-function DEFINITIONS in `namespace <Tr>_`.
     fn emit_ufcs_trait_default_free_functions(&mut self, items: &[syn::Item]) {
-        if !self.ufcs_traits {
-            return;
-        }
         for item in items {
             match item {
                 syn::Item::Trait(t) => {
@@ -12034,9 +12005,6 @@ impl CodeGen {
     /// § 3.2.13 (early): forward-declare each trait's default-method templates +
     /// a `using namespace <Tr>_;`, before function bodies, so call sites resolve.
     fn emit_ufcs_trait_default_free_function_decls(&mut self, items: &[syn::Item]) {
-        if !self.ufcs_traits {
-            return;
-        }
         for item in items {
             match item {
                 syn::Item::Trait(t) => {
@@ -12680,7 +12648,7 @@ impl CodeGen {
             // emitted — i.e. the trait is crate-declared (Phase 7). For a
             // prelude/std-trait adapter (e.g. DisplayAdapter), `Display_::m`
             // does not exist, so keep the member call.
-            if self.ufcs_traits && self.ufcs_declared_trait_names.contains(trait_name) {
+            if self.ufcs_declared_trait_names.contains(trait_name) {
                 // UFCS Phase 6 (book § 3.2.10): forward the vtable slot to the
                 // static free-function impl `<Tr>_::m(value_, args)` rather
                 // than the member `value_.m(args)`, so static and dynamic
@@ -13039,11 +13007,7 @@ impl CodeGen {
             // must qualify a nested-module self type (`MapAsEnum<A>` →
             // `de::value::private_::MapAsEnum<A>`). No-op for global-scope types
             // and flag-off.
-            if self.ufcs_traits {
-                self.qualify_nested_local_type_for_global_scope(&mapped)
-            } else {
-                mapped
-            }
+            self.qualify_nested_local_type_for_global_scope(&mapped)
         };
         if method_name == "deserialize" && self_cpp_ty.contains("PhantomData<") {
             self.pop_type_param_scope();
@@ -13081,9 +13045,7 @@ impl CodeGen {
             ty = self.rewrite_extension_assoc_error_paths(&ty, &associated_type_cpp_bindings);
             // serde_core Fix B: qualify nested-module types in param positions
             // (the free fn is at global `<Tr>_` scope). No-op flag-off.
-            if self.ufcs_traits {
-                ty = self.qualify_nested_local_types_in_type_string(&ty);
-            }
+            ty = self.qualify_nested_local_types_in_type_string(&ty);
             let param_name = match pat_type.pat.as_ref() {
                 syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 _ => format!("_arg{}", idx),
@@ -13130,9 +13092,7 @@ impl CodeGen {
             ""
         };
         // serde_core Fix B: qualify nested-module types in the return position.
-        if self.ufcs_traits {
-            return_type = self.qualify_nested_local_types_in_type_string(&return_type);
-        }
+        return_type = self.qualify_nested_local_types_in_type_string(&return_type);
         self.record_extension_free_function_symbol(&method_name);
         // Fix A part 2: inject the multi-owner default's `requires` constraint
         // after the template parameter list.
@@ -13309,11 +13269,7 @@ impl CodeGen {
             // must qualify a nested-module self type (`MapAsEnum<A>` →
             // `de::value::private_::MapAsEnum<A>`). No-op for global-scope types
             // and flag-off.
-            if self.ufcs_traits {
-                self.qualify_nested_local_type_for_global_scope(&mapped)
-            } else {
-                mapped
-            }
+            self.qualify_nested_local_type_for_global_scope(&mapped)
         };
         if method_name == "deserialize" && self_cpp_ty.contains("PhantomData<") {
             self.in_forward_decl_signature = prev_forward_decl_signature;
@@ -13356,9 +13312,7 @@ impl CodeGen {
             ty = self.rewrite_extension_assoc_error_paths(&ty, &associated_type_cpp_bindings);
             // serde_core Fix B: qualify nested-module types in param positions
             // (the free fn is at global `<Tr>_` scope). No-op flag-off.
-            if self.ufcs_traits {
-                ty = self.qualify_nested_local_types_in_type_string(&ty);
-            }
+            ty = self.qualify_nested_local_types_in_type_string(&ty);
             let param_name = match pat_type.pat.as_ref() {
                 syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
                 _ => format!("_arg{}", idx),
@@ -13409,9 +13363,7 @@ impl CodeGen {
             ""
         };
         // serde_core Fix B: qualify nested-module types in the return position.
-        if self.ufcs_traits {
-            return_type = self.qualify_nested_local_types_in_type_string(&return_type);
-        }
+        return_type = self.qualify_nested_local_types_in_type_string(&return_type);
         self.record_extension_free_function_symbol(&method_name);
         // Fix A part 2: inject the multi-owner default's `requires` constraint
         // after the template parameter list (must match the declaration).
@@ -13450,9 +13402,7 @@ impl CodeGen {
         // the map from the ORIGINAL method generics (bounds intact), mirroring the member
         // emitter which pushes the unstripped `method.sig.generics`. Body-scope state only —
         // the emitted template prefix (already built from `free_generics`) is untouched.
-        if self.ufcs_traits
-            && let Some(top) = self.trait_bound_type_param_scopes.last_mut()
-        {
+        if let Some(top) = self.trait_bound_type_param_scopes.last_mut() {
             *top = Self::collect_trait_bound_type_param_map(&method_spec.method.sig.generics);
         }
         self.current_struct_assoc_cpp_types
@@ -25537,49 +25487,43 @@ impl CodeGen {
                 arg_call_list
             );
         }
-        if self.ufcs_traits {
-            // UFCS Phase 6 (book § 3.2.10): a `dyn Tr` receiver derefs to the
-            // abstract interface `Tr&`, for which there is NO `m(const Tr&)`
-            // free function — only `m(const ConcreteU&)` per impl. So make the
-            // deref-free-call branch conditional and add a final MEMBER
-            // fallback `deref(__self).m(args)`. For a `dyn` receiver that
-            // resolves to the virtual member, which routes through the
-            // adapter override back to `<Tr>_::m(value_, args)` — the same
-            // static impl the direct branch would have called. Static and
-            // dynamic dispatch thus bottom out in one implementation.
-            let member_args = deref_arg_uses.join(", ");
-            // Re-attach the turbofish on the member fallback. `__self` is a
-            // deduced `auto&&`, so the access is on a dependent type — a
-            // turbofish member call there needs the `.template` disambiguator
-            // (`deref(__self).template next_value<de::IgnoredAny>()`), else
-            // clang parses `<` as less-than.
-            let member_call = if callee_targs.is_empty() {
-                format!("{}.{}({})", deref_receiver, callee_leaf, member_args)
-            } else {
-                format!(
-                    "{}.template {}{}({})",
-                    deref_receiver, callee_leaf, callee_targs, member_args
-                )
-            };
-            // `[]` (no capture) not `[&]`: the receiver and every arg are passed
-            // as lambda *parameters*, so the body captures nothing — and a
-            // capturing lambda is illegal at namespace scope, where this shim
-            // lands inside `const` static-member initializers (Phase-7 fallout
-            // category B, e.g. bitflags `TestFlags::ABC = …`).
-            return format!(
-                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-                arg_param_list,
-                direct_call,
-                direct_call,
-                deref_call,
-                deref_call,
-                member_call,
-                arg_call_list
-            );
-        }
+        // UFCS Phase 6 (book § 3.2.10): a `dyn Tr` receiver derefs to the
+        // abstract interface `Tr&`, for which there is NO `m(const Tr&)`
+        // free function — only `m(const ConcreteU&)` per impl. So make the
+        // deref-free-call branch conditional and add a final MEMBER
+        // fallback `deref(__self).m(args)`. For a `dyn` receiver that
+        // resolves to the virtual member, which routes through the
+        // adapter override back to `<Tr>_::m(value_, args)` — the same
+        // static impl the direct branch would have called. Static and
+        // dynamic dispatch thus bottom out in one implementation.
+        let member_args = deref_arg_uses.join(", ");
+        // Re-attach the turbofish on the member fallback. `__self` is a
+        // deduced `auto&&`, so the access is on a dependent type — a
+        // turbofish member call there needs the `.template` disambiguator
+        // (`deref(__self).template next_value<de::IgnoredAny>()`), else
+        // clang parses `<` as less-than.
+        let member_call = if callee_targs.is_empty() {
+            format!("{}.{}({})", deref_receiver, callee_leaf, member_args)
+        } else {
+            format!(
+                "{}.template {}{}({})",
+                deref_receiver, callee_leaf, callee_targs, member_args
+            )
+        };
+        // `[]` (no capture) not `[&]`: the receiver and every arg are passed
+        // as lambda *parameters*, so the body captures nothing — and a
+        // capturing lambda is illegal at namespace scope, where this shim
+        // lands inside `const` static-member initializers (Phase-7 fallout
+        // category B, e.g. bitflags `TestFlags::ABC = …`).
         format!(
-            "([&]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
-            arg_param_list, direct_call, direct_call, deref_call, arg_call_list
+            "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+            arg_param_list,
+            direct_call,
+            direct_call,
+            deref_call,
+            deref_call,
+            member_call,
+            arg_call_list
         )
     }
 

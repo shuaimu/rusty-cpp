@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use syn::visit::{self, Visit};
 
 /// Cross-crate UFCS trait manifest (book § 3.2.7). Emitted as a sidecar JSON
-/// next to a crate's `.cppm` when `ufcs_traits` is on, and consumed when
+/// next to a crate's `.cppm`, and consumed when
 /// transpiling a dependent crate so it can classify + module-qualify calls to
 /// the dependency's trait methods (`<module>::<Tr>_::m`). Records ONLY methods
 /// for which an `<Tr>_::m` free function was ACTUALLY emitted (the pruned
@@ -130,7 +130,7 @@ pub struct TranspileOptions {
     pub external_crate_module_aliases: HashMap<String, String>,
     /// UFCS cross-crate (book § 3.2.7): when set, write a `UfcsTraitManifest`
     /// JSON here after emission (records this crate's declared traits + the
-    /// actually-emitted `<Tr>_::m` owner map). No-op unless `ufcs_traits` is on.
+    /// actually-emitted `<Tr>_::m` owner map). No-op unless a path is set.
     pub emit_ufcs_trait_manifest_path: Option<PathBuf>,
     /// UFCS cross-crate: dependency manifest paths to load + merge, so calls to
     /// a dependency's trait methods classify and qualify to `<module>::<Tr>_::m`.
@@ -217,14 +217,6 @@ pub struct TranspileOptions {
     /// dev-dependency) are harmless — so a transpile-time panic there is a
     /// false failure. The backstop still fires for the crate under test.
     pub is_dependency: bool,
-    /// **Default ON (Phase-7 flip).** Lower trait *method dispatch* via the
-    /// UFCS free-function design (book § 3.2): inherent methods stay members,
-    /// trait methods become free functions in trait namespaces reached by a
-    /// self-implemented member-first UFCS, with clang's overload resolution as
-    /// the trait solver. Off → the legacy member/adapter lowering (still
-    /// compiled). Opt out via `RUSTY_CPP_UFCS_TRAITS=0/off/false/no` at the
-    /// binary entry (`ufcs_traits_enabled()`). See the phase roadmap in § 3.2.12.
-    pub ufcs_traits: bool,
 }
 
 /// Classification of a method *name* across the whole crate, used by the UFCS
@@ -292,21 +284,6 @@ pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameC
 /// re-qualification in lockstep.
 pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
     matches!(crate_name, "serde_bytes")
-}
-
-/// Whether UFCS trait lowering (book § 3.2) is enabled for a binary invocation.
-/// As of the Phase-7 default flip this is ON by default; the `RUSTY_CPP_UFCS_TRAITS`
-/// env var is now an OPT-OUT escape hatch (set it to `0`/`off`/`false`/`no` to
-/// restore the legacy member/adapter lowering, which stays compiled). Any other
-/// value — or the var being unset — keeps UFCS on.
-pub fn ufcs_traits_enabled() -> bool {
-    match std::env::var("RUSTY_CPP_UFCS_TRAITS") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ),
-        Err(_) => true,
-    }
 }
 
 /// Short names of every trait this crate DECLARES (`trait Tr { … }`), recursing
@@ -524,11 +501,6 @@ impl Default for TranspileOptions {
         Self {
             by_value_cycle_breaking_prototype: false,
             is_dependency: false,
-            // Phase-7 default flip: UFCS trait lowering is ON by default. Callers
-            // that need the legacy member/adapter path set this to false
-            // explicitly (the binary honors the RUSTY_CPP_UFCS_TRAITS=0 opt-out
-            // via `ufcs_traits_enabled()`).
-            ufcs_traits: true,
             cpp_module_symbol_index: None,
             cpp_module_symbol_index_sources: Vec::new(),
             external_crate_module_aliases: HashMap::new(),
@@ -900,7 +872,6 @@ pub fn transpile_full_with_options(
     }
     codegen.set_by_value_cycle_breaking_prototype(options.by_value_cycle_breaking_prototype);
     codegen.set_is_dependency_module(options.is_dependency);
-    codegen.set_ufcs_traits(options.ufcs_traits);
     codegen.set_external_crate_module_aliases(options.external_crate_module_aliases.clone());
     codegen.set_use_import_std_in_modules(options.use_import_std_in_modules);
     codegen.set_cxx_namespace(options.cxx_namespace.clone());
@@ -921,7 +892,7 @@ pub fn transpile_full_with_options(
     // UFCS cross-crate (book § 3.2.7): load dependency trait manifests so the
     // classifier + call-site qualification know the dependency's trait methods
     // and the module each lives in. Merged during emit_file.
-    if options.ufcs_traits && !options.dependency_ufcs_trait_manifests.is_empty() {
+    if !options.dependency_ufcs_trait_manifests.is_empty() {
         codegen.set_dependency_ufcs_trait_manifests(load_ufcs_trait_manifests(
             &options.dependency_ufcs_trait_manifests,
         ));
@@ -931,9 +902,7 @@ pub fn transpile_full_with_options(
     log_profile("codegen_emit_file");
     // UFCS cross-crate: emit this crate's trait manifest (declared traits +
     // actually-emitted `<Tr>_::m` owner map) for dependents to consume.
-    if options.ufcs_traits
-        && let Some(path) = options.emit_ufcs_trait_manifest_path.as_ref()
-    {
+    if let Some(path) = options.emit_ufcs_trait_manifest_path.as_ref() {
         let manifest = codegen.build_ufcs_trait_manifest(module_name.unwrap_or(""));
         if let Ok(json) = serde_json::to_string_pretty(&manifest) {
             let _ = fs::write(path, json);
@@ -1963,26 +1932,6 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    /// Transpile with UFCS trait lowering explicitly OFF (the legacy
-    /// member/adapter path). Since the Phase-7 default flip made
-    /// `TranspileOptions::default()` UFCS-ON, flag-OFF control assertions must
-    /// pin the flag here rather than rely on the `transpile()` convenience
-    /// wrapper (which now defaults to UFCS-on, matching production).
-    fn transpile_ufcs_off(src: &str) -> Result<String, String> {
-        let options = TranspileOptions {
-            ufcs_traits: false,
-            ..TranspileOptions::default()
-        };
-        transpile_full_with_options(
-            src,
-            None,
-            &UserTypeMap::default(),
-            &HashSet::new(),
-            None,
-            &options,
-        )
-    }
-
     #[test]
     fn test_transpile_basic() {
         let result = transpile("fn main() { let x = 42; }", None);
@@ -2214,19 +2163,6 @@ mod tests {
         );
     }
 
-    /// Phase-7 default flip: UFCS trait lowering is the production default.
-    /// Pins the default so a future accidental revert is caught. The binary
-    /// honors a `RUSTY_CPP_UFCS_TRAITS=0/off/false/no` opt-out via
-    /// `ufcs_traits_enabled()` (not asserted here — mutating process env is
-    /// unsafe under edition 2024 and races parallel tests).
-    #[test]
-    fn test_ufcs_traits_default_is_on_after_phase7_flip() {
-        assert!(
-            TranspileOptions::default().ufcs_traits,
-            "UFCS trait lowering must be ON by default after the Phase-7 flip"
-        );
-    }
-
     #[test]
     fn test_ufcs_traits_phase2_emits_trait_namespace_free_functions() {
         let src = r#"
@@ -2239,17 +2175,9 @@ mod tests {
             }
         "#;
 
-        // Flag OFF (default): no UFCS trait namespace.
-        let off = transpile_ufcs_off(src).expect("flag-off transpile should succeed");
-        assert!(
-            !off.contains("namespace Greet_"),
-            "flag-off output must not emit the UFCS trait namespace\nGot: {off}"
-        );
-
-        // Flag ON: `impl Greet for Foo` is additionally emitted as a free
+        // `impl Greet for Foo` is emitted as a free
         // function in `namespace Greet_`, with `self` rewritten to `self_`.
         let options = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -2280,17 +2208,9 @@ mod tests {
             fn use_it(f: &Foo) -> i32 { f.hello() }
         "#;
 
-        // Flag OFF (default): plain member call, no UFCS free dispatch.
-        let off = transpile_ufcs_off(src).expect("flag-off transpile should succeed");
-        assert!(
-            !off.contains("requires { hello("),
-            "flag-off must not lower `f.hello()` to UFCS free dispatch\nGot: {off}"
-        );
-
-        // Flag ON: `f.hello()` (a trait-only crate method) lowers to the
+        // `f.hello()` (a trait-only crate method) lowers to the
         // free-function dispatch form `... requires { hello(__self) } ...`.
         let options = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -2332,7 +2252,6 @@ mod tests {
         "#;
 
         let options = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -2363,7 +2282,6 @@ mod tests {
             fn use_it(f: &Foo) -> i32 { f.hello() }
         "#;
         let options = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -2408,7 +2326,6 @@ mod tests {
             fn use_generic<T: Producer>(t: &T) -> T::Output { t.produce() }
         "#;
         let options = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -2448,7 +2365,6 @@ mod tests {
             fn use_it(f: &Foo) -> i32 { f.hello() }
         "#;
         let options = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -2478,14 +2394,6 @@ mod tests {
             "flag-on shim must keep both free-call guards before the member fallback (got {guard_count})\nGot: {on}"
         );
 
-        // Flag OFF: the shim is the original 2-branch form — no member-call
-        // fallback synthesized, and no qualified Greet_::hello calls
-        // (flag-off keeps the native member call).
-        let off = transpile_ufcs_off(src).expect("flag-off transpile should succeed");
-        assert!(
-            !off.contains("requires { hello("),
-            "flag-off must not emit the UFCS dispatch shim at all\nGot: {off}"
-        );
     }
 
     #[test]
@@ -2507,7 +2415,6 @@ mod tests {
             fn via_qualified(p: &Person) -> i32 { <Person as Greet>::name(p) }
         "#;
         let options = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -2529,13 +2436,6 @@ mod tests {
             "`Farewell::name(p)` must qualify to Farewell_::name (not collapse to p.name())\nGot: {on}"
         );
 
-        // Flag OFF: the disambiguated calls stay on the member-collapse path
-        // (no trait_ qualification synthesized).
-        let off = transpile_ufcs_off(src).expect("flag-off transpile should succeed");
-        assert!(
-            !off.contains("Greet_::name") && !off.contains("Farewell_::name"),
-            "flag-off must not synthesize qualified trait_ calls\nGot: {off}"
-        );
     }
 
     #[test]
@@ -2553,7 +2453,6 @@ mod tests {
             fn read(x: &Flags) -> u32 { let bits = x.bits(); bits }
         "#;
         let options = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -2593,7 +2492,6 @@ mod tests {
             fn d_foo(f: &Foo) -> i32 { f.describe() }
         "#;
         let options = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let on = transpile_full_with_options(
@@ -2627,12 +2525,6 @@ mod tests {
             "`f.describe()` must qualify to Greet_::describe\nGot: {on}"
         );
 
-        // Flag OFF: no Self-templated default free function.
-        let off = transpile_ufcs_off(src).expect("flag-off transpile should succeed");
-        assert!(
-            !off.contains("describe(const Self_& self_)") && !off.contains("Greet_::describe"),
-            "flag-off must not emit the default free function or qualified call\nGot: {off}"
-        );
     }
 
     #[test]
@@ -2648,7 +2540,6 @@ mod tests {
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_emit_test.json");
         let _ = std::fs::remove_file(&path);
         let options = TranspileOptions {
-            ufcs_traits: true,
             emit_ufcs_trait_manifest_path: Some(path.clone()),
             ..TranspileOptions::default()
         };
@@ -2706,7 +2597,6 @@ mod tests {
             fn use_it(x: &Local) -> i32 { x.hello() }
         "#;
         let options = TranspileOptions {
-            ufcs_traits: true,
             dependency_ufcs_trait_manifests: vec![path.clone()],
             ..TranspileOptions::default()
         };
@@ -2729,7 +2619,6 @@ mod tests {
         // Without the manifest, `hello` isn't a known trait method → not lowered
         // to a UFCS free call (stays a plain member call).
         let off_opts = TranspileOptions {
-            ufcs_traits: true,
             ..TranspileOptions::default()
         };
         let without = transpile_full_with_options(

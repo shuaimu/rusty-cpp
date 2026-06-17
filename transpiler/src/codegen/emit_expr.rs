@@ -5004,7 +5004,7 @@ impl CodeGen {
         // phase 4). The classifier never sees std/inherent methods, so those
         // fall through to the existing member-call lowering unchanged. Guarded
         // by `ufcs_traits` (default off).
-        if self.ufcs_traits {
+        {
             let method_name = mc.method.to_string();
             if matches!(
                 self.ufcs_method_classes.get(&method_name),
@@ -12925,8 +12925,7 @@ impl CodeGen {
                 // and runtime-helper (assoc-const) traits have no
                 // `<Trait>_::m`, so qualifying them is a HARD error — fall
                 // through to the member call instead.
-                if self.ufcs_traits
-                    && let Some(trait_name) = ufcs.function_path.rsplit("::").nth(1)
+                if let Some(trait_name) = ufcs.function_path.rsplit("::").nth(1)
                     && self
                         .ufcs_method_trait_owners
                         .get(&ufcs.method_name)
@@ -16233,11 +16232,10 @@ impl CodeGen {
         // runtime-helper (assoc-const) traits have no `<Trait>_::m`, so
         // qualifying them is a HARD error; fall through to the member call.
         // Placed AFTER the serde/Display/Debug special-cases above.
-        if self.ufcs_traits
-            && self
-                .ufcs_method_trait_owners
-                .get(&method_name)
-                .is_some_and(|owners| owners.contains(&owner_leaf))
+        if self
+            .ufcs_method_trait_owners
+            .get(&method_name)
+            .is_some_and(|owners| owners.contains(&owner_leaf))
         {
             let recv = match self.peel_paren_group_expr(call.args.first()?) {
                 syn::Expr::Reference(r) => self.emit_expr_to_string(&r.expr),
