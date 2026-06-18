@@ -16768,9 +16768,20 @@ impl CodeGen {
                 self.infer_iter_item_type_with_generic_fallback(e)
                     .filter(|t| self.type_is_placeholder_hint_candidate_allow_scoped_generics(t))
             };
-            if let Some(elem) =
-                type_solver::infer_local_owner_element_from_block(stmts, &name, &item_resolver)
-                && self.type_is_placeholder_hint_candidate_allow_scoped_generics(&elem)
+            // §13.14 C1: supply the sole field type of a single-field newtype
+            // struct so a `Wrapper::from/new(local)` consumer pins `local`'s
+            // type. This lets the solver recover an opaque wrapper's element
+            // (serde_bytes `Ok(ByteBuf::from(bytes))` ⇒ `bytes : Vec<u8>`)
+            // where the constructor/push alone leave it circular — replacing
+            // the former bespoke newtype-consumer heuristic pass.
+            let field_resolver =
+                |owner: &str| -> Option<syn::Type> { self.single_field_type_of_struct(owner) };
+            if let Some(elem) = type_solver::infer_local_owner_element_from_block(
+                stmts,
+                &name,
+                &item_resolver,
+                Some(&field_resolver),
+            ) && self.type_is_placeholder_hint_candidate_allow_scoped_generics(&elem)
             {
                 let vec_ty: syn::Type = syn::parse_quote!(Vec<#elem>);
                 hints.insert(name, vec_ty);
@@ -16778,135 +16789,14 @@ impl CodeGen {
         }
     }
 
-    /// serde_bytes ByteBuf/Cow deserialize pattern: a `Vec` local is
-    /// accumulated via `push` inside a `while let Some(b) =
-    /// seq.next_element()? { v.push(b) }` loop, then handed to a
-    /// newtype-over-Vec constructor — `Ok(ByteBuf::from(bytes))`. The element
-    /// type is invisible from the `Vec::with_capacity(..)`/`Vec::new()`
-    /// initializer and circular through the push (`b` *is* the loop payload),
-    /// and the solver pass above can't break the cycle. But the WRAPPER struct
-    /// pins it: `struct ByteBuf { bytes: Vec<u8> }` has a single `Vec<E>`
-    /// field, so `Wrapper::from(v)` forces `v: Vec<E>`. Recover `E` from that
-    /// field and seed `Vec<E>`, so the while-let payload inference resolves
-    /// (`b: E`) and the `next_element<E>` turbofish lands.
-    ///
-    /// Fills only still-unresolved single-param Vec-owner locals; conservative
-    /// — requires a constructor consumer (`from`/`try_from`/`new`/`new_`) whose
-    /// owner is a locally-declared struct with EXACTLY ONE field, of concrete
-    /// `Vec<E>` shape.
-    fn augment_vec_local_element_hints_from_newtype_consumer(
-        &self,
-        stmts: &[syn::Stmt],
-        hints: &mut HashMap<String, syn::Type>,
-    ) {
-        for stmt in stmts {
-            let syn::Stmt::Local(local) = stmt else {
-                continue;
-            };
-            if get_local_type(local).is_some() {
-                continue;
-            }
-            let Some(name) = local_binding_name(local) else {
-                continue;
-            };
-            if hints.contains_key(&name) {
-                continue;
-            }
-            let Some(init) = &local.init else {
-                continue;
-            };
-            let syn::Expr::Call(call) = self.peel_paren_group_expr(&init.expr) else {
-                continue;
-            };
-            if type_solver::owner_constructor_head(call).as_deref() != Some("Vec") {
-                continue;
-            }
-            let mut wrapper_owner = None;
-            for scan_stmt in stmts {
-                if let Some(owner) =
-                    self.newtype_wrapper_consumer_owner_in_stmt(scan_stmt, &name)
-                {
-                    wrapper_owner = Some(owner);
-                    break;
-                }
-            }
-            let Some(wrapper_owner) = wrapper_owner else {
-                continue;
-            };
-            if let Some(elem) = self.single_vec_field_element_of_struct(&wrapper_owner)
-                && self.type_is_placeholder_hint_candidate_allow_scoped_generics(&elem)
-            {
-                let vec_ty: syn::Type = syn::parse_quote!(Vec<#elem>);
-                hints.insert(name, vec_ty);
-            }
-        }
-    }
-
-    /// Find a `Wrapper::ctor(<name>)` constructor consumer of the local `name`
-    /// anywhere in `stmt` (including inside `Ok(..)`/`return`/blocks). Returns
-    /// the wrapper owner's short name.
-    fn newtype_wrapper_consumer_owner_in_stmt(
-        &self,
-        stmt: &syn::Stmt,
-        name: &str,
-    ) -> Option<String> {
-        match stmt {
-            syn::Stmt::Expr(expr, _) => self.newtype_wrapper_consumer_owner_in_expr(expr, name),
-            syn::Stmt::Local(local) => local
-                .init
-                .as_ref()
-                .and_then(|init| self.newtype_wrapper_consumer_owner_in_expr(&init.expr, name)),
-            _ => None,
-        }
-    }
-
-    fn newtype_wrapper_consumer_owner_in_expr(
-        &self,
-        expr: &syn::Expr,
-        name: &str,
-    ) -> Option<String> {
-        let expr = self.peel_paren_group_expr(expr);
-        match expr {
-            syn::Expr::Call(call) => {
-                if let syn::Expr::Path(fp) = call.func.as_ref()
-                    && fp.path.segments.len() >= 2
-                {
-                    let last = fp.path.segments.last()?.ident.to_string();
-                    if matches!(last.as_str(), "from" | "try_from" | "new" | "new_")
-                        && call.args.iter().any(|a| {
-                            extract_simple_local_ident(a).as_deref() == Some(name)
-                        })
-                    {
-                        let owner = fp.path.segments.iter().nth_back(1)?.ident.to_string();
-                        return Some(owner);
-                    }
-                }
-                call.args
-                    .iter()
-                    .find_map(|a| self.newtype_wrapper_consumer_owner_in_expr(a, name))
-            }
-            syn::Expr::MethodCall(mc) => mc
-                .args
-                .iter()
-                .find_map(|a| self.newtype_wrapper_consumer_owner_in_expr(a, name))
-                .or_else(|| self.newtype_wrapper_consumer_owner_in_expr(&mc.receiver, name)),
-            syn::Expr::Return(r) => r
-                .expr
-                .as_deref()
-                .and_then(|e| self.newtype_wrapper_consumer_owner_in_expr(e, name)),
-            syn::Expr::Block(b) => b
-                .block
-                .stmts
-                .iter()
-                .find_map(|s| self.newtype_wrapper_consumer_owner_in_stmt(s, name)),
-            _ => None,
-        }
-    }
-
-    /// If `struct_tail` names a locally-declared struct with exactly one field
-    /// whose type is a concrete `Vec<E>`, return `E`. Used to recover the
-    /// element type of a Vec handed to a newtype-over-Vec wrapper.
-    fn single_vec_field_element_of_struct(&self, struct_tail: &str) -> Option<syn::Type> {
+    /// The sole field type of a locally-declared single-field struct,
+    /// looked up by tail / scoped / tail-matched key. Backs the §13.14 C1
+    /// `FieldResolver` so the inference engine can pin a Vec handed to a
+    /// newtype-over-Vec wrapper (`Ok(ByteBuf::from(bytes))` ⇒ `bytes` is the
+    /// type of `ByteBuf`'s sole `Vec<u8>` field). Returns `None` unless the
+    /// struct has exactly one field (otherwise which field the arg maps to
+    /// is ambiguous).
+    fn single_field_type_of_struct(&self, struct_tail: &str) -> Option<syn::Type> {
         let fields = self
             .struct_field_types
             .get(struct_tail)
@@ -16917,15 +16807,14 @@ impl CodeGen {
             .or_else(|| {
                 // Fall back to a tail match (struct_field_types may be keyed by
                 // a scoped path while the consumer names only the tail).
-                self.struct_field_types.iter().find_map(|(k, v)| {
-                    (k.rsplit("::").next() == Some(struct_tail)).then_some(v)
-                })
+                self.struct_field_types
+                    .iter()
+                    .find_map(|(k, v)| (k.rsplit("::").next() == Some(struct_tail)).then_some(v))
             })?;
         if fields.len() != 1 {
             return None;
         }
-        let ty = fields.values().next()?;
-        extract_vec_element_type_for_hint(ty).or_else(|| extract_sequence_element_type_for_hint(ty))
+        Some(fields.values().next()?.clone())
     }
 
     /// Parallel forward-scan for two-parameter generic owners (HashMap,

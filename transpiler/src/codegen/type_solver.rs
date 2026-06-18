@@ -47,6 +47,16 @@ use syn::Type;
 /// the item type can't be determined.
 pub(crate) type ItemResolver<'a> = dyn Fn(&syn::Expr) -> Option<Type> + 'a;
 
+/// Callback supplying the sole field type of a locally-declared
+/// single-field "newtype" struct, keyed by the struct's (tail) name —
+/// backed by `CodeGen::single_field_type_of_struct` reading
+/// `struct_field_types`. Lets the collector turn a consumer
+/// `Wrapper::from(local)` / `Wrapper::new(local)` into the constraint
+/// `typeof(local) = <Wrapper's field type>` — the §13.14 C1 rule that
+/// recovers an opaque wrapper's element (serde_bytes `ByteBuf`/`ByteArray`).
+/// `None` when the name isn't a known single-field struct.
+pub(crate) type FieldResolver<'a> = dyn Fn(&str) -> Option<Type> + 'a;
+
 /// Identifier for a free type variable allocated by the engine.
 ///
 /// Variables are dense, monotonically-issued `usize` keys. A
@@ -438,8 +448,13 @@ pub(crate) fn tyterm_from_syn(ty: &Type, binders: &HashMap<String, TyVarId>) -> 
 /// Coverage will grow as Phase 4 needs more sites. Anything we
 /// don't recognize is silently skipped — the engine is allowed
 /// to be incomplete, not allowed to be incorrect.
-pub(crate) struct ConstraintCollector<'ctx> {
+pub(crate) struct ConstraintCollector<'ctx, 'r> {
     ctx: &'ctx mut InferenceContext,
+    /// Optional callback resolving a single-field newtype struct's field
+    /// type by name (§13.14 C1). When set, `Wrapper::from/new(local)`
+    /// consumer calls constrain `local`'s type to that field type. `None`
+    /// for callers (if/else merge, fold reducer) that don't need it.
+    field_resolver: Option<&'r FieldResolver<'r>>,
     /// Type parameter names in scope for the function being
     /// walked (e.g. `T` from `fn foo<T>()`). Used by
     /// `tyterm_from_syn` to lower references to those names into
@@ -459,10 +474,11 @@ pub(crate) struct ConstraintCollector<'ctx> {
     expr_var_buffer: Vec<TyVarId>,
 }
 
-impl<'ctx> ConstraintCollector<'ctx> {
+impl<'ctx, 'r> ConstraintCollector<'ctx, 'r> {
     pub(crate) fn new(ctx: &'ctx mut InferenceContext) -> Self {
         Self {
             ctx,
+            field_resolver: None,
             binders: HashMap::new(),
             env: HashMap::new(),
             expr_var_buffer: Vec::new(),
@@ -475,6 +491,7 @@ impl<'ctx> ConstraintCollector<'ctx> {
     ) -> Self {
         Self {
             ctx,
+            field_resolver: None,
             binders,
             env: HashMap::new(),
             expr_var_buffer: Vec::new(),
@@ -802,6 +819,60 @@ impl<'ctx> ConstraintCollector<'ctx> {
         });
     }
 
+    /// §13.14 C1: when `call` is a single-field-newtype consumer
+    /// `Wrapper::from/new/new_/try_from(local)` and `local` is a bare
+    /// identifier bound in `env`, constrain `local`'s type to `Wrapper`'s
+    /// sole field type (supplied by `field_resolver`). This is how an
+    /// opaque wrapper's element flows backward to the accumulator local —
+    /// `Ok(ByteBuf::from(bytes))` pins `bytes : Vec<u8>` because `ByteBuf`
+    /// has a single `Vec<u8>` field — without a bespoke heuristic pass.
+    fn record_newtype_field_constraint(&mut self, call: &syn::ExprCall) {
+        let Some(resolver) = self.field_resolver else {
+            return;
+        };
+        let syn::Expr::Path(fp) = call.func.as_ref() else {
+            return;
+        };
+        if fp.qself.is_some() || fp.path.segments.len() < 2 {
+            return;
+        }
+        let last = fp.path.segments.last().unwrap().ident.to_string();
+        if !matches!(last.as_str(), "from" | "new" | "new_" | "try_from") {
+            return;
+        }
+        let owner = fp
+            .path
+            .segments
+            .iter()
+            .nth_back(1)
+            .unwrap()
+            .ident
+            .to_string();
+        let Some(field_ty) = resolver(&owner) else {
+            return;
+        };
+        let field_term = tyterm_from_syn(&field_ty, &self.binders);
+        for arg in &call.args {
+            let syn::Expr::Path(ap) = arg else {
+                continue;
+            };
+            if ap.qself.is_some()
+                || ap.path.segments.len() != 1
+                || !matches!(ap.path.segments[0].arguments, syn::PathArguments::None)
+            {
+                continue;
+            }
+            let name = ap.path.segments[0].ident.to_string();
+            if let Some(&v) = self.env.get(&name) {
+                self.ctx.push_constraint(Constraint {
+                    lhs: TyTerm::Var(v),
+                    rhs: field_term.clone(),
+                    origin: ConstraintOrigin::Synthetic("newtype-field"),
+                });
+            }
+        }
+    }
+
     /// Bind a closure's parameters into `env`, pinning any annotated
     /// parameter to its declared type. Used by the block walk so that
     /// references to the parameters inside the body resolve to the same
@@ -992,6 +1063,7 @@ impl<'ctx> ConstraintCollector<'ctx> {
             }
             syn::Expr::Loop(e) => self.collect_block_constraints(&e.body.stmts, resolver),
             syn::Expr::Call(c) => {
+                self.record_newtype_field_constraint(c);
                 for a in &c.args {
                     self.collect_expr_constraints(a, resolver);
                 }
@@ -1242,10 +1314,12 @@ pub(crate) fn infer_local_owner_element_from_block(
     stmts: &[syn::Stmt],
     target: &str,
     resolver: &ItemResolver<'_>,
+    field_resolver: Option<&FieldResolver<'_>>,
 ) -> Option<Type> {
     let mut ctx = InferenceContext::new();
     let target_var = {
         let mut c = ConstraintCollector::new(&mut ctx);
+        c.field_resolver = field_resolver;
         c.collect_block_constraints(stmts, resolver);
         c.env.get(target).copied()
     }?;
@@ -1260,7 +1334,7 @@ pub(crate) fn infer_local_owner_element_from_block(
     }
 }
 
-impl<'ast> Visit<'ast> for ConstraintCollector<'_> {
+impl<'ast> Visit<'ast> for ConstraintCollector<'_, '_> {
     fn visit_local(&mut self, local: &'ast syn::Local) {
         self.visit_local_for_constraints(local);
         syn::visit::visit_local(self, local);
@@ -1418,7 +1492,7 @@ mod tests {
             });
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| None;
-        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver)
+        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, None)
             .expect("params element should resolve");
         assert_eq!(norm(&elem), "(Vec<i32>,i32)");
     }
@@ -1435,7 +1509,7 @@ mod tests {
             });
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| Some(parse_quote!(u8));
-        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver)
+        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, None)
             .expect("params element should resolve from item resolver");
         assert_eq!(norm(&elem), "u8");
     }
@@ -1449,7 +1523,7 @@ mod tests {
             let _ = params;
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| None;
-        assert!(infer_local_owner_element_from_block(&block.stmts, "params", resolver).is_none());
+        assert!(infer_local_owner_element_from_block(&block.stmts, "params", resolver, None).is_none());
     }
 
     #[test]

@@ -566,16 +566,6 @@ impl CodeGen {
                 &mut placeholder_hints,
             );
             block_profile_mark("augment_owner_local_type_hints_from_solver");
-            // serde_bytes ByteBuf pattern: a Vec accumulated via push and then
-            // wrapped by a newtype-over-Vec constructor (`ByteBuf::from(v)`)
-            // gets its element type from the wrapper's single `Vec<E>` field —
-            // recoverable when the solver above can't break the push/next_element
-            // cycle. Seeds the while-let payload + `next_element<E>` turbofish.
-            self.augment_vec_local_element_hints_from_newtype_consumer(
-                &block.stmts,
-                &mut placeholder_hints,
-            );
-            block_profile_mark("augment_vec_local_element_hints_from_newtype_consumer");
             // Two-parameter generic owners (HashMap, BTreeMap) need
             // both K and V from their `insert(K, V)` usage. The
             // single-inner pipeline above handles only Vec&lt;T&gt;-shaped
