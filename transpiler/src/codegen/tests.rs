@@ -6288,15 +6288,23 @@ fn test_interface_traits_foreign_impl_assoc_type_emits_specialization_with_assoc
 #[test]
 fn test_interface_traits_assoc_type_emits_helper_traits_forward_decl() {
     // Phase 3b.1: traits with associated types get a helper class
-    // forward decl `template <class B> struct <Trait>Traits;` next
-    // to the Adapter primary template forward decls. Phase 3b.2
-    // will wire the rewrite of `T::AssocName` → `typename
+    // `<Trait>Traits<B>` next to the Adapter primary template forward
+    // decls. The primary is DEFINED (not a bare forward decl): each
+    // associated type defaults to the nested typedef on B
+    // (`using Owned = typename B::Owned;`), so a concrete impl that
+    // materializes its assoc types as nested members resolves
+    // `<Trait>Traits<B>` through the primary without a full
+    // specialization — important cross-crate (e.g.
+    // `SerializerTraits<ser::Serializer>`, book §13.10). Phase 3b.2
+    // wires the rewrite of `T::AssocName` → `typename
     // <Trait>Traits<T>::AssocName` at type-emit time.
     let out = transpile_str_interface_traits(
         "trait MyToOwned { type Owned; fn to_owned(&self) -> Self::Owned; }",
     );
     assert!(
-        out.contains("template <class B> struct MyToOwnedTraits;"),
+        out.contains(
+            "template <class B> struct MyToOwnedTraits { using Owned = typename B::Owned; };"
+        ),
         "{out}"
     );
 }
