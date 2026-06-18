@@ -1224,6 +1224,20 @@ pub struct CodeGen {
     /// site so both forward-decl and final-pass emissions produce the
     /// same `typename I::AssocName` form. See Ch. 14 §2b-ii.
     pub(crate) in_constraint_emit: std::cell::Cell<bool>,
+    /// When set, `maybe_prefix_typename_for_dependent_path` keeps a dependent
+    /// projection `X::Assoc` in its plain `typename X::Assoc` spelling instead
+    /// of routing it through the `<Trait>Traits<X>` helper. Used for the
+    /// DeserializeSeed seed-accessor extension free functions
+    /// (`next_value_seed`/`next_key_seed`/`next_entry_seed`), whose return type
+    /// projects the *seed's* `::Value` (`V`/`K` is always a concrete
+    /// DeserializeSeed at instantiation, so `typename V::Value` is valid and
+    /// needs no helper). Forcing the plain spelling in BOTH the forward-decl
+    /// pre-pass and the definition pass keeps the two emissions textually
+    /// identical regardless of `trait_associated_type_names` population timing
+    /// (which otherwise routes the def — but not the early decl — through
+    /// `VisitorTraits<V>`, mis-attributing the seed's `Value` to `Visitor` and
+    /// making the call ambiguous). See § 13.13 / Ch. 14.
+    pub(crate) suppress_dependent_assoc_traits_routing: std::cell::Cell<bool>,
     /// Top-level declared item names available as global `::Name` lookup targets.
     /// Used to avoid emitting invalid bare `using ::name;` imports in inline modules.
     pub(crate) declared_item_names: HashSet<String>,
@@ -1615,6 +1629,7 @@ impl CodeGen {
             cpp_module_member_symbols: HashMap::new(),
             in_forward_decl_signature: false,
             in_constraint_emit: std::cell::Cell::new(false),
+            suppress_dependent_assoc_traits_routing: std::cell::Cell::new(false),
             declared_item_names: HashSet::new(),
             item_const_types: HashMap::new(),
             declared_module_names: HashSet::new(),
@@ -13062,6 +13077,23 @@ impl CodeGen {
             return false;
         }
 
+        // DeserializeSeed seed accessors project the seed's own `::Value`
+        // (`V`/`K` is a concrete DeserializeSeed at instantiation), so keep the
+        // plain `typename V::Value` spelling rather than routing through
+        // `<Trait>Traits<V>` — which is pass-dependent (empty assoc-name table
+        // in the forward-decl pre-pass vs populated in the def pass) and would
+        // make the decl/def return types diverge and the call ambiguous.
+        let prev_suppress_assoc_traits = self.suppress_dependent_assoc_traits_routing.get();
+        self.suppress_dependent_assoc_traits_routing.set(
+            prev_suppress_assoc_traits
+                || matches!(
+                    method_name.as_str(),
+                    "next_value_seed"
+                        | "next_key_seed"
+                        | "next_entry_seed"
+                        | "next_element_seed"
+                ),
+        );
         let mut return_type =
             self.rewrite_cpp_import_bound_type_spelling(&self.map_extension_impl_return_type(
                 &method.sig.output,
@@ -13071,6 +13103,8 @@ impl CodeGen {
             ));
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
+        self.suppress_dependent_assoc_traits_routing
+            .set(prev_suppress_assoc_traits);
         if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
             return_type = "auto".to_string();
         }
@@ -13197,6 +13231,23 @@ impl CodeGen {
             return None;
         }
 
+        // DeserializeSeed seed accessors project the seed's own `::Value`
+        // (`V`/`K` is a concrete DeserializeSeed at instantiation), so keep the
+        // plain `typename V::Value` spelling rather than routing through
+        // `<Trait>Traits<V>` — which is pass-dependent (empty assoc-name table
+        // in the forward-decl pre-pass vs populated in the def pass) and would
+        // make the decl/def return types diverge and the call ambiguous.
+        let prev_suppress_assoc_traits = self.suppress_dependent_assoc_traits_routing.get();
+        self.suppress_dependent_assoc_traits_routing.set(
+            prev_suppress_assoc_traits
+                || matches!(
+                    method_name.as_str(),
+                    "next_value_seed"
+                        | "next_key_seed"
+                        | "next_entry_seed"
+                        | "next_element_seed"
+                ),
+        );
         let mut return_type =
             self.rewrite_cpp_import_bound_type_spelling(&self.map_extension_impl_return_type(
                 &method.sig.output,
@@ -13206,6 +13257,8 @@ impl CodeGen {
             ));
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
+        self.suppress_dependent_assoc_traits_routing
+            .set(prev_suppress_assoc_traits);
         if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
             return_type = "auto".to_string();
         }
@@ -13329,6 +13382,23 @@ impl CodeGen {
             return;
         }
 
+        // DeserializeSeed seed accessors project the seed's own `::Value`
+        // (`V`/`K` is a concrete DeserializeSeed at instantiation), so keep the
+        // plain `typename V::Value` spelling rather than routing through
+        // `<Trait>Traits<V>` — which is pass-dependent (empty assoc-name table
+        // in the forward-decl pre-pass vs populated in the def pass) and would
+        // make the decl/def return types diverge and the call ambiguous.
+        let prev_suppress_assoc_traits = self.suppress_dependent_assoc_traits_routing.get();
+        self.suppress_dependent_assoc_traits_routing.set(
+            prev_suppress_assoc_traits
+                || matches!(
+                    method_name.as_str(),
+                    "next_value_seed"
+                        | "next_key_seed"
+                        | "next_entry_seed"
+                        | "next_element_seed"
+                ),
+        );
         let mut return_type =
             self.rewrite_cpp_import_bound_type_spelling(&self.map_extension_impl_return_type(
                 &method.sig.output,
@@ -13338,6 +13408,8 @@ impl CodeGen {
             ));
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
+        self.suppress_dependent_assoc_traits_routing
+            .set(prev_suppress_assoc_traits);
         if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
             return_type = "auto".to_string();
         }
@@ -34223,7 +34295,7 @@ impl CodeGen {
         // intact — both routes resolve to the same type at the C++
         // level. Skip when first is `Self` (Self::Owned is handled
         // separately by the impl's own self type machinery).
-        if is_dependent_owner && first != "Self" {
+        if is_dependent_owner && first != "Self" && !self.suppress_dependent_assoc_traits_routing.get() {
             let segments: Vec<&str> = path.split("::").map(|s| s.trim()).collect();
             if segments.len() == 2 {
                 let assoc_name = segments[1];

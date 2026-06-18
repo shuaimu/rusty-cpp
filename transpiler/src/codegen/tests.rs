@@ -25181,6 +25181,134 @@ fn test_non_generic_next_element_is_not_given_serde_template_arg() {
 }
 
 #[test]
+fn test_byte_buf_opaque_return_while_let_next_element_uint8() {
+    // #36: the REAL serde_bytes ByteBuf::visit_seq shape. The function returns an
+    // OPAQUE container (ByteBuf), NOT Vec<T> — so the element type u8 is NOT
+    // spelled in the return type and cannot be recovered from it. It must come
+    // from the byte-named push target (`bytes.push(b)` where the container is a
+    // byte buffer). This is the case test_leaf5202 does NOT cover (that one
+    // returns Result<Vec<Value>>, where the element IS spelled in the return).
+    let out = transpile_str(
+        r#"
+        struct ByteBuf;
+        impl ByteBuf {
+            fn from(v: Vec<u8>) -> ByteBuf { loop {} }
+        }
+        trait SeqAccess {
+            fn next_element<T>(&mut self) -> Result<Option<T>, ()> { loop {} }
+        }
+        fn f<A: SeqAccess>(visitor: &mut A) -> Result<ByteBuf, ()> {
+            let mut bytes = Vec::with_capacity(0);
+            while let Some(b) = visitor.next_element()? {
+                bytes.push(b);
+            }
+            Ok(ByteBuf::from(bytes))
+        }
+    "#,
+    );
+    let nl: Vec<&str> = out.lines().filter(|l| l.contains("next_element")).collect();
+    assert!(
+        out.contains("next_element<uint8_t>")
+            || out.contains(".template next_element<uint8_t>()"),
+        "expected next_element<uint8_t> for opaque ByteBuf return; next_element lines:\n{}",
+        nl.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "#36 pending: ByteArray element type must survive the ok_or/? collapse from the *byte assignment target"]
+fn test_byte_array_assignment_next_element_uint8() {
+    // #36 ByteArray half: element type comes from the assignment target
+    // (`*byte` is u8), but it must survive the `.ok_or(())?` / `?` collapse to
+    // reach the next_element call. Harder than the while-let/push case.
+    let out = transpile_str(
+        r#"
+        struct ByteArray;
+        impl ByteArray {
+            fn new(a: [u8; 4]) -> ByteArray { loop {} }
+        }
+        trait SeqAccess {
+            fn next_element<T>(&mut self) -> Result<Option<T>, ()> { loop {} }
+        }
+        fn f<A: SeqAccess>(seq: &mut A) -> Result<ByteArray, ()> {
+            let mut bytes = [0u8; 4];
+            for byte in bytes.iter_mut() {
+                *byte = seq.next_element()?.ok_or(())?;
+            }
+            Ok(ByteArray::new(bytes))
+        }
+    "#,
+    );
+    let nl: Vec<&str> = out.lines().filter(|l| l.contains("next_element")).collect();
+    assert!(
+        out.contains("next_element<uint8_t>")
+            || out.contains(".template next_element<uint8_t>()"),
+        "expected next_element<uint8_t> from *byte assignment target; next_element lines:\n{}",
+        nl.join("\n")
+    );
+}
+
+#[test]
+fn test_seed_accessor_decl_def_return_type_consistent() {
+    // #36 sub-B: the UFCS extension-trait free function `next_value_seed<V>` is
+    // emitted twice — a forward declaration (pre-pass) and a definition. Its
+    // return type is `Result<V::Value, A::Error>` where V is the *seed*
+    // (DeserializeSeed), NOT a Visitor. The Phase-3b helper-routing must spell
+    // the seed assoc `V::Value` identically in both passes; if the decl says
+    // `V::Value` while the def says `VisitorTraits<V>::Value`, the two
+    // declarations have differing return types and the call is ambiguous.
+    let out = transpile_str(
+        r#"
+        trait DeserializeSeed<'de>: Sized {
+            type Value;
+            fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, ()>;
+        }
+        trait Visitor<'de>: Sized {
+            type Value;
+        }
+        trait MapAccess<'de> {
+            type Error;
+            fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+            where
+                V: DeserializeSeed<'de>;
+        }
+        struct M;
+        impl<'de> MapAccess<'de> for M {
+            type Error = ();
+            fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, ()>
+            where
+                V: DeserializeSeed<'de>,
+            {
+                loop {}
+            }
+        }
+    "#,
+    );
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("next_value_seed("))
+        .collect();
+    let decl_uses_visitor = lines
+        .iter()
+        .any(|l| l.contains("VisitorTraits<V>") && l.trim_end().ends_with(';'));
+    let def_uses_visitor = lines
+        .iter()
+        .any(|l| l.contains("VisitorTraits<V>") && l.trim_end().ends_with('{'));
+    let decl_uses_plain = lines
+        .iter()
+        .any(|l| l.contains("typename V::Value") && l.trim_end().ends_with(';'));
+    let def_uses_plain = lines
+        .iter()
+        .any(|l| l.contains("typename V::Value") && l.trim_end().ends_with('{'));
+    // Both must agree: either both plain `V::Value` or both `VisitorTraits<V>`.
+    assert!(
+        decl_uses_visitor == def_uses_visitor && decl_uses_plain == def_uses_plain,
+        "decl/def next_value_seed return type spelling diverged:\n{}",
+        lines.join("\n")
+    );
+}
+
+#[test]
 fn test_if_let_slice_rest_binding_expression_lowers_runtime_condition() {
     let out = transpile_str(
         r#"

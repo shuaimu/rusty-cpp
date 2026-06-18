@@ -5033,11 +5033,50 @@ impl CodeGen {
                     // `m(__self)` can't be shadowed by a local of the same name.
                     let escaped = escape_cpp_keyword(&method_name);
                     if traits.len() == 1 {
-                        let callee = format!(
+                        let mut callee = format!(
                             "{}::{}",
                             self.ufcs_trait_namespace(traits.iter().next().unwrap()),
                             escaped
                         );
+                        // #36: serde's SeqAccess/MapAccess accessors
+                        // (next_element/next_key/next_value) are generic over the
+                        // element/key/value type, which appears in no argument, so
+                        // C++ cannot deduce it. The member-call path infers it from
+                        // the expected `Result<Option<T>, E>` type and emits a
+                        // `<T>` turbofish (see the block near
+                        // `infer_serde_access_method_template_type_from_expected`),
+                        // but this UFCS TraitOnly path short-circuits before that.
+                        // Mirror the inference here so the turbofish threads into
+                        // the `<Tr>_::next_element<T>(...)` callee (the autoderef
+                        // fallback emitter splits/reattaches the `<...>` suffix
+                        // across its direct/deref/member branches). When inference
+                        // yields nothing — the normal seq/map case where the
+                        // expected type doesn't encode the element — the callee is
+                        // left bare, unchanged.
+                        if mc.args.is_empty()
+                            && mc.turbofish.is_none()
+                            && matches!(
+                                method_name.as_str(),
+                                "next_element" | "next_key" | "next_value"
+                            )
+                            && self.method_call_may_need_serde_access_template_arg(
+                                &mc.receiver,
+                                &method_name,
+                            )
+                            && let Some(access_ty) = self
+                                .infer_serde_access_method_template_type_from_expected(
+                                    &method_name,
+                                    expected_ty,
+                                )
+                        {
+                            let access_cpp = self.map_type(&access_ty);
+                            if access_cpp != "auto"
+                                && !access_cpp.contains("/* TODO")
+                                && !type_string_has_auto_placeholder(&access_cpp)
+                            {
+                                callee = format!("{}<{}>", callee, access_cpp);
+                            }
+                        }
                         return self.emit_extension_call_with_receiver_autoderef_fallback(
                             &callee, &receiver, &args,
                         );
