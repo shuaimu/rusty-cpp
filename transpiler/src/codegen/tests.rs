@@ -25190,9 +25190,13 @@ fn test_byte_buf_opaque_return_while_let_next_element_uint8() {
     // returns Result<Vec<Value>>, where the element IS spelled in the return).
     let out = transpile_str(
         r#"
-        struct ByteBuf;
+        struct ByteBuf {
+            bytes: Vec<u8>,
+        }
         impl ByteBuf {
-            fn from(v: Vec<u8>) -> ByteBuf { loop {} }
+            fn from<T: Into<Vec<u8>>>(bytes: T) -> ByteBuf {
+                ByteBuf { bytes: bytes.into() }
+            }
         }
         trait SeqAccess {
             fn next_element<T>(&mut self) -> Result<Option<T>, ()> { loop {} }
