@@ -59,6 +59,46 @@ fn transpile_str_with_by_value_cycle_breaking_prototype(rust_code: &str) -> Stri
     cg.into_output()
 }
 
+/// §13.14 Phase-4: transpile with the constraint-solver engine flag on
+/// (deterministic via the setter, independent of the ambient env var).
+fn transpile_str_infer_engine(rust_code: &str) -> String {
+    let file: syn::File = syn::parse_str(rust_code).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_infer_engine(true);
+    cg.emit_file(&file, None);
+    cg.into_output()
+}
+
+#[test]
+fn test_infer_engine_call_signature_resolves_vec_element_live() {
+    // §13.14 C2 live wiring, on the case the existing heuristic CANNOT do:
+    // generic instantiation. `identity<T>(x: T) -> T` called as
+    // `v.push(identity(7u8))` must monomorphize T = u8 from the argument so the
+    // Vec element is u8. The existing forward-scan heuristic leaves the generic
+    // return unresolved; the engine's per-call unification (arg ↔ param, result
+    // = return) pins it. Proves both that the live path works AND that the
+    // engine adds capability the heuristic lacks.
+    let src = r#"
+        fn identity<T>(x: T) -> T { x }
+        fn build() {
+            let mut v = Vec::new();
+            v.push(identity(7u8));
+            let _ = v;
+        }
+    "#;
+    let on = transpile_str_infer_engine(src);
+    assert!(
+        on.contains("rusty::Vec<uint8_t>"),
+        "engine-on should resolve the Vec element to u8 via generic call instantiation:\n{on}"
+    );
+    // NB: the engine-OFF transpile of this snippet leaks `rusty::Vec<auto>`
+    // (the heuristic can't instantiate the generic return), which the
+    // auto-leak guard in `into_output` rejects with a panic — so we can't
+    // assert the OFF spelling here. That the engine adds capability the
+    // heuristic lacks is covered by the engine-level test
+    // `block_local_element_from_generic_call_instantiates_from_arg`.
+}
+
 #[test]
 fn test_simple_function() {
     let out = transpile_str("fn add(a: i32, b: i32) -> i32 { a + b }");

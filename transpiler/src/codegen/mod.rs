@@ -1337,6 +1337,12 @@ pub struct CodeGen {
     pub(crate) unsupported_by_value_cycle_keys: HashSet<String>,
     /// Opt-in prototype mode for by-value SCC cycle breaking diagnostics.
     pub(crate) enable_by_value_cycle_breaking_prototype: bool,
+    /// §13.14 Phase-4 flag: when set, emit consults the constraint-solver
+    /// engine (currently the C2 call-signature rule fed into the owner-element
+    /// solver seam) as an additional type source before falling back to the
+    /// heuristic passes. Default reads `RUSTY_CPP_INFER_ENGINE`; tests/CLI
+    /// override via `set_infer_engine`. Off by default until matrix-validated.
+    pub(crate) infer_engine_enabled: bool,
     /// Deterministic prototype diagnostics describing selected feedback edges.
     pub(crate) by_value_cycle_breaking_prototype_diagnostics: Vec<String>,
     /// De-duplication keys for prototype cycle-breaking diagnostics.
@@ -1660,6 +1666,7 @@ impl CodeGen {
             unsupported_by_value_cycle_diagnostics: Vec::new(),
             unsupported_by_value_cycle_keys: HashSet::new(),
             enable_by_value_cycle_breaking_prototype: false,
+            infer_engine_enabled: std::env::var_os("RUSTY_CPP_INFER_ENGINE").is_some(),
             by_value_cycle_breaking_prototype_diagnostics: Vec::new(),
             by_value_cycle_breaking_prototype_keys: HashSet::new(),
             by_value_cycle_breaking_rewrite_fields: HashSet::new(),
@@ -2095,6 +2102,13 @@ impl CodeGen {
     /// candidate feedback edges selected by the prototype planner.
     pub fn set_by_value_cycle_breaking_prototype(&mut self, enabled: bool) {
         self.enable_by_value_cycle_breaking_prototype = enabled;
+    }
+
+    /// §13.14 Phase-4: enable the constraint-solver engine as an emit-time type
+    /// source (overrides the `RUSTY_CPP_INFER_ENGINE` default). Used by the CLI
+    /// and by tests that exercise the engine-on path deterministically.
+    pub fn set_infer_engine(&mut self, enabled: bool) {
+        self.infer_engine_enabled = enabled;
     }
 
     pub fn set_is_dependency_module(&mut self, is_dependency: bool) {
@@ -16776,15 +16790,40 @@ impl CodeGen {
             // the former bespoke newtype-consumer heuristic pass.
             let field_resolver =
                 |owner: &str| -> Option<syn::Type> { self.single_field_type_of_struct(owner) };
-            // §13.14 C2 (call-signature constraints) is not wired into this
-            // live seam yet — pass `None` so default behavior is unchanged; the
-            // CodeGen `SignatureResolver` + matrix gate is a separate slice.
+            // §13.14 C2: when the engine flag is on, resolve a call's element
+            // contribution from the callee's declared signature (each argument
+            // unifies with its parameter; the call's result is the instantiated
+            // return type) — so `v.push(make())` pins `v`'s element to `make`'s
+            // return type, and generic callees monomorphize per call from their
+            // args. Flag-gated (off by default) until matrix-validated; returns
+            // None for unknown callees, leaving the heuristics in place.
+            let sig_resolver = |call: &syn::ExprCall| -> Option<type_solver::FnSig> {
+                let func = call.func.as_ref();
+                let ret = self.lookup_function_return_type(func)?.clone();
+                let type_params = self
+                    .lookup_function_type_param_names(func)
+                    .cloned()
+                    .unwrap_or_default();
+                let params = (0..call.args.len())
+                    .map(|i| self.lookup_function_arg_expected_type(func, i).cloned())
+                    .collect();
+                Some(type_solver::FnSig {
+                    type_params,
+                    params,
+                    ret,
+                })
+            };
+            let sig_arg: Option<&type_solver::SignatureResolver> = if self.infer_engine_enabled {
+                Some(&sig_resolver)
+            } else {
+                None
+            };
             if let Some(elem) = type_solver::infer_local_owner_element_from_block(
                 stmts,
                 &name,
                 &item_resolver,
                 Some(&field_resolver),
-                None,
+                sig_arg,
             ) && self.type_is_placeholder_hint_candidate_allow_scoped_generics(&elem)
             {
                 let vec_ty: syn::Type = syn::parse_quote!(Vec<#elem>);
