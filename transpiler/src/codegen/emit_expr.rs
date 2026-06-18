@@ -6809,6 +6809,22 @@ impl CodeGen {
             return format!("rusty::write_fmt({}, {})", receiver, args[0]);
         }
         if method_name == "ok_or" && mc.args.len() == 1 {
+            // `ok_or` maps `Option<T>` -> `Result<T, E>`. Its receiver is an
+            // `Option<T>`, so thread `Option<Ok>` (from the expected `Result`)
+            // down to the receiver — NOT the `Result` itself. This lets a
+            // chained `seq.next_element()?.ok_or(())?` recover the
+            // `next_element<T>` element type from the assignment/`?` target
+            // (serde_bytes ByteArray): the receiver `next_element()?` then sees
+            // expected `Option<T>`, its `?` operand `next_element()` sees
+            // `Result<Option<T>, _>`, and the turbofish injection fires.
+            let receiver_expected: Option<syn::Type> = self
+                .expected_result_type_arg(expected_ty, 0)
+                .filter(|ok_ty| {
+                    !self.type_contains_infer(ok_ty)
+                        && !self.type_contains_unresolved_placeholder_like(ok_ty)
+                })
+                .map(|ok_ty| parse_quote!(Option<#ok_ty>));
+            let receiver_expected_arg = receiver_expected.as_ref().or(expected_ty);
             if let Some(expected_err_ty) = self.expected_result_type_arg(expected_ty, 1) {
                 let expected_err_cpp = self.map_type(expected_err_ty);
                 let expected_err_is_unit_tuple =
@@ -6825,7 +6841,7 @@ impl CodeGen {
                         &method_name,
                         None,
                         &[coerced_arg],
-                        expected_ty,
+                        receiver_expected_arg,
                     );
                 }
             }
@@ -6834,7 +6850,7 @@ impl CodeGen {
                 &method_name,
                 None,
                 &args,
-                expected_ty,
+                receiver_expected_arg,
             );
         }
         if method_name == "map_err" && mc.args.len() == 1 {

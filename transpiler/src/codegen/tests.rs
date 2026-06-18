@@ -25220,7 +25220,36 @@ fn test_byte_buf_opaque_return_while_let_next_element_uint8() {
 }
 
 #[test]
-#[ignore = "#36 pending: ByteArray element type must survive the ok_or/? collapse from the *byte assignment target"]
+fn test_next_element_ok_or_chain_typed_let_uint8() {
+    // The `ok_or` receiver-expected threading: a typed `let x: u8 = ...` seeds
+    // the chain `seq.next_element()?.ok_or(())?` with `u8`; the outer `?` types
+    // the `ok_or` as `Result<u8, ()>`, `ok_or` threads `Option<u8>` to its
+    // receiver, the inner `?` types `next_element()` as `Result<Option<u8>, _>`,
+    // and the turbofish lands. This is the typed-binding analogue of the
+    // ByteArray `*byte = ...` case (which additionally needs the for-loop
+    // iter_mut binding-type seed, not yet wired).
+    let out = transpile_str(
+        r#"
+        trait SeqAccess {
+            fn next_element<T>(&mut self) -> Result<Option<T>, ()> { loop {} }
+        }
+        fn f<A: SeqAccess>(seq: &mut A) -> Result<u8, ()> {
+            let x: u8 = seq.next_element()?.ok_or(())?;
+            Ok(x)
+        }
+    "#,
+    );
+    let nl: Vec<&str> = out.lines().filter(|l| l.contains("next_element")).collect();
+    assert!(
+        out.contains("next_element<uint8_t>")
+            || out.contains(".template next_element<uint8_t>()"),
+        "expected next_element<uint8_t> from typed ok_or chain; next_element lines:\n{}",
+        nl.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "#36 pending: ByteArray needs the for-loop iter_mut binding-type seed (*byte: u8) feeding the ok_or chain"]
 fn test_byte_array_assignment_next_element_uint8() {
     // #36 ByteArray half: element type comes from the assignment target
     // (`*byte` is u8), but it must survive the `.ok_or(())?` / `?` collapse to
