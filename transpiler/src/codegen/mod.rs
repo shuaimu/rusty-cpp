@@ -16776,11 +16776,15 @@ impl CodeGen {
             // the former bespoke newtype-consumer heuristic pass.
             let field_resolver =
                 |owner: &str| -> Option<syn::Type> { self.single_field_type_of_struct(owner) };
+            // §13.14 C2 (call-signature constraints) is not wired into this
+            // live seam yet — pass `None` so default behavior is unchanged; the
+            // CodeGen `SignatureResolver` + matrix gate is a separate slice.
             if let Some(elem) = type_solver::infer_local_owner_element_from_block(
                 stmts,
                 &name,
                 &item_resolver,
                 Some(&field_resolver),
+                None,
             ) && self.type_is_placeholder_hint_candidate_allow_scoped_generics(&elem)
             {
                 let vec_ty: syn::Type = syn::parse_quote!(Vec<#elem>);

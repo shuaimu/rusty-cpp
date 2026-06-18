@@ -57,6 +57,28 @@ pub(crate) type ItemResolver<'a> = dyn Fn(&syn::Expr) -> Option<Type> + 'a;
 /// `None` when the name isn't a known single-field struct.
 pub(crate) type FieldResolver<'a> = dyn Fn(&str) -> Option<Type> + 'a;
 
+/// A callee's declared signature, as seen at a call site, for the §13.14 C2
+/// call-signature rule. `type_params` are the callee's own generic parameter
+/// names (e.g. `["T"]` for `fn f<T>(…)`); the collector allocates a fresh type
+/// variable per call so distinct call sites monomorphize independently.
+/// `params[i]` is the declared type of positional argument `i` (`None` when
+/// unknown), and `ret` is the declared return type — both written in terms of
+/// the callee's `type_params`, which `tyterm_from_syn` lowers to the
+/// per-call fresh variables.
+pub(crate) struct FnSig {
+    pub(crate) type_params: Vec<String>,
+    pub(crate) params: Vec<Option<Type>>,
+    pub(crate) ret: Type,
+}
+
+/// Callback resolving a *call expression* to its callee's [`FnSig`] — backed by
+/// `CodeGen`'s `lookup_function_type_param_names` / `lookup_function_arg_expected_type`
+/// / `lookup_function_return_type`. Lets the collector pin a call's argument
+/// types to the callee's parameters and the call's result to the (instantiated)
+/// return type — Rust's cross-call unification that C++ per-site CTAD can't do.
+/// `None` when the callee's signature isn't known.
+pub(crate) type SignatureResolver<'a> = dyn Fn(&syn::ExprCall) -> Option<FnSig> + 'a;
+
 /// Identifier for a free type variable allocated by the engine.
 ///
 /// Variables are dense, monotonically-issued `usize` keys. A
@@ -455,6 +477,11 @@ pub(crate) struct ConstraintCollector<'ctx, 'r> {
     /// consumer calls constrain `local`'s type to that field type. `None`
     /// for callers (if/else merge, fold reducer) that don't need it.
     field_resolver: Option<&'r FieldResolver<'r>>,
+    /// Optional callback resolving a call expression to its callee's signature
+    /// (§13.14 C2). When set, `summarize_expr` pins each call argument to the
+    /// callee's parameter type and returns the (per-call-instantiated) return
+    /// type instead of a fresh variable. `None` for callers that don't need it.
+    sig_resolver: Option<&'r SignatureResolver<'r>>,
     /// Type parameter names in scope for the function being
     /// walked (e.g. `T` from `fn foo<T>()`). Used by
     /// `tyterm_from_syn` to lower references to those names into
@@ -479,6 +506,7 @@ impl<'ctx, 'r> ConstraintCollector<'ctx, 'r> {
         Self {
             ctx,
             field_resolver: None,
+            sig_resolver: None,
             binders: HashMap::new(),
             env: HashMap::new(),
             expr_var_buffer: Vec::new(),
@@ -492,6 +520,7 @@ impl<'ctx, 'r> ConstraintCollector<'ctx, 'r> {
         Self {
             ctx,
             field_resolver: None,
+            sig_resolver: None,
             binders,
             env: HashMap::new(),
             expr_var_buffer: Vec::new(),
@@ -596,6 +625,11 @@ impl<'ctx, 'r> ConstraintCollector<'ctx, 'r> {
                         head,
                         args: vec![TyTerm::Var(self.fresh_expr_var())],
                     };
+                }
+                // §13.14 C2: a call to a known-signature callee — pin args to
+                // params and yield the instantiated return type.
+                if let Some(term) = self.summarize_call_via_signature(call) {
+                    return term;
                 }
                 TyTerm::Var(self.fresh_expr_var())
             }
@@ -871,6 +905,38 @@ impl<'ctx, 'r> ConstraintCollector<'ctx, 'r> {
                 });
             }
         }
+    }
+
+    /// §13.14 C2: summarize a call `f(a0, a1, …)` via its callee's signature.
+    /// Allocates a fresh type variable per callee generic (so each call site
+    /// monomorphizes independently), constrains each argument's type to the
+    /// matching parameter type, and returns the instantiated return type. This
+    /// is the cross-call unification Rust does and C++ per-site deduction can't:
+    /// `let v = Vec::new(); v.push(make());` resolves `v`'s element to `make`'s
+    /// return type, and `f::<T>(x)`-style generic returns pin `T` from the
+    /// argument. Returns `None` (→ fresh var, today's behavior) when no
+    /// signature resolver is set or the callee is unknown.
+    fn summarize_call_via_signature(&mut self, call: &syn::ExprCall) -> Option<TyTerm> {
+        let resolver = self.sig_resolver?;
+        let sig = resolver(call)?;
+        let mut binders = HashMap::new();
+        for tp in &sig.type_params {
+            let v = self.ctx.fresh_var();
+            binders.insert(tp.clone(), v);
+        }
+        for (i, arg) in call.args.iter().enumerate() {
+            let Some(Some(param_ty)) = sig.params.get(i) else {
+                continue;
+            };
+            let param_term = tyterm_from_syn(param_ty, &binders);
+            let arg_term = self.summarize_expr(arg);
+            self.ctx.push_constraint(Constraint {
+                lhs: arg_term,
+                rhs: param_term,
+                origin: ConstraintOrigin::Synthetic("call-arg-param"),
+            });
+        }
+        Some(tyterm_from_syn(&sig.ret, &binders))
     }
 
     /// Bind a closure's parameters into `env`, pinning any annotated
@@ -1315,11 +1381,13 @@ pub(crate) fn infer_local_owner_element_from_block(
     target: &str,
     resolver: &ItemResolver<'_>,
     field_resolver: Option<&FieldResolver<'_>>,
+    sig_resolver: Option<&SignatureResolver<'_>>,
 ) -> Option<Type> {
     let mut ctx = InferenceContext::new();
     let target_var = {
         let mut c = ConstraintCollector::new(&mut ctx);
         c.field_resolver = field_resolver;
+        c.sig_resolver = sig_resolver;
         c.collect_block_constraints(stmts, resolver);
         c.env.get(target).copied()
     }?;
@@ -1492,7 +1560,7 @@ mod tests {
             });
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| None;
-        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, None)
+        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, None, None)
             .expect("params element should resolve");
         assert_eq!(norm(&elem), "(Vec<i32>,i32)");
     }
@@ -1509,7 +1577,7 @@ mod tests {
             });
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| Some(parse_quote!(u8));
-        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, None)
+        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, None, None)
             .expect("params element should resolve from item resolver");
         assert_eq!(norm(&elem), "u8");
     }
@@ -1540,6 +1608,7 @@ mod tests {
             "bytes",
             resolver,
             Some(field_resolver),
+            None,
         )
         .expect("bytes element should resolve from ByteBuf's Vec<u8> field");
         assert_eq!(norm(&elem), "u8");
@@ -1560,7 +1629,78 @@ mod tests {
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| None;
         assert!(
-            infer_local_owner_element_from_block(&block.stmts, "bytes", resolver, None).is_none()
+            infer_local_owner_element_from_block(&block.stmts, "bytes", resolver, None, None).is_none()
+        );
+    }
+
+    #[test]
+    fn block_local_element_from_call_return_via_signature() {
+        // §13.14 C2: a Vec element pushed as a function-call result resolves to
+        // the callee's (non-generic) return type via the SignatureResolver.
+        let block: syn::Block = parse_quote!({
+            let mut v = Vec::new();
+            v.push(make_widget());
+        });
+        let resolver: &ItemResolver = &|_e: &syn::Expr| None;
+        let sig_resolver: &SignatureResolver = &|call: &syn::ExprCall| {
+            let syn::Expr::Path(p) = call.func.as_ref() else {
+                return None;
+            };
+            match p.path.segments.last()?.ident.to_string().as_str() {
+                "make_widget" => Some(FnSig {
+                    type_params: vec![],
+                    params: vec![],
+                    ret: parse_quote!(Widget),
+                }),
+                _ => None,
+            }
+        };
+        let elem =
+            infer_local_owner_element_from_block(&block.stmts, "v", resolver, None, Some(sig_resolver))
+                .expect("v element should resolve from make_widget()'s return type");
+        assert_eq!(norm(&elem), "Widget");
+    }
+
+    #[test]
+    fn block_local_element_from_generic_call_instantiates_from_arg() {
+        // §13.14 C2: a generic callee `fn identity<T>(x: T) -> T` monomorphizes
+        // per call — the argument's type (`u8`) pins `T`, so the pushed result
+        // is `u8` and the Vec element resolves to `u8`.
+        let block: syn::Block = parse_quote!({
+            let mut v = Vec::new();
+            v.push(identity(7u8));
+        });
+        let resolver: &ItemResolver = &|_e: &syn::Expr| None;
+        let sig_resolver: &SignatureResolver = &|call: &syn::ExprCall| {
+            let syn::Expr::Path(p) = call.func.as_ref() else {
+                return None;
+            };
+            match p.path.segments.last()?.ident.to_string().as_str() {
+                "identity" => Some(FnSig {
+                    type_params: vec!["T".to_string()],
+                    params: vec![Some(parse_quote!(T))],
+                    ret: parse_quote!(T),
+                }),
+                _ => None,
+            }
+        };
+        let elem =
+            infer_local_owner_element_from_block(&block.stmts, "v", resolver, None, Some(sig_resolver))
+                .expect("v element should resolve via generic identity instantiation");
+        assert_eq!(norm(&elem), "u8");
+    }
+
+    #[test]
+    fn block_local_element_call_return_inert_without_sig_resolver() {
+        // The same call-return push must stay unresolved with no
+        // SignatureResolver — the C2 rule fires only via the resolver.
+        let block: syn::Block = parse_quote!({
+            let mut v = Vec::new();
+            v.push(make_widget());
+        });
+        let resolver: &ItemResolver = &|_e: &syn::Expr| None;
+        assert!(
+            infer_local_owner_element_from_block(&block.stmts, "v", resolver, None, None).is_none()
         );
     }
 
@@ -1573,7 +1713,7 @@ mod tests {
             let _ = params;
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| None;
-        assert!(infer_local_owner_element_from_block(&block.stmts, "params", resolver, None).is_none());
+        assert!(infer_local_owner_element_from_block(&block.stmts, "params", resolver, None, None).is_none());
     }
 
     #[test]
