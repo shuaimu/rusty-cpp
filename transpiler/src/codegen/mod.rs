@@ -16813,17 +16813,35 @@ impl CodeGen {
                     ret,
                 })
             };
-            let sig_arg: Option<&type_solver::SignatureResolver> = if self.infer_engine_enabled {
-                Some(&sig_resolver)
+            // §13.14 C2 (method form): resolve a method call's result type so
+            // `v.push(x.method())` pins `v`'s element. Flag-gated alongside sig.
+            let method_resolver = |mc: &syn::ExprMethodCall| -> Option<syn::Type> {
+                // Known method patterns (unwrap/borrow/lock/…) first; else a
+                // user method whose name maps to a unique concrete return type
+                // across declared impls (the lookup already filters
+                // generic/placeholder returns).
+                self.infer_method_call_result_type_for_local(mc)
+                    .or_else(|| self.lookup_unique_method_return_type_by_name(&mc.method.to_string()))
+            };
+            // `field` (§13.14 C1) is always on (matrix-validated, e62758c); the
+            // call/method signature rules (C2) are gated on the engine flag.
+            let extra = if self.infer_engine_enabled {
+                type_solver::OwnerElementResolvers {
+                    field: Some(&field_resolver),
+                    sig: Some(&sig_resolver),
+                    method: Some(&method_resolver),
+                }
             } else {
-                None
+                type_solver::OwnerElementResolvers {
+                    field: Some(&field_resolver),
+                    ..Default::default()
+                }
             };
             if let Some(elem) = type_solver::infer_local_owner_element_from_block(
                 stmts,
                 &name,
                 &item_resolver,
-                Some(&field_resolver),
-                sig_arg,
+                extra,
             ) && self.type_is_placeholder_hint_candidate_allow_scoped_generics(&elem)
             {
                 let vec_ty: syn::Type = syn::parse_quote!(Vec<#elem>);

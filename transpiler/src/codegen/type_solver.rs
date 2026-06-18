@@ -79,6 +79,23 @@ pub(crate) struct FnSig {
 /// `None` when the callee's signature isn't known.
 pub(crate) type SignatureResolver<'a> = dyn Fn(&syn::ExprCall) -> Option<FnSig> + 'a;
 
+/// Callback resolving a *method call* `recv.m(args)` to its result type —
+/// backed by `CodeGen::infer_method_call_result_type_for_local` (+ user-method
+/// return lookups). The common element source `v.push(x.method())` needs the
+/// method's return type; method generics/arg-unification are rarer and skipped
+/// for now (result-type only). `None` when the method's return isn't known.
+pub(crate) type MethodResolver<'a> = dyn Fn(&syn::ExprMethodCall) -> Option<Type> + 'a;
+
+/// The optional CodeGen-backed resolvers an owner-element/local inference query
+/// may consult. Bundled so adding rules (§13.14 C-series) doesn't grow the
+/// query signatures. `Default` is all-`None` (pure-structural inference).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct OwnerElementResolvers<'a> {
+    pub(crate) field: Option<&'a FieldResolver<'a>>,
+    pub(crate) sig: Option<&'a SignatureResolver<'a>>,
+    pub(crate) method: Option<&'a MethodResolver<'a>>,
+}
+
 /// Identifier for a free type variable allocated by the engine.
 ///
 /// Variables are dense, monotonically-issued `usize` keys. A
@@ -482,6 +499,11 @@ pub(crate) struct ConstraintCollector<'ctx, 'r> {
     /// callee's parameter type and returns the (per-call-instantiated) return
     /// type instead of a fresh variable. `None` for callers that don't need it.
     sig_resolver: Option<&'r SignatureResolver<'r>>,
+    /// Optional callback resolving a method call to its result type (§13.14 C2,
+    /// method form). When set, `summarize_expr` returns it for an unrecognized
+    /// `recv.m(args)` instead of a fresh variable. `None` for callers that
+    /// don't need it.
+    method_resolver: Option<&'r MethodResolver<'r>>,
     /// Type parameter names in scope for the function being
     /// walked (e.g. `T` from `fn foo<T>()`). Used by
     /// `tyterm_from_syn` to lower references to those names into
@@ -507,6 +529,7 @@ impl<'ctx, 'r> ConstraintCollector<'ctx, 'r> {
             ctx,
             field_resolver: None,
             sig_resolver: None,
+            method_resolver: None,
             binders: HashMap::new(),
             env: HashMap::new(),
             expr_var_buffer: Vec::new(),
@@ -521,6 +544,7 @@ impl<'ctx, 'r> ConstraintCollector<'ctx, 'r> {
             ctx,
             field_resolver: None,
             sig_resolver: None,
+            method_resolver: None,
             binders,
             env: HashMap::new(),
             expr_var_buffer: Vec::new(),
@@ -666,6 +690,18 @@ impl<'ctx, 'r> ConstraintCollector<'ctx, 'r> {
                 // type for element-inference purposes (the engine erases
                 // the owned/borrowed distinction per §13.4).
                 self.summarize_expr(&mc.receiver)
+            }
+            syn::Expr::MethodCall(mc) => {
+                // §13.14 C2 (method form): an unrecognized `recv.m(args)` —
+                // ask the method resolver for its result type so e.g.
+                // `v.push(x.parse_thing())` resolves the Vec element. Falls
+                // back to a fresh variable when no resolver / unknown method.
+                if let Some(resolver) = self.method_resolver
+                    && let Some(ty) = resolver(mc)
+                {
+                    return TyTerm::Concrete(ty);
+                }
+                TyTerm::Var(self.fresh_expr_var())
             }
             _ => TyTerm::Var(self.fresh_expr_var()),
         }
@@ -1380,14 +1416,14 @@ pub(crate) fn infer_local_owner_element_from_block(
     stmts: &[syn::Stmt],
     target: &str,
     resolver: &ItemResolver<'_>,
-    field_resolver: Option<&FieldResolver<'_>>,
-    sig_resolver: Option<&SignatureResolver<'_>>,
+    extra: OwnerElementResolvers<'_>,
 ) -> Option<Type> {
     let mut ctx = InferenceContext::new();
     let target_var = {
         let mut c = ConstraintCollector::new(&mut ctx);
-        c.field_resolver = field_resolver;
-        c.sig_resolver = sig_resolver;
+        c.field_resolver = extra.field;
+        c.sig_resolver = extra.sig;
+        c.method_resolver = extra.method;
         c.collect_block_constraints(stmts, resolver);
         c.env.get(target).copied()
     }?;
@@ -1560,7 +1596,7 @@ mod tests {
             });
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| None;
-        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, None, None)
+        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, OwnerElementResolvers::default())
             .expect("params element should resolve");
         assert_eq!(norm(&elem), "(Vec<i32>,i32)");
     }
@@ -1577,7 +1613,7 @@ mod tests {
             });
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| Some(parse_quote!(u8));
-        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, None, None)
+        let elem = infer_local_owner_element_from_block(&block.stmts, "params", resolver, OwnerElementResolvers::default())
             .expect("params element should resolve from item resolver");
         assert_eq!(norm(&elem), "u8");
     }
@@ -1607,8 +1643,10 @@ mod tests {
             &block.stmts,
             "bytes",
             resolver,
-            Some(field_resolver),
-            None,
+            OwnerElementResolvers {
+                field: Some(field_resolver),
+                ..Default::default()
+            },
         )
         .expect("bytes element should resolve from ByteBuf's Vec<u8> field");
         assert_eq!(norm(&elem), "u8");
@@ -1629,7 +1667,7 @@ mod tests {
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| None;
         assert!(
-            infer_local_owner_element_from_block(&block.stmts, "bytes", resolver, None, None).is_none()
+            infer_local_owner_element_from_block(&block.stmts, "bytes", resolver, OwnerElementResolvers::default()).is_none()
         );
     }
 
@@ -1656,7 +1694,7 @@ mod tests {
             }
         };
         let elem =
-            infer_local_owner_element_from_block(&block.stmts, "v", resolver, None, Some(sig_resolver))
+            infer_local_owner_element_from_block(&block.stmts, "v", resolver, OwnerElementResolvers { sig: Some(sig_resolver), ..Default::default() })
                 .expect("v element should resolve from make_widget()'s return type");
         assert_eq!(norm(&elem), "Widget");
     }
@@ -1685,7 +1723,7 @@ mod tests {
             }
         };
         let elem =
-            infer_local_owner_element_from_block(&block.stmts, "v", resolver, None, Some(sig_resolver))
+            infer_local_owner_element_from_block(&block.stmts, "v", resolver, OwnerElementResolvers { sig: Some(sig_resolver), ..Default::default() })
                 .expect("v element should resolve via generic identity instantiation");
         assert_eq!(norm(&elem), "u8");
     }
@@ -1700,8 +1738,38 @@ mod tests {
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| None;
         assert!(
-            infer_local_owner_element_from_block(&block.stmts, "v", resolver, None, None).is_none()
+            infer_local_owner_element_from_block(&block.stmts, "v", resolver, OwnerElementResolvers::default()).is_none()
         );
+    }
+
+    #[test]
+    fn block_local_element_from_method_call_via_resolver() {
+        // §13.14 C2 (method form): a Vec element pushed as a method-call result
+        // resolves to the method's return type via the MethodResolver — the
+        // common `v.push(x.make_item())` element source.
+        let block: syn::Block = parse_quote!({
+            let mut v = Vec::new();
+            v.push(x.make_item());
+        });
+        let resolver: &ItemResolver = &|_e: &syn::Expr| None;
+        let method_resolver: &MethodResolver = &|mc: &syn::ExprMethodCall| {
+            if mc.method.to_string() == "make_item" {
+                Some(parse_quote!(Widget))
+            } else {
+                None
+            }
+        };
+        let elem = infer_local_owner_element_from_block(
+            &block.stmts,
+            "v",
+            resolver,
+            OwnerElementResolvers {
+                method: Some(method_resolver),
+                ..Default::default()
+            },
+        )
+        .expect("v element should resolve from x.make_item()'s return type");
+        assert_eq!(norm(&elem), "Widget");
     }
 
     #[test]
@@ -1713,7 +1781,7 @@ mod tests {
             let _ = params;
         });
         let resolver: &ItemResolver = &|_e: &syn::Expr| None;
-        assert!(infer_local_owner_element_from_block(&block.stmts, "params", resolver, None, None).is_none());
+        assert!(infer_local_owner_element_from_block(&block.stmts, "params", resolver, OwnerElementResolvers::default()).is_none());
     }
 
     #[test]

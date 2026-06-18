@@ -100,6 +100,31 @@ fn test_infer_engine_call_signature_resolves_vec_element_live() {
 }
 
 #[test]
+fn test_infer_engine_method_call_resolves_vec_element_live() {
+    // §13.14 C2 method form, live: a Vec element pushed as a user-method-call
+    // result (`v.push(f.make_item())`) resolves to the method's return type
+    // (Widget) via the MethodResolver (unique-method-return lookup) when the
+    // engine flag is on.
+    let src = r#"
+        struct Widget;
+        struct Factory;
+        impl Factory {
+            fn make_item(&self) -> Widget { loop {} }
+        }
+        fn build(f: Factory) {
+            let mut v = Vec::new();
+            v.push(f.make_item());
+            let _ = v;
+        }
+    "#;
+    let on = transpile_str_infer_engine(src);
+    assert!(
+        on.contains("rusty::Vec<Widget>"),
+        "engine-on should resolve the Vec element via the method's return type:\n{on}"
+    );
+}
+
+#[test]
 fn test_simple_function() {
     let out = transpile_str("fn add(a: i32, b: i32) -> i32 { a + b }");
     assert!(out.contains("int32_t add(int32_t a, int32_t b)"), "{out}");
