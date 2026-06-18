@@ -1344,6 +1344,13 @@ pub struct CodeGen {
     /// after the flag-on parity matrix passed; tests/CLI override via
     /// `set_infer_engine`.
     pub(crate) infer_engine_enabled: bool,
+    /// §13.14.1 reconcile telemetry (opt-in via `RUSTY_CPP_PRINT_INFERENCE`).
+    /// When set, the owner-element seam computes BOTH the heuristic and the
+    /// engine answer at each site and logs their relationship to stderr
+    /// (AGREE / DISAGREE / ENGINE-ONLY / HEURISTIC-ONLY) without changing emit.
+    /// DISAGREE lines are bugs (an unsound resolver or heuristic); AGREE counts
+    /// are the retirement ledger that gates heuristic removal. Read-only.
+    pub(crate) print_inference: bool,
     /// Deterministic prototype diagnostics describing selected feedback edges.
     pub(crate) by_value_cycle_breaking_prototype_diagnostics: Vec<String>,
     /// De-duplication keys for prototype cycle-breaking diagnostics.
@@ -1674,6 +1681,11 @@ impl CodeGen {
             infer_engine_enabled: !matches!(
                 std::env::var("RUSTY_CPP_INFER_ENGINE").as_deref(),
                 Ok("0") | Ok("off") | Ok("false") | Ok("no")
+            ),
+            // §13.14.1 reconcile telemetry: opt-IN, default-off, logging only.
+            print_inference: matches!(
+                std::env::var("RUSTY_CPP_PRINT_INFERENCE").as_deref(),
+                Ok("1") | Ok("on") | Ok("true") | Ok("yes")
             ),
             by_value_cycle_breaking_prototype_diagnostics: Vec::new(),
             by_value_cycle_breaking_prototype_keys: HashSet::new(),
@@ -2117,6 +2129,13 @@ impl CodeGen {
     /// and by tests that exercise the engine-on path deterministically.
     pub fn set_infer_engine(&mut self, enabled: bool) {
         self.infer_engine_enabled = enabled;
+    }
+
+    /// §13.14.1 reconcile telemetry: enable/disable the heuristic-vs-engine
+    /// disagreement log (overrides the `RUSTY_CPP_PRINT_INFERENCE` default).
+    /// Diagnostic only — never changes the emitted C++.
+    pub fn set_print_inference(&mut self, enabled: bool) {
+        self.print_inference = enabled;
     }
 
     pub fn set_is_dependency_module(&mut self, is_dependency: bool) {
@@ -16771,7 +16790,11 @@ impl CodeGen {
             let Some(name) = local_binding_name(local) else {
                 continue;
             };
-            if hints.contains_key(&name) {
+            // Fill-only fast path: if a heuristic already typed this local and
+            // reconcile telemetry (§13.14.1) is off, there is nothing to
+            // compute or compare — leave the heuristic's answer untouched.
+            let already_hinted = hints.contains_key(&name);
+            if already_hinted && !self.print_inference {
                 continue;
             }
             let Some(init) = &local.init else {
@@ -16845,16 +16868,42 @@ impl CodeGen {
                     ..Default::default()
                 }
             };
-            if let Some(elem) = type_solver::infer_local_owner_element_from_block(
+            let engine_vec: Option<syn::Type> = type_solver::infer_local_owner_element_from_block(
                 stmts,
                 &name,
                 &item_resolver,
                 extra,
-            ) && self.type_is_placeholder_hint_candidate_allow_scoped_generics(&elem)
-            {
-                let vec_ty: syn::Type = syn::parse_quote!(Vec<#elem>);
+            )
+            .filter(|elem| self.type_is_placeholder_hint_candidate_allow_scoped_generics(elem))
+            .map(|elem| syn::parse_quote!(Vec<#elem>));
+            // §13.14.1 reconcile: log heuristic vs engine before filling, so the
+            // comparison sees the heuristic's pre-existing answer (if any).
+            if self.print_inference {
+                self.log_inference_reconcile(&name, hints.get(&name), engine_vec.as_ref());
+            }
+            // Fill-only: never overwrite a heuristic's answer; the engine only
+            // turns an otherwise-unresolved local into a concrete owner type.
+            if !already_hinted && let Some(vec_ty) = engine_vec {
                 hints.insert(name, vec_ty);
             }
+        }
+    }
+
+    /// §13.14.1 reconcile telemetry: log how the heuristic and engine answers
+    /// for one owner-element site relate, to stderr (opt-in via
+    /// `RUSTY_CPP_PRINT_INFERENCE`). Categories: AGREE (both fire, identical),
+    /// DISAGREE (both fire, differ — a bug in one path), ENGINE-ONLY /
+    /// HEURISTIC-ONLY (coverage gap on the silent side). NEITHER (both silent)
+    /// is not logged, to keep the stream actionable. Diagnostic only — does not
+    /// affect emit.
+    fn log_inference_reconcile(
+        &self,
+        local: &str,
+        heuristic: Option<&syn::Type>,
+        engine: Option<&syn::Type>,
+    ) {
+        if let Some((category, h, e)) = classify_inference_reconcile(heuristic, engine) {
+            eprintln!("[infer-reconcile] {category} local={local} heuristic={h} engine={e}");
         }
     }
 
@@ -42595,6 +42644,42 @@ fn local_binding_name(local: &syn::Local) -> Option<String> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// §13.14.1 reconcile classifier: given the heuristic and engine answers for
+/// one owner-element site, return `(category, heuristic_str, engine_str)` or
+/// `None` when both are silent (NEITHER — not worth logging). The reported
+/// strings are the RAW stored types (so a human sees what each side actually
+/// produced), but the AGREE/DISAGREE verdict is computed on the normalized
+/// ELEMENT type, because the owner-element hint map tolerates two equivalent
+/// representations: the engine seam stores `Vec<T>` while the heuristic passes
+/// store bare `T`, and the consumer (`infer_local_type_from_placeholder_hint`)
+/// reads both as the same element via `extract_vec_element_type_for_hint(...)
+/// .unwrap_or(self)`. Comparing raw strings would cry DISAGREE on a semantic
+/// match. Pure (no I/O) so it is unit-testable; the eprintln wrapper lives in
+/// `log_inference_reconcile`.
+fn classify_inference_reconcile(
+    heuristic: Option<&syn::Type>,
+    engine: Option<&syn::Type>,
+) -> Option<(&'static str, String, String)> {
+    let raw = |t: &syn::Type| quote!(#t).to_string().replace(' ', "");
+    // Mirror the consumer's element extraction: `Vec<T>`/`[T; N]` → `T`,
+    // otherwise the type stands for the element itself.
+    let elem = |t: &syn::Type| -> String {
+        let e = extract_vec_element_type_for_hint(t)
+            .or_else(|| extract_sequence_element_type_for_hint(t))
+            .unwrap_or_else(|| t.clone());
+        raw(&e)
+    };
+    match (heuristic, engine) {
+        (Some(h), Some(e)) => {
+            let cat = if elem(h) == elem(e) { "AGREE" } else { "DISAGREE" };
+            Some((cat, raw(h), raw(e)))
+        }
+        (None, Some(e)) => Some(("ENGINE-ONLY", "-".to_string(), raw(e))),
+        (Some(h), None) => Some(("HEURISTIC-ONLY", raw(h), "-".to_string())),
+        (None, None) => None,
     }
 }
 

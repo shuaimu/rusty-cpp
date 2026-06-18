@@ -31891,3 +31891,78 @@ fn test_placeholder_tuple_turbofish_is_dropped_not_emitted_as_auto() {
     );
 }
 
+
+// §13.14.1 reconcile-telemetry classifier (RUSTY_CPP_PRINT_INFERENCE). The
+// classifier is the substance of the disagreement log; the eprintln wrapper is
+// not unit-tested. Both-silent must be NEITHER (None, not logged); the verdict
+// is computed on the normalized ELEMENT type (not the raw representation), so
+// the engine's `Vec<T>` and a heuristic's bare `T` count as AGREE; differing
+// elements DISAGREE; one-sided answers name the gap.
+#[test]
+fn reconcile_classifier_agrees_on_identical_types() {
+    let h: syn::Type = syn::parse_str("Vec<u8>").unwrap();
+    let e: syn::Type = syn::parse_str("Vec < u8 >").unwrap(); // whitespace differs
+    let got = classify_inference_reconcile(Some(&h), Some(&e));
+    assert_eq!(got.as_ref().map(|t| t.0), Some("AGREE"), "{got:?}");
+}
+
+// The exact shape the first real telemetry run surfaced: the heuristic stores
+// the bare element (`u8`) while the engine seam stores the full owner
+// (`Vec<u8>`). These are equivalent downstream and MUST classify as AGREE.
+#[test]
+fn reconcile_classifier_agrees_across_element_vs_owner_representation() {
+    let heuristic_elem: syn::Type = syn::parse_str("u8").unwrap();
+    let engine_owner: syn::Type = syn::parse_str("Vec<u8>").unwrap();
+    let got = classify_inference_reconcile(Some(&heuristic_elem), Some(&engine_owner));
+    assert_eq!(got.as_ref().map(|t| t.0), Some("AGREE"), "{got:?}");
+    let (_, hs, es) = got.unwrap();
+    assert_eq!(hs, "u8", "raw heuristic representation preserved in the log");
+    assert_eq!(es, "Vec<u8>", "raw engine representation preserved in the log");
+}
+
+#[test]
+fn reconcile_classifier_disagrees_on_different_elements() {
+    // Different elements even after normalization → a genuine bug in one path.
+    let h: syn::Type = syn::parse_str("Vec<ByteArray<N>>").unwrap();
+    let e: syn::Type = syn::parse_str("Vec<u8>").unwrap();
+    let got = classify_inference_reconcile(Some(&h), Some(&e));
+    assert_eq!(got.as_ref().map(|t| t.0), Some("DISAGREE"), "{got:?}");
+    let (_, hs, es) = got.unwrap();
+    assert_eq!(hs, "Vec<ByteArray<N>>");
+    assert_eq!(es, "Vec<u8>");
+}
+
+#[test]
+fn reconcile_classifier_reports_one_sided_answers() {
+    let t: syn::Type = syn::parse_str("Vec<u8>").unwrap();
+    assert_eq!(
+        classify_inference_reconcile(None, Some(&t)).as_ref().map(|c| c.0),
+        Some("ENGINE-ONLY")
+    );
+    assert_eq!(
+        classify_inference_reconcile(Some(&t), None).as_ref().map(|c| c.0),
+        Some("HEURISTIC-ONLY")
+    );
+}
+
+#[test]
+fn reconcile_classifier_skips_both_silent() {
+    assert!(classify_inference_reconcile(None, None).is_none());
+}
+
+// §13.14.1: enabling reconcile telemetry must be read-only — the emitted C++
+// is byte-identical with and without the flag (it only adds stderr logging).
+#[test]
+fn reconcile_telemetry_does_not_change_emit() {
+    let src = "pub fn t() -> Vec<u8> { let mut v = Vec::new(); v.push(1u8); v }";
+    let baseline = transpile_str(src);
+    let file: syn::File = syn::parse_str(src).unwrap();
+    let mut cg = CodeGen::new();
+    cg.set_print_inference(true);
+    cg.emit_file(&file, None);
+    let with_telemetry = cg.into_output();
+    assert_eq!(
+        baseline, with_telemetry,
+        "RUSTY_CPP_PRINT_INFERENCE must not alter emitted code"
+    );
+}
