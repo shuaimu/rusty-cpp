@@ -6402,7 +6402,7 @@ The four families of bug this produces:
 
 1. **Cross-arm unification** — ternary / `match` where each arm fixes a different subset of the parameters. Rust unifies across arms; C++ computes a common type per arm and fails when arms only see partial information. The canonical case is `either`: `cond ? Either{Left{a}} : Either{Right{b}}` — see §13.3.
 
-2. **Backward flow into earlier sites** — `let xs = collect()` whose element type comes from a later `.push()` or a downstream consumer. Rust gathers the constraint backward; C++ sees `collect<?>()` with no way to fill `?`.
+2. **Backward flow into earlier sites** — `let xs = collect()` whose element type comes from a later `.push()` or a downstream consumer. Rust gathers the constraint backward; C++ sees `collect<?>()` with no way to fill `?`. This bites *only* when the element type isn't already on the surface of a known type at the call site: an ordinary `Vec<i32>` field carries `i32` in its own spelling, so emit reads it straight off the container and no backward flow is needed. The case that genuinely needs the engine is an **opaque container** — serde's `ByteBuf`/`ByteArray<N>` deserialize — whose element type (`u8`) survives only in the consuming `push`/assignment. This is the live `#36` instance worked through in §13.13.
 
 3. **Multi-return closure unification** — `|x| match x { A => None, B => Some(y) }` returning `Option<T>`. Rust unifies the two arms; C++ deduces the lambda's return from the *first* return (often `None_t`) and rejects the second. We hit a specific instance of this with `RUSTY_TRY_OPT`-inside-lambda; the commit annotating an explicit return type is the local-fix flavor of what a real engine would handle generically.
 
@@ -6553,6 +6553,8 @@ The engine has *failed cleanly* (i.e. fallen back, not crashed) when a constrain
 
 The engine is "real-enough" for the criteria that don't require an emit-site rewrite. The remaining matrix flip needs the variant template trim plus a conditional emit consumer; both are emit-pipeline work, not engine work, so they're queued under the existing TODO-misc.md §1 / §4 entries rather than as new engine phases.
 
+**Update (2026-06 — serde_bytes serialize landed; deserialize is the remaining inference case).** The serialize-side deduction blockers for serde_bytes were resolved *without* the engine — explicit dispatcher return types, cross-module dispatcher unification, and a defined `<Trait>Traits` primary (commits e59945d → f0c1d56). That is expected: serialize *dispatches on a value whose type is already known* (forward flow), so name resolution suffices. serde_bytes' *deserialize* targets (`test_derive` / `test_serde`) remain skipped on exactly the backward-flow case this chapter exists for — recovering `next_element`'s element type from later use (§13.13, `#36`). The engine (Phases 1–4) is the intended home for it but is not yet wired to the `next_element` turbofish slot; today emit falls back to a byte-name heuristic that types the local `Vec` but never reaches the call.
+
 ### 13.11 Relationship to existing local fixes
 
 Several commits already land local fixes for symptoms of this gap:
@@ -6571,6 +6573,35 @@ These are *not* wasted work. Each documents a specific constraint shape the engi
 - Whether constraint failures should warn during development builds even when the fallback succeeds (probably yes; gated by a flag).
 
 These are implementation choices, not design choices. The choices above lock the *architecture*: a single inference pass, runs before emit, talks to emit by decorating the AST with resolved types, falls back cleanly on failure.
+
+### 13.13 The live deserialize instance: serde's hidden element type (#36)
+
+The most current worked case for the engine is serde sequence deserialize. It shows precisely where the backward-flow gap bites — and, just as importantly, why *most* deserialize escapes it.
+
+A visitor pulls elements one at a time and builds a container:
+
+```rust
+let mut bytes = Vec::new();
+while let Some(b) = seq.next_element()? {   // next_element::<?>()
+    bytes.push(b);                          // b flows into bytes  ⇒  ? = element(bytes)
+}
+Ok(ByteBuf::from(bytes))
+```
+
+`next_element` is generic over its *output* `T`, and `T` appears in no argument — so C++ deduction cannot recover it (this is §13.2 case 2). The call has to be spelled `next_element<uint8_t>(seq)`.
+
+**Why most deserialize already works — the container spells the element.** For an ordinary field of type `Vec<i32>`, the visitor's output type *is* `Vec<i32>`, and `Vec<i32>` names its element on its surface. The existing expected-type plumbing carries `Result<Vec<i32>, E>` to the call, extracts `i32` from `Vec<i32>`, and emits `next_element<i32>`. No constraint-solving is needed: the element is readable straight off the container type. This is why ordinary seq/map deserialize passes across the matrix without the engine.
+
+**Why bytes break — the wrapper hides the element.** serde_bytes' outputs are *opaque* wrappers — `ByteBuf`, `ByteArray<N>`, `Bytes`. The element is `u8`, but `ByteBuf` does not look like `Vec<u8>` at the type level, so "extract element from the container type" returns nothing (`extract_option_inner_type_for_hint(ByteBuf) = None`). The only remaining witness for `u8` is the *consumption* — `bytes.push(b)` / `*byte = …` — which is exactly the backward constraint of §13.6 ("element from later use") that C++ cannot gather.
+
+**Two tiers — and the shortcut to retire.** There are two ways to supply the `u8`:
+
+1. *Name/shape heuristic* (interim, fragile). Special-case the byte wrappers (`ByteBuf → u8`, `ByteArray<N> → u8`), or guess from a `byte`-named local. The transpiler does the latter today (`inference.rs:9233`: `local_lower.contains("byte") → uint8_t`) — but only to *type the local `Vec`*; it never threads that `u8` to the `next_element` call. This is precisely the name-driven shortcut the engine is meant to replace: correct for serde_bytes, generalizing to nothing.
+2. *Engine-driven backward flow* (proper). Collect `element(typeof(next_element())) = typeof(b)` from `bytes.push(b)`, unify with `typeof(b) = element(typeof(bytes))`, resolve `u8`, and decorate the call so emit spells `next_element<uint8_t>`. This generalizes to any opaque-wrapper sequence deserialize, not just bytes.
+
+**Where it plugs in.** The plumbing already exists: the call routes through a turbofish slot (`::de::rusty_ext::next_element<T>(…)`, `mod.rs:24826`) and an injection point in the UFCS dispatch (`emit_expr.rs ~5035`). What is missing is the *value* of `T` — the engine must resolve it from the `push`/assignment target and decorate the node. The two surface shapes differ in difficulty: `while let Some(b) = next_element()? { … push(b) }` exposes the target one statement away, while `*byte = next_element()?.ok_or(…)?` buries it behind `ok_or_else` / `?`, so the constraint must survive those hops (a `?`-and-`ok_or`-transparent propagation rule in the collector).
+
+**The serialize/deserialize asymmetry — why one needed the engine and the other didn't.** Serialize *dispatches on a value whose type is already known*: information flows **forward**, which the name-resolution machinery (Chapter 14) handles. Deserialize must *produce a value of a type recovered from how the result is later used*: information flows **backward**, which only this engine supplies. `#36` splits cleanly along the two chapters: the element-type recovery above is Chapter 13's. Its sibling — the `next_value_seed` ambiguity, where the same `(A&, V)` signature is emitted with two return *spellings* (`V::Value` vs `VisitorTraits<V>::Value`, because the associated name `Value` is co-owned by `Visitor` and `DeserializeSeed`) — is a *spelling*/qualification problem and belongs to Chapter 14, not here.
 
 ## 14. Name Resolution: Trait Helper Qualification and the Two-Pass Inconsistency Problem
 
