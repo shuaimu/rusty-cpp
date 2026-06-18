@@ -17014,6 +17014,25 @@ impl CodeGen {
                             .lookup_field_type_for_expr_base(&field_expr.base, &member.to_string()),
                         syn::Member::Unnamed(_) => None,
                     },
+                    deref_left @ syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                        // `*x = ...`: the target is the deref'd value type. For a
+                        // real reference / smart-pointer binding the deref yields
+                        // it (`&mut T`/`Box<T>`/`*mut T` -> T). An iter_mut
+                        // for-binding (`for byte in xs.iter_mut()`) is recorded as
+                        // its ELEMENT value `T` (the C++ ref-elision model), so the
+                        // deref yields nothing — fall back to the binding's own
+                        // value type, since assigning through `*byte` still targets
+                        // `T`. Seeds the `next_element()?.ok_or(())?` chain
+                        // (serde_bytes ByteArray) with the element type. The
+                        // fallback only fires when the deref produced nothing,
+                        // which in well-formed code is exactly this mis-recorded
+                        // iter-binding case.
+                        let inner = self.peel_paren_group_expr(&u.expr);
+                        self.infer_simple_expr_type(inner)
+                            .and_then(|t| self.infer_deref_result_type_from_type(&t))
+                            .or_else(|| self.infer_simple_expr_type(inner))
+                            .or_else(|| self.infer_simple_expr_type(deref_left))
+                    }
                     _ => None,
                 }
                 .or_else(|| self.infer_simple_expr_type(&a.left));

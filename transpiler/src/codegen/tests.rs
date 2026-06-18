@@ -25249,11 +25249,18 @@ fn test_next_element_ok_or_chain_typed_let_uint8() {
 }
 
 #[test]
-#[ignore = "#36 pending: ByteArray needs the for-loop iter_mut binding-type seed (*byte: u8) feeding the ok_or chain"]
-fn test_byte_array_assignment_next_element_uint8() {
-    // #36 ByteArray half: element type comes from the assignment target
-    // (`*byte` is u8), but it must survive the `.ok_or(())?` / `?` collapse to
-    // reach the next_element call. Harder than the while-let/push case.
+fn test_deref_assign_ok_or_chain_next_element_uint8() {
+    // The `*byte = ...` deref-seed: when a `&mut`/iter_mut binding's element
+    // type is known (`bytes: [u8; 4]` -> `byte` element u8), assigning through
+    // `*byte` seeds the `seq.next_element()?.ok_or(())?` chain with u8 so the
+    // turbofish lands. This is the SIMPLIFIED shape. The REAL serde_bytes
+    // ByteArray (`let mut bytes = [0; N]; for (idx, byte) in
+    // bytes.iter_mut().enumerate() { *byte = seq.next_element()?.ok_or_else(||
+    // ...)?; } Ok(ByteArray::new(bytes))`) additionally needs: (a) array-newtype
+    // consumer inference (element u8 from `ByteArray<N>`'s `[u8; N]` field, not
+    // the unsuffixed `[0; N]` literal), (b) enumerate-tuple for-binding type
+    // recording for `(idx, byte)`, and (c) `ok_or_else` receiver threading — all
+    // still open (#36).
     let out = transpile_str(
         r#"
         struct ByteArray;
