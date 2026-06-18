@@ -172,9 +172,15 @@ export struct Group {
     }
 
     Group convert_special_to_empty_and_full_to_deleted() const {
-        // Set high bit on all (special), clear low bit on all.
-        GroupWord full = _0 & BITMASK_MASK;
-        return Group{(~full + (full >> 7)) | 0x8080808080808080ULL};
+        // FULL (high bit clear) -> DELETED (0x80); EMPTY/DELETED (high bit set) -> EMPTY (0xFF).
+        // PORT FIX (matches hashbrown `!self.0 & repeat(0x80)` then `!full + (full >> 7)`):
+        //   * `full` must mask the COMPLEMENT `~_0` (0x80 for FULL bytes, 0 for special) — the
+        //     transpiler dropped the leading `!` (cf. match_full above, which has it).
+        //   * the result must NOT be OR'd with 0x8080.. — that extra OR inverted the whole mapping
+        //     (FULL->EMPTY, special->DELETED), so prepare_rehash_in_place left tombstones DELETED
+        //     and marked live slots EMPTY, and rehash then re-placed phantom elements.
+        GroupWord full = ~_0 & BITMASK_MASK;
+        return Group{~full + (full >> 7)};
     }
 
     Group clone() const { return Group{_0}; }
