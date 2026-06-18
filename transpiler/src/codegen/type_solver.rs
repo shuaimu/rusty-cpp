@@ -1515,6 +1515,56 @@ mod tests {
     }
 
     #[test]
+    fn block_local_element_from_newtype_field_consumer() {
+        // §13.14 C1: a Vec accumulated then handed to a single-field newtype
+        // wrapper (`Ok(ByteBuf::from(bytes))`) gets its element from the
+        // wrapper's sole field type, supplied by the FieldResolver — even when
+        // the push value (`b`, the while-let payload) is circular/unbound.
+        let block: syn::Block = parse_quote!({
+            let mut bytes = Vec::with_capacity(0);
+            while let Some(b) = visitor.next_element()? {
+                bytes.push(b);
+            }
+            Ok(ByteBuf::from(bytes))
+        });
+        let resolver: &ItemResolver = &|_e: &syn::Expr| None;
+        let field_resolver: &FieldResolver = &|name: &str| {
+            if name == "ByteBuf" {
+                Some(parse_quote!(Vec<u8>))
+            } else {
+                None
+            }
+        };
+        let elem = infer_local_owner_element_from_block(
+            &block.stmts,
+            "bytes",
+            resolver,
+            Some(field_resolver),
+        )
+        .expect("bytes element should resolve from ByteBuf's Vec<u8> field");
+        assert_eq!(norm(&elem), "u8");
+    }
+
+    #[test]
+    fn block_local_element_newtype_consumer_inert_without_field_resolver() {
+        // The same block, but with no FieldResolver, must NOT resolve — the
+        // push value is circular and there is no other element witness, so the
+        // engine returns None and the caller keeps today's behavior. Guards
+        // that the C1 rule fires only via the resolver, never by accident.
+        let block: syn::Block = parse_quote!({
+            let mut bytes = Vec::with_capacity(0);
+            while let Some(b) = visitor.next_element()? {
+                bytes.push(b);
+            }
+            Ok(ByteBuf::from(bytes))
+        });
+        let resolver: &ItemResolver = &|_e: &syn::Expr| None;
+        assert!(
+            infer_local_owner_element_from_block(&block.stmts, "bytes", resolver, None).is_none()
+        );
+    }
+
+    #[test]
     fn block_local_element_unresolved_without_usage_is_none() {
         // A bare `Vec::new()` with no element-revealing usage stays None
         // so the caller keeps today's (now hard-failing) behavior.
