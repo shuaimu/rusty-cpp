@@ -1338,10 +1338,11 @@ pub struct CodeGen {
     /// Opt-in prototype mode for by-value SCC cycle breaking diagnostics.
     pub(crate) enable_by_value_cycle_breaking_prototype: bool,
     /// §13.14 Phase-4 flag: when set, emit consults the constraint-solver
-    /// engine (currently the C2 call-signature rule fed into the owner-element
-    /// solver seam) as an additional type source before falling back to the
-    /// heuristic passes. Default reads `RUSTY_CPP_INFER_ENGINE`; tests/CLI
-    /// override via `set_infer_engine`. Off by default until matrix-validated.
+    /// engine (the C2 call/method-signature rules fed into the owner-element
+    /// solver seam) as an additional type source alongside the heuristic
+    /// passes. Default-ON (opt-out via `RUSTY_CPP_INFER_ENGINE=0/off/false/no`)
+    /// after the flag-on parity matrix passed; tests/CLI override via
+    /// `set_infer_engine`.
     pub(crate) infer_engine_enabled: bool,
     /// Deterministic prototype diagnostics describing selected feedback edges.
     pub(crate) by_value_cycle_breaking_prototype_diagnostics: Vec<String>,
@@ -1666,7 +1667,14 @@ impl CodeGen {
             unsupported_by_value_cycle_diagnostics: Vec::new(),
             unsupported_by_value_cycle_keys: HashSet::new(),
             enable_by_value_cycle_breaking_prototype: false,
-            infer_engine_enabled: std::env::var_os("RUSTY_CPP_INFER_ENGINE").is_some(),
+            // §13.14: the C2 call/method-signature rules graduated to default-on
+            // after the flag-on parity matrix passed (14/1, no regression). Now
+            // an OPT-OUT (set RUSTY_CPP_INFER_ENGINE=0/off/false/no to disable),
+            // mirroring the UFCS-traits flag's graduation.
+            infer_engine_enabled: !matches!(
+                std::env::var("RUSTY_CPP_INFER_ENGINE").as_deref(),
+                Ok("0") | Ok("off") | Ok("false") | Ok("no")
+            ),
             by_value_cycle_breaking_prototype_diagnostics: Vec::new(),
             by_value_cycle_breaking_prototype_keys: HashSet::new(),
             by_value_cycle_breaking_rewrite_fields: HashSet::new(),
