@@ -1873,11 +1873,11 @@ std::ptr::copy_nonoverlapping(src, dst, n);
 ```
 
 ```cpp
-rusty::ptr_write(rusty::ptr_add(ptr, i), value);
-rusty::ptr_copy_nonoverlapping(src, dst, n);
+rusty::ptr::write(rusty::ptr::add(ptr, i), value);
+rusty::ptr::copy_nonoverlapping(src, dst, n);
 ```
 
-This keeps generated C++ valid when Rust raw-pointer method shapes do not map directly to well-typed C++ member calls.
+This keeps generated C++ valid when Rust raw-pointer method shapes do not map directly to well-typed C++ member calls. The intrinsic runtime that backs these calls is described in **The `rusty::ptr` Intrinsic Runtime** below.
 
 #### Design Decision
 
@@ -1888,6 +1888,108 @@ The transpiler emits `// @unsafe` (not just `// unsafe`) so that the rusty-cpp a
 3. The safety boundary is preserved across the transpilation — Rust's `unsafe` maps exactly to rusty-cpp's `@unsafe`
 
 This is consistent with the forward correctness guarantee: if Rust's borrow checker approved the safe code, the transpiled C++ should also pass the rusty-cpp analyzer's checks.
+
+#### Two Halves of the Problem
+
+Translating unsafe Rust splits into two largely independent obligations:
+
+1. **Boundary preservation** — keep Rust's `unsafe` regions marked so the rusty-cpp analyzer can keep enforcing safety on the *safe* code around them. This is the `unsafe { }` → `// @unsafe` mapping above, and it is purely a *comment*: the generated C++ carries no runtime or compile-time enforcement from the marker (see *What the `@unsafe` Comment Does — and Doesn't — Mean*).
+2. **Operation lowering** — turn each unsafe *operation* (raw-pointer arithmetic, `read`/`write`, `transmute`, pointer casts, byte-string decay, FFI types) into *well-typed, compilable* C++. C++ raw pointers have no methods and Rust's pointer intrinsics have no direct C++ spelling, so most of the work lives here.
+
+The rest of this section is about the second half. It is the part that decides whether a raw-pointer-heavy crate compiles at all.
+
+#### The `rusty::ptr` Intrinsic Runtime
+
+Rust calls pointer operations as *methods* (`ptr.add(i)`, `ptr.write(v)`, `ptr.offset_from(other)`) or as `core::ptr::*` free functions. Neither has a direct C++ form — a C++ `T*` has no member functions. The transpiler lowers both shapes onto a free-function runtime in `include/rusty/ptr.hpp` under namespace `rusty::ptr`:
+
+| Family | Members (`rusty::ptr::…`) |
+|--------|---------------------------|
+| Arithmetic | `add`, `sub`, `offset`, `wrapping_offset` (→`offset`), `offset_from` |
+| Read/write/copy | `read`, `read_unaligned`, `write`, `write_unaligned`, `write_bytes`, `copy`, `copy_nonoverlapping`, `swap`, `swap_nonoverlapping`, `replace` |
+| Construction / null | `null`, `null_mut`, `null<T>()`, `null_mut<T>()`, `without_provenance[_mut]` |
+| Cast / view | `cast_mut`, `cast_const`, `as_ref`/`as_mut` (→ `Option<T&>`), `addr_of[_mut]` |
+| Lifetime | `drop_in_place` (scalar + range overloads) |
+| Wrapper types | `NonNull<T>`, `Unique<T>` (= `NonNull<T>`), `Alignment` |
+
+Two lowering paths feed this runtime:
+
+- **Method calls** on a raw-pointer receiver are rewritten in `emit_expr.rs`, *gated* by the predicate `is_expr_raw_pointer_like` (`predicates.rs`). That gate is the linchpin: it must recognise the receiver as a pointer (a `*mut`/`*const` local, a pointer-typed struct field, `as_ptr()`/`as_mut_ptr()`, `UnsafeCell::get`, `AtomicPtr::load`, or a pointer-arithmetic chain). When the gate *fails*, the method falls through to a C++ member call `(*p).add(i)` on a non-struct and the file does not compile — so most raw-pointer regressions trace back to an inference gap in this predicate rather than to the lowering itself.
+- **Free-function paths** `std::ptr::*` / `core::ptr::*` are rewritten to `rusty::ptr::*` in `transpiler/src/types.rs`; `slice::from_raw_parts[_mut]` maps to `rusty::from_raw_parts[_mut]`.
+
+```rust
+let len = end.offset_from(start);        // *const u8 method
+unsafe { dst.add(i).write(byte); }       // chained pointer method
+let s = core::slice::from_raw_parts(p, n);
+```
+
+```cpp
+const auto len = rusty::ptr::offset_from(end, start);
+rusty::ptr::write(rusty::ptr::add(dst, i), byte);
+const auto s = rusty::from_raw_parts(p, n);
+```
+
+#### Casts, `transmute`, and the Cast Matrix
+
+`as` casts that touch pointers do **not** all become `static_cast`. C++ forbids `static_cast` between unrelated pointer types and between pointers and integers, so the transpiler selects a cast kind per source/target shape (the matrix lives in `mod.rs`’s cast emitter):
+
+| Rust cast | C++ emitted |
+|-----------|-------------|
+| `p as *const U` / `*mut U` (ptr→ptr) | `reinterpret_cast<U*>(p)` |
+| `p as *mut U` from a `const` source | `const_cast<U*>(reinterpret_cast<const U*>(p))` |
+| `p as *mut *mut U` (pointer **depth** change) | `(U**)(p)` (C-style — the const_cast/reinterpret dance cannot bridge a level) |
+| `n as *const T` (int→ptr) | `reinterpret_cast<const T*>(static_cast<std::uintptr_t>(n))` |
+| `p as usize` (ptr→int) | `static_cast<size_t>(reinterpret_cast<std::uintptr_t>(p))` |
+| `&x as *const T` (ref→ptr) | `static_cast<const T*>(&x)`, or `reinterpret_cast<…>(rusty::addr_of_temp(…))` for temporaries |
+| `b"…" as *const u8` (byte-string→ptr) | function-local-static decay (below) |
+
+`mem::transmute::<Src, Dst>(x)` lowers to `rusty::mem::transmute<Src, Dst>(x)` (`emit_expr.rs`), backed by a size-checked `memcpy` into aligned storage plus `std::launder` in `include/rusty/mem.hpp` — Rust’s “reinterpret the bits” with a static `sizeof` assertion.
+
+**Byte strings.** A `b"…"` literal is a value `std::array<uint8_t, N>{{…}}`. But in Rust `b"…"` has type `&'static [u8; N]`, so casting it to a pointer must decay to *static storage*, not route the array value through `static_cast<uintptr_t>` (ill-formed — an array is not an integer). The transpiler emits a function-local static:
+
+```rust
+let tag = b"tag:yaml.org,2002:str\0" as *const u8 as *mut yaml_char_t;
+```
+```cpp
+auto tag = const_cast<yaml_char_t*>(reinterpret_cast<const yaml_char_t*>(
+    ([]() -> const uint8_t* { static const uint8_t _bs[] = { 0x74, /*…*/ }; return _bs; }())));
+```
+
+#### FFI and `c_void`
+
+`core::ffi::c_void` / `std::os::raw::c_void` lower to `rusty::ffi::c_void`, which `include/rusty/ffi.hpp` defines as `using c_void = void;` — so `*mut c_void` → `void*` and `*const c_void` → `const void*`. (`c_void` is only ever used behind a raw pointer, so aliasing it to `void` is exactly right.) The neighbouring C-string/OS-string family — `CStr`, `CString`, `OsStr`, `OsString` — maps to `rusty::ffi::*` in `transpiler/src/types.rs`. Note this is the *C ABI* surface; the separate `use cpp::…` C++-module interop and its safety contract are covered in §3.13.
+
+#### What the `@unsafe` Comment Does — and Doesn't — Mean
+
+The emitted `// @unsafe` is consumed only by the rusty-cpp **analyzer**, as a directive to *skip* safety checking inside the region. It is erased from the program semantics: the generated C++ for an `unsafe { … }` block is just `{ … }` with a comment, and an `unsafe fn` is an ordinary function with a comment above it. There is no C++-level re-verification of the unsafe operations.
+
+This is deliberate and follows the forward-correctness guarantee: the input already type-checked and borrow-checked as Rust, so the transpiler’s job for unsafe regions is *faithful lowering*, not re-litigating safety. The analyzer still enforces the *safe* code that surrounds them.
+
+#### Case Study: Porting c2rust Output (`unsafe-libyaml`)
+
+The hardest stress test for this machinery is not hand-written Rust but **machine-generated** Rust: a [c2rust](https://github.com/immunant/c2rust) transliteration of a C library, which is *wall-to-wall* raw pointers, unions, pointer arithmetic, and byte-string casts, with no idiomatic Rust to lean on. We use **`unsafe-libyaml` 0.2.11** (dtolnay’s c2rust port of libyaml) as the benchmark. Crucially it is a *pure-Rust* port (no `extern "C"`, no FFI) — the goal is to *translate* it, exercising the unsafe-lowering paths end to end, not to bind to C.
+
+The methodology that works here is **systemic-gap reduction**, not bug-by-bug fixing:
+
+1. Transpilation itself essentially never fails (no panic) — the AST lowers fine.
+2. The thousands of resulting C++ *compile* errors collapse into a *handful* of systemic gaps, each worth hundreds of errors.
+3. Fix one gap at the root, re-transpile the whole crate, and *measure* the error delta. This is reliable in a way that guessing from transpiled output is not (synthetic mini-repros consistently diverge from the real shapes — always measure against the real crate build).
+
+Representative systemic fixes, in error-impact order:
+
+| Gap | Root-cause fix | C++ errors removed |
+|-----|----------------|--------------------|
+| `rusty::ffi::c_void` undefined | add `using c_void = void;` to `ffi.hpp` | ~797 |
+| `ptr.field` chains untyped | infer struct-field-access types (the “keystone”) | ~1002 |
+| renamed primitive re-export (`u8 as yaml_char_t`) | collapse the alias target to `uint8_t` | ~389 |
+| Deref-coercion field access via user `impl Deref` | track Deref targets, emit `(*base).field` | ~222 |
+| `b"…" as *ptr` → `static_cast<uintptr_t>(array)` | function-local-static decay | ~195 |
+| `null_mut::<T>()` not a template | add `template<typename T> T* null_mut()` overload | ~138 |
+| un-annotated `let x = …` left `x` untyped | record the inferred initializer type | ~115 |
+| `c_offset_from` auto-deref’d the receiver | dedicated lowering to `rusty::ptr::offset_from` | ~73 |
+
+Across these (and a few more), the benchmark moved from **3471 → ~327** C++ compile errors (≈ −91%) with the transpiler unit suite green throughout. What remains is a *diffuse* long tail rather than another systemic gap: bare C-like enum-variant qualification (`use Enum::*` variants emitted under their flat-alias name), per-function inconsistency in extern-declaration type qualification, and c2rust anonymous-union types. The detailed remaining-error breakdown is tracked in the project memory (`unsafe-rust-translation-roadmap`) and the parity log (§10.6).
+
+Two lessons generalise beyond libyaml: (a) the biggest leverage on raw-pointer code is **type inference**, not the lowerings themselves — when `is_expr_raw_pointer_like` / field inference resolves a receiver, the existing lowering just fires; and (b) for generated-code ports, **always measure against the real crate build**, because hand-made repros drift from the real expression shapes.
 
 ### 3.8 Async/Await → Pollable State Machine on C++20 Coroutines
 
