@@ -5779,6 +5779,12 @@ return std::move(v);
                 if (auto&& _iflet_scrutinee = self_cursor.peek_next(); _iflet_scrutinee.is_some()) {
                     auto&& _iflet_payload = _iflet_scrutinee.unwrap();
                     auto&& self_key = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_iflet_payload)));
+                    // PORT FIX (dropped-loop-label): a Rust `break` in a `match` arm breaks the
+                    // enclosing loop, but lowered to a C++ `switch` it is caught by the switch
+                    // (the transpiler used to emit `break; break;` where the 2nd is dead code).
+                    // The transpiler now lowers this via goto (rusty-cpp d8488311); this manual
+                    // `done` flag fixes the already-committed port until it is re-transpiled.
+                    bool _merge_done = false;
                     switch (K::cmp(rusty::detail::deref_if_pointer_like(self_key), other_key)) {
                     case Ordering::Equal:
                     {
@@ -5792,7 +5798,7 @@ return std::move(v);
                                 self_cursor.insert_after_unchecked(std::move(k), std::move(v_shadow1));
                             }
                         }
-                        break;
+                        _merge_done = true; // Rust `break` targets the while-loop, not the switch
                         break;
                     }
                     case Ordering::Greater:
@@ -5801,7 +5807,7 @@ return std::move(v);
                         {
                             self_cursor.insert_before_unchecked(std::move(other_key), std::move(other_val));
                         }
-                        break;
+                        _merge_done = true; // Rust `break` targets the while-loop, not the switch
                         break;
                     }
                     case Ordering::Less:
@@ -5810,6 +5816,7 @@ return std::move(v);
                         break;
                     }
                     }
+                    if (_merge_done) { break; } // exit the while-loop (Equal/Greater arms)
                 } else {
                     // @unsafe
                     {
