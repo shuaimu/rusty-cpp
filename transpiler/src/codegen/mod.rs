@@ -30245,6 +30245,15 @@ impl CodeGen {
             && source_is_raw_pointer_type
             && !source_is_explicit_reference
         {
+            if ty.trim_end().ends_with("**") {
+                // Pointer-to-pointer raw-pointer cast (c2rust `p as *mut *mut T`):
+                // the const_cast(reinterpret) dance below cannot bridge a pointer
+                // LEVEL change — it produced `const_cast<T**>(const T*)`, an
+                // illegal const_cast across differing pointer depth. A C-style
+                // cast applies reinterpret + const adjustment together, which is
+                // exactly the C pointer semantics being ported.
+                return format!("({})({})", ty, expr);
+            }
             let target_is_mut_ptr = match target_ty_override {
                 Some(syn::Type::Ptr(p)) => p.mutability.is_some(),
                 _ => matches!(cast.ty.as_ref(), syn::Type::Ptr(p) if p.mutability.is_some()),
