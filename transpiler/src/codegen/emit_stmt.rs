@@ -1602,8 +1602,19 @@ impl CodeGen {
                     && matches!(
                         self.peel_paren_group_expr(&init.expr),
                         syn::Expr::Reference(_)
+                            | syn::Expr::Path(_)
+                            | syn::Expr::Field(_)
+                            | syn::Expr::Unary(syn::ExprUnary {
+                                op: syn::UnOp::Deref(_),
+                                ..
+                            })
                     )
                 {
+                    // Record the concrete type of an un-annotated `let x = <expr>`
+                    // (const/static path like `NULL_STRING`, a field access, or a
+                    // deref) so later `x.field` / `x.method()` / `x as *T` inference
+                    // resolves instead of treating `x` as opaque `auto`. c2rust
+                    // output is full of `let s = NULL_STRING; s.pointer.wrapping_offset(..)`.
                     inferred_binding_ty = self.infer_simple_expr_type(&init.expr);
                 }
                 if let Some(placeholder_ty) =

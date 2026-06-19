@@ -19118,6 +19118,27 @@ fn test_byte_string_literal() {
 }
 
 #[test]
+fn test_unannotated_let_from_field_records_type_for_pointer_method() {
+    // `let x = s.p;` (un-annotated, field-access init) must record x's concrete
+    // pointer type so a later raw-pointer method on x lowers via rusty::ptr::*
+    // instead of becoming a `(*x).wrapping_offset(...)` member call on a non-struct.
+    let out = transpile_str(
+        r#"
+        struct S { p: *mut u8 }
+        fn f(s: S) -> *mut u8 {
+            let x = s.p;
+            x.wrapping_offset(1)
+        }
+        "#,
+    );
+    // x is recorded as `*mut u8`, so the raw-pointer method lowers to a
+    // rusty::ptr::* free call (offset/wrapping_offset) on the pointer x — not a
+    // `(*x).wrapping_offset(...)` / `x.wrapping_offset(...)` member call.
+    assert!(out.contains("rusty::ptr::") && out.contains("(x, "), "{out}");
+    assert!(!out.contains("x.wrapping_offset"), "{out}");
+}
+
+#[test]
 fn test_c_offset_from_lowers_to_ptr_offset_from() {
     // c2rust's raw-pointer `PointerExt::c_offset_from(origin)` must lower to the
     // pointer-arithmetic helper with the receiver kept as a pointer — NOT to a
