@@ -16848,6 +16848,15 @@ impl CodeGen {
                     match &f.member {
                         syn::Member::Named(ident) => {
                             let rust_name = ident.to_string();
+                            // Deref coercion: when `field` is not a member of
+                            // base's own struct but base's user `Deref::Target`
+                            // has it, Rust auto-derefs; C++ does not, so access
+                            // through `(*base)` (unsafe-libyaml `success.fail`).
+                            if let Some(coerced) = self
+                                .field_access_through_user_deref(&f.base, &base_for_field, &rust_name)
+                            {
+                                return coerced;
+                            }
                             if self.expr_base_is_range_with_private_end_field(&f.base) {
                                 if rust_name == "end" {
                                     return format!("rusty::field_end({})", base_for_field);

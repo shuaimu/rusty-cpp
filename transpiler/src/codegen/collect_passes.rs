@@ -2450,6 +2450,32 @@ impl CodeGen {
                         .map(|seg| seg.ident.to_string());
                     let is_inherent_impl = trait_name.is_none();
 
+                    // Record `impl Deref for T { type Target = U }` so field /
+                    // method access through Deref coercion can emit an explicit
+                    // `(*x)` when the member lives on `U`, not `T` (C++ has no
+                    // auto-deref). c2rust ports use this (unsafe-libyaml's
+                    // `Success: Deref<Target = Failure>` for `.fail`/`.ok`).
+                    if matches!(trait_name.as_deref(), Some("Deref") | Some("DerefMut")) {
+                        for impl_item in &impl_block.items {
+                            if let syn::ImplItem::Type(assoc) = impl_item
+                                && assoc.ident == "Target"
+                            {
+                                let simple = tp
+                                    .path
+                                    .segments
+                                    .last()
+                                    .map(|s| s.ident.to_string())
+                                    .unwrap_or_else(|| raw_type_name.clone());
+                                let scoped = self.scoped_type_key(&simple);
+                                self.user_deref_targets
+                                    .insert(simple, assoc.ty.clone());
+                                self.user_deref_targets
+                                    .insert(type_name.clone(), assoc.ty.clone());
+                                self.user_deref_targets.insert(scoped, assoc.ty.clone());
+                            }
+                        }
+                    }
+
                     // `#[cpp_inherit] impl Trait for Type` → record that Type
                     // uses direct-inheritance emission (see cpp_inherit_trait
                     // doc in mod.rs). Keyed by the simple type name (matches

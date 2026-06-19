@@ -765,6 +765,12 @@ pub struct CodeGen {
     /// Used to resolve expected-type context through aliases (for example
     /// `MapInto<I, R>` -> `MapSpecialCase<I, MapSpecialCaseFnInto<R>>`).
     pub(crate) type_alias_targets: HashMap<String, syn::Type>,
+    /// User `impl Deref for T { type Target = U }` map: `T` (simple, scoped,
+    /// and tail keys) -> `U`. Lets field/method access through Deref coercion
+    /// emit an explicit `(*x)` when the member lives on the Deref target rather
+    /// than on `T` itself (C++ has no auto-deref). c2rust-ported crates use this
+    /// idiom (unsafe-libyaml's `Success: Deref<Target = Failure>`).
+    pub(crate) user_deref_targets: HashMap<String, syn::Type>,
     /// Scoped type aliases already emitted in this file.
     /// Used so alias forward declarations can be emitted once and later
     /// item emission does not duplicate them.
@@ -1518,6 +1524,7 @@ impl CodeGen {
             tuple_type_aliases: HashMap::new(),
             tuple_type_alias_elem_types: HashMap::new(),
             type_alias_targets: HashMap::new(),
+            user_deref_targets: HashMap::new(),
             emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
             local_type_module_path: HashMap::new(),
@@ -23950,6 +23957,47 @@ impl CodeGen {
                 "Box" | "Rc" | "Arc" | "MutexGuard" | "Ref" | "RefMut"
             )
         })
+    }
+
+    /// Deref-coercion field access: when `field_name` is NOT a member of the
+    /// base expression's own struct but the base's user `impl Deref` target
+    /// type DOES have it, Rust silently auto-derefs (`success.fail` →
+    /// `(*success).fail` where `Success: Deref<Target = Failure>`). C++ has no
+    /// such coercion, so emit `(*base).field` explicitly. Returns `None` when
+    /// the pattern doesn't apply (no user Deref, field is a direct member, or
+    /// the target lacks the field) so the caller falls back to plain `.field`.
+    fn field_access_through_user_deref(
+        &self,
+        base_expr: &syn::Expr,
+        base_for_field: &str,
+        field_name: &str,
+    ) -> Option<String> {
+        let base_ty = self.infer_simple_expr_type(base_expr)?;
+        let base_ty = self.peel_reference_paren_group_type(&base_ty);
+        let syn::Type::Path(tp) = base_ty else {
+            return None;
+        };
+        let base_struct = tp.path.segments.last()?.ident.to_string();
+        // Only coerce when the field is NOT on the base's own struct.
+        if self.lookup_struct_field_type(&base_struct, field_name).is_some() {
+            return None;
+        }
+        let scoped = self.scoped_type_key(&base_struct);
+        let target_ty = self
+            .user_deref_targets
+            .get(&base_struct)
+            .or_else(|| self.user_deref_targets.get(&scoped))?;
+        let target_ty = self.peel_reference_paren_group_type(target_ty);
+        let syn::Type::Path(ttp) = target_ty else {
+            return None;
+        };
+        let target_struct = ttp.path.segments.last()?.ident.to_string();
+        // The Deref target must actually have the field.
+        self.lookup_struct_field_type(&target_struct, field_name)?;
+        let field_cpp = self
+            .lookup_struct_field_cpp_name(&target_struct, field_name)
+            .unwrap_or_else(|| escape_cpp_keyword(field_name));
+        Some(format!("(*{}).{}", base_for_field, field_cpp))
     }
 
 
