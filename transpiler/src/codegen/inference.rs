@@ -5780,6 +5780,19 @@ impl CodeGen {
                         }
                     }
                 }
+                // Last resort: a free-function call returning a RAW POINTER
+                // resolves to that pointer type (e.g. `yaml_malloc(...)` ->
+                // `*mut c_void`), so a `ptr as usize` cast / raw-pointer method on
+                // the result is typed. Restricted to raw-pointer returns to stay
+                // additive without perturbing owner-type inference (e.g. Box::new
+                // element inference keys off `None` here). Uses the import-aware
+                // fallback so cross-module `use`-imported calls also resolve.
+                if let Some(ret_ty) =
+                    self.lookup_fn_return_type_with_import_fallback(call.func.as_ref())
+                    && self.is_type_raw_pointer_like(self.peel_reference_paren_group_type(&ret_ty))
+                {
+                    return Some(ret_ty);
+                }
                 self.infer_local_binding_type_from_initializer(expr)
             }
             syn::Expr::Unsafe(unsafe_expr) => self

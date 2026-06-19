@@ -19167,6 +19167,24 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
+    // A call to a raw-pointer-returning fn imported from another module, cast to
+    // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is
+    // ill-formed. The callee's return type is recovered via the import-aware
+    // unique-leaf fallback even though the call site is in a different module.
+    let out = transpile_str(
+        r#"
+        pub mod api { pub unsafe fn yaml_alloc(n: usize) -> *mut u8 { core::ptr::null_mut() } }
+        pub mod user {
+            use crate::api::yaml_alloc;
+            pub unsafe fn f() -> usize { yaml_alloc(1) as usize }
+        }
+        "#,
+    );
+    assert!(out.contains("reinterpret_cast<std::uintptr_t>"), "{out}");
+}
+
+#[test]
 fn test_forward_decl_qualifies_cross_namespace_type_through_fnptr_fallback() {
     // A free fn in one module taking a struct param from another module PLUS a
     // function-pointer-typedef param: the fn-ptr triggers the unresolved-path

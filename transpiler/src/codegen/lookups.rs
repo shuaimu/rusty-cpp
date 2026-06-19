@@ -385,6 +385,41 @@ impl CodeGen {
         None
     }
 
+    /// Like `lookup_function_return_type`, but adds a fallback for a bare call to
+    /// a function imported via `use` from another module (so the current-module
+    /// candidates miss): if exactly ONE recorded crate function has this leaf
+    /// name, use its return type. Function names are globally unique in c2rust
+    /// ports, so this resolves `yaml_malloc()` called from `dumper`/`parser`/…
+    /// back to the `api::yaml_malloc` record. The uniqueness guard avoids
+    /// guessing when two modules declare same-named functions.
+    pub(super) fn lookup_fn_return_type_with_import_fallback(
+        &self,
+        func: &syn::Expr,
+    ) -> Option<syn::Type> {
+        if let Some(ty) = self.lookup_function_return_type(func) {
+            return Some(ty.clone());
+        }
+        let syn::Expr::Path(path_expr) = func else {
+            return None;
+        };
+        let leaf = path_expr.path.segments.last()?.ident.to_string();
+        let suffix = format!("::{}", leaf);
+        let mut found: Option<&syn::Type> = None;
+        let mut count = 0usize;
+        for (key, ret) in &self.function_return_types {
+            if (key == &leaf || key.ends_with(&suffix))
+                && let Some(ty) = ret
+            {
+                count += 1;
+                if count > 1 {
+                    return None;
+                }
+                found = Some(ty);
+            }
+        }
+        found.cloned()
+    }
+
     pub(super) fn lookup_method_arg_pass_style(
         &self,
         method_name: &str,

@@ -30426,6 +30426,16 @@ impl CodeGen {
                     let src_ty = self.peel_reference_paren_group_type(src_ty);
                     self.is_type_raw_pointer_like(src_ty)
                 });
+        // The source's VALUE type is a raw pointer (not necessarily a reference):
+        // a call returning `*mut T` (e.g. `yaml_malloc(...)`), a pointer-typed
+        // field, etc. `is_expr_raw_pointer_like` misses these, so a `ptr as usize`
+        // would wrongly fall to the illegal `static_cast<uintptr_t>(ptr)`.
+        let source_value_is_pointer_like = self
+            .infer_simple_expr_type(&cast.expr)
+            .as_ref()
+            .is_some_and(|src_ty| {
+                self.is_type_raw_pointer_like(self.peel_reference_paren_group_type(src_ty))
+            });
         let source_is_slice_like_value = self
             .infer_simple_expr_type(&cast.expr)
             .as_ref()
@@ -30608,7 +30618,9 @@ impl CodeGen {
                 ty, expr
             )
         } else if target_is_numeric_scalar
-            && (source_is_raw_pointer_type || source_reference_to_pointer_like)
+            && (source_is_raw_pointer_type
+                || source_reference_to_pointer_like
+                || source_value_is_pointer_like)
         {
             format!(
                 "static_cast<{}>(reinterpret_cast<std::uintptr_t>({}))",
