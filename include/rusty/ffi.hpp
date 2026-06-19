@@ -7,6 +7,13 @@
 
 namespace rusty::ffi {
 
+// Rust's `core::ffi::c_void` (the opaque FFI void type) is only ever used
+// behind a raw pointer (`*mut c_void` / `*const c_void`), so mapping it to
+// C++ `void` yields the natural `void*` / `const void*`. The transpiler emits
+// `rusty::ffi::c_void` for `core::ffi::c_void` / `std::os::raw::c_void` paths
+// (heavily used by c2rust-ported crates such as unsafe-libyaml).
+using c_void = void;
+
 // Rust's `OsString::from_vec` is a Unix-only extension on `OsStringExt`
 // that adopts a `Vec<u8>` as the OS string's bytes. We map `OsString`
 // to `std::basic_string<char>` (no dedicated rusty type), so the
