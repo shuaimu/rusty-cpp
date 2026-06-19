@@ -19117,6 +19117,20 @@ fn test_byte_string_literal() {
     assert!(out.contains("0x68")); // 'h'
 }
 
+#[test]
+fn test_byte_string_literal_cast_to_pointer_decays_to_static() {
+    // In Rust `b"..."` is `&'static [u8; N]`; casting it to a raw pointer must
+    // decay to static storage, NOT route the array value through
+    // `static_cast<std::uintptr_t>(...)` (ill-formed: an array is not an integer).
+    let out = transpile_str(r#"fn f() { let p = b"hi" as *const u8; }"#);
+    assert!(out.contains("static const uint8_t _bs[]"), "{out}");
+    assert!(
+        !out.contains("static_cast<std::uintptr_t>(std::array"),
+        "{out}"
+    );
+    assert!(out.contains("0x68")); // 'h'
+}
+
 // ── Phase 15 Gap 8: Self in trait signatures ────────────────
 
 #[test]

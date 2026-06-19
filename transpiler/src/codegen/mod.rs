@@ -30250,6 +30250,47 @@ impl CodeGen {
             || self.expr_lowers_to_slice_or_span_view(&cast.expr)
             || expr.trim_start().starts_with("rusty::as_slice(")
             || expr.trim_start().starts_with("rusty::as_mut_slice(");
+        // Byte-string literal cast to a pointer: `b"..." as *const u8`.
+        // In Rust, `b"..."` has type `&'static [u8; N]` — it decays to a pointer
+        // into static storage. The byte-string literal otherwise emits as an array
+        // *value* (`std::array<uint8_t, N>{{...}}`); routing that through
+        // `static_cast<std::uintptr_t>(...)` is ill-formed (an array is not an
+        // integer). Materialize the bytes in a function-local `static` and decay it.
+        if target_is_pointer_type
+            && let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::ByteStr(bs),
+                ..
+            }) = self.peel_paren_group_expr(&cast.expr)
+        {
+            let bytes = bs.value();
+            if !bytes.is_empty() {
+                let initializer: Vec<String> =
+                    bytes.iter().map(|b| format!("0x{:02x}", b)).collect();
+                let static_ptr = format!(
+                    "([]() -> const uint8_t* {{ static const uint8_t _bs[] = {{ {} }}; return _bs; }}())",
+                    initializer.join(", ")
+                );
+                let target_is_mut_ptr = match target_ty_override {
+                    Some(syn::Type::Ptr(p)) => p.mutability.is_some(),
+                    _ => matches!(cast.ty.as_ref(), syn::Type::Ptr(p) if p.mutability.is_some()),
+                };
+                if target_is_mut_ptr {
+                    if let Some(const_ty) = Self::pointer_const_cast_target_cpp_type(&ty) {
+                        return format!(
+                            "const_cast<{}>(reinterpret_cast<{}>({}))",
+                            ty, const_ty, static_ptr
+                        );
+                    }
+                    let target_pointee_str = ty.trim_end_matches('*').trim();
+                    let const_ty = format!("const {}*", target_pointee_str);
+                    return format!(
+                        "const_cast<{}>(reinterpret_cast<{}>({}))",
+                        ty, const_ty, static_ptr
+                    );
+                }
+                return format!("reinterpret_cast<{}>({})", ty, static_ptr);
+            }
+        }
         if target_is_slice_pointer && source_is_slice_like_value && !source_is_raw_pointer_type {
             // Casts from slice-like values to raw slice pointers are often used by
             // unsafe transmute patterns (e.g. `&[u8] as *const [u8] as *const Wrapper`).
