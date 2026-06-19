@@ -4344,6 +4344,20 @@ impl CodeGen {
                         self.rewrite_global_using_path_for_private_alias_root(&using_path);
                     let using_path =
                         self.rewrite_using_path_for_module_runtime_helper_trait(&using_path);
+                    // Collapse a renamed re-export of a Rust primitive
+                    // (`pub use core::primitive::u8 as yaml_char_t;`) to the C++
+                    // primitive (`using yaml_char_t = uint8_t;`). Otherwise the
+                    // alias target stays the undefined `std::primitive::u8` — a
+                    // typedef pattern c2rust-ported crates (unsafe-libyaml) use
+                    // heavily for `yaml_char_t` / `size_t` / `ptrdiff_t`.
+                    let using_path = if let Some((alias, target)) =
+                        split_use_import_alias(&using_path)
+                        && let Some(prim) = Self::map_qualified_primitive_alias_path(target)
+                    {
+                        format!("{} = {}", alias, prim)
+                    } else {
+                        using_path
+                    };
                     if let Some((alias, _)) = split_use_import_alias(&using_path)
                         && alias.trim() == "_"
                     {
