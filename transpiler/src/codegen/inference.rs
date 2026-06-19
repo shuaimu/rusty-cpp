@@ -5606,6 +5606,30 @@ impl CodeGen {
                 }
                 _ => None,
             },
+            // Field access (`(*parser).buffer.pointer`, `parser.buffer`): resolve
+            // the base to its owning struct — auto-dereferencing through a raw
+            // pointer / reference, as Rust does — then look up the named field's
+            // declared type. Recurses for chains. This is what lets a field of
+            // raw-pointer type be recognized as such (`is_expr_raw_pointer_like`),
+            // so the `rusty::ptr::*` lowering of `.offset()/.wrapping_offset()/…`
+            // fires on struct-field receivers — pervasive in c2rust-ported crates
+            // (unsafe-libyaml: `(*parser).buffer.pointer.wrapping_offset(n)`).
+            syn::Expr::Field(field) => {
+                let field_name = match &field.member {
+                    syn::Member::Named(ident) => ident.to_string(),
+                    syn::Member::Unnamed(index) => index.index.to_string(),
+                };
+                let base_ty = self.infer_simple_expr_type(&field.base)?;
+                let struct_ty = self
+                    .extract_pointer_pointee_info_from_type(&base_ty)
+                    .map(|(pointee, _)| pointee)
+                    .unwrap_or_else(|| self.peel_reference_paren_group_type(&base_ty).clone());
+                let syn::Type::Path(tp) = &struct_ty else {
+                    return None;
+                };
+                let struct_name = tp.path.segments.last()?.ident.to_string();
+                self.lookup_struct_field_type(&struct_name, &field_name)
+            }
             syn::Expr::Try(try_expr) => {
                 let inner_ty = self
                     .infer_simple_expr_type(&try_expr.expr)
