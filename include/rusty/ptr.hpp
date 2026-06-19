@@ -486,6 +486,15 @@ inline T* offset(T* ptr, Count count) {
     return ptr + static_cast<std::ptrdiff_t>(count);
 }
 
+// `<ptr>.offset_from(origin)` (and c2rust's `<ptr>.c_offset_from(origin)`):
+// the element-count difference between two pointers into the same allocation.
+// Rust returns `isize`; both arguments decay to `const T*` so a mut/const
+// receiver-vs-origin mix still resolves to a single T.
+template<typename T>
+inline std::ptrdiff_t offset_from(const T* ptr, const T* origin) noexcept {
+    return ptr - origin;
+}
+
 template<typename T>
 inline void drop_in_place(T* dst) {
     std::destroy_at(dst);

@@ -19118,6 +19118,19 @@ fn test_byte_string_literal() {
 }
 
 #[test]
+fn test_c_offset_from_lowers_to_ptr_offset_from() {
+    // c2rust's raw-pointer `PointerExt::c_offset_from(origin)` must lower to the
+    // pointer-arithmetic helper with the receiver kept as a pointer — NOT to a
+    // `(*ptr).c_offset_from(...)` member call (which fails: ptr isn't a struct),
+    // and NOT to the winnow string/span `rusty::offset_from`.
+    let out = transpile_str(
+        r#"fn f(end: *const u8, start: *const u8) -> isize { end.c_offset_from(start) }"#,
+    );
+    assert!(out.contains("rusty::ptr::offset_from(end, start)"), "{out}");
+    assert!(!out.contains("(*end).c_offset_from"), "{out}");
+}
+
+#[test]
 fn test_byte_string_literal_cast_to_pointer_decays_to_static() {
     // In Rust `b"..."` is `&'static [u8; N]`; casting it to a raw pointer must
     // decay to static storage, NOT route the array value through

@@ -5418,6 +5418,16 @@ impl CodeGen {
             let from = self.emit_expr_to_string(&mc.args[0]);
             return format!("rusty::offset_from({}, {})", receiver, from);
         }
+        // c2rust's raw-pointer `PointerExt::c_offset_from(origin)` — the
+        // element-count difference between two pointers. Emit the pointer
+        // arithmetic helper directly (NOT the winnow string/span `offset_from`)
+        // and keep the receiver as a pointer, so it is not auto-dereferenced
+        // into a `(*ptr).c_offset_from(...)` member call on a non-struct.
+        if mc.method == "c_offset_from" && mc.args.len() == 1 {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let origin = self.emit_expr_to_string(&mc.args[0]);
+            return format!("rusty::ptr::offset_from({}, {})", receiver, origin);
+        }
         if mc.method == "offset_for" && mc.args.len() == 1 {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             let pred = self.emit_expr_to_string(&mc.args[0]);
