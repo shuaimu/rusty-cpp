@@ -19139,6 +19139,23 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_force_add_mul_lower_to_arithmetic() {
+    // c2rust's `ops::ForceAdd::force_add` / `ForceMul::force_mul` (crate-declared
+    // trait methods) must lower to parenthesized arithmetic, intercepted BEFORE
+    // the UFCS trait dispatch (which would leave a `x.force_add(y)` member call
+    // on a scalar). Operands parenthesized to preserve precedence.
+    let out = transpile_str(
+        r#"
+        trait ForceAdd { fn force_add(self, rhs: Self) -> Self; }
+        impl ForceAdd for u64 { fn force_add(self, rhs: u64) -> u64 { self + rhs } }
+        fn f(a: u64, b: u64) -> u64 { a.force_add(b) }
+        "#,
+    );
+    assert!(out.contains("((a) + (b))"), "{out}");
+    assert!(!out.contains("a.force_add"), "{out}");
+}
+
+#[test]
 fn test_c_like_enum_bare_variant_qualifies_to_scoped_form() {
     // A C-like enum whose name AND variants contain underscores, with variants
     // used bare (c2rust `use Enum::*` style). The match must compare against the

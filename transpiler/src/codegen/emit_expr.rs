@@ -5005,6 +5005,20 @@ impl CodeGen {
         if let Some(seed_rewrite) = self.try_emit_deserialize_map_seed_rewrite(mc, expected_ty) {
             return seed_rewrite;
         }
+        // c2rust's `ops::ForceAdd::force_add` / `ForceMul::force_mul` — checked
+        // integer arithmetic helpers (`self OP rhs`). They are crate-declared
+        // trait methods, so they MUST be intercepted before the UFCS trait
+        // dispatch below (which otherwise routes them through a member-call
+        // fallback `x.force_add(y)` on a scalar — not a struct). Lower to
+        // parenthesized arithmetic (operands parenthesized to keep precedence).
+        if matches!(mc.method.to_string().as_str(), "force_add" | "force_mul")
+            && mc.args.len() == 1
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let rhs = self.emit_expr_to_string(&mc.args[0]);
+            let op = if mc.method == "force_add" { "+" } else { "*" };
+            return format!("(({}) {} ({}))", receiver, op, rhs);
+        }
         // UFCS Phase 3 (book § 3.2.3): a method whose name is a *trait-only*
         // method of one of THIS crate's traits lowers to a free call
         // `m(recv, args)` (resolved via the `<Tr>_` namespace + `using`s in
