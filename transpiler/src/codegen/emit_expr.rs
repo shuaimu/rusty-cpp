@@ -1663,6 +1663,10 @@ impl CodeGen {
         arms: &[syn::Arm],
         variant_ctx: Option<&VariantTypeContext>,
     ) {
+        // A `switch` catches a plain C++ `break`, so a Rust `break` inside an arm
+        // (which targets the enclosing loop) must be lowered to a `goto`. Track
+        // the switch frame so break/continue lowering knows it sits in between.
+        self.cf_stack.push(crate::codegen::CfFrame::Switch);
         self.writeln(&format!("switch ({}) {{", scrutinee));
 
         // Track emitted case values across ALL arms to detect duplicates.
@@ -1783,12 +1787,37 @@ impl CodeGen {
                     self.emit_arm_body(&arm.body);
                 }
 
-                self.writeln("break;");
+                // Emit the switch-case terminator `break;` UNLESS the (unguarded)
+                // arm body already diverges — i.e. ends in a Rust break/continue/
+                // return, which lowers to a C++ break/goto/return that makes the
+                // terminator unreachable dead code. (A guarded arm can still fall
+                // through when the guard is false, so it always needs the break.)
+                if arm.guard.is_some() || !self.match_arm_body_diverges(&arm.body) {
+                    self.writeln("break;");
+                }
                 self.indent -= 1;
                 self.writeln("}");
             }
         }
         self.writeln("}");
+        self.cf_stack.pop();
+    }
+
+    /// Whether a match-arm body unconditionally diverges: it is, or ends in, a
+    /// Rust `break`/`continue`/`return`. Used to suppress the dead switch-case
+    /// terminator `break;` after such an arm.
+    fn match_arm_body_diverges(&self, body: &syn::Expr) -> bool {
+        fn expr_diverges(e: &syn::Expr) -> bool {
+            match e {
+                syn::Expr::Break(_) | syn::Expr::Continue(_) | syn::Expr::Return(_) => true,
+                syn::Expr::Block(b) => match b.block.stmts.last() {
+                    Some(syn::Stmt::Expr(tail, _)) => expr_diverges(tail),
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+        expr_diverges(body)
     }
 
     pub(super) fn emit_match_as_visit(
@@ -16952,10 +16981,28 @@ impl CodeGen {
                         let v = self.emit_expr_to_string(val);
                         format!("return {}", v) // break-with-value inside lambda wrapper
                     }
-                    None => "break".to_string(),
+                    None => {
+                        // A plain `break` / `break 'label`. If it can't reach its
+                        // target loop with a C++ `break;` (an outer loop, or a
+                        // `switch` from a lowered `match` sits in between), emit a
+                        // `goto` to the loop's break label instead.
+                        let label = brk.label.as_ref().map(|lt| lt.ident.to_string());
+                        match self.cf_break_goto(label.as_deref()) {
+                            Some(goto_label) => format!("goto {}", goto_label),
+                            None => "break".to_string(),
+                        }
+                    }
                 }
             }
-            syn::Expr::Continue(_) => "continue".to_string(),
+            syn::Expr::Continue(cont) => {
+                // A plain `continue` / `continue 'label`. A goto is needed only to
+                // reach an outer loop (a `switch` does not catch `continue`).
+                let label = cont.label.as_ref().map(|lt| lt.ident.to_string());
+                match self.cf_continue_goto(label.as_deref()) {
+                    Some(goto_label) => format!("goto {}", goto_label),
+                    None => "continue".to_string(),
+                }
+            }
             syn::Expr::Range(range) => {
                 let start = range.start.as_ref().map(|e| self.emit_expr_to_string(e));
                 let end = range.end.as_ref().map(|e| self.emit_expr_to_string(e));

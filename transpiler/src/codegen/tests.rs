@@ -3337,6 +3337,34 @@ fn test_infinite_loop() {
 }
 
 #[test]
+fn test_break_in_match_arm_targets_loop_not_switch() {
+    // A Rust `break` inside a `match` arm breaks the ENCLOSING LOOP. Lowered to a
+    // C++ `switch`, a plain `break;` would target the switch instead, so it must
+    // become a `goto` to the loop's break label (and the dead terminator break is
+    // suppressed). Regression for the BTreeMap::merge `break; break;` bug.
+    let out = transpile_str(
+        "fn f(x: i32) { loop { match x.cmp(&0) { \
+         std::cmp::Ordering::Less => { break; } \
+         _ => { let _y = x; } } } }",
+    );
+    assert!(out.contains("goto _loop"), "break should goto the loop label: {out}");
+    assert!(out.contains("_break: ;"), "loop should emit a break label: {out}");
+}
+
+#[test]
+fn test_labeled_continue_to_outer_loop_lowers_to_goto() {
+    // `continue 'outer` from inside a nested loop must `goto` the OUTER loop's
+    // continue label; the transpiler used to drop the label and emit a plain
+    // `continue;` targeting the inner loop. Regression for rehash_in_place.
+    let out = transpile_str(
+        "fn f(n: usize) { 'outer: for i in 0..n { \
+         loop { if i > 0 { continue 'outer; } break; } } }",
+    );
+    assert!(out.contains("goto _loop"), "labeled continue should goto: {out}");
+    assert!(out.contains("_continue: ;"), "outer loop should emit a continue label: {out}");
+}
+
+#[test]
 fn test_for_in_range() {
     let out = transpile_str("fn f() { for i in 0..10 { i; } }");
     assert!(out.contains("for (auto&& i : rusty::for_in(rusty::range(0, 10))) {"));

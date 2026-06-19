@@ -542,11 +542,44 @@ impl<'ast> Visit<'ast> for OptionSomeNoneExprCollector {
     }
 }
 
+/// A control-flow frame for lowering Rust `break`/`continue` (including labeled
+/// forms) to the correct C++ target. A plain C++ `break` is caught by the
+/// innermost loop OR `switch`; a plain `continue` by the innermost loop only.
+/// When the Rust target is not reachable that way — an outer loop, or a `switch`
+/// (from a lowered `match`) sits between a `break` and its loop — we emit
+/// `goto _loopN_break/_continue;` and the owning loop emits the matching label.
+/// `used_*` are `Cell`s because break/continue are lowered through the `&self`
+/// `emit_expr_to_string` path, while the labels are emitted by the loop.
+#[derive(Clone)]
+pub(crate) enum CfFrame {
+    Loop {
+        id: u32,
+        label: Option<String>,
+        // `Rc` so the flag is SHARED across `self.clone()` sub-codegens (used to
+        // render if/else-branch and closure fragments): a `goto` emitted while
+        // rendering a cloned fragment must still flip the flag on the original
+        // loop frame so the loop emits its `_loopN_break:`/`_loopN_continue:`
+        // label. `Cell` for `&self`-path (`emit_expr_to_string`) interior
+        // mutability.
+        used_break: std::rc::Rc<std::cell::Cell<bool>>,
+        used_continue: std::rc::Rc<std::cell::Cell<bool>>,
+    },
+    Switch,
+}
+
 /// Code generation context tracking indentation and output buffer.
 #[derive(Clone)]
 pub struct CodeGen {
     pub(crate) output: String,
     pub(crate) indent: usize,
+    /// Control-flow frame stack (loops + switches) used to lower Rust
+    /// break/continue to plain C++ break/continue or `goto`. See [`CfFrame`].
+    pub(crate) cf_stack: Vec<CfFrame>,
+    /// Monotonic counter handing out unique ids for C++ loop labels. Shared
+    /// (`Rc<Cell>`) so ids stay globally unique across `self.clone()` fragment
+    /// sub-codegens — otherwise a cloned fragment would reuse an id the parent
+    /// later assigns, producing duplicate `_loopN_break:` labels.
+    pub(crate) cf_loop_id: std::rc::Rc<std::cell::Cell<u32>>,
     /// True for transient sub-codegens spun up to render a fragment (e.g. a
     /// closure body in `new_inner_for_block`) whose output is then embedded
     /// into a parent. The strict-auto backstop in `into_output` is skipped on
@@ -1477,6 +1510,8 @@ impl CodeGen {
         Self {
             output: String::new(),
             indent: 0,
+            cf_stack: Vec::new(),
+            cf_loop_id: std::rc::Rc::new(std::cell::Cell::new(0)),
             is_sub_codegen: false,
             is_dependency_module: false,
             ufcs_method_classes: HashMap::new(),
@@ -21514,11 +21549,12 @@ impl CodeGen {
         }
         let bool_ty: syn::Type = parse_quote!(bool);
         let cond = self.emit_expr_to_string_with_expected(&while_expr.cond, Some(&bool_ty));
+        let cf_label = while_expr.label.as_ref().map(|l| l.name.ident.to_string());
+        let cf_id = self.cf_enter_loop(cf_label);
         self.writeln(&format!("while ({}) {{", cond));
         self.indent += 1;
         self.emit_block(&while_expr.body);
-        self.indent -= 1;
-        self.writeln("}");
+        self.cf_close_loop(cf_id);
     }
 
     /// `while let` runtime fallback for custom enum variants. Lowers
@@ -21570,6 +21606,7 @@ impl CodeGen {
             return false;
         };
 
+        let cf_id = self.cf_enter_loop(None);
         self.writeln("while (true) {");
         self.indent += 1;
         self.writeln(&format!("auto&& {} = {};", scrutinee_var, scrutinee_cpp));
@@ -21600,8 +21637,7 @@ impl CodeGen {
             self.local_bindings.pop();
             self.local_cpp_bindings.pop();
         }
-        self.indent -= 1;
-        self.writeln("}");
+        self.cf_close_loop(cf_id);
         true
     }
 
@@ -21701,6 +21737,7 @@ impl CodeGen {
             _ => return false,
         }
 
+        let cf_id = self.cf_enter_loop(None);
         self.writeln("while (true) {");
         self.indent += 1;
         self.writeln(&format!("auto&& _whilelet = {};", scrutinee));
@@ -21732,8 +21769,7 @@ impl CodeGen {
             self.local_shadowed_binding_types.pop();
             self.local_cpp_bindings.pop();
         }
-        self.indent -= 1;
-        self.writeln("}");
+        self.cf_close_loop(cf_id);
         true
     }
 
@@ -21828,6 +21864,102 @@ impl CodeGen {
 
 
 
+    /// Index of the loop frame a `break`/`continue` with the given optional Rust
+    /// label targets: the innermost loop, or the innermost loop carrying `label`.
+    fn cf_find_loop(&self, label: Option<&str>) -> Option<usize> {
+        match label {
+            None => self
+                .cf_stack
+                .iter()
+                .rposition(|f| matches!(f, CfFrame::Loop { .. })),
+            Some(l) => self.cf_stack.iter().rposition(
+                |f| matches!(f, CfFrame::Loop { label: Some(fl), .. } if fl == l),
+            ),
+        }
+    }
+
+    /// `Some("_loopN_break")` if a `break` (with optional Rust label) must be
+    /// lowered to `goto` to reach its target loop, `None` if a plain C++
+    /// `break;` already targets it. A plain `break` reaches the innermost
+    /// loop-or-switch, so a goto is needed whenever the target loop is not the
+    /// topmost control-flow frame (an outer loop, or a `switch` sits above it).
+    /// Marks the target loop's break label as used.
+    fn cf_break_goto(&self, label: Option<&str>) -> Option<String> {
+        let target = self.cf_find_loop(label)?;
+        if target + 1 == self.cf_stack.len() {
+            return None;
+        }
+        if let CfFrame::Loop { id, used_break, .. } = &self.cf_stack[target] {
+            used_break.set(true);
+            return Some(format!("_loop{}_break", id));
+        }
+        None
+    }
+
+    /// As [`Self::cf_break_goto`] but for `continue`. A plain C++ `continue`
+    /// reaches the innermost *loop* (a `switch` does not catch `continue`), so a
+    /// goto is needed only when the target loop is not the innermost loop.
+    fn cf_continue_goto(&self, label: Option<&str>) -> Option<String> {
+        let target = self.cf_find_loop(label)?;
+        let innermost_loop = self
+            .cf_stack
+            .iter()
+            .rposition(|f| matches!(f, CfFrame::Loop { .. }))?;
+        if target == innermost_loop {
+            return None;
+        }
+        if let CfFrame::Loop { id, used_continue, .. } = &self.cf_stack[target] {
+            used_continue.set(true);
+            return Some(format!("_loop{}_continue", id));
+        }
+        None
+    }
+
+    /// Pushes a loop control-flow frame and returns its unique id. The caller
+    /// emits the C++ loop, then calls [`Self::cf_pop_loop_flags`] after the body.
+    fn cf_enter_loop(&mut self, label: Option<String>) -> u32 {
+        let id = self.cf_loop_id.get();
+        self.cf_loop_id.set(id + 1);
+        self.cf_stack.push(CfFrame::Loop {
+            id,
+            label,
+            used_break: std::rc::Rc::new(std::cell::Cell::new(false)),
+            used_continue: std::rc::Rc::new(std::cell::Cell::new(false)),
+        });
+        id
+    }
+
+    /// Pops the current loop frame, returning `(used_break, used_continue)` so
+    /// the caller can emit `_loopN_continue:`/`_loopN_break:` labels only when a
+    /// `goto` referenced them.
+    fn cf_pop_loop_flags(&mut self) -> (bool, bool) {
+        match self.cf_stack.pop() {
+            Some(CfFrame::Loop {
+                used_break,
+                used_continue,
+                ..
+            }) => (used_break.get(), used_continue.get()),
+            _ => (false, false),
+        }
+    }
+
+    /// Closes a loop opened with [`Self::cf_enter_loop`]: emits the
+    /// `_loopN_continue:` label (end of body, only if a `goto` referenced it),
+    /// de-indents, writes the closing `}`, then emits the `_loopN_break:` label
+    /// after the loop (only if referenced). Call with the body already emitted
+    /// and the indent still at body level.
+    fn cf_close_loop(&mut self, id: u32) {
+        let (used_break, used_continue) = self.cf_pop_loop_flags();
+        if used_continue {
+            self.writeln(&format!("_loop{}_continue: ;", id));
+        }
+        self.indent -= 1;
+        self.writeln("}");
+        if used_break {
+            self.writeln(&format!("_loop{}_break: ;", id));
+        }
+    }
+
     fn emit_loop(&mut self, loop_expr: &syn::ExprLoop) {
         // Check if this loop uses break-with-value.
         // If a loop has `break <expr>`, it's used as a value-producing loop.
@@ -21835,11 +21967,12 @@ impl CodeGen {
         // the break-with-value is handled by emit_expr_to_string emitting `return val`.
         // The enclosing `let x = loop { ... }` should wrap in a lambda —
         // but that's handled at the let-binding level.
+        let cf_label = loop_expr.label.as_ref().map(|l| l.name.ident.to_string());
+        let cf_id = self.cf_enter_loop(cf_label);
         self.writeln("while (true) {");
         self.indent += 1;
         self.emit_block(&loop_expr.body);
-        self.indent -= 1;
-        self.writeln("}");
+        self.cf_close_loop(cf_id);
     }
 
     fn emit_for_loop(&mut self, for_expr: &syn::ExprForLoop) {
@@ -21898,6 +22031,8 @@ impl CodeGen {
 
         // Rust `for x in expr` → C++ `for (auto& x : expr)` or `for (auto x : expr)`
         // Use auto&& to handle both references and values correctly
+        let cf_id =
+            self.cf_enter_loop(for_expr.label.as_ref().map(|l| l.name.ident.to_string()));
         self.writeln(&format!(
             "for (auto&& {} : {}) {{",
             loop_header_binding, iter_expr
@@ -21936,8 +22071,7 @@ impl CodeGen {
         self.pending_loop_var_bindings.clear();
         self.pending_loop_var_binding_types.clear();
 
-        self.indent -= 1;
-        self.writeln("}");
+        self.cf_close_loop(cf_id);
         if iter_is_borrowed {
             self.pattern_ref_bindings.pop();
         }
@@ -33698,6 +33832,14 @@ impl CodeGen {
         let mut inner = self.clone();
         inner.output.clear();
         inner.indent = 0;
+        // NOTE: cf_stack is intentionally INHERITED (not cleared). This fragment
+        // renderer is used both for closures and for same-scope fragments (e.g.
+        // if/else branches), so a break/continue inside it must still resolve
+        // against the enclosing loops. The loop frames' `used_*` flags are
+        // `Rc<Cell<_>>`, so a goto emitted while rendering the (cloned) fragment
+        // still flips the flag on the parent's loop frame and the label is
+        // emitted. (Closures can't target an outer loop in valid Rust, so
+        // inheriting the frames never mis-resolves a closure-local break.)
         // Fragment renderer: defer the strict-auto backstop to the parent's
         // top-level `into_output` so any `<auto>` leak is reported with an
         // accurate full-module line number rather than a fragment-relative one.
