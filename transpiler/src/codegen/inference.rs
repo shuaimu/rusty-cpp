@@ -5624,6 +5624,15 @@ impl CodeGen {
                     .extract_pointer_pointee_info_from_type(&base_ty)
                     .map(|(pointee, _)| pointee)
                     .unwrap_or_else(|| self.peel_reference_paren_group_type(&base_ty).clone());
+                // Tuple field `t.0`/`t.1`: return the i-th element type. (This
+                // arm must preserve the prior tuple-field inference that
+                // downstream match-arm / pattern-binding typing relies on —
+                // returning None here regressed `match (a.1, b.1) { … }`.)
+                if let syn::Type::Tuple(tuple) = &struct_ty
+                    && let syn::Member::Unnamed(index) = &field.member
+                {
+                    return tuple.elems.iter().nth(index.index as usize).cloned();
+                }
                 let syn::Type::Path(tp) = &struct_ty else {
                     return None;
                 };

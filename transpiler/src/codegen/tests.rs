@@ -8855,11 +8855,17 @@ fn test_deferred_init_let_merges_with_first_assignment() {
     );
     // The materialized declaration MUST live at the outer scope so
     // subsequent uses (the `let _ = first_part_tail;` after the
-    // unsafe block) see it. If the merged emit landed inside the
-    // unsafe block's braces, this assertion catches it.
+    // unsafe block) see it, NOT bare-uninitialized. Two valid forms:
+    //   - merge-into-`auto`: `auto first_part_tail = <rhs>;` (used when the
+    //     first-assignment RHS is statically un-typeable), or
+    //   - typed deferred storage: `std::optional<T> first_part_tail;` at the
+    //     outer scope + `.emplace(<rhs>)` in the unsafe block (used when the
+    //     RHS type IS resolvable — here `node.as_mut().prev.take()` resolves
+    //     to `Option<NonNull<Node<T>>>` via struct-field type inference).
     assert!(
-        out.contains("auto first_part_tail = "),
-        "deferred-init local declaration not materialized:\n{out}"
+        out.contains("auto first_part_tail = ")
+            || out.contains("> first_part_tail;"),
+        "deferred-init local declaration not materialized at outer scope:\n{out}"
     );
     // The substring `{\n    auto first_part_tail = ` would mean
     // the materialization happened INSIDE the unsafe braces,
