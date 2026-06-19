@@ -323,6 +323,45 @@ public:
         return Result<uint64_t>::ok(static_cast<uint64_t>(pos_));
     }
 
+    // ── BufRead surface (mirrors Rust's `impl BufRead for Cursor<T>`) ──
+    // Peek the unread bytes [pos_, len) as a borrowed slice WITHOUT
+    // copying or advancing — the zero-copy view that frame/codec parsers
+    // need (Rust: `BufRead::fill_buf`). `remaining()` is an alias.
+    // @unsafe - returns a span over raw buffer bytes; the span borrows
+    //           the Cursor's inner buffer and is invalidated by writes
+    //           that reallocate it (same contract as Rust's `&[u8]`).
+    std::span<const uint8_t> fill_buf() const {
+        size_t len = get_len();
+        if (pos_ >= len) return std::span<const uint8_t>();
+        return std::span<const uint8_t>(get_data() + pos_, len - pos_);
+    }
+    std::span<const uint8_t> remaining() const { return fill_buf(); }
+
+    // Mutable peek of the unread bytes (no direct Rust analogue on
+    // Cursor, but symmetric; needed for in-place codec scratch).
+    // @unsafe - returns a mutable span over raw buffer bytes.
+    std::span<uint8_t> fill_buf_mut() {
+        size_t len = get_len();
+        if (pos_ >= len) return std::span<uint8_t>();
+        return std::span<uint8_t>(get_mut_data() + pos_, len - pos_);
+    }
+    std::span<uint8_t> remaining_mut() { return fill_buf_mut(); }
+
+    // Advance the cursor by `amt` (Rust: `BufRead::consume`). Saturates
+    // at len so it can never run past the buffer.
+    void consume(size_t amt) {
+        size_t len = get_len();
+        size_t target = pos_ + amt;
+        if (target < pos_ || target > len) target = len;  // overflow / past-end → clamp
+        pos_ = target;
+    }
+
+    // Number of unread bytes [pos_, len). Convenience.
+    size_t remaining_len() const {
+        size_t len = get_len();
+        return pos_ >= len ? 0 : len - pos_;
+    }
+
     // Accessors
     size_t position() const { return pos_; }
     void set_position(size_t pos) { pos_ = pos; }

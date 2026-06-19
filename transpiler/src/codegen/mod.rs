@@ -11579,6 +11579,41 @@ impl CodeGen {
                 trait_method_names,
                 current_method,
             ),
+            // Transparent wrappers — recurse into the sub-expression(s).
+            // These let composition-style default bodies inline into the
+            // interface: e.g. `self.state().status_.get() == 2` (a Field
+            // `self.state().status_` under a MethodCall `.get()`), the
+            // canonical shape for reshaping a stateful C++ base into a
+            // Rust-flavored state-struct + behavior-trait. The same-trait
+            // method check still fires on any `self.<m>()` reached below;
+            // field/index NAMES need no check (C++ resolves them on the
+            // type returned by the checked method call).
+            syn::Expr::Field(f) => Self::expr_only_refs_same_trait_methods(
+                &f.base,
+                trait_method_names,
+                current_method,
+            ),
+            syn::Expr::Reference(r) => Self::expr_only_refs_same_trait_methods(
+                &r.expr,
+                trait_method_names,
+                current_method,
+            ),
+            syn::Expr::Cast(c) => Self::expr_only_refs_same_trait_methods(
+                &c.expr,
+                trait_method_names,
+                current_method,
+            ),
+            syn::Expr::Index(idx) => {
+                Self::expr_only_refs_same_trait_methods(
+                    &idx.expr,
+                    trait_method_names,
+                    current_method,
+                ) && Self::expr_only_refs_same_trait_methods(
+                    &idx.index,
+                    trait_method_names,
+                    current_method,
+                )
+            }
             syn::Expr::Lit(_) | syn::Expr::Path(_) => true,
             // Conservative: any other expression shape (Block, If, Match,
             // Macro, Try, Closure, ...) requires further analysis we don't

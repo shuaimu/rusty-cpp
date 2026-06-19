@@ -118,11 +118,20 @@ impl CodeGen {
         } else {
             ""
         };
-        let static_prefix = if self.should_emit_internal_linkage_function(f) {
-            "static "
+        let constexpr_prefix = if f.sig.constness.is_some() {
+            "constexpr "
         } else {
             ""
         };
+        let static_prefix = format!(
+            "{}{}",
+            if self.should_emit_internal_linkage_function(f) {
+                "static "
+            } else {
+                ""
+            },
+            constexpr_prefix
+        );
         self.emit_template_declaration_with_type_defaults(
             &emitted_generics,
             export_prefix,
@@ -330,11 +339,20 @@ impl CodeGen {
         } else {
             ""
         };
-        let static_prefix = if self.should_emit_internal_linkage_function(f) {
-            "static "
+        let constexpr_prefix = if f.sig.constness.is_some() {
+            "constexpr "
         } else {
             ""
         };
+        let static_prefix = format!(
+            "{}{}",
+            if self.should_emit_internal_linkage_function(f) {
+                "static "
+            } else {
+                ""
+            },
+            constexpr_prefix
+        );
         // Template declarations must be emitted outside the function's type-param scope.
         // Otherwise in-scope params are treated as already declared and the `template<...>`
         // prefix is dropped.
@@ -5407,11 +5425,27 @@ impl CodeGen {
             emitted_auto_trailing_return = emitted_auto_trailing_return
                 .map(|ty| self.qualify_out_of_line_owner_assoc_aliases_in_cpp_type(&ty, owner));
         }
-        let static_prefix = if is_static && out_of_line_owner.is_none() {
-            "static "
+        // Rust `const fn` → C++ `constexpr`. Fold the qualifier into the prefix
+        // so it applies to every signature form below (decl + def, in-line +
+        // out-of-line). Without this, a `const`-initialized associated item whose
+        // initializer calls a `const fn` becomes a runtime (dynamic) initializer
+        // — a static-initialization-order hazard. (A `const fn` whose transpiled
+        // body is not constexpr-eligible, e.g. uses reinterpret_cast, is handled
+        // by stripping the qualifier in post_transpile_patch.py.)
+        let constexpr_prefix = if method.sig.constness.is_some() {
+            "constexpr "
         } else {
             ""
         };
+        let static_prefix = format!(
+            "{}{}",
+            if is_static && out_of_line_owner.is_none() {
+                "static "
+            } else {
+                ""
+            },
+            constexpr_prefix
+        );
         let emitted_callable_name = if let Some(ref owner) = out_of_line_owner {
             format!("{}::{}", owner, name)
         } else {

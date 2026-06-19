@@ -1122,12 +1122,29 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
         r"\1.align",
         text,
     )
-    # `static constexpr TableLayout TABLE_LAYOUT = TableLayout::new_<T>();`
-    # — `TableLayout::new_<T>()` isn't constexpr (it uses Layout::new_
-    # and ternaries that are non-constexpr). Drop the constexpr.
+    # RawTable::TABLE_LAYOUT stays `static constexpr` (constant-initialized).
+    # The transpiler now lowers Rust `const fn` -> C++ `constexpr`, so
+    # `TableLayout::new_<T>()` is constexpr (Layout::new_ and rusty::clone are
+    # constexpr; ternaries are constexpr-valid) and the constant initializer is
+    # well-formed. Previously this was downgraded to `static inline const`, which
+    # made TABLE_LAYOUT *dynamically* initialized — a static-init-order fiasco when
+    # a HashMap is built from a static initializer. (No downgrade now.)
+    #
+    # RawTableInner::NEW = RawTableInner::new_() is a *dynamically*-initialized
+    # inline global, and new_() can't be constexpr (it reinterpret_casts the
+    # Tag* control-group pointer to u8*, illegal in a constant expression). Cloning
+    # NEW to build an empty table from a static initializer reads it before its
+    # dynamic init runs -> null ctrl -> SIGSEGV in Group::load_aligned. Eliminate
+    # the dynamic-init-global read: call new_() directly at each use site. new_()
+    # re-reads the constexpr Group::static_empty() sentinel, so it is safe to call
+    # at any time, including during static initialization.
     text = text.replace(
-        "static constexpr TableLayout TABLE_LAYOUT = TableLayout::new_<T>();",
-        "static inline const TableLayout TABLE_LAYOUT = TableLayout::new_<T>();",
+        "rusty::clone(rusty::clone(RawTableInner::NEW))",
+        "RawTableInner::new_()",
+    )
+    text = text.replace(
+        "rusty::detail::deref_if_pointer_like(RawTableInner::NEW)",
+        "rusty::detail::deref_if_pointer_like(RawTableInner::new_())",
     )
     # `drop_inner_table<T, std::remove_cvref_t<decltype((rusty::clone(rusty::clone(RawTable<T, A>::TABLE_LAYOUT))))>>`
     # — the transpiler recovered the table_layout arg's type as a

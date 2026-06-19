@@ -6943,6 +6943,32 @@ fn test_interface_traits_default_method_can_be_overridden_by_impl() {
 }
 
 #[test]
+fn test_interface_traits_default_method_with_field_access_body_inlines() {
+    // Composition reshape of a stateful C++ base into Rust flavor: a
+    // behavior trait whose default methods read a state struct via
+    // `self.state().<field>`. The Field access (and Cast) must NOT block
+    // inlining into the interface — otherwise the body drops to `= 0`,
+    // leaving every Adapter abstract/uninstantiable.
+    let out = transpile_str_interface_traits(
+        "struct St { ready: bool, ticks: u64 } \
+         trait Ev { \
+            fn state(&self) -> &St; \
+            fn is_ready(&self) -> bool { self.state().ready } \
+            fn ticks(&self) -> u64 { self.state().ticks } \
+         }",
+    );
+    // The accessor stays abstract.
+    assert!(out.contains("virtual const St& state() const = 0;"), "{out}");
+    // Field-access default bodies inline as non-pure virtuals (not `= 0`).
+    assert!(out.contains("virtual bool is_ready() const {"), "{out}");
+    assert!(out.contains("return this->state().ready;"), "{out}");
+    assert!(!out.contains("virtual bool is_ready() const = 0;"), "{out}");
+    assert!(out.contains("virtual uint64_t ticks() const {"), "{out}");
+    assert!(out.contains("return this->state().ticks;"), "{out}");
+    assert!(!out.contains("virtual uint64_t ticks() const = 0;"), "{out}");
+}
+
+#[test]
 fn test_interface_traits_no_default_methods_still_emit_pure_virtuals() {
     // Sanity: traits without default methods still emit pure virtuals
     // for every method (no behavioral change).
