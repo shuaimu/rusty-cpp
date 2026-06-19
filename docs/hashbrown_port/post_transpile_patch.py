@@ -621,9 +621,13 @@ export struct Group {
     }
 
     Group convert_special_to_empty_and_full_to_deleted() const {
-        // Set high bit on all (special), clear low bit on all.
-        GroupWord full = _0 & BITMASK_MASK;
-        return Group{(~full + (full >> 7)) | 0x8080808080808080ULL};
+        // FULL (high bit clear) -> DELETED (0x80); EMPTY/DELETED (high bit set) -> EMPTY (0xFF).
+        // Matches hashbrown `full = !self.0 & repeat(0x80); !full + (full >> 7)` (cf. match_full
+        // above, which masks ~_0). The earlier `_0 & BITMASK_MASK` (no ~) plus a spurious
+        // `| 0x8080..` computed the INVERSE mapping, so prepare_rehash_in_place marked live slots
+        // EMPTY and left tombstones DELETED and rehash re-placed phantom elements.
+        GroupWord full = ~_0 & BITMASK_MASK;
+        return Group{~full + (full >> 7)};
     }
 
     Group clone() const { return Group{_0}; }
