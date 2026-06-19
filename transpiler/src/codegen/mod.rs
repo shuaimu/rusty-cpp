@@ -2261,6 +2261,49 @@ impl CodeGen {
     /// string and qualifies each identifier that is an unambiguous nested-module
     /// type AND is not already preceded by `::` (so `typename A::Error` and
     /// already-qualified spellings are left alone). No-op when the map is empty.
+    /// Like `qualify_nested_local_types_in_type_string` but ONLY qualifies BARE
+    /// (un-`::`-prefixed) leaf type names; it never absolutizes an already
+    /// relative-qualified path (`mod::T` stays `mod::T`, not `::mod::T`). Used by
+    /// the function-forward-decl emitter, where the broader absolutizing variant
+    /// would wrongly force serde-style nested private aliases to the global root.
+    fn qualify_bare_local_types_in_type_string(&self, s: &str) -> String {
+        if self.local_type_module_path.is_empty() {
+            return s.to_string();
+        }
+        let bytes = s.as_bytes();
+        let mut out = String::with_capacity(s.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if c.is_alphabetic() || c == '_' {
+                let start = i;
+                while i < bytes.len()
+                    && ((bytes[i] as char).is_alphanumeric() || bytes[i] == b'_')
+                {
+                    i += 1;
+                }
+                let ident = &s[start..i];
+                let already_qualified = start >= 2 && &s[start - 2..start] == "::";
+                let followed_by_path_sep =
+                    i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b':';
+                if !already_qualified
+                    && !followed_by_path_sep
+                    && let Some(path) = self.local_type_module_path.get(ident)
+                    && !path.is_empty()
+                {
+                    out.push_str("::");
+                    out.push_str(path);
+                    out.push_str("::");
+                }
+                out.push_str(ident);
+            } else {
+                out.push(c);
+                i += 1;
+            }
+        }
+        out
+    }
+
     fn qualify_nested_local_types_in_type_string(&self, s: &str) -> String {
         if self.local_type_module_path.is_empty() {
             return s.to_string();

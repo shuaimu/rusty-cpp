@@ -19139,6 +19139,34 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_forward_decl_qualifies_cross_namespace_type_through_fnptr_fallback() {
+    // A free fn in one module taking a struct param from another module PLUS a
+    // function-pointer-typedef param: the fn-ptr triggers the unresolved-path
+    // fallback that drops cross-namespace qualification. The bare cross-namespace
+    // struct type must still be namespace-qualified (not left bare/undeclared).
+    let out = transpile_str(
+        r#"
+        pub mod yaml {
+            pub struct yaml_emitter_t { pub x: i32 }
+            pub type yaml_write_handler_t = unsafe fn(data: *mut core::ffi::c_void) -> i32;
+        }
+        pub mod api {
+            pub unsafe fn yaml_emitter_set_output(
+                emitter: *mut crate::yaml::yaml_emitter_t,
+                handler: crate::yaml::yaml_write_handler_t,
+            ) {}
+        }
+        "#,
+    );
+    // The emitter param must be qualified (::yaml:: or yaml::), never bare.
+    assert!(
+        out.contains("yaml::yaml_emitter_t* emitter"),
+        "{out}"
+    );
+    assert!(!out.contains("(yaml_emitter_t* emitter"), "{out}");
+}
+
+#[test]
 fn test_force_add_mul_lower_to_arithmetic() {
     // c2rust's `ops::ForceAdd::force_add` / `ForceMul::force_mul` (crate-declared
     // trait methods) must lower to parenthesized arithmetic, intercepted BEFORE

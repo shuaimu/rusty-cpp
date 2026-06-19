@@ -77,13 +77,26 @@ impl CodeGen {
                 .forward_decl_type_spelling_has_unresolved_scoped_path(&fallback_return_type)
                 || self
                     .forward_decl_type_spelling_has_unresolved_scoped_path(&fallback_param_types);
+            let mut used_unqualified_fallback = false;
             if !fallback_has_unresolved {
                 return_type = fallback_return_type;
                 params = fallback_params;
                 param_types = fallback_param_types;
                 signature_has_unresolved_scoped_paths = false;
+                used_unqualified_fallback = true;
             }
             self.in_forward_decl_signature = true;
+            if used_unqualified_fallback {
+                // The fallback re-mapped with `in_forward_decl_signature = false`,
+                // which drops cross-namespace qualification (e.g. a `yaml::`-module
+                // struct param of a free function emitted under `namespace api`,
+                // triggered by a function-pointer-typedef param). Re-qualify BARE
+                // local types only — the absolutizing variant would wrongly force
+                // serde-style nested private aliases to the global root.
+                return_type = self.qualify_bare_local_types_in_type_string(&return_type);
+                params = self.qualify_bare_local_types_in_type_string(&params);
+                param_types = self.qualify_bare_local_types_in_type_string(&param_types);
+            }
         }
         self.in_forward_decl_signature = prev_forward_decl_signature;
         let signature_has_unqualified_unknown_type = self
