@@ -220,6 +220,25 @@ inline constexpr std::nullptr_t null_mut() noexcept {
     return nullptr;
 }
 
+// Typed form: `core::ptr::null_mut::<T>()` → `T*`. A separate template
+// overload, so the bare `null_mut()` above still yields `nullptr_t` for
+// untyped callers (this template is not viable without an explicit argument,
+// so `null_mut()` is unambiguous).
+template<typename T>
+inline constexpr T* null_mut() noexcept {
+    return nullptr;
+}
+
+// `core::ptr::null::<T>()` → `const T*`, with the same bare/typed split.
+inline constexpr std::nullptr_t null() noexcept {
+    return nullptr;
+}
+
+template<typename T>
+inline constexpr const T* null() noexcept {
+    return nullptr;
+}
+
 // `without_provenance(addr)` — construct a pointer from a raw address with
 // strict-provenance API (the resulting pointer has no provenance). In C++
 // we just reinterpret the address. Used by transpiled core::slice::iter
