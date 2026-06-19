@@ -19139,6 +19139,34 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_c_like_enum_bare_variant_qualifies_to_scoped_form() {
+    // A C-like enum whose name AND variants contain underscores, with variants
+    // used bare (c2rust `use Enum::*` style). The match must compare against the
+    // scoped `Enum::VARIANT` — C++20 enum-class variants are not flattened into
+    // scope — and the owner lookup must not mis-split on the wrong underscore.
+    let out = transpile_str(
+        r#"
+        pub enum yaml_parser_state_t {
+            YAML_PARSE_STREAM_START_STATE = 0,
+            YAML_PARSE_DOCUMENT_START_STATE = 1,
+        }
+        use yaml_parser_state_t::*;
+        fn step(s: yaml_parser_state_t) -> i32 {
+            match s {
+                YAML_PARSE_STREAM_START_STATE => 1,
+                YAML_PARSE_DOCUMENT_START_STATE => 2,
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("yaml_parser_state_t::YAML_PARSE_STREAM_START_STATE"),
+        "{out}"
+    );
+    assert!(!out.contains("== YAML_PARSE_STREAM_START_STATE"), "{out}");
+}
+
+#[test]
 fn test_c_offset_from_lowers_to_ptr_offset_from() {
     // c2rust's raw-pointer `PointerExt::c_offset_from(origin)` must lower to the
     // pointer-arithmetic helper with the receiver kept as a pointer — NOT to a

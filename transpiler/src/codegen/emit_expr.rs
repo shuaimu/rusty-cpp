@@ -2259,9 +2259,16 @@ impl CodeGen {
                                 c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'
                             });
                         if is_const_style {
+                            // A bare C-like enum variant (`use Enum::*`) must be
+                            // compared against the scoped `Enum::VARIANT` — C++20
+                            // `enum class` does not flatten variants into scope.
+                            let cmp = self
+                                .unique_c_like_enum_owner_for_variant_name(&ident_str)
+                                .map(|owner| format!("{}::{}", owner, ident_str))
+                                .unwrap_or_else(|| ident_str.clone());
                             parts.push(format!(
                                 "if (_m == {}) {{ {}{};  }}",
-                                ident_str, ret_prefix, body
+                                cmp, ret_prefix, body
                             ));
                         } else {
                             // Catch-all with binding: `cmp => cmp` → declare alias to scrutinee

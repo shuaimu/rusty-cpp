@@ -21000,11 +21000,17 @@ impl CodeGen {
         let mut owner_tails: HashSet<String> = HashSet::new();
         for key in &self.c_like_enum_variants {
             let key_tail = key.rsplit("::").next().unwrap_or(key);
-            let Some((owner, member)) = key_tail.rsplit_once('_') else {
-                continue;
-            };
-            if member == variant_name || member == canonical_variant {
-                owner_tails.insert(owner.to_string());
+            // `key_tail` is `{owner}_{variant}`. BOTH the owner (e.g.
+            // `yaml_parser_state_t`) and the variant (e.g.
+            // `YAML_PARSE_STREAM_START_STATE`) can contain underscores, so a
+            // plain `rsplit_once('_')` mis-splits at the last underscore. Match
+            // on the KNOWN variant as an exact `_{variant}` suffix instead.
+            for variant in [variant_name, canonical_variant.as_str()] {
+                if let Some(owner) = key_tail.strip_suffix(&format!("_{}", variant)) {
+                    if !owner.is_empty() {
+                        owner_tails.insert(owner.to_string());
+                    }
+                }
             }
         }
         if owner_tails.len() == 1 {

@@ -683,11 +683,21 @@ impl CodeGen {
                                 None
                             }
                         });
+                        // A bare C-like enum variant (`use Enum::*`) compares
+                        // against the scoped `Enum::VARIANT` — C++20 `enum class`
+                        // does not flatten variants into the surrounding scope, so
+                        // the bare name is undeclared. Qualify with the unique
+                        // owning enum (same resolution the expression path uses).
+                        let c_like_qualified = self
+                            .unique_c_like_enum_owner_for_variant_name(&raw_ident)
+                            .map(|owner| format!("{}::{}", owner, ident));
                         if let Some(tag) = data_unit_emit {
                             out.push_str(&format!(
                                 "if (rusty::detail::variant_holds<{}>(_m)) {{ ",
                                 tag
                             ));
+                        } else if let Some(qualified) = c_like_qualified {
+                            out.push_str(&format!("if (_m == {}) {{ ", qualified));
                         } else {
                             out.push_str(&format!("if (_m == {}) {{ ", ident));
                         }
