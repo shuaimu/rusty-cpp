@@ -22,5 +22,6 @@ tests/transpile_tests/serde_bytes/
 tests/transpile_tests/serde_repr/
 tests/transpile_tests/serde/
 tests/transpile_tests/serde_core/
+tests/transpile_tests/serde_yaml/
 tests/transpile_tests/toml/
 Testing/

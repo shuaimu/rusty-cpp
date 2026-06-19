@@ -26,6 +26,7 @@ declare -a MATRIX_CRATES=(
     "serde_core"
     "serde"
     "pollster"
+    "serde_yaml"
 )
 
 # Crates known to FAIL for reasons unrelated to (and predating) the UFCS
@@ -36,6 +37,7 @@ declare -a MATRIX_CRATES=(
 # Itertools-default-body long tail (see memory itertools-codegen-remaining).
 declare -a KNOWN_FAIL_CRATES=(
     "itertools"
+    "serde_yaml"
 )
 
 is_known_fail() {
@@ -65,6 +67,7 @@ declare -A CRATE_REPO=(
     ["serde_core"]="https://github.com/serde-rs/serde.git"
     ["serde"]="https://github.com/serde-rs/serde.git"
     ["pollster"]="https://github.com/zesterer/pollster.git"
+    ["serde_yaml"]="https://github.com/dtolnay/serde-yaml.git"
 )
 
 declare -A CRATE_REF=(
@@ -83,6 +86,7 @@ declare -A CRATE_REF=(
     ["serde_core"]="v1.0.228"
     ["serde"]="v1.0.228"
     ["pollster"]="master"
+    ["serde_yaml"]="0.9.34"
 )
 
 declare -A CRATE_MANIFEST_REL=(
