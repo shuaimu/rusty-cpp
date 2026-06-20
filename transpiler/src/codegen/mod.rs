@@ -3624,6 +3624,7 @@ impl CodeGen {
             let mut final_result = Vec::with_capacity(early_enums.len() + rest.len());
             final_result.extend(early_enums);
             final_result.extend(rest);
+            self.delay_aggregate_typed_consts_after_aggregates(&mut final_result);
             Self::delay_functions_after_non_function_items(&mut final_result);
             log_order("done(no_inline_modules)");
             return final_result;
@@ -3881,6 +3882,61 @@ impl CodeGen {
         Self::delay_functions_after_non_function_items(&mut final_ordered);
         log_order("done");
         final_ordered
+    }
+
+    /// A `const X: LocalAggregate = LocalAggregate { .. }` needs its struct/union
+    /// complete at the definition point. Source order (and c2rust output) can place
+    /// such a const BEFORE the type definition; the const-forward pass only emits an
+    /// `extern const` decl for an aggregate-literal initializer (not a `constexpr`
+    /// one), so the real definition lands in body order — which must follow the
+    /// aggregate. Move aggregate-typed consts to just after the last struct/union
+    /// definition (preserving relative order), so they aren't emitted against an
+    /// incomplete type.
+    fn delay_aggregate_typed_consts_after_aggregates<'a>(
+        &self,
+        items: &mut Vec<&'a syn::Item>,
+    ) {
+        let is_aggregate_def =
+            |it: &syn::Item| matches!(it, syn::Item::Struct(_) | syn::Item::Union(_));
+        let is_aggregate_typed_const = |it: &syn::Item| -> bool {
+            let syn::Item::Const(c) = it else {
+                return false;
+            };
+            let syn::Type::Path(tp) = c.ty.as_ref() else {
+                return false;
+            };
+            let Some(seg) = tp.path.segments.last() else {
+                return false;
+            };
+            self.local_declared_types.contains(&seg.ident.to_string())
+        };
+        if !items.iter().any(|it| is_aggregate_typed_const(it)) {
+            return;
+        }
+        let movers: Vec<&syn::Item> = items
+            .iter()
+            .copied()
+            .filter(|it| is_aggregate_typed_const(it))
+            .collect();
+        let remaining: Vec<&syn::Item> = items
+            .iter()
+            .copied()
+            .filter(|it| !is_aggregate_typed_const(it))
+            .collect();
+        let last_agg = remaining.iter().rposition(|it| is_aggregate_def(it));
+        let mut result = Vec::with_capacity(items.len());
+        match last_agg {
+            Some(idx) => {
+                result.extend_from_slice(&remaining[..=idx]);
+                result.extend(movers);
+                result.extend_from_slice(&remaining[idx + 1..]);
+            }
+            None => {
+                result.extend(remaining);
+                result.extend(movers);
+            }
+        }
+        *items = result;
     }
 
     fn delay_functions_after_non_function_items<'a>(items: &mut Vec<&'a syn::Item>) {

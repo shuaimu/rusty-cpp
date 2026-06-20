@@ -19418,6 +19418,34 @@ fn test_deref_idiom_raw_addr_cast_targets_reference_return_pointee() {
 }
 
 #[test]
+fn test_aggregate_typed_const_definition_follows_its_struct() {
+    // c2rust `pub const OK: Success = Success { .. }` precedes `pub struct Success`
+    // in source. The const-forward pass only emits an `extern const` decl for an
+    // aggregate-literal initializer, so the real `constexpr Success OK = ..` lands
+    // in body order — which must follow the struct definition, else the const is
+    // defined against an incomplete (and non-literal) type.
+    let out = transpile_str(
+        r#"
+        pub mod success {
+            pub const OK: Success = Success { ok: true };
+            pub const FAIL: Success = Success { ok: false };
+            pub struct Success { pub ok: bool }
+        }
+        "#,
+    );
+    let struct_pos = out
+        .find("struct Success {")
+        .expect("struct Success definition must be emitted");
+    let const_pos = out
+        .find("constexpr Success OK =")
+        .expect("constexpr OK definition must be emitted");
+    assert!(
+        struct_pos < const_pos,
+        "aggregate-typed const definition must follow its struct\n{out}"
+    );
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is
