@@ -24205,7 +24205,17 @@ impl CodeGen {
         base_for_field: &str,
         field_name: &str,
     ) -> Option<String> {
-        let base_ty = self.infer_simple_expr_type(base_expr)?;
+        // The base is often a CALL returning the Deref-able struct
+        // (`yaml_emitter_flush(e).fail` where the fn returns `Success`). General
+        // infer_simple_expr_type only resolves raw-pointer call returns, so fall
+        // back to the callee's declared return type here.
+        let base_ty = self.infer_simple_expr_type(base_expr).or_else(|| {
+            if let syn::Expr::Call(call) = self.peel_paren_group_expr(base_expr) {
+                self.lookup_fn_return_type_with_import_fallback(call.func.as_ref())
+            } else {
+                None
+            }
+        })?;
         let base_ty = self.peel_reference_paren_group_type(&base_ty);
         let syn::Type::Path(tp) = base_ty else {
             return None;

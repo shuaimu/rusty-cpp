@@ -19167,6 +19167,30 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_user_deref_field_access_on_call_result() {
+    // `flush().fail` where flush() returns a `Success` that Derefs to `Failure`
+    // (which owns `fail`). The base is a CALL, whose return type general infer
+    // doesn't resolve for a struct return — so it must fall back to the callee's
+    // declared return type, then deref-coerce: `(*flush()).fail`.
+    let out = transpile_str(
+        r#"
+        use std::ops::Deref;
+        pub struct Failure { pub fail: bool }
+        pub struct Success;
+        impl Deref for Success {
+            type Target = Failure;
+            fn deref(&self) -> &Failure { todo!() }
+        }
+        pub fn flush() -> Success { Success }
+        pub fn check() -> bool { flush().fail }
+        "#,
+    );
+    // Deref-coerced: `(*<call>).fail`, not a bare `<call>.fail` member access.
+    assert!(out.contains("flush()).fail"), "{out}");
+    assert!(out.contains("(*"), "{out}");
+}
+
+#[test]
 fn test_primitive_assoc_const_under_core_primitive_prefix() {
     // c2rust imports primitives via `core::primitive`, so integer assoc consts
     // arrive as 4-segment paths `std::primitive::i32::MAX`. These must map to
