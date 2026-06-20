@@ -14135,7 +14135,11 @@ impl CodeGen {
                     .iter()
                     .map(|a| self.emit_expr_maybe_move(a))
                     .collect();
-                let expected_cpp = self.map_type(expected);
+                // `[[noreturn]]` is a function/decl attribute, not a type
+                // attribute: a `!`-typed expected (`map_type` → `[[noreturn]]
+                // void`) is illegal as a lambda trailing return type. Strip it —
+                // the IIFE wraps a diverging call and yields nothing anyway.
+                let expected_cpp = self.map_type(expected).replace("[[noreturn]] ", "");
                 if expected_cpp == "auto"
                     || expected_cpp.contains("/* TODO")
                     || expected_cpp.contains("Self::")

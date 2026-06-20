@@ -19357,6 +19357,36 @@ fn test_reexport_of_core_ffi_c_void_binds_runtime_alias() {
 }
 
 #[test]
+fn test_noreturn_panic_in_never_context_strips_attr_from_iife_return_type() {
+    // A diverging panic in a `!`-typed position (e.g. the body of a
+    // `-> !` fn) lowers to an IIFE `[&]() -> <expected> { panic(); }()`.
+    // The expected type is `!` -> `map_type` yields `[[noreturn]] void`, but
+    // `[[noreturn]]` is a decl attribute, illegal as a lambda trailing return
+    // type ("an attribute list cannot appear here"). It must be stripped to
+    // plain `void` on the lambda while the real fn decl keeps the attribute.
+    let out = transpile_str(
+        r#"
+        pub fn do_die() -> ! {
+            core::panicking::panic("arithmetic overflow");
+        }
+        "#,
+    );
+    assert!(
+        out.contains("[&]() -> void {"),
+        "diverging IIFE must use plain `void` return type\n{out}"
+    );
+    assert!(
+        !out.contains("[&]() -> [[noreturn]]"),
+        "lambda trailing return type must not carry [[noreturn]]\n{out}"
+    );
+    // The real function declaration legitimately keeps the attribute.
+    assert!(
+        out.contains("[[noreturn]] void do_die()"),
+        "the actual fn decl should still carry [[noreturn]]\n{out}"
+    );
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is
