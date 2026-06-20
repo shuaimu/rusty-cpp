@@ -5651,6 +5651,15 @@ impl CodeGen {
                     return None;
                 };
                 let struct_name = tp.path.segments.last()?.ident.to_string();
+                // A `Self`-typed base (e.g. a `source: &Self` param in a trait
+                // impl) resolves through the impl's concrete self type so its
+                // fields can be looked up — `lookup_struct_field_type("Self", …)`
+                // would otherwise miss.
+                let struct_name = if struct_name == "Self" {
+                    self.current_struct.clone().unwrap_or(struct_name)
+                } else {
+                    struct_name
+                };
                 let field_ty = self.lookup_struct_field_type(&struct_name, &field_name)?;
                 // Substitute the owner's generic args into the field type, so a
                 // field declared `*mut T` on `yaml_stack_t<yaml_tag_directive_t>`

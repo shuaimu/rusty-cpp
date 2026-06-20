@@ -897,6 +897,12 @@ pub struct CodeGen {
     /// to a concept/facade name instead of `const auto&` (which is invalid
     /// inside generic argument lists like `SafeFn<T(auto)>`).
     pub(crate) type_arg_nesting: std::cell::Cell<usize>,
+    /// Counter for `_let_unwrapped_<n>` temporaries emitted when a
+    /// `Some/Ok/Err(<multi-binding pat>)` is destructured: the `.unwrap()`
+    /// must run once (it consumes the Option/Result), so it is bound to a
+    /// temp instead of being textually duplicated into each leaf access.
+    /// `Cell` so the `&self` pattern-collection pass can bump it.
+    pub(crate) unwrap_tmp_counter: std::cell::Cell<usize>,
     pub(crate) iflet_result_counter: usize,
     /// Named struct field types for local type-context recovery in match lowering.
     pub(crate) struct_field_types: HashMap<String, HashMap<String, syn::Type>>,
@@ -1586,6 +1592,7 @@ impl CodeGen {
             forward_emitted_consts: HashSet::new(),
             module_body_forward_decl_pass: false,
             type_arg_nesting: std::cell::Cell::new(0),
+            unwrap_tmp_counter: std::cell::Cell::new(0),
             iflet_result_counter: 0,
             struct_field_types: HashMap::new(),
             struct_field_order: HashMap::new(),
