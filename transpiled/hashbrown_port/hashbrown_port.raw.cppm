@@ -3922,7 +3922,7 @@ struct RawIterRange {
         // debug_assert: len != 0
         assert(true);  // assert((ctrl as size_t % Group :: WIDTH == 0));...
         auto end = rusty::ptr::add(ctrl, std::move(len));
-        auto&& [current_group, next_ctrl] = rusty::detail::deref_if_pointer_like(std::make_tuple(Group::load_aligned(reinterpret_cast<const uint8_t*>(const_cast<Tag*>(reinterpret_cast<const Tag*>(ctrl)))).match_full(), rusty::ptr::add(ctrl, rusty::clone(rusty::clone(Group::WIDTH)))));
+        auto [current_group, next_ctrl] = rusty::detail::deref_if_pointer_like(std::make_tuple(Group::load_aligned(reinterpret_cast<const uint8_t*>(const_cast<Tag*>(reinterpret_cast<const Tag*>(ctrl)))).match_full(), rusty::ptr::add(ctrl, rusty::clone(rusty::clone(Group::WIDTH)))));
         return RawIterRange<T>{.current_group = BitMask{current_group._0}.into_iter(), .data = std::move(data), .next_ctrl = std::move(next_ctrl), .end = end};
     }
     std::tuple<RawIterRange<T>, rusty::Option<RawIterRange<T>>> split() {
@@ -4351,14 +4351,18 @@ struct RawTable {
         this->table.clear_no_drop();
     }
     void clear() {
+        // Patcher fix (RawTable double-free): the transpiled
+        // body wrapped *this in a ScopeGuard that takes T by
+        // value, copying the RawTable (same ctrl_field,
+        // same items). The guard's drop then freed the shared
+        // buffer while the caller's *this still pointed at it.
+        // Move-assign a fresh empty table instead: ~RawTable
+        // on *this runs first (proper element drop + single
+        // free_buckets), then *this becomes empty-singleton.
         if (rusty::is_empty((*this))) {
             return;
         }
-        auto self_ = guard((*this), [&](auto&& self_) { return self_.clear_no_drop(); });
-        // @unsafe
-        {
-            self_.table.template drop_elements<T>();
-        }
+        (*this) = RawTable<T, A>::new_in(rusty::clone(this->alloc));
     }
     void shrink_to(size_t min_size, const auto& hasher) {
         auto min_size_shadow1 = std::max<size_t>(this->table.items, std::move(min_size));
@@ -4706,9 +4710,9 @@ if ((!std::is_trivially_destructible_v<T>)) {
         {
             for (auto&& from : rusty::for_in(rusty::iter(source))) {
                 auto index = source.bucket_index(rusty::detail::deref_if_pointer_like(from));
-                const auto to = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(_guard).bucket(std::move(index));
-                to.write(rusty::clone(from.as_ref()));
-                ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(_guard) = rusty::detail::deref_if_pointer_like(index) + 1;
+                const auto to = ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(_guard.value).bucket(std::move(index));
+                to.write_(rusty::clone(from.as_ref()));
+                ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(_guard.value) = rusty::detail::deref_if_pointer_like(index) + 1;
             }
         }
         rusty::mem::forget(std::move(_guard));
@@ -5387,53 +5391,60 @@ void RawTableInner::rehash_in_place(const std::function<uint64_t(RawTableInner&,
     {
         this->prepare_rehash_in_place();
     }
-    auto _guard = guard((*this), [=, drop = std::move(drop), size_of = std::move(size_of)](auto&& self_) mutable {
-for (auto&& i : rusty::for_in(rusty::range(0, self_.num_buckets()))) {
-    // @unsafe
-    {
-        if (rusty::detail::deref_if_pointer_like(self_.ctrl(std::move(i))) == rusty::clone(Tag::DELETED)) {
-            self_.set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY)));
-            if (drop.is_some()) {
-                auto&& _iflet_bound_scrutinee = drop;
-                decltype(auto) drop = _iflet_bound_scrutinee.unwrap();
-                drop.call_unsafe(self_.bucket_ptr(std::move(i), std::move(size_of)));
+    // PORT FIX: operate on *this DIRECTLY. The transpiler lowered Rust's `guard(&mut self, ...)` to a
+    // by-value `guard((*this), ...)`, which copies the table so the in-place rehash's growth_left/items
+    // updates never reach the real table -> growth_left stays stale (0) and later inserts underflow it
+    // -> the probe runs past the end of the table. Rust rehashes in place through the &mut borrow; we
+    // do the same here on *this. The Rust `guard(...)` closure is panic cleanup only (run on unwind),
+    // so it is preserved as a catch handler rather than a by-value ScopeGuard copy.
+    auto _cleanup = [this, &drop, size_of]() mutable {
+        for (auto&& i : rusty::for_in(rusty::range(0, this->num_buckets()))) {
+            // @unsafe
+            {
+                if (rusty::detail::deref_if_pointer_like(this->ctrl(std::move(i))) == rusty::clone(Tag::DELETED)) {
+                    this->set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY)));
+                    if (drop.is_some()) {
+                        auto&& _iflet_bound_scrutinee = drop;
+                        decltype(auto) drop = _iflet_bound_scrutinee.unwrap();
+                        drop.call_unsafe(this->bucket_ptr(std::move(i), std::move(size_of)));
+                    }
+                    this->items -= 1;
+                }
             }
-            rusty::detail::deref_if_pointer_like(self_.items) -= 1;
         }
-    }
-}
-self_.growth_left = bucket_mask_to_capacity(std::move(self_.bucket_mask)) - rusty::detail::deref_if_pointer_like(self_.items);
-});
-    for (auto&& i : rusty::for_in(rusty::range(0, (*_guard).num_buckets()))) {
+        this->growth_left = bucket_mask_to_capacity(this->bucket_mask) - rusty::detail::deref_if_pointer_like(this->items);
+    };
+    try {
+    for (auto&& i : rusty::for_in(rusty::range(0, this->num_buckets()))) {
         // @unsafe
         {
-            if (rusty::detail::deref_if_pointer_like((*_guard).ctrl(std::move(i))) != rusty::clone(Tag::DELETED)) {
+            if (rusty::detail::deref_if_pointer_like(this->ctrl(std::move(i))) != rusty::clone(Tag::DELETED)) {
                 continue;
             }
         }
-        const auto i_p = (*_guard).bucket_ptr(std::move(i), std::move(size_of));
+        const auto i_p = this->bucket_ptr(std::move(i), std::move(size_of));
         while (true) {
-            auto hash = hasher(rusty::detail::deref_if_pointer_like(_guard), std::move(i));
-            auto new_i = (*_guard).find_insert_index(std::move(hash));
-            if (likely((*_guard).is_in_same_group(std::move(i), std::move(new_i), std::move(hash)))) {
+            auto hash = hasher((*this), std::move(i));
+            auto new_i = this->find_insert_index(std::move(hash));
+            if (likely(this->is_in_same_group(std::move(i), std::move(new_i), std::move(hash)))) {
                 // @unsafe
                 {
-                    (*_guard).set_ctrl_hash(std::move(i), std::move(hash));
+                    this->set_ctrl_hash(std::move(i), std::move(hash));
                 }
-                goto _loop14_continue;
+                break; // Rust `continue 'outer`: advance the outer for-loop, not the inner while(true). Transpiler drops loop labels (emit_expr.rs Continue/Break ignore the label).
             }
-            const auto new_i_p = (*_guard).bucket_ptr(std::move(new_i), std::move(size_of));
-            const auto prev_ctrl = (*_guard).replace_ctrl_hash(std::move(new_i), std::move(hash));
+            const auto new_i_p = this->bucket_ptr(std::move(new_i), std::move(size_of));
+            const auto prev_ctrl = this->replace_ctrl_hash(std::move(new_i), std::move(hash));
             if (rusty::detail::deref_if_pointer_like(prev_ctrl) == rusty::clone(Tag::EMPTY)) {
                 // @unsafe
                 {
-                    (*_guard).set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY)));
+                    this->set_ctrl(std::move(i), rusty::clone(rusty::clone(Tag::EMPTY)));
                 }
                 // @unsafe
                 {
                     rusty::ptr::copy_nonoverlapping(std::move(i_p), std::move(new_i_p), std::move(size_of));
                 }
-                goto _loop14_continue;
+                break; // Rust `continue 'outer`: advance the outer for-loop, not the inner while(true). Transpiler drops loop labels (emit_expr.rs Continue/Break ignore the label).
             }
         assert(true);  // assert((prev_ctrl == Tag :: DELETED));...
             // @unsafe
@@ -5441,18 +5452,9 @@ self_.growth_left = bucket_mask_to_capacity(std::move(self_.bucket_mask)) - rust
                 rusty::ptr::swap_nonoverlapping(std::move(i_p), std::move(new_i_p), std::move(size_of));
             }
         }
-        _loop14_continue: ;
     }
-    (*_guard).growth_left = bucket_mask_to_capacity(std::move((*_guard).bucket_mask)) - rusty::detail::deref_if_pointer_like((*_guard).items);
-    // PORT FIX: `guard` is a by-value copy of the table (transpiler lowered Rust's
-    // `&mut self` to `(*this)`). Its ctrl buffer is SHARED (shallow copy), so the
-    // rehash above reached the real control bytes, but these scalar fields live only
-    // on the copy. Reflect them back into *this before forgetting it, else growth_left
-    // stays stale and a later insert underflows it -> probe past end of table.
-    this->growth_left = (*_guard).growth_left;
-    this->items = (*_guard).items;
-    this->bucket_mask = (*_guard).bucket_mask;
-    rusty::mem::forget(std::move(_guard));
+    } catch (...) { _cleanup(); throw; }
+    this->growth_left = bucket_mask_to_capacity(this->bucket_mask) - rusty::detail::deref_if_pointer_like(this->items);
 }
 
 template<typename A>
@@ -5500,7 +5502,7 @@ void RawTableInner::erase(size_t index) {
         // debug_assert: this->is_bucket_full(std::move(index))
     }
     auto index_before = (static_cast<size_t>(index) - static_cast<size_t>(rusty::clone(rusty::clone(Group::WIDTH)))) & rusty::detail::deref_if_pointer_like(this->bucket_mask);
-    auto&& [empty_before, empty_after] = rusty::detail::deref_if_pointer_like(std::make_tuple(Group::load(reinterpret_cast<const uint8_t*>(this->ctrl(std::move(index_before)))).match_empty(), Group::load(reinterpret_cast<const uint8_t*>(this->ctrl(std::move(index)))).match_empty()));
+    auto [empty_before, empty_after] = rusty::detail::deref_if_pointer_like(std::make_tuple(Group::load(reinterpret_cast<const uint8_t*>(this->ctrl(std::move(index_before)))).match_empty(), Group::load(reinterpret_cast<const uint8_t*>(this->ctrl(std::move(index)))).match_empty()));
     auto ctrl = [&]() {
 if (((empty_before).leading_zeros() + (empty_after).trailing_zeros()) >= rusty::clone(Group::WIDTH)) {
 return rusty::clone(Tag::DELETED);

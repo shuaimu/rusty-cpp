@@ -894,6 +894,85 @@ def patch_raw_imports_top(cpp_out: Path) -> int:
     return 1
 
 
+def patch_dangling_tuple_bindings(cpp_out: Path) -> int:
+    """Fix a dangling-reference bug in tuple destructuring.
+
+    `let (a, b) = <expr>` is lowered to
+    `auto&& [a, b] = rusty::detail::deref_if_pointer_like(std::make_tuple(...))`.
+    `std::make_tuple(...)` is a TEMPORARY and `deref_if_pointer_like`
+    returns a reference INTO it, so the `auto&&` reference does NOT extend
+    the temporary's lifetime — `a` and `b` dangle past the full
+    expression. (A bare `auto&& [a,b] = std::make_tuple(...)` WOULD be
+    lifetime-extended; it's the deref_if_pointer_like wrapper returning a
+    reference that breaks extension — so only the wrapped form is fixed.)
+    The older transpiler emitted `auto [a, b]` (by value), which copies
+    the small tuple and never dangles. Most visibly, `RawTableInner::erase`
+    reads dangling `empty_before`/`empty_after` to decide whether a removed
+    slot becomes EMPTY or DELETED; under insert/remove churn the control
+    bytes corrupt, lookups start missing, rrr replies go unmatched, and the
+    StressPipelined test idles ~25s (vs 123ms) while ConcurrentRequests
+    fails. Restore the by-value binding."""
+    total = 0
+    for path in sorted(cpp_out.glob("hashbrown_port.*.cppm")):
+        text = path.read_text()
+        new = re.sub(
+            r"auto&& (\[[^\]]+\] = rusty::detail::deref_if_pointer_like\(std::make_tuple\()",
+            r"auto \1",
+            text,
+        )
+        if new != text:
+            path.write_text(new)
+            total += 1
+    return total
+
+
+def patch_raw_rehash_this_rewrite(cpp_out: Path) -> int:
+    """Replace rehash_in_place with a `*this`-direct rewrite.
+
+    The transpiler lowers Rust's `guard(&mut self, ...)` to a by-value
+    `guard((*this), ...)` ScopeGuard that COPIES the table; the in-place
+    rehash then runs on the copy. A scalar write-back of
+    growth_left/items/bucket_mask at the end (the prior
+    `patch_raw_rehash_guard_writeback` approach) is NOT runtime-equivalent
+    to the &mut-borrow rehash: under insert/remove churn the table state
+    diverges, lookups miss, and the rrr StressPipelined test runs ~200x
+    slower (25s vs 123ms) while ConcurrentRequests fails. Rust rehashes in
+    place through the &mut borrow; reproduce that on `*this` directly, with
+    the Rust `guard(...)` closure preserved only as a panic-cleanup catch
+    handler. The known-good body is vendored next to this script as
+    `rehash_in_place_body.cppm.inc`. This supersedes the guard-writeback
+    rule (whose needle no longer matches once this has run)."""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if "PORT FIX: operate on *this DIRECTLY" in text:
+        return 0
+    start = text.find("void RawTableInner::rehash_in_place(")
+    if start == -1:
+        return 0
+    open_seq = text.find(") {", start)
+    if open_seq == -1:
+        return 0
+    open_brace = text.index("{", open_seq)
+    depth = 0
+    end = None
+    for i in range(open_brace, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end is None:
+        return 0
+    body = (Path(__file__).resolve().parent / "rehash_in_place_body.cppm.inc").read_text()
+    text = text[:start] + body.rstrip("\n") + text[end:]
+    path.write_text(text)
+    return 1
+
+
 def patch_raw_misc_fixups(cpp_out: Path) -> int:
     """Several mechanical fixups for raw.cppm:
     - `control::BitMaskIter` etc → drop `control::` (imported flat).
@@ -913,6 +992,13 @@ def patch_raw_misc_fixups(cpp_out: Path) -> int:
     # Strip `control::` qualifier (only the path, not `control:` followed
     # by other punctuation).
     text = re.sub(r"\bcontrol::(?=\w)", "", text)
+
+    # clone_from_impl: the transpiler emits `to.write(...)` but Bucket's
+    # method is `write_` (escaped because `write` collides). Fix the call.
+    text = text.replace(
+        "to.write(rusty::clone(from.as_ref()));",
+        "to.write_(rusty::clone(from.as_ref()));",
+    )
 
     # invalid_mut(x) → reinterpret_cast<T*>(x) where T comes from context.
     # Since we don't know T at patch time, use a generic cast via void*
@@ -2327,10 +2413,50 @@ def patch_map_module(cpp_out: Path) -> int:
         "::make_hasher(",
         text,
     )
+    # Iter/IterMut `next()` destructures a `std::tuple` with `r._0, r._1`
+    # (the transpiler's tuple-field syntax) inside `std::tuple<const K&,
+    # V&>{...}` (IterMut) and `std::tuple<const K&, const V&>{...}` (Iter).
+    # A std::tuple has no `_0`/`_1` members — swap to std::get for both.
+    text = re.sub(
+        r"(std::tuple<[^>{}]*>)\{r\._0, r\._1\}",
+        r"\1{std::get<0>(r), std::get<1>(r)}",
+        text,
+    )
     if text != original:
         path.write_text(text)
         return 1
     return 1 if changed else 0
+
+
+def patch_map_hashmap_compat_block(cpp_out: Path) -> int:
+    """Re-inject the hand-written HashMap-compatibility surface that the
+    transpiler can't emit and `_delete_conflated_iter_methods` strips.
+
+    Mako's rrr code uses `rusty::HashMap` like a C++ container: a plain
+    `HashMap<K,V> map;` field (default ctor), `map.get(k)` / `contains_key`
+    / `remove` with a concrete K, `for (auto& [k,v] : map)` (STL range
+    iteration), and `map[k]`. Rust expresses get/remove/contains_key via a
+    `Q: Borrow<K>` bound the transpiler skips, and HashMap()/operator[]/
+    begin()-end() have no Rust analog at all. The committed port carried a
+    121-line block providing these; it lives next to this script as
+    `hashmap_compat_block.cppm.inc`. Splice it in after the HashMap field
+    declarations (anchor: the `table;` field line), idempotently."""
+    path = cpp_out / "hashbrown_port.map.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    sentinel = "Hand-written-HashMap-compatibility extension"
+    if sentinel in text:
+        return 0
+    anchor = "    RawTable<std::tuple<K, V>, A> table;\n"
+    if anchor not in text:
+        return 0
+    block = (Path(__file__).resolve().parent / "hashmap_compat_block.cppm.inc").read_text()
+    if not block.endswith("\n"):
+        block += "\n"
+    text = text.replace(anchor, anchor + "\n" + block, 1)
+    path.write_text(text)
+    return 1
 
 
 def patch_cmakelists_smoke_test(cpp_out: Path) -> int:
@@ -2530,6 +2656,22 @@ def patch_set_facade(cpp_out: Path) -> int:
         "        this->map = HashMap<T, std::monostate, S>::new_();\n"
         "    }\n"
         "\n"
+        "    // STL-compat range iteration. Wraps the underlying HashMap's\n"
+        "    // stl_iter_t (entries are tuple<T, monostate>) and projects to\n"
+        "    // just the key via operator*. Enables `for (const auto& x : set)`.\n"
+        "    struct stl_iter_t {\n"
+        "        typename HashMap<T, std::monostate, S>::stl_iter_t inner;\n"
+        "        stl_iter_t() = default;\n"
+        "        explicit stl_iter_t(typename HashMap<T, std::monostate, S>::stl_iter_t it)\n"
+        "            : inner(std::move(it)) {}\n"
+        "        stl_iter_t& operator++() { ++inner; return *this; }\n"
+        "        const T& operator*() { return std::get<0>(*inner); }\n"
+        "        bool operator==(const stl_iter_t& o) const { return inner == o.inner; }\n"
+        "        bool operator!=(const stl_iter_t& o) const { return inner != o.inner; }\n"
+        "    };\n"
+        "    stl_iter_t begin() { return stl_iter_t(this->map.begin()); }\n"
+        "    stl_iter_t end() { return stl_iter_t(this->map.end()); }\n"
+        "\n"
         "    HashSet<T, S> clone() const { return HashSet<T, S>(this->map.clone()); }\n"
         "};\n"
     )
@@ -2605,7 +2747,7 @@ def patch_raw_table_clear_double_free(cpp_out: Path) -> int:
         r"(?:        // [^\n]*\n)*"
         r"        // @unsafe\n"
         r"        \{\n"
-        r"            self_\.value\.table\.template drop_elements<T>\(\);\n"
+        r"            self_\.(?:value\.)?table\.template drop_elements<T>\(\);\n"
         r"        \}\n"
         r"    \}\n"
     )
@@ -3263,6 +3405,12 @@ def patch_deep_raw_guard_rename(cpp_out: Path) -> int:
     text = re.sub(r"\(\*guard\)", "(*_guard)", text)
     text = re.sub(r"std::move\(guard\)", "std::move(_guard)", text)
     text = re.sub(r"_pointer_like\(guard\b", "_pointer_like(_guard", text)
+    # clone_from_impl wraps `std::make_tuple(0, (*this))` in a ScopeGuard,
+    # then extracts tuple fields via IIFEs called as `})(_guard)`. They need
+    # the WRAPPED tuple (`ScopeGuard::value`), not the guard itself —
+    # `std::get<N>(_guard)` has no match, and one site is an assignment
+    # target that needs the mutable `.value` member (operator* is const).
+    text = text.replace("})(_guard)", "})(_guard.value)")
     if text == original:
         return 0
     text = text.replace(
@@ -3538,9 +3686,12 @@ def main(cpp_out: Path):
         ("raw: misc fixups (control::, invalid_mut, Rust-syntax assert!s)", patch_raw_misc_fixups),
         ("raw: fix RawTable::clear() double-free (ScopeGuard takes T by value)", patch_raw_table_clear_double_free),
         ("raw: rehash_in_place — write back guard-copy scalars (ScopeGuard takes T by value)", patch_raw_rehash_guard_writeback),
+        ("raw: rehash_in_place — *this-direct rewrite (guard-copy writeback is not runtime-equivalent)", patch_raw_rehash_this_rewrite),
+        ("all: fix dangling auto&& tuple bindings on deref(make_tuple(...)) temporaries (erase ctrl corruption)", patch_dangling_tuple_bindings),
         ("scopeguard: dropfn arg by reference, not pointer", patch_scopeguard_dropfn_arg),
         ("table: hoist imports + std::* → rusty::* + drop raw:: qualifier", patch_table_module),
         ("map: same fixups as table", patch_map_module),
+        ("map: re-inject hand-written HashMap-compat block (default ctor/get/remove/contains_key/operator[]/range-for)", patch_map_hashmap_compat_block),
         # set/raw_entry/rustc_entry: stub for Phase A2 (advanced
         # features beyond core HashMap port).
         ("set: stub (Phase A2 — HashSet not in core scope)", patch_set_stub),
