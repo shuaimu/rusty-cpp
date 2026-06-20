@@ -546,6 +546,43 @@ impl CodeGen {
         self.writeln("}");
     }
 
+    /// Emit a Rust `union` (pervasive in c2rust C ports, e.g.
+    /// `unnamed_yaml_token_t_data`) as a C++ `union`. These are plain data
+    /// unions with no impls/methods, so — unlike structs — we deliberately do
+    /// NOT synthesize clone()/constructors (which would be ill-formed for a
+    /// union with several members). Field types resolve via `map_type`; field
+    /// metadata for inference is recorded separately in `collect_struct_metadata`.
+    pub(super) fn emit_union(&mut self, u: &syn::ItemUnion) {
+        let name_str = u.ident.to_string();
+        let name = self.named_module_root_type_decl_cpp_name(&name_str);
+        self.emit_doc_comments(&u.attrs);
+        let export_prefix = if self.should_export_item(&u.vis, &name_str) {
+            "export "
+        } else {
+            ""
+        };
+        self.emit_template_declaration_with_type_defaults(
+            &u.generics,
+            export_prefix,
+            &format!("union {} {{", name),
+        );
+        self.push_type_param_scope(&u.generics);
+        let prev_struct = self.current_struct.clone();
+        self.current_struct = Some(name_str.clone());
+        self.indent += 1;
+        for field in &u.fields.named {
+            if let Some(ident) = &field.ident {
+                let cpp_ty = self.map_type(&field.ty);
+                let cpp_name = escape_cpp_keyword(&ident.to_string());
+                self.writeln(&format!("{} {};", cpp_ty, cpp_name));
+            }
+        }
+        self.indent -= 1;
+        self.current_struct = prev_struct;
+        self.pop_type_param_scope();
+        self.writeln("};");
+    }
+
     pub(super) fn emit_struct(&mut self, s: &syn::ItemStruct) {
         let name_str = s.ident.to_string();
         let name = self.named_module_root_type_decl_cpp_name(&name_str);

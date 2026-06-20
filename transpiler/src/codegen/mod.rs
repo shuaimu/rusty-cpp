@@ -4574,6 +4574,7 @@ impl CodeGen {
             .iter()
             .filter_map(|item| match item {
                 syn::Item::Struct(s) => Some(s.ident.to_string()),
+                syn::Item::Union(u) => Some(u.ident.to_string()),
                 syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
                     Some(e.ident.to_string())
                 }
@@ -4593,6 +4594,7 @@ impl CodeGen {
         for (idx, item) in items.iter().enumerate() {
             let name = match item {
                 syn::Item::Struct(s) => s.ident.to_string(),
+                syn::Item::Union(u) => u.ident.to_string(),
                 syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
                     e.ident.to_string()
                 }
@@ -4621,6 +4623,7 @@ impl CodeGen {
         for (pos, &idx) in struct_indices.iter().enumerate() {
             let owner_name = match items[idx] {
                 syn::Item::Struct(s) => s.ident.to_string(),
+                syn::Item::Union(u) => u.ident.to_string(),
                 syn::Item::Enum(e) if e.variants.iter().any(|v| !v.fields.is_empty()) => {
                     e.ident.to_string()
                 }
@@ -4628,6 +4631,12 @@ impl CodeGen {
             };
             let dependency_type_names = match items[idx] {
                 syn::Item::Struct(s) => Self::collect_field_type_names(&s.fields, &type_names),
+                syn::Item::Union(u) => {
+                    Self::collect_field_type_names(
+                        &syn::Fields::Named(u.fields.clone()),
+                        &type_names,
+                    )
+                }
                 syn::Item::Enum(e) => {
                     let mut deps = HashSet::new();
                     for variant in &e.variants {
@@ -7365,6 +7374,7 @@ impl CodeGen {
         match item {
             syn::Item::Fn(f) => self.emit_function(f),
             syn::Item::Struct(s) => self.emit_struct(s),
+            syn::Item::Union(u) => self.emit_union(u),
             syn::Item::Enum(e) => self.emit_enum(e),
             syn::Item::Type(t) => self.emit_type_alias(t),
             syn::Item::Const(c) => self.emit_const(c),

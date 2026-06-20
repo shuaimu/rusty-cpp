@@ -4096,6 +4096,48 @@ impl CodeGen {
                         }
                     }
                 }
+                syn::Item::Union(u) => {
+                    // c2rust unions: record field types so `x.field` (a union
+                    // member access) infers, exactly like a struct's named fields.
+                    let union_name = u.ident.to_string();
+                    let named_field_types: HashMap<String, syn::Type> = u
+                        .fields
+                        .named
+                        .iter()
+                        .filter_map(|f| f.ident.as_ref().map(|id| (id.to_string(), f.ty.clone())))
+                        .collect();
+                    let named_field_order: Vec<String> = u
+                        .fields
+                        .named
+                        .iter()
+                        .filter_map(|f| f.ident.as_ref().map(|id| id.to_string()))
+                        .collect();
+                    let named_field_cpp_names: HashMap<String, String> = u
+                        .fields
+                        .named
+                        .iter()
+                        .filter_map(|f| {
+                            f.ident
+                                .as_ref()
+                                .map(|id| (id.to_string(), escape_cpp_keyword(&id.to_string())))
+                        })
+                        .collect();
+                    if !named_field_types.is_empty() {
+                        self.struct_field_types
+                            .insert(union_name.clone(), named_field_types.clone());
+                        self.struct_field_order
+                            .insert(union_name.clone(), named_field_order.clone());
+                        self.struct_field_cpp_names
+                            .insert(union_name.clone(), named_field_cpp_names.clone());
+                        if !module_path.is_empty() {
+                            let scoped = format!("{}::{}", module_path.join("::"), union_name);
+                            self.struct_field_types.insert(scoped.clone(), named_field_types);
+                            self.struct_field_order.insert(scoped.clone(), named_field_order);
+                            self.struct_field_cpp_names
+                                .insert(scoped, named_field_cpp_names);
+                        }
+                    }
+                }
                 syn::Item::Mod(m) => {
                     if let Some((_, nested_items)) = &m.content {
                         let mut nested_path = module_path.to_vec();

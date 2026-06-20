@@ -19167,6 +19167,24 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_rust_union_emitted_as_cpp_union_and_ordered_before_user() {
+    // c2rust C ports use real Rust `union`s. They must emit as C++ `union`
+    // (previously dropped as "unhandled item kind") and be topologically ordered
+    // BEFORE a struct that holds one by value (else the union member is an
+    // incomplete type).
+    let out = transpile_str(
+        r#"
+        pub struct Holder { pub data: Payload }
+        pub union Payload { pub as_int: u64, pub as_ptr: *mut u8 }
+        "#,
+    );
+    assert!(out.contains("union Payload {"), "{out}");
+    let upos = out.find("union Payload {").unwrap();
+    let hpos = out.find("struct Holder {").unwrap();
+    assert!(upos < hpos, "union must precede the struct that holds it\n{out}");
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is
