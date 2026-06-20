@@ -32838,3 +32838,34 @@ fn test_sibling_same_named_generic_type_recovers_own_params_not_collide() {
         "set::IntoIter must not pull map's <K, V> via the colliding bare key\n{out}"
     );
 }
+
+#[test]
+fn test_module_alias_resolved_in_sibling_reexport() {
+    // `use sse2 as imp;` is a MODULE rename. A sibling module's re-export
+    // resolved transitively through `control::group`'s `pub use self::imp::X`
+    // must expand the `imp` alias to `sse2` (`control::group::sse2::X`), not
+    // leak `control::group::imp::X` (hashbrown's control::group cluster).
+    let out = transpile_str(
+        r#"
+        pub mod control {
+            pub mod group {
+                pub mod sse2 { pub const BITMASK_ITER_MASK: usize = 1; }
+                use sse2 as imp;
+                pub(super) use self::imp::BITMASK_ITER_MASK;
+            }
+            pub mod bitmask {
+                use super::group::BITMASK_ITER_MASK;
+                pub fn f() -> usize { BITMASK_ITER_MASK }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("control::group::imp"),
+        "`use sse2 as imp` module alias must be resolved, not leaked\n{out}"
+    );
+    assert!(
+        out.contains("control::group::sse2::BITMASK_ITER_MASK"),
+        "must resolve the sibling re-export through imp to sse2\n{out}"
+    );
+}

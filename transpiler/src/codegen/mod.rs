@@ -1250,6 +1250,15 @@ pub struct CodeGen {
     /// `alloc::alloc::Layout`). Collected in a pre-pass so use-import targets can
     /// be normalized before they are recorded/qualified.
     pub(crate) extern_crate_aliases: HashMap<String, String>,
+    /// Intra-crate `use <module> as <alias>;` renames, as fully-qualified
+    /// `<scope>::<alias>` -> `<scope>::<target-module>` (e.g. hashbrown's
+    /// `use sse2 as imp;` in `control::group` -> `control::group::imp` ->
+    /// `control::group::sse2`). Unlike type/value `use … as …` (which become
+    /// import aliases) a module rename must be expanded wherever it appears as
+    /// an interior path segment — most importantly when a SIBLING module's
+    /// re-export is resolved transitively through it (`control::bitmask`'s
+    /// `use super::group::X` follows group's `pub use self::imp::X`).
+    pub(crate) module_path_aliases: HashMap<String, String>,
     /// In-progress guards for nonlocal type-tail resolution.
     /// Prevents recursive fallback cycles (`emit_path_to_string` <-> nonlocal lookup).
     pub(crate) nonlocal_type_resolution_in_progress: std::cell::RefCell<HashSet<String>>,
@@ -1692,6 +1701,7 @@ impl CodeGen {
             module_scope_namespace_aliases: HashSet::new(),
             scope_import_bindings: HashMap::new(),
             extern_crate_aliases: HashMap::new(),
+            module_path_aliases: HashMap::new(),
             nonlocal_type_resolution_in_progress: std::cell::RefCell::new(HashSet::new()),
             expr_type_inference_in_progress: std::cell::RefCell::new(HashSet::new()),
             cpp_module_import_bindings: HashMap::new(),
@@ -2635,6 +2645,7 @@ impl CodeGen {
         self.module_scope_namespace_aliases.clear();
         self.scope_import_bindings.clear();
         self.extern_crate_aliases.clear();
+        self.module_path_aliases.clear();
         self.cpp_module_import_bindings.clear();
         self.cpp_module_import_paths.clear();
         self.cpp_module_import_path_keys.clear();
@@ -2927,6 +2938,7 @@ impl CodeGen {
         // alias (`use stdalloc::alloc::Layout`) can be normalized to the real
         // crate root when recorded.
         self.collect_extern_crate_aliases(&file.items);
+        self.collect_module_path_aliases(&file.items);
         // Pass 1i.2: collect module-scope import bindings so path lowering can resolve
         // names introduced later via `use` regardless source order.
         self.collect_scope_import_bindings(&file.items, &[]);

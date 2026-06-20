@@ -3346,6 +3346,126 @@ impl CodeGen {
         if leading { format!("::{}", joined) } else { joined }
     }
 
+    /// Collect intra-crate `use <module> as <alias>;` renames into
+    /// `module_path_aliases` (`<scope>::<alias>` -> `<scope>::<target-module>`).
+    /// Two walks: first gather every declared module's full path, then record a
+    /// rename only when its target resolves to one of those modules (so a
+    /// type/value `use Foo as Bar` is never mistaken for a module alias).
+    pub(super) fn collect_module_path_aliases(&mut self, items: &[syn::Item]) {
+        let mut modules: HashSet<String> = HashSet::new();
+        Self::collect_module_full_paths(items, &mut Vec::new(), &mut modules);
+        self.collect_module_path_aliases_inner(items, &[], &modules);
+    }
+
+    fn collect_module_full_paths(
+        items: &[syn::Item],
+        prefix: &mut Vec<String>,
+        out: &mut HashSet<String>,
+    ) {
+        for item in items {
+            if let syn::Item::Mod(m) = item {
+                prefix.push(m.ident.to_string());
+                out.insert(prefix.join("::"));
+                if let Some((_, nested)) = &m.content {
+                    Self::collect_module_full_paths(nested, prefix, out);
+                }
+                prefix.pop();
+            }
+        }
+    }
+
+    fn collect_module_path_aliases_inner(
+        &mut self,
+        items: &[syn::Item],
+        module_path: &[String],
+        modules: &HashSet<String>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Use(u) => {
+                    self.record_module_path_alias_from_use_tree(&u.tree, module_path, modules);
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.collect_module_path_aliases_inner(nested, &nested_path, modules);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn record_module_path_alias_from_use_tree(
+        &mut self,
+        tree: &syn::UseTree,
+        module_path: &[String],
+        modules: &HashSet<String>,
+    ) {
+        match tree {
+            syn::UseTree::Rename(r) => {
+                let target_seg = r.ident.to_string();
+                let alias = r.rename.to_string();
+                if matches!(target_seg.as_str(), "self" | "super" | "crate") || alias == "_" {
+                    return;
+                }
+                // Resolve the single-segment rename target relative to the
+                // current module (child) or the crate root (sibling/top-level).
+                let mut child = module_path.to_vec();
+                child.push(target_seg.clone());
+                for cand in [child.join("::"), target_seg.clone()] {
+                    if modules.contains(&cand) {
+                        let alias_full = if module_path.is_empty() {
+                            alias.clone()
+                        } else {
+                            format!("{}::{}", module_path.join("::"), alias)
+                        };
+                        self.module_path_aliases.insert(alias_full, cand);
+                        return;
+                    }
+                }
+            }
+            syn::UseTree::Path(p) => {
+                self.record_module_path_alias_from_use_tree(&p.tree, module_path, modules);
+            }
+            syn::UseTree::Group(g) => {
+                for t in &g.items {
+                    self.record_module_path_alias_from_use_tree(t, module_path, modules);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Expand a fully-qualified `use <mod> as <alias>` rename that appears as an
+    /// interior path-prefix segment (`control::group::imp::X` ->
+    /// `control::group::sse2::X`). No-op when no recorded alias prefixes `path`.
+    pub(super) fn normalize_module_path_aliases(&self, path: &str) -> String {
+        if self.module_path_aliases.is_empty() {
+            return path.to_string();
+        }
+        let leading = path.starts_with("::");
+        let trimmed = path.trim_start_matches("::");
+        for (alias_full, target) in &self.module_path_aliases {
+            let rewritten = if trimmed == alias_full {
+                Some(target.clone())
+            } else {
+                trimmed
+                    .strip_prefix(&format!("{}::", alias_full))
+                    .map(|rest| format!("{}::{}", target, rest))
+            };
+            if let Some(rewritten) = rewritten {
+                return if leading {
+                    format!("::{}", rewritten)
+                } else {
+                    rewritten
+                };
+            }
+        }
+        path.to_string()
+    }
+
     pub(super) fn collect_scope_import_bindings(&mut self, items: &[syn::Item], module_path: &[String]) {
         let prev_stack = self.module_stack.clone();
         self.module_stack = module_path.to_vec();

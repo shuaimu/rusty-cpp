@@ -1210,13 +1210,18 @@ impl CodeGen {
             return path.to_string();
         }
         if let Some((alias, target)) = split_use_import_alias(path) {
-            if let Some(resolved) = self.try_resolve_nested_local_type_path(target) {
+            let target = self.normalize_module_path_aliases(target);
+            if let Some(resolved) = self.try_resolve_nested_local_type_path(&target) {
                 return format!("{} = {}", alias, resolved);
             }
-            return path.to_string();
+            return format!("{} = {}", alias, target);
         }
-        self.try_resolve_nested_local_type_path(path)
-            .unwrap_or_else(|| path.to_string())
+        // Expand a `use <mod> as <alias>` rename appearing as an interior path
+        // segment (`control::group::imp::X` -> `control::group::sse2::X`) before
+        // resolving, so a sibling module's re-export through the alias resolves.
+        let path = self.normalize_module_path_aliases(path);
+        self.try_resolve_nested_local_type_path(&path)
+            .unwrap_or(path)
     }
 
     pub(super) fn resolve_type_reexport_path_via_scope_binding(&self, path: &str) -> Option<String> {
