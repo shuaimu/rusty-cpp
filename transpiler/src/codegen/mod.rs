@@ -24286,6 +24286,33 @@ impl CodeGen {
     /// such coercion, so emit `(*base).field` explicitly. Returns `None` when
     /// the pattern doesn't apply (no user Deref, field is a direct member, or
     /// the target lacks the field) so the caller falls back to plain `.field`.
+    /// Infer the (struct) type of an `if/else` expression whose branch tails are
+    /// const paths of the same struct type — e.g. c2rust's `STACK_LIMIT!` expands
+    /// to `if .. { OK } else { ..; FAIL }` where `OK`/`FAIL` are `const Success`.
+    /// Used to recover the user-Deref base type when the if-expr is the receiver
+    /// of a Deref-target field access.
+    fn infer_if_branch_const_struct_type(&self, if_expr: &syn::ExprIf) -> Option<syn::Type> {
+        let branch_tail_ty = |block: &syn::Block| -> Option<syn::Type> {
+            let syn::Stmt::Expr(tail, None) = block.stmts.last()? else {
+                return None;
+            };
+            match self.peel_paren_group_expr(tail) {
+                syn::Expr::Path(p) if p.path.segments.len() == 1 => {
+                    self.lookup_item_const_type(&p.path.segments[0].ident.to_string())
+                }
+                other => self.infer_simple_expr_type(other),
+            }
+        };
+        branch_tail_ty(&if_expr.then_branch).or_else(|| {
+            let (_, else_expr) = if_expr.else_branch.as_ref()?;
+            if let syn::Expr::Block(b) = self.peel_paren_group_expr(else_expr) {
+                branch_tail_ty(&b.block)
+            } else {
+                None
+            }
+        })
+    }
+
     fn field_access_through_user_deref(
         &self,
         base_expr: &syn::Expr,
@@ -24296,13 +24323,26 @@ impl CodeGen {
         // (`yaml_emitter_flush(e).fail` where the fn returns `Success`). General
         // infer_simple_expr_type only resolves raw-pointer call returns, so fall
         // back to the callee's declared return type here.
-        let base_ty = self.infer_simple_expr_type(base_expr).or_else(|| {
-            if let syn::Expr::Call(call) = self.peel_paren_group_expr(base_expr) {
-                self.lookup_fn_return_type_with_import_fallback(call.func.as_ref())
-            } else {
-                None
-            }
-        })?;
+        let base_ty = self
+            .infer_simple_expr_type(base_expr)
+            .or_else(|| {
+                if let syn::Expr::Call(call) = self.peel_paren_group_expr(base_expr) {
+                    self.lookup_fn_return_type_with_import_fallback(call.func.as_ref())
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // Macro-expansion if-blocks yield the Deref-able struct via branch
+                // consts: c2rust `STACK_LIMIT!(...)` → `if .. { OK } else { ..; FAIL }`,
+                // accessed as `STACK_LIMIT!(...).fail`. The base is `Expr::If` (lowered
+                // to an IIFE); infer its type from a branch tail's const type.
+                if let syn::Expr::If(if_expr) = self.peel_paren_group_expr(base_expr) {
+                    self.infer_if_branch_const_struct_type(if_expr)
+                } else {
+                    None
+                }
+            })?;
         let base_ty = self.peel_reference_paren_group_type(&base_ty);
         let syn::Type::Path(tp) = base_ty else {
             return None;

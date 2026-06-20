@@ -19446,6 +19446,38 @@ fn test_aggregate_typed_const_definition_follows_its_struct() {
 }
 
 #[test]
+fn test_user_deref_field_access_on_if_expr_base_with_const_branches() {
+    // c2rust `STACK_LIMIT!(...)` expands to `if .. { OK } else { ..; FAIL }` of
+    // type Success, then `.fail` (a Failure field reached via `impl Deref for
+    // Success`). The if-expr base's type must be recovered from a branch tail's
+    // const type (`OK`/`FAIL` are `const Success`) so the field access lowers to
+    // `(*base).fail`, not a bare `.fail` on Success.
+    let out = transpile_str(
+        r#"
+        pub struct Success { pub ok: bool }
+        pub struct Failure { pub fail: bool }
+        impl core::ops::Deref for Success {
+            type Target = Failure;
+            fn deref(&self) -> &Failure {
+                if self.ok { &Failure { fail: false } } else { &Failure { fail: true } }
+            }
+        }
+        pub const OK: Success = Success { ok: true };
+        pub const FAIL: Success = Success { ok: false };
+        pub unsafe fn check(n: i64) -> i32 {
+            if (if n < 10 { OK } else { FAIL }).fail { return 1; }
+            0
+        }
+        "#,
+    );
+    // The `.fail` access must be deref-coerced: `(*<if-expr>).fail`.
+    assert!(
+        out.contains(")).fail"),
+        "user-Deref field access on an if-expr base must emit `(*base).fail`\n{out}"
+    );
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is
