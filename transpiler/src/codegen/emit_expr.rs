@@ -7950,6 +7950,25 @@ impl CodeGen {
                     } else {
                         None
                     }
+                })
+                .or_else(|| {
+                    // c2rust Deref idiom: `&*addr_of!(*self).cast()` inside a
+                    // `-> &Target` fn. The `&*` wrapper doesn't propagate a
+                    // pointer expected type to the `.cast()`, so derive the cast
+                    // target pointee from the enclosing fn's reference return
+                    // type. Gated to an addr-of receiver so a bare `ptr.cast()`
+                    // in a reference-returning fn isn't mis-targeted.
+                    if !matches!(
+                        self.peel_paren_group_expr(&mc.receiver),
+                        syn::Expr::RawAddr(_)
+                    ) {
+                        return None;
+                    }
+                    let ret = self.current_return_type_hint()?;
+                    if !matches!(ret, syn::Type::Reference(_)) {
+                        return None;
+                    }
+                    Some(self.peel_reference_paren_group_type(ret).clone())
                 });
             if let Some(target_ty) = target_ty {
                 let is_mut = self
@@ -7962,6 +7981,17 @@ impl CodeGen {
                             };
                             Some(ptr.mutability.is_some())
                         })
+                    })
+                    .or_else(|| {
+                        // `addr_of!(x)` → `*const`, `addr_of_mut!(x)` → `*mut`.
+                        // Const-ness of the source pointer carries through `.cast()`
+                        // so the deref-idiom cast doesn't strip qualifiers.
+                        match self.peel_paren_group_expr(&mc.receiver) {
+                            syn::Expr::RawAddr(raw) => {
+                                Some(matches!(raw.mutability, syn::PointerMutability::Mut(_)))
+                            }
+                            _ => None,
+                        }
                     })
                     .unwrap_or(true);
                 let cast_ty: syn::Type = if is_mut {

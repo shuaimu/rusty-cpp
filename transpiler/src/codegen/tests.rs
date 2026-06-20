@@ -19387,6 +19387,37 @@ fn test_noreturn_panic_in_never_context_strips_attr_from_iife_return_type() {
 }
 
 #[test]
+fn test_deref_idiom_raw_addr_cast_targets_reference_return_pointee() {
+    // c2rust Deref impls use `&*(&raw const *self).cast()` (or addr_of! form):
+    // a `.cast()` on a `*const Self` whose target is inferred from the `-> &T`
+    // return. The `&*` wrapper doesn't propagate a pointer expected type, so the
+    // cast target pointee must be recovered from the fn's reference return type,
+    // and const-ness preserved from the `&raw const` receiver (else the
+    // reinterpret_cast strips qualifiers).
+    let out = transpile_str(
+        r#"
+        use core::ops::Deref;
+        pub struct Outer { pub a: u64, pub b: u64 }
+        pub struct Inner { pub a: u64 }
+        impl Deref for Outer {
+            type Target = Inner;
+            fn deref(&self) -> &Self::Target {
+                unsafe { &*(&raw const *self).cast() }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("std::add_pointer_t<std::add_const_t<Inner>>"),
+        "deref-idiom cast must target `const Inner*` from the reference return\n{out}"
+    );
+    assert!(
+        !out.contains("->cast()") && !out.contains(".cast()"),
+        "the raw-pointer `.cast()` must be lowered, not emitted verbatim\n{out}"
+    );
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is
