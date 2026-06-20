@@ -32718,3 +32718,32 @@ fn test_into_iter_cross_source_hint_not_routed_to_unqualified_rusty_ext() {
         "into_iter must still be emitted in a valid form\n{out}"
     );
 }
+
+#[test]
+fn test_extern_crate_alias_resolved_in_use_import_qualification() {
+    // `extern crate alloc as stdalloc;` then `use stdalloc::alloc::Layout;` and
+    // a bare `Layout` param. When a UFCS/forward-decl signature re-qualifies the
+    // bare `Layout` to its use-source path, the leading extern-crate alias
+    // `stdalloc` must resolve to `alloc` (-> rusty::alloc::Layout). Otherwise it
+    // emits an undeclared `stdalloc::alloc::Layout` (hashbrown's 34-error cluster).
+    let out = transpile_str(
+        r#"
+        extern crate alloc as stdalloc;
+        pub mod a {
+            use stdalloc::alloc::Layout;
+            pub enum Fallibility { Inf, Stb }
+            impl Fallibility {
+                pub fn alloc_err(self, layout: Layout) -> u32 { 0 }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("stdalloc"),
+        "extern-crate alias `stdalloc` must be resolved away, not emitted\n{out}"
+    );
+    assert!(
+        out.contains("rusty::alloc::Layout"),
+        "stdalloc::alloc::Layout must map to rusty::alloc::Layout\n{out}"
+    );
+}

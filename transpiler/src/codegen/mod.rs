@@ -1243,6 +1243,13 @@ pub struct CodeGen {
     /// Enables order-independent path lowering for names introduced by `use` items
     /// that may appear later in source order than their first use.
     pub(crate) scope_import_bindings: HashMap<(String, String), HashSet<String>>,
+    /// Crate-wide `extern crate <crate> as <alias>;` renames (`alias -> crate`).
+    /// `extern crate` aliases are crate-global in Rust, so a leading `<alias>::`
+    /// segment anywhere must resolve to the real crate root (e.g. hashbrown's
+    /// `extern crate alloc as stdalloc;` -> `stdalloc::alloc::Layout` is really
+    /// `alloc::alloc::Layout`). Collected in a pre-pass so use-import targets can
+    /// be normalized before they are recorded/qualified.
+    pub(crate) extern_crate_aliases: HashMap<String, String>,
     /// In-progress guards for nonlocal type-tail resolution.
     /// Prevents recursive fallback cycles (`emit_path_to_string` <-> nonlocal lookup).
     pub(crate) nonlocal_type_resolution_in_progress: std::cell::RefCell<HashSet<String>>,
@@ -1684,6 +1691,7 @@ impl CodeGen {
             import_alias_names: HashSet::new(),
             module_scope_namespace_aliases: HashSet::new(),
             scope_import_bindings: HashMap::new(),
+            extern_crate_aliases: HashMap::new(),
             nonlocal_type_resolution_in_progress: std::cell::RefCell::new(HashSet::new()),
             expr_type_inference_in_progress: std::cell::RefCell::new(HashSet::new()),
             cpp_module_import_bindings: HashMap::new(),
@@ -2626,6 +2634,7 @@ impl CodeGen {
         self.import_alias_names.clear();
         self.module_scope_namespace_aliases.clear();
         self.scope_import_bindings.clear();
+        self.extern_crate_aliases.clear();
         self.cpp_module_import_bindings.clear();
         self.cpp_module_import_paths.clear();
         self.cpp_module_import_path_keys.clear();
@@ -2913,6 +2922,11 @@ impl CodeGen {
         // avoid alias-order-sensitive non-void signatures.
         self.collect_import_alias_names(&file.items);
         log_emit("collect_import_alias_names");
+        // Pass 1i.1b: collect crate-wide `extern crate <crate> as <alias>;` renames
+        // BEFORE scope import bindings, so use-import targets that start with an
+        // alias (`use stdalloc::alloc::Layout`) can be normalized to the real
+        // crate root when recorded.
+        self.collect_extern_crate_aliases(&file.items);
         // Pass 1i.2: collect module-scope import bindings so path lowering can resolve
         // names introduced later via `use` regardless source order.
         self.collect_scope_import_bindings(&file.items, &[]);
@@ -7544,6 +7558,11 @@ impl CodeGen {
 
 
     fn record_scope_import_binding(&mut self, module_path: &[String], raw_path: &str) {
+        // Resolve a leading `extern crate … as <alias>` segment first
+        // (`stdalloc::alloc::Layout` -> `alloc::alloc::Layout`) so the alias never
+        // leaks into the recorded binding or downstream path mangling.
+        let raw_path = self.normalize_extern_crate_alias_path(raw_path);
+        let raw_path = raw_path.as_str();
         let rewritten = self.rewrite_external_crate_import_path(raw_path);
         let resolved = self.resolve_unqualified_local_import_path(&rewritten);
         let resolved = self.strip_current_crate_prefix_from_import_path(&resolved);

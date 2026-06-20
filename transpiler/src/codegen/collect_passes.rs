@@ -3285,6 +3285,67 @@ impl CodeGen {
         }
     }
 
+    /// Collect crate-wide `extern crate <crate> as <alias>;` renames into
+    /// `extern_crate_aliases` (`alias -> crate`). `extern crate` aliases are
+    /// crate-global in Rust, so this recurses the whole item tree (including
+    /// `const _: () = { … }` expansion wrappers) regardless of module scope.
+    pub(super) fn collect_extern_crate_aliases(&mut self, items: &[syn::Item]) {
+        for item in items {
+            match item {
+                syn::Item::ExternCrate(ec) => {
+                    if let Some((_, rename)) = &ec.rename {
+                        let alias = rename.to_string();
+                        let target = ec.ident.to_string();
+                        if alias != target && alias != "_" {
+                            self.extern_crate_aliases.insert(alias, target);
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        self.collect_extern_crate_aliases(nested);
+                    }
+                }
+                syn::Item::Const(c) if c.ident == "_" => {
+                    if let syn::Expr::Block(block) = c.expr.as_ref() {
+                        for stmt in &block.block.stmts {
+                            if let syn::Stmt::Item(nested) = stmt {
+                                self.collect_extern_crate_aliases(std::slice::from_ref(nested));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Rewrite a leading `<extern-crate-alias>::` segment of a path to the real
+    /// crate root (e.g. `stdalloc::alloc::Layout` -> `alloc::alloc::Layout` for
+    /// `extern crate alloc as stdalloc;`). Leaves a leading `::` intact and is a
+    /// no-op when no alias matches the first segment.
+    pub(super) fn normalize_extern_crate_alias_path(&self, path: &str) -> String {
+        if self.extern_crate_aliases.is_empty() {
+            return path.to_string();
+        }
+        let leading = path.starts_with("::");
+        let trimmed = path.trim_start_matches("::");
+        let mut segs = trimmed.split("::");
+        let Some(first) = segs.next() else {
+            return path.to_string();
+        };
+        let Some(real) = self.extern_crate_aliases.get(first) else {
+            return path.to_string();
+        };
+        let rest: Vec<&str> = segs.collect();
+        let joined = if rest.is_empty() {
+            real.clone()
+        } else {
+            format!("{}::{}", real, rest.join("::"))
+        };
+        if leading { format!("::{}", joined) } else { joined }
+    }
+
     pub(super) fn collect_scope_import_bindings(&mut self, items: &[syn::Item], module_path: &[String]) {
         let prev_stack = self.module_stack.clone();
         self.module_stack = module_path.to_vec();
