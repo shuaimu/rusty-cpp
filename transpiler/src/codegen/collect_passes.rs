@@ -9001,6 +9001,32 @@ impl CodeGen {
                         format!("({}).unwrap()", base_expr)
                     };
                     if let Some(elem) = tuple_struct_pat.elems.first() {
+                        // `.unwrap()` / `.unwrap_err()` CONSUMES the Option/Result.
+                        // If the inner pattern binds more than one value (e.g.
+                        // `Some((a, b))`), recursing with the unwrap *string* as
+                        // the source would textually duplicate it into each leaf
+                        // access (`get<0>((x).unwrap())`, `get<1>((x).unwrap())`),
+                        // double-consuming a moved-from value → "unwrap on None"
+                        // at runtime. Bind the unwrap to a temp ONCE first.
+                        let mut inner_names = HashSet::new();
+                        self.collect_pattern_binding_names(elem, &mut inner_names);
+                        let binds_multiple =
+                            inner_names.iter().filter(|n| n.as_str() != "_").count() > 1;
+                        if binds_multiple {
+                            let tmp = format!(
+                                "_let_unwrapped_{}",
+                                self.unwrap_tmp_counter.get()
+                            );
+                            self.unwrap_tmp_counter
+                                .set(self.unwrap_tmp_counter.get() + 1);
+                            out.push(format!("auto {} = {};", tmp, inner_expr));
+                            return self.collect_pattern_binding_stmts_with_cpp_name_map(
+                                elem,
+                                &tmp,
+                                out,
+                                rust_to_cpp,
+                            );
+                        }
                         return self.collect_pattern_binding_stmts_with_cpp_name_map(
                             elem,
                             &inner_expr,

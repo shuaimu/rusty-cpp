@@ -8122,6 +8122,27 @@ impl CodeGen {
             };
             return format!("{}({}, {}, {})", helper, args[0], receiver, args[1]);
         }
+        // `<ptr>.write_bytes(val, count)` (a raw-pointer intrinsic, like
+        // `copy_to_nonoverlapping` above) → free function
+        // `rusty::ptr::write_bytes(ptr, val, count)`. The rusty header exposes
+        // it only as a free function (include/rusty/ptr.hpp), so the method
+        // form must be lowered. Guarded on a pointer-like receiver so we don't
+        // intercept an unrelated user method named `write_bytes`.
+        if method_name == "write_bytes"
+            && args.len() == 2
+            && self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!(
+                "rusty::ptr::write_bytes({}, {}, {})",
+                receiver, args[0], args[1]
+            );
+        }
         if matches!(method_name.as_str(), "add" | "offset" | "sub")
             && args.len() == 1
             && self.is_expr_raw_pointer_like(&mc.receiver)

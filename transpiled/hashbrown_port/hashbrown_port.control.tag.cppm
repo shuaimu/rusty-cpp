@@ -78,6 +78,24 @@ if (detail::less_than(b, a)) return Ordering::Greater;
 return Ordering::Equal;
 }
 }
+// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==.
+// Derefs pointer-like rhs (Rust `&other` becomes addr_of_temp() in C++ emit).
+template<typename A, typename B>
+bool eq(const A& a, const B& b) {
+if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.eq(rusty::detail::deref_if_pointer_like(b));
+} else {
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+}
+template<typename A, typename B>
+bool ne(const A& a, const B& b) {
+if constexpr (requires { a.ne(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.ne(rusty::detail::deref_if_pointer_like(b));
+} else {
+return !(a == rusty::detail::deref_if_pointer_like(b));
+}
+}
 template<typename F>
 Ordering then_with(Ordering ord, F&& f) {
 if (ord == Ordering::Equal) {
@@ -96,12 +114,10 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Clone: dispatches to .clone() if available; Copy types fall through to ::rusty::clone (move.hpp).
-template<typename T>
-requires requires(const T& v) { v.clone(); }
-auto clone(const T& value) {
-return value.clone();
-}
+// `rusty::clone` was previously defined here, but `<rusty/move.hpp>`
+// (pulled in via `<rusty/rusty.hpp>`) already provides it. Emitting
+// it again as a redundant duplicate makes call sites that pass a
+// type accepted by both overloads ambiguous, so we omit it.
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -331,7 +347,7 @@ return rusty::Result<Value, E>::Ok(value);
 
 template<typename E>
 rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(std::forward<decltype(value)>(value)));
 }
 
 template<typename E>
@@ -1935,8 +1951,24 @@ return serializer_ref<Serializer&&>{&serializer};
 return std::forward<Serializer>(serializer);
 }
 }
+// Explicit (non-deduced) result type for the recursive serialize dispatchers.
+// serialize/serialize_value/serialize_bytes call each other, so a deduced
+// `decltype(auto)` return makes the mutual recursion ill-formed (function with
+// deduced return type cannot be used before it is defined) for any value that
+// reaches the recursive fall-through edge. Every serde serialize path yields
+// Result<S::Ok, S::Error>, so we can state it explicitly and break the cycle.
+// deref_if_pointer_like handles serializers arriving as a raw pointer / ref /
+// serializer_ref proxy; a serializer without Ok/Error makes this SFINAE-fail
+// (return-type substitution), so `requires { serialize(...) }` stays well-behaved.
+template<typename S>
+using __ser_result_t = rusty::Result<
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Ok,
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Error>;
 template<typename Serializer, typename BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes);
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer>;
 struct fallback_error {
 rusty::String message;
 
@@ -1945,7 +1977,8 @@ return fallback_error{rusty::String::from(msg)};
 }
 };
 template<typename Value, typename Serializer>
-decltype(auto) serialize_value(Value&& value, Serializer&& serializer) {
+auto serialize_value(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
 if constexpr (requires {
 std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));
@@ -2056,7 +2089,8 @@ return std::forward<Value>(value).serialize(std::forward<Serializer>(serializer)
 }
 }
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -2077,7 +2111,8 @@ rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(std::forward<BytesLike>(
 });
 template<typename Serializer, typename BytesLike>
 requires serialize_bytes_compatible<Serializer, BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes) {
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 if constexpr (requires {
 std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
 }) {
@@ -2171,7 +2206,8 @@ return std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLi
 namespace impls {
 namespace rusty_ext {
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -3639,6 +3675,15 @@ namespace rusty::port::collections::hashbrown {
 
 export struct Tag;
 
+namespace TagSliceExt_ {
+    export void fill_tag(std::span<rusty::MaybeUninit<Tag>>& self_, Tag tag);
+}
+using namespace TagSliceExt_;
+namespace TagSliceExt_ {
+    export template<typename Self_>
+    void fill_empty(Self_& self_);
+}
+using namespace TagSliceExt_;
 namespace mem = rusty::mem;
 
 /// Single tag in a control group.
@@ -3647,14 +3692,14 @@ export struct Tag {
 
     static const Tag EMPTY;
     static const Tag DELETED;
-    bool is_full() const;
-    bool is_special() const;
-    bool special_is_empty() const;
-    static Tag full(uint64_t hash);
+    constexpr bool is_full() const;
+    constexpr bool is_special() const;
+    constexpr bool special_is_empty() const;
+    static constexpr Tag full(uint64_t hash);
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const;
 
     // TODO: derive(Copy)
-    Tag clone() const { return Tag{this->_0}; }
+    Tag clone() const { return Tag{rusty::clone(this->_0)}; }
     bool operator==(const Tag&) const = default;
 };
 inline const Tag Tag::EMPTY = Tag(static_cast<uint8_t>(255));
@@ -3678,20 +3723,20 @@ template <class U> class TagSliceExtAdapterRef;
 template <class U> class TagSliceExtAdapterRefMut;
 
 
-bool Tag::is_full() const {
+constexpr bool Tag::is_full() const {
     return (rusty::detail::deref_if_pointer_like(this->_0) & static_cast<int32_t>(128)) == static_cast<int32_t>(0);
 }
 
-bool Tag::is_special() const {
+constexpr bool Tag::is_special() const {
     return (rusty::detail::deref_if_pointer_like(this->_0) & static_cast<int32_t>(128)) != static_cast<int32_t>(0);
 }
 
-bool Tag::special_is_empty() const {
+constexpr bool Tag::special_is_empty() const {
     // debug_assert: this->is_special()
     return (rusty::detail::deref_if_pointer_like(this->_0) & static_cast<int32_t>(1)) != static_cast<int32_t>(0);
 }
 
-Tag Tag::full(uint64_t hash) {
+constexpr Tag Tag::full(uint64_t hash) {
     constexpr size_t MIN_HASH_LEN = (rusty::mem::size_of<size_t>() < rusty::mem::size_of<uint64_t>() ? rusty::mem::size_of<size_t>() : rusty::mem::size_of<uint64_t>());
     const auto top7 = rusty::detail::deref_if_pointer_like(hash) >> (((rusty::detail::deref_if_pointer_like(MIN_HASH_LEN) * 8) - 7));
     return Tag(static_cast<uint8_t>((rusty::detail::deref_if_pointer_like(top7) & 127)));
@@ -3702,4 +3747,24 @@ rusty::fmt::Result Tag::fmt(rusty::fmt::Formatter& f) const {
     return rusty::fmt::Result::Ok(std::tuple<>{});
 }
 
+// UFCS trait migration: free functions for `impl TagSliceExt for ...`
+namespace TagSliceExt_ {
+    export void fill_tag(std::span<rusty::MaybeUninit<Tag>>& self_, Tag tag) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        // @unsafe
+        {
+            rusty::ptr::write_bytes(rusty::as_mut_ptr(self_), std::move(tag._0), rusty::len(self_));
+        }
+    }
+
+}
+// UFCS trait migration: default methods for trait `TagSliceExt`
+namespace TagSliceExt_ {
+    export template<typename Self_>
+    void fill_empty(Self_& self_) {
+        using Self = std::remove_reference_t<decltype(self_)>;
+        ([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return TagSliceExt_::fill_tag(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else if constexpr (requires { TagSliceExt_::fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return TagSliceExt_::fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).fill_tag(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })(self_, Tag::EMPTY);
+    }
+
+}
 } // namespace rusty::port::collections::hashbrown

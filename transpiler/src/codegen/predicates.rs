@@ -1672,6 +1672,24 @@ impl CodeGen {
                 ) {
                     return self.is_expr_raw_pointer_like(&mc.receiver);
                 }
+                // General: a user method whose DECLARED return type is a raw
+                // pointer (e.g. `RawTableInner::ctrl(&self, i) -> *mut u8`).
+                // Resolve the receiver's owner type, look the method's return
+                // type up in its impl block, and check for a pointer. This lets
+                // the pointer-intrinsic lowerings (copy_to_nonoverlapping,
+                // write_bytes, ptr::add) fire on `recv.ctrl(i).copy_to(...)`
+                // chains, which `infer_simple_expr_type` can't type (it has no
+                // MethodCall arm).
+                if let Some(owner) = self.infer_method_call_receiver_owner_name(&mc.receiver) {
+                    let scoped = self.scoped_type_key(&owner);
+                    if let Some(ret_ty) = self
+                        .lookup_method_return_type_for_owner_key(&scoped, &method)
+                        .or_else(|| self.lookup_method_return_type_for_owner_key(&owner, &method))
+                        && self.is_type_raw_pointer_like(&ret_ty)
+                    {
+                        return true;
+                    }
+                }
                 false
             }
             syn::Expr::Call(call) => {

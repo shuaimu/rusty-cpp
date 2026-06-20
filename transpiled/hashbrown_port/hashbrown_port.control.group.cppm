@@ -33,9 +33,4 @@ export module hashbrown_port.control.group;
 export import hashbrown_port.control.group.generic;
 
 namespace rusty::port::collections::hashbrown {
-
-
-
-
-
 } // namespace rusty::port::collections::hashbrown
