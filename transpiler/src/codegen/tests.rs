@@ -19508,6 +19508,70 @@ fn test_match_arm_calling_user_never_fn_is_diverging_not_returned() {
 }
 
 #[test]
+fn test_external_fmt_path_not_attributed_to_local_mod_fmt() {
+    // A crate with `mod fmt` plus macro-expanded `#[derive(Debug)]` impls that
+    // spell `::core::fmt::Formatter` must NOT have those external references
+    // attributed to the local `mod fmt`: doing so fabricates a phantom module
+    // dependency edge and a false ordering cycle (the unsafe-libyaml fmt<->yaml
+    // bug, where yaml's Debug impls created a spurious yaml->fmt edge).
+    use std::collections::{HashMap, HashSet};
+    let cg = CodeGen::new();
+    let mut known_modules: HashSet<String> = HashSet::new();
+    known_modules.insert("fmt".to_string());
+    known_modules.insert("data".to_string());
+    let fwd: HashMap<String, HashSet<String>> = HashMap::new();
+    let imports: HashMap<String, String> = HashMap::new();
+
+    // `::core::fmt::Formatter` (leading colon) must not yield a local `fmt` dep.
+    let external_leading: syn::Type = syn::parse_quote!(::core::fmt::Formatter<'a>);
+    let mut out = HashSet::new();
+    cg.collect_type_module_dependencies(
+        &external_leading,
+        &known_modules,
+        &fwd,
+        &imports,
+        false,
+        &mut out,
+    );
+    assert!(
+        !out.contains("fmt"),
+        "::core::fmt must not attribute to local `mod fmt`; got {out:?}"
+    );
+
+    // `std::fmt::Result` (external crate root, no leading colon) likewise.
+    let external_root: syn::Type = syn::parse_quote!(std::fmt::Result);
+    let mut out2 = HashSet::new();
+    cg.collect_type_module_dependencies(
+        &external_root,
+        &known_modules,
+        &fwd,
+        &imports,
+        false,
+        &mut out2,
+    );
+    assert!(
+        !out2.contains("fmt"),
+        "std::fmt must not attribute to local `mod fmt`; got {out2:?}"
+    );
+
+    // A genuine local sibling reference must STILL be detected.
+    let local_ref: syn::Type = syn::parse_quote!(crate::data::Glyph);
+    let mut out3 = HashSet::new();
+    cg.collect_type_module_dependencies(
+        &local_ref,
+        &known_modules,
+        &fwd,
+        &imports,
+        false,
+        &mut out3,
+    );
+    assert!(
+        out3.contains("data"),
+        "genuine local sibling reference must still be detected; got {out3:?}"
+    );
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is

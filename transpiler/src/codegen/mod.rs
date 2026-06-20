@@ -5978,6 +5978,14 @@ impl CodeGen {
 
 
 
+    /// Crate roots that are never a local sibling module: the standard library
+    /// facades and built-in crates. A path rooted here (e.g. `::core::fmt::…`)
+    /// references an external namespace, so its segments must not be attributed
+    /// to same-named local modules during dependency collection.
+    fn is_external_crate_root(name: &str) -> bool {
+        matches!(name, "std" | "core" | "alloc" | "proc_macro" | "test")
+    }
+
     fn record_path_module_dependency_for_hard_dependencies(
         &self,
         path: &syn::Path,
@@ -6049,6 +6057,30 @@ impl CodeGen {
             } else {
                 resolved_type_name = Some(first_name.clone());
                 resolved_type_segment_index = Some(0);
+            }
+        }
+        // Externally-rooted paths (`::core::fmt::Formatter`, `std::io::Error`,
+        // `alloc::vec::Vec`) dive into ANOTHER crate's namespace; their middle
+        // segments (`fmt`, `io`, `vec`, ...) must NOT be matched as same-named
+        // LOCAL modules by the sibling-scan fallbacks below — doing so fabricates
+        // phantom dependency edges and false ordering cycles for crates that
+        // declare e.g. `mod fmt` (macro-expanded `#[derive(Debug)]` impls spell
+        // `::core::fmt::Formatter`). The explicit first-segment branches above
+        // already resolve genuine local refs (`yaml::`, `crate::yaml::`, aliases);
+        // if none matched and the path is externally rooted, there is no local
+        // dependency to record.
+        if resolved_module.is_none() {
+            let effective_root = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .find(|segment| !matches!(segment.as_str(), "crate" | "self" | "super"));
+            let externally_rooted = path.leading_colon.is_some()
+                || effective_root
+                    .as_deref()
+                    .is_some_and(Self::is_external_crate_root);
+            if externally_rooted {
+                return;
             }
         }
         // Nested sibling-module paths (for example `de::parser::prelude::Input`)
