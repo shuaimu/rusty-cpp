@@ -15908,15 +15908,36 @@ impl CodeGen {
                         );
                     }
                     "super" => {
-                        if self.module_stack.len() > 1 {
+                        // Each `super` peels ONE module level. Supers are leading
+                        // in Rust, so when we reach a `super` the accumulated
+                        // `prefix` is either empty (the first super → peel from
+                        // module_stack) or the result of a PRIOR super (a
+                        // already-peeled module path → peel one more level from
+                        // IT). The old code re-derived `module_stack[..len-1]` on
+                        // every super and then concatenated onto `prefix`, so
+                        // `super::super::X` doubled to
+                        // `control::group::control::group::X`. Peel progressively
+                        // and return directly (super REPLACES the prefix, it does
+                        // not append to it, so bypass the trailing concat).
+                        let peeled = if !prefix.is_empty() {
+                            let parts: Vec<&str> = prefix.split("::").collect();
+                            parts[..parts.len().saturating_sub(1)].join("::")
+                        } else if self.module_stack.len() > 1 {
                             self.module_stack[..self.module_stack.len() - 1].join("::")
                         } else {
+                            // `super` from a top-level module / crate root:
+                            // preserve prior behavior (no peel).
                             return self.flatten_use_tree_impl(
                                 &p.tree,
                                 prefix,
                                 preserve_crate_root,
                             );
-                        }
+                        };
+                        return self.flatten_use_tree_impl(
+                            &p.tree,
+                            &peeled,
+                            preserve_crate_root,
+                        );
                     }
                     "std" | "core" | "alloc" if at_root => "std".to_string(),
                     _ => ident,

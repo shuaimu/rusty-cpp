@@ -32776,3 +32776,33 @@ fn test_unsafe_wrapped_tuple_destructure_binds_by_value_not_dangling_ref() {
         "must not bind a dangling forwarding-ref to the make_tuple temporary\n{out}"
     );
 }
+
+#[test]
+fn test_multi_super_use_path_peels_progressively() {
+    // `use super::super::X;` inside a 3-deep module (control::group::sse2) must
+    // peel TWO levels to `control::X`. The old `super` arm re-derived
+    // `module_stack[..len-1]` on every super and concatenated, doubling the path
+    // to `control::group::control::group::X` (hashbrown control::group cluster,
+    // ~33 errors). Each super must peel one level from the accumulated prefix.
+    let out = transpile_str(
+        r#"
+        pub mod control {
+            pub struct BitMask;
+            pub mod group {
+                pub mod sse2 {
+                    use super::super::BitMask;
+                    pub fn f(_b: BitMask) {}
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("control::group::control"),
+        "multi-super must not double the module path\n{out}"
+    );
+    assert!(
+        out.contains("control::BitMask"),
+        "super::super from control::group::sse2 must resolve to control::BitMask\n{out}"
+    );
+}
