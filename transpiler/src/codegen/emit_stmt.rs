@@ -1614,6 +1614,7 @@ impl CodeGen {
                         syn::Expr::Reference(_)
                             | syn::Expr::Path(_)
                             | syn::Expr::Field(_)
+                            | syn::Expr::RawAddr(_)
                             | syn::Expr::Unary(syn::ExprUnary {
                                 op: syn::UnOp::Deref(_),
                                 ..

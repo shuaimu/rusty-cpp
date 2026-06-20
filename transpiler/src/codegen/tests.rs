@@ -19167,6 +19167,24 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_raw_addr_of_binding_types_local_for_pointer_method() {
+    // c2rust's `addr_of_mut!(x)` -> `&raw mut x` (Expr::RawAddr). The binding
+    // must record its pointer type so a later deref + raw-pointer method lowers
+    // to rusty::ptr::* instead of a `(*p).wrapping_offset(...)` member call.
+    let out = transpile_str(
+        r#"
+        pub unsafe fn f(mut x: *mut u8) -> *mut u8 {
+            let pp = &raw mut x;
+            let p = *pp;
+            p.wrapping_offset(1)
+        }
+        "#,
+    );
+    assert!(out.contains("rusty::ptr::"), "{out}");
+    assert!(!out.contains("p.wrapping_offset"), "{out}");
+}
+
+#[test]
 fn test_enum_variant_imported_via_module_binds_to_scoped_owner() {
     // c2rust re-exports c-like enum variants through their MODULE:
     // `use crate::yaml::YAML_ALIAS_EVENT`. The variant is NOT a namespace member,
