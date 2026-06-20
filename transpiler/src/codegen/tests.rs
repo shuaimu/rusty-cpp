@@ -19167,6 +19167,24 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_nested_never_returning_fn_strips_noreturn_in_safefn() {
+    // A nested `fn() -> !` is emitted as a `rusty::SafeFn` closure. The `!`
+    // return maps to `[[noreturn]] void`, which is ill-formed both in the SafeFn
+    // template argument and the lambda trailing-return-type. The attribute must
+    // be stripped there (it stays valid on real top-level fn declarations).
+    let out = transpile_str(
+        r#"
+        pub fn outer() {
+            fn diverge() -> ! { loop {} }
+            diverge();
+        }
+        "#,
+    );
+    assert!(!out.contains("SafeFn<[[noreturn]]"), "{out}");
+    assert!(!out.contains("-> [[noreturn]] void"), "{out}");
+}
+
+#[test]
 fn test_raw_addr_of_binding_types_local_for_pointer_method() {
     // c2rust's `addr_of_mut!(x)` -> `&raw mut x` (Expr::RawAddr). The binding
     // must record its pointer type so a later deref + raw-pointer method lowers

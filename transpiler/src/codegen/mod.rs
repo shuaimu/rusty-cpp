@@ -10598,6 +10598,11 @@ impl CodeGen {
         let params = params_vec.join(", ");
         let needs_sibling_capture = self.nested_function_needs_sibling_capture(f);
 
+        // A nested `fn() -> !` maps its return to `[[noreturn]] void`, but the
+        // attribute is ill-formed both in the `SafeFn<…>` template argument and
+        // the lambda trailing-return-type below. Strip it — the diverging body
+        // still deduces `void`. (Real top-level fn decls keep the attribute.)
+        let return_type = return_type.replace("[[noreturn]] ", "");
         let return_type_is_concrete = return_type != "auto"
             && !return_type.contains("/* TODO:")
             && !type_string_has_auto_placeholder(&return_type)

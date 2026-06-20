@@ -18563,6 +18563,11 @@ impl CodeGen {
                 .map(|mapped| format!(" -> {}", mapped))
                 .unwrap_or_default(),
         };
+        // A `-> !` (never) closure maps to `-> [[noreturn]] void`, but the
+        // attribute is ill-formed in a lambda trailing-return-type. Strip it —
+        // the diverging body still deduces `void`. (It stays valid on real
+        // function declarations, which go through a different emit path.)
+        let lambda_return_annotation = lambda_return_annotation.replace("[[noreturn]] ", "");
         let push_outer_expected_hint = matches!(&resolved_closure_output, syn::ReturnType::Default)
             || matches!(
                 &resolved_closure_output,
