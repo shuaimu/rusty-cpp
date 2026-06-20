@@ -5599,9 +5599,23 @@ impl CodeGen {
             syn::Expr::Unary(unary) => match unary.op {
                 syn::UnOp::Neg(_) | syn::UnOp::Not(_) => self.infer_simple_expr_type(&unary.expr),
                 syn::UnOp::Deref(_) => {
-                    let base_ty = self
-                        .infer_simple_expr_type(&unary.expr)
-                        .or_else(|| self.infer_local_binding_type_from_initializer(&unary.expr))?;
+                    // `*{ stmt; …; TAIL }` — c2rust's `POP!` expands to
+                    // `*{ stack.top = stack.top.offset(-1); stack.top }`. The
+                    // multi-statement block otherwise short-circuits to None
+                    // (extract_value_expr only peels single-expr blocks), so
+                    // infer the block's tail expression directly here.
+                    let operand = self.peel_paren_group_expr(&unary.expr);
+                    let base_ty = if let syn::Expr::Block(block_expr) = operand
+                        && block_expr.block.stmts.len() > 1
+                        && let Some(tail) = self.extract_tail_expr_from_block(&block_expr.block)
+                    {
+                        self.infer_simple_expr_type(tail)?
+                    } else {
+                        self.infer_simple_expr_type(&unary.expr)
+                            .or_else(|| {
+                                self.infer_local_binding_type_from_initializer(&unary.expr)
+                            })?
+                    };
                     self.infer_deref_result_type_from_type(&base_ty)
                 }
                 _ => None,
@@ -5637,7 +5651,18 @@ impl CodeGen {
                     return None;
                 };
                 let struct_name = tp.path.segments.last()?.ident.to_string();
-                self.lookup_struct_field_type(&struct_name, &field_name)
+                let field_ty = self.lookup_struct_field_type(&struct_name, &field_name)?;
+                // Substitute the owner's generic args into the field type, so a
+                // field declared `*mut T` on `yaml_stack_t<yaml_tag_directive_t>`
+                // resolves to `*mut yaml_tag_directive_t` rather than the unbound
+                // `*mut T` (pervasive in c2rust's generic stack/queue structs).
+                let last_idx = tp.path.segments.len() - 1;
+                if let Some(subs) = self.owner_segment_type_arg_substitutions(&tp.path, last_idx)
+                    && !subs.is_empty()
+                {
+                    return Some(self.substitute_type_params_in_type(&field_ty, &subs));
+                }
+                Some(field_ty)
             }
             syn::Expr::Try(try_expr) => {
                 let inner_ty = self

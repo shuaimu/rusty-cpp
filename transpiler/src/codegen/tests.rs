@@ -19167,6 +19167,27 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_deref_of_multistmt_block_with_generic_field_types_local() {
+    // c2rust's `POP!` expands to `*{ stack.top = …; stack.top }`. Two inference
+    // pieces must combine: (a) the deref's operand is a MULTI-statement block —
+    // infer its tail; (b) `Stack<Item>.top` is declared `*mut T` — substitute the
+    // generic arg so it resolves to `*mut Item`. The deref then types the local,
+    // so a later `it.handle as usize` reinterprets (ptr->int) instead of the
+    // ill-formed `static_cast<uintptr_t>(ptr)`.
+    let out = transpile_str(
+        r#"
+        pub struct Stack<T> { pub top: *mut T }
+        pub struct Item { pub handle: *mut u8 }
+        pub unsafe fn f(s: Stack<Item>) -> usize {
+            let it = *{ let _k = 0; s.top };
+            it.handle as usize
+        }
+        "#,
+    );
+    assert!(out.contains("reinterpret_cast<std::uintptr_t>"), "{out}");
+}
+
+#[test]
 fn test_rust_union_emitted_as_cpp_union_and_ordered_before_user() {
     // c2rust C ports use real Rust `union`s. They must emit as C++ `union`
     // (previously dropped as "unhandled item kind") and be topologically ordered
