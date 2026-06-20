@@ -3286,21 +3286,34 @@ impl CodeGen {
     /// Check if an expression is an rvalue (temporary/function-call result)
     /// rather than an lvalue (variable/field access).
     pub(super) fn is_rvalue_expr(&self, expr: &syn::Expr) -> bool {
-        matches!(
-            expr,
-            syn::Expr::Call(_)
-                | syn::Expr::MethodCall(_)
-                | syn::Expr::Lit(_)
-                | syn::Expr::Struct(_)
-                | syn::Expr::Tuple(_)
-                | syn::Expr::Array(_)
-                | syn::Expr::Binary(_)
-                | syn::Expr::Unary(_)
-                | syn::Expr::If(_)
-                | syn::Expr::Match(_)
-                | syn::Expr::Block(_)
-                | syn::Expr::Closure(_)
-        )
+        match expr {
+            // Grouping wrappers carry the value category of their inner expr.
+            syn::Expr::Paren(p) => self.is_rvalue_expr(&p.expr),
+            syn::Expr::Group(g) => self.is_rvalue_expr(&g.expr),
+            // Block-like expressions evaluate to a fresh prvalue temporary. This
+            // includes `unsafe { … }` / `const { … }` / `async { … }`, which were
+            // previously omitted while a bare `{ … }` block was matched — so
+            // `let (a, b) = unsafe { (x, y) };` was misclassified as a non-rvalue
+            // and bound with a DANGLING `auto&&` (the owning rvalue case must
+            // bind by value, which move-constructs from the temporary rather
+            // than referencing it). Treat all block-likes as rvalues.
+            syn::Expr::Block(_)
+            | syn::Expr::Unsafe(_)
+            | syn::Expr::Const(_)
+            | syn::Expr::Async(_)
+            | syn::Expr::Call(_)
+            | syn::Expr::MethodCall(_)
+            | syn::Expr::Lit(_)
+            | syn::Expr::Struct(_)
+            | syn::Expr::Tuple(_)
+            | syn::Expr::Array(_)
+            | syn::Expr::Binary(_)
+            | syn::Expr::Unary(_)
+            | syn::Expr::If(_)
+            | syn::Expr::Match(_)
+            | syn::Expr::Closure(_) => true,
+            _ => false,
+        }
     }
 
     // In module mode, trait-object error surfaces like `Box<dyn Error>` are

@@ -32747,3 +32747,32 @@ fn test_extern_crate_alias_resolved_in_use_import_qualification() {
         "stdalloc::alloc::Layout must map to rusty::alloc::Layout\n{out}"
     );
 }
+
+#[test]
+fn test_unsafe_wrapped_tuple_destructure_binds_by_value_not_dangling_ref() {
+    // `let (a, b) = unsafe { (x, y) };` — the init is `Expr::Unsafe`, a
+    // block-like rvalue. It must be classified as an rvalue so the owning
+    // `auto [a, b] = deref_if_pointer_like(make_tuple(...))` binding is used.
+    // That binding MOVE-constructs from the make_tuple temporary (deref_if_
+    // pointer_like forwards the xvalue), so it owns and never copies — move is
+    // preserved. The previous `auto&&` (from misclassifying unsafe{} as a
+    // non-rvalue) bound a reference INTO the temporary, which dies at end of
+    // statement -> dangling (hashbrown RawTableInner::erase control-byte
+    // corruption).
+    let out = transpile_str(
+        r#"
+        pub unsafe fn f(x: u32, y: u32) -> u32 {
+            let (a, b) = unsafe { (x, y) };
+            a + b
+        }
+        "#,
+    );
+    assert!(
+        out.contains("auto [a, b] ="),
+        "unsafe-wrapped owning tuple destructure must bind by value (owns + moves)\n{out}"
+    );
+    assert!(
+        !out.contains("auto&& [a, b]"),
+        "must not bind a dangling forwarding-ref to the make_tuple temporary\n{out}"
+    );
+}
