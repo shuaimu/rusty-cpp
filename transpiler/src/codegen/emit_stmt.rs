@@ -2047,9 +2047,25 @@ impl CodeGen {
                                 owner.as_str(),
                                 "OnceNonZeroUsize" | "OnceBool"
                             ));
+                        // `slice.get_unchecked(a..b)` / `get_unchecked(a..)` — the
+                        // RANGE-argument form — returns a SUB-SLICE, which lowers to
+                        // a `std::span<…>` BY VALUE (rusty::slice_from), not an
+                        // element reference. Binding as `auto&` would bind a
+                        // non-const lvalue ref to that span temporary. Only the
+                        // SCALAR-index form `get_unchecked(i)` yields a true element
+                        // reference, so restrict the suppression to the range form.
+                        let receiver_is_range_get_unchecked = matches!(
+                            method.as_str(),
+                            "get_unchecked" | "get_unchecked_mut"
+                        ) && mc.args.len() == 1
+                            && matches!(
+                                self.peel_paren_group_expr(&mc.args[0]),
+                                syn::Expr::Range(_)
+                            );
                         if !receiver_is_refcell_borrow
                             && !receiver_is_arc_get_mut
                             && !receiver_is_value_returning_once
+                            && !receiver_is_range_get_unchecked
                             && (matches!(
                                 method.as_str(),
                                 "get_or_init"
@@ -4184,7 +4200,12 @@ impl CodeGen {
                     None
                 };
                 match stmt {
-                    syn::Stmt::Expr(expr, None) => {
+                    // Only the TAIL expression yields the branch value. A NON-final
+                    // `Stmt::Expr(_, None)` is a brace-terminated statement (`loop{}`,
+                    // `if{}`, `match{}`, …) in statement position — `return`ing it
+                    // would give the IIFE conflicting deduced return types
+                    // (e.g. void/`loop{}` vs `rusty::Unit`/`if{}` vs the real tail).
+                    syn::Stmt::Expr(expr, None) if idx + 1 == then_len => {
                         let expr_str =
                             then_inner.emit_expr_to_string_with_expected(expr, stmt_expected);
                         then_inner.writeln(&format!("return {};", expr_str));
@@ -4213,7 +4234,10 @@ impl CodeGen {
                                 None
                             };
                             match stmt {
-                                syn::Stmt::Expr(expr, None) => {
+                                // Only the TAIL expression yields the branch value;
+                                // a non-final `Stmt::Expr(_, None)` is a
+                                // brace-terminated statement, not a return value.
+                                syn::Stmt::Expr(expr, None) if idx + 1 == else_len => {
                                     let expr_str = else_inner
                                         .emit_expr_to_string_with_expected(expr, stmt_expected);
                                     else_inner.writeln(&format!("return {};", expr_str));

@@ -20944,6 +20944,65 @@ fn test_partial_eq_ufcs_call_lowers_to_rusty_cmp_eq() {
 }
 
 #[test]
+fn test_range_get_unchecked_let_binding_is_value_not_reference() {
+    // `let x = slice.get_unchecked(a..)` returns a SUB-SLICE that lowers to a
+    // `std::span<…>` BY VALUE (rusty::slice_from). It must bind as `auto`
+    // (value), not `auto&` — an `auto&` would bind a non-const lvalue ref to a
+    // span temporary (itoa's slice_buffer_to_str). The SCALAR-index form
+    // `get_unchecked(i)` (a true element reference) must be unaffected.
+    let out = transpile_str(
+        r#"
+        pub fn f(buf: &[u8], offset: usize) -> usize {
+            let written = unsafe { buf.get_unchecked(offset..) };
+            written.len()
+        }
+        "#,
+    );
+    assert!(
+        out.contains("auto written = rusty::slice_from"),
+        "range get_unchecked must bind the span by value\n{out}"
+    );
+    assert!(
+        !out.contains("auto& written"),
+        "range get_unchecked must not bind a reference to a span temporary\n{out}"
+    );
+}
+
+#[test]
+fn test_value_if_iife_does_not_return_non_tail_brace_statements() {
+    // `let x = if c { <brace-stmt>; tail } else { … }` lowers to an IIFE. A
+    // NON-final `Stmt::Expr(_, None)` (here an `if {}` in statement position)
+    // must be emitted as a plain statement, NOT `return`ed — returning it gives
+    // the IIFE conflicting deduced return types (rusty::Unit vs the real tail),
+    // which is ryu's d2d digit-removal block.
+    let out = transpile_str(
+        r#"
+        pub fn f(c: bool, mut n: u64) -> u64 {
+            let out = if c {
+                if n > 10 { n = n - 1; }
+                n + 1
+            } else {
+                0
+            };
+            out
+        }
+        "#,
+    );
+    // The non-tail inner if must not be wrapped in a returning unit-lambda:
+    // returning a `()` materializes `std::tuple<>()` (rusty::Unit), the bug's
+    // smoking gun — absent once the if is emitted as a plain statement.
+    assert!(
+        !out.contains("std::tuple<>()"),
+        "non-tail brace statement must not lower to a returned unit value\n{out}"
+    );
+    // The inner if is present as a bare statement, and the genuine tail returns.
+    assert!(
+        out.contains("> 10) {") && out.contains("return rusty::detail::deref_if_pointer_like(n) + 1"),
+        "inner if must be a statement; only the tail expression returns\n{out}"
+    );
+}
+
+#[test]
 fn test_leaf410_ordering_match_does_not_emit_flattened_placeholder_name() {
     let out = transpile_str(
         r#"
@@ -32625,3 +32684,4 @@ fn reconcile_telemetry_does_not_change_emit() {
         "RUSTY_CPP_PRINT_INFERENCE must not alter emitted code"
     );
 }
+
