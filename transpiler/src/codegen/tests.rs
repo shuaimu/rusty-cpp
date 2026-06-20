@@ -19478,6 +19478,36 @@ fn test_user_deref_field_access_on_if_expr_base_with_const_branches() {
 }
 
 #[test]
+fn test_match_arm_calling_user_never_fn_is_diverging_not_returned() {
+    // A match arm that calls a user `-> !` fn (c2rust's `__assert_fail`) in a
+    // value-position match must NOT be wrapped in `return <call>;` — the call is
+    // `[[noreturn]] void`, so returning it from a non-void match IIFE is a "no
+    // viable conversion from void" error. is_expr_diverging must recognize the
+    // callee's Never return type so the arm emits a bare statement.
+    let out = transpile_str(
+        r#"
+        pub fn bail() -> ! { loop {} }
+        pub enum Kind { A, B, C }
+        pub fn pick(k: Kind) -> i32 {
+            match k {
+                Kind::A => 1,
+                Kind::B => 2,
+                _ => bail(),
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("return ::bail()") && !out.contains("return bail()"),
+        "a diverging user `-> !` arm must not be `return`ed\n{out}"
+    );
+    assert!(
+        out.contains("bail();"),
+        "the diverging arm should emit the call as a bare statement\n{out}"
+    );
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is

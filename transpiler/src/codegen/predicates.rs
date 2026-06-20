@@ -1544,6 +1544,12 @@ impl CodeGen {
             syn::Expr::Call(call) => {
                 let path_str = self.expr_path_string(&call.func);
                 Self::is_diverging_function_path(&path_str)
+                    // A call to a user `-> !` fn (e.g. c2rust's `__assert_fail`)
+                    // diverges too; recover the callee's Never return type so the
+                    // arm isn't wrapped in `return <void>;` against a typed match.
+                    || self
+                        .lookup_fn_return_type_with_import_fallback(call.func.as_ref())
+                        .is_some_and(|ty| matches!(ty, syn::Type::Never(_)))
             }
             syn::Expr::Block(eb) => {
                 // Block is diverging if its last statement/expression is diverging
