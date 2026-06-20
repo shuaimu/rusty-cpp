@@ -42007,6 +42007,10 @@ fn rewrite_std_ffi_import(path: &str) -> Option<UseImportAction> {
         "CString" => UseImportAction::Using("rusty::ffi::CString".to_string()),
         "OsStr" => UseImportAction::Using("rusty::ffi::OsStr".to_string()),
         "OsString" => UseImportAction::Using("rusty::ffi::OsString".to_string()),
+        // c2rust ports re-export the opaque FFI void (`pub use core::ffi::c_void`)
+        // into a local `libc` module; bring the runtime alias into scope so
+        // `libc::c_void` resolves to `rusty::ffi::c_void` (= void).
+        "c_void" => UseImportAction::Using("rusty::ffi::c_void".to_string()),
         _ => UseImportAction::RustOnly,
     };
     Some(action)

@@ -19331,6 +19331,32 @@ fn test_module_union_clone_impl_not_routed_to_extension_free_function() {
 }
 
 #[test]
+fn test_reexport_of_core_ffi_c_void_binds_runtime_alias() {
+    // c2rust ports define `mod libc { pub use core::ffi::c_void; ... }` and then
+    // spell types as `libc::c_void`. The re-export must bring the runtime alias
+    // into the module (`using rusty::ffi::c_void;`) rather than being dropped as
+    // a Rust-only comment — otherwise `libc::c_void` is an undeclared type.
+    let out = transpile_str(
+        r#"
+        pub mod libc {
+            pub use core::ffi::c_void;
+        }
+        pub unsafe fn alloc(n: usize) -> *mut libc::c_void {
+            core::ptr::null_mut()
+        }
+        "#,
+    );
+    assert!(
+        out.contains("using rusty::ffi::c_void"),
+        "c_void re-export must bind the runtime alias, not a Rust-only comment\n{out}"
+    );
+    assert!(
+        !out.contains("// Rust-only: using core::ffi::c_void"),
+        "c_void re-export must not be dropped as Rust-only\n{out}"
+    );
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is
