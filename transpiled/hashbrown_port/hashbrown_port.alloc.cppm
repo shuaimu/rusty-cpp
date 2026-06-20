@@ -78,6 +78,24 @@ if (detail::less_than(b, a)) return Ordering::Greater;
 return Ordering::Equal;
 }
 }
+// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==.
+// Derefs pointer-like rhs (Rust `&other` becomes addr_of_temp() in C++ emit).
+template<typename A, typename B>
+bool eq(const A& a, const B& b) {
+if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.eq(rusty::detail::deref_if_pointer_like(b));
+} else {
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+}
+template<typename A, typename B>
+bool ne(const A& a, const B& b) {
+if constexpr (requires { a.ne(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.ne(rusty::detail::deref_if_pointer_like(b));
+} else {
+return !(a == rusty::detail::deref_if_pointer_like(b));
+}
+}
 template<typename F>
 Ordering then_with(Ordering ord, F&& f) {
 if (ord == Ordering::Equal) {
@@ -96,12 +114,10 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Clone: dispatches to .clone() if available; Copy types fall through to ::rusty::clone (move.hpp).
-template<typename T>
-requires requires(const T& v) { v.clone(); }
-auto clone(const T& value) {
-return value.clone();
-}
+// `rusty::clone` was previously defined here, but `<rusty/move.hpp>`
+// (pulled in via `<rusty/rusty.hpp>`) already provides it. Emitting
+// it again as a redundant duplicate makes call sites that pass a
+// type accepted by both overloads ambiguous, so we omit it.
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -331,7 +347,7 @@ return rusty::Result<Value, E>::Ok(value);
 
 template<typename E>
 rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-(void)value; return rusty::Result<Value, E>::Err(E{});
+return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(std::forward<decltype(value)>(value)));
 }
 
 template<typename E>
@@ -1935,8 +1951,24 @@ return serializer_ref<Serializer&&>{&serializer};
 return std::forward<Serializer>(serializer);
 }
 }
+// Explicit (non-deduced) result type for the recursive serialize dispatchers.
+// serialize/serialize_value/serialize_bytes call each other, so a deduced
+// `decltype(auto)` return makes the mutual recursion ill-formed (function with
+// deduced return type cannot be used before it is defined) for any value that
+// reaches the recursive fall-through edge. Every serde serialize path yields
+// Result<S::Ok, S::Error>, so we can state it explicitly and break the cycle.
+// deref_if_pointer_like handles serializers arriving as a raw pointer / ref /
+// serializer_ref proxy; a serializer without Ok/Error makes this SFINAE-fail
+// (return-type substitution), so `requires { serialize(...) }` stays well-behaved.
+template<typename S>
+using __ser_result_t = rusty::Result<
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Ok,
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Error>;
 template<typename Serializer, typename BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes);
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer>;
 struct fallback_error {
 rusty::String message;
 
@@ -1945,7 +1977,8 @@ return fallback_error{rusty::String::from(msg)};
 }
 };
 template<typename Value, typename Serializer>
-decltype(auto) serialize_value(Value&& value, Serializer&& serializer) {
+auto serialize_value(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
 if constexpr (requires {
 std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));
@@ -2056,7 +2089,8 @@ return std::forward<Value>(value).serialize(std::forward<Serializer>(serializer)
 }
 }
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -2077,7 +2111,8 @@ rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(std::forward<BytesLike>(
 });
 template<typename Serializer, typename BytesLike>
 requires serialize_bytes_compatible<Serializer, BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes) {
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 if constexpr (requires {
 std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
 }) {
@@ -2171,7 +2206,8 @@ return std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLi
 namespace impls {
 namespace rusty_ext {
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -3647,6 +3683,17 @@ namespace inner {
 }
 export using inner::Global;
 
+namespace inner {
+    namespace __ufcs_Allocator {
+        export rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> allocate(const rusty::alloc::Global& self_, rusty::alloc::Layout layout);
+        export void deallocate(const rusty::alloc::Global& self_, rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout layout);
+    }
+}
+namespace Allocator_ {
+    export using inner::__ufcs_Allocator::allocate;
+    export using inner::__ufcs_Allocator::deallocate;
+}
+using namespace Allocator_;
 // Rust-only: using inner::Allocator;
 export using inner::Global;
 export using inner::do_alloc;
@@ -3698,9 +3745,7 @@ namespace inner {
     export template<typename A>
         requires (rusty::alloc::Allocator<A>)
     rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> do_alloc(const A& alloc, rusty::alloc::Layout layout) {
-        auto r = rusty::deref_call(alloc, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).allocate(std::move(layout))) { return std::forward<decltype(__recv)>(__recv).allocate(std::move(layout)); });
-        if (r.is_ok()) return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Ok(std::move(r).unwrap());
-        return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Err(rusty::Unit{});
+        return ([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { Allocator_::allocate(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return Allocator_::allocate(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else if constexpr (requires { Allocator_::allocate(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return Allocator_::allocate(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).allocate(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })(alloc, layout);
     }
 
 }
@@ -3734,13 +3779,10 @@ class AllocatorAdapter<rusty::alloc::Global> final : public Allocator {
 public:
     explicit AllocatorAdapter(rusty::alloc::Global v) : value_(std::move(v)) {}
     rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> allocate(rusty::alloc::Layout layout) const override {
-        // adapter-error-convert: rusty AllocError → rusty::Unit
-        auto r = value_.allocate(layout);
-        if (r.is_ok()) return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Ok(r.unwrap());
-        return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Err(rusty::Unit{});
+        return Allocator_::allocate(value_, layout);
     }
     void deallocate(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout layout) const override {
-        value_.deallocate(ptr, layout);
+        Allocator_::deallocate(value_, ptr, layout);
     }
 };
 
@@ -3750,13 +3792,10 @@ class AllocatorAdapterRef<rusty::alloc::Global> final : public Allocator {
 public:
     explicit AllocatorAdapterRef(const rusty::alloc::Global& u) : value_(u) {}
     rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> allocate(rusty::alloc::Layout layout) const override {
-        // adapter-error-convert: rusty AllocError → rusty::Unit
-        auto r = value_.allocate(layout);
-        if (r.is_ok()) return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Ok(r.unwrap());
-        return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Err(rusty::Unit{});
+        return Allocator_::allocate(value_, layout);
     }
     void deallocate(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout layout) const override {
-        value_.deallocate(ptr, layout);
+        Allocator_::deallocate(value_, ptr, layout);
     }
 };
 
@@ -3766,16 +3805,31 @@ class AllocatorAdapterRefMut<rusty::alloc::Global> final : public Allocator {
 public:
     explicit AllocatorAdapterRefMut(rusty::alloc::Global& u) : value_(u) {}
     rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> allocate(rusty::alloc::Layout layout) const override {
-        // adapter-error-convert: rusty AllocError → rusty::Unit
-        auto r = value_.allocate(layout);
-        if (r.is_ok()) return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Ok(r.unwrap());
-        return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Err(rusty::Unit{});
+        return Allocator_::allocate(value_, layout);
     }
     void deallocate(rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout layout) const override {
-        value_.deallocate(ptr, layout);
+        Allocator_::deallocate(value_, ptr, layout);
     }
 };
 
 }
 
+// UFCS trait migration: free functions for `impl Allocator for ...`
+namespace inner {
+    namespace __ufcs_Allocator {
+        export rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> allocate(const rusty::alloc::Global& self_, rusty::alloc::Layout layout) {
+            using Self = std::remove_reference_t<decltype(self_)>;
+            return [&]() -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> { auto&& _m = NonNull<uint8_t>::new_(alloc(std::move(layout))); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& data = rusty::detail::deref_if_pointer(_mv0); return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Ok(rusty::ptr::NonNull<uint8_t>::new_unchecked(rusty::as_ptr(data))); } if (_m.is_none()) { return rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit>::Err(std::make_tuple()); } return [&]() -> rusty::Result<rusty::ptr::NonNull<uint8_t>, rusty::Unit> { rusty::intrinsics::unreachable(); }(); }();
+        }
+
+        export void deallocate(const rusty::alloc::Global& self_, rusty::ptr::NonNull<uint8_t> ptr, rusty::alloc::Layout layout) {
+            using Self = std::remove_reference_t<decltype(self_)>;
+            // @unsafe
+            {
+                dealloc(rusty::as_ptr(ptr), std::move(layout));
+            }
+        }
+
+    }
+}
 } // namespace rusty::port::collections::hashbrown

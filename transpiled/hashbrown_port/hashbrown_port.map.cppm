@@ -78,6 +78,24 @@ if (detail::less_than(b, a)) return Ordering::Greater;
 return Ordering::Equal;
 }
 }
+// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==.
+// Derefs pointer-like rhs (Rust `&other` becomes addr_of_temp() in C++ emit).
+template<typename A, typename B>
+bool eq(const A& a, const B& b) {
+if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.eq(rusty::detail::deref_if_pointer_like(b));
+} else {
+return a == rusty::detail::deref_if_pointer_like(b);
+}
+}
+template<typename A, typename B>
+bool ne(const A& a, const B& b) {
+if constexpr (requires { a.ne(rusty::detail::deref_if_pointer_like(b)); }) {
+return a.ne(rusty::detail::deref_if_pointer_like(b));
+} else {
+return !(a == rusty::detail::deref_if_pointer_like(b));
+}
+}
 template<typename F>
 Ordering then_with(Ordering ord, F&& f) {
 if (ord == Ordering::Equal) {
@@ -96,12 +114,10 @@ using C = std::common_type_t<std::remove_cvref_t<A>, std::remove_cvref_t<B>>;
 return detail::less_than(lhs, rhs) ? static_cast<C>(rhs) : static_cast<C>(lhs);
 }
 }
-// Clone: dispatches to .clone() if available; Copy types fall through to ::rusty::clone (move.hpp).
-template<typename T>
-requires requires(const T& v) { v.clone(); }
-auto clone(const T& value) {
-return value.clone();
-}
+// `rusty::clone` was previously defined here, but `<rusty/move.hpp>`
+// (pulled in via `<rusty/rusty.hpp>`) already provides it. Emitting
+// it again as a redundant duplicate makes call sites that pass a
+// type accepted by both overloads ambiguous, so we omit it.
 template<typename Iter>
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {
 return iter.size_hint();
@@ -331,7 +347,7 @@ return rusty::Result<Value, E>::Ok(value);
 
 template<typename E>
 rusty::Result<Value, E> visit_byte_buf(auto&& value) {
-return rusty::Result<Value, E>::Err(rusty::String("visit_byte_buf stubbed"));
+return rusty::Result<Value, E>::Ok(rusty::as_u8_slice(std::forward<decltype(value)>(value)));
 }
 
 template<typename E>
@@ -1935,8 +1951,24 @@ return serializer_ref<Serializer&&>{&serializer};
 return std::forward<Serializer>(serializer);
 }
 }
+// Explicit (non-deduced) result type for the recursive serialize dispatchers.
+// serialize/serialize_value/serialize_bytes call each other, so a deduced
+// `decltype(auto)` return makes the mutual recursion ill-formed (function with
+// deduced return type cannot be used before it is defined) for any value that
+// reaches the recursive fall-through edge. Every serde serialize path yields
+// Result<S::Ok, S::Error>, so we can state it explicitly and break the cycle.
+// deref_if_pointer_like handles serializers arriving as a raw pointer / ref /
+// serializer_ref proxy; a serializer without Ok/Error makes this SFINAE-fail
+// (return-type substitution), so `requires { serialize(...) }` stays well-behaved.
+template<typename S>
+using __ser_result_t = rusty::Result<
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Ok,
+typename std::remove_cv_t<std::remove_reference_t<decltype(
+rusty::detail::deref_if_pointer_like(std::declval<S>()))>>::Error>;
 template<typename Serializer, typename BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes);
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer>;
 struct fallback_error {
 rusty::String message;
 
@@ -1945,7 +1977,8 @@ return fallback_error{rusty::String::from(msg)};
 }
 };
 template<typename Value, typename Serializer>
-decltype(auto) serialize_value(Value&& value, Serializer&& serializer) {
+auto serialize_value(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 using ValueType = std::remove_cv_t<std::remove_reference_t<Value>>;
 if constexpr (requires {
 std::forward<Value>(value).serialize(std::forward<Serializer>(serializer));
@@ -2056,7 +2089,8 @@ return std::forward<Value>(value).serialize(std::forward<Serializer>(serializer)
 }
 }
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -2077,7 +2111,8 @@ rusty::as_u8_slice(rusty::detail::deref_if_pointer_like(std::forward<BytesLike>(
 });
 template<typename Serializer, typename BytesLike>
 requires serialize_bytes_compatible<Serializer, BytesLike>
-decltype(auto) serialize_bytes(Serializer&& serializer, BytesLike&& bytes) {
+auto serialize_bytes(Serializer&& serializer, BytesLike&& bytes)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 if constexpr (requires {
 std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLike>(bytes));
 }) {
@@ -2171,7 +2206,8 @@ return std::forward<Serializer>(serializer).serialize_bytes(std::forward<BytesLi
 namespace impls {
 namespace rusty_ext {
 template<typename Value, typename Serializer>
-decltype(auto) serialize(Value&& value, Serializer&& serializer) {
+auto serialize(Value&& value, Serializer&& serializer)
+-> ::ser::rusty_ext::__ser_result_t<Serializer> {
 return ::ser::rusty_ext::serialize_value(
 std::forward<Value>(value), std::forward<Serializer>(serializer));
 }
@@ -3637,6 +3673,7 @@ export module hashbrown_port.map;
 import hashbrown_port.raw;
 import hashbrown_port.hasher;
 
+
 namespace test_map {}
 namespace test_map_with_mmap_allocations {}
 
@@ -3789,11 +3826,8 @@ struct Iter {
         return Iter<K, V>{.inner = rusty::default_value<RawIter<std::tuple<K, V>>>(), .marker = rusty::PhantomData<std::tuple<const K&, const V&>>{}};
     }
     rusty::Option<std::tuple<const K&, const V&>> next() {
-        // Patcher fix: same `r._0` / `r._1` → `std::get<>(r)` swap as
-        // IterMut::next() below; transpiler emitted the Rust tuple
-        // field-access form which isn't valid for std::tuple.
         return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& x = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { auto& r = x.as_ref();
-return rusty::Option<std::tuple<const K&, const V&>>(std::tuple<const K&, const V&>{std::get<0>(r), std::get<1>(r)}); }(); } if (_m.is_none()) { return rusty::Option<std::tuple<const K&, const V&>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { rusty::intrinsics::unreachable(); }(); }();
+return rusty::Option<std::tuple<const K&, const V&>>(std::tuple<const K&, const V&>{r._0, r._1}); }(); } if (_m.is_none()) { return rusty::Option<std::tuple<const K&, const V&>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<const K&, const V&>> { rusty::intrinsics::unreachable(); }(); }();
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
@@ -3849,12 +3883,8 @@ struct IterMut {
         return IterMut<K, V>{.inner = rusty::default_value<RawIter<std::tuple<K, V>>>(), .marker = rusty::PhantomData<std::tuple<const K&, V&>>{}};
     }
     rusty::Option<std::tuple<const K&, V&>> next() {
-        // Patcher fix: transpiler emitted `r._0, r._1` to destructure
-        // the std::tuple<K, V>. Those `._0` / `._1` field-access forms
-        // are valid for transpiled Rust tuple structs but std::tuple
-        // requires std::get<>(). Swap to the std::get form.
         return [&]() -> rusty::Option<std::tuple<const K&, V&>> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& x = rusty::detail::deref_if_pointer(_mv0); return [&]() -> rusty::Option<std::tuple<const K&, V&>> { auto& r = x.as_mut();
-return rusty::Option<std::tuple<const K&, V&>>(std::tuple<const K&, V&>{std::get<0>(r), std::get<1>(r)}); }(); } if (_m.is_none()) { return rusty::Option<std::tuple<const K&, V&>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<const K&, V&>> { rusty::intrinsics::unreachable(); }(); }();
+return rusty::Option<std::tuple<const K&, V&>>(std::tuple<const K&, V&>{r._0, r._1}); }(); } if (_m.is_none()) { return rusty::Option<std::tuple<const K&, V&>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<const K&, V&>> { rusty::intrinsics::unreachable(); }(); }();
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
@@ -4108,7 +4138,7 @@ struct Keys {
         return Keys<K, V>{.inner = rusty::default_value<Iter<K, V>>()};
     }
     rusty::Option<const K&> next() {
-        return [&]() -> rusty::Option<const K&> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))); return rusty::Option<const K&>(k); } if (_m.is_none()) { return rusty::Option<const K&>{rusty::None}; } return [&]() -> rusty::Option<const K&> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::Option<const K&> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))); return rusty::Option<const K&>(std::move(k)); } if (_m.is_none()) { return rusty::Option<const K&>{rusty::None}; } return [&]() -> rusty::Option<const K&> { rusty::intrinsics::unreachable(); }(); }();
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
@@ -4167,7 +4197,7 @@ struct Values {
         return Values<K, V>{.inner = rusty::default_value<Iter<K, V>>()};
     }
     rusty::Option<const V&> next() {
-        return [&]() -> rusty::Option<const V&> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv0))); return rusty::Option<const V&>(v); } if (_m.is_none()) { return rusty::Option<const V&>{rusty::None}; } return [&]() -> rusty::Option<const V&> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::Option<const V&> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv0))); return rusty::Option<const V&>(std::move(v)); } if (_m.is_none()) { return rusty::Option<const V&>{rusty::None}; } return [&]() -> rusty::Option<const V&> { rusty::intrinsics::unreachable(); }(); }();
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
@@ -4328,7 +4358,7 @@ struct ValuesMut {
         return ValuesMut<K, V>{.inner = rusty::default_value<IterMut<K, V>>()};
     }
     rusty::Option<V&> next() {
-        return [&]() -> rusty::Option<V&> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv0))); return rusty::Option<V&>(v); } if (_m.is_none()) { return rusty::Option<V&>{rusty::None}; } return [&]() -> rusty::Option<V&> { rusty::intrinsics::unreachable(); }(); }();
+        return [&]() -> rusty::Option<V&> { auto&& _m = this->inner.next(); if (_m.is_some()) { auto&& _mv0 = _m.unwrap(); auto&& v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv0))); return rusty::Option<V&>(std::move(v)); } if (_m.is_none()) { return rusty::Option<V&>{rusty::None}; } return [&]() -> rusty::Option<V&> { rusty::intrinsics::unreachable(); }(); }();
     }
     std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
         return this->inner.size_hint();
@@ -4525,127 +4555,6 @@ struct HashMap {
     S hash_builder;
     RawTable<std::tuple<K, V>, A> table;
 
-    // Hand-written-HashMap-compatibility extension: default ctor delegates
-    // to default_(). Real Rust HashMap is only constructible via `new()`
-    // / `default()` / `with_capacity()`; the C++ aggregate translation
-    // otherwise has no default ctor (RawTable's ctor takes 3 args). Mako
-    // rrr's `SerializableRegistryMap` / `AnyMessageRegistryMap` and many
-    // ported map-of-X structs declare a plain `rusty::HashMap<K,V> map;`
-    // field; surface a default ctor here so those keep building.
-    HashMap()
-        : hash_builder(),
-          table(RawTable<std::tuple<K, V>, A>::new_()) {}
-    // Two-arg ctor previously provided implicitly via aggregate
-    // initialization (`HashMap{hash, table}`); adding the default ctor
-    // above suppressed the aggregate, so spell out the field-init form
-    // explicitly here. Used by `with_hasher` / `with_capacity_*` /
-    // `default_()` factories below.
-    HashMap(S hash_builder_init, RawTable<std::tuple<K, V>, A> table_init)
-        : hash_builder(std::move(hash_builder_init)),
-          table(std::move(table_init)) {}
-
-    // Hand-written-HashMap-compatibility lookups: `contains_key`,
-    // `get`, `remove`. Real Rust expresses these with a `Q: Borrow<K>`
-    // trait bound that the transpiler skips; provide concrete K-typed
-    // overloads here using the existing table.find()/erase() entry
-    // points (same pattern HashSet uses above in set.cppm).
-    bool contains_key(const K& key) const {
-        auto& m = const_cast<HashMap<K, V, S, A>&>(*this);
-        auto h = make_hash<K, S>(m.hash_builder, key);
-        return m.table.find(h, [&](const auto& kv) {
-            return std::get<0>(kv) == key;
-        }).is_some();
-    }
-    ::rusty::Option<V&> get(const K& key) {
-        auto h = make_hash<K, S>(this->hash_builder, key);
-        auto b = this->table.find(h, [&](const auto& kv) {
-            return std::get<0>(kv) == key;
-        });
-        if (b.is_none()) return ::rusty::Option<V&>(::rusty::None);
-        auto&& bucket = b.unwrap();
-        return ::rusty::Option<V&>(std::get<1>(bucket.as_mut()));
-    }
-    ::rusty::Option<const V&> get(const K& key) const {
-        auto& m = const_cast<HashMap<K, V, S, A>&>(*this);
-        auto h = make_hash<K, S>(m.hash_builder, key);
-        auto b = m.table.find(h, [&](const auto& kv) {
-            return std::get<0>(kv) == key;
-        });
-        if (b.is_none()) return ::rusty::Option<const V&>(::rusty::None);
-        auto&& bucket = b.unwrap();
-        return ::rusty::Option<const V&>(
-            static_cast<const V&>(std::get<1>(bucket.as_mut())));
-    }
-    ::rusty::Option<V> remove(const K& key) {
-        auto h = make_hash<K, S>(this->hash_builder, key);
-        auto b = this->table.find(h, [&](const auto& kv) {
-            return std::get<0>(kv) == key;
-        });
-        if (b.is_none()) return ::rusty::Option<V>(::rusty::None);
-        auto bucket = b.unwrap();
-        auto kv = this->table.remove(bucket);
-        return ::rusty::Option<V>(
-            std::move(std::get<1>(std::get<0>(kv))));
-    }
-
-    // STL-compat range iteration. Wraps the underlying `iter_mut()`
-    // Rust-style next() iterator with a stateful adapter that exposes
-    // operator++ / operator* / != so consumers can write
-    // `for (auto& [k,v] : map)`. `*it` returns `std::tuple<const K&, V&>`
-    // which destructures into k (const K) and v (V&). All actual storage
-    // remains in the map; the tuple only holds references.
-    struct stl_iter_t {
-        // The raw iterator owns the bucket position. We cache the
-        // current Bucket so operator* can return refs into it without
-        // re-advancing.
-        rusty::Option<IterMut<K, V>> raw;
-        rusty::Option<std::tuple<const K&, V&>> cur;
-
-        stl_iter_t() : raw(rusty::None), cur(rusty::None) {}
-        explicit stl_iter_t(IterMut<K, V> it) : raw(std::move(it)), cur(rusty::None) {
-            advance();
-        }
-        void advance() {
-            if (raw.is_none()) { cur = rusty::None; return; }
-            cur = raw.as_mut().unwrap().next();
-        }
-        stl_iter_t& operator++() { advance(); return *this; }
-        std::tuple<const K&, V&> operator*() {
-            return cur.as_ref().unwrap();
-        }
-        bool operator==(const stl_iter_t& o) const {
-            return cur.is_none() && o.cur.is_none();
-        }
-        bool operator!=(const stl_iter_t& o) const { return !(*this == o); }
-    };
-
-    stl_iter_t begin() {
-        return stl_iter_t(this->iter_mut());
-    }
-    stl_iter_t end() {
-        return stl_iter_t{};
-    }
-
-    // operator[]: container-style insert-or-default-and-get. Returns a
-    // reference into the map's storage. Hand-written HashMap relied on
-    // std::unordered_map's `[]` returning a default-constructed value
-    // for missing keys. We replicate by inserting a default V on miss.
-    V& operator[](const K& key) {
-        auto h = make_hash<K, S>(this->hash_builder, key);
-        auto b = this->table.find(h, [&](const auto& kv) {
-            return std::get<0>(kv) == key;
-        });
-        if (b.is_some()) {
-            return std::get<1>(b.unwrap().as_mut());
-        }
-        // Not present: insert default V.
-        this->insert(K(key), V{});
-        auto b2 = this->table.find(h, [&](const auto& kv) {
-            return std::get<0>(kv) == key;
-        });
-        return std::get<1>(b2.unwrap().as_mut());
-    }
-
     HashMap<K, V, S, A> clone() const {
         return HashMap<K, V, S, A>(rusty::clone(this->hash_builder), rusty::clone(this->table));
     }
@@ -4665,7 +4574,7 @@ struct HashMap {
     static HashMap<K, V, S, A> with_capacity_in(size_t capacity, A alloc) {
         return HashMap<K, V, S, A>::with_capacity_and_hasher_in(std::move(capacity), DefaultHasher::new_(), std::move(alloc));
     }
-    static HashMap<K, V, S, A> with_hasher(S hash_builder) {
+    static constexpr HashMap<K, V, S, A> with_hasher(S hash_builder) {
         return HashMap<K, V, S, A>(std::move(hash_builder), RawTable<std::tuple<K, V>, A>::new_());
     }
     static HashMap<K, V, S, A> with_capacity_and_hasher(size_t capacity, S hash_builder) {
@@ -4674,7 +4583,7 @@ struct HashMap {
     const A& allocator() const {
         return this->table.allocator();
     }
-    static HashMap<K, V, S, A> with_hasher_in(S hash_builder, A alloc) {
+    static constexpr HashMap<K, V, S, A> with_hasher_in(S hash_builder, A alloc) {
         return HashMap<K, V, S, A>(std::move(hash_builder), RawTable<std::tuple<K, V>, A>::new_in(std::move(alloc)));
     }
     static HashMap<K, V, S, A> with_capacity_and_hasher_in(size_t capacity, S hash_builder, A alloc) {
@@ -4780,7 +4689,7 @@ return rusty::Option<V>{rusty::None}; }(); } return [&]() -> rusty::Option<V> { 
     std::tuple<const K&, V&> insert_unique_unchecked(K k, V v) {
         auto hash = make_hash<K, S>(this->hash_builder, k);
         const auto bucket = this->table.insert(std::move(hash), std::make_tuple(std::move(k), std::move(v)), make_hasher(this->hash_builder));
-        auto [k_ref, v_ref] = rusty::detail::deref_if_pointer_like(bucket.as_mut());
+        auto&& [k_ref, v_ref] = rusty::detail::deref_if_pointer_like(bucket.as_mut());
         return std::tuple<const K&, V&>{k_ref, v_ref};
     }
     rusty::Result<V&, OccupiedError<K, V, S, A>> try_insert(K key, V value) {
@@ -4862,22 +4771,22 @@ struct Entry : std::variant<Entry_Occupied<K, V, S, A>, Entry_Vacant<K, V, S, A>
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return [&]() -> rusty::fmt::Result { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 0) { const auto& v = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("Entry").field(v).finish(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { const auto& o = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("Entry").field(o).finish(); } return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }();
     }
-    OccupiedEntry<K, V, S, A> insert(V value) {
-        return [&]() -> OccupiedEntry<K, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> OccupiedEntry<K, V, S, A> { entry.insert(std::move(value));
+    OccupiedEntry<K, V, S, A> insert(V value) const {
+        return [&]() -> OccupiedEntry<K, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> OccupiedEntry<K, V, S, A> { entry.insert(std::move(value));
 return entry; }(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert_entry(std::move(value)); } return [&]() -> OccupiedEntry<K, V, S, A> { rusty::intrinsics::unreachable(); }(); }();
     }
-    V& or_insert(V default_) {
+    V& or_insert(V default_) const {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(std::move(default_)); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
-    OccupiedEntry<K, V, S, A> or_insert_entry(V default_) {
+    OccupiedEntry<K, V, S, A> or_insert_entry(V default_) const {
         return [&]() -> OccupiedEntry<K, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert_entry(std::move(default_)); } return [&]() -> OccupiedEntry<K, V, S, A> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
-    V& or_insert_with(F default_) {
+    V& or_insert_with(F default_) const {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(default_()); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
-    V& or_insert_with_key(F default_) {
+    V& or_insert_with_key(F default_) const {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> V& { auto value = default_(entry.key());
 return entry.insert(std::move(value)); }(); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
@@ -4885,18 +4794,18 @@ return entry.insert(std::move(value)); }(); } return [&]() -> V& { rusty::intrin
         return [&]() -> const K& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { const auto& entry = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return entry.key(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { const auto& entry = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return entry.key(); } return [&]() -> const K& { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
-    Entry<K, V, S, A> and_modify(F f) {
-        return [&]() -> Entry<K, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> Entry<K, V, S, A> { f(entry.get_mut());
+    Entry<K, V, S, A> and_modify(F f) const {
+        return [&]() -> Entry<K, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> Entry<K, V, S, A> { f(entry.get_mut());
 return Entry<K, V, S, A>{Entry_Occupied<K, V, S, A>{entry}}; }(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return Entry<K, V, S, A>{Entry_Vacant<K, V, S, A>{entry}}; } return [&]() -> Entry<K, V, S, A> { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
-    Entry<K, V, S, A> and_replace_entry_with(F f) {
+    Entry<K, V, S, A> and_replace_entry_with(F f) const {
         return [&]() -> Entry<K, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.replace_entry_with(std::move(f)); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { return this->clone(); } return [&]() -> Entry<K, V, S, A> { rusty::intrinsics::unreachable(); }(); }();
     }
-    HashMap<K, V, S, A>& into_map() {
+    HashMap<K, V, S, A>& into_map() const {
         return [&]() -> HashMap<K, V, S, A>& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.table; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.table; } return [&]() -> HashMap<K, V, S, A>& { rusty::intrinsics::unreachable(); }(); }();
     }
-    V& or_default() {
+    V& or_default() const {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(V::default_()); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
 };
@@ -4960,7 +4869,7 @@ struct OccupiedEntry {
         }
     }
     K replace_key(K key) {
-        if (!(([&](auto&& __self) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), key); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), key); } else { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(key)); } })(this->key()))) { throw std::logic_error("replaced key is not equivalent to the one in the entry"); }
+        if (!(([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else if constexpr (requires { __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })(this->key(), key))) { throw std::logic_error("replaced key is not equivalent to the one in the entry"); }
         // @unsafe
         {
             return this->replace_key_unchecked(std::move(key));
@@ -4987,14 +4896,14 @@ struct OccupiedEntry {
             return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->elem.as_mut());
         }
     }
-    V& into_mut() {
+    V& into_mut() const {
         // @unsafe
         {
             return ([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(this->elem.as_mut());
         }
     }
     std::tuple<const K&, V&> into_entry() {
-        auto [key, val] = rusty::detail::deref_if_pointer_like(this->elem.as_mut());
+        auto&& [key, val] = rusty::detail::deref_if_pointer_like(this->elem.as_mut());
         return std::tuple<const K&, V&>{key, val};
     }
     V insert(V value) {
@@ -5114,19 +5023,19 @@ struct EntryRef : std::variant<EntryRef_Occupied<K, Q, V, S, A>, EntryRef_Vacant
     rusty::fmt::Result fmt(rusty::fmt::Formatter& f) const {
         return [&]() -> rusty::fmt::Result { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 0) { const auto& v = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("EntryRef").field(v).finish(); } if (rusty::detail::deref_if_pointer(_m).index() == 1) { const auto& o = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return f.debug_tuple("EntryRef").field(o).finish(); } return [&]() -> rusty::fmt::Result { rusty::intrinsics::unreachable(); }(); }();
     }
-    OccupiedEntry<K, V, S, A> insert(V value) {
-        return [&]() -> OccupiedEntry<K, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> OccupiedEntry<K, V, S, A> { entry.insert(std::move(value));
+    OccupiedEntry<K, V, S, A> insert(V value) const {
+        return [&]() -> OccupiedEntry<K, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> OccupiedEntry<K, V, S, A> { entry.insert(std::move(value));
 return entry; }(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert_entry(std::move(value)); } return [&]() -> OccupiedEntry<K, V, S, A> { rusty::intrinsics::unreachable(); }(); }();
     }
-    V& or_insert(V default_) {
+    V& or_insert(V default_) const {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(std::move(default_)); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
-    V& or_insert_with(F default_) {
+    V& or_insert_with(F default_) const {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(default_()); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
-    V& or_insert_with_key(F default_) {
+    V& or_insert_with_key(F default_) const {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> V& { auto value = default_(std::move(entry.key));
 return entry.insert(std::move(value)); }(); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
@@ -5134,17 +5043,17 @@ return entry.insert(std::move(value)); }(); } return [&]() -> V& { rusty::intrin
         return [&]() -> const Q& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { const auto& entry = std::get<1>(rusty::detail::deref_if_pointer(_m))._0; return entry.key().borrow(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { const auto& entry = std::get<0>(rusty::detail::deref_if_pointer(_m))._0; return entry.key(); } return [&]() -> const Q& { rusty::intrinsics::unreachable(); }(); }();
     }
     template<typename F>
-    EntryRef<K, Q, V, S, A> and_modify(F f) {
-        return [&]() -> EntryRef<K, Q, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> EntryRef<K, Q, V, S, A> { f(entry.get_mut());
+    EntryRef<K, Q, V, S, A> and_modify(F f) const {
+        return [&]() -> EntryRef<K, Q, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return [&]() -> EntryRef<K, Q, V, S, A> { f(entry.get_mut());
 return EntryRef<K, Q, V, S, A>{EntryRef_Occupied<K, Q, V, S, A>{entry}}; }(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return EntryRef<K, Q, V, S, A>{EntryRef_Vacant<K, Q, V, S, A>{entry}}; } return [&]() -> EntryRef<K, Q, V, S, A> { rusty::intrinsics::unreachable(); }(); }();
     }
-    HashMap<K, V, S, A>& into_map() {
+    HashMap<K, V, S, A>& into_map() const {
         return [&]() -> HashMap<K, V, S, A>& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.table; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.table; } return [&]() -> HashMap<K, V, S, A>& { rusty::intrinsics::unreachable(); }(); }();
     }
-    V& or_default() {
+    V& or_default() const {
         return [&]() -> V& { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry.into_mut(); } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert(V::default_()); } return [&]() -> V& { rusty::intrinsics::unreachable(); }(); }();
     }
-    OccupiedEntry<K, V, S, A> or_default_entry() {
+    OccupiedEntry<K, V, S, A> or_default_entry() const {
         return [&]() -> OccupiedEntry<K, V, S, A> { auto&& _m = (*this); if (rusty::detail::deref_if_pointer(_m).index() == 1) { auto&& entry = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m))._0); return entry; } if (rusty::detail::deref_if_pointer(_m).index() == 0) { auto&& entry = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m))._0); return entry.insert_entry(rusty::default_value<V>()); } return [&]() -> OccupiedEntry<K, V, S, A> { rusty::intrinsics::unreachable(); }(); }();
     }
 };
@@ -5210,7 +5119,7 @@ struct VacantEntryRef {
         return OccupiedEntry<K, V, S, A>{.hash = std::move(this->hash), .elem = std::move(elem), .table = this->table};
     }
     OccupiedEntry<K, V, S, A> insert_entry_with_key(K key, V value) {
-        if (!(([&](auto&& __self) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), key); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), key); } else { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(key)); } })((this->key_field)))) { throw std::logic_error("key used for Entry creation is not equivalent to the one used for insertion"); }
+        if (!(([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else if constexpr (requires { __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })((this->key_field), key))) { throw std::logic_error("key used for Entry creation is not equivalent to the one used for insertion"); }
         // @unsafe
         {
             return this->insert_entry_with_key_unchecked(std::move(key), std::move(value));
@@ -5277,14 +5186,14 @@ const auto& make_hasher(const S& hash_builder) {
 /// instances of any functions like `RawTable::reserve` from being generated
 export template<typename Q, typename K, typename V>
 const auto& equivalent_key(const Q& k) {
-    return [=, k = std::move(k)](auto&& x) mutable -> bool { return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), &([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x)); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), &([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x)); } else { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(&([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x))); } })(k); };
+    return [=, k = std::move(k)](auto&& x) mutable -> bool { return ([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else if constexpr (requires { __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })(k, &([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._0; }) return (std::forward<decltype(__t)>(__t)._0); else return std::get<0>(std::forward<decltype(__t)>(__t)); })(x)); };
 }
 
 /// Ensures that a single closure type across uses of this which, in turn prevents multiple
 /// instances of any functions like `RawTable::reserve` from being generated
 export template<typename Q, typename K>
 const auto& equivalent(const Q& k) {
-    return [=, k = std::move(k)](auto&& x) mutable -> bool { return ([&](auto&& __self) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::move(x)); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::move(x)); } else { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::move(x))); } })(k); };
+    return [=, k = std::move(k)](auto&& x) mutable -> bool { return ([](auto&& __self, auto&& __arg0) -> decltype(auto) { if constexpr (requires { __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); }) { return __rusty_ext_equivalent(std::forward<decltype(__self)>(__self), std::forward<decltype(__arg0)>(__arg0)); } else if constexpr (requires { __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); }) { return __rusty_ext_equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)), rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } else { return rusty::detail::deref_if_pointer_like(std::forward<decltype(__self)>(__self)).equivalent(rusty::detail::deref_if_pointer_like(std::forward<decltype(__arg0)>(__arg0))); } })(k, std::move(x)); };
 }
 
 export template<typename Q, typename S>

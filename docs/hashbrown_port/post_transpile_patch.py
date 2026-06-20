@@ -27,22 +27,20 @@ def patch_tag_methods_const(cpp_out: Path) -> int:
         return 0
     text = path.read_text()
     original = text
-    text = text.replace("    bool is_full();", "    bool is_full() const;")
-    text = text.replace("    bool is_special();", "    bool is_special() const;")
-    text = text.replace("    bool special_is_empty();", "    bool special_is_empty() const;")
-    # Out-of-line definitions
-    text = re.sub(
-        r"^bool Tag::is_full\(\) \{",
-        "bool Tag::is_full() const {",
-        text, flags=re.MULTILINE)
-    text = re.sub(
-        r"^bool Tag::is_special\(\) \{",
-        "bool Tag::is_special() const {",
-        text, flags=re.MULTILINE)
-    text = re.sub(
-        r"^bool Tag::special_is_empty\(\) \{",
-        "bool Tag::special_is_empty() const {",
-        text, flags=re.MULTILINE)
+    # Declarations + out-of-line definitions. The transpiler may emit these
+    # methods with a leading `constexpr ` (newer codegen), so allow it
+    # optionally and re-emit it verbatim.
+    for m in ("is_full", "is_special", "special_is_empty"):
+        # Declaration:  [constexpr ]bool <m>();  ->  ... <m>() const;
+        text = re.sub(
+            r"^(\s*)((?:constexpr )?)bool " + m + r"\(\);",
+            r"\1\2bool " + m + r"() const;",
+            text, flags=re.MULTILINE)
+        # Definition:   [constexpr ]bool Tag::<m>() {  ->  ... () const {
+        text = re.sub(
+            r"^((?:constexpr )?)bool Tag::" + m + r"\(\) \{",
+            r"\1bool Tag::" + m + r"() const {",
+            text, flags=re.MULTILINE)
     if text != original:
         path.write_text(text)
         return 1
@@ -88,6 +86,28 @@ def patch_tag_formatter_pad(cpp_out: Path) -> int:
             "}")
     new_text = text[:sig_pos] + stub + text[j+1:]
     path.write_text(new_text)
+    return 1
+
+
+def patch_control_tag_fill_tag_mut_self(cpp_out: Path) -> int:
+    """`impl TagSliceExt for [MaybeUninit<Tag>]` has `fn fill_tag(&mut
+    self, ...)`. The UFCS trait-migration lowers the `&mut self` slice
+    receiver to `std::span<const rusty::MaybeUninit<Tag>>& self_` — it
+    drops the mutability, emitting a `const`-element span. The body then
+    does `as_mut_ptr(self_)->write_bytes(...)` (lowered to
+    `rusty::ptr::write_bytes`), which can't write through a const
+    element pointer. Restore the `&mut self` mutability by dropping the
+    `const` on the self_ span (decl + def). Callers pass a mutable
+    `span<MaybeUninit<Tag>>` (ctrl_slice), so this matches."""
+    path = cpp_out / "hashbrown_port.control.tag.cppm"
+    if not path.exists():
+        return 0
+    needle = "std::span<const rusty::MaybeUninit<Tag>>& self_"
+    repl = "std::span<rusty::MaybeUninit<Tag>>& self_"
+    text = path.read_text()
+    if needle not in text:
+        return 0
+    path.write_text(text.replace(needle, repl))
     return 1
 
 
@@ -1968,6 +1988,10 @@ def _patch_downstream_module(path: Path) -> bool:
         return False
     text = path.read_text()
     original = text
+    # `import rusty;` — rusty is a header-only library pulled in via the
+    # global module fragment (`#include <rusty/rusty.hpp>`), not a C++20
+    # module. The transpiler emits a spurious module import for it; drop it.
+    text = re.sub(r"^import rusty;\n", "", text, flags=re.MULTILINE)
     # Collect any stray `import hashbrown_port.X;` lines NOT at the top.
     import_lines = re.findall(
         r"^import hashbrown_port\.[\w.]+;\n", text, flags=re.MULTILINE
@@ -3374,6 +3398,29 @@ def patch_deep_util_cold_path(cpp_out: Path) -> int:
     return 1
 
 
+def patch_deep_alloc_ufcs_allocator_qualify(cpp_out: Path) -> int:
+    """The UFCS trait-migration emits the `Allocator_` bridge as
+    `export using ::inner::__ufcs_Allocator::allocate;` — an absolute
+    path that assumes flat emit. Under `--cxx-namespace`, `inner` lives
+    in the deep wrap (`rusty::port::collections::hashbrown::inner`), so
+    `::inner` resolves at global scope and misses. The transpiler's
+    wrap re-qualification (Rule 2, `ufcs_bridge_top_namespaces`) does not
+    catch this `inner` bridge. Strip the leading `::` so the reference is
+    relative and resolves through the enclosing wrap — same shape as the
+    other deep-ns `::`-strip patches (cold_path, Group, ScopeGuard, …)."""
+    path = cpp_out / "hashbrown_port.alloc.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    if not _has_deep_ns_wrap(text):
+        return 0
+    needle = "using ::inner::__ufcs_Allocator::"
+    if needle not in text:
+        return 0
+    path.write_text(text.replace(needle, "using inner::__ufcs_Allocator::"))
+    return 1
+
+
 def patch_deep_alloc_adapter_rusty_unit_convert(cpp_out: Path) -> int:
     """Like `patch_alloc_adapter_error_convert` but for the deep-emit
     error type. `AllocatorAdapter::allocate` returns `Result<_,
@@ -3472,6 +3519,7 @@ def main(cpp_out: Path):
     patches = [
         ("Tag methods: add const qualifier", patch_tag_methods_const),
         ("Tag::fmt — stub (rusty::fmt::Formatter has no pad)", patch_tag_formatter_pad),
+        ("control.tag: fill_tag(&mut self) — drop const on self_ span (UFCS mut-self)", patch_control_tag_fill_tag_mut_self),
         ("hasher: replace entire module body with FNV-1a stub", patch_hasher_replace_with_stub),
         ("alloc: allocator_api2 → rusty::alloc", patch_alloc_allocator_api2),
         ("alloc: drop duplicate do_alloc definition", patch_alloc_do_alloc_dup),
@@ -3519,6 +3567,7 @@ def main(cpp_out: Path):
         ("deep-ns: set.cppm hand-written facade — wrap in deep namespace", patch_deep_set_facade_wrap),
         ("deep-ns: hasher.cppm hand-written facade — wrap in deep namespace", patch_deep_hasher_facade_wrap),
         ("deep-ns: util.cppm — strip :: prefix on cold_path", patch_deep_util_cold_path),
+        ("deep-ns: alloc.cppm — strip :: on inner::__ufcs_Allocator bridge re-export", patch_deep_alloc_ufcs_allocator_qualify),
         ("deep-ns: alloc.cppm — drop rusty::ptr::slice_from_raw_parts_mut (not in rusty/ptr.hpp)", patch_deep_alloc_slice_from_raw_parts_mut),
         ("deep-ns: alloc.cppm AllocatorAdapter — convert AllocError → rusty::Unit", patch_deep_alloc_adapter_rusty_unit_convert),
         ("deep-ns: alloc.cppm do_alloc — convert AllocError → rusty::Unit (deep-emit shape)", patch_deep_alloc_do_alloc_result_convert),

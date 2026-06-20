@@ -33,6 +33,7 @@ export module hashbrown_port.control;
 export import hashbrown_port.control.bitmask;
 export import hashbrown_port.control.group;
 export import hashbrown_port.control.tag;
+// deep-ns: child modules re-exported via export import; using-decls stripped
 
 namespace rusty::port::collections::hashbrown {
 } // namespace rusty::port::collections::hashbrown
