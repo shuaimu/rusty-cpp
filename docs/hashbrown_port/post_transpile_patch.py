@@ -797,6 +797,48 @@ def patch_raw_tryreserveerror(cpp_out: Path) -> int:
     return 0
 
 
+def patch_raw_rehash_guard_writeback(cpp_out: Path) -> int:
+    """rehash_in_place() lowers Rust `guard(self, ...)` (where `self` is `&mut Self`)
+    to `auto guard = guard((*this), ...)`, which makes a BY-VALUE copy of the table
+    (the transpiler maps `self` to `(*this)` and ScopeGuard takes its `T` by value —
+    same root cause as patch_raw_table_clear_double_free / patch_scopeguard_dropfn_arg).
+    `RawTableInner` has no user copy ctor, so the copy is SHALLOW and shares the
+    `ctrl_field` buffer pointer: the in-place set_ctrl / element moves DO reach the real
+    control bytes, but the copy's scalar fields (growth_left/items/bucket_mask) live only
+    on the copy and `mem::forget(guard)` discards them. Without writing them back,
+    growth_left stays stale and a later insert underflows it (size_t) -> the probe runs
+    past the end of the table ("Went past end of probe sequence"). Reflect the scalars
+    back into *this before forgetting the guard. (Runs after the earlier raw patches that
+    rewrite `guard.x` -> `(*guard).x`.)"""
+    path = cpp_out / "hashbrown_port.raw.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    needle = (
+        "    (*guard).growth_left = ::bucket_mask_to_capacity(std::move((*guard).bucket_mask))"
+        " - rusty::detail::deref_if_pointer_like((*guard).items);\n"
+        "    rusty::mem::forget(std::move(guard));"
+    )
+    replacement = (
+        "    (*guard).growth_left = ::bucket_mask_to_capacity(std::move((*guard).bucket_mask))"
+        " - rusty::detail::deref_if_pointer_like((*guard).items);\n"
+        "    // PORT FIX: `guard` is a by-value copy of the table (transpiler lowered Rust's\n"
+        "    // `&mut self` to `(*this)`). Its ctrl buffer is SHARED (shallow copy), so the\n"
+        "    // rehash above reached the real control bytes, but these scalar fields live only\n"
+        "    // on the copy. Reflect them back into *this before forgetting it, else growth_left\n"
+        "    // stays stale and a later insert underflows it -> probe past end of table.\n"
+        "    this->growth_left = (*guard).growth_left;\n"
+        "    this->items = (*guard).items;\n"
+        "    this->bucket_mask = (*guard).bucket_mask;\n"
+        "    rusty::mem::forget(std::move(guard));"
+    )
+    if needle in text:
+        text = text.replace(needle, replacement)
+        path.write_text(text)
+        return 1
+    return 0
+
+
 def patch_raw_imports_top(cpp_out: Path) -> int:
     """`raw.cppm` has `import hashbrown_port.control;` (and friends)
     appearing after forward decls. C++20 requires all imports right
@@ -3447,6 +3489,7 @@ def main(cpp_out: Path):
         ("raw: TryReserveError variant constructors → rusty tagged-struct ctor", patch_raw_tryreserveerror_constructors),
         ("raw: misc fixups (control::, invalid_mut, Rust-syntax assert!s)", patch_raw_misc_fixups),
         ("raw: fix RawTable::clear() double-free (ScopeGuard takes T by value)", patch_raw_table_clear_double_free),
+        ("raw: rehash_in_place — write back guard-copy scalars (ScopeGuard takes T by value)", patch_raw_rehash_guard_writeback),
         ("scopeguard: dropfn arg by reference, not pointer", patch_scopeguard_dropfn_arg),
         ("table: hoist imports + std::* → rusty::* + drop raw:: qualifier", patch_table_module),
         ("map: same fixups as table", patch_map_module),
