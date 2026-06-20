@@ -19572,6 +19572,33 @@ fn test_external_fmt_path_not_attributed_to_local_mod_fmt() {
 }
 
 #[test]
+fn test_std_type_import_not_hijacked_as_clike_enum_variant() {
+    // `use std::string::String` maps to the runtime type `rusty::String`. It must
+    // NOT be rewritten as a c-like-enum variant import just because a local enum
+    // (serde's `Unsupported`) happens to declare a `String` variant — that emitted
+    // a bogus `constexpr auto String = rusty::Unsupported::String;` (Unsupported is
+    // not in `rusty::`, and it's the wrong meaning of `String`).
+    let out = transpile_str(
+        r#"
+        pub mod ser {
+            #[derive(Clone, Copy)]
+            pub enum Unsupported { Boolean, String, Integer }
+            pub use std::string::String;
+            pub fn name() -> String { String::new() }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("using rusty::String"),
+        "std String import must map to the runtime type\n{out}"
+    );
+    assert!(
+        !out.contains("constexpr auto String ="),
+        "std String import must not be hijacked as the Unsupported::String variant\n{out}"
+    );
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is

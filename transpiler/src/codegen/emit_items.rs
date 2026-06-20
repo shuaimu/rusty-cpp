@@ -4515,6 +4515,19 @@ impl CodeGen {
                                 ))
                         {
                             Some(parent.to_string())
+                        } else if using_segments
+                            .first()
+                            .is_some_and(|root| matches!(*root, "rusty" | "std" | "core" | "alloc"))
+                        {
+                            // A runtime/external TYPE import already mapped to a
+                            // `rusty::`/std path (`use std::string::String` ->
+                            // `rusty::String`) must NOT be hijacked as a local
+                            // c-like-enum variant import just because the leaf
+                            // (`String`) happens to name a variant of some local
+                            // enum (e.g. serde's `private_::ser::Unsupported::String`).
+                            // Genuine c2rust variant re-exports resolve to a LOCAL
+                            // sibling-module path, never a runtime/std root.
+                            None
                         } else {
                             self.unique_c_like_enum_owner_for_variant_name(variant)
                         }
