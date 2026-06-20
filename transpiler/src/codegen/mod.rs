@@ -6385,6 +6385,30 @@ impl CodeGen {
                     }
                     emitted_any = true;
                 }
+                syn::Item::Union(u) => {
+                    let name = self.named_module_root_type_decl_cpp_name_at_depth(
+                        &u.ident.to_string(),
+                        module_depth,
+                    );
+                    if !emitted_names.insert(name.clone()) {
+                        continue;
+                    }
+                    let export_prefix = if self.should_export_item_at_module_depth(
+                        &u.vis,
+                        module_depth,
+                        &u.ident.to_string(),
+                    ) {
+                        "export "
+                    } else {
+                        ""
+                    };
+                    self.emit_template_declaration_without_type_defaults(
+                        &u.generics,
+                        export_prefix,
+                        &format!("union {};", name),
+                    );
+                    emitted_any = true;
+                }
                 _ => {}
             }
         }

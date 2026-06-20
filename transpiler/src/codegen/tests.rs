@@ -19300,6 +19300,37 @@ fn test_rust_union_emitted_as_cpp_union_and_ordered_before_user() {
 }
 
 #[test]
+fn test_module_union_clone_impl_not_routed_to_extension_free_function() {
+    // c2rust ports `#[derive(Copy, Clone)]` a union; after macro expansion that
+    // becomes an explicit `impl Clone for <union>`. The union must be recorded as
+    // a local declared type (like structs/enums) so this inherent-ish impl is
+    // NOT routed to a `rusty_ext` extension-trait free function — which named the
+    // union BARE at a foreign namespace (`core::clone::rusty_ext`), yielding
+    // "unknown type name '<union>'" since the union lives in its own module.
+    let out = transpile_str(
+        r#"
+        pub mod yaml {
+            #[repr(C)]
+            pub union Payload { pub as_int: u64, pub as_ptr: *mut u8 }
+            impl Clone for Payload {
+                fn clone(&self) -> Self { *self }
+            }
+            impl Copy for Payload {}
+        }
+        "#,
+    );
+    assert!(out.contains("union Payload"), "union must be emitted\n{out}");
+    // The bug: a free-function clone decl `Payload clone(const Payload& self_)`
+    // emitted under the trait's namespace, naming the union bare. A union has no
+    // member clone (emit_union emits a plain union), so a `clone(const Payload`
+    // signature can ONLY be the spurious extension free function.
+    assert!(
+        !out.contains("clone(const Payload"),
+        "union Clone impl must not become a rusty_ext free function\n{out}"
+    );
+}
+
+#[test]
 fn test_ptr_returning_call_result_cast_to_int_uses_reinterpret() {
     // A call to a raw-pointer-returning fn imported from another module, cast to
     // an integer, must reinterpret (ptr->int): `static_cast<uintptr_t>(ptr)` is

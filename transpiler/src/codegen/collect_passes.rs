@@ -3647,6 +3647,14 @@ impl CodeGen {
                         &s.generics,
                     );
                 }
+                syn::Item::Union(u) => {
+                    self.record_local_declared_type(module_path, &u.ident.to_string());
+                    self.record_local_declared_type_params(
+                        module_path,
+                        &u.ident.to_string(),
+                        &u.generics,
+                    );
+                }
                 syn::Item::Enum(e) => {
                     self.record_local_declared_type(module_path, &e.ident.to_string());
                     self.record_local_declared_type_params(
