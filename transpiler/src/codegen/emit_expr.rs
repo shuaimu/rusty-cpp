@@ -18108,15 +18108,38 @@ impl CodeGen {
             Some("MIN") => "min",
             _ => return None,
         };
-
-        // Primitive paths like `usize::MAX`, `std::u32::MIN`, `core::isize::MAX`.
+        // Primitive paths: `usize::MAX`, `std::u32::MIN`, `core::isize::MAX`, and
+        // `std::primitive::i32::MAX` / `core::primitive::…` (c2rust ports import
+        // primitives via `core::primitive`). The primitive is the segment right
+        // before MAX/MIN; accept it under any of these known wrapper prefixes.
         let primitive_candidate = if segments.len() == 2 {
             Some(segments[0].as_str())
-        } else if segments.len() == 3 && matches!(segments[0].as_str(), "std" | "core") {
-            Some(segments[1].as_str())
         } else {
-            None
+            let prefix: Vec<&str> =
+                segments[..segments.len() - 2].iter().map(String::as_str).collect();
+            matches!(
+                prefix.as_slice(),
+                ["std"] | ["core"] | ["std", "primitive"] | ["core", "primitive"] | ["libc"]
+            )
+            .then(|| segments[segments.len() - 2].as_str())
         };
+        // Normalize libc C type aliases to the matching Rust primitive
+        // (`c_int::MAX`, common in c2rust ports, imported as a bare 2-segment
+        // path) so `map_primitive_type` resolves them. `c_long`/`c_ulong` follow
+        // the type mapping (`isize`->`ptrdiff_t`, `usize`->`size_t`).
+        let primitive_candidate = primitive_candidate.map(|c| match c {
+            "c_char" | "c_schar" => "i8",
+            "c_uchar" => "u8",
+            "c_short" => "i16",
+            "c_ushort" => "u16",
+            "c_int" => "i32",
+            "c_uint" => "u32",
+            "c_long" => "isize",
+            "c_ulong" => "usize",
+            "c_longlong" => "i64",
+            "c_ulonglong" => "u64",
+            other => other,
+        });
         if let Some(candidate) = primitive_candidate {
             if let Some(cpp_prim) = types::map_primitive_type(candidate) {
                 if candidate == "char" {

@@ -19167,6 +19167,16 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_primitive_assoc_const_under_core_primitive_prefix() {
+    // c2rust imports primitives via `core::primitive`, so integer assoc consts
+    // arrive as 4-segment paths `std::primitive::i32::MAX`. These must map to
+    // `std::numeric_limits<int32_t>::max()`, not the invalid `int32_t::MAX`.
+    let out = transpile_str(r#"fn f() -> i32 { std::primitive::i32::MAX }"#);
+    assert!(out.contains("std::numeric_limits<int32_t>::max()"), "{out}");
+    assert!(!out.contains("int32_t::MAX"), "{out}");
+}
+
+#[test]
 fn test_nested_never_returning_fn_strips_noreturn_in_safefn() {
     // A nested `fn() -> !` is emitted as a `rusty::SafeFn` closure. The `!`
     // return maps to `[[noreturn]] void`, which is ill-formed both in the SafeFn
