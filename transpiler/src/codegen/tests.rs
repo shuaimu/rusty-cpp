@@ -32806,3 +32806,35 @@ fn test_multi_super_use_path_peels_progressively() {
         "super::super from control::group::sse2 must resolve to control::BitMask\n{out}"
     );
 }
+
+#[test]
+fn test_sibling_same_named_generic_type_recovers_own_params_not_collide() {
+    // Sibling modules define same-named generic types with DIFFERENT params:
+    // map::IntoIter<K,V> vs set::IntoIter<T,A>. Both register a bare
+    // `declared_type_params["IntoIter"]` key (map's, registered first). When
+    // set::IntoIter's `-> Self` / struct-literal recovers its omitted type
+    // args, the owner-param lookup must use the MODULE-SCOPED key
+    // (`set::IntoIter` -> [T,A]), not the colliding bare key (map's [K,V]),
+    // which previously emitted `IntoIter<K, V>` with K/V undeclared in set.
+    let out = transpile_str(
+        r#"
+        pub mod map {
+            pub struct IntoIter<K, V> { pub k: K, pub v: V }
+        }
+        pub mod set {
+            pub struct IntoIter<T, A> { pub t: T, pub a: A }
+            impl<T, A> IntoIter<T, A> {
+                pub fn make(t: T, a: A) -> Self { IntoIter { t, a } }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("IntoIter<T, A>"),
+        "set::IntoIter must recover its own params <T, A>\n{out}"
+    );
+    assert!(
+        !out.contains("IntoIter<K, V>"),
+        "set::IntoIter must not pull map's <K, V> via the colliding bare key\n{out}"
+    );
+}

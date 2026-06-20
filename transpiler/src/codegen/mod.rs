@@ -32819,27 +32819,34 @@ impl CodeGen {
 
         let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         let mut candidates: Vec<String> = Vec::new();
-        candidates.push(segments.join("::"));
-        if let Some(last) = segments.last() {
-            candidates.push(last.clone());
-        }
-
         if segments.len() == 1 {
-            candidates.push(self.scoped_type_key(&segments[0]));
+            // A BARE simple name must resolve to the CURRENT module's type before
+            // a same-named sibling in another module. The bare key is registered
+            // for every same-named type (map::IntoIter / set::IntoIter /
+            // table::IntoIter all under `IntoIter`), so trying the bare key first
+            // pulled the wrong module's generic params (set's `IntoIter<T,A>`
+            // recovered map's `<K,V>` -> undeclared K/V). Prefer the module-scoped
+            // key; fall back to the (ambiguous) bare name only if it's absent.
+            let scoped = self.scoped_type_key(&segments[0]);
+            if scoped != segments[0] {
+                candidates.push(scoped);
+            }
+            candidates.push(segments[0].clone());
         } else {
+            candidates.push(segments.join("::"));
             match segments[0].as_str() {
-                "crate" if segments.len() > 1 => {
+                "crate" => {
                     let resolved = segments[1..].join("::");
                     candidates.push(resolved);
                 }
-                "self" if segments.len() > 1 => {
+                "self" => {
                     let mut resolved = self.module_stack.clone();
                     resolved.extend(segments[1..].iter().cloned());
                     if !resolved.is_empty() {
                         candidates.push(resolved.join("::"));
                     }
                 }
-                "super" if segments.len() > 1 => {
+                "super" => {
                     let mut resolved = if self.module_stack.len() > 1 {
                         self.module_stack[..self.module_stack.len() - 1].to_vec()
                     } else {
@@ -32851,6 +32858,11 @@ impl CodeGen {
                     }
                 }
                 _ => {}
+            }
+            // Bare simple name as a last-resort fallback (lowest priority, since
+            // it's ambiguous across modules).
+            if let Some(last) = segments.last() {
+                candidates.push(last.clone());
             }
         }
 
@@ -33056,16 +33068,24 @@ impl CodeGen {
         declared_kinds: Option<&Vec<GenericParamKind>>,
     ) -> Option<Vec<String>> {
         let declared_kinds = declared_kinds?;
+        // Try owners in PRIORITY order (most-specific first), NOT alphabetical:
+        // the bare current-struct name (`IntoIter`) collides with same-named
+        // types in sibling modules under the bare `declared_type_params` key
+        // (map/set/table all register `IntoIter`), so an alphabetical sort put
+        // the bare name first and pulled the WRONG module's params (set's
+        // `IntoIter<T,A>` recovered map's `<K,V>`). Scoped key first; bare last.
         let mut owner_candidates: Vec<String> = Vec::new();
+        if let Some(current) = self.current_struct.as_ref() {
+            owner_candidates.push(self.scoped_type_key(current));
+        }
         if let Some((owner, _)) = type_key.rsplit_once("::") {
             owner_candidates.push(owner.to_string());
         }
         if let Some(current) = self.current_struct.as_ref() {
             owner_candidates.push(current.clone());
-            owner_candidates.push(self.scoped_type_key(current));
         }
-        owner_candidates.sort();
-        owner_candidates.dedup();
+        let mut seen = HashSet::new();
+        owner_candidates.retain(|o| seen.insert(o.clone()));
 
         for owner in owner_candidates {
             let current_params = self.declared_type_params.get(&owner).or_else(|| {
