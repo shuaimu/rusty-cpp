@@ -19167,6 +19167,30 @@ fn test_unannotated_let_from_field_records_type_for_pointer_method() {
 }
 
 #[test]
+fn test_enum_variant_imported_via_module_binds_to_scoped_owner() {
+    // c2rust re-exports c-like enum variants through their MODULE:
+    // `use crate::yaml::YAML_ALIAS_EVENT`. The variant is NOT a namespace member,
+    // so `using yaml::YAML_ALIAS_EVENT;` is invalid — bind a constant to the
+    // scoped `Owner::VARIANT`, resolving the owning enum from the variant name.
+    let out = transpile_str(
+        r#"
+        pub mod yaml {
+            pub enum yaml_event_type_t { YAML_ALIAS_EVENT, YAML_SCALAR_EVENT }
+        }
+        pub mod user {
+            use crate::yaml::YAML_ALIAS_EVENT;
+            pub fn pick() -> crate::yaml::yaml_event_type_t { YAML_ALIAS_EVENT }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("yaml_event_type_t::YAML_ALIAS_EVENT"),
+        "{out}"
+    );
+    assert!(!out.contains("using yaml::YAML_ALIAS_EVENT"), "{out}");
+}
+
+#[test]
 fn test_deref_of_multistmt_block_with_generic_field_types_local() {
     // c2rust's `POP!` expands to `*{ stack.top = …; stack.top }`. Two inference
     // pieces must combine: (a) the deref's operand is a MULTI-statement block —

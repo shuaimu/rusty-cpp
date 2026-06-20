@@ -4498,24 +4498,46 @@ impl CodeGen {
                     // C++ enum class values can't be imported with `using`.
                     // Emit `constexpr auto SeqCst = ...::Ordering::SeqCst;` instead.
                     let using_segments: Vec<&str> = using_path.split("::").collect();
-                    let is_enum_variant_import = if using_segments.len() >= 2 {
+                    // The owning enum of an imported c-like variant. The parent
+                    // segment is usually the enum (`Ordering::SeqCst`), but a
+                    // c2rust-style re-export imports the variant via its MODULE
+                    // (`use crate::yaml::YAML_ALIAS_EVENT`) — there the parent is
+                    // `yaml`, so resolve the unique owning enum by variant name.
+                    let enum_variant_owner: Option<String> = if using_segments.len() >= 2 {
                         let variant = *using_segments.last().unwrap_or(&"");
                         let parent = using_segments[using_segments.len() - 2];
                         let key = format!("{}_{}", parent, variant);
-                        self.c_like_enum_consts.contains(&key)
+                        if self.c_like_enum_consts.contains(&key)
                             || (parent == "Ordering"
                                 && matches!(
                                     variant,
                                     "SeqCst" | "Acquire" | "Release" | "AcqRel" | "Relaxed"
                                 ))
+                        {
+                            Some(parent.to_string())
+                        } else {
+                            self.unique_c_like_enum_owner_for_variant_name(variant)
+                        }
                     } else {
-                        false
+                        None
                     };
-                    if is_enum_variant_import {
-                        let variant_name = using_segments.last().unwrap();
+                    if let Some(owner) = enum_variant_owner {
+                        let variant_name = *using_segments.last().unwrap();
+                        // C++20 `enum class` variants can't be `using`-imported;
+                        // bind a constant to the scoped `Owner::VARIANT`. When the
+                        // parent segment is the module (not the enum), inject the
+                        // owning enum between the module path and the variant.
+                        let variant_ref =
+                            if using_segments[using_segments.len() - 2] == owner.as_str() {
+                                using_path.clone()
+                            } else {
+                                let parent_path =
+                                    using_segments[..using_segments.len() - 1].join("::");
+                                format!("{}::{}::{}", parent_path, owner, variant_name)
+                            };
                         self.writeln(&format!(
                             "{}constexpr auto {} = {};",
-                            export_prefix, variant_name, using_path
+                            export_prefix, variant_name, variant_ref
                         ));
                     } else {
                         // Cross-module sibling detection.
