@@ -32685,3 +32685,36 @@ fn reconcile_telemetry_does_not_change_emit() {
     );
 }
 
+
+
+
+#[test]
+fn test_into_iter_cross_source_hint_not_routed_to_unqualified_rusty_ext() {
+    // serde_yaml seeds `into_iter` into external_extension_method_hints (its
+    // de::value IntoDeserializer surface). For a non-bridging receiver (a
+    // concrete type, not a Vec/array/iterator), the cross-source extension-hint
+    // fallback emitted an UNQUALIFIED `rusty_ext::into_iter(...)` lambda. When
+    // that body is emitted inside a nested `*::rusty_ext` namespace, the
+    // unqualified `rusty_ext` binds the ENCLOSING namespace (which has no
+    // into_iter member) -> hard "no member named into_iter" at every call site
+    // (serde_core's 40 errors). into_iter is a std IntoIterator method with
+    // dedicated handling and must never route through the cross-source shim.
+    let src = r#"
+        struct W;
+        fn g(w: W) { let _ = w.into_iter(); }
+    "#;
+    let file: syn::File = syn::parse_str(src).unwrap();
+    let mut cg = CodeGen::new();
+    cg.external_extension_method_hints.insert("into_iter".to_string());
+    cg.emit_file(&file, None);
+    let out = cg.into_output();
+    assert!(
+        !out.contains("rusty_ext::into_iter"),
+        "into_iter must not route through the unqualified cross-source extension shim\n{out}"
+    );
+    // It must still be lowered to *some* valid iterator form, not dropped.
+    assert!(
+        out.contains("into_iter") || out.contains("rusty::iter"),
+        "into_iter must still be emitted in a valid form\n{out}"
+    );
+}

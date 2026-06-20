@@ -9361,9 +9361,19 @@ impl CodeGen {
             // Cross-source extension hints are name-only and can collide with
             // common inherent/runtime methods (`get`, `newline`). Keep these
             // on receiver method syntax when no concrete extension path exists.
+            //
+            // The std iterator-entry methods (`into_iter`/`iter`/`iter_mut`) are
+            // IntoIterator/Iterator surface with dedicated lowering (rusty::iter,
+            // the into_iter bridge at emit_expr.rs ~5915-5940), never user
+            // extension shims. Routing them through the unqualified
+            // `rusty_ext::<m>` fallback emits a call that, inside a nested
+            // `*::rusty_ext` namespace, binds the enclosing namespace (no such
+            // member) and hard-errors (serde_core's 40 `into_iter` errors). Keep
+            // them on method syntax so the dedicated iterator handling applies.
             let skip_unqualified_cross_source_fallback = matches!(
                 method_name.as_str(),
                 "get" | "newline" | "whitespace" | "write" | "write_"
+                    | "into_iter" | "iter" | "iter_mut"
             );
             if is_cross_source_extension_hint && !skip_unqualified_cross_source_fallback {
                 // Cross-target parity transpilation can call extension shims from
