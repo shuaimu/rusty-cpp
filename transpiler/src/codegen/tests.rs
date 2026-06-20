@@ -20916,6 +20916,34 @@ fn test_leaf410_core_cmp_fallback_helpers_emitted_for_core_cmp_calls() {
 }
 
 #[test]
+fn test_partial_eq_ufcs_call_lowers_to_rusty_cmp_eq() {
+    // UFCS `PartialEq::eq(a, b)` / `PartialEq::ne(a, b)` (common in cargo-expand
+    // output and blanket impls — e.g. equivalent's `Equivalent` impl) must lower
+    // to the `rusty::cmp::eq`/`ne` runtime helpers, NOT be emitted verbatim as a
+    // bare undeclared `PartialEq::eq(...)`. Symmetric with the `.eq()` method form.
+    let out = transpile_str(
+        r#"
+        fn f<T>(a: T, b: T) {
+            PartialEq::eq(&a, &b);
+            core::cmp::PartialEq::ne(&a, &b);
+        }
+    "#,
+    );
+    assert!(
+        out.contains("rusty::cmp::eq("),
+        "PartialEq::eq UFCS must lower to rusty::cmp::eq\n{out}"
+    );
+    assert!(
+        out.contains("rusty::cmp::ne("),
+        "PartialEq::ne UFCS must lower to rusty::cmp::ne\n{out}"
+    );
+    assert!(
+        !out.contains("PartialEq::eq(") && !out.contains("PartialEq::ne("),
+        "bare PartialEq::eq/ne must not be emitted verbatim\n{out}"
+    );
+}
+
+#[test]
 fn test_leaf410_ordering_match_does_not_emit_flattened_placeholder_name() {
     let out = transpile_str(
         r#"

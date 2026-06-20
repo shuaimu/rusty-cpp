@@ -16055,6 +16055,13 @@ impl CodeGen {
             ("Ord", "cmp") if call.args.len() == 2 => "rusty::cmp::cmp",
             ("PartialOrd", "partial_cmp") if call.args.len() == 2 => "rusty::partial_cmp",
             ("Hash", "hash") if call.args.len() == 2 => "rusty::hash::hash",
+            // UFCS form `PartialEq::eq(a, b)` / `PartialEq::ne(a, b)` (common in
+            // cargo-expand output and blanket impls, e.g. equivalent's
+            // `Equivalent` impl). Symmetric with the `.eq()`/`.ne()` method-call
+            // lowering (emit_expr.rs ~6315) — both target the same `rusty::cmp`
+            // runtime helpers, which SFINAE-dispatch to `.eq()` or `==`.
+            ("PartialEq", "eq") if call.args.len() == 2 => "rusty::cmp::eq",
+            ("PartialEq", "ne") if call.args.len() == 2 => "rusty::cmp::ne",
             _ => return None,
         };
 
