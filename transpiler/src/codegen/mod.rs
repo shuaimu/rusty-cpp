@@ -7759,23 +7759,51 @@ impl CodeGen {
     /// blocks keyed by (host_type, method). Only considers inherent impls
     /// (no trait clause) so we don't conflate trait impls' methods.
     fn walk_items_for_parallel_impls(
+        &self,
         items: &[syn::Item],
+        module_path: &[String],
         groups: &mut HashMap<(String, String), Vec<Vec<String>>>,
     ) {
         for item in items {
             match item {
                 syn::Item::Mod(m) => {
                     if let Some((_, nested)) = &m.content {
-                        Self::walk_items_for_parallel_impls(nested, groups);
+                        let mut nested_path = module_path.to_vec();
+                        nested_path.push(m.ident.to_string());
+                        self.walk_items_for_parallel_impls(nested, &nested_path, groups);
                     }
                 }
                 syn::Item::Impl(impl_block) => {
                     if impl_block.trait_.is_some() {
                         continue;
                     }
-                    let Some(host) = Self::type_path_leaf_name(&impl_block.self_ty) else {
+                    // Key the group by the MODULE-QUALIFIED host type path (the
+                    // same qualification collect_impl_blocks uses), NOT the bare
+                    // leaf name. Otherwise same-short-named sibling types in
+                    // different modules — e.g. map::OccupiedEntry<K,V,S,A> vs
+                    // set::OccupiedEntry<T,S,A> vs table::OccupiedEntry<T,A> —
+                    // share one group, and the first-declared sibling's params
+                    // poison the others (T -> K substitution into a struct that
+                    // only declares T). Qualifying separates the families so
+                    // each keeps its own params. Same-module siblings (the
+                    // legitimate BTreeMap LazyLeafRange marker case) still group
+                    // because their qualified path is identical.
+                    let Some(tp) = Self::impl_self_type_path(impl_block.self_ty.as_ref()) else {
                         continue;
                     };
+                    let raw_type_name = tp
+                        .path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    let host = qualify_impl_type_name(
+                        &raw_type_name,
+                        module_path,
+                        &self.declared_item_names,
+                        &self.local_declared_types,
+                    );
                     let Some(args) = Self::extract_class_template_args(&impl_block.self_ty)
                     else {
                         continue;

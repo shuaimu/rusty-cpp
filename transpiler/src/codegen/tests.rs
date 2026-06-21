@@ -18333,6 +18333,48 @@ fn test_cluster_c_parallel_impl_blocks_generalize_concrete_marker() {
 }
 
 #[test]
+fn test_parallel_impl_does_not_conflate_same_named_siblings_across_modules() {
+    // Two DISTINCT types share a short name in different modules:
+    // map::OccupiedEntry<K, V> and table::OccupiedEntry<T>. The Cluster-C
+    // parallel-impl pre-pass must NOT group them (they are different types
+    // that merely share a leaf name). Before the module-qualified re-key, the
+    // pre-pass grouped by bare name `OccupiedEntry`, took the first-declared
+    // (map) sibling's params [K, V], saw position 0 differ (K vs T), and
+    // emitted a T->K substitution that corrupted table's `get(&self) -> &T`
+    // into `const K& get()` — with K undeclared in `OccupiedEntry<T>`.
+    let out = transpile_str(
+        r#"
+        mod map {
+            pub struct OccupiedEntry<K, V> { pub k: K, pub v: V }
+            impl<K, V> OccupiedEntry<K, V> {
+                pub fn get(&self) -> &K { &self.k }
+            }
+        }
+        mod table {
+            pub struct OccupiedEntry<T> { pub t: T }
+            impl<T> OccupiedEntry<T> {
+                pub fn get(&self) -> &T { &self.t }
+            }
+        }
+        "#,
+    );
+    // table::OccupiedEntry<T>::get must keep its own param T — the decisive
+    // flip (absent before the fix, where it was poisoned to `const K& get`).
+    assert!(
+        out.contains("const T& get()"),
+        "table sibling's method must keep its own param T, not the map \
+         sibling's K:\n{out}"
+    );
+    // Exactly one K-returning get (the map sibling's own), not two.
+    assert_eq!(
+        out.matches("const K& get()").count(),
+        1,
+        "only map::OccupiedEntry<K,V>::get should return K; table's must not \
+         be conflated:\n{out}"
+    );
+}
+
+#[test]
 fn test_cluster_a_completion_template_args_recovery_in_absorbed_method() {
     // Cluster A completion: in addition to dropping the undeducible
     // method-template params, also (1) substitute the dropped-generic

@@ -3840,13 +3840,24 @@ impl CodeGen {
     /// whichever impl's method got absorbed into the merged C++ struct.
     pub(super) fn collect_parallel_impl_groups(&mut self, items: &[syn::Item]) {
         // (host_type_name, method_ident) → Vec<class-template-args-of-this-impl>
+        // host_type_name is MODULE-QUALIFIED (see walk_items_for_parallel_impls)
+        // so sibling families across modules never share a group.
         let mut groups: HashMap<(String, String), Vec<Vec<String>>> = HashMap::new();
-        Self::walk_items_for_parallel_impls(items, &mut groups);
+        self.walk_items_for_parallel_impls(items, &[], &mut groups);
 
         let mut nested_marker_subs: HashMap<(String, String), Vec<(String, String)>> =
             HashMap::new();
         for ((host_type_name, method_ident), arg_vec_list) in groups {
             if arg_vec_list.len() < 2 {
+                continue;
+            }
+            // Arity guard: a parallel-impl group must have a uniform
+            // class-template-arg width — impls of genuinely the same host type
+            // share an arity. Differing widths mean distinct types were
+            // conflated (which qualified keying should already prevent); skip
+            // rather than emit cross-arity substitutions.
+            let group_width = arg_vec_list[0].len();
+            if arg_vec_list.iter().any(|a| a.len() != group_width) {
                 continue;
             }
             // Look up host class params; need positions to know what each
