@@ -3372,6 +3372,22 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 return None;
             }
         }
+        // A `_` placeholder in a call turbofish would render as `auto`, which
+        // C++ forbids in an explicit template-argument list (e.g.
+        // `make_hasher::<_, V, S>` -> `make_hasher<auto, V, S>`). C++ also has
+        // no partial turbofish — you cannot keep the concrete suffix and skip
+        // the leading slot — so drop the WHOLE turbofish and let the call
+        // deduce its arguments, matching how the transpiler already emits the
+        // no-turbofish form of the same call. This is strictly safe: a
+        // turbofish containing `auto` is always a hard error, so no
+        // currently-compiling call site changes behavior.
+        if args
+            .args
+            .iter()
+            .any(|arg| matches!(arg, syn::GenericArgument::Type(t) if self.type_contains_infer(t)))
+        {
+            return None;
+        }
         let mapped_args: Vec<String> = args
             .args
             .iter()

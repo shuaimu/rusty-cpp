@@ -2832,6 +2832,61 @@ fn test_leaf415432_nested_local_fn_turbofish_call_drops_template_args() {
 }
 
 #[test]
+fn test_call_turbofish_infer_placeholder_drops_whole_turbofish() {
+    // A `_` placeholder in a call turbofish would render as `auto`, which C++
+    // forbids in an explicit template-argument list (and C++ has no partial
+    // turbofish, so the concrete suffix can't be kept while skipping the
+    // leading slot). The whole turbofish is dropped and the call left to
+    // deduce. Regression for hashbrown `make_hasher::<_, V, S>` (12 "'auto'
+    // not allowed in template argument" errors).
+    let out = transpile_str(
+        r#"
+        mod map {
+            fn make_hasher<Q, V, S>(s: &S) -> u64 { 0 }
+            struct HashMap<K, V, S> { hb: S }
+            impl<K, V, S> HashMap<K, V, S> {
+                fn reserve(&self, s: &S) -> u64 {
+                    make_hasher::<_, V, S>(s)
+                }
+            }
+        }
+    "#,
+    );
+    assert!(
+        out.contains("return make_hasher(s);"),
+        "placeholder turbofish should drop to a plain call:\n{out}"
+    );
+    assert!(
+        !out.contains("make_hasher<auto"),
+        "`auto` must never leak into an explicit template-argument list:\n{out}"
+    );
+}
+
+#[test]
+fn test_call_turbofish_concrete_args_preserved() {
+    // Guard against over-dropping: a turbofish with only CONCRETE args (no `_`)
+    // must keep its explicit template arguments. Same call shape as the
+    // placeholder test, differing only in `i32` vs `_` in the first slot.
+    let out = transpile_str(
+        r#"
+        mod map {
+            fn make_hasher<Q, V, S>(s: &S) -> u64 { 0 }
+            struct HashMap<K, V, S> { hb: S }
+            impl<K, V, S> HashMap<K, V, S> {
+                fn reserve(&self, s: &S) -> u64 {
+                    make_hasher::<i32, V, S>(s)
+                }
+            }
+        }
+    "#,
+    );
+    assert!(
+        out.contains("make_hasher<int32_t, V, S>(s)"),
+        "concrete turbofish args must be preserved:\n{out}"
+    );
+}
+
+#[test]
 fn test_leaf415432_assume_init_uses_expected_type_for_maybe_uninit_receiver() {
     let out = transpile_str(
         r#"
