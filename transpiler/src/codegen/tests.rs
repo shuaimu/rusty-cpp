@@ -32832,6 +32832,28 @@ fn test_sibling_same_named_generic_type_recovers_own_params_not_collide() {
 }
 
 #[test]
+fn test_copy_struct_by_value_self_method_is_const() {
+    // A `Copy` struct's fields are all `Copy`, so a by-value-`self` method can
+    // never move out of `self` and must be emitted as a C++ `const` method —
+    // otherwise it can't be called on a const receiver (hashbrown's `Tag`/
+    // `Group` predicate methods). `Copy` arrives as an `impl Copy for X` block
+    // in expanded (cargo-expand) source, which is what gets transpiled.
+    let out = transpile_str(
+        r#"
+        pub struct Tag(u8);
+        impl ::core::marker::Copy for Tag {}
+        impl Tag {
+            pub fn is_special(self) -> bool { self.0 & 1 != 0 }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("is_special() const"),
+        "by-value-self method on a Copy struct must be a const method\n{out}"
+    );
+}
+
+#[test]
 fn test_crate_declaring_std_named_type_keeps_self_refs_local() {
     // A std-library port that DEFINES its own `HashMap` (hashbrown) must keep
     // bare self-references local, not rewrite them to the umbrella

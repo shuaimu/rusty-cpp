@@ -2509,6 +2509,11 @@ impl CodeGen {
                         continue;
                     }
                     let is_drop_trait = trait_name.as_deref() == Some("Drop");
+                    if trait_name.as_deref() == Some("Copy") {
+                        self.copy_derived_types.insert(type_name.clone());
+                        let scoped = self.scoped_type_key(&type_name);
+                        self.copy_derived_types.insert(scoped);
+                    }
                     let op_name = trait_name
                         .as_ref()
                         .and_then(|name| map_operator_trait(name).map(|s| s.to_string()));

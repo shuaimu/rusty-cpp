@@ -906,6 +906,12 @@ pub struct CodeGen {
     pub(crate) iflet_result_counter: usize,
     /// Named struct field types for local type-context recovery in match lowering.
     pub(crate) struct_field_types: HashMap<String, HashMap<String, syn::Type>>,
+    /// Type keys (bare + scoped) that derive/impl `Copy`. A `Copy` struct's
+    /// fields are all `Copy`, so a by-value-`self` method can never move out of
+    /// `self` — it must be emitted as a C++ `const` method (otherwise it can't
+    /// be called on a const receiver; e.g. hashbrown's `Tag`/`Group` predicate
+    /// methods). Populated in the `collect_impl_blocks` pre-pass.
+    pub(crate) copy_derived_types: HashSet<String>,
     /// Named struct field declaration order keyed by struct name.
     /// Used for constructor-style lowering when designated initializers are unavailable.
     pub(crate) struct_field_order: HashMap<String, Vec<String>>,
@@ -1600,6 +1606,7 @@ impl CodeGen {
             unwrap_tmp_counter: std::cell::Cell::new(0),
             iflet_result_counter: 0,
             struct_field_types: HashMap::new(),
+            copy_derived_types: HashSet::new(),
             struct_field_order: HashMap::new(),
             struct_field_cpp_names: HashMap::new(),
             struct_reference_fields: HashMap::new(),
@@ -2698,6 +2705,7 @@ impl CodeGen {
         self.forward_emitted_consts.clear();
         self.module_body_forward_decl_pass = false;
         self.struct_field_types.clear();
+        self.copy_derived_types.clear();
         self.struct_field_order.clear();
         self.struct_field_cpp_names.clear();
         self.struct_reference_fields.clear();
@@ -16286,6 +16294,19 @@ impl CodeGen {
                 _ => return peeled,
             }
         }
+    }
+
+    /// True when the struct currently being emitted derives/impls `Copy`. Its
+    /// fields are all `Copy`, so a by-value-`self` method cannot move out of
+    /// `self` and is safe to emit as a C++ `const` method.
+    fn current_struct_is_copy(&self) -> bool {
+        let Some(struct_name) = self.current_struct.as_ref() else {
+            return false;
+        };
+        self.copy_derived_types.contains(struct_name)
+            || self
+                .copy_derived_types
+                .contains(&self.scoped_type_key(struct_name))
     }
 
     fn current_struct_is_bitflags_like(&self) -> bool {

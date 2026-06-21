@@ -5386,6 +5386,7 @@ impl CodeGen {
                     ("".to_string(), false)
                 } else if Self::body_moves_out_self_field(&method.block)
                     && !self.current_struct_is_bitflags_like()
+                    && !self.current_struct_is_copy()
                 {
                     // `fn foo(self)` whose body moves a non-Copy field
                     // out of `self` (e.g. `Foo { kv: self.kv, ... }`
