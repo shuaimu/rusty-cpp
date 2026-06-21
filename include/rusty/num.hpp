@@ -464,6 +464,22 @@ constexpr std::uint32_t count_zeros(const num::NonZero<T>& value) {
     return count_zeros(value.get());
 }
 
+// Rust `iN/uN::swap_bytes(self) -> Self` — reverse the byte order.
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T swap_bytes(T value) {
+    using U = std::make_unsigned_t<T>;
+    return static_cast<T>(std::byteswap(static_cast<U>(value)));
+}
+
+// Rust `uN::is_power_of_two(self) -> bool` — exactly one bit set (0 is not a power of two).
+template<typename T>
+requires std::is_integral_v<T>
+constexpr bool is_power_of_two(T value) {
+    using U = std::make_unsigned_t<T>;
+    return std::has_single_bit(static_cast<U>(value));
+}
+
 template<typename T>
 requires num::is_nonzero_integral_v<std::remove_cvref_t<T>>
 constexpr std::remove_cvref_t<T> wrapping_neg(T value) {

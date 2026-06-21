@@ -32832,6 +32832,37 @@ fn test_sibling_same_named_generic_type_recovers_own_params_not_collide() {
 }
 
 #[test]
+fn test_integer_intrinsic_methods_lower_on_field_chain_and_param_receivers() {
+    // Rust integer-trait methods (leading_zeros / swap_bytes / is_power_of_two)
+    // only exist on primitive integers, so they must lower to `rusty::` free
+    // functions even when the receiver's type can't be inferred — a tuple-struct
+    // field (`self.0`), a chained intrinsic (`x.swap_bytes().leading_zeros()`),
+    // or a bare function parameter. Otherwise they emit `.method()` on a
+    // primitive and fail to compile (hashbrown's SIMD bitmask path).
+    let out = transpile_str(
+        r#"
+        struct BitMask(u16);
+        impl BitMask {
+            fn lowest(&self) -> u32 { self.0.swap_bytes().leading_zeros() }
+        }
+        fn is_pow2(n: usize) -> bool { n.is_power_of_two() }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::leading_zeros(rusty::swap_bytes(this->_0))"),
+        "field + chained integer intrinsics must lower to rusty:: free fns\n{out}"
+    );
+    assert!(
+        out.contains("rusty::is_power_of_two(n)"),
+        "is_power_of_two on a parameter must lower to rusty::is_power_of_two\n{out}"
+    );
+    assert!(
+        !out.contains(".swap_bytes()") && !out.contains(".is_power_of_two()"),
+        "no integer intrinsic should remain as a `.method()` call on a primitive\n{out}"
+    );
+}
+
+#[test]
 fn test_module_alias_resolved_in_sibling_reexport() {
     // `use sse2 as imp;` is a MODULE rename. A sibling module's re-export
     // resolved transitively through `control::group`'s `pub use self::imp::X`

@@ -1840,12 +1840,21 @@ impl CodeGen {
                 return true;
             }
         }
+        // Every caller of this predicate has already matched the method name
+        // against an integer-EXCLUSIVE intrinsic (leading_zeros, swap_bytes,
+        // is_power_of_two, to_le, …). Those methods only exist on primitive
+        // integers in valid Rust, so when type inference can't pin the receiver
+        // down (a tuple-struct field like `self.0`, or a chained intrinsic such
+        // as `x.swap_bytes().leading_zeros()`), accepting it is sound — the
+        // method name itself guarantees an integer receiver.
         matches!(
             peeled,
             syn::Expr::Binary(_)
                 | syn::Expr::Cast(_)
                 | syn::Expr::Paren(_)
                 | syn::Expr::Group(_)
+                | syn::Expr::Field(_)
+                | syn::Expr::MethodCall(_)
                 | syn::Expr::Lit(syn::ExprLit {
                     lit: syn::Lit::Int(_),
                     ..
