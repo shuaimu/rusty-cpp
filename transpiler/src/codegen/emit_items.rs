@@ -4176,7 +4176,7 @@ impl CodeGen {
 
         // Detect external crate imports
         let root_ident = self.get_use_root(&u.tree);
-        let mapped_external_root = self.external_crate_module_aliases.get(&root_ident);
+        let mapped_external_root = self.name_resolver.external_crate_target(&root_ident);
         let root_is_scope_import = self
             .resolve_scope_import_binding_path(&root_ident)
             .or_else(|| self.resolve_scope_import_binding_path_for_scope("", &root_ident))

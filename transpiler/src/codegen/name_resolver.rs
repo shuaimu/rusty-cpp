@@ -31,9 +31,23 @@ pub(crate) struct NameResolver {
     /// `std` must not rewrite an unrelated Rust `std::…` path). Consumers look
     /// them up single-hop via `cpp_binding` / iterate via `cpp_bindings`.
     cpp_module_bindings: HashMap<String, String>,
+    /// External-crate-root -> transpiled C++ module namespace (e.g.
+    /// `serde_core -> serde_core` identity, `itoa -> ""` strip). CRATE-LIFETIME
+    /// config set once via `set_external_crate_aliases` (from transpile
+    /// options), NOT per-file collected — so it is deliberately NOT touched by
+    /// `clear()`. Kept separate from `alias_edges` because its values carry
+    /// strip/identity/presence semantics (empty target = strip; identity edge
+    /// must remain a queryable presence) that the `add_alias`/`resolve_prefix`
+    /// engine does not model. Consumers look up single-hop via
+    /// `external_crate_target` and do their own empty-string / presence
+    /// branching, exactly as before.
+    external_crate_aliases: HashMap<String, String>,
 }
 
 impl NameResolver {
+    /// Clears only the PER-FILE collected state (`alias_edges`,
+    /// `cpp_module_bindings`). `external_crate_aliases` is crate-lifetime config
+    /// and is intentionally preserved across files.
     pub(crate) fn clear(&mut self) {
         self.alias_edges.clear();
         self.cpp_module_bindings.clear();
@@ -62,6 +76,20 @@ impl NameResolver {
     /// Iterate `(binding, module_path)` for the `use cpp::…` interop bindings.
     pub(crate) fn cpp_bindings(&self) -> impl Iterator<Item = (&String, &String)> {
         self.cpp_module_bindings.iter()
+    }
+
+    /// Replace the crate-lifetime external-crate-root -> C++ module map (from
+    /// transpile options). Mirrors the prior whole-map assignment.
+    pub(crate) fn set_external_crate_aliases(&mut self, aliases: HashMap<String, String>) {
+        self.external_crate_aliases = aliases;
+    }
+
+    /// Single-hop lookup of an external-crate root's mapped C++ module path.
+    /// Returns `&String` (not `&str`) so callers' existing `.trim()/.is_empty()/
+    /// .clone()` and empty-string-strip branching are unchanged from when this
+    /// was a bare `HashMap::get`.
+    pub(crate) fn external_crate_target(&self, root: &str) -> Option<&String> {
+        self.external_crate_aliases.get(root)
     }
 
     /// Record `alias -> target`. First writer wins (matches the `or_insert`

@@ -1375,9 +1375,9 @@ pub struct CodeGen {
     pub(crate) recursive_nested_fns_in_scope: Vec<HashSet<String>>,
     /// User-provided type mappings for external crate types.
     pub(crate) user_type_map: types::UserTypeMap,
-    /// Maps Rust external crate roots (e.g., `serde_core`) to transpiled C++ module
-    /// namespaces available in the current build unit.
-    pub(crate) external_crate_module_aliases: HashMap<String, String>,
+    // Maps Rust external crate roots (e.g., `serde_core`) to transpiled C++
+    // module namespaces — now lives on `name_resolver`
+    // (set_external_crate_aliases / external_crate_target).
     /// Forward-declared cyclic type names for proper emission ordering.
     /// Populated during `topological_sort_structs` when cycles are detected.
     pub(crate) cyclic_type_names: HashSet<String>,
@@ -1723,7 +1723,6 @@ impl CodeGen {
             recursive_nested_fn_self_emit_stack: Vec::new(),
             recursive_nested_fns_in_scope: Vec::new(),
             user_type_map: types::UserTypeMap::default(),
-            external_crate_module_aliases: HashMap::new(),
             cyclic_type_names: HashSet::new(),
             unsupported_by_value_cycle_diagnostics: Vec::new(),
             unsupported_by_value_cycle_keys: HashSet::new(),
@@ -2476,7 +2475,8 @@ impl CodeGen {
         &mut self,
         external_crate_module_aliases: HashMap<String, String>,
     ) {
-        self.external_crate_module_aliases = external_crate_module_aliases;
+        self.name_resolver
+            .set_external_crate_aliases(external_crate_module_aliases);
     }
 
     pub fn set_use_import_std_in_modules(&mut self, enabled: bool) {
@@ -10081,7 +10081,7 @@ impl CodeGen {
         if !Self::should_prefix_named_module_root_type(type_name) {
             return None;
         }
-        let mapped_root = self.external_crate_module_aliases.get(crate_root)?;
+        let mapped_root = self.name_resolver.external_crate_target(crate_root)?;
         let module_name = if mapped_root.trim().is_empty() {
             crate_root
         } else {
@@ -15200,7 +15200,7 @@ impl CodeGen {
         if matches!(root.as_str(), "std" | "core" | "alloc" | "test") {
             return None;
         }
-        let mapped = self.external_crate_module_aliases.get(&root);
+        let mapped = self.name_resolver.external_crate_target(&root);
         let mut module_path = mapped
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -16028,13 +16028,13 @@ impl CodeGen {
             return format!("{} = {}", alias, mapped_target);
         }
         let Some((root, rest)) = path.split_once("::") else {
-            return match self.external_crate_module_aliases.get(path) {
+            return match self.name_resolver.external_crate_target(path) {
                 Some(mapped_root) if mapped_root.is_empty() => path.to_string(),
                 Some(mapped_root) => mapped_root.clone(),
                 None => path.to_string(),
             };
         };
-        let Some(mapped_root) = self.external_crate_module_aliases.get(root) else {
+        let Some(mapped_root) = self.name_resolver.external_crate_target(root) else {
             return path.to_string();
         };
         if mapped_root.is_empty() {
@@ -16055,7 +16055,7 @@ impl CodeGen {
             return Vec::new();
         }
         let root = &segments[0];
-        let Some(mapped_root) = self.external_crate_module_aliases.get(root) else {
+        let Some(mapped_root) = self.name_resolver.external_crate_target(root) else {
             return segments.to_vec();
         };
         let mut rewritten: Vec<String> = Vec::new();
