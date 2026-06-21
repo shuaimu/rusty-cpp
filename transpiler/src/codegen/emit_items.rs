@@ -1839,6 +1839,20 @@ impl CodeGen {
             self.data_enum_variant_indices_by_enum
                 .remove(&scoped_enum_name);
         }
+        // Compute the where-bound `requires (...)` constraints BEFORE pushing the
+        // type-param scope. collect_emitted_template_parts filters out params that
+        // are "already visible for emission" (it returns no constraints once the
+        // param list is empty), so after push_type_param_scope this would yield
+        // nothing. The wrapper-struct DEFINITION must repeat the same requires
+        // clause its forward declaration emits (via emit_template_declaration_
+        // without_type_defaults → the same helper) or C++ rejects the redeclaration.
+        let wrapper_template_constraints: Vec<String> = {
+            let prev = self.in_constraint_emit.get();
+            self.in_constraint_emit.set(true);
+            let (_, constraints) = self.collect_emitted_template_parts(&e.generics, false);
+            self.in_constraint_emit.set(prev);
+            constraints
+        };
         self.push_type_param_scope(&e.generics);
 
         // Collect type parameters (skip lifetimes)
@@ -2123,6 +2137,18 @@ impl CodeGen {
                 let variant_type = format!("std::variant<{}>", variant_list.join(", "));
                 if has_generics {
                     self.writeln(&template_prefix);
+                    // Repeat the where-bound `requires (...)` clause on the
+                    // wrapper struct DEFINITION so it matches the forward
+                    // declaration emitted by the pre-pass. C++ rejects a
+                    // definition whose requires-clause differs from a prior
+                    // declaration; the data-enum prefix is built from
+                    // type_params only and omits the constraint, so emit it here.
+                    if !wrapper_template_constraints.is_empty() {
+                        self.writeln(&format!(
+                            "    requires ({})",
+                            wrapper_template_constraints.join(" && ")
+                        ));
+                    }
                 }
                 self.writeln(&format!("struct {} : {} {{", name, variant_type));
                 self.indent += 1;

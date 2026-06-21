@@ -10342,6 +10342,60 @@ fn test_inline_mod_enum_impl_methods_merged_into_wrapper() {
 }
 
 #[test]
+fn test_data_enum_wrapper_struct_definition_repeats_where_requires_clause() {
+    // A data enum with a where-bound constraint that uses the struct-wrapper
+    // form (it has an impl block) must repeat the `requires (...)` clause on its
+    // DEFINITION so it matches the forward declaration the pre-pass emits.
+    // Without it, C++ rejects the redeclaration with "requires clause differs in
+    // template redeclaration". Regression for the standalone hashbrown
+    // mono-module (table::Entry / map::Entry / EntryRef all hit this).
+    let out = transpile_str(
+        r#"
+        mod inner {
+            enum Entry<T, A = Global>
+            where
+                A: Allocator,
+            {
+                Occupied(T),
+                Vacant(A),
+            }
+            impl<T, A: Allocator> Entry<T, A> {
+                fn is_occupied(&self) -> bool { true }
+            }
+        }
+    "#,
+    );
+
+    // The wrapper struct DEFINITION must carry the requires clause, sitting
+    // between its `template<...>` prefix and the `struct ... : std::variant<`.
+    let def_pos = out
+        .find("struct Entry : std::variant<")
+        .unwrap_or_else(|| panic!("wrapper struct definition missing:\n{out}"));
+    let preceding = &out[..def_pos];
+    let last_requires = preceding
+        .rfind("requires (rusty::alloc::Allocator<A>)")
+        .unwrap_or_else(|| {
+            panic!("definition must repeat the where-bound requires clause:\n{out}")
+        });
+    let last_template = preceding
+        .rfind("template<typename T, typename A>")
+        .unwrap_or_else(|| panic!("definition template prefix missing:\n{out}"));
+    assert!(
+        last_template < last_requires && last_requires < def_pos,
+        "requires clause must sit between the template prefix and the struct \
+         definition:\n{out}"
+    );
+
+    // Both the forward declaration and the definition must carry it so the two
+    // template redeclarations match.
+    assert!(
+        out.matches("requires (rusty::alloc::Allocator<A>)").count() >= 2,
+        "both the forward declaration and the definition must carry the requires \
+         clause:\n{out}"
+    );
+}
+
+#[test]
 fn test_merged_impl_namespace_is_forward_declared_before_struct_methods() {
     let out = transpile_str(
         r#"
