@@ -3285,8 +3285,8 @@ impl CodeGen {
         }
     }
 
-    /// Collect crate-wide `extern crate <crate> as <alias>;` renames into
-    /// `extern_crate_aliases` (`alias -> crate`). `extern crate` aliases are
+    /// Collect crate-wide `extern crate <crate> as <alias>;` renames as alias
+    /// edges in the name resolver (`alias -> crate`). `extern crate` aliases are
     /// crate-global in Rust, so this recurses the whole item tree (including
     /// `const _: () = { … }` expansion wrappers) regardless of module scope.
     pub(super) fn collect_extern_crate_aliases(&mut self, items: &[syn::Item]) {
@@ -3296,8 +3296,8 @@ impl CodeGen {
                     if let Some((_, rename)) = &ec.rename {
                         let alias = rename.to_string();
                         let target = ec.ident.to_string();
-                        if alias != target && alias != "_" {
-                            self.extern_crate_aliases.insert(alias, target);
+                        if alias != "_" {
+                            self.name_resolver.add_alias(alias, target);
                         }
                     }
                 }
@@ -3320,34 +3320,8 @@ impl CodeGen {
         }
     }
 
-    /// Rewrite a leading `<extern-crate-alias>::` segment of a path to the real
-    /// crate root (e.g. `stdalloc::alloc::Layout` -> `alloc::alloc::Layout` for
-    /// `extern crate alloc as stdalloc;`). Leaves a leading `::` intact and is a
-    /// no-op when no alias matches the first segment.
-    pub(super) fn normalize_extern_crate_alias_path(&self, path: &str) -> String {
-        if self.extern_crate_aliases.is_empty() {
-            return path.to_string();
-        }
-        let leading = path.starts_with("::");
-        let trimmed = path.trim_start_matches("::");
-        let mut segs = trimmed.split("::");
-        let Some(first) = segs.next() else {
-            return path.to_string();
-        };
-        let Some(real) = self.extern_crate_aliases.get(first) else {
-            return path.to_string();
-        };
-        let rest: Vec<&str> = segs.collect();
-        let joined = if rest.is_empty() {
-            real.clone()
-        } else {
-            format!("{}::{}", real, rest.join("::"))
-        };
-        if leading { format!("::{}", joined) } else { joined }
-    }
-
-    /// Collect intra-crate `use <module> as <alias>;` renames into
-    /// `module_path_aliases` (`<scope>::<alias>` -> `<scope>::<target-module>`).
+    /// Collect intra-crate `use <module> as <alias>;` renames as alias edges in
+    /// the name resolver (`<scope>::<alias>` -> `<scope>::<target-module>`).
     /// Two walks: first gather every declared module's full path, then record a
     /// rename only when its target resolves to one of those modules (so a
     /// type/value `use Foo as Bar` is never mistaken for a module alias).
@@ -3421,7 +3395,7 @@ impl CodeGen {
                         } else {
                             format!("{}::{}", module_path.join("::"), alias)
                         };
-                        self.module_path_aliases.insert(alias_full, cand);
+                        self.name_resolver.add_alias(alias_full, cand);
                         return;
                     }
                 }
@@ -3436,34 +3410,6 @@ impl CodeGen {
             }
             _ => {}
         }
-    }
-
-    /// Expand a fully-qualified `use <mod> as <alias>` rename that appears as an
-    /// interior path-prefix segment (`control::group::imp::X` ->
-    /// `control::group::sse2::X`). No-op when no recorded alias prefixes `path`.
-    pub(super) fn normalize_module_path_aliases(&self, path: &str) -> String {
-        if self.module_path_aliases.is_empty() {
-            return path.to_string();
-        }
-        let leading = path.starts_with("::");
-        let trimmed = path.trim_start_matches("::");
-        for (alias_full, target) in &self.module_path_aliases {
-            let rewritten = if trimmed == alias_full {
-                Some(target.clone())
-            } else {
-                trimmed
-                    .strip_prefix(&format!("{}::", alias_full))
-                    .map(|rest| format!("{}::{}", target, rest))
-            };
-            if let Some(rewritten) = rewritten {
-                return if leading {
-                    format!("::{}", rewritten)
-                } else {
-                    rewritten
-                };
-            }
-        }
-        path.to_string()
     }
 
     pub(super) fn collect_scope_import_bindings(&mut self, items: &[syn::Item], module_path: &[String]) {

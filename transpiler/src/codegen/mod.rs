@@ -1243,22 +1243,12 @@ pub struct CodeGen {
     /// Enables order-independent path lowering for names introduced by `use` items
     /// that may appear later in source order than their first use.
     pub(crate) scope_import_bindings: HashMap<(String, String), HashSet<String>>,
-    /// Crate-wide `extern crate <crate> as <alias>;` renames (`alias -> crate`).
-    /// `extern crate` aliases are crate-global in Rust, so a leading `<alias>::`
-    /// segment anywhere must resolve to the real crate root (e.g. hashbrown's
-    /// `extern crate alloc as stdalloc;` -> `stdalloc::alloc::Layout` is really
-    /// `alloc::alloc::Layout`). Collected in a pre-pass so use-import targets can
-    /// be normalized before they are recorded/qualified.
-    pub(crate) extern_crate_aliases: HashMap<String, String>,
-    /// Intra-crate `use <module> as <alias>;` renames, as fully-qualified
-    /// `<scope>::<alias>` -> `<scope>::<target-module>` (e.g. hashbrown's
-    /// `use sse2 as imp;` in `control::group` -> `control::group::imp` ->
-    /// `control::group::sse2`). Unlike type/value `use … as …` (which become
-    /// import aliases) a module rename must be expanded wherever it appears as
-    /// an interior path segment — most importantly when a SIBLING module's
-    /// re-export is resolved transitively through it (`control::bitmask`'s
-    /// `use super::group::X` follows group's `pub use self::imp::X`).
-    pub(crate) module_path_aliases: HashMap<String, String>,
+    /// Unified alias/path resolution engine. Absorbs `extern crate X as Y`
+    /// (`stdalloc -> alloc`) and `use <mod> as <alias>` (`control::group::imp ->
+    /// control::group::sse2`) as alias EDGES, resolved transitively to a
+    /// fixpoint. Replaces the former per-flavor `extern_crate_aliases` /
+    /// `module_path_aliases` maps + their single-hop `normalize_*` helpers.
+    pub(crate) name_resolver: name_resolver::NameResolver,
     /// In-progress guards for nonlocal type-tail resolution.
     /// Prevents recursive fallback cycles (`emit_path_to_string` <-> nonlocal lookup).
     pub(crate) nonlocal_type_resolution_in_progress: std::cell::RefCell<HashSet<String>>,
@@ -1700,8 +1690,7 @@ impl CodeGen {
             import_alias_names: HashSet::new(),
             module_scope_namespace_aliases: HashSet::new(),
             scope_import_bindings: HashMap::new(),
-            extern_crate_aliases: HashMap::new(),
-            module_path_aliases: HashMap::new(),
+            name_resolver: name_resolver::NameResolver::default(),
             nonlocal_type_resolution_in_progress: std::cell::RefCell::new(HashSet::new()),
             expr_type_inference_in_progress: std::cell::RefCell::new(HashSet::new()),
             cpp_module_import_bindings: HashMap::new(),
@@ -2644,8 +2633,7 @@ impl CodeGen {
         self.import_alias_names.clear();
         self.module_scope_namespace_aliases.clear();
         self.scope_import_bindings.clear();
-        self.extern_crate_aliases.clear();
-        self.module_path_aliases.clear();
+        self.name_resolver.clear();
         self.cpp_module_import_bindings.clear();
         self.cpp_module_import_paths.clear();
         self.cpp_module_import_path_keys.clear();
@@ -7570,10 +7558,10 @@ impl CodeGen {
 
 
     fn record_scope_import_binding(&mut self, module_path: &[String], raw_path: &str) {
-        // Resolve a leading `extern crate … as <alias>` segment first
-        // (`stdalloc::alloc::Layout` -> `alloc::alloc::Layout`) so the alias never
-        // leaks into the recorded binding or downstream path mangling.
-        let raw_path = self.normalize_extern_crate_alias_path(raw_path);
+        // Resolve any leading alias segment first (`extern crate … as <alias>`
+        // / `use <mod> as <alias>`, transitively via the name resolver) so the
+        // alias never leaks into the recorded binding or downstream mangling.
+        let raw_path = self.name_resolver.resolve_prefix(raw_path);
         let raw_path = raw_path.as_str();
         let rewritten = self.rewrite_external_crate_import_path(raw_path);
         let resolved = self.resolve_unqualified_local_import_path(&rewritten);
@@ -15741,6 +15729,19 @@ impl CodeGen {
             return None;
         }
         let resolved = candidates.pop()?;
+        // A flat `parent::Leaf` re-export must not silently resolve into a type
+        // nested two-or-more submodules below `parent`. An umbrella namespace's
+        // `private_::Content` loosely matches `private_::ser::content::Content`,
+        // but that is an arbitrary pick among same-leaf siblings (the `de` side
+        // also declares `Content`) rather than a genuine re-export target, so it
+        // binds the wrong type. Keep such paths flat (return None) — matches the
+        // pre-module-alias-resolution behavior and lets the emitter's own
+        // `using` alias bind the correct type.
+        let parent_depth = parent.split("::").filter(|s| !s.is_empty()).count();
+        let resolved_depth = resolved.split("::").filter(|s| !s.is_empty()).count();
+        if resolved_depth.saturating_sub(parent_depth) >= 3 {
+            return None;
+        }
         if path.starts_with("::") {
             Some(format!("::{}", resolved))
         } else {
@@ -45505,6 +45506,7 @@ mod emit_items;
 mod emit_stmt;
 mod inference;
 mod lookups;
+mod name_resolver;
 mod paths;
 mod predicates;
 mod symbol_category;

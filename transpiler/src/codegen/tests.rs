@@ -32869,3 +32869,34 @@ fn test_module_alias_resolved_in_sibling_reexport() {
         "must resolve the sibling re-export through imp to sse2\n{out}"
     );
 }
+
+#[test]
+fn test_flat_umbrella_reexport_does_not_bind_deep_sibling_same_named_type() {
+    // serde regression (commit a04b1a0): a flat `private_::Content` re-export
+    // must NOT resolve into the two-levels-deep `private_::ser::content::Content`
+    // just because that sibling is the only declared `Content` in scope. serde's
+    // umbrella `__private` carries BOTH `ser::content::Content` and
+    // `de::content::Content`; binding the flat re-export to the `ser` one gives
+    // the de-side use sites a type missing their `Str`/`ByteBuf`/`Newtype`
+    // variants (incomplete-type + no-member compile errors). Keep it flat so the
+    // emitter's own `using` binds the correct type.
+    let mut cg = CodeGen::new();
+    cg.local_declared_types
+        .insert("private_::ser::content::Content".to_string());
+    assert_eq!(
+        cg.try_resolve_nested_local_type_path("private_::Content"),
+        None,
+        "flat umbrella re-export must not bind a 2-levels-deep sibling type"
+    );
+
+    // A single-intermediate re-export (`mod::Type` -> `mod::sub::Type`) is the
+    // common, legitimate case and must still resolve.
+    cg.local_declared_types
+        .insert("modx::sub::Widget".to_string());
+    assert_eq!(
+        cg.try_resolve_nested_local_type_path("modx::Widget")
+            .as_deref(),
+        Some("modx::sub::Widget"),
+        "one-level re-export resolution must be preserved"
+    );
+}
