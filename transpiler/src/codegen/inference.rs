@@ -9671,7 +9671,7 @@ impl CodeGen {
             return None;
         }
         let binding = path.segments.first()?.ident.to_string();
-        let module_path = self.cpp_module_import_bindings.get(&binding)?.clone();
+        let module_path = self.name_resolver.cpp_binding(&binding)?.to_string();
         let symbol_name = path
             .segments
             .iter()

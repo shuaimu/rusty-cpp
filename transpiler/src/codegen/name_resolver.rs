@@ -23,15 +23,45 @@ use std::collections::HashMap;
 #[derive(Default, Clone)]
 pub(crate) struct NameResolver {
     alias_edges: HashMap<String, String>,
+    /// Rust-visible bindings introduced by `use cpp::...` interop imports:
+    /// binding name (alias or tail segment) -> imported C++ module path (no
+    /// `cpp::`). Kept in a SEPARATE map from `alias_edges` on purpose: these
+    /// are C++-interop binding names (e.g. `std`), not Rust path-prefix
+    /// aliases, so they must never feed `resolve_prefix` (a binding named
+    /// `std` must not rewrite an unrelated Rust `std::…` path). Consumers look
+    /// them up single-hop via `cpp_binding` / iterate via `cpp_bindings`.
+    cpp_module_bindings: HashMap<String, String>,
 }
 
 impl NameResolver {
     pub(crate) fn clear(&mut self) {
         self.alias_edges.clear();
+        self.cpp_module_bindings.clear();
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.alias_edges.is_empty()
+    }
+
+    /// Record a `use cpp::<path> [as <alias>]` interop binding
+    /// (`binding -> module_path`). Last writer wins, matching the prior
+    /// `HashMap::insert` semantics this replaces.
+    pub(crate) fn record_cpp_binding(&mut self, binding: String, module_path: String) {
+        self.cpp_module_bindings.insert(binding, module_path);
+    }
+
+    /// Single-hop lookup of a `use cpp::…` binding's C++ module path.
+    pub(crate) fn cpp_binding(&self, binding: &str) -> Option<&str> {
+        self.cpp_module_bindings.get(binding).map(String::as_str)
+    }
+
+    pub(crate) fn cpp_bindings_is_empty(&self) -> bool {
+        self.cpp_module_bindings.is_empty()
+    }
+
+    /// Iterate `(binding, module_path)` for the `use cpp::…` interop bindings.
+    pub(crate) fn cpp_bindings(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.cpp_module_bindings.iter()
     }
 
     /// Record `alias -> target`. First writer wins (matches the `or_insert`

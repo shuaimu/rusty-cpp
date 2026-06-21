@@ -11788,10 +11788,7 @@ fn test_leaf221_use_cpp_import_is_classified_as_foreign_module_import() {
     );
     assert!(!cg.output.contains("// TODO: external crate 'cpp'"));
     assert!(!cg.output.contains("\nusing cpp::std;"));
-    assert_eq!(
-        cg.cpp_module_import_bindings.get("std").map(String::as_str),
-        Some("std")
-    );
+    assert_eq!(cg.name_resolver.cpp_binding("std"), Some("std"));
     assert_eq!(cg.cpp_module_import_paths, vec!["std".to_string()]);
 }
 
@@ -11807,12 +11804,7 @@ fn test_leaf221_use_cpp_alias_import_records_alias_binding() {
     );
     assert!(!cg.output.contains("// TODO: external crate 'cpp'"));
     assert!(!cg.output.contains("\nusing cpp_std = cpp::std;"));
-    assert_eq!(
-        cg.cpp_module_import_bindings
-            .get("cpp_std")
-            .map(String::as_str),
-        Some("std")
-    );
+    assert_eq!(cg.name_resolver.cpp_binding("cpp_std"), Some("std"));
     assert_eq!(cg.cpp_module_import_paths, vec!["std".to_string()]);
 }
 

@@ -1255,9 +1255,8 @@ pub struct CodeGen {
     /// In-progress guards for simple expression type inference.
     /// Prevents recursive type-inference loops across match-arm and receiver contexts.
     pub(crate) expr_type_inference_in_progress: std::cell::RefCell<HashSet<usize>>,
-    /// Rust-visible bindings introduced by `use cpp::...` imports.
-    /// Maps binding name (alias or tail segment) → imported C++ module path without `cpp::`.
-    pub(crate) cpp_module_import_bindings: HashMap<String, String>,
+    /// `use cpp::...` interop bindings now live on `name_resolver`
+    /// (`record_cpp_binding` / `cpp_binding` / `cpp_bindings`).
     /// Ordered imported C++ module paths (without `cpp::`) from `use cpp::...` imports.
     pub(crate) cpp_module_import_paths: Vec<String>,
     /// De-duplication keys for recorded C++ module import paths.
@@ -1693,7 +1692,6 @@ impl CodeGen {
             name_resolver: name_resolver::NameResolver::default(),
             nonlocal_type_resolution_in_progress: std::cell::RefCell::new(HashSet::new()),
             expr_type_inference_in_progress: std::cell::RefCell::new(HashSet::new()),
-            cpp_module_import_bindings: HashMap::new(),
             cpp_module_import_paths: Vec::new(),
             cpp_module_import_path_keys: HashSet::new(),
             cpp_module_member_symbols: HashMap::new(),
@@ -2634,7 +2632,6 @@ impl CodeGen {
         self.module_scope_namespace_aliases.clear();
         self.scope_import_bindings.clear();
         self.name_resolver.clear();
-        self.cpp_module_import_bindings.clear();
         self.cpp_module_import_paths.clear();
         self.cpp_module_import_path_keys.clear();
         self.in_forward_decl_signature = false;
@@ -15178,8 +15175,8 @@ impl CodeGen {
     }
 
     fn record_cpp_module_use_import(&mut self, import: &CppModuleUseImport) {
-        self.cpp_module_import_bindings
-            .insert(import.binding_name.clone(), import.module_path.clone());
+        self.name_resolver
+            .record_cpp_binding(import.binding_name.clone(), import.module_path.clone());
         self.record_cpp_module_import_path(&import.module_path);
     }
 
@@ -32496,7 +32493,7 @@ impl CodeGen {
             return None;
         }
         let first_segment = path.segments.first()?.ident.to_string();
-        let module_path = self.cpp_module_import_bindings.get(&first_segment)?;
+        let module_path = self.name_resolver.cpp_binding(&first_segment)?;
 
         let mut resolved_segments: Vec<String> = module_path
             .split("::")
@@ -32549,13 +32546,12 @@ impl CodeGen {
     }
 
     fn rewrite_cpp_import_bound_type_spelling(&self, cpp_ty: &str) -> String {
-        if self.cpp_module_import_bindings.is_empty() || cpp_ty.is_empty() {
+        if self.name_resolver.cpp_bindings_is_empty() || cpp_ty.is_empty() {
             let rewritten = Self::rewrite_builtin_namespace_aliases_in_type(cpp_ty);
             return Self::rewrite_private_keyword_namespace_in_type_path(&rewritten);
         }
         let mut rewritten = cpp_ty.to_string();
-        let mut bindings: Vec<(&String, &String)> =
-            self.cpp_module_import_bindings.iter().collect();
+        let mut bindings: Vec<(&String, &String)> = self.name_resolver.cpp_bindings().collect();
         bindings.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.len()));
         for (alias, target) in bindings {
             let escaped_alias = escape_cpp_keyword(alias);
