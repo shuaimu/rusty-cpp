@@ -380,7 +380,10 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "std::process::Command" => Some(("rusty::process::Command", false)),
 
         // MaybeUninit
-        "MaybeUninit" | "std::mem::MaybeUninit" => Some(("rusty::MaybeUninit", true)),
+        "MaybeUninit"
+        | "mem::MaybeUninit"
+        | "std::mem::MaybeUninit"
+        | "core::mem::MaybeUninit" => Some(("rusty::MaybeUninit", true)),
         "ManuallyDrop" | "std::mem::ManuallyDrop" => Some(("rusty::mem::ManuallyDrop", true)),
 
         // I/O types
