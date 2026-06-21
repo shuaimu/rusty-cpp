@@ -2391,9 +2391,18 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             return cpp_fn.to_string();
         }
 
-        // Try mapping as a standard type
-        if let Some((cpp_type, _)) = types::map_std_type(&joined) {
-            return cpp_type.to_string();
+        // Try mapping as a standard type — UNLESS this is a bare reference to a
+        // type the crate declares itself. A std-library port (hashbrown defines
+        // HashMap/HashSet) must keep its OWN self-references local, not rewrite
+        // them to the umbrella `rusty::*` alias (which collides with and
+        // circularly imports the very type the port defines). Explicit std
+        // paths (`std::collections::HashMap`) are multi-segment and still map.
+        let suppress_std_map =
+            segments.len() == 1 && self.crate_declares_std_named_type(&joined);
+        if !suppress_std_map {
+            if let Some((cpp_type, _)) = types::map_std_type(&joined) {
+                return cpp_type.to_string();
+            }
         }
 
         // Try as primitive

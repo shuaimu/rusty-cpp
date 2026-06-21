@@ -2221,16 +2221,33 @@ impl CodeGen {
                             .map(|seg| seg.ident.to_string())
                             .collect::<Vec<_>>()
                             .join("::");
-                        let std_generic_base = types::map_std_type(&joined_no_args).and_then(
-                            |(cpp_type, needs_template_args)| {
-                                needs_template_args.then_some(cpp_type.to_string())
-                            },
-                        );
-                        if let Some((cpp_type, needs_template_args)) =
-                            types::map_std_type(&joined_no_args)
-                        {
-                            if !needs_template_args {
-                                return cpp_type.to_string();
+                        // A bare reference (`HashMap<…>`, single segment) to a
+                        // type the crate itself declares is the crate's OWN
+                        // type — don't rewrite it to the umbrella `rusty::*`
+                        // std alias. Critical when transpiling a std-library
+                        // port (hashbrown defines HashMap/HashSet): otherwise
+                        // its self-references collide with and circularly
+                        // import the very type it defines. Explicit std paths
+                        // (`std::collections::HashMap`) are multi-segment and
+                        // still map.
+                        let suppress_std_map = tp.path.segments.len() == 1
+                            && self.crate_declares_std_named_type(&joined_no_args);
+                        let std_generic_base = (!suppress_std_map)
+                            .then(|| {
+                                types::map_std_type(&joined_no_args).and_then(
+                                    |(cpp_type, needs_template_args)| {
+                                        needs_template_args.then_some(cpp_type.to_string())
+                                    },
+                                )
+                            })
+                            .flatten();
+                        if !suppress_std_map {
+                            if let Some((cpp_type, needs_template_args)) =
+                                types::map_std_type(&joined_no_args)
+                            {
+                                if !needs_template_args {
+                                    return cpp_type.to_string();
+                                }
                             }
                         }
                         self.type_arg_nesting.set(self.type_arg_nesting.get() + 1);

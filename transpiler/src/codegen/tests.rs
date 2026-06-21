@@ -32832,6 +32832,28 @@ fn test_sibling_same_named_generic_type_recovers_own_params_not_collide() {
 }
 
 #[test]
+fn test_crate_declaring_std_named_type_keeps_self_refs_local() {
+    // A std-library port that DEFINES its own `HashMap` (hashbrown) must keep
+    // bare self-references local, not rewrite them to the umbrella
+    // `rusty::HashMap` alias — that collides with and circularly imports the
+    // very type the port defines. A bare name resolves local-first in Rust.
+    let out = transpile_str(
+        r#"
+        pub struct HashMap<K, V> { k: K, v: V }
+        pub fn first(m: &HashMap<i32, i64>) -> i32 { m.k }
+        "#,
+    );
+    assert!(
+        !out.contains("rusty::HashMap"),
+        "a crate that declares its own HashMap must not map self-refs to rusty::HashMap\n{out}"
+    );
+    assert!(
+        out.contains("HashMap<int32_t, int64_t>"),
+        "bare HashMap reference should stay local\n{out}"
+    );
+}
+
+#[test]
 fn test_integer_intrinsic_methods_lower_on_field_chain_and_param_receivers() {
     // Rust integer-trait methods (leading_zeros / swap_bytes / is_power_of_two)
     // only exist on primitive integers, so they must lower to `rusty::` free

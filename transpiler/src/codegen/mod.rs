@@ -10472,6 +10472,24 @@ impl CodeGen {
             .any(|candidate| self.local_declared_types.contains(&candidate))
     }
 
+    /// True when the crate being transpiled DECLARES its own type by this
+    /// (bare) leaf name anywhere in the crate — e.g. transpiling hashbrown
+    /// itself, which defines `HashMap`/`HashSet`. A bare reference to such a
+    /// name is the crate's OWN type (Rust resolves bare names local-first), so
+    /// it must NOT be rewritten to the umbrella `rusty::*` std alias: doing so
+    /// makes a std-library port's self-references collide with — and circularly
+    /// `import rusty;` for — the very type the port defines.
+    pub(crate) fn crate_declares_std_named_type(&self, leaf: &str) -> bool {
+        if leaf.is_empty() {
+            return false;
+        }
+        let escaped = escape_cpp_keyword(leaf);
+        self.local_declared_types.iter().any(|t| {
+            let tail = t.rsplit("::").next().unwrap_or(t.as_str());
+            tail == leaf || tail == escaped
+        })
+    }
+
     fn current_module_declares_type_name_exact(&self, name: &str) -> bool {
         if name.is_empty() {
             return false;
