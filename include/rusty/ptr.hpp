@@ -239,6 +239,24 @@ inline constexpr const T* null() noexcept {
     return nullptr;
 }
 
+// `core::ptr::slice_from_raw_parts[_mut](data, len)` build a `*const/*mut [T]`
+// raw slice (fat) pointer. This runtime models a raw slice pointer by its data
+// pointer alone — the length is carried separately by the caller (and a
+// `NonNull<[T]>` is represented as `NonNull<T>`), so the constructors return the
+// data pointer. Distinct from `slice::from_raw_parts[_mut]`, which build an
+// actual `&[T]`/`std::span<T>` view.
+template<typename T>
+inline constexpr T* slice_from_raw_parts_mut(T* data, size_t len) noexcept {
+    (void)len;
+    return data;
+}
+
+template<typename T>
+inline constexpr const T* slice_from_raw_parts(const T* data, size_t len) noexcept {
+    (void)len;
+    return data;
+}
+
 // `without_provenance(addr)` — construct a pointer from a raw address with
 // strict-provenance API (the resulting pointer has no provenance). In C++
 // we just reinterpret the address. Used by transpiled core::slice::iter

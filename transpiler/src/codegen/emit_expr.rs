@@ -13488,8 +13488,10 @@ impl CodeGen {
                     let arg = self.emit_expr_maybe_move(&call.args[0]);
                     return format!("static_cast<{}>({})", target_cpp, arg);
                 }
-                if method_name.as_deref() == Some("from_le_bytes")
-                    && call.args.len() == 1
+                if matches!(
+                    method_name.as_deref(),
+                    Some("from_le_bytes" | "from_be_bytes" | "from_ne_bytes")
+                ) && call.args.len() == 1
                     && let Some(target_cpp) = target_cpp.as_deref()
                 {
                     let arg_expr = &call.args[0];
@@ -13509,7 +13511,32 @@ impl CodeGen {
                         }
                         _ => self.emit_expr_maybe_move(arg_expr),
                     };
-                    return format!("rusty::from_le_bytes<{}>({})", target_cpp, bytes_arg);
+                    return format!(
+                        "rusty::{}<{}>({})",
+                        method_name.as_deref().unwrap(),
+                        target_cpp,
+                        bytes_arg
+                    );
+                }
+                // Primitive `Ord::max`/`min` UFCS path-calls, e.g.
+                // `usize::max(a, b)` -> `rusty::max(a, b)`. Two args
+                // disambiguate the Ord method from the `MAX`/`MIN` associated
+                // consts (which are paths, not calls).
+                if matches!(method_name.as_deref(), Some("max" | "min"))
+                    && call.args.len() == 2
+                    && target_cpp.is_some()
+                {
+                    let helper = if method_name.as_deref() == Some("min") {
+                        "rusty::min"
+                    } else {
+                        "rusty::max"
+                    };
+                    return format!(
+                        "{}({}, {})",
+                        helper,
+                        self.emit_expr_maybe_move(&call.args[0]),
+                        self.emit_expr_maybe_move(&call.args[1])
+                    );
                 }
                 if method_name.as_deref() == Some("try_from")
                     && call.args.len() == 1

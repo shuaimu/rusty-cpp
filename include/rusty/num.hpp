@@ -641,7 +641,7 @@ Result<std::remove_cvref_t<T>, std::tuple<>> from_str_radix(Input&& input, Radix
 
 template<typename T, typename Bytes>
 requires std::is_integral_v<std::remove_cvref_t<T>>
-std::remove_cvref_t<T> from_le_bytes(Bytes&& bytes) {
+constexpr std::remove_cvref_t<T> from_le_bytes(Bytes&& bytes) {
     using RawT = std::remove_cvref_t<T>;
     using Unsigned = std::make_unsigned_t<RawT>;
     auto&& view = std::forward<Bytes>(bytes);
@@ -654,6 +654,36 @@ std::remove_cvref_t<T> from_le_bytes(Bytes&& bytes) {
         value |= (static_cast<Unsigned>(static_cast<uint8_t>(std::data(view)[i])) << (i * 8));
     }
     return static_cast<RawT>(value);
+}
+
+// Big-endian byte order: most-significant byte first.
+template<typename T, typename Bytes>
+requires std::is_integral_v<std::remove_cvref_t<T>>
+constexpr std::remove_cvref_t<T> from_be_bytes(Bytes&& bytes) {
+    using RawT = std::remove_cvref_t<T>;
+    using Unsigned = std::make_unsigned_t<RawT>;
+    auto&& view = std::forward<Bytes>(bytes);
+    const size_t count = std::size(view);
+    if (count < sizeof(RawT)) {
+        throw std::out_of_range("from_be_bytes input is too short");
+    }
+    Unsigned value = 0;
+    for (size_t i = 0; i < sizeof(RawT); ++i) {
+        value |= (static_cast<Unsigned>(static_cast<uint8_t>(std::data(view)[i]))
+                  << ((sizeof(RawT) - 1 - i) * 8));
+    }
+    return static_cast<RawT>(value);
+}
+
+// Native byte order: little- or big-endian per the host (std::endian::native).
+template<typename T, typename Bytes>
+requires std::is_integral_v<std::remove_cvref_t<T>>
+constexpr std::remove_cvref_t<T> from_ne_bytes(Bytes&& bytes) {
+    if constexpr (std::endian::native == std::endian::big) {
+        return from_be_bytes<T>(std::forward<Bytes>(bytes));
+    } else {
+        return from_le_bytes<T>(std::forward<Bytes>(bytes));
+    }
 }
 
 } // namespace rusty

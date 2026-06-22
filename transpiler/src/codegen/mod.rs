@@ -15049,12 +15049,26 @@ impl CodeGen {
                     .next()
                     .is_some_and(|ch| ch.is_ascii_lowercase())
                 || self.declared_module_names.contains(alias);
-            if !alias_is_module_like || !self.matches_declared_module_path(target) {
+            if !alias_is_module_like {
                 return None;
             }
-            let alias = escape_cpp_keyword(alias);
-            let target = self.escape_and_rename_qualified_name(target);
-            return Some(format!("namespace {} = ::{};", alias, target));
+            let escaped_alias = escape_cpp_keyword(alias);
+            if self.matches_declared_module_path(target) {
+                let escaped_target = self.escape_and_rename_qualified_name(target);
+                return Some(format!("namespace {} = ::{};", escaped_alias, escaped_target));
+            }
+            // `use sibling as alias;` inside a nested module: the bare target
+            // resolves relative to the current module scope (e.g. `generic` ->
+            // `control::group::generic` while emitting inside `control::group`),
+            // so it is not in declared_module_paths under its bare name. Emit a
+            // RELATIVE namespace alias (`namespace imp = generic;`) — C++
+            // unqualified lookup binds the sibling; a `::`-qualified form would
+            // wrongly target a nonexistent global `::generic`.
+            if !target.contains("::") && self.current_scope_declares_nested_module_root(target) {
+                let escaped_target = escape_cpp_keyword(target);
+                return Some(format!("namespace {} = {};", escaped_alias, escaped_target));
+            }
+            return None;
         }
         if trimmed.contains(" = ") || !trimmed.contains("::") {
             return None;

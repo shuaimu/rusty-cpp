@@ -2802,6 +2802,61 @@ fn test_leaf415432_std_mem_size_of_turbofish_preserved_in_function_path() {
 }
 
 #[test]
+fn test_primitive_assoc_function_path_calls_lower_to_rusty_free_fns() {
+    // `<primitive>::<assoc_fn>(args)` path-calls (NOT method calls) must lower
+    // to the rusty free functions, not leave `u64::`/`usize::` as undeclared
+    // identifiers. Regression for hashbrown's `u64::from_ne_bytes(...)` and
+    // `usize::max(a, b)`.
+    let out = transpile_str(
+        r#"
+        fn f(bytes: [u8; 8], a: usize, b: usize) -> u64 {
+            let x = u64::from_ne_bytes(bytes);
+            let _m = usize::max(a, b);
+            x
+        }
+    "#,
+    );
+    assert!(
+        out.contains("rusty::from_ne_bytes<uint64_t>(bytes)"),
+        "u64::from_ne_bytes should lower to rusty::from_ne_bytes<uint64_t>:\n{out}"
+    );
+    assert!(
+        out.contains("rusty::max("),
+        "usize::max(a, b) should lower to rusty::max(a, b):\n{out}"
+    );
+    assert!(
+        !out.contains("u64::from_ne_bytes") && !out.contains("usize::max"),
+        "primitive type name must not survive as an undeclared identifier:\n{out}"
+    );
+}
+
+#[test]
+fn test_use_sibling_module_as_alias_emits_relative_namespace_alias() {
+    // `use sibling as alias;` inside a nested module must emit a namespace
+    // alias (`namespace alias = sibling;`), not a type alias
+    // (`using alias = sibling;`). The bare sibling target resolves relative to
+    // the current module scope, so the alias is emitted relative (no `::`).
+    // Regression for hashbrown's `use generic as imp;` in control::group.
+    let out = transpile_str(
+        r#"
+        mod group {
+            mod generic { pub struct G; }
+            use generic as imp;
+            pub fn h() -> imp::G { imp::G }
+        }
+    "#,
+    );
+    assert!(
+        out.contains("namespace imp = generic;"),
+        "module rename should emit a (relative) namespace alias:\n{out}"
+    );
+    assert!(
+        !out.contains("using imp = generic;"),
+        "module rename must not emit a type alias:\n{out}"
+    );
+}
+
+#[test]
 fn test_leaf415432_mem_size_of_alias_turbofish_preserved() {
     let out = transpile_str(
         r#"
