@@ -3954,6 +3954,19 @@ impl CodeGen {
                     if let Some(ret_ty) = self.lookup_associated_call_return_type(call) {
                         return Some(ret_ty);
                     }
+                    // Generic return-type substitution: when the callee has type
+                    // params, unify each declared parameter type against the
+                    // inferred argument type to bind the params, then substitute
+                    // into the return type — so `let g = guard(inner, f)` over
+                    // `fn guard<T,F>(value: T, dropfn: F) -> ScopeGuard<T,F>`
+                    // yields `ScopeGuard<Inner, _>` (concrete Target) instead of
+                    // the raw generic `ScopeGuard<T,F>`. This is the Rust
+                    // cross-call unification C++ per-site CTAD cannot reproduce.
+                    if let Some(ret_ty) =
+                        self.infer_call_return_type_with_generic_substitution(call)
+                    {
+                        return Some(ret_ty);
+                    }
                     if let Some(ret_ty) = self.lookup_function_return_type(call.func.as_ref()) {
                         return Some(ret_ty.clone());
                     }
@@ -4560,6 +4573,93 @@ impl CodeGen {
             syn::Expr::MethodCall(mc) => self.infer_method_call_result_type_for_local(mc),
             syn::Expr::Range(range) => self.infer_range_expr_type(range),
             _ => None,
+        }
+    }
+
+    /// Infer a call's result type by instantiating the callee's GENERIC return
+    /// type from the concrete argument types. Looks up the callee's type-param
+    /// names, declared parameter types, and return type (the same maps the
+    /// SignatureResolver uses), unifies each declared parameter against the
+    /// inferred argument type to bind the type params, and substitutes the
+    /// bindings into the return type. Returns `None` when the callee has no
+    /// type params, its signature is unknown, or nothing could be bound — so
+    /// callers fall back to the raw (uninstantiated) return-type lookup.
+    pub(super) fn infer_call_return_type_with_generic_substitution(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<syn::Type> {
+        let type_params = self.lookup_function_type_param_names(call.func.as_ref())?;
+        if type_params.is_empty() {
+            return None;
+        }
+        let ret_ty = self.lookup_function_return_type(call.func.as_ref())?.clone();
+        let mut bindings: HashMap<String, syn::Type> = HashMap::new();
+        for (arg_idx, arg) in call.args.iter().enumerate() {
+            let Some(param_ty) = self.lookup_function_arg_expected_type(call.func.as_ref(), arg_idx)
+            else {
+                continue;
+            };
+            let Some(arg_ty) = self
+                .infer_simple_expr_type(arg)
+                .or_else(|| self.infer_local_binding_type_from_initializer(arg))
+            else {
+                continue;
+            };
+            self.unify_type_param_binding(param_ty, &arg_ty, type_params, &mut bindings);
+        }
+        if bindings.is_empty() {
+            return None;
+        }
+        Some(self.substitute_type_params_in_type(&ret_ty, &bindings))
+    }
+
+    /// Structurally unify a callee's declared parameter type against a concrete
+    /// argument type, recording `type_param -> concrete` bindings. Handles the
+    /// common shapes: a bare type-param ident (`T` <- arg), references on either
+    /// side (peeled symmetrically), and same-head generic applications
+    /// (`Vec<T>` vs `Vec<Inner>` -> recurse pairwise). First binding wins; later
+    /// conflicting bindings for the same param are ignored (conservative).
+    fn unify_type_param_binding(
+        &self,
+        param_ty: &syn::Type,
+        arg_ty: &syn::Type,
+        type_params: &[String],
+        bindings: &mut HashMap<String, syn::Type>,
+    ) {
+        // Peel references symmetrically (`&T` vs `&Inner`, `&mut T` vs `&mut X`).
+        let param_inner = self.peel_reference_paren_group_type(param_ty);
+        let arg_inner = self.peel_reference_paren_group_type(arg_ty);
+        if let (syn::Type::Path(param_tp), syn::Type::Path(arg_tp)) = (param_inner, arg_inner) {
+            // A bare single-segment param that names a type param -> bind it.
+            if param_tp.qself.is_none() && param_tp.path.segments.len() == 1 {
+                let name = param_tp.path.segments[0].ident.to_string();
+                if type_params.contains(&name)
+                    && matches!(param_tp.path.segments[0].arguments, syn::PathArguments::None)
+                {
+                    bindings
+                        .entry(name)
+                        .or_insert_with(|| arg_inner.clone());
+                    return;
+                }
+            }
+            // Same-head generic applications: recurse pairwise over type args.
+            if let (Some(param_seg), Some(arg_seg)) = (
+                param_tp.path.segments.last(),
+                arg_tp.path.segments.last(),
+            ) && param_seg.ident == arg_seg.ident
+                && let (
+                    syn::PathArguments::AngleBracketed(param_args),
+                    syn::PathArguments::AngleBracketed(arg_args),
+                ) = (&param_seg.arguments, &arg_seg.arguments)
+            {
+                for (p, a) in param_args.args.iter().zip(arg_args.args.iter()) {
+                    if let (syn::GenericArgument::Type(p_ty), syn::GenericArgument::Type(a_ty)) =
+                        (p, a)
+                    {
+                        self.unify_type_param_binding(p_ty, a_ty, type_params, bindings);
+                    }
+                }
+            }
         }
     }
 

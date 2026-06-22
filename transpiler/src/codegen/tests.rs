@@ -2802,6 +2802,40 @@ fn test_leaf415432_std_mem_size_of_turbofish_preserved_in_function_path() {
 }
 
 #[test]
+fn test_generic_deref_wrapper_field_access_resolves_through_target() {
+    // Field access through a GENERIC user `Deref` wrapper must resolve to the
+    // concrete deref-target's field. Two inference steps combine: (1) the local
+    // binding's type is the callee's return type with type params substituted
+    // from the argument types (`guard(inner, f)` -> `ScopeGuard<Inner, F>`,
+    // not the raw `ScopeGuard<T, F>`); (2) the recorded Deref Target `T` is
+    // instantiated with the receiver's actual args (`T` -> `Inner`). Then the
+    // field is found on `Inner` and emitted as `(*g).field`. Foundation for the
+    // auto-deref engine (ScopeGuard).
+    let out = transpile_str(
+        r#"
+        struct Inner { payload: i32 }
+        struct ScopeGuard<T, F> { value: T, dropfn: F }
+        impl<T, F> std::ops::Deref for ScopeGuard<T, F> {
+            type Target = T;
+            fn deref(&self) -> &T { &self.value }
+        }
+        fn guard<T, F>(value: T, dropfn: F) -> ScopeGuard<T, F> {
+            ScopeGuard { value, dropfn }
+        }
+        fn use_it(inner: Inner) -> i32 {
+            let g = guard(inner, || {});
+            g.payload
+        }
+    "#,
+    );
+    assert!(
+        out.contains("(*g).payload"),
+        "field access through a generic Deref wrapper should resolve to \
+         (*g).payload:\n{out}"
+    );
+}
+
+#[test]
 fn test_primitive_assoc_function_path_calls_lower_to_rusty_free_fns() {
     // `<primitive>::<assoc_fn>(args)` path-calls (NOT method calls) must lower
     // to the rusty free functions, not leave `u64::`/`usize::` as undeclared

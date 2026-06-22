@@ -24529,6 +24529,49 @@ impl CodeGen {
         })
     }
 
+    /// Instantiate a Deref `Target` (recorded in terms of the wrapper's own
+    /// generic params, e.g. `T` for `ScopeGuard<T,F>: Deref<Target=T>`) with the
+    /// receiver's actual type args. Given receiver `ScopeGuard<Inner,F>` and raw
+    /// target `T`, returns `Inner`. Returns the raw target unchanged when the
+    /// wrapper's declared params or the receiver's args are unavailable.
+    fn instantiate_deref_target_with_receiver_args(
+        &self,
+        receiver_path: &syn::TypePath,
+        raw_target: &syn::Type,
+    ) -> syn::Type {
+        let Some(last) = receiver_path.path.segments.last() else {
+            return raw_target.clone();
+        };
+        let wrapper_name = last.ident.to_string();
+        let scoped = self.scoped_type_key(&wrapper_name);
+        let Some(param_names) = self
+            .declared_type_params
+            .get(&wrapper_name)
+            .or_else(|| self.declared_type_params.get(&scoped))
+        else {
+            return raw_target.clone();
+        };
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return raw_target.clone();
+        };
+        let actual_args: Vec<&syn::Type> = args
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        let mut subst: HashMap<String, syn::Type> = HashMap::new();
+        for (name, ty) in param_names.iter().zip(actual_args.iter()) {
+            subst.insert(name.clone(), (*ty).clone());
+        }
+        if subst.is_empty() {
+            return raw_target.clone();
+        }
+        self.substitute_type_params_in_type(raw_target, &subst)
+    }
+
     fn field_access_through_user_deref(
         &self,
         base_expr: &syn::Expr,
@@ -24574,6 +24617,13 @@ impl CodeGen {
             .get(&base_struct)
             .or_else(|| self.user_deref_targets.get(&scoped))?;
         let target_ty = self.peel_reference_paren_group_type(target_ty);
+        // The recorded Deref Target is written in terms of the wrapper's generic
+        // params (e.g. `ScopeGuard<T,F>: Deref<Target=T>` records `T`).
+        // Instantiate it with the receiver's actual type args
+        // (`ScopeGuard<Inner,F>` -> Target `Inner`) so a generic wrapper resolves
+        // to a concrete struct whose fields we can look up.
+        let target_ty = self.instantiate_deref_target_with_receiver_args(tp, target_ty);
+        let target_ty = self.peel_reference_paren_group_type(&target_ty);
         let syn::Type::Path(ttp) = target_ty else {
             return None;
         };
