@@ -6234,6 +6234,63 @@ impl CodeGen {
         is_recursive || has_impls
     }
 
+    /// Forward-declare the per-variant member structs (`Enum_Variant`) of a
+    /// data enum. Shared by the alias path and the struct-wrapper path so that
+    /// aggregate-construction sites `Enum{Enum_Variant{...}}` that appear
+    /// before the enum's definition can name the variant structs. Emits a
+    /// PLAIN template prefix (no `requires` clause, no type defaults), matching
+    /// how the variant payload structs are defined in `emit_enum` — using
+    /// `emit_template_declaration_without_type_defaults` here would add the
+    /// where-bound `requires (...)` clause and create a redeclaration mismatch
+    /// against the (unconstrained) variant-struct definitions.
+    fn emit_data_enum_variant_member_forward_decls(
+        &mut self,
+        e: &syn::ItemEnum,
+        export_prefix: &str,
+    ) {
+        let name = &e.ident;
+        let type_params: Vec<String> = e
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| {
+                if let syn::GenericParam::Type(tp) = p {
+                    Some(tp.ident.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let has_generics = !type_params.is_empty();
+        let template_prefix = if has_generics {
+            format!(
+                "template<{}>",
+                type_params
+                    .iter()
+                    .map(|p| format!("typename {}", p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            String::new()
+        };
+        for variant in &e.variants {
+            if has_generics {
+                if export_prefix.is_empty() {
+                    self.writeln(&template_prefix);
+                } else {
+                    self.writeln(&format!("{}{}", export_prefix, template_prefix));
+                }
+                self.writeln(&format!("struct {}_{};", name, variant.ident));
+            } else {
+                self.writeln(&format!(
+                    "{}struct {}_{};",
+                    export_prefix, name, variant.ident
+                ));
+            }
+        }
+    }
+
     fn emit_data_enum_alias_forward_decl(&mut self, e: &syn::ItemEnum, export_prefix: &str) {
         let name = &e.ident;
         // Keep type-param handling aligned with `emit_enum` for data enums.
@@ -6268,21 +6325,7 @@ impl CodeGen {
             String::new()
         };
 
-        for variant in &e.variants {
-            if has_generics {
-                if export_prefix.is_empty() {
-                    self.writeln(&template_prefix);
-                } else {
-                    self.writeln(&format!("{}{}", export_prefix, template_prefix));
-                }
-                self.writeln(&format!("struct {}_{};", name, variant.ident));
-            } else {
-                self.writeln(&format!(
-                    "{}struct {}_{};",
-                    export_prefix, name, variant.ident
-                ));
-            }
-        }
+        self.emit_data_enum_variant_member_forward_decls(e, export_prefix);
 
         let variant_list: Vec<String> = e
             .variants
@@ -6489,6 +6532,11 @@ impl CodeGen {
                         );
                         self.emit_c_like_enum_variant_helper_forward_decls(e, export_prefix);
                     } else if self.enum_uses_struct_wrapper(e) {
+                        // Forward-declare the per-variant member structs too
+                        // (not just the umbrella), so construction sites
+                        // `Enum{Enum_Variant{...}}` appearing before the enum
+                        // definition can name them — matching the alias path.
+                        self.emit_data_enum_variant_member_forward_decls(e, export_prefix);
                         self.emit_template_declaration_without_type_defaults(
                             &e.generics,
                             export_prefix,
@@ -6800,6 +6848,11 @@ impl CodeGen {
                             module_depth,
                         );
                     } else if self.enum_uses_struct_wrapper(e) {
+                        // Forward-declare the per-variant member structs too
+                        // (not just the umbrella), so construction sites
+                        // `Enum{Enum_Variant{...}}` appearing before the enum
+                        // definition can name them — matching the alias path.
+                        self.emit_data_enum_variant_member_forward_decls(e, export_prefix);
                         self.emit_template_declaration_without_type_defaults(
                             &e.generics,
                             export_prefix,

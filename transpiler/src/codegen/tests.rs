@@ -10451,6 +10451,66 @@ fn test_data_enum_wrapper_struct_definition_repeats_where_requires_clause() {
 }
 
 #[test]
+fn test_struct_wrapper_enum_forward_declares_variant_member_structs() {
+    // A struct-wrapper data enum (recursive or has impls) must forward-declare
+    // its per-variant member structs (`Enum_Variant`), not just the umbrella,
+    // so construction sites `Enum{Enum_Variant{...}}` appearing before the enum
+    // definition can name them. Previously only the alias path did this; the
+    // struct-wrapper path emitted just `struct Enum;`, leaving variant names
+    // undeclared. Regression for the standalone hashbrown mono (TryReserveError,
+    // Entry/EntryRef/RawEntryMut variant constructions).
+    let out = transpile_str(
+        r#"
+        enum E { A(i32), B(u32) }
+        impl E { fn tag(&self) -> i32 { 0 } }
+    "#,
+    );
+
+    // Variant member-struct forward declarations must be present...
+    let a_fwd = out
+        .find("struct E_A;")
+        .unwrap_or_else(|| panic!("missing variant forward decl struct E_A;:\n{out}"));
+    let b_fwd = out
+        .find("struct E_B;")
+        .unwrap_or_else(|| panic!("missing variant forward decl struct E_B;:\n{out}"));
+    // ...and must precede the umbrella definition that aggregates them.
+    let def = out
+        .find("struct E : std::variant<E_A, E_B>")
+        .unwrap_or_else(|| panic!("missing wrapper struct definition:\n{out}"));
+    assert!(
+        a_fwd < def && b_fwd < def,
+        "variant member-struct forward decls must precede the umbrella \
+         definition:\n{out}"
+    );
+}
+
+#[test]
+fn test_generic_struct_wrapper_enum_forward_declares_variant_member_structs() {
+    // Same as above for a GENERIC struct-wrapper enum: the variant forward
+    // decls must carry a plain `template<...>` prefix (no requires / no type
+    // defaults), matching the unconstrained variant-struct definitions — using
+    // a constrained prefix here would create a redeclaration mismatch.
+    let out = transpile_str(
+        r#"
+        enum Pair<T, U> { Left(T), Right(U) }
+        impl<T, U> Pair<T, U> { fn tag(&self) -> i32 { 0 } }
+    "#,
+    );
+    assert!(
+        out.contains("template<typename T, typename U>\nstruct Pair_Left;")
+            || out.contains("template<typename T, typename U>\n        struct Pair_Left;")
+            || (out.contains("struct Pair_Left;")
+                && out.contains("template<typename T, typename U>")),
+        "generic variant member structs must be forward-declared with a plain \
+         template prefix:\n{out}"
+    );
+    assert!(
+        out.contains("struct Pair_Right;"),
+        "second variant member struct must be forward-declared:\n{out}"
+    );
+}
+
+#[test]
 fn test_merged_impl_namespace_is_forward_declared_before_struct_methods() {
     let out = transpile_str(
         r#"
