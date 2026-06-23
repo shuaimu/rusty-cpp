@@ -494,6 +494,9 @@ set(TEST_SOURCES
     tests/rusty_function_test.cpp
     tests/rusty_array_test.cpp
     tests/rusty_error_test.cpp
+    # Self-contained (no-std) rusty::fmt runtime: coverage + Rust-parity.
+    tests/rusty_fmt_test.cpp
+    tests/rusty_fmt_parity_test.cpp
     tests/test_traits.cpp
     tests/test_mutex.cpp
     tests/test_thread.cpp
@@ -803,7 +806,12 @@ foreach(test_source IN LISTS TEST_SOURCES)
     # ctest — they print timings rather than asserting, and we don't want
     # them to gate `ctest --output-on-failure`. Invoke directly:
     # `./build/<bench>.out`.
-    if(NOT test_name MATCHES "_bench$")
+    if(test_name STREQUAL "rusty_fmt_parity_test")
+        # The parity test reads the Rust-generated golden fixture; ctest runs
+        # from the build dir, so pass the source-tree path explicitly.
+        add_test(NAME ${test_name} COMMAND ${test_executable}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fmt_parity/golden.txt)
+    elseif(NOT test_name MATCHES "_bench$")
         add_test(NAME ${test_name} COMMAND ${test_executable})
     endif()
     list(APPEND TEST_TARGETS ${test_executable})

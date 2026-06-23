@@ -1,0 +1,17 @@
+plain_hi|6869
+plain_empty|
+plain_unicode|68c3a96c6c6f
+w8_hi|6869202020202020
+w8_right_hi|2020202020206869
+w8_left_hi|6869202020202020
+w8_center_hi|2020206869202020
+w7_center_hi|20206869202020
+fill_star_right|2a2a2a2a6869
+fill_star_left|68692a2a2a2a
+fill_star_center|2a2a68692a2a2a
+prec3_hello|68656c
+prec0_hello|
+prec10_hello|68656c6c6f
+w6_prec3_right|20202068656c
+w8_under_len|6869
+w6_left_default|686920202020
