@@ -4588,24 +4588,30 @@ impl CodeGen {
         &self,
         call: &syn::ExprCall,
     ) -> Option<syn::Type> {
-        let type_params = self.lookup_function_type_param_names(call.func.as_ref())?;
+        let type_params = self
+            .lookup_function_type_param_names_with_import_fallback(call.func.as_ref())?
+            .clone();
         if type_params.is_empty() {
             return None;
         }
-        let ret_ty = self.lookup_function_return_type(call.func.as_ref())?.clone();
+        let ret_ty = self
+            .lookup_fn_return_type_with_import_fallback(call.func.as_ref())?;
         let mut bindings: HashMap<String, syn::Type> = HashMap::new();
         for (arg_idx, arg) in call.args.iter().enumerate() {
-            let Some(param_ty) = self.lookup_function_arg_expected_type(call.func.as_ref(), arg_idx)
+            let Some(param_ty) = self
+                .lookup_function_arg_expected_type_with_import_fallback(call.func.as_ref(), arg_idx)
             else {
                 continue;
             };
-            let Some(arg_ty) = self
-                .infer_simple_expr_type(arg)
-                .or_else(|| self.infer_local_binding_type_from_initializer(arg))
-            else {
+            let param_ty = param_ty.clone();
+            // NOTE: use only the non-recursive `infer_simple_expr_type` for args
+            // — NOT `infer_local_binding_type_from_initializer`, which re-enters
+            // this function and (with the import-fallback widening which calls
+            // resolve) can recurse without bound on deep call graphs.
+            let Some(arg_ty) = self.infer_simple_expr_type(arg) else {
                 continue;
             };
-            self.unify_type_param_binding(param_ty, &arg_ty, type_params, &mut bindings);
+            self.unify_type_param_binding(&param_ty, &arg_ty, &type_params, &mut bindings);
         }
         if bindings.is_empty() {
             return None;

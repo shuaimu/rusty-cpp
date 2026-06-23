@@ -373,6 +373,68 @@ impl CodeGen {
         None
     }
 
+    /// Like `lookup_function_type_param_names`, but falls back to a unique
+    /// leaf-name match when the current-module candidates miss — so a bare
+    /// `guard(...)` call resolves to a cross-module `scopeguard::guard` (function
+    /// names are globally unique in c2rust-style ports). The uniqueness guard
+    /// avoids guessing across same-named functions.
+    pub(super) fn lookup_function_type_param_names_with_import_fallback<'a>(
+        &'a self,
+        func: &syn::Expr,
+    ) -> Option<&'a Vec<String>> {
+        if let Some(params) = self.lookup_function_type_param_names(func) {
+            return Some(params);
+        }
+        let syn::Expr::Path(path_expr) = func else {
+            return None;
+        };
+        let leaf = path_expr.path.segments.last()?.ident.to_string();
+        let suffix = format!("::{}", leaf);
+        let mut found: Option<&Vec<String>> = None;
+        let mut count = 0usize;
+        for (key, params) in &self.function_type_param_names {
+            if (key == &leaf || key.ends_with(&suffix)) && !params.is_empty() {
+                count += 1;
+                if count > 1 {
+                    return None;
+                }
+                found = Some(params);
+            }
+        }
+        found
+    }
+
+    /// Like `lookup_function_arg_expected_type`, but falls back to a unique
+    /// leaf-name match (same rationale as the type-param-names fallback).
+    pub(super) fn lookup_function_arg_expected_type_with_import_fallback<'a>(
+        &'a self,
+        func: &syn::Expr,
+        arg_idx: usize,
+    ) -> Option<&'a syn::Type> {
+        if let Some(ty) = self.lookup_function_arg_expected_type(func, arg_idx) {
+            return Some(ty);
+        }
+        let syn::Expr::Path(path_expr) = func else {
+            return None;
+        };
+        let leaf = path_expr.path.segments.last()?.ident.to_string();
+        let suffix = format!("::{}", leaf);
+        let mut found: Option<&syn::Type> = None;
+        let mut count = 0usize;
+        for (key, expected) in &self.function_arg_expected_types {
+            if key == &leaf || key.ends_with(&suffix) {
+                count += 1;
+                if count > 1 {
+                    return None;
+                }
+                if let Some(Some(ty)) = expected.get(arg_idx) {
+                    found = Some(ty);
+                }
+            }
+        }
+        found
+    }
+
     pub(super) fn lookup_function_return_type<'a>(&'a self, func: &syn::Expr) -> Option<&'a syn::Type> {
         let syn::Expr::Path(path_expr) = func else {
             return None;

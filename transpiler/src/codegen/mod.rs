@@ -24564,6 +24564,15 @@ impl CodeGen {
             .collect();
         let mut subst: HashMap<String, syn::Type> = HashMap::new();
         for (name, ty) in param_names.iter().zip(actual_args.iter()) {
+            // Skip self-referential bindings (`A -> <type mentioning A>`, e.g.
+            // `SmallVec<A>` where the deref Target is `[A::Item]` and the
+            // inferred arg still mentions `A`). substitute_type_params_in_type
+            // recurses into its own replacement, so a cyclic binding loops
+            // forever. A self-referential binding can't concretize the Target
+            // anyway, so dropping it is both safe and correct.
+            if self.type_references_name(ty, name) {
+                continue;
+            }
             subst.insert(name.clone(), (*ty).clone());
         }
         if subst.is_empty() {
@@ -25496,6 +25505,69 @@ impl CodeGen {
         )
     }
 
+    /// Does `type_name` declare an inherent method `method_name`? (Same lookup
+    /// shape as `receiver_has_inherent_method_named`, but keyed by a type name
+    /// string rather than a receiver expression — used for the Deref Target.)
+    fn type_name_has_inherent_method(&self, type_name: &str, method_name: &str) -> bool {
+        self.inherent_impl_method_names
+            .iter()
+            .any(|(impl_ty, methods)| {
+                let type_matches = impl_ty == type_name
+                    || impl_ty.ends_with(&format!("::{}", type_name));
+                type_matches && methods.contains(method_name)
+            })
+    }
+
+    /// Auto-deref engine (method side): does `receiver.method_name(..)` resolve
+    /// to a method on the receiver's user `Deref` Target rather than the
+    /// receiver itself? Mirrors `field_access_through_user_deref`: infer the
+    /// receiver type; if the method is NOT inherent on the wrapper but IS
+    /// inherent on the (instantiated) Deref Target, the call must go through a
+    /// deref. Returns the emitted `(*receiver)` form's target — callers emit
+    /// `(*receiver).method(..)`. Disjoint from the runtime-wrapper predicates
+    /// (Arc/Box/Ref/...), which key on hardcoded names, not `user_deref_targets`.
+    fn method_call_resolves_through_user_deref_target(
+        &self,
+        receiver: &syn::Expr,
+        method_name: &str,
+    ) -> bool {
+        let Some(receiver_ty) = self
+            .infer_simple_expr_type(receiver)
+            .or_else(|| self.infer_local_binding_type_from_initializer(receiver))
+        else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        let Some(base_struct) = tp.path.segments.last().map(|s| s.ident.to_string()) else {
+            return false;
+        };
+        // Inherent on the wrapper itself → stays `receiver.method()`.
+        if self.type_name_has_inherent_method(&base_struct, method_name) {
+            return false;
+        }
+        let scoped = self.scoped_type_key(&base_struct);
+        let Some(raw_target) = self
+            .user_deref_targets
+            .get(&base_struct)
+            .or_else(|| self.user_deref_targets.get(&scoped))
+        else {
+            return false;
+        };
+        let raw_target = raw_target.clone();
+        let target_ty = self.instantiate_deref_target_with_receiver_args(tp, &raw_target);
+        let target_ty = self.peel_reference_paren_group_type(&target_ty);
+        let syn::Type::Path(ttp) = target_ty else {
+            return false;
+        };
+        let Some(target_struct) = ttp.path.segments.last().map(|s| s.ident.to_string()) else {
+            return false;
+        };
+        self.type_name_has_inherent_method(&target_struct, method_name)
+    }
+
     fn method_receiver_uses_wrapper_autoderef_member_access(
         &self,
         receiver: &syn::Expr,
@@ -25869,6 +25941,19 @@ impl CodeGen {
             return format!(
                 "([&](auto&& __recv) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }}({}))",
                 object_call, object_call, default_call, default_call, pointer_call, receiver
+            );
+        }
+        // Auto-deref engine (method side): a method that lives on the receiver's
+        // user `Deref` Target (not the wrapper) resolves through an explicit
+        // deref — `(*receiver).method(..)` — mirroring the field side's
+        // `(*g).field`. Uses the existing operator* (no operator-> needed) and
+        // keeps the output clean (no `if constexpr` ladder).
+        if self.method_call_resolves_through_user_deref_target(receiver_expr, method_name) {
+            return format!(
+                "(*{}).{}({})",
+                receiver,
+                method_call,
+                args.join(", ")
             );
         }
         let member_op = if self.method_receiver_uses_pointer_member_access(receiver_expr)

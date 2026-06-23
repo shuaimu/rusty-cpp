@@ -2836,6 +2836,43 @@ fn test_generic_deref_wrapper_field_access_resolves_through_target() {
 }
 
 #[test]
+fn test_generic_deref_wrapper_method_call_resolves_through_target() {
+    // Method side of the auto-deref engine: a method that lives on the
+    // receiver's Deref Target (not the wrapper) must lower to `(*g).method()`,
+    // while a method inherent on the wrapper stays `g.method()`. Mirrors the
+    // field path. Clears the hashbrown ScopeGuard cluster (guard.num_buckets()
+    // etc.).
+    let out = transpile_str(
+        r#"
+        struct Inner { payload: i32 }
+        impl Inner { fn compute(&self) -> i32 { self.payload } }
+        struct ScopeGuard<T, F> { value: T, dropfn: F }
+        impl<T, F> ScopeGuard<T, F> { fn defuse(&self) {} }
+        impl<T, F> std::ops::Deref for ScopeGuard<T, F> {
+            type Target = T;
+            fn deref(&self) -> &T { &self.value }
+        }
+        fn guard<T, F>(value: T, dropfn: F) -> ScopeGuard<T, F> {
+            ScopeGuard { value, dropfn }
+        }
+        fn use_it(inner: Inner) -> i32 {
+            let g = guard(inner, || {});
+            g.defuse();
+            g.compute()
+        }
+    "#,
+    );
+    assert!(
+        out.contains("(*g).compute()"),
+        "method on the Deref target should resolve to (*g).compute():\n{out}"
+    );
+    assert!(
+        out.contains("g.defuse()") && !out.contains("(*g).defuse()"),
+        "method inherent on the wrapper must stay g.defuse():\n{out}"
+    );
+}
+
+#[test]
 fn test_primitive_assoc_function_path_calls_lower_to_rusty_free_fns() {
     // `<primitive>::<assoc_fn>(args)` path-calls (NOT method calls) must lower
     // to the rusty free functions, not leave `u64::`/`usize::` as undeclared
