@@ -3600,6 +3600,177 @@ impl CodeGen {
         out
     }
 
+    /// Collect every nominal type name referenced anywhere in `ty` (path
+    /// segments + nested generic args, through refs/ptrs/slices/arrays/tuples).
+    fn collect_type_referenced_idents(ty: &syn::Type, out: &mut HashSet<String>) {
+        match ty {
+            syn::Type::Path(tp) => {
+                if let Some(qself) = &tp.qself {
+                    Self::collect_type_referenced_idents(&qself.ty, out);
+                }
+                for seg in &tp.path.segments {
+                    out.insert(seg.ident.to_string());
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        for arg in &args.args {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                Self::collect_type_referenced_idents(inner, out);
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Type::Reference(r) => Self::collect_type_referenced_idents(&r.elem, out),
+            syn::Type::Ptr(p) => Self::collect_type_referenced_idents(&p.elem, out),
+            syn::Type::Slice(s) => Self::collect_type_referenced_idents(&s.elem, out),
+            syn::Type::Array(a) => Self::collect_type_referenced_idents(&a.elem, out),
+            syn::Type::Tuple(t) => {
+                for elem in &t.elems {
+                    Self::collect_type_referenced_idents(elem, out);
+                }
+            }
+            syn::Type::Paren(p) => Self::collect_type_referenced_idents(&p.elem, out),
+            syn::Type::Group(g) => Self::collect_type_referenced_idents(&g.elem, out),
+            _ => {}
+        }
+    }
+
+    /// Variant-ordering Part B: a non-generic DATA enum is "early-hoistable"
+    /// when none of its variant field types reference a crate-local nominal type
+    /// — so its COMPLETE definition can be emitted in the early type-definition
+    /// region (ahead of module bodies that construct it / return it by value)
+    /// without itself hitting an incomplete type. External / primitive field
+    /// types (rusty/std/core, ints, ...) are always complete, so an enum like
+    /// `TryReserveError { CapacityOverflow, AllocError { layout: Layout } }`
+    /// qualifies. A forward declaration is NOT enough for a by-value use; the
+    /// full definition must precede it. Generic data enums are excluded: their
+    /// completeness is deferred by C++ templates (Part A's forward decls of the
+    /// variant member structs suffice), and body-hoisting a template is both
+    /// unnecessary and order-fragile. The crate-local-reference guard is
+    /// conservative — a false negative just leaves the enum in source order (no
+    /// regression); a false positive could trade one incomplete type for
+    /// another, so the check excludes anything touching a declared local type.
+    fn data_enum_is_early_hoistable(&self, e: &syn::ItemEnum) -> bool {
+        // Unit-only enums are already hoisted by the C-like-enum partition.
+        if e.variants.iter().all(|v| v.fields.is_empty()) {
+            return false;
+        }
+        if e.generics.params.iter().any(|p| {
+            matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_))
+        }) {
+            return false;
+        }
+        let mut referenced: HashSet<String> = HashSet::new();
+        for variant in &e.variants {
+            for field in &variant.fields {
+                Self::collect_type_referenced_idents(&field.ty, &mut referenced);
+            }
+        }
+        !referenced.iter().any(|name| {
+            self.local_declared_types.contains(name)
+                || self
+                    .local_declared_types
+                    .iter()
+                    .any(|local| local.ends_with(&format!("::{}", name)))
+        })
+    }
+
+    fn name_is_crate_local_type(&self, name: &str) -> bool {
+        self.local_declared_types.contains(name)
+            || self
+                .local_declared_types
+                .iter()
+                .any(|local| local.ends_with(&format!("::{}", name)))
+    }
+
+    /// Variant-ordering Part B: the set of non-generic data-enum names safe to
+    /// hoist to the early type-definition region. Starts from the variant-field
+    /// check (`data_enum_is_early_hoistable`) then EXCLUDES any candidate whose
+    /// impl items reference a crate-local type other than the enum itself or its
+    /// own variant helper structs — because an INLINE method/factory definition
+    /// referencing a later-defined local type would break once the enum is
+    /// hoisted ahead of it. Conservative: scans all impl items (a false
+    /// exclusion just leaves the enum in source order, no regression).
+    fn data_enum_hoistable_names(&self, items: &[syn::Item]) -> HashSet<String> {
+        let mut candidates: HashSet<String> = HashSet::new();
+        for item in items {
+            if let syn::Item::Enum(e) = item {
+                if self.data_enum_is_early_hoistable(e) {
+                    candidates.insert(e.ident.to_string());
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return candidates;
+        }
+
+        fn collect_token_idents(
+            tokens: proc_macro2::TokenStream,
+            out: &mut HashSet<String>,
+        ) {
+            for tt in tokens {
+                match tt {
+                    proc_macro2::TokenTree::Ident(ident) => {
+                        out.insert(ident.to_string());
+                    }
+                    proc_macro2::TokenTree::Group(group) => {
+                        collect_token_idents(group.stream(), out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        struct IdentCollector<'a> {
+            out: &'a mut HashSet<String>,
+        }
+        impl<'a, 'ast> syn::visit::Visit<'ast> for IdentCollector<'a> {
+            fn visit_ident(&mut self, ident: &'ast syn::Ident) {
+                self.out.insert(ident.to_string());
+            }
+            // syn does not descend into macro token streams, but a type
+            // referenced only inside `format_args!(... Type ...)` is still a real
+            // dependency. Walk the raw tokens too.
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                collect_token_idents(mac.tokens.clone(), self.out);
+                syn::visit::visit_macro(self, mac);
+            }
+        }
+
+        for item in items {
+            let syn::Item::Impl(imp) = item else {
+                continue;
+            };
+            let Some(target) = Self::impl_self_type_path(imp.self_ty.as_ref()) else {
+                continue;
+            };
+            let Some(target_name) = target.path.segments.last().map(|s| s.ident.to_string())
+            else {
+                continue;
+            };
+            if !candidates.contains(&target_name) {
+                continue;
+            }
+            let mut refs: HashSet<String> = HashSet::new();
+            {
+                let mut collector = IdentCollector { out: &mut refs };
+                for impl_item in &imp.items {
+                    syn::visit::Visit::visit_impl_item(&mut collector, impl_item);
+                }
+            }
+            let own_variant_prefix = format!("{}_", target_name);
+            let references_other_local = refs.iter().any(|name| {
+                if *name == target_name || name.starts_with(&own_variant_prefix) {
+                    return false;
+                }
+                self.name_is_crate_local_type(name)
+            });
+            if references_other_local {
+                candidates.remove(&target_name);
+            }
+        }
+        candidates
+    }
+
     fn order_items_for_emission<'a>(
         &self,
         items: &'a [syn::Item],
@@ -3622,6 +3793,10 @@ impl CodeGen {
             }
         };
         log_order("start");
+        // Variant-ordering Part B: names of non-generic data enums whose COMPLETE
+        // definition can be hoisted ahead of module bodies that use them by value.
+        let early_hoistable_data_enums = self.data_enum_hoistable_names(items);
+        log_order("data_enum_hoistable_names");
         let known_scope_type_names = Self::collect_top_level_type_names(items);
         log_order("collect_top_level_type_names");
         let trait_default_type_deps =
@@ -3645,7 +3820,7 @@ impl CodeGen {
             log_order("topological_sort_traits(no_inline_modules)");
             let (early_enums, rest): (Vec<&syn::Item>, Vec<&syn::Item>) =
                 result.into_iter().partition(|item| {
-                    matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()))
+                    matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()) || early_hoistable_data_enums.contains(&e.ident.to_string()))
                 });
             let mut final_result = Vec::with_capacity(early_enums.len() + rest.len());
             final_result.extend(early_enums);
@@ -3859,7 +4034,7 @@ impl CodeGen {
         // `enum class Op` is defined after structs that use `Op::Wildcard`.
         let (early_enums, rest): (Vec<&syn::Item>, Vec<&syn::Item>) =
             ordered.into_iter().partition(|item| {
-                matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()))
+                matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()) || early_hoistable_data_enums.contains(&e.ident.to_string()))
             });
         let mut final_ordered = Vec::with_capacity(early_enums.len() + rest.len());
         final_ordered.extend(early_enums);
@@ -3890,7 +4065,7 @@ impl CodeGen {
         // enumerators (e.g., `Position::First`) in all mixed ordering layouts.
         let (early_enums, rest): (Vec<&syn::Item>, Vec<&syn::Item>) =
             final_ordered.into_iter().partition(|item| {
-                matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()))
+                matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()) || early_hoistable_data_enums.contains(&e.ident.to_string()))
             });
         let mut final_ordered = Vec::with_capacity(early_enums.len() + rest.len());
         final_ordered.extend(early_enums);

@@ -10577,6 +10577,69 @@ fn test_data_enum_wrapper_struct_definition_repeats_where_requires_clause() {
 }
 
 #[test]
+fn test_non_generic_data_enum_hoisted_before_module_that_constructs_it() {
+    // Variant-ordering Part B: a non-generic data enum whose variant field types
+    // are all external/primitive (here `f64`) and whose impls reference no other
+    // crate-local type must have its COMPLETE definition emitted before a module
+    // that constructs it / returns it by value — a forward declaration is not
+    // enough for a by-value use.
+    let out = transpile_str(
+        r#"
+        enum Status { Ok, Failed(f64) }
+        impl Status { fn is_ok(&self) -> bool { true } }
+        mod worker {
+            use super::Status;
+            fn run() -> Status { Status::Failed(1.0) }
+        }
+        "#,
+    );
+    let def_pos = out
+        .find("struct Status : std::variant<")
+        .unwrap_or_else(|| panic!("Status enum definition missing:\n{out}"));
+    // The by-value construction inside the module must follow the complete
+    // definition (a forward declaration is not enough to aggregate-construct it).
+    let construct_pos = out
+        .find("Status{Status_Failed{")
+        .unwrap_or_else(|| panic!("by-value construction site missing:\n{out}"));
+    let module_construct_pos = out[def_pos..]
+        .find("Status{Status_Failed{1.0}}")
+        .map(|rel| def_pos + rel)
+        .unwrap_or(construct_pos);
+    assert!(
+        def_pos < module_construct_pos,
+        "the complete data-enum definition must precede the module's by-value \
+         construction:\n{out}"
+    );
+}
+
+#[test]
+fn test_data_enum_referencing_local_type_in_method_is_not_hoisted() {
+    // The hoist must NOT fire when the enum's impl (including macro token streams)
+    // references another crate-local type that may be defined later — that local
+    // type must stay ordered ahead of the enum's out-of-line method definition.
+    let out = transpile_str(
+        r#"
+        enum Wrap { V(f64) }
+        impl Wrap {
+            fn show(&self) { let _ = format_args!("{}", Helper(1.0)); }
+        }
+        struct Helper(f64);
+        "#,
+    );
+    let helper_pos = out
+        .find("struct Helper {")
+        .expect("Helper definition emitted");
+    let enum_pos = out
+        .find("struct Wrap :")
+        .expect("Wrap enum emitted");
+    assert!(
+        helper_pos < enum_pos,
+        "an enum whose method references a later local type (even via a macro \
+         token stream) must not be hoisted ahead of it:\n{out}"
+    );
+}
+
+#[test]
 fn test_struct_wrapper_enum_forward_declares_variant_member_structs() {
     // A struct-wrapper data enum (recursive or has impls) must forward-declare
     // its per-variant member structs (`Enum_Variant`), not just the umbrella,
