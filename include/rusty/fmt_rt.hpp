@@ -123,6 +123,13 @@ struct FormatSpec {
     bool sign_aware_zero_pad = false;   // `{:0}`
 };
 
+// Debug-builder classes (defined after the primitives they recurse into).
+class DebugStruct;
+class DebugTuple;
+class DebugList;
+class DebugSet;
+class DebugMap;
+
 // ---------------------------------------------------------------------------
 // Formatter — what transpiled `fmt(Formatter&)` methods will write into (after
 // cutover). Phase 0: the sink + spec + write_str/write_char/pad + flag accessors.
@@ -271,6 +278,14 @@ public:
         }
         return ok();
     }
+
+    // Debug builders (`#[derive(Debug)]` / hand-written Debug impls). Defined
+    // out-of-line once the builder classes are complete.
+    DebugStruct debug_struct(std::string_view name);
+    DebugTuple debug_tuple(std::string_view name);
+    DebugList debug_list();
+    DebugSet debug_set();
+    DebugMap debug_map();
 };
 
 namespace detail {
@@ -432,6 +447,226 @@ inline Result fmt_char_debug(Formatter& f, char32_t c) {
     f.write_char('\'');
     return ok();
 }
+
+// ---------------------------------------------------------------------------
+// Debug dispatch + builders (Phase 2).
+// ---------------------------------------------------------------------------
+
+// Format a value's DEBUG representation. Prefers the value's own
+// `fmt(Formatter&)` (the transpiled Debug impl); otherwise routes primitives to
+// their Debug forms (int -> decimal, bool, &str -> quoted, char -> 'c').
+template<typename T>
+inline Result debug_value(Formatter& f, const T& value) {
+    using U = std::remove_cvref_t<T>;
+    if constexpr (requires { value.fmt(f); }) {
+        return value.fmt(f);
+    } else if constexpr (std::is_same_v<U, bool>) {
+        return fmt_bool(f, value);
+    } else if constexpr (std::is_same_v<U, char32_t>) {
+        return fmt_char_debug(f, value);
+    } else if constexpr (std::is_integral_v<U>) {
+        return fmt_int(f, value);
+    } else if constexpr (std::is_convertible_v<const U&, std::string_view>) {
+        return fmt_str_debug(f, std::string_view(value));
+    } else {
+        return ok();
+    }
+}
+
+// Write `content`, prefixing `indent` after every newline (Rust's PadAdapter):
+// this is what nests pretty-printed (`{:#?}`) Debug output one level deeper.
+inline void write_indented(Formatter& f, std::string_view content,
+                           std::string_view indent) {
+    bool on_newline = false;
+    for (char c : content) {
+        if (on_newline) {
+            f.write_str(indent);
+        }
+        f.write_char(c);
+        on_newline = (c == '\n');
+    }
+}
+
+// Format a value's Debug into a fresh buffer (alternate-aware) so it can be
+// re-emitted with indentation. Returns the owning Buffer (move).
+template<typename T>
+inline Buffer debug_to_buffer(bool alternate, const T& value) {
+    Buffer tmp;
+    FormatSpec spec;
+    spec.alternate = alternate;
+    Formatter sub(tmp, spec);
+    debug_value(sub, value);
+    return tmp;
+}
+
+inline constexpr std::string_view kIndent = "    ";
+
+class DebugStruct {
+    Formatter& f_;
+    bool has_fields_ = false;
+
+public:
+    DebugStruct(Formatter& f, std::string_view name) : f_(f) { f_.write_str(name); }
+
+    template<typename T>
+    DebugStruct& field(std::string_view name, const T& value) {
+        if (f_.alternate()) {
+            if (!has_fields_) {
+                f_.write_str(" {\n");
+            }
+            Buffer vb = debug_to_buffer(true, value);
+            f_.write_str(kIndent);
+            f_.write_str(name);
+            f_.write_str(": ");
+            write_indented(f_, vb.view(), kIndent);
+            f_.write_str(",\n");
+        } else {
+            f_.write_str(has_fields_ ? ", " : " { ");
+            f_.write_str(name);
+            f_.write_str(": ");
+            debug_value(f_, value);
+        }
+        has_fields_ = true;
+        return *this;
+    }
+
+    Result finish() {
+        if (has_fields_) {
+            f_.write_str(f_.alternate() ? std::string_view("}") : std::string_view(" }"));
+        }
+        return ok();
+    }
+
+    Result finish_non_exhaustive() {
+        if (f_.alternate()) {
+            f_.write_str(has_fields_ ? std::string_view("") : std::string_view(" {\n"));
+            f_.write_str(kIndent);
+            f_.write_str("..\n}");
+        } else {
+            f_.write_str(has_fields_ ? std::string_view(", .. }") : std::string_view(" { .. }"));
+        }
+        return ok();
+    }
+};
+
+// Shared body for the "sequence" builders (tuple / list / set), parameterized by
+// the bracket pair and (for tuple) a name prefix.
+class SeqBuilder {
+    Formatter& f_;
+    char open_;
+    char close_;
+    bool has_entries_ = false;
+
+public:
+    SeqBuilder(Formatter& f, std::string_view name_prefix, char open, char close)
+        : f_(f), open_(open), close_(close) {
+        f_.write_str(name_prefix);
+    }
+
+    template<typename T>
+    SeqBuilder& entry(const T& value) {
+        if (f_.alternate()) {
+            if (!has_entries_) {
+                f_.write_char(open_);
+                f_.write_char('\n');
+            }
+            Buffer vb = debug_to_buffer(true, value);
+            f_.write_str(kIndent);
+            write_indented(f_, vb.view(), kIndent);
+            f_.write_str(",\n");
+        } else {
+            if (!has_entries_) {
+                f_.write_char(open_);
+            } else {
+                f_.write_str(", ");
+            }
+            debug_value(f_, value);
+        }
+        has_entries_ = true;
+        return *this;
+    }
+
+    Result finish() {
+        if (!has_entries_) {
+            f_.write_char(open_);
+        }
+        f_.write_char(close_);
+        return ok();
+    }
+};
+
+// Thin typed wrappers so the transpiler's debug_tuple()/list()/set() return
+// distinct types (matching Rust's API) over the shared sequence logic.
+class DebugTuple : public SeqBuilder {
+public:
+    DebugTuple(Formatter& f, std::string_view name) : SeqBuilder(f, name, '(', ')') {}
+    template<typename T> DebugTuple& field(const T& v) { entry(v); return *this; }
+};
+class DebugList : public SeqBuilder {
+public:
+    explicit DebugList(Formatter& f) : SeqBuilder(f, std::string_view(), '[', ']') {}
+    template<typename It> DebugList& entries(It begin, It end) {
+        for (; begin != end; ++begin) entry(*begin);
+        return *this;
+    }
+};
+class DebugSet : public SeqBuilder {
+public:
+    explicit DebugSet(Formatter& f) : SeqBuilder(f, std::string_view(), '{', '}') {}
+    template<typename It> DebugSet& entries(It begin, It end) {
+        for (; begin != end; ++begin) entry(*begin);
+        return *this;
+    }
+};
+
+class DebugMap {
+    Formatter& f_;
+    bool has_entries_ = false;
+
+public:
+    explicit DebugMap(Formatter& f) : f_(f) {}
+
+    template<typename K, typename V>
+    DebugMap& entry(const K& key, const V& value) {
+        if (f_.alternate()) {
+            if (!has_entries_) {
+                f_.write_str("{\n");
+            }
+            Buffer kb = debug_to_buffer(true, key);
+            Buffer vb = debug_to_buffer(true, value);
+            f_.write_str(kIndent);
+            write_indented(f_, kb.view(), kIndent);
+            f_.write_str(": ");
+            write_indented(f_, vb.view(), kIndent);
+            f_.write_str(",\n");
+        } else {
+            f_.write_str(has_entries_ ? ", " : "{");
+            debug_value(f_, key);
+            f_.write_str(": ");
+            debug_value(f_, value);
+        }
+        has_entries_ = true;
+        return *this;
+    }
+
+    Result finish() {
+        if (!has_entries_) {
+            f_.write_char('{');
+        }
+        f_.write_char('}');
+        return ok();
+    }
+};
+
+inline DebugStruct Formatter::debug_struct(std::string_view name) {
+    return DebugStruct(*this, name);
+}
+inline DebugTuple Formatter::debug_tuple(std::string_view name) {
+    return DebugTuple(*this, name);
+}
+inline DebugList Formatter::debug_list() { return DebugList(*this); }
+inline DebugSet Formatter::debug_set() { return DebugSet(*this); }
+inline DebugMap Formatter::debug_map() { return DebugMap(*this); }
 
 } // namespace rt
 } // namespace fmt

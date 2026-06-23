@@ -69,6 +69,22 @@ FormatSpec spec_zero_width(std::size_t w) {
     return s;
 }
 
+FormatSpec spec_alt() {
+    FormatSpec s;
+    s.alternate = true;
+    return s;
+}
+
+// A user type with a Debug `fmt` — exercises the nested-builder dispatch and the
+// pretty-print indentation (debug_value routes to `value.fmt(f)`).
+struct CppPoint {
+    int x;
+    int y;
+    rusty::fmt::Result fmt(Formatter& f) const {
+        return f.debug_struct("Point").field("x", x).field("y", y).finish();
+    }
+};
+
 FormatSpec width(std::size_t w, Alignment a = Alignment::Unknown, char fill = ' ') {
     FormatSpec s;
     s.has_width = true;
@@ -236,6 +252,70 @@ std::map<std::string, std::function<std::string()>> reproductions() {
     };
     r["char_dbg_unicode"] = [] {
         return render({}, [](Formatter& f) { rt::fmt_char_debug(f, U'é'); });
+    };
+
+    // Phase 2: Debug builders.
+    auto sv = [](const char* s) { return std::string_view(s); };
+    r["dbg_struct"] = [] {
+        return render({}, [](Formatter& f) {
+            f.debug_struct("Point").field("x", 1).field("y", 2).finish();
+        });
+    };
+    r["dbg_struct_pretty"] = [] {
+        return render(spec_alt(), [](Formatter& f) {
+            f.debug_struct("Point").field("x", 1).field("y", 2).finish();
+        });
+    };
+    r["dbg_struct_empty"] = [] {
+        return render({}, [](Formatter& f) { f.debug_struct("Empty").finish(); });
+    };
+    r["dbg_tuple"] = [sv] {
+        return render({}, [sv](Formatter& f) {
+            f.debug_tuple("Wrap").field(1).field(sv("hi")).finish();
+        });
+    };
+    r["dbg_tuple_pretty"] = [sv] {
+        return render(spec_alt(), [sv](Formatter& f) {
+            f.debug_tuple("Wrap").field(1).field(sv("hi")).finish();
+        });
+    };
+    r["dbg_list"] = [] {
+        return render({}, [](Formatter& f) {
+            f.debug_list().entry(1).entry(2).entry(3).finish();
+        });
+    };
+    r["dbg_list_pretty"] = [] {
+        return render(spec_alt(), [](Formatter& f) {
+            f.debug_list().entry(1).entry(2).entry(3).finish();
+        });
+    };
+    r["dbg_list_empty"] = [] {
+        return render({}, [](Formatter& f) { f.debug_list().finish(); });
+    };
+    r["dbg_set"] = [] {
+        return render({}, [](Formatter& f) {
+            f.debug_set().entry(1).entry(2).entry(3).finish();
+        });
+    };
+    r["dbg_map"] = [sv] {
+        return render({}, [sv](Formatter& f) {
+            f.debug_map().entry(1, sv("a")).entry(2, sv("b")).finish();
+        });
+    };
+    r["dbg_map_pretty"] = [sv] {
+        return render(spec_alt(), [sv](Formatter& f) {
+            f.debug_map().entry(1, sv("a")).entry(2, sv("b")).finish();
+        });
+    };
+    r["dbg_nested"] = [sv] {
+        return render({}, [sv](Formatter& f) {
+            f.debug_struct("Outer").field("inner", CppPoint{1, 2}).field("label", sv("hi")).finish();
+        });
+    };
+    r["dbg_nested_pretty"] = [sv] {
+        return render(spec_alt(), [sv](Formatter& f) {
+            f.debug_struct("Outer").field("inner", CppPoint{1, 2}).field("label", sv("hi")).finish();
+        });
     };
     return r;
 }

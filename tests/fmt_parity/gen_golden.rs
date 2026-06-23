@@ -17,7 +17,23 @@
 // exists, the C++ side can parse the same format string and the sync becomes
 // automatic.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+
+#[derive(Debug)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+#[derive(Debug)]
+struct Wrap(i32, &'static str);
+#[derive(Debug)]
+struct Empty;
+#[derive(Debug)]
+struct Outer {
+    inner: Point,
+    label: &'static str,
+}
 
 fn hex(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
@@ -92,6 +108,20 @@ fn main() {
         ("char_dbg_newline", format!("{:?}", '\n')),
         ("char_dbg_quote", format!("{:?}", '\'')),
         ("char_dbg_unicode", format!("{:?}", 'é')),
+        // Phase 2: Debug builders.
+        ("dbg_struct", format!("{:?}", Point { x: 1, y: 2 })),
+        ("dbg_struct_pretty", format!("{:#?}", Point { x: 1, y: 2 })),
+        ("dbg_struct_empty", format!("{:?}", Empty)),
+        ("dbg_tuple", format!("{:?}", Wrap(1, "hi"))),
+        ("dbg_tuple_pretty", format!("{:#?}", Wrap(1, "hi"))),
+        ("dbg_list", format!("{:?}", [1, 2, 3])),
+        ("dbg_list_pretty", format!("{:#?}", [1, 2, 3])),
+        ("dbg_list_empty", format!("{:?}", Vec::<i32>::new())),
+        ("dbg_set", format!("{:?}", BTreeSet::from([1, 2, 3]))),
+        ("dbg_map", format!("{:?}", BTreeMap::from([(1, "a"), (2, "b")]))),
+        ("dbg_map_pretty", format!("{:#?}", BTreeMap::from([(1, "a"), (2, "b")]))),
+        ("dbg_nested", format!("{:?}", Outer { inner: Point { x: 1, y: 2 }, label: "hi" })),
+        ("dbg_nested_pretty", format!("{:#?}", Outer { inner: Point { x: 1, y: 2 }, label: "hi" })),
     ];
 
     for (id, out) in &cases {
