@@ -186,6 +186,43 @@ void test_bool_char_strdebug() {
     printf("PASS\n");
 }
 
+void test_float_basic() {
+    printf("test_float_basic: ");
+    Buffer buf;
+    using rt::FloatStyle;
+    // Display: always positional, whole numbers carry no ".0".
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f64(f, 100.0, FloatStyle::Display); }) == "100");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f64(f, 12.34, FloatStyle::Display); }) == "12.34");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f64(f, 0.5, FloatStyle::Display); }) == "0.5");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f64(f, -0.0, FloatStyle::Display); }) == "-0");
+    // Debug: positional whole numbers gain ".0", and flip to scientific at 1e16.
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f64(f, 100.0, FloatStyle::Debug); }) == "100.0");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f64(f, 1e16, FloatStyle::Debug); }) == "1e16");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f64(f, 1e15, FloatStyle::Debug); }) == "1000000000000000.0");
+    // Scientific.
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f64(f, 1234.5, FloatStyle::LowerExp); }) == "1.2345e3");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f64(f, 0.00125, FloatStyle::LowerExp); }) == "1.25e-3");
+    // Non-finite: NaN never carries a sign, inf does.
+    {
+        FormatSpec s; s.sign_plus = true;
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_f64(f, __builtin_nan(""), FloatStyle::Display); }) == "NaN");
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_f64(f, __builtin_huge_val(), FloatStyle::Display); }) == "+inf");
+    }
+    // f32 has its own (shorter) shortest representation.
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_f32(f, 0.1f, FloatStyle::Display); }) == "0.1");
+    // Fixed precision {:.N}: round-half-to-even, with the point placed exactly.
+    {
+        FormatSpec s; s.has_precision = true; s.precision = 2;
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_f64(f, 3.14159, FloatStyle::Display); }) == "3.14");
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_f64(f, 100.0, FloatStyle::Display); }) == "100.00");
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_f64(f, 0.125, FloatStyle::Display); }) == "0.12");
+        s.precision = 0;
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_f64(f, 2.5, FloatStyle::Display); }) == "2");
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_f64(f, 3.5, FloatStyle::Display); }) == "4");
+    }
+    printf("PASS\n");
+}
+
 }  // namespace
 
 int main() {
@@ -200,6 +237,7 @@ int main() {
     test_int_decimal();
     test_int_radix();
     test_bool_char_strdebug();
-    printf("All rusty::fmt Phase 0+1 tests passed.\n");
+    test_float_basic();
+    printf("All rusty::fmt Phase 0+1+3 tests passed.\n");
     return 0;
 }

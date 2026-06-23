@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -317,6 +318,133 @@ std::map<std::string, std::function<std::string()>> reproductions() {
             f.debug_struct("Outer").field("inner", CppPoint{1, 2}).field("label", sv("hi")).finish();
         });
     };
+
+    // Phase 3: floats. `fd`/`fd32` bind a value+style under a spec.
+    using rt::FloatStyle;
+    auto fd = [](double v, FloatStyle st, const FormatSpec& s = {}) {
+        return render(s, [v, st](Formatter& f) { rt::fmt_f64(f, v, st); });
+    };
+    auto fd32 = [](float v, FloatStyle st, const FormatSpec& s = {}) {
+        return render(s, [v, st](Formatter& f) { rt::fmt_f32(f, v, st); });
+    };
+
+    // f64 Display (always positional).
+    r["f_disp_whole"] = [fd] { return fd(100.0, FloatStyle::Display); };
+    r["f_disp_one"] = [fd] { return fd(1.0, FloatStyle::Display); };
+    r["f_disp_frac"] = [fd] { return fd(12.34, FloatStyle::Display); };
+    r["f_disp_half"] = [fd] { return fd(0.5, FloatStyle::Display); };
+    r["f_disp_small"] = [fd] { return fd(0.00125, FloatStyle::Display); };
+    r["f_disp_third"] = [fd] { return fd(0.3, FloatStyle::Display); };
+    r["f_disp_pi"] = [fd] { return fd(3.141592653589793, FloatStyle::Display); };
+    r["f_disp_neg"] = [fd] { return fd(-3.14, FloatStyle::Display); };
+    r["f_disp_negzero"] = [fd] { return fd(-0.0, FloatStyle::Display); };
+    r["f_disp_zero"] = [fd] { return fd(0.0, FloatStyle::Display); };
+    r["f_disp_big"] = [fd] { return fd(1e21, FloatStyle::Display); };
+    r["f_disp_e16"] = [fd] { return fd(1e16, FloatStyle::Display); };
+    r["f_disp_tiny"] = [fd] { return fd(1e-5, FloatStyle::Display); };
+    r["f_disp_123456789"] = [fd] { return fd(123456789.0, FloatStyle::Display); };
+
+    // f64 Debug (positional with ".0", flips to scientific past the threshold).
+    r["f_dbg_whole"] = [fd] { return fd(100.0, FloatStyle::Debug); };
+    r["f_dbg_one"] = [fd] { return fd(1.0, FloatStyle::Debug); };
+    r["f_dbg_frac"] = [fd] { return fd(12.34, FloatStyle::Debug); };
+    r["f_dbg_half"] = [fd] { return fd(0.5, FloatStyle::Debug); };
+    r["f_dbg_negzero"] = [fd] { return fd(-0.0, FloatStyle::Debug); };
+    r["f_dbg_zero"] = [fd] { return fd(0.0, FloatStyle::Debug); };
+    r["f_dbg_e15"] = [fd] { return fd(1e15, FloatStyle::Debug); };
+    r["f_dbg_e16"] = [fd] { return fd(1e16, FloatStyle::Debug); };
+    r["f_dbg_e20"] = [fd] { return fd(1e20, FloatStyle::Debug); };
+    r["f_dbg_e_minus4"] = [fd] { return fd(1e-4, FloatStyle::Debug); };
+    r["f_dbg_e_minus5"] = [fd] { return fd(1e-5, FloatStyle::Debug); };
+    r["f_dbg_small_frac"] = [fd] { return fd(0.000123, FloatStyle::Debug); };
+    r["f_dbg_big_mantissa"] = [fd] { return fd(12345678901234567.0, FloatStyle::Debug); };
+
+    // f64 scientific {:e} / {:E}.
+    r["f_exp_1234"] = [fd] { return fd(1234.5, FloatStyle::LowerExp); };
+    r["f_exp_whole"] = [fd] { return fd(100.0, FloatStyle::LowerExp); };
+    r["f_exp_small"] = [fd] { return fd(0.00125, FloatStyle::LowerExp); };
+    r["f_exp_zero"] = [fd] { return fd(0.0, FloatStyle::LowerExp); };
+    r["f_exp_neg"] = [fd] { return fd(-3.14, FloatStyle::LowerExp); };
+    r["f_Exp_upper"] = [fd] { return fd(1234.5, FloatStyle::UpperExp); };
+    r["f_exp_pi"] = [fd] { return fd(3.141592653589793, FloatStyle::LowerExp); };
+
+    // f64 width / fill / sign / zero-pad.
+    r["f_width8"] = [fd] { return fd(3.14, FloatStyle::Display, width(8)); };
+    r["f_width8_left"] = [fd] { return fd(3.14, FloatStyle::Display, width(8, Alignment::Left)); };
+    r["f_zeropad"] = [fd] { return fd(3.14, FloatStyle::Display, spec_zero_width(8)); };
+    r["f_zeropad_neg"] = [fd] { return fd(-3.14, FloatStyle::Display, spec_zero_width(8)); };
+    r["f_plus"] = [fd] { return fd(3.14, FloatStyle::Display, spec_flags(false, true)); };
+    r["f_plus_neg"] = [fd] { return fd(-3.14, FloatStyle::Display, spec_flags(false, true)); };
+    r["f_fill_star"] = [fd] { return fd(3.14, FloatStyle::Display, width(8, Alignment::Right, '*')); };
+
+    // f64 non-finite.
+    const double NAN_V = std::numeric_limits<double>::quiet_NaN();
+    const double INF_V = std::numeric_limits<double>::infinity();
+    r["f_nan"] = [fd, NAN_V] { return fd(NAN_V, FloatStyle::Display); };
+    r["f_nan_dbg"] = [fd, NAN_V] { return fd(NAN_V, FloatStyle::Debug); };
+    r["f_nan_plus"] = [fd, NAN_V] { return fd(NAN_V, FloatStyle::Display, spec_flags(false, true)); };
+    r["f_inf"] = [fd, INF_V] { return fd(INF_V, FloatStyle::Display); };
+    r["f_neg_inf"] = [fd, INF_V] { return fd(-INF_V, FloatStyle::Display); };
+    r["f_inf_plus"] = [fd, INF_V] { return fd(INF_V, FloatStyle::Display, spec_flags(false, true)); };
+    r["f_inf_width8"] = [fd, INF_V] { return fd(INF_V, FloatStyle::Display, width(8)); };
+    r["f_inf_exp"] = [fd, INF_V] { return fd(INF_V, FloatStyle::LowerExp); };
+
+    // f32 (own shortest — fewer digits than the widened f64).
+    r["f32_tenth"] = [fd32] { return fd32(0.1f, FloatStyle::Display); };
+    r["f32_dbg_tenth"] = [fd32] { return fd32(0.1f, FloatStyle::Debug); };
+    r["f32_third"] = [fd32] { return fd32(0.3f, FloatStyle::Display); };
+    r["f32_pi"] = [fd32] { return fd32(3.14159265358979323846f, FloatStyle::Display); };
+    r["f32_big"] = [fd32] { return fd32(1e20f, FloatStyle::Display); };
+
+    // Phase 3b: fixed precision {:.N} (positional, round-half-to-even).
+    auto prec_full = [](std::size_t w, bool has_w, std::size_t p, bool zero, char fill) {
+        FormatSpec s;
+        s.has_width = has_w; s.width = w;
+        s.has_precision = true; s.precision = p;
+        s.sign_aware_zero_pad = zero; s.fill = fill;
+        return s;
+    };
+    r["fp_pi2"] = [fd] { return fd(3.141592653589793, FloatStyle::Display, precision(2)); };
+    r["fp_pi5"] = [fd] { return fd(3.141592653589793, FloatStyle::Display, precision(5)); };
+    r["fp_whole2"] = [fd] { return fd(100.0, FloatStyle::Display, precision(2)); };
+    r["fp_zero3"] = [fd] { return fd(0.0, FloatStyle::Display, precision(3)); };
+    r["fp_negzero2"] = [fd] { return fd(-0.0, FloatStyle::Display, precision(2)); };
+    r["fp_neg2"] = [fd] { return fd(-3.14159, FloatStyle::Display, precision(2)); };
+    r["fp_small5"] = [fd] { return fd(0.00125, FloatStyle::Display, precision(5)); };
+    r["fp_round0_half"] = [fd] { return fd(0.5, FloatStyle::Display, precision(0)); };
+    r["fp_round0_1p5"] = [fd] { return fd(1.5, FloatStyle::Display, precision(0)); };
+    r["fp_round0_2p5"] = [fd] { return fd(2.5, FloatStyle::Display, precision(0)); };
+    r["fp_round0_3p7"] = [fd] { return fd(3.7, FloatStyle::Display, precision(0)); };
+    r["fp_round2_125"] = [fd] { return fd(0.125, FloatStyle::Display, precision(2)); };
+    r["fp_round2_375"] = [fd] { return fd(0.375, FloatStyle::Display, precision(2)); };
+    r["fp_big2"] = [fd] { return fd(12345.678, FloatStyle::Display, precision(2)); };
+    r["fp_dbg2"] = [fd] { return fd(3.14159, FloatStyle::Debug, precision(2)); };
+    r["fp_dbg0_whole"] = [fd] { return fd(5.0, FloatStyle::Debug, precision(0)); };
+    r["fp_zeropad"] = [fd, prec_full] {
+        return fd(3.14159, FloatStyle::Display, prec_full(8, true, 2, true, '0'));
+    };
+    r["fp_zeropad_neg"] = [fd, prec_full] {
+        return fd(-3.14159, FloatStyle::Display, prec_full(8, true, 2, true, '0'));
+    };
+    r["fp_width"] = [fd] { return fd(3.14159, FloatStyle::Display, width_prec(10, 3, Alignment::Unknown)); };
+    r["fp_f32_2"] = [fd32] { return fd32(0.1f, FloatStyle::Display, precision(2)); };
+
+    // f64 Debug/Display exponent sweep — pins the positional/scientific switch.
+    // Build 10^e exactly (matches Rust's `powi`: every 10^k for |k|<=22 is
+    // exactly representable, so repeated *10 / reciprocal rounds identically).
+    auto powi10 = [](int e) -> double {
+        double mag = 1.0;
+        for (int i = 0; i < (e < 0 ? -e : e); ++i) mag *= 10.0;
+        return e < 0 ? 1.0 / mag : mag;
+    };
+    for (int e = -7; e < 23; ++e) {
+        double v = powi10(e);
+        int idx = e + 7;
+        r["f_sweep_dbg_" + std::to_string(idx)] =
+            [fd, v] { return fd(v, FloatStyle::Debug); };
+        r["f_sweep_disp_" + std::to_string(idx)] =
+            [fd, v] { return fd(v, FloatStyle::Display); };
+    }
     return r;
 }
 
