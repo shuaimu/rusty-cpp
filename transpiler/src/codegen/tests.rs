@@ -2775,6 +2775,65 @@ fn test_leaf4122_std_ptr_and_mem_function_paths_remapped() {
 }
 
 #[test]
+fn test_raw_pointer_cast_without_target_uses_cast_proxy() {
+    // `ptr.cast()` with no turbofish and a callee whose signature we don't model
+    // (here a free fn) has no determinable target pointee — emit the adapting
+    // `rusty::ptr::cast(ptr)` proxy, NOT the bare `ptr->cast()` member call
+    // (raw pointers have no `cast` member). hashbrown's SSE2 Group::load pattern.
+    let out = transpile_str(
+        r#"
+        struct Tag(u8);
+        fn sink(p: *const u64);
+        fn f(ptr: *const Tag) {
+            unsafe { sink(ptr.cast()); }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::ptr::cast(ptr)"),
+        "no-target cast should use the proxy, got:\n{}",
+        out
+    );
+    assert!(!out.contains("ptr->cast()"), "{out}");
+}
+
+#[test]
+fn test_raw_pointer_cast_with_turbofish_uses_reinterpret_cast() {
+    // With an explicit target, the cast still lowers directly to reinterpret_cast.
+    let out = transpile_str(
+        r#"
+        struct Tag(u8);
+        fn f(ptr: *const Tag) {
+            let _q: *const u64 = ptr.cast::<u64>();
+        }
+        "#,
+    );
+    assert!(
+        out.contains("reinterpret_cast<const uint64_t*>(ptr)"),
+        "turbofish cast should lower to reinterpret_cast, got:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_raw_pointer_align_offset_lowers_to_runtime_helper() {
+    let out = transpile_str(
+        r#"
+        struct Tag(u8);
+        fn f(ptr: *const Tag) -> usize {
+            ptr.align_offset(16)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::ptr::align_offset(ptr, 16)"),
+        "align_offset should lower to the runtime helper, got:\n{}",
+        out
+    );
+    assert!(!out.contains("ptr->align_offset"), "{out}");
+}
+
+#[test]
 fn test_leaf41543333332_std_mem_manually_drop_new_path_remapped() {
     let out = transpile_str(
         r#"

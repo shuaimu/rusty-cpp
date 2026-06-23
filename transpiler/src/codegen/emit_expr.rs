@@ -8009,6 +8009,32 @@ impl CodeGen {
                 };
                 return format!("reinterpret_cast<{}>({})", cast_cpp, receiver);
             }
+            // Target pointee undeterminable (no turbofish, and the result flows
+            // into a callee whose signature we don't model — e.g. a C SIMD
+            // intrinsic). Emit a cast proxy that adapts to whatever pointer type
+            // the surrounding context requires, rather than the bare
+            // `ptr->cast()` member call (raw pointers have no `cast` member).
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::ptr::cast({})", receiver);
+        }
+        // `<*const T>::align_offset(align)` — raw-pointer alignment helper.
+        if method_name == "align_offset"
+            && mc.args.len() == 1
+            && self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            let align_arg = self.emit_expr_to_string(&mc.args[0]);
+            return format!("rusty::ptr::align_offset({}, {})", receiver, align_arg);
         }
         if matches!(
             method_name.as_str(),

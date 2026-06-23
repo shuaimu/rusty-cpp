@@ -291,6 +291,47 @@ inline constexpr const T* cast_const(T& value) noexcept {
     return &value;
 }
 
+// `<*const T>::cast()` / `<*mut T>::cast()` when the target pointee type is NOT
+// determinable at the call site (no turbofish, and the result flows into a
+// callee whose signature the transpiler doesn't model — e.g. a C SIMD
+// intrinsic `_mm_loadu_si128(const __m128i*)`). Returns a proxy that
+// reinterpret-casts to whatever pointer type the surrounding context requires.
+// Const-correct: a proxy over a `const T*` only converts to `const U*` (a
+// conversion to a mutable `U*` is a compile error, as it should be).
+template<typename T>
+struct RawCastProxy {
+    T* ptr_;
+    template<typename U>
+    constexpr operator U*() const noexcept {
+        return reinterpret_cast<U*>(ptr_);
+    }
+};
+
+template<typename T>
+inline constexpr RawCastProxy<T> cast(T* ptr) noexcept {
+    return RawCastProxy<T>{ptr};
+}
+
+// `<*const T>::align_offset(align)` — the number of ELEMENTS of T that must be
+// added to `ptr` to reach an `align`-aligned address, or SIZE_MAX when that is
+// unreachable. `align` must be a power of two. Mirrors core::ptr::align_offset.
+template<typename T>
+inline std::size_t align_offset(const T* ptr, std::size_t align) noexcept {
+    if (align == 0 || (align & (align - 1)) != 0) {
+        return static_cast<std::size_t>(-1);
+    }
+    std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(ptr);
+    std::size_t misalign = static_cast<std::size_t>(addr & (align - 1));
+    if (misalign == 0) {
+        return 0;
+    }
+    std::size_t byte_offset = align - misalign;
+    if (sizeof(T) == 0 || byte_offset % sizeof(T) != 0) {
+        return static_cast<std::size_t>(-1);  // alignment unreachable for this T
+    }
+    return byte_offset / sizeof(T);
+}
+
 template<typename T>
 inline Option<const T&> as_ref(const T* ptr) {
     if (ptr == nullptr) {
