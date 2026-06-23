@@ -129,10 +129,67 @@ void test_pad_precision_then_width() {
     printf("PASS\n");
 }
 
+namespace rt = rusty::fmt::rt;
+
+std::string_view render(Buffer& buf, const FormatSpec& spec,
+                        void (*fn)(Formatter&)) {
+    buf.clear();
+    Formatter f(buf, spec);
+    fn(f);
+    return buf.view();
+}
+
+void test_int_decimal() {
+    printf("test_int_decimal: ");
+    Buffer buf;
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_int(f, 0); }) == "0");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_int(f, 42); }) == "42");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_int(f, -5); }) == "-5");
+    // precision is ignored for integers.
+    {
+        FormatSpec s; s.has_precision = true; s.precision = 4;
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_int(f, 42); }) == "42");
+    }
+    // sign-aware zero pad keeps the sign outside the zeros.
+    {
+        FormatSpec s; s.has_width = true; s.width = 6;
+        s.sign_aware_zero_pad = true; s.fill = '0';
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_int(f, -42); }) == "-00042");
+    }
+    printf("PASS\n");
+}
+
+void test_int_radix() {
+    printf("test_int_radix: ");
+    Buffer buf;
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_int_radix(f, 255u, rt::Base::LowerHex); }) == "ff");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_int_radix(f, 255u, rt::Base::UpperHex); }) == "FF");
+    // alternate adds the 0x/0o/0b prefix.
+    {
+        FormatSpec s; s.alternate = true;
+        assert(render(buf, s, [](Formatter& f) { rt::fmt_int_radix(f, 5u, rt::Base::Binary); }) == "0b101");
+    }
+    // signed hex is the two's-complement bit pattern.
+    assert(render(buf, {}, [](Formatter& f) {
+        rt::fmt_int_radix(f, static_cast<int>(-5), rt::Base::LowerHex);
+    }) == "fffffffb");
+    printf("PASS\n");
+}
+
+void test_bool_char_strdebug() {
+    printf("test_bool_char_strdebug: ");
+    Buffer buf;
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_bool(f, true); }) == "true");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_str_debug(f, "a\"b"); }) == "\"a\\\"b\"");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_char_debug(f, U'\n'); }) == "'\\n'");
+    assert(render(buf, {}, [](Formatter& f) { rt::fmt_char_display(f, U'A'); }) == "A");
+    printf("PASS\n");
+}
+
 }  // namespace
 
 int main() {
-    printf("=== rusty::fmt Phase 0 coverage ===\n");
+    printf("=== rusty::fmt Phase 0+1 coverage ===\n");
     test_buffer_growth();
     test_write_str_and_char();
     test_pad_plain();
@@ -140,6 +197,9 @@ int main() {
     test_pad_width_align();
     test_pad_custom_fill();
     test_pad_precision_then_width();
-    printf("All rusty::fmt Phase 0 tests passed.\n");
+    test_int_decimal();
+    test_int_radix();
+    test_bool_char_strdebug();
+    printf("All rusty::fmt Phase 0+1 tests passed.\n");
     return 0;
 }

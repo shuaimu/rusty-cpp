@@ -8,6 +8,7 @@
 // NOTE: only the rusty::fmt LIBRARY is no-std; this TEST may use std freely.
 #include "../include/rusty/fmt_rt.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -35,14 +36,37 @@ std::string to_hex(std::string_view bytes) {
     return out;
 }
 
-// Render a string through `Formatter::pad` with the given spec and return the
-// raw bytes (as a std::string copy so it outlives the buffer).
-std::string padded(std::string_view value, const FormatSpec& spec) {
+namespace rt = rusty::fmt::rt;
+
+// Render via an arbitrary formatting callback and return the raw bytes.
+std::string render(const FormatSpec& spec, const std::function<void(Formatter&)>& fn) {
     Buffer buf;
     Formatter f(buf, spec);
-    f.pad(value);
+    fn(f);
     auto v = buf.view();
     return std::string(v.data(), v.size());
+}
+
+// Render a string through `Formatter::pad` with the given spec.
+std::string padded(std::string_view value, const FormatSpec& spec) {
+    return render(spec, [&](Formatter& f) { f.pad(value); });
+}
+
+FormatSpec spec_flags(bool alt = false, bool plus = false, bool zero = false) {
+    FormatSpec s;
+    s.alternate = alt;
+    s.sign_plus = plus;
+    s.sign_aware_zero_pad = zero;
+    return s;
+}
+
+FormatSpec spec_zero_width(std::size_t w) {
+    FormatSpec s;
+    s.has_width = true;
+    s.width = w;
+    s.sign_aware_zero_pad = true;
+    s.fill = '0';
+    return s;
 }
 
 FormatSpec width(std::size_t w, Alignment a = Alignment::Unknown, char fill = ' ') {
@@ -91,6 +115,128 @@ std::map<std::string, std::function<std::string()>> reproductions() {
     r["w6_prec3_right"] = [] { return padded("hello", width_prec(6, 3, Alignment::Right)); };
     r["w8_under_len"] = [] { return padded("hi", width(1)); };
     r["w6_left_default"] = [] { return padded("hi", width(6)); };
+
+    // Phase 1: integers — decimal Display.
+    r["int_42"] = [] { return render({}, [](Formatter& f) { rt::fmt_int(f, 42); }); };
+    r["int_neg5"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_int(f, static_cast<std::int32_t>(-5)); });
+    };
+    r["int_zero"] = [] { return render({}, [](Formatter& f) { rt::fmt_int(f, 0); }); };
+    r["int_plus"] = [] {
+        return render(spec_flags(false, true), [](Formatter& f) { rt::fmt_int(f, 42); });
+    };
+    r["int_plus_neg"] = [] {
+        return render(spec_flags(false, true),
+                      [](Formatter& f) { rt::fmt_int(f, static_cast<std::int32_t>(-5)); });
+    };
+    r["int_width6"] = [] {
+        return render(width(6), [](Formatter& f) { rt::fmt_int(f, 42); });
+    };
+    r["int_width6_left"] = [] {
+        return render(width(6, Alignment::Left), [](Formatter& f) { rt::fmt_int(f, 42); });
+    };
+    r["int_zeropad"] = [] {
+        return render(spec_zero_width(6), [](Formatter& f) { rt::fmt_int(f, 42); });
+    };
+    r["int_zeropad_neg"] = [] {
+        return render(spec_zero_width(6),
+                      [](Formatter& f) { rt::fmt_int(f, static_cast<std::int32_t>(-42)); });
+    };
+    r["int_prec4"] = [] {
+        return render(precision(4), [](Formatter& f) { rt::fmt_int(f, 42); });
+    };
+    r["int_width8_prec4"] = [] {
+        return render(width_prec(8, 4, Alignment::Unknown),
+                      [](Formatter& f) { rt::fmt_int(f, 42); });
+    };
+    r["int_u64max"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_int(f, static_cast<std::uint64_t>(18446744073709551615ULL)); });
+    };
+    r["int_i64min"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_int(f, static_cast<std::int64_t>(INT64_MIN)); });
+    };
+    r["int_fill_star"] = [] {
+        return render(width(6, Alignment::Right, '*'), [](Formatter& f) { rt::fmt_int(f, 42); });
+    };
+
+    // Phase 1: integers — radix.
+    r["hex_255"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_int_radix(f, 255u, rt::Base::LowerHex); });
+    };
+    r["hex_upper_255"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_int_radix(f, 255u, rt::Base::UpperHex); });
+    };
+    r["hex_alt_255"] = [] {
+        return render(spec_flags(true),
+                      [](Formatter& f) { rt::fmt_int_radix(f, 255u, rt::Base::LowerHex); });
+    };
+    r["hex_neg5_i32"] = [] {
+        return render({}, [](Formatter& f) {
+            rt::fmt_int_radix(f, static_cast<std::int32_t>(-5), rt::Base::LowerHex);
+        });
+    };
+    r["oct_8"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_int_radix(f, 8u, rt::Base::Octal); });
+    };
+    r["oct_alt_8"] = [] {
+        return render(spec_flags(true),
+                      [](Formatter& f) { rt::fmt_int_radix(f, 8u, rt::Base::Octal); });
+    };
+    r["bin_5"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_int_radix(f, 5u, rt::Base::Binary); });
+    };
+    r["bin_alt_5"] = [] {
+        return render(spec_flags(true),
+                      [](Formatter& f) { rt::fmt_int_radix(f, 5u, rt::Base::Binary); });
+    };
+    r["hex_zeropad_alt"] = [] {
+        FormatSpec s = spec_zero_width(6);
+        s.alternate = true;
+        return render(s, [](Formatter& f) { rt::fmt_int_radix(f, 255u, rt::Base::LowerHex); });
+    };
+    r["hex_width8"] = [] {
+        return render(width(8), [](Formatter& f) { rt::fmt_int_radix(f, 255u, rt::Base::LowerHex); });
+    };
+    r["hex_prec4"] = [] {
+        return render(precision(4),
+                      [](Formatter& f) { rt::fmt_int_radix(f, 255u, rt::Base::LowerHex); });
+    };
+
+    // Phase 1: bool.
+    r["bool_true"] = [] { return render({}, [](Formatter& f) { rt::fmt_bool(f, true); }); };
+    r["bool_false_dbg"] = [] { return render({}, [](Formatter& f) { rt::fmt_bool(f, false); }); };
+    r["bool_width8"] = [] {
+        return render(width(8), [](Formatter& f) { rt::fmt_bool(f, true); });
+    };
+
+    // Phase 1: str Debug.
+    r["str_dbg_plain"] = [] { return render({}, [](Formatter& f) { rt::fmt_str_debug(f, "hi"); }); };
+    r["str_dbg_escape"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_str_debug(f, "a\nb\"c\\d"); });
+    };
+    r["str_dbg_tab"] = [] { return render({}, [](Formatter& f) { rt::fmt_str_debug(f, "\t"); }); };
+    r["str_dbg_unicode"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_str_debug(f, "caf\xc3\xa9"); });
+    };
+
+    // Phase 1: char Display + Debug.
+    r["char_disp"] = [] { return render({}, [](Formatter& f) { rt::fmt_char_display(f, U'A'); }); };
+    r["char_disp_unicode"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_char_display(f, U'é'); });
+    };
+    r["char_disp_width"] = [] {
+        return render(width(3), [](Formatter& f) { rt::fmt_char_display(f, U'x'); });
+    };
+    r["char_dbg"] = [] { return render({}, [](Formatter& f) { rt::fmt_char_debug(f, U'A'); }); };
+    r["char_dbg_newline"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_char_debug(f, U'\n'); });
+    };
+    r["char_dbg_quote"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_char_debug(f, U'\''); });
+    };
+    r["char_dbg_unicode"] = [] {
+        return render({}, [](Formatter& f) { rt::fmt_char_debug(f, U'é'); });
+    };
     return r;
 }
 

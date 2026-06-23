@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 #include "rusty/alloc.hpp"
 #include "rusty/fmt.hpp"   // rusty::fmt::Error / Result / trait stubs
 
@@ -37,6 +38,9 @@ using rusty::fmt::Error;
 using rusty::fmt::Result;
 
 inline Result ok() { return Result::Ok(std::make_tuple()); }
+
+/// Radix for `{:x}` / `{:X}` / `{:o}` / `{:b}` integer formatting.
+enum class Base : std::uint8_t { LowerHex, UpperHex, Octal, Binary };
 
 // ---------------------------------------------------------------------------
 // Buffer — a growable byte sink backed by rusty::alloc (no std::string/vector).
@@ -203,7 +207,231 @@ public:
         }
         return ok();
     }
+
+    // `Formatter::pad_integral` — the numeric formatting path (Display/Debug for
+    // integers and the radix traits). Lays out `[sign][prefix][precision-zeros]
+    // [digits]` and applies width via: sign-aware zero pad (zeros between prefix
+    // and digits), else fill/align (default alignment RIGHT). `prefix` (e.g.
+    // "0x"/"0o"/"0b") is emitted only when the `#` alternate flag is set;
+    // `min_digits` is the integer precision (minimum digit count, zero-padded).
+    Result pad_integral(bool is_nonneg, std::string_view prefix,
+                        std::string_view digits, std::size_t min_digits = 0) {
+        std::string_view sign =
+            !is_nonneg ? std::string_view("-")
+                       : (spec_.sign_plus ? std::string_view("+") : std::string_view());
+        std::string_view pfx = spec_.alternate ? prefix : std::string_view();
+        std::size_t prec_zeros = digits.size() < min_digits ? min_digits - digits.size() : 0;
+
+        auto emit_n = [&](std::size_t n, char c) {
+            for (std::size_t i = 0; i < n; ++i) {
+                buf_.push_byte(c);
+            }
+        };
+        auto emit_content = [&] {
+            write_str(sign);
+            write_str(pfx);
+            emit_n(prec_zeros, '0');
+            write_str(digits);
+        };
+
+        std::size_t content_width = sign.size() + pfx.size() + prec_zeros + digits.size();
+        if (!spec_.has_width || content_width >= spec_.width) {
+            emit_content();
+            return ok();
+        }
+        std::size_t padding = spec_.width - content_width;
+
+        if (spec_.sign_aware_zero_pad) {
+            // `{:08}` — zeros go AFTER sign/prefix, ignoring fill/align.
+            write_str(sign);
+            write_str(pfx);
+            emit_n(padding, '0');
+            emit_n(prec_zeros, '0');
+            write_str(digits);
+            return ok();
+        }
+
+        Alignment align =
+            spec_.align == Alignment::Unknown ? Alignment::Right : spec_.align;
+        switch (align) {
+            case Alignment::Left:
+                emit_content();
+                emit_n(padding, spec_.fill);
+                break;
+            case Alignment::Center:
+                emit_n(padding / 2, spec_.fill);
+                emit_content();
+                emit_n(padding - padding / 2, spec_.fill);
+                break;
+            case Alignment::Right:
+            case Alignment::Unknown:
+                emit_n(padding, spec_.fill);
+                emit_content();
+                break;
+        }
+        return ok();
+    }
 };
+
+namespace detail {
+
+// Render an unsigned magnitude as digits in `radix` into `out` (caller buffer,
+// >= 128 bytes covers u128 binary), most-significant first. Returns count.
+inline std::size_t to_radix_digits(unsigned __int128 mag, unsigned radix,
+                                   bool upper, char* out) {
+    static const char lower[] = "0123456789abcdef";
+    static const char upper_d[] = "0123456789ABCDEF";
+    const char* d = upper ? upper_d : lower;
+    char tmp[130];
+    std::size_t n = 0;
+    if (mag == 0) {
+        tmp[n++] = '0';
+    }
+    while (mag != 0) {
+        tmp[n++] = d[static_cast<unsigned>(mag % radix)];
+        mag /= radix;
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i] = tmp[n - 1 - i];
+    }
+    return n;
+}
+
+// UTF-8 encode a Unicode scalar into `out` (>= 4 bytes). Returns byte count.
+inline std::size_t utf8_encode(char32_t c, char* out) {
+    if (c < 0x80) {
+        out[0] = static_cast<char>(c);
+        return 1;
+    } else if (c < 0x800) {
+        out[0] = static_cast<char>(0xC0 | (c >> 6));
+        out[1] = static_cast<char>(0x80 | (c & 0x3F));
+        return 2;
+    } else if (c < 0x10000) {
+        out[0] = static_cast<char>(0xE0 | (c >> 12));
+        out[1] = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+        out[2] = static_cast<char>(0x80 | (c & 0x3F));
+        return 3;
+    }
+    out[0] = static_cast<char>(0xF0 | (c >> 18));
+    out[1] = static_cast<char>(0x80 | ((c >> 12) & 0x3F));
+    out[2] = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+    out[3] = static_cast<char>(0x80 | (c & 0x3F));
+    return 4;
+}
+
+}  // namespace detail
+
+// Integer Display/Debug: signed-aware DECIMAL (sign + magnitude).
+template<typename T>
+    requires(std::is_integral_v<T> && !std::is_same_v<std::remove_cv_t<T>, bool>)
+inline Result fmt_int(Formatter& f, T value) {
+    bool nonneg = true;
+    unsigned __int128 mag;
+    if constexpr (std::is_signed_v<T>) {
+        nonneg = value >= 0;
+        using U = std::make_unsigned_t<T>;
+        U u = static_cast<U>(value);
+        mag = nonneg ? static_cast<unsigned __int128>(u)
+                     : static_cast<unsigned __int128>(static_cast<U>(static_cast<U>(0) - u));
+    } else {
+        mag = static_cast<unsigned __int128>(value);
+    }
+    char buf[130];
+    std::size_t n = detail::to_radix_digits(mag, 10, false, buf);
+    // Integer formatting IGNORES precision (only str/float honor it).
+    return f.pad_integral(nonneg, std::string_view(), std::string_view(buf, n));
+}
+
+// Integer radix (`{:x}`/`{:X}`/`{:o}`/`{:b}`): the raw bit pattern, UNSIGNED
+// (two's-complement for signed inputs — `format!("{:x}", -5i32) == "fffffffb"`).
+template<typename T>
+    requires(std::is_integral_v<T> && !std::is_same_v<std::remove_cv_t<T>, bool>)
+inline Result fmt_int_radix(Formatter& f, T value, Base base) {
+    using U = std::make_unsigned_t<T>;
+    unsigned __int128 bits = static_cast<unsigned __int128>(static_cast<U>(value));
+    unsigned radix = 16;
+    bool upper = false;
+    std::string_view prefix = "0x";
+    switch (base) {
+        case Base::LowerHex: radix = 16; upper = false; prefix = "0x"; break;
+        case Base::UpperHex: radix = 16; upper = true;  prefix = "0x"; break;
+        case Base::Octal:    radix = 8;  upper = false; prefix = "0o"; break;
+        case Base::Binary:   radix = 2;  upper = false; prefix = "0b"; break;
+    }
+    char buf[130];
+    std::size_t n = detail::to_radix_digits(bits, radix, upper, buf);
+    // Integer formatting IGNORES precision (only str/float honor it).
+    return f.pad_integral(true, prefix, std::string_view(buf, n));
+}
+
+// `bool` Display/Debug: "true"/"false", honoring width/precision via pad.
+inline Result fmt_bool(Formatter& f, bool value) {
+    return f.pad(value ? std::string_view("true") : std::string_view("false"));
+}
+
+// `&str` Debug: `"..."` with escaping. ASCII-correct; printable non-ASCII (e.g.
+// 'é') passes through. Non-printable non-ASCII (which Rust escapes via Unicode
+// tables) is a documented later refinement.
+inline Result fmt_str_debug(Formatter& f, std::string_view s) {
+    f.write_char('"');
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        switch (c) {
+            case '"':  f.write_str("\\\""); break;
+            case '\\': f.write_str("\\\\"); break;
+            case '\n': f.write_str("\\n"); break;
+            case '\r': f.write_str("\\r"); break;
+            case '\t': f.write_str("\\t"); break;
+            case '\0': f.write_str("\\0"); break;
+            default:
+                if (c < 0x20 || c == 0x7f) {
+                    char hb[3];
+                    std::size_t hn = detail::to_radix_digits(c, 16, false, hb);
+                    f.write_str("\\u{");
+                    f.write_str(std::string_view(hb, hn));
+                    f.write_char('}');
+                } else {
+                    f.write_char(static_cast<char>(c));
+                }
+        }
+    }
+    f.write_char('"');
+    return ok();
+}
+
+// `char` Display: the UTF-8 of the scalar, honoring width via pad.
+inline Result fmt_char_display(Formatter& f, char32_t c) {
+    char b[4];
+    std::size_t n = detail::utf8_encode(c, b);
+    return f.pad(std::string_view(b, n));
+}
+
+// `char` Debug: `'c'` with escaping (same rules as str Debug, plus `\'`).
+inline Result fmt_char_debug(Formatter& f, char32_t c) {
+    f.write_char('\'');
+    switch (c) {
+        case U'\'': f.write_str("\\'"); break;
+        case U'\\': f.write_str("\\\\"); break;
+        case U'\n': f.write_str("\\n"); break;
+        case U'\r': f.write_str("\\r"); break;
+        case U'\t': f.write_str("\\t"); break;
+        case 0:     f.write_str("\\0"); break;
+        default:
+            if (c < 0x20 || c == 0x7f) {
+                char hb[8];
+                std::size_t hn = detail::to_radix_digits(c, 16, false, hb);
+                f.write_str("\\u{");
+                f.write_str(std::string_view(hb, hn));
+                f.write_char('}');
+            } else {
+                char b[4];
+                std::size_t n = detail::utf8_encode(c, b);
+                f.write_str(std::string_view(b, n));
+            }
+    }
+    f.write_char('\'');
+    return ok();
+}
 
 } // namespace rt
 } // namespace fmt
