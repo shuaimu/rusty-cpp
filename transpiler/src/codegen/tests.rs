@@ -2775,6 +2775,31 @@ fn test_leaf4122_std_ptr_and_mem_function_paths_remapped() {
 }
 
 #[test]
+fn test_module_const_typed_with_later_type_alias_emits_alias_first() {
+    // A module const whose TYPE is a local type alias declared LATER in source
+    // (Rust items are order-independent) must emit the `using` alias before the
+    // const that uses it. hashbrown's bitmask module:
+    //   const BITMASK_ITER_MASK: BitMaskWord = ...;  type BitMaskWord = u16;
+    let out = transpile_str(
+        r#"
+        mod m {
+            pub const MASK: Word = 0xFF;
+            pub type Word = u16;
+        }
+        "#,
+    );
+    let alias_pos = out
+        .find("using Word = uint16_t;")
+        .expect("missing Word alias");
+    let const_pos = out.find("Word MASK").expect("missing MASK const");
+    assert!(
+        alias_pos < const_pos,
+        "type alias must precede the const that uses it:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_raw_pointer_cast_without_target_uses_cast_proxy() {
     // `ptr.cast()` with no turbofish and a callee whose signature we don't model
     // (here a free fn) has no determinable target pointee — emit the adapting

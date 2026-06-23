@@ -7042,6 +7042,71 @@ impl CodeGen {
             }
         }
 
+        // Emit "simple" type aliases BEFORE consts: a const's TYPE can be a
+        // local type alias (e.g. `const BITMASK_ITER_MASK: BitMaskWord = …;`),
+        // so the alias must already be visible. Aliases that reference a NESTED
+        // MODULE's types are SKIPPED here and emitted by the late pass below
+        // (after those modules' forward decls) — those can't precede consts that
+        // use them anyway, and that combination doesn't occur in practice.
+        let nested_module_names: std::collections::HashSet<String> = ordered_items
+            .iter()
+            .filter_map(|it| match it {
+                syn::Item::Mod(m) if m.content.is_some() => Some(m.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        // Local const names — an alias whose type uses one (e.g. a const-generic
+        // array `type Arr = [u8; N]`) must stay AFTER the const pass, so defer it.
+        let local_const_names: std::collections::HashSet<String> = ordered_items
+            .iter()
+            .filter_map(|it| match it {
+                syn::Item::Const(c) if c.ident != "_" => Some(c.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        for item in ordered_items.iter().copied() {
+            let syn::Item::Type(t) = item else {
+                continue;
+            };
+            if Self::has_cfg_test(&t.attrs) {
+                continue;
+            }
+            if self.type_tokens_contain_import_alias(&t.ty) {
+                continue;
+            }
+            // Defer aliases that name a nested-module type to the late pass.
+            if nested_module_names
+                .iter()
+                .any(|n| Self::type_references_module_path(&t.ty, n))
+            {
+                continue;
+            }
+            // Defer aliases whose type references a local const (e.g. array
+            // length `[u8; N]`) — they must follow the const pass. Token-scan
+            // (whole-identifier match) catches const-generic array lengths,
+            // which a type-path walk would miss.
+            if !local_const_names.is_empty() {
+                let ty_tokens = t.ty.to_token_stream().to_string();
+                let references_const = ty_tokens
+                    .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                    .any(|tok| local_const_names.contains(tok));
+                if references_const {
+                    continue;
+                }
+            }
+            let alias_name = escape_cpp_keyword(&t.ident.to_string());
+            if !emitted_aliases.insert(alias_name) {
+                continue;
+            }
+            let prev_forward_decl_signature = self.in_forward_decl_signature;
+            self.in_forward_decl_signature = true;
+            let emitted_alias = self.emit_type_alias_once(t);
+            self.in_forward_decl_signature = prev_forward_decl_signature;
+            if emitted_alias {
+                emitted_any = true;
+            }
+        }
+
         // Emit const declarations so inline methods can reference constants even
         // when their definitions appear later in source order.
         for item in ordered_items.iter().copied() {
@@ -7377,8 +7442,9 @@ impl CodeGen {
             }
         }
 
-        // Emit type aliases after nested module declarations so aliases can
-        // reference nested namespace types (e.g. `private_::Foo`) safely.
+        // Late alias pass: aliases that reference nested-module types, now that
+        // those modules' forward declarations have been emitted above. The
+        // `emitted_aliases` set skips anything the early (pre-const) pass took.
         for item in ordered_items.iter().copied() {
             let syn::Item::Type(t) = item else {
                 continue;
