@@ -5778,6 +5778,59 @@ fn test_leaf5298_untyped_closure_param_deref_lowers_via_deref_mut_helper() {
 }
 
 #[test]
+fn test_field_stored_closure_call_passes_borrow_as_reference() {
+    // Calling a struct field that holds a closure — `(self.dropfn)(&mut self.value)`
+    // — must pass the borrow as a C++ reference bind, NOT address-of. The closure
+    // body accesses the param via dot (`self_.bump()`), so the `auto&&` param must
+    // deduce a reference, not a pointer. (hashbrown's ScopeGuard::drop pattern.)
+    let out = transpile_str(
+        r#"
+        struct Inner { n: usize }
+        impl Inner { fn bump(&self) -> usize { self.n } }
+        struct ScopeGuard<T, F: FnMut(&mut T)> { value: T, dropfn: F }
+        impl<T, F: FnMut(&mut T)> Drop for ScopeGuard<T, F> {
+            fn drop(&mut self) {
+                (self.dropfn)(&mut self.value);
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("(this->dropfn)(this->value)"),
+        "field-stored closure call should reference-bind the borrow, got:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("(this->dropfn)(&this->value)"),
+        "field-stored closure call must not take the address of the borrow, got:\n{}",
+        out
+    );
+}
+
+#[test]
+fn test_method_call_borrow_arg_unaffected_by_field_closure_rule() {
+    // Negative guard: a real METHOD call (`x.method(&mut y)`, syntactically an
+    // Expr::MethodCall, not Expr::Call over Expr::Field) must NOT be rewritten by
+    // the field-closure reference-bind rule.
+    let out = transpile_str(
+        r#"
+        struct W { v: i32 }
+        impl W { fn take(&self, other: &mut i32) { let _ = (other, self.v); } }
+        fn run(w: &W) {
+            let mut y = 3;
+            w.take(&mut y);
+        }
+        "#,
+    );
+    // The call still resolves to a normal method invocation on `w`.
+    assert!(
+        out.contains("w.take(") || out.contains(".take("),
+        "method call should be emitted normally, got:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_leaf10538_iter_count_after_iter_call_lowers_to_runtime_count() {
     let out = transpile_str(
         r#"
@@ -19468,8 +19521,10 @@ fn test_leaf4154333333333_drop_tail_expr_does_not_emit_return_value() {
         }
     "#,
     );
-    assert!(out.contains("(this->f)(&this->data, &this->value);"));
-    assert!(!out.contains("return (this->f)(&this->data, &this->value);"));
+    // Field-stored closure call passes the borrows as references (reference-bind),
+    // not address-of — the closure's params are `&Data`/`&mut T` (C++ references).
+    assert!(out.contains("(this->f)(this->data, this->value);"));
+    assert!(!out.contains("return (this->f)(this->data, this->value);"));
 }
 
 #[test]

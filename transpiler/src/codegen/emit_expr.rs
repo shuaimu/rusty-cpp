@@ -15475,7 +15475,25 @@ impl CodeGen {
                     && (declared_arg_expected_ty
                         .is_some_and(|expected| self.type_is_bare_generic_param_like(expected))
                         || inferred_expected_matches_borrowed_value);
-                let arg_cpp = if preserve_bare_generic_borrow {
+                // `(recv.field)(&mut place)` — a CALL whose callee is a field
+                // access (syntactically `Expr::Call` over `Expr::Field`; method
+                // calls are `Expr::MethodCall`) — means the field holds a
+                // closure / fn value. Rust closures receive `&mut T` / `&T`
+                // params as C++ references (their bodies use dot-access on the
+                // param, e.g. `self_.method()`), so bind the borrow as a
+                // reference rather than taking its address — `&place` would
+                // deduce the `auto&&` param as a pointer and break `.`-access.
+                // Skip when the param is a raw pointer (intent Pointer).
+                let callee_is_field_value_call =
+                    matches!(self.peel_paren_group_expr(&call.func), syn::Expr::Field(_));
+                let arg_cpp = if callee_is_field_value_call
+                    && reference_arg.is_some()
+                    && !matches!(callable_bound_arg_intent, Some(CallableArgPassIntent::Pointer))
+                {
+                    let reference =
+                        reference_arg.expect("callee_is_field_value_call requires reference arg");
+                    self.emit_expr_to_string_with_expected(&reference.expr, None)
+                } else if preserve_bare_generic_borrow {
                     self.emit_explicit_reference_call_arg(
                         reference_arg.expect("preserve_bare_generic_borrow requires reference arg"),
                         None,
