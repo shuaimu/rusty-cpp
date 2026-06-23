@@ -5032,6 +5032,21 @@ impl CodeGen {
         }
     }
 
+    /// A trait bound resolves to a CRATE-LOCAL trait (not the support-header
+    /// concept of the same name). hashbrown defines its own `Allocator` trait
+    /// (`allocate -> Result<_, ()>`), so a `where A: Allocator` bound refers to
+    /// THAT trait — emitting the support-header `rusty::alloc::Allocator<A>`
+    /// concept (which requires `Result<_, AllocError>`) wrongly fails the
+    /// constraint. Same keystone rule as `map_std_type` / `crate_declares_std_
+    /// named_type`: when the crate owns the name, keep it local. Precise — only
+    /// crates that declare their own trait of that name are affected.
+    fn trait_path_is_crate_declared_local(&self, path: &syn::Path) -> bool {
+        path.segments.last().is_some_and(|seg| {
+            self.ufcs_declared_trait_names
+                .contains(&seg.ident.to_string())
+        })
+    }
+
     pub(super) fn collect_emitted_template_parts(
         &self,
         generics: &syn::Generics,
@@ -5080,7 +5095,9 @@ impl CodeGen {
             for bound in &tp.bounds {
                 if let syn::TypeParamBound::Trait(tb) = bound {
                     if let Some(concept) = well_known_concept_for_trait_path(&tb.path) {
-                        constraints.push(format!("{}<{}>", concept, tp.ident));
+                        if !self.trait_path_is_crate_declared_local(&tb.path) {
+                            constraints.push(format!("{}<{}>", concept, tp.ident));
+                        }
                         continue;
                     }
                     if skip_facade_constraints {
@@ -5101,7 +5118,9 @@ impl CodeGen {
                     for bound in &pt.bounds {
                         if let syn::TypeParamBound::Trait(tb) = bound {
                             if let Some(concept) = well_known_concept_for_trait_path(&tb.path) {
-                                constraints.push(format!("{}<{}>", concept, ty_name));
+                                if !self.trait_path_is_crate_declared_local(&tb.path) {
+                                    constraints.push(format!("{}<{}>", concept, ty_name));
+                                }
                                 continue;
                             }
                             if skip_facade_constraints {

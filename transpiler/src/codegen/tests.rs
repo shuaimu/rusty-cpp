@@ -10523,6 +10523,35 @@ fn test_inline_mod_enum_impl_methods_merged_into_wrapper() {
 }
 
 #[test]
+fn test_crate_local_allocator_trait_suppresses_support_concept() {
+    // When the crate declares its OWN `Allocator` trait, a `where A: Allocator`
+    // bound refers to that local trait — emitting the support-header
+    // `rusty::alloc::Allocator<A>` concept (a different signature) wrongly fails
+    // the constraint. The keystone rule: keep it local. With a local Allocator,
+    // no support concept is emitted; without one, it is (normal crates).
+    let with_local = transpile_str(
+        r#"
+        pub trait Allocator {}
+        struct Holder<A: Allocator> { a: A }
+        "#,
+    );
+    assert!(
+        !with_local.contains("requires (rusty::alloc::Allocator<A>)"),
+        "a crate-local Allocator trait must suppress the support-header concept:\n{with_local}"
+    );
+
+    let without_local = transpile_str(
+        r#"
+        struct Holder<A: Allocator> { a: A }
+        "#,
+    );
+    assert!(
+        without_local.contains("requires (rusty::alloc::Allocator<A>)"),
+        "a crate WITHOUT its own Allocator must still emit the support concept:\n{without_local}"
+    );
+}
+
+#[test]
 fn test_data_enum_wrapper_struct_definition_repeats_where_requires_clause() {
     // A data enum with a where-bound constraint that uses the struct-wrapper
     // form (it has an impl block) must repeat the `requires (...)` clause on its
