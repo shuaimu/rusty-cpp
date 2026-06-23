@@ -40428,6 +40428,26 @@ enum class Alignment { Left, Right, Center };\n\
 struct DebugList {\n\
     template<typename... Args>\n\
     DebugList& entries(Args&&...) { return *this; }\n\
+    template<typename... Args>\n\
+    DebugList& entry(Args&&...) { return *this; }\n\
+    Result finish() { return Result::Ok(std::make_tuple()); }\n\
+};\n\
+struct DebugSet {\n\
+    template<typename... Args>\n\
+    DebugSet& entries(Args&&...) { return *this; }\n\
+    template<typename... Args>\n\
+    DebugSet& entry(Args&&...) { return *this; }\n\
+    Result finish() { return Result::Ok(std::make_tuple()); }\n\
+};\n\
+struct DebugMap {\n\
+    template<typename... Args>\n\
+    DebugMap& entries(Args&&...) { return *this; }\n\
+    template<typename... Args>\n\
+    DebugMap& entry(Args&&...) { return *this; }\n\
+    template<typename... Args>\n\
+    DebugMap& key(Args&&...) { return *this; }\n\
+    template<typename... Args>\n\
+    DebugMap& value(Args&&...) { return *this; }\n\
     Result finish() { return Result::Ok(std::make_tuple()); }\n\
 };\n\
 struct Formatter {\n\
@@ -40541,6 +40561,10 @@ struct Formatter {\n\
         return st;\n\
     }\n\
     DebugList debug_list() const { return DebugList{}; }\n\
+    DebugSet debug_set() const { return DebugSet{}; }\n\
+    DebugMap debug_map() const { return DebugMap{}; }\n\
+    template<typename Str>\n\
+    Result pad(Str&& s) const { out_ += rusty::to_string(std::forward<Str>(s)); return Result::Ok(std::make_tuple()); }\n\
 private:\n\
     template<typename Arg>\n\
     void append_one(Arg&& arg) const { out_ += rusty::to_string(std::forward<Arg>(arg)); }\n\

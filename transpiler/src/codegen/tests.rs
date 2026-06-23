@@ -17827,6 +17827,23 @@ fn test_leaf5115_runtime_fallback_formatter_supports_debug_tuple_builder_surface
 }
 
 #[test]
+fn test_runtime_fallback_formatter_supports_debug_set_map_and_pad() {
+    // Debug impls for hashbrown's set/map types call `f.debug_set()` /
+    // `f.debug_map()` (with `.entries(...).finish()`), and the EMPTY/DELETED
+    // tag Display impls call `f.pad("…")`. The emitted Formatter shim must
+    // expose all three so those translate cleanly.
+    let helpers = runtime_path_fallback_helpers_text();
+    assert!(helpers.contains("struct DebugSet {"));
+    assert!(helpers.contains("struct DebugMap {"));
+    assert!(helpers.contains("DebugSet debug_set() const"));
+    assert!(helpers.contains("DebugMap debug_map() const"));
+    assert!(helpers.contains("Result pad(Str&& s) const"));
+    // The set/map builders accept the `.entries(range)` surface like DebugList.
+    assert!(helpers.contains("DebugSet& entries(Args&&...)"));
+    assert!(helpers.contains("DebugMap& entries(Args&&...)"));
+}
+
+#[test]
 fn test_leaf10526_runtime_to_string_supports_fmt_display_fallback() {
     let helpers = runtime_path_fallback_helpers_text();
     assert!(helpers.contains("requires(rusty::fmt::Formatter& f) { value.fmt(f); }"));
