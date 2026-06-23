@@ -42020,6 +42020,7 @@ fn cpp_module_path_to_import_name(path: &str) -> String {
 }
 
 fn classify_use_import(path: &str) -> UseImportAction {
+    let namespace_import = path.trim_start().starts_with("namespace ");
     let normalized = normalize_use_import_path(path);
     if let Some((alias, target_path)) = split_use_import_alias(normalized) {
         return match classify_use_import(target_path) {
@@ -42079,7 +42080,7 @@ fn classify_use_import(path: &str) -> UseImportAction {
     if let Some(action) = rewrite_std_intrinsics_import(normalized) {
         return action;
     }
-    if let Some(action) = rewrite_std_arch_import(normalized) {
+    if let Some(action) = rewrite_std_arch_import(normalized, namespace_import) {
         return action;
     }
     if let Some(action) = rewrite_std_ops_import(normalized) {
@@ -42536,12 +42537,38 @@ fn rewrite_std_intrinsics_import(path: &str) -> Option<UseImportAction> {
     Some(action)
 }
 
-fn rewrite_std_arch_import(path: &str) -> Option<UseImportAction> {
+fn rewrite_std_arch_import(path: &str, namespace_import: bool) -> Option<UseImportAction> {
     if matches!(path, "std::arch" | "core::arch") {
+        if namespace_import {
+            return Some(UseImportAction::Using(
+                "namespace rusty::arch".to_string(),
+            ));
+        }
+        return Some(UseImportAction::Raw(
+            "namespace arch = rusty::arch;".to_string(),
+        ));
+    }
+
+    let item = path
+        .strip_prefix("std::arch::")
+        .or_else(|| path.strip_prefix("core::arch::"))?;
+    if item.is_empty() {
         return Some(UseImportAction::RustOnly);
     }
-    if path.starts_with("std::arch::") || path.starts_with("core::arch::") {
-        return Some(UseImportAction::RustOnly);
+    if matches!(item, "x86" | "x86_64") {
+        if namespace_import {
+            return Some(UseImportAction::Using(format!(
+                "namespace rusty::arch::{}",
+                item
+            )));
+        }
+        return Some(UseImportAction::Raw(format!(
+            "namespace {} = rusty::arch::{};",
+            item, item
+        )));
+    }
+    if item.starts_with("x86::") || item.starts_with("x86_64::") {
+        return Some(UseImportAction::Using(format!("rusty::arch::{}", item)));
     }
     None
 }

@@ -279,6 +279,50 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
         "core::fmt::Arguments" | "fmt::Arguments" => Some(("rusty::fmt::Arguments", false)),
         "core::fmt::Alignment" | "fmt::Alignment" => Some(("rusty::fmt::Alignment", false)),
         "core::fmt::Error" | "std::fmt::Error" | "fmt::Error" => Some(("rusty::fmt::Error", false)),
+        "core::arch::x86::__m128"
+        | "std::arch::x86::__m128"
+        | "arch::x86::__m128" => Some(("rusty::arch::x86::__m128", false)),
+        "core::arch::x86_64::__m128"
+        | "std::arch::x86_64::__m128"
+        | "arch::x86_64::__m128" => Some(("rusty::arch::x86_64::__m128", false)),
+        "core::arch::x86::__m128d"
+        | "std::arch::x86::__m128d"
+        | "arch::x86::__m128d" => Some(("rusty::arch::x86::__m128d", false)),
+        "core::arch::x86_64::__m128d"
+        | "std::arch::x86_64::__m128d"
+        | "arch::x86_64::__m128d" => Some(("rusty::arch::x86_64::__m128d", false)),
+        "core::arch::x86::__m128i"
+        | "std::arch::x86::__m128i"
+        | "arch::x86::__m128i" => Some(("rusty::arch::x86::__m128i", false)),
+        "core::arch::x86_64::__m128i"
+        | "std::arch::x86_64::__m128i"
+        | "arch::x86_64::__m128i" => Some(("rusty::arch::x86_64::__m128i", false)),
+        "core::arch::x86::__m256"
+        | "std::arch::x86::__m256"
+        | "arch::x86::__m256" => Some(("rusty::arch::x86::__m256", false)),
+        "core::arch::x86_64::__m256"
+        | "std::arch::x86_64::__m256"
+        | "arch::x86_64::__m256" => Some(("rusty::arch::x86_64::__m256", false)),
+        "core::arch::x86::__m256d"
+        | "std::arch::x86::__m256d"
+        | "arch::x86::__m256d" => Some(("rusty::arch::x86::__m256d", false)),
+        "core::arch::x86_64::__m256d"
+        | "std::arch::x86_64::__m256d"
+        | "arch::x86_64::__m256d" => Some(("rusty::arch::x86_64::__m256d", false)),
+        "core::arch::x86::__m256i"
+        | "std::arch::x86::__m256i"
+        | "arch::x86::__m256i" => Some(("rusty::arch::x86::__m256i", false)),
+        "core::arch::x86_64::__m256i"
+        | "std::arch::x86_64::__m256i"
+        | "arch::x86_64::__m256i" => Some(("rusty::arch::x86_64::__m256i", false)),
+        "core::arch::x86::CpuidResult"
+        | "std::arch::x86::CpuidResult"
+        | "arch::x86::CpuidResult" => Some(("rusty::arch::x86::CpuidResult", false)),
+        "core::arch::x86_64::CpuidResult"
+        | "std::arch::x86_64::CpuidResult"
+        | "arch::x86_64::CpuidResult" => {
+            Some(("rusty::arch::x86_64::CpuidResult", false))
+        }
         "core::num::FpCategory" | "std::num::FpCategory" | "num::FpCategory" => {
             Some(("rusty::num::FpCategory", false))
         }
@@ -490,6 +534,96 @@ pub fn map_function_path(rust_path: &str) -> Option<&'static str> {
         "core::intrinsics::unreachable" => Some("rusty::intrinsics::unreachable"),
         "core::intrinsics::abort" | "intrinsics::abort" | "std::intrinsics::abort" => {
             Some("rusty::intrinsics::abort")
+        }
+        "core::arch::x86::_mm_loadu_si128" | "std::arch::x86::_mm_loadu_si128" => {
+            Some("rusty::arch::x86::_mm_loadu_si128")
+        }
+        "core::arch::x86_64::_mm_loadu_si128" | "std::arch::x86_64::_mm_loadu_si128" => {
+            Some("rusty::arch::x86_64::_mm_loadu_si128")
+        }
+        "core::arch::x86::_mm_storeu_si128" | "std::arch::x86::_mm_storeu_si128" => {
+            Some("rusty::arch::x86::_mm_storeu_si128")
+        }
+        "core::arch::x86_64::_mm_storeu_si128" | "std::arch::x86_64::_mm_storeu_si128" => {
+            Some("rusty::arch::x86_64::_mm_storeu_si128")
+        }
+        "core::arch::x86::_mm_movemask_epi8" | "std::arch::x86::_mm_movemask_epi8" => {
+            Some("rusty::arch::x86::_mm_movemask_epi8")
+        }
+        "core::arch::x86_64::_mm_movemask_epi8" | "std::arch::x86_64::_mm_movemask_epi8" => {
+            Some("rusty::arch::x86_64::_mm_movemask_epi8")
+        }
+        "core::arch::x86::_mm_or_si128" | "std::arch::x86::_mm_or_si128" => {
+            Some("rusty::arch::x86::_mm_or_si128")
+        }
+        "core::arch::x86_64::_mm_or_si128" | "std::arch::x86_64::_mm_or_si128" => {
+            Some("rusty::arch::x86_64::_mm_or_si128")
+        }
+        "core::arch::x86::_mm_and_si128" | "std::arch::x86::_mm_and_si128" => {
+            Some("rusty::arch::x86::_mm_and_si128")
+        }
+        "core::arch::x86_64::_mm_and_si128" | "std::arch::x86_64::_mm_and_si128" => {
+            Some("rusty::arch::x86_64::_mm_and_si128")
+        }
+        "core::arch::x86::_mm_set1_epi8" | "std::arch::x86::_mm_set1_epi8" => {
+            Some("rusty::arch::x86::_mm_set1_epi8")
+        }
+        "core::arch::x86_64::_mm_set1_epi8" | "std::arch::x86_64::_mm_set1_epi8" => {
+            Some("rusty::arch::x86_64::_mm_set1_epi8")
+        }
+        "core::arch::x86::_mm_srli_epi64" | "std::arch::x86::_mm_srli_epi64" => {
+            Some("rusty::arch::x86::_mm_srli_epi64")
+        }
+        "core::arch::x86_64::_mm_srli_epi64" | "std::arch::x86_64::_mm_srli_epi64" => {
+            Some("rusty::arch::x86_64::_mm_srli_epi64")
+        }
+        "core::arch::x86::_mm_cmpgt_epi8" | "std::arch::x86::_mm_cmpgt_epi8" => {
+            Some("rusty::arch::x86::_mm_cmpgt_epi8")
+        }
+        "core::arch::x86_64::_mm_cmpgt_epi8" | "std::arch::x86_64::_mm_cmpgt_epi8" => {
+            Some("rusty::arch::x86_64::_mm_cmpgt_epi8")
+        }
+        "core::arch::x86::_mm_add_epi8" | "std::arch::x86::_mm_add_epi8" => {
+            Some("rusty::arch::x86::_mm_add_epi8")
+        }
+        "core::arch::x86_64::_mm_add_epi8" | "std::arch::x86_64::_mm_add_epi8" => {
+            Some("rusty::arch::x86_64::_mm_add_epi8")
+        }
+        "core::arch::x86::_mm_blendv_epi8" | "std::arch::x86::_mm_blendv_epi8" => {
+            Some("rusty::arch::x86::_mm_blendv_epi8")
+        }
+        "core::arch::x86_64::_mm_blendv_epi8" | "std::arch::x86_64::_mm_blendv_epi8" => {
+            Some("rusty::arch::x86_64::_mm_blendv_epi8")
+        }
+        "core::arch::x86::_mm_unpacklo_epi8" | "std::arch::x86::_mm_unpacklo_epi8" => {
+            Some("rusty::arch::x86::_mm_unpacklo_epi8")
+        }
+        "core::arch::x86_64::_mm_unpacklo_epi8" | "std::arch::x86_64::_mm_unpacklo_epi8" => {
+            Some("rusty::arch::x86_64::_mm_unpacklo_epi8")
+        }
+        "core::arch::x86::_mm_unpackhi_epi8" | "std::arch::x86::_mm_unpackhi_epi8" => {
+            Some("rusty::arch::x86::_mm_unpackhi_epi8")
+        }
+        "core::arch::x86_64::_mm_unpackhi_epi8" | "std::arch::x86_64::_mm_unpackhi_epi8" => {
+            Some("rusty::arch::x86_64::_mm_unpackhi_epi8")
+        }
+        "core::arch::x86::__cpuid" | "std::arch::x86::__cpuid" => {
+            Some("rusty::arch::x86::__cpuid")
+        }
+        "core::arch::x86_64::__cpuid" | "std::arch::x86_64::__cpuid" => {
+            Some("rusty::arch::x86_64::__cpuid")
+        }
+        "core::arch::x86::__cpuid_count" | "std::arch::x86::__cpuid_count" => {
+            Some("rusty::arch::x86::__cpuid_count")
+        }
+        "core::arch::x86_64::__cpuid_count" | "std::arch::x86_64::__cpuid_count" => {
+            Some("rusty::arch::x86_64::__cpuid_count")
+        }
+        "core::arch::x86::_rdtsc" | "std::arch::x86::_rdtsc" => {
+            Some("rusty::arch::x86::_rdtsc")
+        }
+        "core::arch::x86_64::_rdtsc" | "std::arch::x86_64::_rdtsc" => {
+            Some("rusty::arch::x86_64::_rdtsc")
         }
         "core::panicking::panic" | "panicking::panic" | "std::panicking::panic" => {
             Some("rusty::panicking::panic")
@@ -800,6 +934,18 @@ mod tests {
             Some(("rusty::fmt::Alignment", false))
         );
         assert_eq!(
+            map_std_type("core::arch::x86_64::__m128i"),
+            Some(("rusty::arch::x86_64::__m128i", false))
+        );
+        assert_eq!(
+            map_std_type("std::arch::x86::__m256i"),
+            Some(("rusty::arch::x86::__m256i", false))
+        );
+        assert_eq!(
+            map_std_type("std::arch::x86_64::CpuidResult"),
+            Some(("rusty::arch::x86_64::CpuidResult", false))
+        );
+        assert_eq!(
             map_std_type("std::ptr::NonNull"),
             Some(("rusty::ptr::NonNull", true))
         );
@@ -1007,6 +1153,18 @@ mod tests {
         assert_eq!(
             map_function_path("core::intrinsics::discriminant_value"),
             Some("rusty::intrinsics::discriminant_value")
+        );
+        assert_eq!(
+            map_function_path("core::arch::x86_64::_mm_loadu_si128"),
+            Some("rusty::arch::x86_64::_mm_loadu_si128")
+        );
+        assert_eq!(
+            map_function_path("std::arch::x86_64::_mm_movemask_epi8"),
+            Some("rusty::arch::x86_64::_mm_movemask_epi8")
+        );
+        assert_eq!(
+            map_function_path("std::arch::x86::__cpuid"),
+            Some("rusty::arch::x86::__cpuid")
         );
         assert_eq!(
             map_function_path("core::panicking::panic"),

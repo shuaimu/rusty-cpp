@@ -17660,6 +17660,37 @@ fn test_leaf415447_fmt_import_rewrites_keep_concrete_runtime_surfaces() {
 }
 
 #[test]
+fn test_arch_import_rewrites_to_runtime_facade() {
+    let out = transpile_str(
+        r#"
+        use core::arch::{self};
+        use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_movemask_epi8};
+        use core::arch::x86_64::*;
+        "#,
+    );
+
+    assert!(out.contains("namespace arch = rusty::arch;"), "{out}");
+    assert!(
+        out.contains("using rusty::arch::x86_64::__m128i;"),
+        "{out}"
+    );
+    assert!(
+        out.contains("using rusty::arch::x86_64::_mm_loadu_si128;"),
+        "{out}"
+    );
+    assert!(
+        out.contains("using rusty::arch::x86_64::_mm_movemask_epi8;"),
+        "{out}"
+    );
+    assert!(
+        out.contains("using namespace ::rusty::arch::x86_64;")
+            || out.contains("using namespace rusty::arch::x86_64;"),
+        "{out}"
+    );
+    assert!(!out.contains("Rust-only: using std::arch::x86_64"), "{out}");
+}
+
+#[test]
 fn test_leaf415447_fmt_result_ok_lowering_uses_fmt_result_ctor_surface() {
     let out = transpile_str(
         r#"

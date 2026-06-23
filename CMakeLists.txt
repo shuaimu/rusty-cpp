@@ -494,6 +494,7 @@ set(TEST_SOURCES
     tests/rusty_function_test.cpp
     tests/rusty_array_test.cpp
     tests/rusty_error_test.cpp
+    tests/rusty_arch_test.cpp
     # Self-contained (no-std) rusty::fmt runtime: coverage + Rust-parity.
     tests/rusty_fmt_test.cpp
     tests/rusty_fmt_parity_test.cpp
