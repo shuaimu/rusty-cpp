@@ -495,6 +495,8 @@ set(TEST_SOURCES
     tests/rusty_array_test.cpp
     tests/rusty_error_test.cpp
     tests/rusty_arch_test.cpp
+    # Integer/range intrinsics (NonZero bit-ops, range::step_by) — hashbrown.
+    tests/rusty_intrinsics_test.cpp
     # Self-contained (no-std) rusty::fmt runtime: coverage + Rust-parity.
     tests/rusty_fmt_test.cpp
     tests/rusty_fmt_parity_test.cpp

@@ -72,6 +72,14 @@ public:
         using UnsignedT = std::make_unsigned_t<T>;
         return static_cast<int>(std::countl_zero(static_cast<UnsignedT>(value_)));
     }
+    constexpr int trailing_zeros() const noexcept {
+        using UnsignedT = std::make_unsigned_t<T>;
+        return static_cast<int>(std::countr_zero(static_cast<UnsignedT>(value_)));
+    }
+    constexpr int count_ones() const noexcept {
+        using UnsignedT = std::make_unsigned_t<T>;
+        return static_cast<int>(std::popcount(static_cast<UnsignedT>(value_)));
+    }
 };
 
 template<typename T>

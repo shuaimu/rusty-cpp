@@ -1958,6 +1958,51 @@ public:
         return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
     }
 
+    /// Rust-style `Range::step_by(n)` — yields start, start+n, start+2n, …
+    /// strictly less than end. Iterable via range-for (begin/end) and the
+    /// `.next()` protocol.
+    struct StepBy {
+        T current;
+        T end_;
+        T step;
+        bool done;
+        struct iterator {
+            T current;
+            T end;
+            T step;
+            bool done;
+            T operator*() const { return current; }
+            iterator& operator++() {
+                T next = static_cast<T>(current + step);
+                if (next >= end || next < current) {  // reached end (or wrapped)
+                    done = true;
+                }
+                current = next;
+                return *this;
+            }
+            bool operator!=(const iterator& other) const {
+                (void)other;
+                return !done;
+            }
+        };
+        iterator begin() const { return {current, end_, step, current >= end_}; }
+        iterator end() const { return {end_, end_, step, true}; }
+        rusty::Option<T> next() {
+            if (done || current >= end_) {
+                done = true;
+                return rusty::None;
+            }
+            T value = current;
+            T n = static_cast<T>(current + step);
+            if (n >= end_ || n < current) {
+                done = true;
+            }
+            current = n;
+            return rusty::Option<T>(value);
+        }
+    };
+    StepBy step_by(T step) const { return StepBy{start, end_, step, start >= end_}; }
+
 private:
     T end_;
 };
