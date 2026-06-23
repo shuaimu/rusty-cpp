@@ -2520,6 +2520,176 @@ struct ModuleStepOutcome {
     first_err: String,
 }
 
+// ── Content-addressed module BMI/object cache ──────────────────────────────
+//
+// Opt-in via `RUSTY_CPP_MODULE_CACHE=1`. Caches each module's `.pcm` and `.o`
+// under a key = hash(the `.cppm` bytes + the transitive cache keys of the
+// modules it imports + the build environment). Two modules with the same key
+// are byte-identical compiler inputs, so their BMI/object are interchangeable.
+//
+// This dedups shared dependencies (serde_core, syn, …) across crates WITHIN a
+// matrix run (e.g. serde_core[no-rc] built once for serde_bytes + serde_repr)
+// AND ACROSS runs: a localized transpiler change leaves most crates' `.cppm`
+// byte-identical, so their (expensive) precompile/codegen is skipped on the
+// next gate. Mirrors Cargo's per-unit fingerprint, but keyed on the actual
+// transpiled output rather than the resolved feature set.
+//
+// Correctness: the key folds in EVERYTHING that affects the artifact — the
+// `.cppm` content, every imported module's key (so a dep change ripples up),
+// the clang version, the exact compile flags, and a digest of the `include/`
+// headers (which the `.cppm` `#include`s into its global module fragment).
+// When any input is uncertain (an import that wasn't keyed), the unit is left
+// uncached and rebuilt. A miss is only slow; a wrong hit would be unsound, so
+// we bias toward misses.
+const MODULE_CACHE_SCHEMA: u32 = 1;
+
+fn module_cache_enabled() -> bool {
+    matches!(
+        std::env::var("RUSTY_CPP_MODULE_CACHE").ok().as_deref(),
+        Some("1") | Some("true") | Some("on")
+    )
+}
+
+fn module_cache_units_dir(include_dir: &Path) -> Option<PathBuf> {
+    if !module_cache_enabled() {
+        return None;
+    }
+    let repo_root = find_repo_root_with_cmake(include_dir)?;
+    let dir = repo_root.join(".rusty-modules-cache").join("units");
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Sha256 over every file under `dir`, keyed by path relative to `dir` (sorted)
+/// + its content. Used to fold the rusty headers into the environment hash.
+fn hash_directory_tree(dir: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    fn walk(d: &Path, base: &Path, out: &mut Vec<(String, PathBuf)>) {
+        if let Ok(rd) = fs::read_dir(d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, base, out);
+                } else if let Ok(rel) = p.strip_prefix(base) {
+                    out.push((rel.to_string_lossy().into_owned(), p));
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files);
+    files.sort();
+    let mut h = Sha256::new();
+    for (rel, path) in &files {
+        h.update(rel.as_bytes());
+        h.update([0u8]);
+        if let Ok(bytes) = fs::read(path) {
+            h.update((bytes.len() as u64).to_le_bytes());
+            h.update(&bytes);
+        }
+        h.update([0u8]);
+    }
+    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Hash of everything that affects a module artifact but ISN'T the `.cppm` or
+/// its imports: clang version, compile flags, and the `include/` headers.
+fn module_cache_env_hash(
+    cpp_compiler: &str,
+    cxx_standard: &str,
+    portable_intrinsics_define: &str,
+    import_std: bool,
+    include_dir: &Path,
+    rusty_pcm_dir: Option<&Path>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let clang_version = std::process::Command::new(cpp_compiler)
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .unwrap_or_default();
+    let mut h = Sha256::new();
+    h.update(MODULE_CACHE_SCHEMA.to_le_bytes());
+    h.update(clang_version.as_bytes());
+    h.update([0u8]);
+    h.update(cxx_standard.as_bytes());
+    h.update([0u8]);
+    h.update(portable_intrinsics_define.as_bytes());
+    h.update([0u8]);
+    h.update([import_std as u8, b'\0']);
+    h.update(b"-march=native\0");
+    h.update(hash_directory_tree(include_dir).as_bytes());
+    h.update([0u8]);
+    // The runtime module BMIs are rebuilt whenever rusty sources change; fold
+    // the marker in so a runtime-module change invalidates dependent caches.
+    if let Some(p) = rusty_pcm_dir {
+        if let Ok(b) = fs::read(p.join("rusty.pcm")) {
+            h.update(sha256_hex(&b).as_bytes());
+            h.update([0u8]);
+        }
+    }
+    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Cache key for one module: env + its `.cppm` bytes + sorted import keys.
+/// Returns None if the `.cppm` can't be read.
+fn module_unit_cache_key(env_hash: &str, cppm_path: &Path, dep_keys: &[String]) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let content = fs::read(cppm_path).ok()?;
+    let mut h = Sha256::new();
+    h.update(env_hash.as_bytes());
+    h.update([0u8]);
+    h.update((content.len() as u64).to_le_bytes());
+    h.update(&content);
+    h.update([0u8]);
+    let mut deps = dep_keys.to_vec();
+    deps.sort();
+    for d in &deps {
+        h.update(d.as_bytes());
+        h.update([0u8]);
+    }
+    Some(h.finalize().iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+/// Copy `cache_file` → `dst` if the cache entry exists. Returns true on hit.
+fn module_cache_fetch(cache_file: &Path, dst: &Path) -> bool {
+    cache_file.is_file() && fs::copy(cache_file, dst).is_ok()
+}
+
+/// Store `src` into the cache atomically (temp + rename). Concurrent stores of
+/// the same key race harmlessly — the content is identical, last writer wins.
+fn module_cache_store(cache_file: &Path, src: &Path) {
+    let Some(parent) = cache_file.parent() else {
+        return;
+    };
+    let tmp = parent.join(format!(
+        "{}.tmp.{}",
+        cache_file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("entry"),
+        std::process::id()
+    ));
+    if fs::copy(src, &tmp).is_ok() {
+        let _ = fs::rename(&tmp, cache_file);
+        let _ = fs::remove_file(&tmp); // no-op if rename succeeded
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compile_module_step(
     cpp_compiler: &str,
@@ -2730,6 +2900,25 @@ fn run_stage_d_module_build(
     let pcm_dir_ref: &Path = pcm_dir.as_path();
     let _ = &stdlib_flag_suffix; // command strings are now built in compile_module_step
 
+    // Content-addressed module cache (opt-in via RUSTY_CPP_MODULE_CACHE=1).
+    // Keys are computed in topological order so each unit's imported-module
+    // keys are already known when we reach it.
+    let cache_units_dir = module_cache_units_dir(include_dir);
+    let cache_env_hash = cache_units_dir.as_ref().map(|_| {
+        module_cache_env_hash(
+            cpp_compiler,
+            cxx_standard,
+            portable_intrinsics_define,
+            import_std,
+            include_dir,
+            rusty_pcm_ref,
+        )
+    });
+    let local_module_names: HashSet<String> =
+        units.iter().map(|u| u.module_name.clone()).collect();
+    let mut module_name_to_key: HashMap<String, String> = HashMap::new();
+    let mut unit_keys: Vec<Option<String>> = vec![None; units.len()];
+
     // Phase 1 — precompile (.pcm), sequential in topological order. A unit's
     // .pcm must exist before any dependent precompiles/compiles, so this phase
     // carries the module DAG and the skip/fail logic.
@@ -2753,6 +2942,46 @@ fn run_stage_d_module_build(
                 continue;
             }
             // Lib depending on skipped — fail-fast below (precompile will fail).
+        }
+        // Compute this unit's cache key. Only cacheable when every crate-local
+        // import is already keyed (else a dep's identity is unknown → unsound).
+        let cache_key: Option<String> = match (&cache_units_dir, &cache_env_hash) {
+            (Some(_), Some(env)) => {
+                let mut dep_keys: Vec<String> = Vec::new();
+                let mut all_local_deps_keyed = true;
+                for imp in &unit.imports {
+                    if local_module_names.contains(imp) {
+                        match module_name_to_key.get(imp) {
+                            Some(k) => dep_keys.push(k.clone()),
+                            None => {
+                                all_local_deps_keyed = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if all_local_deps_keyed {
+                    module_unit_cache_key(env, &unit.source_path, &dep_keys)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(k) = &cache_key {
+            module_name_to_key.insert(unit.module_name.clone(), k.clone());
+            unit_keys[idx] = Some(k.clone());
+        }
+        // Cache hit: copy the cached .pcm and skip the (expensive) precompile.
+        if let (Some(dir), Some(k)) = (&cache_units_dir, &cache_key) {
+            if module_cache_fetch(&dir.join(format!("{}.pcm", k)), &unit.pcm_path) {
+                build_log.push_str(&format!(
+                    "# module-cache HIT pcm {} {}\n",
+                    unit.module_name, k
+                ));
+                to_object.push(idx);
+                continue;
+            }
         }
         let outcome = compile_module_step(
             cpp_compiler,
@@ -2797,6 +3026,10 @@ fn run_stage_d_module_build(
             );
             return Err("C++ module precompile failed".to_string());
         }
+        // Store the freshly-built .pcm into the content-addressed cache.
+        if let (Some(dir), Some(k)) = (&cache_units_dir, &cache_key) {
+            module_cache_store(&dir.join(format!("{}.pcm", k)), &unit.pcm_path);
+        }
         to_object.push(idx);
     }
 
@@ -2804,6 +3037,8 @@ fn run_stage_d_module_build(
     // no inter-object dependency, so compile them concurrently (chunked by
     // build_jobs; chunk size 1 = sequential). Results are consumed in
     // submission order for a deterministic build.log and skip/fail handling.
+    let cache_dir_ref = cache_units_dir.as_ref();
+    let unit_keys_ref = &unit_keys;
     for chunk in to_object.chunks(build_jobs) {
         let outcomes: Vec<(usize, Result<ModuleStepOutcome, String>)> =
             std::thread::scope(|scope| {
@@ -2812,7 +3047,25 @@ fn run_stage_d_module_build(
                     .map(|&idx| {
                         let unit = &units[idx];
                         let handle = scope.spawn(move || {
-                            compile_module_step(
+                            let key_opt =
+                                unit_keys_ref.get(idx).and_then(|o| o.as_ref());
+                            // Cache hit: reuse the cached .o, skip codegen.
+                            if let (Some(dir), Some(k)) = (cache_dir_ref, key_opt) {
+                                if module_cache_fetch(
+                                    &dir.join(format!("{}.o", k)),
+                                    &unit.object_path,
+                                ) {
+                                    return Ok(ModuleStepOutcome {
+                                        ok: true,
+                                        log: format!(
+                                            "# module-cache HIT obj {} {}\n",
+                                            unit.module_name, k
+                                        ),
+                                        first_err: String::new(),
+                                    });
+                                }
+                            }
+                            let outcome = compile_module_step(
                                 cpp_compiler,
                                 cxx_standard,
                                 import_std,
@@ -2822,7 +3075,21 @@ fn run_stage_d_module_build(
                                 rusty_pcm_ref,
                                 unit,
                                 false,
-                            )
+                            );
+                            // Store a freshly-built .o into the cache.
+                            if let Ok(o) = &outcome {
+                                if o.ok {
+                                    if let (Some(dir), Some(k)) =
+                                        (cache_dir_ref, key_opt)
+                                    {
+                                        module_cache_store(
+                                            &dir.join(format!("{}.o", k)),
+                                            &unit.object_path,
+                                        );
+                                    }
+                                }
+                            }
+                            outcome
                         });
                         (idx, handle)
                     })
