@@ -16245,6 +16245,20 @@ impl CodeGen {
                             preserve_crate_root,
                         );
                     }
+                    // A crate-local module named `alloc`/`core`/`std` (e.g.
+                    // hashbrown's own `mod alloc`, reached via
+                    // `use crate::alloc::Global`) SHADOWS the extern crate in
+                    // Rust — so `alloc::Global` means the local module, not
+                    // `std`. The `crate::` root was already stripped above, so
+                    // detect this by a visible same-named local module and keep
+                    // the path local instead of remapping the root to `std`.
+                    // (Extern access in such crates is spelled differently, e.g.
+                    // hashbrown renames the extern alloc crate to `stdalloc`.)
+                    "std" | "core" | "alloc"
+                        if at_root && self.current_scope_has_visible_module_root(&ident) =>
+                    {
+                        ident
+                    }
                     "std" | "core" | "alloc" if at_root => "std".to_string(),
                     _ => ident,
                 };

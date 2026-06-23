@@ -8688,6 +8688,33 @@ fn test_leaf4154333333334_std_path_import_rewritten() {
 }
 
 #[test]
+fn test_crate_local_alloc_module_import_stays_local() {
+    // A crate that declares its OWN `mod alloc` (like hashbrown) reaches it via
+    // `use crate::alloc::Global`. The crate-local module shadows the extern
+    // `alloc` crate in Rust, so the import must stay `alloc::Global`, NOT be
+    // remapped to the non-existent `std::Global`.
+    let out = transpile_str(
+        r#"
+        mod alloc {
+            pub struct Global;
+        }
+        mod consumer {
+            use crate::alloc::Global;
+            pub fn g() -> Global { Global }
+        }
+    "#,
+    );
+    assert!(
+        !out.contains("using std::Global;"),
+        "crate-local alloc::Global must not be remapped to std::Global: {out}"
+    );
+    assert!(
+        out.contains("using alloc::Global;"),
+        "expected crate-local `using alloc::Global;`: {out}"
+    );
+}
+
+#[test]
 fn test_leaf522_std_sync_atomic_and_mpsc_imports_rewritten() {
     let out = transpile_str(
         r#"
