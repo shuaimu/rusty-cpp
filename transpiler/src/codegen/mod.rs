@@ -727,7 +727,7 @@ pub struct CodeGen {
     pub(crate) trait_declared_paths: HashSet<String>,
     /// Trait method receiver shape keyed by `Trait::method` (scoped + unscoped).
     /// Used to safely rewrite UFCS-style trait calls with by-value receivers.
-    pub(crate) trait_method_has_receiver: HashMap<String, bool>,
+    pub(crate) trait_method_has_receiver: std::rc::Rc<HashMap<String, bool>>,
     /// Local trait names (scoped + unscoped) for which module-mode runtime
     /// helper structs were emitted. UFCS calls to these helpers must stay as
     /// associated calls (`Trait::method(self, ...)`) to avoid self-recursive
@@ -797,7 +797,7 @@ pub struct CodeGen {
     /// Local type-alias target types keyed by alias name (scoped + unscoped).
     /// Used to resolve expected-type context through aliases (for example
     /// `MapInto<I, R>` -> `MapSpecialCase<I, MapSpecialCaseFnInto<R>>`).
-    pub(crate) type_alias_targets: HashMap<String, syn::Type>,
+    pub(crate) type_alias_targets: std::rc::Rc<HashMap<String, syn::Type>>,
     /// User `impl Deref for T { type Target = U }` map: `T` (simple, scoped,
     /// and tail keys) -> `U`. Lets field/method access through Deref coercion
     /// emit an explicit `(*x)` when the member lives on the Deref target rather
@@ -868,7 +868,7 @@ pub struct CodeGen {
     pub(crate) data_enum_variant_names: HashSet<String>,
     /// Data-enum variant payload field types keyed by `Enum::Variant`
     /// (scoped + unscoped owner keys).
-    pub(crate) data_enum_variant_field_types: HashMap<String, Vec<syn::Type>>,
+    pub(crate) data_enum_variant_field_types: std::rc::Rc<HashMap<String, Vec<syn::Type>>>,
     /// Tracks associated constants on C-like enums (e.g., "Op_DEFAULT").
     /// These are emitted as standalone constants since enum class can't
     /// have static members; path references are rewritten accordingly.
@@ -905,7 +905,7 @@ pub struct CodeGen {
     pub(crate) unwrap_tmp_counter: std::cell::Cell<usize>,
     pub(crate) iflet_result_counter: usize,
     /// Named struct field types for local type-context recovery in match lowering.
-    pub(crate) struct_field_types: HashMap<String, HashMap<String, syn::Type>>,
+    pub(crate) struct_field_types: std::rc::Rc<HashMap<String, HashMap<String, syn::Type>>>,
     /// Type keys (bare + scoped) that derive/impl `Copy`. A `Copy` struct's
     /// fields are all `Copy`, so a by-value-`self` method can never move out of
     /// `self` — it must be emitted as a C++ `const` method (otherwise it can't
@@ -914,10 +914,10 @@ pub struct CodeGen {
     pub(crate) copy_derived_types: HashSet<String>,
     /// Named struct field declaration order keyed by struct name.
     /// Used for constructor-style lowering when designated initializers are unavailable.
-    pub(crate) struct_field_order: HashMap<String, Vec<String>>,
+    pub(crate) struct_field_order: std::rc::Rc<HashMap<String, Vec<String>>>,
     /// Named struct field emitted C++ member names keyed by Rust field name.
     /// Needed when field names are rewritten to avoid collisions with merged impl items.
-    pub(crate) struct_field_cpp_names: HashMap<String, HashMap<String, String>>,
+    pub(crate) struct_field_cpp_names: std::rc::Rc<HashMap<String, HashMap<String, String>>>,
     /// Named struct fields that are Rust references (`&T` / `&mut T`), keyed by
     /// struct name (scoped + unscoped). Used for reference-aware unary-deref lowering.
     pub(crate) struct_reference_fields: HashMap<String, HashSet<String>>,
@@ -927,37 +927,37 @@ pub struct CodeGen {
     /// Collected free-function parameter passing styles keyed by scoped function path.
     /// Used to lower `&x`/`&mut x` arguments to C++ reference arguments without
     /// turning them into raw pointers at call sites.
-    pub(crate) function_arg_pass_styles: HashMap<String, Vec<ArgPassStyle>>,
+    pub(crate) function_arg_pass_styles: std::rc::Rc<HashMap<String, Vec<ArgPassStyle>>>,
     /// Collected free-function argument type hints keyed by scoped function path.
     /// Used to propagate expected type context into argument lowering (for example
     /// `&[1,2,3]` coercions for slice/span parameters).
-    pub(crate) function_arg_expected_types: HashMap<String, Vec<Option<syn::Type>>>,
+    pub(crate) function_arg_expected_types: std::rc::Rc<HashMap<String, Vec<Option<syn::Type>>>>,
     /// Collected free-function type generic parameter names keyed by scoped
     /// function path. Used for targeted template-argument recovery when C++
     /// deduction is blocked by wrapper pointer forms.
-    pub(crate) function_type_param_names: HashMap<String, Vec<String>>,
+    pub(crate) function_type_param_names: std::rc::Rc<HashMap<String, Vec<String>>>,
     /// Collected free-function return types keyed by scoped function path.
     /// Used for local type recovery when call results flow into untyped locals
     /// (for example pointer helper wrappers returning `*mut T`).
-    pub(crate) function_return_types: HashMap<String, Option<syn::Type>>,
+    pub(crate) function_return_types: std::rc::Rc<HashMap<String, Option<syn::Type>>>,
     /// Collected method parameter passing styles keyed by method name.
     /// Mixed signatures remain conservative and do not trigger address-of stripping.
-    pub(crate) method_arg_pass_styles: HashMap<String, Vec<ArgPassStyle>>,
+    pub(crate) method_arg_pass_styles: std::rc::Rc<HashMap<String, Vec<ArgPassStyle>>>,
     /// Collected method argument type hints keyed by method name.
     /// Mixed signatures are softened to `None` per slot.
-    pub(crate) method_arg_expected_types: HashMap<String, Vec<Option<syn::Type>>>,
+    pub(crate) method_arg_expected_types: std::rc::Rc<HashMap<String, Vec<Option<syn::Type>>>>,
     /// Collected method argument type hints keyed by `Owner::method`.
     /// This preserves owner-specific signatures for associated-call fallback
     /// when method names are globally ambiguous (`from`, `new`, etc).
-    pub(crate) owner_method_arg_expected_types: HashMap<String, Vec<Option<syn::Type>>>,
+    pub(crate) owner_method_arg_expected_types: std::rc::Rc<HashMap<String, Vec<Option<syn::Type>>>>,
     /// Raw owner-scoped method argument signatures keyed by `Owner::method`.
     /// Used when merged owner hints are ambiguous (`None`) so call-site shape
     /// can choose a compatible overload hint without losing type context.
-    pub(crate) owner_method_arg_expected_type_variants: HashMap<String, Vec<Vec<Option<syn::Type>>>>,
+    pub(crate) owner_method_arg_expected_type_variants: std::rc::Rc<HashMap<String, Vec<Vec<Option<syn::Type>>>>>,
     /// Whether an owner-scoped method has a Rust receiver (`self`) keyed by
     /// `Owner::method`. `Some(true)` = instance method, `Some(false)` = static
     /// method, `None` = mixed/ambiguous declarations.
-    pub(crate) owner_method_has_receiver: HashMap<String, Option<bool>>,
+    pub(crate) owner_method_has_receiver: std::rc::Rc<HashMap<String, Option<bool>>>,
     /// Receiver shape for inherent impl methods declared on local type aliases.
     /// Keyed by `Owner::method` using alias owner spellings.
     /// Used to lower alias impl calls to generated free functions.
@@ -1560,7 +1560,7 @@ impl CodeGen {
             callable_type_param_return_scopes: Vec::new(),
             trait_static_default_methods: HashMap::new(),
             trait_declared_paths: HashSet::new(),
-            trait_method_has_receiver: HashMap::new(),
+            trait_method_has_receiver: std::rc::Rc::new(HashMap::new()),
             module_runtime_helper_traits: HashSet::new(),
             module_runtime_helper_trait_type_names: HashMap::new(),
             module_runtime_helper_trait_methods: HashMap::new(),
@@ -1575,7 +1575,7 @@ impl CodeGen {
             numeric_type_aliases: HashMap::new(),
             tuple_type_aliases: HashMap::new(),
             tuple_type_alias_elem_types: HashMap::new(),
-            type_alias_targets: HashMap::new(),
+            type_alias_targets: std::rc::Rc::new(HashMap::new()),
             user_deref_targets: HashMap::new(),
             emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
@@ -1594,7 +1594,7 @@ impl CodeGen {
             data_enum_variants_by_enum: HashMap::new(),
             data_enum_variant_indices_by_enum: HashMap::new(),
             data_enum_variant_names: HashSet::new(),
-            data_enum_variant_field_types: HashMap::new(),
+            data_enum_variant_field_types: std::rc::Rc::new(HashMap::new()),
             c_like_enum_consts: HashSet::new(),
             c_like_enum_variants: HashSet::new(),
             c_like_enum_types: HashSet::new(),
@@ -1605,21 +1605,21 @@ impl CodeGen {
             type_arg_nesting: std::cell::Cell::new(0),
             unwrap_tmp_counter: std::cell::Cell::new(0),
             iflet_result_counter: 0,
-            struct_field_types: HashMap::new(),
+            struct_field_types: std::rc::Rc::new(HashMap::new()),
             copy_derived_types: HashSet::new(),
-            struct_field_order: HashMap::new(),
-            struct_field_cpp_names: HashMap::new(),
+            struct_field_order: std::rc::Rc::new(HashMap::new()),
+            struct_field_cpp_names: std::rc::Rc::new(HashMap::new()),
             struct_reference_fields: HashMap::new(),
             tuple_struct_arities: HashMap::new(),
-            function_arg_pass_styles: HashMap::new(),
-            function_arg_expected_types: HashMap::new(),
-            function_type_param_names: HashMap::new(),
-            function_return_types: HashMap::new(),
-            method_arg_pass_styles: HashMap::new(),
-            method_arg_expected_types: HashMap::new(),
-            owner_method_arg_expected_types: HashMap::new(),
-            owner_method_arg_expected_type_variants: HashMap::new(),
-            owner_method_has_receiver: HashMap::new(),
+            function_arg_pass_styles: std::rc::Rc::new(HashMap::new()),
+            function_arg_expected_types: std::rc::Rc::new(HashMap::new()),
+            function_type_param_names: std::rc::Rc::new(HashMap::new()),
+            function_return_types: std::rc::Rc::new(HashMap::new()),
+            method_arg_pass_styles: std::rc::Rc::new(HashMap::new()),
+            method_arg_expected_types: std::rc::Rc::new(HashMap::new()),
+            owner_method_arg_expected_types: std::rc::Rc::new(HashMap::new()),
+            owner_method_arg_expected_type_variants: std::rc::Rc::new(HashMap::new()),
+            owner_method_has_receiver: std::rc::Rc::new(HashMap::new()),
             alias_inherent_owner_method_has_receiver: HashMap::new(),
             emitted_alias_impl_owner_forward_decls: HashSet::new(),
             emitted_alias_impl_owner_defs: HashSet::new(),
@@ -2666,7 +2666,7 @@ impl CodeGen {
         self.method_emission_skip_conflict_registration = false;
         self.trait_static_default_methods.clear();
         self.trait_declared_paths.clear();
-        self.trait_method_has_receiver.clear();
+        std::rc::Rc::make_mut(&mut self.trait_method_has_receiver).clear();
         self.module_runtime_helper_traits.clear();
         self.module_runtime_helper_trait_type_names.clear();
         self.module_runtime_helper_trait_methods.clear();
@@ -2681,7 +2681,7 @@ impl CodeGen {
         self.numeric_type_aliases.clear();
         self.tuple_type_aliases.clear();
         self.tuple_type_alias_elem_types.clear();
-        self.type_alias_targets.clear();
+        std::rc::Rc::make_mut(&mut self.type_alias_targets).clear();
         self.local_declared_types.clear();
         self.unit_struct_types.clear();
         self.extension_trait_impl_methods.clear();
@@ -2696,7 +2696,7 @@ impl CodeGen {
         self.data_enum_variants_by_enum.clear();
         self.data_enum_variant_indices_by_enum.clear();
         self.data_enum_variant_names.clear();
-        self.data_enum_variant_field_types.clear();
+        std::rc::Rc::make_mut(&mut self.data_enum_variant_field_types).clear();
         self.c_like_enum_consts.clear();
         self.c_like_enum_variants.clear();
         self.c_like_enum_types.clear();
@@ -2704,21 +2704,21 @@ impl CodeGen {
         self.forward_emitted_c_like_enums.clear();
         self.forward_emitted_consts.clear();
         self.module_body_forward_decl_pass = false;
-        self.struct_field_types.clear();
+        std::rc::Rc::make_mut(&mut self.struct_field_types).clear();
         self.copy_derived_types.clear();
-        self.struct_field_order.clear();
-        self.struct_field_cpp_names.clear();
+        std::rc::Rc::make_mut(&mut self.struct_field_order).clear();
+        std::rc::Rc::make_mut(&mut self.struct_field_cpp_names).clear();
         self.struct_reference_fields.clear();
         self.tuple_struct_arities.clear();
-        self.function_arg_pass_styles.clear();
-        self.function_arg_expected_types.clear();
-        self.function_type_param_names.clear();
-        self.function_return_types.clear();
-        self.method_arg_pass_styles.clear();
-        self.method_arg_expected_types.clear();
-        self.owner_method_arg_expected_types.clear();
-        self.owner_method_arg_expected_type_variants.clear();
-        self.owner_method_has_receiver.clear();
+        std::rc::Rc::make_mut(&mut self.function_arg_pass_styles).clear();
+        std::rc::Rc::make_mut(&mut self.function_arg_expected_types).clear();
+        std::rc::Rc::make_mut(&mut self.function_type_param_names).clear();
+        std::rc::Rc::make_mut(&mut self.function_return_types).clear();
+        std::rc::Rc::make_mut(&mut self.method_arg_pass_styles).clear();
+        std::rc::Rc::make_mut(&mut self.method_arg_expected_types).clear();
+        std::rc::Rc::make_mut(&mut self.owner_method_arg_expected_types).clear();
+        std::rc::Rc::make_mut(&mut self.owner_method_arg_expected_type_variants).clear();
+        std::rc::Rc::make_mut(&mut self.owner_method_has_receiver).clear();
         self.alias_inherent_owner_method_has_receiver.clear();
         self.emitted_alias_impl_owner_forward_decls.clear();
         self.emitted_alias_impl_owner_defs.clear();
@@ -8263,7 +8263,7 @@ impl CodeGen {
                 variant_type_keys.push(format!("{}::{}", scoped_enum_name, canonical.clone()));
             }
             for key in variant_type_keys {
-                self.data_enum_variant_field_types
+                std::rc::Rc::make_mut(&mut self.data_enum_variant_field_types)
                     .insert(key, field_types.clone());
             }
             if variant.fields.is_empty() {
@@ -8296,10 +8296,10 @@ impl CodeGen {
 
     fn record_type_alias_target(&mut self, module_path: &[String], alias: &syn::ItemType) {
         let alias_name = alias.ident.to_string();
-        self.type_alias_targets
+        std::rc::Rc::make_mut(&mut self.type_alias_targets)
             .insert(alias_name.clone(), (*alias.ty).clone());
         if !module_path.is_empty() {
-            self.type_alias_targets.insert(
+            std::rc::Rc::make_mut(&mut self.type_alias_targets).insert(
                 format!("{}::{}", module_path.join("::"), alias_name),
                 (*alias.ty).clone(),
             );
@@ -8512,7 +8512,7 @@ impl CodeGen {
 
     fn record_function_arg_pass_styles(&mut self, key: &str, styles: Vec<ArgPassStyle>) {
         use std::collections::hash_map::Entry;
-        match self.function_arg_pass_styles.entry(key.to_string()) {
+        match std::rc::Rc::make_mut(&mut self.function_arg_pass_styles).entry(key.to_string()) {
             Entry::Occupied(mut occ) => Self::merge_arg_pass_style_vec(occ.get_mut(), &styles),
             Entry::Vacant(vac) => {
                 vac.insert(styles);
@@ -8522,7 +8522,7 @@ impl CodeGen {
 
     fn record_function_arg_expected_types(&mut self, key: &str, expected: Vec<Option<syn::Type>>) {
         use std::collections::hash_map::Entry;
-        match self.function_arg_expected_types.entry(key.to_string()) {
+        match std::rc::Rc::make_mut(&mut self.function_arg_expected_types).entry(key.to_string()) {
             Entry::Occupied(mut occ) => Self::merge_arg_expected_type_vec(occ.get_mut(), &expected),
             Entry::Vacant(vac) => {
                 vac.insert(expected);
@@ -8532,7 +8532,7 @@ impl CodeGen {
 
     fn record_function_type_param_names(&mut self, key: &str, params: Vec<String>) {
         use std::collections::hash_map::Entry;
-        match self.function_type_param_names.entry(key.to_string()) {
+        match std::rc::Rc::make_mut(&mut self.function_type_param_names).entry(key.to_string()) {
             Entry::Occupied(mut occ) => {
                 if occ.get() != &params {
                     // Signature ambiguity across same name/path: disable
@@ -8557,7 +8557,7 @@ impl CodeGen {
 
     fn record_function_return_type(&mut self, key: &str, return_ty: Option<syn::Type>) {
         use std::collections::hash_map::Entry;
-        match self.function_return_types.entry(key.to_string()) {
+        match std::rc::Rc::make_mut(&mut self.function_return_types).entry(key.to_string()) {
             Entry::Occupied(mut occ) => {
                 Self::merge_function_return_type(occ.get_mut(), &return_ty);
             }
@@ -8569,7 +8569,7 @@ impl CodeGen {
 
     fn record_method_arg_pass_styles(&mut self, method_name: &str, styles: Vec<ArgPassStyle>) {
         use std::collections::hash_map::Entry;
-        match self.method_arg_pass_styles.entry(method_name.to_string()) {
+        match std::rc::Rc::make_mut(&mut self.method_arg_pass_styles).entry(method_name.to_string()) {
             Entry::Occupied(mut occ) => Self::merge_arg_pass_style_vec(occ.get_mut(), &styles),
             Entry::Vacant(vac) => {
                 vac.insert(styles);
@@ -8583,8 +8583,7 @@ impl CodeGen {
         expected: Vec<Option<syn::Type>>,
     ) {
         use std::collections::hash_map::Entry;
-        match self
-            .method_arg_expected_types
+        match std::rc::Rc::make_mut(&mut self.method_arg_expected_types)
             .entry(method_name.to_string())
         {
             Entry::Occupied(mut occ) => Self::merge_arg_expected_type_vec(occ.get_mut(), &expected),
@@ -8606,11 +8605,11 @@ impl CodeGen {
     ) {
         use std::collections::hash_map::Entry;
         let key = Self::owner_method_key(owner, method_name);
-        self.owner_method_arg_expected_type_variants
+        std::rc::Rc::make_mut(&mut self.owner_method_arg_expected_type_variants)
             .entry(key.clone())
             .or_default()
             .push(expected.clone());
-        match self.owner_method_arg_expected_types.entry(key) {
+        match std::rc::Rc::make_mut(&mut self.owner_method_arg_expected_types).entry(key) {
             Entry::Occupied(mut occ) => Self::merge_arg_expected_type_vec(occ.get_mut(), &expected),
             Entry::Vacant(vac) => {
                 vac.insert(expected);
@@ -8626,7 +8625,7 @@ impl CodeGen {
     ) {
         use std::collections::hash_map::Entry;
         let key = Self::owner_method_key(owner, method_name);
-        match self.owner_method_has_receiver.entry(key) {
+        match std::rc::Rc::make_mut(&mut self.owner_method_has_receiver).entry(key) {
             Entry::Vacant(vac) => {
                 vac.insert(Some(has_receiver));
             }
@@ -26284,7 +26283,7 @@ impl CodeGen {
         }
         let suffix = format!("::{}", method_name);
         let mut candidates = Vec::new();
-        for (key, has_receiver) in &self.trait_method_has_receiver {
+        for (key, has_receiver) in self.trait_method_has_receiver.iter() {
             if !*has_receiver || !key.ends_with(&suffix) {
                 continue;
             }
@@ -35169,7 +35168,7 @@ impl CodeGen {
             seen_values.insert(*value);
         }
         let suffix = format!("::{}::{}", trait_name, method_name);
-        for (key, value) in &self.trait_method_has_receiver {
+        for (key, value) in self.trait_method_has_receiver.iter() {
             if key.ends_with(&suffix) {
                 seen_values.insert(*value);
             }

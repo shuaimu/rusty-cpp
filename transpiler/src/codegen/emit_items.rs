@@ -808,10 +808,10 @@ impl CodeGen {
             self.tuple_struct_arities.insert(scoped_name, arity);
         }
         if !named_field_types.is_empty() {
-            self.struct_field_types
+            std::rc::Rc::make_mut(&mut self.struct_field_types)
                 .insert(name_str.clone(), named_field_types.clone());
             let scoped_name = self.scoped_type_key(&name_str);
-            self.struct_field_types
+            std::rc::Rc::make_mut(&mut self.struct_field_types)
                 .insert(scoped_name, named_field_types);
             if !named_reference_fields.is_empty() {
                 self.struct_reference_fields
@@ -820,22 +820,22 @@ impl CodeGen {
                 self.struct_reference_fields
                     .insert(scoped_name, named_reference_fields.clone());
             }
-            self.struct_field_order
+            std::rc::Rc::make_mut(&mut self.struct_field_order)
                 .insert(name_str.clone(), named_field_order.clone());
             let scoped_name = self.scoped_type_key(&name_str);
-            self.struct_field_order
+            std::rc::Rc::make_mut(&mut self.struct_field_order)
                 .insert(scoped_name, named_field_order);
-            self.struct_field_cpp_names
+            std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                 .insert(name_str.clone(), named_field_cpp_names.clone());
             let scoped_name = self.scoped_type_key(&name_str);
-            self.struct_field_cpp_names
+            std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                 .insert(scoped_name, named_field_cpp_names.clone());
         }
         if !unnamed_field_types.is_empty() {
-            self.struct_field_types
+            std::rc::Rc::make_mut(&mut self.struct_field_types)
                 .insert(name_str.clone(), unnamed_field_types.clone());
             let scoped_name = self.scoped_type_key(&name_str);
-            self.struct_field_types
+            std::rc::Rc::make_mut(&mut self.struct_field_types)
                 .insert(scoped_name, unnamed_field_types);
             if !unnamed_reference_fields.is_empty() {
                 self.struct_reference_fields
@@ -844,15 +844,15 @@ impl CodeGen {
                 self.struct_reference_fields
                     .insert(scoped_name, unnamed_reference_fields.clone());
             }
-            self.struct_field_order
+            std::rc::Rc::make_mut(&mut self.struct_field_order)
                 .insert(name_str.clone(), unnamed_field_order.clone());
             let scoped_name = self.scoped_type_key(&name_str);
-            self.struct_field_order
+            std::rc::Rc::make_mut(&mut self.struct_field_order)
                 .insert(scoped_name, unnamed_field_order);
-            self.struct_field_cpp_names
+            std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                 .insert(name_str.clone(), unnamed_field_cpp_names.clone());
             let scoped_name = self.scoped_type_key(&name_str);
-            self.struct_field_cpp_names
+            std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                 .insert(scoped_name, unnamed_field_cpp_names.clone());
         }
 
@@ -1800,7 +1800,7 @@ impl CodeGen {
                     variant_type_keys.push(format!("{}::{}", scoped_enum_name, canonical.clone()));
                 }
                 for key in variant_type_keys {
-                    self.data_enum_variant_field_types
+                    std::rc::Rc::make_mut(&mut self.data_enum_variant_field_types)
                         .insert(key, field_types.clone());
                 }
             }
@@ -1973,10 +1973,10 @@ impl CodeGen {
                             self.writeln(&format!("{} {};", ftype, cpp_field_name));
                         }
                         let variant_struct_name = format!("{}_{}", name, vname);
-                        self.struct_field_cpp_names
+                        std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                             .insert(variant_struct_name.clone(), named_field_cpp_names.clone());
                         if !self.module_stack.is_empty() {
-                            self.struct_field_cpp_names.insert(
+                            std::rc::Rc::make_mut(&mut self.struct_field_cpp_names).insert(
                                 format!(
                                     "{}::{}",
                                     self.module_stack.join("::"),

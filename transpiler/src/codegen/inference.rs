@@ -655,7 +655,7 @@ impl CodeGen {
         }
 
         let mut matches: HashMap<String, Option<bool>> = HashMap::new();
-        for (alias_key, alias_target) in &self.type_alias_targets {
+        for (alias_key, alias_target) in self.type_alias_targets.iter() {
             let alias_target = self.peel_reference_paren_group_type(alias_target);
             if self.map_type(alias_target) != receiver_cpp {
                 continue;

@@ -8094,9 +8094,9 @@ fn test_leaf10536_call_arg_expected_types_specialize_from_explicit_turbofish() {
         _ => panic!("expected call expression"),
     };
     let mut cg = CodeGen::new();
-    cg.function_type_param_names
+    std::rc::Rc::make_mut(&mut cg.function_type_param_names)
         .insert("case_".to_string(), vec!["T".to_string()]);
-    cg.function_arg_expected_types.insert(
+    std::rc::Rc::make_mut(&mut cg.function_arg_expected_types).insert(
         "case_".to_string(),
         vec![
             Some(parse_quote!(Option<T::Bits>)),
@@ -8144,9 +8144,9 @@ fn test_leaf10536_call_arg_expected_types_specialize_from_fn_path_inference() {
         _ => panic!("expected call expression"),
     };
     let mut cg = CodeGen::new();
-    cg.function_type_param_names
+    std::rc::Rc::make_mut(&mut cg.function_type_param_names)
         .insert("case_".to_string(), vec!["T".to_string()]);
-    cg.function_arg_expected_types.insert(
+    std::rc::Rc::make_mut(&mut cg.function_arg_expected_types).insert(
         "case_".to_string(),
         vec![
             Some(parse_quote!(Option<T::Bits>)),
@@ -8192,9 +8192,9 @@ fn test_leaf10536_tuple_expected_context_uses_typed_tuple_constructor() {
         _ => panic!("expected call expression"),
     };
     let mut cg = CodeGen::new();
-    cg.function_type_param_names
+    std::rc::Rc::make_mut(&mut cg.function_type_param_names)
         .insert("case_".to_string(), vec!["T".to_string()]);
-    cg.function_arg_expected_types.insert(
+    std::rc::Rc::make_mut(&mut cg.function_arg_expected_types).insert(
         "case_".to_string(),
         vec![
             Some(parse_quote!(T)),
@@ -26452,7 +26452,7 @@ fn test_leaf5202_missing_visit_method_fallback_uses_result_alias_error_hint() {
     let alias_target: syn::Type = syn::parse_str("result::Result<T, Error>").unwrap();
     let mut cg = CodeGen::new();
     cg.module_name = Some("serde_like".to_string());
-    cg.type_alias_targets
+    std::rc::Rc::make_mut(&mut cg.type_alias_targets)
         .insert("Result".to_string(), alias_target);
     cg.push_return_type_hint(&return_ty);
 

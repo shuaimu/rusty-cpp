@@ -3075,9 +3075,9 @@ impl CodeGen {
                         let method_name = method.sig.ident.to_string();
                         let has_receiver =
                             matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_)));
-                        self.trait_method_has_receiver
+                        std::rc::Rc::make_mut(&mut self.trait_method_has_receiver)
                             .insert(format!("{}::{}", trait_name, method_name), has_receiver);
-                        self.trait_method_has_receiver.insert(
+                        std::rc::Rc::make_mut(&mut self.trait_method_has_receiver).insert(
                             format!("{}::{}", scoped_trait_name, method_name),
                             has_receiver,
                         );
@@ -4142,26 +4142,26 @@ impl CodeGen {
                             })
                             .collect();
                         if !unnamed_field_types.is_empty() {
-                            self.struct_field_types
+                            std::rc::Rc::make_mut(&mut self.struct_field_types)
                                 .insert(struct_name.clone(), unnamed_field_types.clone());
-                            self.struct_field_order
+                            std::rc::Rc::make_mut(&mut self.struct_field_order)
                                 .insert(struct_name.clone(), unnamed_field_order.clone());
-                            self.struct_field_cpp_names
+                            std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                                 .insert(struct_name.clone(), unnamed_field_cpp_names.clone());
                             if !reference_fields.is_empty() {
                                 self.struct_reference_fields
                                     .insert(struct_name.clone(), reference_fields.clone());
                             }
                             if !module_path.is_empty() {
-                                self.struct_field_types.insert(
+                                std::rc::Rc::make_mut(&mut self.struct_field_types).insert(
                                     format!("{}::{}", module_path.join("::"), struct_name),
                                     unnamed_field_types,
                                 );
-                                self.struct_field_order.insert(
+                                std::rc::Rc::make_mut(&mut self.struct_field_order).insert(
                                     format!("{}::{}", module_path.join("::"), struct_name),
                                     unnamed_field_order,
                                 );
-                                self.struct_field_cpp_names.insert(
+                                std::rc::Rc::make_mut(&mut self.struct_field_cpp_names).insert(
                                     format!("{}::{}", module_path.join("::"), struct_name),
                                     unnamed_field_cpp_names,
                                 );
@@ -4214,26 +4214,26 @@ impl CodeGen {
                             })
                             .collect();
                         if !named_field_types.is_empty() {
-                            self.struct_field_types
+                            std::rc::Rc::make_mut(&mut self.struct_field_types)
                                 .insert(struct_name.clone(), named_field_types.clone());
-                            self.struct_field_order
+                            std::rc::Rc::make_mut(&mut self.struct_field_order)
                                 .insert(struct_name.clone(), named_field_order.clone());
-                            self.struct_field_cpp_names
+                            std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                                 .insert(struct_name.clone(), named_field_cpp_names.clone());
                             if !reference_fields.is_empty() {
                                 self.struct_reference_fields
                                     .insert(struct_name.clone(), reference_fields.clone());
                             }
                             if !module_path.is_empty() {
-                                self.struct_field_types.insert(
+                                std::rc::Rc::make_mut(&mut self.struct_field_types).insert(
                                     format!("{}::{}", module_path.join("::"), struct_name),
                                     named_field_types,
                                 );
-                                self.struct_field_order.insert(
+                                std::rc::Rc::make_mut(&mut self.struct_field_order).insert(
                                     format!("{}::{}", module_path.join("::"), struct_name),
                                     named_field_order,
                                 );
-                                self.struct_field_cpp_names.insert(
+                                std::rc::Rc::make_mut(&mut self.struct_field_cpp_names).insert(
                                     format!("{}::{}", module_path.join("::"), struct_name),
                                     named_field_cpp_names,
                                 );
@@ -4274,17 +4274,17 @@ impl CodeGen {
                         })
                         .collect();
                     if !named_field_types.is_empty() {
-                        self.struct_field_types
+                        std::rc::Rc::make_mut(&mut self.struct_field_types)
                             .insert(union_name.clone(), named_field_types.clone());
-                        self.struct_field_order
+                        std::rc::Rc::make_mut(&mut self.struct_field_order)
                             .insert(union_name.clone(), named_field_order.clone());
-                        self.struct_field_cpp_names
+                        std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                             .insert(union_name.clone(), named_field_cpp_names.clone());
                         if !module_path.is_empty() {
                             let scoped = format!("{}::{}", module_path.join("::"), union_name);
-                            self.struct_field_types.insert(scoped.clone(), named_field_types);
-                            self.struct_field_order.insert(scoped.clone(), named_field_order);
-                            self.struct_field_cpp_names
+                            std::rc::Rc::make_mut(&mut self.struct_field_types).insert(scoped.clone(), named_field_types);
+                            std::rc::Rc::make_mut(&mut self.struct_field_order).insert(scoped.clone(), named_field_order);
+                            std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                                 .insert(scoped, named_field_cpp_names);
                         }
                     }
@@ -4393,7 +4393,7 @@ impl CodeGen {
                         let method_return_ty =
                             self.collect_return_type_from_output(&method.sig.output);
                         for trait_name in &trait_keys {
-                            self.trait_method_has_receiver
+                            std::rc::Rc::make_mut(&mut self.trait_method_has_receiver)
                                 .insert(format!("{}::{}", trait_name, method_name), has_receiver);
                         }
                         for owner in &owner_keys {

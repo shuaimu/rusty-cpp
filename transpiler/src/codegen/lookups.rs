@@ -392,7 +392,7 @@ impl CodeGen {
         let suffix = format!("::{}", leaf);
         let mut found: Option<&Vec<String>> = None;
         let mut count = 0usize;
-        for (key, params) in &self.function_type_param_names {
+        for (key, params) in self.function_type_param_names.iter() {
             if (key == &leaf || key.ends_with(&suffix)) && !params.is_empty() {
                 count += 1;
                 if count > 1 {
@@ -421,7 +421,7 @@ impl CodeGen {
         let suffix = format!("::{}", leaf);
         let mut found: Option<&syn::Type> = None;
         let mut count = 0usize;
-        for (key, expected) in &self.function_arg_expected_types {
+        for (key, expected) in self.function_arg_expected_types.iter() {
             if key == &leaf || key.ends_with(&suffix) {
                 count += 1;
                 if count > 1 {
@@ -468,7 +468,7 @@ impl CodeGen {
         let suffix = format!("::{}", leaf);
         let mut found: Option<&syn::Type> = None;
         let mut count = 0usize;
-        for (key, ret) in &self.function_return_types {
+        for (key, ret) in self.function_return_types.iter() {
             if (key == &leaf || key.ends_with(&suffix))
                 && let Some(ty) = ret
             {
@@ -1028,7 +1028,7 @@ impl CodeGen {
 
     pub(super) fn lookup_unique_method_return_type_by_name(&self, method_name: &str) -> Option<syn::Type> {
         let mut unique: Option<syn::Type> = None;
-        for (key, ret_ty) in &self.function_return_types {
+        for (key, ret_ty) in self.function_return_types.iter() {
             let Some(ret_ty) = ret_ty.as_ref() else {
                 continue;
             };
