@@ -31596,6 +31596,38 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_iter_on_user_type_with_own_iter_method_dispatches_directly() {
+    // `self.table.iter()` where `table` is a user type with its OWN `iter()`
+    // method must emit `this->table.iter()`, NOT `rusty::iter(this->table)` (the
+    // generic adapter fails for a non-container user type like RawTableInner).
+    let out = transpile_str(
+        r#"
+        struct RawIter<T> { _m: core::marker::PhantomData<T> }
+        struct RawTableInner { mask: usize }
+        impl RawTableInner {
+            fn iter(&self) -> RawIter<u8> { RawIter { _m: core::marker::PhantomData } }
+        }
+        struct RawTable { table: RawTableInner }
+        impl RawTable {
+            fn iter(&self) -> RawIter<u8> { self.table.iter() }
+        }
+        "#,
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("table.iter") || l.contains("rusty::iter(this->table"))
+        .unwrap_or("<not found>");
+    assert!(
+        !line.contains("rusty::iter("),
+        "iter() on a user type with its own iter() should dispatch directly\nGot: {line}"
+    );
+    assert!(
+        line.contains("table.iter()"),
+        "expected the user's own `table.iter()` dispatch\nGot: {line}"
+    );
+}
+
+#[test]
 fn test_self_returning_assoc_fn_chain_resolves_for_into_iter_dispatch() {
     // Mirrors hashbrown RawIterRange::next: `Group::load_aligned(p).match_full()
     // .into_iter()` where `load_aligned(...) -> Self` (Group is non-generic) and

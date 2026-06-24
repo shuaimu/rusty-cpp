@@ -2898,6 +2898,35 @@ impl CodeGen {
         self.is_type_param_in_scope(&tp.path.segments[0].ident.to_string())
     }
 
+    /// Whether `receiver`'s resolved type is a USER-declared type that has its
+    /// own `method` (`iter`/`iter_mut`/`into_iter`). Only user types have
+    /// `impl_blocks` entries — runtime containers (`rusty::Vec`, slices, …) have
+    /// none, so they keep the generic `rusty::iter(...)` adapter. Lets the
+    /// `.iter()`/`.iter_mut()` seams dispatch to the user's own method rather
+    /// than the adapter, which fails the iter protocol for non-container user
+    /// types (hashbrown `RawTableInner::iter` → `RawIter<T>`).
+    pub(super) fn receiver_type_has_user_iter_method(
+        &self,
+        receiver: &syn::Expr,
+        method: &str,
+    ) -> bool {
+        let Some(receiver_ty) = self.infer_simple_expr_type(receiver) else {
+            return false;
+        };
+        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        let syn::Type::Path(tp) = receiver_ty else {
+            return false;
+        };
+        let Some(owner) = tp.path.segments.last().map(|seg| seg.ident.to_string()) else {
+            return false;
+        };
+        self.lookup_method_return_type_for_owner_key(&owner, method)
+            .is_some()
+            || self
+                .lookup_method_return_type_for_owner_key(&self.scoped_type_key(&owner), method)
+                .is_some()
+    }
+
     pub(super) fn should_bridge_direct_into_iter_receiver_to_iter(&self, receiver: &syn::Expr) -> bool {
         if self.receiver_is_fixed_array_like_expr(receiver) {
             return true;

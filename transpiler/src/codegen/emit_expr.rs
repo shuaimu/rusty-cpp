@@ -5912,11 +5912,17 @@ impl CodeGen {
             let count = self.emit_expr_to_string(&mc.args[0]);
             return format!("rusty::String::from({}).repeat({})", receiver, count);
         }
-        if mc.method == "iter" && mc.args.is_empty() {
+        if mc.method == "iter"
+            && mc.args.is_empty()
+            && !self.receiver_type_has_user_iter_method(&mc.receiver, "iter")
+        {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::iter({})", receiver);
         }
-        if mc.method == "iter_mut" && mc.args.is_empty() {
+        if mc.method == "iter_mut"
+            && mc.args.is_empty()
+            && !self.receiver_type_has_user_iter_method(&mc.receiver, "iter_mut")
+        {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::iter_mut({})", receiver);
         }
