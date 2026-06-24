@@ -18917,6 +18917,20 @@ impl CodeGen {
         }
     }
 
+    /// Emit one element of a tuple/slice structured binding. A nested unit `()`
+    /// pattern renders (recursively) as an empty `[]`, which is NOT a valid
+    /// structured-binding element — bind such an ignored element to a throwaway
+    /// name instead. Example: a HashSet iterator item `(K, ())` destructured as
+    /// `|(k, ())|` would otherwise emit `auto [k, []] = …` (a hard parse error).
+    fn closure_destructure_binding_element(&self, elem: &syn::Pat) -> String {
+        let emitted = self.emit_closure_destructure_pat_to_string(elem);
+        if emitted == "[]" {
+            "_".to_string()
+        } else {
+            emitted
+        }
+    }
+
     pub(super) fn emit_closure_destructure_pat_to_string(&self, pat: &syn::Pat) -> String {
         match pat {
             syn::Pat::Ident(pi) => self.closure_param_cpp_name(&pi.ident.to_string()),
@@ -18925,7 +18939,7 @@ impl CodeGen {
                 let elems: Vec<String> = tuple_pat
                     .elems
                     .iter()
-                    .map(|elem| self.emit_closure_destructure_pat_to_string(elem))
+                    .map(|elem| self.closure_destructure_binding_element(elem))
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
@@ -18933,7 +18947,7 @@ impl CodeGen {
                 let elems: Vec<String> = slice_pat
                     .elems
                     .iter()
-                    .map(|elem| self.emit_closure_destructure_pat_to_string(elem))
+                    .map(|elem| self.closure_destructure_binding_element(elem))
                     .collect();
                 format!("[{}]", elems.join(", "))
             }

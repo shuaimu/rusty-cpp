@@ -31570,6 +31570,26 @@ fn test_closure_tuple_destructuring_uses_body_binding() {
 }
 
 #[test]
+fn test_closure_tuple_destructure_unit_element_binds_to_placeholder_not_empty() {
+    // A HashSet-style item `(K, ())` destructured as `|(k, ())| k` must NOT emit
+    // an empty `[]` structured-binding element — `auto [k, []] = ...` is a hard
+    // parse error ("expected identifier"). The ignored unit binds to a throwaway
+    // name instead. Regression: hashbrown Keys/iterator over `(K, ())`.
+    let out = transpile_str(
+        r#"
+        fn f() {
+            let pairs: Vec<(i32, ())> = vec![(1, ()), (2, ())];
+            let keys: Vec<i32> = pairs.into_iter().map(|(k, ())| k).collect();
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("[]]"),
+        "unit tuple element must not emit an empty `[]` structured binding\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_self_ufcs_method_call_converted_to_dot_call() {
     // `Type::method(self)` inside an impl method should become
     // `(*this).method()` (dot call), not `Type::method((*this))` (static call).
