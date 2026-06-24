@@ -31596,6 +31596,27 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_if_expr_threads_pointer_arith_sibling_to_return_only_branch() {
+    // Mirrors hashbrown from_base_index: the sibling is `base.as_ptr().sub(i)`
+    // (a NonNull pointer chain → `*mut T`). Pointer-arith modeling resolves the
+    // chain, branch-merge threads `*mut T`, and the then-branch return-only call
+    // gets its backward turbofish: `make_ptr<T>(i)`.
+    let out = transpile_str(
+        r#"
+        fn make_ptr<T>(addr: usize) -> *mut T { addr as *mut T }
+        fn pick<T>(zero: bool, base: core::ptr::NonNull<T>, index: usize) -> *mut T {
+            let ptr = if zero { make_ptr(index) } else { base.as_ptr().sub(index) };
+            ptr
+        }
+        "#,
+    );
+    assert!(
+        out.contains("make_ptr<"),
+        "expected pointer-arith sibling to thread *mut T so make_ptr gets a turbofish\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_if_expr_threads_sibling_type_to_return_only_generic_branch() {
     // `let p = if z { make_ptr(i) } else { base.as_ptr() }`: the then-branch is a
     // return-only-generic call (undeducible), the else-branch resolves to `*mut T`.

@@ -4961,6 +4961,23 @@ impl CodeGen {
             return Some(parse_quote!(*const #pointee_ty));
         }
 
+        // Pointer arithmetic preserves the pointer type: `p.sub(n)` / `p.add(n)`
+        // / `p.offset(n)` (and their wrapping_ variants) on a `*mut T`/`*const T`
+        // receiver return the same pointer type. Lets a chain like
+        // `base.as_ptr().sub(i)` resolve to `*mut T` so it can serve as the
+        // sibling type for an if-branch return-only-generic call (invalid_mut).
+        if matches!(
+            method.as_str(),
+            "sub" | "add" | "offset" | "wrapping_add" | "wrapping_sub" | "wrapping_offset"
+        ) && mc.args.len() == 1
+            && let Some(recv_ty) = self.infer_simple_expr_type(&mc.receiver)
+            && self
+                .extract_pointer_pointee_info_from_type(&recv_ty)
+                .is_some()
+        {
+            return Some(recv_ty);
+        }
+
         if method == "get" && mc.args.is_empty() {
             if let Some(receiver_ty) = self.infer_simple_expr_type(&mc.receiver) {
                 let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
