@@ -9678,7 +9678,7 @@ impl CodeGen {
                                                     | "Ref"
                                                     | "RefMut"
                                                     | "MutexGuard"
-                                                    | "RwLockReadGuard"
+                                                    | "SpinMutexGuard"                                                    | "RwLockReadGuard"
                                                     | "RwLockWriteGuard"
                                             )
                                         }));
@@ -9777,7 +9777,7 @@ impl CodeGen {
                                                         | "Ref"
                                                         | "RefMut"
                                                         | "MutexGuard"
-                                                        | "RwLockReadGuard"
+                                                        | "SpinMutexGuard"                                                        | "RwLockReadGuard"
                                                         | "RwLockWriteGuard"
                                                 )
                                             }))
