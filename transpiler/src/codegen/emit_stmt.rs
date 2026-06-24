@@ -3380,6 +3380,12 @@ impl CodeGen {
 
         let inferred_expected_ty = if expected_ty.is_none() {
             self.infer_constructor_expected_type_from_pair(then_expr, else_expr)
+                .or_else(|| {
+                    // §13.14 branch-merge: if one branch is a return-only-generic
+                    // call (needs an expected type to be solved), derive it from
+                    // the resolvable sibling branch (both share one Rust type).
+                    self.infer_if_branch_expected_from_return_only_sibling(then_expr, else_expr)
+                })
         } else {
             None
         };

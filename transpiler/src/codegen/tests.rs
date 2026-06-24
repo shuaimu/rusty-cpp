@@ -31596,6 +31596,31 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_if_expr_threads_sibling_type_to_return_only_generic_branch() {
+    // `let p = if z { make_ptr(i) } else { base.as_ptr() }`: the then-branch is a
+    // return-only-generic call (undeducible), the else-branch resolves to `*mut T`.
+    // Branch-merge derives `*mut T` as the expected type and hands it to the
+    // then-branch so its backward turbofish fires: `make_ptr<T>(i)`.
+    let out = transpile_str(
+        r#"
+        struct NN<T> { p: *mut T }
+        impl<T> NN<T> {
+            fn get_raw(&self) -> *mut T { self.p }
+        }
+        fn make_ptr<T>(addr: usize) -> *mut T { addr as *mut T }
+        fn pick<T>(zero: bool, base: NN<T>, index: usize) -> *mut T {
+            let ptr = if zero { make_ptr(index) } else { base.get_raw() };
+            ptr
+        }
+        "#,
+    );
+    assert!(
+        out.contains("make_ptr<"),
+        "expected branch-merge to thread the sibling `*mut T` so make_ptr gets a turbofish\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_return_only_generic_fn_emits_engine_backward_turbofish() {
     // `make_ptr<T>(addr) -> *mut T` has a RETURN-ONLY T — undeducible by C++
     // argument deduction. At a return-position call whose expected type is

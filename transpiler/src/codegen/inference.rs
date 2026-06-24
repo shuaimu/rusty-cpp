@@ -1,5 +1,32 @@
 use super::*;
 
+/// Whether a `syn::Type`'s token stream mentions the bare identifier `name` —
+/// a crude but reliable type-parameter-occurrence test (token-boundary match).
+fn type_mentions_param(ty: &syn::Type, name: &str) -> bool {
+    quote::quote!(#ty)
+        .to_string()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|tok| tok == name)
+}
+
+/// Whether EVERY type parameter appears in the return type but in no parameter
+/// — the "pure return-only" signature that C++ argument deduction can't touch
+/// (`invalid_mut<T>(addr: usize) -> *mut T`), so it needs an explicit turbofish
+/// solved from the expected/consumer type. False for any mixed forward+return
+/// signature (`from_trait<R, T>`), which argument deduction / existing recovery
+/// already handle.
+fn all_type_params_return_only(
+    type_params: &[String],
+    params: &[Option<syn::Type>],
+    ret: &syn::Type,
+) -> bool {
+    !type_params.is_empty()
+        && type_params.iter().all(|tp| {
+            type_mentions_param(ret, tp)
+                && !params.iter().flatten().any(|p| type_mentions_param(p, tp))
+        })
+}
+
 impl CodeGen {
     // ============================================================
     // Bridge between the type inference engine (`type_solver`) and
@@ -5604,23 +5631,12 @@ impl CodeGen {
         let params: Vec<Option<syn::Type>> = (0..call.args.len())
             .map(|i| self.lookup_function_arg_expected_type(func, i).cloned())
             .collect();
-        // Require at least one return-only param; otherwise argument deduction
-        // already covers it and a turbofish would only over-constrain.
-        let mentions = |ty: &syn::Type, name: &str| -> bool {
-            quote::quote!(#ty)
-                .to_string()
-                .split(|c: char| !c.is_alphanumeric() && c != '_')
-                .any(|tok| tok == name)
-        };
         // Fire only when EVERY type param is return-only — the pure case C++
         // argument deduction can't touch at all (`invalid_mut<T>`). Mixed
         // forward+return cases (`from_trait<R, T>`, where R deduces from the
         // arg) are left to the existing decltype-based recovery, so this path
         // is strictly additive and can't override a working answer.
-        let all_return_only = type_params.iter().all(|tp| {
-            mentions(&ret, tp) && !params.iter().flatten().any(|p| mentions(p, tp))
-        });
-        if !all_return_only {
+        if !all_type_params_return_only(type_params, &params, &ret) {
             return None;
         }
         let arg_types: Vec<Option<syn::Type>> = call
@@ -5637,6 +5653,52 @@ impl CodeGen {
         )?;
         let rendered: Vec<String> = solved.iter().map(|t| self.map_type(t)).collect();
         Some(format!("{}<{}>", base_func, rendered.join(", ")))
+    }
+
+    /// Whether `expr` is a call to a free function whose every type parameter is
+    /// return-only (so its turbofish can't be deduced from the arguments and
+    /// must come from the expected/consumer type — see
+    /// [`Self::engine_return_only_fn_turbofish`]). Used to decide when an
+    /// if-expr/ternary should hand a sibling branch's type down as the expected
+    /// type so this branch can be solved.
+    pub(crate) fn expr_is_return_only_generic_call(&self, expr: &syn::Expr) -> bool {
+        let mut inner = expr;
+        while let syn::Expr::Paren(p) = inner {
+            inner = &p.expr;
+        }
+        let syn::Expr::Call(call) = inner else {
+            return false;
+        };
+        let func = call.func.as_ref();
+        let Some(type_params) = self.lookup_function_type_param_names(func) else {
+            return false;
+        };
+        let Some(ret) = self.lookup_function_return_type(func) else {
+            return false;
+        };
+        let params: Vec<Option<syn::Type>> = (0..call.args.len())
+            .map(|i| self.lookup_function_arg_expected_type(func, i).cloned())
+            .collect();
+        all_type_params_return_only(type_params, &params, ret)
+    }
+
+    /// §13.14 branch-merge: when an if-expr/ternary has no threaded expected
+    /// type and exactly ONE branch is a return-only-generic call (which needs an
+    /// expected type to be solved), derive that type from the OTHER, resolvable
+    /// branch (both branches of a well-typed Rust `if` share one type). Returns
+    /// `None` otherwise, so ordinary if-exprs are untouched (fill-only).
+    pub(crate) fn infer_if_branch_expected_from_return_only_sibling(
+        &self,
+        then_expr: &syn::Expr,
+        else_expr: &syn::Expr,
+    ) -> Option<syn::Type> {
+        let then_needs = self.expr_is_return_only_generic_call(then_expr);
+        let else_needs = self.expr_is_return_only_generic_call(else_expr);
+        match (then_needs, else_needs) {
+            (true, false) => self.infer_simple_expr_type(else_expr),
+            (false, true) => self.infer_simple_expr_type(then_expr),
+            _ => None,
+        }
     }
 
     /// The constructor signature `(type_params, param_types, return_type)` for a
