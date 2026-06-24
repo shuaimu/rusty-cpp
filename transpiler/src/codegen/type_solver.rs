@@ -469,6 +469,29 @@ pub(crate) fn tyterm_from_syn(ty: &Type, binders: &HashMap<String, TyVarId>) -> 
             }
             TyTerm::Concrete(ty.clone())
         }
+        // Pointer / reference constructors decompose so a type parameter buried
+        // inside them can still flow — e.g. a return-only `*mut T` unifies its
+        // element against the expected pointer type's element to solve `T`
+        // (`invalid_mut<T>(addr) -> *mut T`). Heads carry the qualifier so
+        // `*mut`/`*const`/`&`/`&mut` don't accidentally unify with each other.
+        Type::Ptr(p) => {
+            let head = if p.mutability.is_some() {
+                "*mut"
+            } else {
+                "*const"
+            };
+            TyTerm::App {
+                head: head.to_string(),
+                args: vec![tyterm_from_syn(&p.elem, binders)],
+            }
+        }
+        Type::Reference(r) => {
+            let head = if r.mutability.is_some() { "&mut" } else { "&" };
+            TyTerm::App {
+                head: head.to_string(),
+                args: vec![tyterm_from_syn(&r.elem, binders)],
+            }
+        }
         _ => TyTerm::Concrete(ty.clone()),
     }
 }
@@ -1358,6 +1381,19 @@ pub(crate) fn tyterm_to_syn_type(term: &TyTerm) -> Option<Type> {
                 let inner = tyterm_to_syn_type(&args[0])?;
                 return syn::parse2(quote::quote!(&#inner)).ok();
             }
+            if head == "&mut" && args.len() == 1 {
+                let inner = tyterm_to_syn_type(&args[0])?;
+                return syn::parse2(quote::quote!(&mut #inner)).ok();
+            }
+            if (head == "*mut" || head == "*const") && args.len() == 1 {
+                let inner = tyterm_to_syn_type(&args[0])?;
+                let toks = if head == "*mut" {
+                    quote::quote!(*mut #inner)
+                } else {
+                    quote::quote!(*const #inner)
+                };
+                return syn::parse2(toks).ok();
+            }
             if head == "tuple" {
                 let elems: Vec<Type> = args
                     .iter()
@@ -1662,6 +1698,37 @@ mod tests {
         assert!(
             solve_owner_type_args(&["T".to_string()], &[None], None, &[None], None).is_none()
         );
+    }
+
+    #[test]
+    fn solve_owner_type_args_backward_through_pointer_return() {
+        // `invalid_mut<T>(addr: usize) -> *mut T`: T appears ONLY in the return
+        // (the `usize` arg doesn't mention it), so it must be solved from the
+        // expected pointer type's element. Requires the `*mut` structural rule.
+        let out = solve_owner_type_args(
+            &["T".to_string()],
+            &[Some(ty("usize"))],
+            Some(&ty("*mut T")),
+            &[Some(ty("usize"))],
+            Some(&ty("*mut i32")),
+        )
+        .expect("should solve T from the expected pointer element");
+        assert_eq!(render_ty(&out[0]), "i32");
+    }
+
+    #[test]
+    fn solve_owner_type_args_backward_through_mut_reference() {
+        // Same for `&mut T` returns — the qualifier must match (a `&mut` return
+        // does not unify with a `*mut` expected, etc.).
+        let out = solve_owner_type_args(
+            &["T".to_string()],
+            &[],
+            Some(&ty("&mut T")),
+            &[],
+            Some(&ty("&mut u64")),
+        )
+        .expect("should solve T from the expected &mut element");
+        assert_eq!(render_ty(&out[0]), "u64");
     }
 
     fn either_app(l: TyTerm, r: TyTerm) -> TyTerm {
