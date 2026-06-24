@@ -5573,6 +5573,72 @@ impl CodeGen {
         Some(resolved.iter().map(|t| self.map_type(t)).collect())
     }
 
+    /// §13.14 backward turbofish (engine-backed): a free function with a
+    /// RETURN-ONLY type parameter — one that appears in the return type but in
+    /// no parameter — can't have it deduced by C++ argument deduction
+    /// (`invalid_mut<T>(addr: usize) -> *mut T`). Solve the type parameters from
+    /// the call's *expected* result type (plus any argument-determined params)
+    /// and return `base_func<args...>`, or `None` when there's no expected type,
+    /// no return-only param, or the solve doesn't fully resolve (caller keeps
+    /// the bare emission — never a regression).
+    ///
+    /// Relies only on the explicitly-threaded `expected_ty` (not the ambient
+    /// return hint), so it can't misfire at a mid-function call site whose
+    /// enclosing return type merely happens to match the callee's return shape.
+    pub(crate) fn engine_return_only_fn_turbofish(
+        &self,
+        call: &syn::ExprCall,
+        base_func: &str,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        if base_func.contains('<') {
+            return None;
+        }
+        let expected = expected_ty?;
+        let func = call.func.as_ref();
+        let type_params = self.lookup_function_type_param_names(func)?;
+        if type_params.is_empty() {
+            return None;
+        }
+        let ret = self.lookup_function_return_type(func)?.clone();
+        let params: Vec<Option<syn::Type>> = (0..call.args.len())
+            .map(|i| self.lookup_function_arg_expected_type(func, i).cloned())
+            .collect();
+        // Require at least one return-only param; otherwise argument deduction
+        // already covers it and a turbofish would only over-constrain.
+        let mentions = |ty: &syn::Type, name: &str| -> bool {
+            quote::quote!(#ty)
+                .to_string()
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|tok| tok == name)
+        };
+        // Fire only when EVERY type param is return-only — the pure case C++
+        // argument deduction can't touch at all (`invalid_mut<T>`). Mixed
+        // forward+return cases (`from_trait<R, T>`, where R deduces from the
+        // arg) are left to the existing decltype-based recovery, so this path
+        // is strictly additive and can't override a working answer.
+        let all_return_only = type_params.iter().all(|tp| {
+            mentions(&ret, tp) && !params.iter().flatten().any(|p| mentions(p, tp))
+        });
+        if !all_return_only {
+            return None;
+        }
+        let arg_types: Vec<Option<syn::Type>> = call
+            .args
+            .iter()
+            .map(|arg| self.infer_simple_expr_type(arg))
+            .collect();
+        let solved = super::type_solver::solve_owner_type_args(
+            type_params,
+            &params,
+            Some(&ret),
+            &arg_types,
+            Some(expected),
+        )?;
+        let rendered: Vec<String> = solved.iter().map(|t| self.map_type(t)).collect();
+        Some(format!("{}<{}>", base_func, rendered.join(", ")))
+    }
+
     /// The constructor signature `(type_params, param_types, return_type)` for a
     /// generic owner's associated ctor, written in the owner's own type-param
     /// names — the facts `solve_owner_type_args` unifies against. Covers the

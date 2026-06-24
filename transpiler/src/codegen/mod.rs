@@ -28958,6 +28958,17 @@ impl CodeGen {
                 }
             }
         }
+        // §13.14 backward turbofish (engine): emit `f<T>(args)` for a free
+        // function whose type parameter is return-only and thus undeducible by
+        // C++ argument deduction (invalid_mut<T>(addr) -> *mut T). Independent
+        // of owner-template recovery; fires only with a threaded expected type
+        // that fully solves, and never for a mapped runtime path.
+        if types::map_function_path(&function_path).is_none()
+            && let Some(rewritten) =
+                self.engine_return_only_fn_turbofish(call, &base_func, expected_ty)
+        {
+            return rewritten;
+        }
         if let Some(expected_owner_ty) = expected_ty
             && let Some(rewritten) =
                 self.try_emit_error_trait_path_with_expected_owner(path, expected_owner_ty)

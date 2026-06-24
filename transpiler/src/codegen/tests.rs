@@ -31596,6 +31596,27 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_return_only_generic_fn_emits_engine_backward_turbofish() {
+    // `make_ptr<T>(addr) -> *mut T` has a RETURN-ONLY T — undeducible by C++
+    // argument deduction. At a return-position call whose expected type is
+    // `*mut i32`, the engine solves T=i32 and emits `make_ptr<int32_t>(...)`.
+    let out = transpile_str(
+        r#"
+        fn make_ptr<T>(addr: usize) -> *mut T {
+            addr as *mut T
+        }
+        fn get() -> *mut i32 {
+            make_ptr(8)
+        }
+        "#,
+    );
+    assert!(
+        out.contains("make_ptr<"),
+        "expected an engine-solved backward turbofish `make_ptr<...>`\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_closure_tuple_destructure_unit_element_binds_to_placeholder_not_empty() {
     // A HashSet-style item `(K, ())` destructured as `|(k, ())| k` must NOT emit
     // an empty `[]` structured-binding element — `auto [k, []] = ...` is a hard
