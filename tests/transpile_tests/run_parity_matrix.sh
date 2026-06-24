@@ -102,6 +102,18 @@ IMPORT_STD=0
 PREFER_RUSTY_UNIT=0
 PREFER_RUSTY_VIEWS=0
 CONTINUE_ON_FAIL=0
+# Content-addressed module BMI/object cache + shared CARGO_TARGET_DIR (enables
+# RUSTY_CPP_MODULE_CACHE for the per-crate parity-test invocations). OPT-IN via
+# --cache. The caches are content-addressed (BMI keyed on the .cppm bytes +
+# transitive imports + clang/flags; cargo target deduped by cargo's own
+# fingerprint), so a crate whose transpiled output CHANGES gets a cache miss and
+# is rebuilt — never a stale artifact. Default OFF because the win is modest:
+# the caches skip the cargo stages + the C++ build, but the (uncached) Stage-C
+# transpile dominates, so a warm run is only ~10% faster than cold (16-crate
+# matrix: ~21 vs ~23.5 min), while the cold/first run pays cargo-lock
+# serialization + ~4.5 GB of cache population. Worth --cache for a fast iterate
+# loop with LOCALIZED transpiler changes (only the touched crate rebuilds C++).
+MODULE_CACHE=0
 # Cross-crate parallelism. Crates are independent (separate work dirs + dep
 # graphs), so they can build concurrently. With JOBS>1 the binary is pre-built
 # once (so concurrent runs don't serialize on cargo's build lock), each crate
@@ -138,6 +150,10 @@ Options:
                       lower (e.g. --jobs 3) if the serde-family crates OOM;
                       --jobs 1 is the sequential legacy path.
   --import-std       Use parity import-std mode (emit import std; and libc++ std module precompile)
+  --cache / --no-cache  Enable/disable the content-addressed module BMI/object cache
+                      + shared CARGO_TARGET_DIR (default: OFF). Content-keyed, so a
+                      changed crate is always rebuilt. ~10% faster warm; best for a
+                      fast iterate loop with localized transpiler changes.
   --prefer-rusty-unit  Prefer rusty::Unit spelling in generated output
   --prefer-rusty-views  Prefer rusty::StrView / rusty::Span spellings in generated output
   --continue-on-fail  Continue running all crates even after failures
@@ -236,6 +252,14 @@ while [[ $# -gt 0 ]]; do
             IMPORT_STD=1
             shift
             ;;
+        --no-cache)
+            MODULE_CACHE=0
+            shift
+            ;;
+        --cache)
+            MODULE_CACHE=1
+            shift
+            ;;
         --prefer-rusty-unit)
             PREFER_RUSTY_UNIT=1
             shift
@@ -263,6 +287,13 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Enable the content-addressed module cache + shared cargo target for every
+# per-crate parity-test invocation (unless an outer env already set it, or
+# --no-cache turned it off). Respects a pre-set RUSTY_CPP_MODULE_CACHE.
+if [[ "${MODULE_CACHE}" -eq 1 && -z "${RUSTY_CPP_MODULE_CACHE:-}" ]]; then
+    export RUSTY_CPP_MODULE_CACHE=1
+fi
 
 cd "${REPO_ROOT}"
 mkdir -p "${WORK_ROOT}"
