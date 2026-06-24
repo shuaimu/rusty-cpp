@@ -31596,6 +31596,52 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn is_diverging_function_path_matches_bare_imported_leaf() {
+    // Qualified forms already matched; the leaf-name check resolves the
+    // bare `use`-imported forms (`handle_alloc_error` / `unreachable_unchecked`).
+    assert!(CodeGen::is_diverging_function_path("handle_alloc_error"));
+    assert!(CodeGen::is_diverging_function_path("core::alloc::handle_alloc_error"));
+    assert!(CodeGen::is_diverging_function_path("unreachable_unchecked"));
+    assert!(CodeGen::is_diverging_function_path("panic"));
+    assert!(!CodeGen::is_diverging_function_path("do_alloc"));
+    assert!(!CodeGen::is_diverging_function_path("handle"));
+}
+
+#[test]
+fn test_bare_imported_divergent_arm_not_returned_as_void() {
+    // `handle_alloc_error -> !` is imported bare via `use std::alloc::…`, so its
+    // call path is the bare leaf and its `-> !` isn't recorded (external). The
+    // leaf-name divergence check must still recognize it, so the match arm is
+    // emitted as a statement, NOT `return handle_alloc_error(...)` (void) against
+    // the `TryReserveError` return type (hashbrown alloc_err).
+    let out = transpile_str(
+        r#"
+        use std::alloc::{Layout, handle_alloc_error};
+        enum Fallibility { Fallible, Infallible }
+        struct TryReserveError;
+        fn alloc_err(f: Fallibility, layout: Layout) -> TryReserveError {
+            match f {
+                Fallibility::Fallible => TryReserveError,
+                Fallibility::Infallible => handle_alloc_error(layout),
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("handle_alloc_error("),
+        "the call should be present\nGot: {out}"
+    );
+    // With the fix the divergent call is a bare statement; the bug emits it as a
+    // returned/emplaced void value against the TryReserveError return type.
+    assert!(
+        !out.contains("return handle_alloc_error")
+            && !out.contains("emplace(std::move(handle_alloc_error")
+            && !out.contains("emplace(handle_alloc_error"),
+        "divergent handle_alloc_error must be a bare statement, not returned/emplaced\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_iter_on_user_type_with_own_iter_method_dispatches_directly() {
     // `self.table.iter()` where `table` is a user type with its OWN `iter()`
     // method must emit `this->table.iter()`, NOT `rusty::iter(this->table)` (the

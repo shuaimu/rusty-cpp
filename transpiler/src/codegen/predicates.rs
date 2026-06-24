@@ -1600,6 +1600,17 @@ impl CodeGen {
     }
 
     pub(super) fn is_diverging_function_path(path: &str) -> bool {
+        // Bare `use`-imported divergent calls arrive as just the leaf name —
+        // e.g. `handle_alloc_error(layout)` via `use core::alloc::handle_alloc_error`,
+        // whose path is the bare `handle_alloc_error`, not a qualified form below.
+        // Match the leaf against the distinctively-named divergent fns whose
+        // entries below are qualified-only, so imported and fully-qualified forms
+        // both resolve. (These names are unambiguous: no non-divergent function
+        // is named `handle_alloc_error` / `unreachable_unchecked`.)
+        let leaf = path.rsplit("::").next().unwrap_or(path);
+        if matches!(leaf, "handle_alloc_error" | "unreachable_unchecked") {
+            return true;
+        }
         matches!(
             path,
             "panic"
