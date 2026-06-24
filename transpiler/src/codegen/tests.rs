@@ -31603,7 +31603,10 @@ fn test_if_expr_threads_pointer_arith_sibling_to_return_only_branch() {
     // gets its backward turbofish: `make_ptr<T>(i)`.
     let out = transpile_str(
         r#"
-        fn make_ptr<T>(addr: usize) -> *mut T { addr as *mut T }
+        mod util {
+            pub fn make_ptr<T>(addr: usize) -> *mut T { addr as *mut T }
+        }
+        use util::make_ptr;
         struct Bucket<T> { ptr: core::ptr::NonNull<T> }
         impl<T> Bucket<T> {
             unsafe fn from_base_index(base: core::ptr::NonNull<T>, index: usize) -> *mut T {

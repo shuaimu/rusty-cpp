@@ -5640,13 +5640,19 @@ impl CodeGen {
         }
         let expected = expected_ty?;
         let func = call.func.as_ref();
-        let type_params = self.lookup_function_type_param_names(func)?;
+        // Use the import-fallback lookups: hashbrown calls `invalid_mut(..)` bare
+        // via `use crate::util::invalid_mut`, so the current-module candidates
+        // miss — resolve it to the unique cross-module `util::invalid_mut` record.
+        let type_params = self.lookup_function_type_param_names_with_import_fallback(func)?;
         if type_params.is_empty() {
             return None;
         }
-        let ret = self.lookup_function_return_type(func)?.clone();
+        let ret = self.lookup_fn_return_type_with_import_fallback(func)?;
         let params: Vec<Option<syn::Type>> = (0..call.args.len())
-            .map(|i| self.lookup_function_arg_expected_type(func, i).cloned())
+            .map(|i| {
+                self.lookup_function_arg_expected_type_with_import_fallback(func, i)
+                    .cloned()
+            })
             .collect();
         // Fire only when EVERY type param is return-only — the pure case C++
         // argument deduction can't touch at all (`invalid_mut<T>`). Mixed
@@ -5687,16 +5693,20 @@ impl CodeGen {
             return false;
         };
         let func = call.func.as_ref();
-        let Some(type_params) = self.lookup_function_type_param_names(func) else {
+        let Some(type_params) = self.lookup_function_type_param_names_with_import_fallback(func)
+        else {
             return false;
         };
-        let Some(ret) = self.lookup_function_return_type(func) else {
+        let Some(ret) = self.lookup_fn_return_type_with_import_fallback(func) else {
             return false;
         };
         let params: Vec<Option<syn::Type>> = (0..call.args.len())
-            .map(|i| self.lookup_function_arg_expected_type(func, i).cloned())
+            .map(|i| {
+                self.lookup_function_arg_expected_type_with_import_fallback(func, i)
+                    .cloned()
+            })
             .collect();
-        all_type_params_return_only(type_params, &params, ret)
+        all_type_params_return_only(type_params, &params, &ret)
     }
 
     /// §13.14 branch-merge: when an if-expr/ternary has no threaded expected
