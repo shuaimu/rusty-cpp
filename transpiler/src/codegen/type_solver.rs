@@ -473,6 +473,69 @@ pub(crate) fn tyterm_from_syn(ty: &Type, binders: &HashMap<String, TyVarId>) -> 
     }
 }
 
+/// Solve the generic type arguments of an owner type `Owner<…>` for an
+/// associated call `Owner::ctor(args)` — Rust's cross-call/return unification
+/// that C++ per-site CTAD on a class-template static member can't do.
+///
+/// This is the engine half of the §13.14 turbofish rule: CodeGen supplies the
+/// *facts* (the owner's type-parameter names, the ctor's declared parameter and
+/// return types written in those names, the call's concrete argument types, and
+/// the expected result type), and the solver *unifies* them:
+///   - **forward**: each argument's concrete type pins the matching parameter
+///     slot (`UnsafeCell::new(value: T) → T`),
+///   - **backward**: the expected result type pins return-determined params
+///     (`x: Box<i32> = id_box(…) → T = i32`).
+///
+/// Returns one resolved `syn::Type` per `type_params` slot, in order, or `None`
+/// if any slot remains a free variable — so the caller falls back to its
+/// existing heuristic and the rule can only *add* coverage, never change an
+/// answer (freeze-grow-reconcile).
+///
+/// Note: `tyterm_from_syn` treats `*mut T` / `&T` return shapes as opaque, so a
+/// return-ONLY param hidden inside a pointer/reference isn't solved here yet —
+/// that needs the structural pointer rule (a later slice). Path-shaped returns
+/// (`Owner<T>`) and all forward (argument-determined) params work today.
+pub(crate) fn solve_owner_type_args(
+    type_params: &[String],
+    params: &[Option<Type>],
+    ret: Option<&Type>,
+    arg_types: &[Option<Type>],
+    expected: Option<&Type>,
+) -> Option<Vec<Type>> {
+    if type_params.is_empty() {
+        return None;
+    }
+    let mut binders: HashMap<String, TyVarId> = HashMap::new();
+    let mut vars: Vec<TyVarId> = Vec::with_capacity(type_params.len());
+    for (i, tp) in type_params.iter().enumerate() {
+        let v = TyVarId(i);
+        binders.insert(tp.clone(), v);
+        vars.push(v);
+    }
+    let no_binders: HashMap<String, TyVarId> = HashMap::new();
+    let mut subst = Substitution::new();
+    // Forward: argument type pins the corresponding parameter slot.
+    for (i, param) in params.iter().enumerate() {
+        if let (Some(param_ty), Some(Some(arg_ty))) = (param.as_ref(), arg_types.get(i)) {
+            let p = tyterm_from_syn(param_ty, &binders);
+            let a = tyterm_from_syn(arg_ty, &no_binders);
+            let _ = unify(&mut subst, &p, &a);
+        }
+    }
+    // Backward: the expected result type pins return-determined params.
+    if let (Some(ret_ty), Some(exp_ty)) = (ret, expected) {
+        let r = tyterm_from_syn(ret_ty, &binders);
+        let e = tyterm_from_syn(exp_ty, &no_binders);
+        let _ = unify(&mut subst, &r, &e);
+    }
+    let mut out = Vec::with_capacity(vars.len());
+    for v in &vars {
+        let resolved = subst.apply(&TyTerm::Var(*v));
+        out.push(tyterm_to_syn_type(&resolved)?);
+    }
+    Some(out)
+}
+
 /// Visitor that walks a `syn::Block` and pushes constraints onto
 /// the `InferenceContext`. Today it handles:
 ///
@@ -1286,7 +1349,7 @@ fn closure_param_ident_and_type(pat: &syn::Pat) -> (Option<String>, Option<&Type
 /// `head<args…>`. Returns `None` if any sub-term is still a free
 /// variable (underdetermined) or can't be re-parsed — the caller then
 /// falls back to today's heuristic emit.
-fn tyterm_to_syn_type(term: &TyTerm) -> Option<Type> {
+pub(crate) fn tyterm_to_syn_type(term: &TyTerm) -> Option<Type> {
     match term {
         TyTerm::Var(_) => None,
         TyTerm::Concrete(t) => Some(t.clone()),
@@ -1539,6 +1602,66 @@ mod tests {
 
     fn ty(s: &str) -> Type {
         syn::parse_str(s).unwrap()
+    }
+
+    fn render_ty(t: &Type) -> String {
+        quote::quote!(#t).to_string().replace(' ', "")
+    }
+
+    #[test]
+    fn solve_owner_type_args_forward_single_param() {
+        // `UnsafeCell::new(value)` where `new<T>(value: T) -> UnsafeCell<T>`,
+        // called with a `u8` argument → owner arg `T = u8`.
+        let out = solve_owner_type_args(
+            &["T".to_string()],
+            &[Some(ty("T"))],
+            Some(&ty("UnsafeCell<T>")),
+            &[Some(ty("u8"))],
+            None,
+        )
+        .expect("should solve T from the argument");
+        assert_eq!(out.len(), 1);
+        assert_eq!(render_ty(&out[0]), "u8");
+    }
+
+    #[test]
+    fn solve_owner_type_args_forward_passthrough_enclosing_type_param() {
+        // The argument's type is itself the enclosing function's type param `T`
+        // (e.g. `UnsafeCell::new(value)` inside `impl<T> … { fn f(&self, value: T) }`).
+        // The owner arg should come back as the literal `T` (carried as Concrete).
+        let out = solve_owner_type_args(
+            &["E".to_string()],
+            &[Some(ty("E"))],
+            Some(&ty("UnsafeCell<E>")),
+            &[Some(ty("T"))],
+            None,
+        )
+        .expect("should solve owner param from the enclosing type param");
+        assert_eq!(render_ty(&out[0]), "T");
+    }
+
+    #[test]
+    fn solve_owner_type_args_backward_from_expected_path_type() {
+        // A zero-arg factory whose `T` is determined by the expected result:
+        // `x: Box<i32> = make_box()` where `make_box<T>() -> Box<T>` → `T = i32`.
+        let out = solve_owner_type_args(
+            &["T".to_string()],
+            &[],
+            Some(&ty("Box<T>")),
+            &[],
+            Some(&ty("Box<i32>")),
+        )
+        .expect("should solve T from the expected return type");
+        assert_eq!(render_ty(&out[0]), "i32");
+    }
+
+    #[test]
+    fn solve_owner_type_args_unsolvable_returns_none() {
+        // Nothing pins `T` (no arg type, no expected) → None, so the caller
+        // falls back to its heuristic rather than emitting a bad turbofish.
+        assert!(
+            solve_owner_type_args(&["T".to_string()], &[None], None, &[None], None).is_none()
+        );
     }
 
     fn either_app(l: TyTerm, r: TyTerm) -> TyTerm {
