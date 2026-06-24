@@ -31604,9 +31604,12 @@ fn test_if_expr_threads_pointer_arith_sibling_to_return_only_branch() {
     let out = transpile_str(
         r#"
         fn make_ptr<T>(addr: usize) -> *mut T { addr as *mut T }
-        fn pick<T>(zero: bool, base: core::ptr::NonNull<T>, index: usize) -> *mut T {
-            let ptr = if zero { make_ptr(index) } else { base.as_ptr().sub(index) };
-            ptr
+        struct Bucket<T> { ptr: core::ptr::NonNull<T> }
+        impl<T> Bucket<T> {
+            unsafe fn from_base_index(base: core::ptr::NonNull<T>, index: usize) -> *mut T {
+                let ptr = if index == 0 { make_ptr(index) } else { unsafe { base.as_ptr().sub(index) } };
+                ptr
+            }
         }
         "#,
     );

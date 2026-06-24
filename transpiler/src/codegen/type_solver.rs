@@ -518,6 +518,31 @@ pub(crate) fn tyterm_from_syn(ty: &Type, binders: &HashMap<String, TyVarId>) -> 
 /// return-ONLY param hidden inside a pointer/reference isn't solved here yet —
 /// that needs the structural pointer rule (a later slice). Path-shaped returns
 /// (`Owner<T>`) and all forward (argument-determined) params work today.
+/// Collapse pointer/reference qualifiers to a single neutral head
+/// (`*mut`/`*const` → `*`, `&mut`/`&` → `&ref`) so unification ignores mutness
+/// when solving the *element* type parameter — a `*mut T` return unifies against
+/// a `*const T` (or vice versa) expected type to give `T`, since constness never
+/// changes which type fills the slot. Only used inside `solve_owner_type_args`,
+/// which returns the resolved type PARAMS (the elements), so the dropped
+/// qualifier never reaches the emitted output.
+fn neutralize_ptr_ref_heads(t: &TyTerm) -> TyTerm {
+    match t {
+        TyTerm::App { head, args } => {
+            let neutral = match head.as_str() {
+                "*mut" | "*const" => "*",
+                "&mut" | "&" => "&ref",
+                other => other,
+            };
+            TyTerm::App {
+                head: neutral.to_string(),
+                args: args.iter().map(neutralize_ptr_ref_heads).collect(),
+            }
+        }
+        TyTerm::Concrete(c) => TyTerm::Concrete(c.clone()),
+        TyTerm::Var(v) => TyTerm::Var(*v),
+    }
+}
+
 pub(crate) fn solve_owner_type_args(
     type_params: &[String],
     params: &[Option<Type>],
@@ -540,15 +565,15 @@ pub(crate) fn solve_owner_type_args(
     // Forward: argument type pins the corresponding parameter slot.
     for (i, param) in params.iter().enumerate() {
         if let (Some(param_ty), Some(Some(arg_ty))) = (param.as_ref(), arg_types.get(i)) {
-            let p = tyterm_from_syn(param_ty, &binders);
-            let a = tyterm_from_syn(arg_ty, &no_binders);
+            let p = neutralize_ptr_ref_heads(&tyterm_from_syn(param_ty, &binders));
+            let a = neutralize_ptr_ref_heads(&tyterm_from_syn(arg_ty, &no_binders));
             let _ = unify(&mut subst, &p, &a);
         }
     }
     // Backward: the expected result type pins return-determined params.
     if let (Some(ret_ty), Some(exp_ty)) = (ret, expected) {
-        let r = tyterm_from_syn(ret_ty, &binders);
-        let e = tyterm_from_syn(exp_ty, &no_binders);
+        let r = neutralize_ptr_ref_heads(&tyterm_from_syn(ret_ty, &binders));
+        let e = neutralize_ptr_ref_heads(&tyterm_from_syn(exp_ty, &no_binders));
         let _ = unify(&mut subst, &r, &e);
     }
     let mut out = Vec::with_capacity(vars.len());
@@ -1713,6 +1738,22 @@ mod tests {
             Some(&ty("*mut i32")),
         )
         .expect("should solve T from the expected pointer element");
+        assert_eq!(render_ty(&out[0]), "i32");
+    }
+
+    #[test]
+    fn solve_owner_type_args_backward_ignores_pointer_constness() {
+        // `invalid_mut<T>(usize) -> *mut T` solved against a `*const i32` expected
+        // (the sibling branch resolved to a const pointer) still yields T = i32 —
+        // constness never changes which type fills the element slot.
+        let out = solve_owner_type_args(
+            &["T".to_string()],
+            &[Some(ty("usize"))],
+            Some(&ty("*mut T")),
+            &[Some(ty("usize"))],
+            Some(&ty("*const i32")),
+        )
+        .expect("pointer constness mismatch should not block the element solve");
         assert_eq!(render_ty(&out[0]), "i32");
     }
 
