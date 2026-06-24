@@ -5539,6 +5539,68 @@ impl CodeGen {
         }
     }
 
+    /// §13.14 turbofish (engine-backed): solve the generic type arguments of a
+    /// generic owner for an associated constructor call `Owner::new(args)`, so
+    /// emit can write `Owner<T>::new_(args)` instead of a bare `Owner::new_`
+    /// (which is illegal for a C++ class-template static member). CodeGen
+    /// supplies the facts — the owner's constructor signature and the call's
+    /// argument types — and `type_solver::solve_owner_type_args` unifies them.
+    /// Returns the mapped C++ owner type arguments in order, or `None` when the
+    /// owner isn't an engine-known generic ctor or the args can't be solved
+    /// (caller falls back to its heuristic / bare emission — never a regression).
+    pub(crate) fn engine_type_of_assoc_ctor_args(
+        &self,
+        call: &syn::ExprCall,
+        owner_name: &str,
+        method_name: &str,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<Vec<String>> {
+        let (type_params, params, ret) = self.assoc_ctor_fn_sig(owner_name, method_name)?;
+        // Facts: the call's concrete argument types (best-effort; `None` per
+        // arg the heuristics can't resolve, which the solver simply skips).
+        let arg_types: Vec<Option<syn::Type>> = call
+            .args
+            .iter()
+            .map(|arg| self.infer_simple_expr_type(arg))
+            .collect();
+        let resolved = super::type_solver::solve_owner_type_args(
+            &type_params,
+            &params,
+            ret.as_ref(),
+            &arg_types,
+            expected_ty,
+        )?;
+        Some(resolved.iter().map(|t| self.map_type(t)).collect())
+    }
+
+    /// The constructor signature `(type_params, param_types, return_type)` for a
+    /// generic owner's associated ctor, written in the owner's own type-param
+    /// names — the facts `solve_owner_type_args` unifies against. Covers the
+    /// single-type-param wrapper class whose ctor is `new(value: T) -> Self<T>`
+    /// (so `T` is determined by the sole argument). `None` for owners/methods
+    /// the engine doesn't model yet (richer/declared signatures come later).
+    fn assoc_ctor_fn_sig(
+        &self,
+        owner_name: &str,
+        method_name: &str,
+    ) -> Option<(Vec<String>, Vec<Option<syn::Type>>, Option<syn::Type>)> {
+        if !matches!(method_name, "new" | "new_") {
+            return None;
+        }
+        // Genuine single-type-param class-template cells whose ctor is
+        // `new(value: T) -> Self<T>`. Excludes newtype wrappers that lower to a
+        // free helper (ManuallyDrop/Reverse/…) — those are handled by
+        // map_function_path and must not be turned into `Wrapper<T>::new_`.
+        const SINGLE_PARAM_WRAPPERS: &[&str] =
+            &["UnsafeCell", "Cell", "RefCell", "Mutex", "RwLock"];
+        if SINGLE_PARAM_WRAPPERS.contains(&owner_name) {
+            let t: syn::Type = syn::parse_str("T").ok()?;
+            let ret: syn::Type = syn::parse_str(&format!("{}<T>", owner_name)).ok()?;
+            return Some((vec!["T".to_string()], vec![Some(t)], Some(ret)));
+        }
+        None
+    }
+
     pub(super) fn infer_simple_expr_type(&self, expr: &syn::Expr) -> Option<syn::Type> {
         let expr = self.extract_value_expr(expr)?;
         let expr_key = expr as *const syn::Expr as usize;

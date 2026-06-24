@@ -31570,6 +31570,32 @@ fn test_closure_tuple_destructuring_uses_body_binding() {
 }
 
 #[test]
+fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
+    // `UnsafeCell::new(value)` where `value: T` must emit a parameterized
+    // `UnsafeCell<T>::new_(value)` — a bare `UnsafeCell::new_` is illegal for a
+    // C++ class-template static member. The type engine solves T from the arg.
+    let out = transpile_str(
+        r#"
+        struct Holder<T> { inner: T }
+        impl<T> Holder<T> {
+            fn stash(&self, value: T) {
+                let cell = core::cell::UnsafeCell::new(value);
+                let _ = cell;
+            }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("UnsafeCell::new_("),
+        "bare `UnsafeCell::new_(` is an illegal class-template static-member call\nGot: {out}"
+    );
+    assert!(
+        out.contains("UnsafeCell<") && out.contains(">::new_("),
+        "expected an engine-solved `UnsafeCell<T>::new_(...)` turbofish\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_closure_tuple_destructure_unit_element_binds_to_placeholder_not_empty() {
     // A HashSet-style item `(K, ())` destructured as `|(k, ())| k` must NOT emit
     // an empty `[]` structured-binding element — `auto [k, []] = ...` is a hard

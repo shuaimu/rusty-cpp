@@ -29342,6 +29342,27 @@ impl CodeGen {
             && !owner_is_qualified_new_like_omitted_target
             && owner_alias_omitted_args.is_none()
         {
+            // §13.14 turbofish via the type engine (fill-only). The heuristic
+            // recovery above declined, so we are about to emit a bare
+            // `Owner::new_` — illegal when `Owner` is a C++ class template.
+            // Ask the engine to solve the owner's type arguments from the call's
+            // argument types (and the expected result). Only rewrites when the
+            // engine fully resolves and the owner isn't already parameterized;
+            // otherwise the existing bare emission stands (no regression).
+            if owner_args_omitted
+                && !base_func.contains('<')
+                && types::map_function_path(&function_path).is_none()
+                && let Some((owner_part, method_part)) = base_func.rsplit_once("::")
+                && let Some(owner_args) = self.engine_type_of_assoc_ctor_args(
+                    call,
+                    &owner_name,
+                    &method_name,
+                    expected_ty,
+                )
+                && !owner_args.is_empty()
+            {
+                return format!("{}<{}>::{}", owner_part, owner_args.join(", "), method_part);
+            }
             return base_func;
         }
         let expected_owner_args = expected_ty
