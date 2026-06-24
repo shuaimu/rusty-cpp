@@ -555,17 +555,20 @@ fn run_cargo_expand(input_path: &Path) -> Result<String, String> {
 
     eprintln!("Running cargo expand in {}...", dir.display());
 
-    let output = std::process::Command::new("cargo")
+    let mut expand_cmd = std::process::Command::new("cargo");
+    expand_cmd
         .arg("expand")
         .arg("--theme=none")
-        .current_dir(&dir)
-        .output()
-        .map_err(|e| {
-            format!(
-                "Failed to run `cargo expand`: {}. Install with: cargo install cargo-expand",
-                e
-            )
-        })?;
+        .current_dir(&dir);
+    if let Some(target) = shared_cargo_target_dir() {
+        expand_cmd.env("CARGO_TARGET_DIR", &target);
+    }
+    let output = expand_cmd.output().map_err(|e| {
+        format!(
+            "Failed to run `cargo expand`: {}. Install with: cargo install cargo-expand",
+            e
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1022,6 +1025,9 @@ fn run_cargo_test(
         };
         cmd.env("RUSTFLAGS", merged);
     }
+    if let Some(target) = shared_cargo_target_dir() {
+        cmd.env("CARGO_TARGET_DIR", &target);
+    }
     cmd.output()
         .map_err(|e| format!("Failed to run cargo test: {}", e))
 }
@@ -1047,6 +1053,9 @@ fn run_cargo_expand_command(
     cmd.arg("--theme=none");
     for flag in cargo_flags {
         cmd.arg(flag);
+    }
+    if let Some(target) = shared_cargo_target_dir() {
+        cmd.env("CARGO_TARGET_DIR", &target);
     }
     cmd.output()
         .map_err(|e| format!("Failed to run cargo expand: {}", e))
@@ -2556,6 +2565,28 @@ fn module_cache_units_dir(include_dir: &Path) -> Option<PathBuf> {
     }
     let repo_root = find_repo_root_with_cmake(include_dir)?;
     let dir = repo_root.join(".rusty-modules-cache").join("units");
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Absolute shared `CARGO_TARGET_DIR` for the matrix's baseline (`cargo test`)
+/// and expand (`cargo expand`) builds, when matrix caching is on. A single
+/// shared target lets Cargo's OWN fingerprint cache dedup the Rust builds of
+/// shared dependencies (serde_core, syn, …) across crates AND across runs —
+/// Cargo keys each unit by version+features+profile, so different feature sets
+/// (serde_core[rc] vs [no-rc]) coexist as distinct cached units. Returns None
+/// when disabled, or when `CARGO_TARGET_DIR` is already set (respect the
+/// caller's override).
+fn shared_cargo_target_dir() -> Option<PathBuf> {
+    if !module_cache_enabled() {
+        return None;
+    }
+    if std::env::var_os("CARGO_TARGET_DIR").is_some() {
+        return None;
+    }
+    let include_dir = find_rusty_include_dir();
+    let repo_root = find_repo_root_with_cmake(&include_dir)?;
+    let dir = repo_root.join(".rusty-modules-cache").join("cargo-target");
     fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
