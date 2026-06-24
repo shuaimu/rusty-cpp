@@ -23567,7 +23567,22 @@ impl CodeGen {
                 owner_key = Some(scoped);
             }
         }
-        let owner_key = owner_key?;
+        let Some(owner_key) = owner_key else {
+            // A NON-generic declared type has no `declared_type_params` entry but
+            // is still a valid `Self` target — `Self` resolves to the bare owner
+            // name. Without this, `Group::load_aligned() -> Self` (Group has no
+            // type params) left `Self` unresolved, breaking the receiver-type
+            // resolution of chains like `Group::load_aligned(p).match_full()`.
+            let scoped = self.scoped_type_key(owner_tail);
+            let is_declared = self.local_declared_types.contains(owner_tail)
+                || self.declared_item_names.contains(owner_tail)
+                || self.local_declared_types.contains(&scoped)
+                || self.declared_item_names.contains(&scoped);
+            if is_declared {
+                return syn::parse_str::<syn::Type>(owner_tail).ok();
+            }
+            return None;
+        };
         let params = self
             .declared_owner_type_param_names_for_owner_key(&owner_key)
             .unwrap_or_default();

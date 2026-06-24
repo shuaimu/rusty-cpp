@@ -31596,6 +31596,63 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_self_returning_assoc_fn_chain_resolves_for_into_iter_dispatch() {
+    // Mirrors hashbrown RawIterRange::next: `Group::load_aligned(p).match_full()
+    // .into_iter()` where `load_aligned(...) -> Self` (Group is non-generic) and
+    // BitMask has its own IntoIterator impl. The `-> Self` must resolve to Group
+    // so the chain types to BitMask, so the iter-dispatch emits the user's
+    // `.into_iter()` and NOT the generic `rusty::iter(...)` adapter (which fails
+    // the protocol static_assert + the BitMaskIter field assignment).
+    let out = transpile_str(
+        r#"
+        mod bitmask {
+            pub struct BitMask(pub u16);
+            pub struct BitMaskIter(pub BitMask);
+            impl IntoIterator for BitMask {
+                type Item = usize;
+                type IntoIter = BitMaskIter;
+                fn into_iter(self) -> BitMaskIter { BitMaskIter(self) }
+            }
+            impl Iterator for BitMaskIter {
+                type Item = usize;
+                fn next(&mut self) -> Option<usize> { None }
+            }
+        }
+        mod group {
+            use crate::bitmask::BitMask;
+            pub struct Group(pub u64);
+            impl Group {
+                pub fn load_aligned(ptr: *const u8) -> Self { Group(0) }
+                pub fn match_full(&self) -> BitMask { BitMask(0) }
+            }
+        }
+        mod raw {
+            use crate::bitmask::BitMaskIter;
+            use crate::group::Group;
+            pub struct RawIterRange { current_group: BitMaskIter }
+            impl RawIterRange {
+                fn advance(&mut self, ctrl: *const u8) {
+                    self.current_group = Group::load_aligned(ctrl).match_full().into_iter();
+                }
+            }
+        }
+        "#,
+    );
+    let line = out
+        .lines()
+        .find(|l| l.contains("current_group ="))
+        .unwrap_or("<not found>");
+    assert!(
+        !line.contains("rusty::iter("),
+        "into_iter on a user IntoIterator type should dispatch to `.into_iter()`, not rusty::iter\nGot: {line}"
+    );
+    assert!(
+        line.contains(".into_iter()"),
+        "expected the user's own `.into_iter()` dispatch\nGot: {line}"
+    );
+}
+
+#[test]
 fn test_if_expr_threads_pointer_arith_sibling_to_return_only_branch() {
     // Mirrors hashbrown from_base_index: the sibling is `base.as_ptr().sub(i)`
     // (a NonNull pointer chain → `*mut T`). Pointer-arith modeling resolves the
