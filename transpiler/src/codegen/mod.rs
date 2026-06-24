@@ -24744,7 +24744,7 @@ impl CodeGen {
         tp.path.segments.last().is_some_and(|seg| {
             matches!(
                 seg.ident.to_string().as_str(),
-                "Box" | "Rc" | "Arc" | "MutexGuard" | "Ref" | "RefMut"
+                "Box" | "Rc" | "Arc" | "MutexGuard" | "SpinMutexGuard" | "Ref" | "RefMut"
             )
         })
     }
@@ -26209,6 +26209,26 @@ impl CodeGen {
                 method_call,
                 args.join(", ")
             );
+        }
+        // Lock-guard owners (MutexGuard/SpinMutexGuard/RwLock guards): a method
+        // that lives on the guarded value (not the guard) resolves through
+        // operator* — `(*guard).method()` — mirroring the field side and the
+        // user-Deref method side, so the guard needs no operator->. The guard's
+        // own raw-pointer accessors (get/get_mut) stay direct.
+        if !matches!(method_name, "get" | "get_mut")
+            && self
+                .infer_simple_expr_type(self.peel_paren_group_expr(receiver_expr))
+                .is_some_and(|ty| {
+                    matches!(
+                        self.peel_reference_paren_group_type(&ty),
+                        syn::Type::Path(tp) if tp.path.segments.last().is_some_and(|s| matches!(
+                            s.ident.to_string().as_str(),
+                            "MutexGuard" | "SpinMutexGuard" | "RwLockReadGuard" | "RwLockWriteGuard"
+                        ))
+                    )
+                })
+        {
+            return format!("(*{}).{}({})", receiver, method_call, args.join(", "));
         }
         let member_op = if self.method_receiver_uses_pointer_member_access(receiver_expr)
             || self.method_receiver_uses_wrapper_autoderef_member_access(receiver_expr, method_name)

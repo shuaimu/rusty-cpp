@@ -180,7 +180,7 @@ impl CodeGen {
                 | "Ref"
                 | "RefMut"
                 | "MutexGuard"
-                | "RwLockReadGuard"
+                | "SpinMutexGuard"                | "RwLockReadGuard"
                 | "RwLockWriteGuard"
         )
     }
