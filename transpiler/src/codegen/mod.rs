@@ -13522,6 +13522,25 @@ impl CodeGen {
         }
         let is_reference_like = mapped.ends_with('&');
         if receiver.mutability.is_some() {
+            // `&mut self` must bind rvalue receivers (e.g. a `std::span` produced by
+            // value from `self.ctrl_slice()`), which a plain `T&` lvalue ref cannot.
+            // (`&self` below uses `const T&`, which already binds rvalues.)
+            //   - template param `Self_` → FORWARDING reference (binds anything; for
+            //     lvalue args still deduces to an lvalue ref, so call sites are
+            //     unaffected);
+            //   - `std::span` (a view = the `&mut [T]` fat pointer) → BY VALUE, with
+            //     element const-ness carrying `&` vs `&mut` (drop a leading element
+            //     `const` here); mutation through the view still hits the data;
+            //   - regular types → keep the in-place lvalue ref.
+            if mapped == "Self_" {
+                return "Self_&&".to_string();
+            }
+            if mapped.starts_with("std::span<") {
+                if let Some(inner) = mapped.strip_prefix("std::span<const ") {
+                    return format!("std::span<{}", inner);
+                }
+                return mapped;
+            }
             if is_reference_like {
                 if let Some(stripped) = mapped.strip_prefix("const ") {
                     return stripped.trim().to_string();

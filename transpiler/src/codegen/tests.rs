@@ -31596,6 +31596,44 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_extension_trait_mut_receiver_forwarding_ref_and_mut_span() {
+    // `&mut self` extension-trait receivers must bind rvalue receivers (e.g. a
+    // std::span returned by value from `.ctrl_slice()`): a template-param `Self_`
+    // → forwarding ref `Self_&&`; a slice impl (`[T]`) → `std::span<T>` BY VALUE
+    // with non-const elements. (`&self` stays `const T&`, which already binds
+    // rvalues.) This is hashbrown's TagSliceExt::fill_empty/fill_tag pattern.
+    let out = transpile_str(
+        r#"
+        use core::mem::MaybeUninit;
+        pub struct Tag(pub u8);
+        pub trait TagSliceExt {
+            fn fill_tag(&mut self, tag: Tag);
+            fn fill_empty(&mut self) {
+                self.fill_tag(Tag(0));
+            }
+        }
+        impl TagSliceExt for [MaybeUninit<Tag>] {
+            fn fill_tag(&mut self, tag: Tag) {
+                let _ = tag;
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("fill_empty(Self_&& self_)"),
+        "&mut default method must take a forwarding ref\nGot: {out}"
+    );
+    assert!(
+        out.contains("std::span<rusty::MaybeUninit<Tag>> self_"),
+        "&mut slice-impl receiver must be a non-const span by value\nGot: {out}"
+    );
+    assert!(
+        !out.contains("std::span<const rusty::MaybeUninit<Tag>>"),
+        "&mut receiver must not emit a const-element span\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_assoc_const_receiver_dispatches_to_user_iter_method() {
     // `Owner::CONST.iter()` where `CONST: Self` must dispatch to the owner's own
     // `iter()` method (the assoc-const receiver type resolves to the owner), not
