@@ -1618,6 +1618,64 @@ decltype(auto) skip(Range&& range, size_t remaining) {
     }
 }
 
+// `Iterator::flat_map(f)` — map each item to an iterable, flatten lazily: hold
+// the current inner iterator, and advance the outer one whenever it drains.
+template<typename Iter, typename Func>
+class flat_map_next_iter {
+    using OuterItem = detail::next_item_t<std::remove_reference_t<Iter>>;
+    using InnerIterable = std::invoke_result_t<Func&, OuterItem>;
+    using InnerIter = std::remove_cvref_t<decltype(iter(std::declval<InnerIterable>()))>;
+    using ItemType = detail::next_item_t<std::remove_reference_t<InnerIter>>;
+
+public:
+    flat_map_next_iter(Iter it, Func func)
+        : iter_(std::forward<Iter>(it)), func_(std::forward<Func>(func)) {}
+
+    flat_map_next_iter into_iter() { return std::move(*this); }
+
+    auto next() {
+        using next_result = rusty::Option<ItemType>;
+        for (;;) {
+            if (inner_.has_value()) {
+                auto item = inner_->next();
+                if (detail::option_like_has_value(item)) {
+                    return next_result(detail::option_like_take_value(item));
+                }
+                inner_.reset();
+            }
+            auto outer = iter_.next();
+            if (!detail::option_like_has_value(outer)) {
+                return next_result(rusty::None);
+            }
+            inner_.emplace(iter(func_(detail::option_like_take_value(outer))));
+        }
+    }
+
+private:
+    Iter iter_;
+    Func func_;
+    std::optional<InnerIter> inner_;
+};
+
+template<typename Iter, typename Func>
+auto make_flat_map_next_iter(Iter&& it, Func&& func) {
+    using stored_iter =
+        std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
+    return flat_map_next_iter<stored_iter, std::decay_t<Func>>(
+        std::forward<Iter>(it), std::forward<Func>(func));
+}
+
+template<typename Range, typename Func>
+decltype(auto) flat_map(Range&& range, Func&& func) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return make_flat_map_next_iter(std::forward<Range>(range), std::forward<Func>(func));
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return flat_map(std::forward<Range>(range).into_iter(), std::forward<Func>(func));
+    } else {
+        return flat_map(iter(std::forward<Range>(range)), std::forward<Func>(func));
+    }
+}
+
 // `Iterator::step_by(n)` — yields the first item then every n-th. (The range
 // types don't carry their own `.step_by`, so the transpiler lowers it here.)
 template<typename Range>

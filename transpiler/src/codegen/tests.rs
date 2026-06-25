@@ -31607,6 +31607,9 @@ fn test_iter_sum_and_step_by_lower_to_free_fns() {
         fn t() -> Vec<i64> {
             (0..=10).step_by(3).collect()
         }
+        fn f() -> Vec<i64> {
+            (1..=3).flat_map(|x| x..=x + 1).collect()
+        }
         "#,
     );
     assert!(
@@ -31616,6 +31619,10 @@ fn test_iter_sum_and_step_by_lower_to_free_fns() {
     assert!(
         out.contains("rusty::step_by("),
         "`.step_by(n)` should lower to rusty::step_by(...)\nGot: {out}"
+    );
+    assert!(
+        out.contains("rusty::flat_map("),
+        "`.flat_map(f)` should lower to rusty::flat_map(...)\nGot: {out}"
     );
 }
 

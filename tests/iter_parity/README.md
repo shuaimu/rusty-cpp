@@ -42,22 +42,22 @@ clang++ -std=c++23 -I include tests/rusty_iter_parity_test.cpp -o /tmp/iterp \
 ## Coverage
 
 Now: `map`, `filter`, `filter_map`, `chain` (incl. composed), `take`, `skip`,
-`rev`, `step_by`, `fold`, `count`, `sum`.
+`rev`, `step_by`, `enumerate`, `zip`, `flat_map`, `fold`, `count`, `sum`
+(15 cases). Tuple-yielding adapters (`enumerate`/`zip`) render each pair as
+`a:b`.
 
 ## Gaps this harness surfaced (now fixed)
 
-Building the C++ side revealed two runtime gaps, since closed:
+Building the C++ side revealed three missing runtime adapters, since added:
 
-- **`sum()`** had no rusty equivalent — added `rusty::sum` (slice.hpp), with the
-  transpiler lowering `.sum()` → `rusty::sum(...)` (like `.count()`).
+- **`sum()`** — added `rusty::sum` (slice.hpp), lowering `.sum()` → `rusty::sum`.
 - **`step_by`** existed only on `array.hpp`'s exclusive `Range`, so
-  `range_inclusive(..).step_by(n)` didn't compile — added a uniform
-  `rusty::step_by` adapter + free fn (slice.hpp) and the `.step_by()` → 
-  `rusty::step_by(...)` lowering.
+  `range_inclusive(..).step_by(n)` didn't compile — added a uniform lazy
+  `rusty::step_by` adapter + lowering `.step_by()` → `rusty::step_by`.
+- **`flat_map`** had no rusty equivalent — added a lazy `flat_map_next_iter`
+  adapter + `rusty::flat_map` free fn + lowering `.flat_map()` → `rusty::flat_map`.
 
 ## Still TODO
 
-- Tuple-yielding adapters (`enumerate`, `zip`) and `flat_map` are not yet in the
-  harness (need tuple-aware rendering on both sides).
 - Name the remaining factory-style adapters (`Map`/`Filter`/`Zip`/`Scan`) as
   field/return types, the same recipe as `Chain`.

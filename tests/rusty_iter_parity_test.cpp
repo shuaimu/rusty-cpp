@@ -6,8 +6,8 @@
 // the oracle; any divergence — or a case present on only one side — fails.
 //
 // The emitted-by-the-transpiler rusty API is used directly: free functions
-// `rusty::map/filter/filter_map/chain/take/skip/rev/step_by/fold/count/sum`,
-// over `rusty::range_inclusive(a, b)` (`a..=b`).
+// `rusty::map/filter/filter_map/chain/take/skip/rev/step_by/enumerate/zip/
+// flat_map/fold/count/sum`, over `rusty::range_inclusive(a, b)` (`a..=b`).
 #include "../include/rusty/rusty.hpp"
 
 #include <cstdint>
@@ -18,6 +18,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <tuple>
 
 namespace {
 
@@ -31,6 +32,19 @@ std::string seq(It&& it) {
                            if (!acc.empty()) acc.push_back(',');
                            acc += std::to_string(
                                static_cast<int64_t>(rusty::detail::deref_if_pointer_like(x)));
+                           return acc;
+                       });
+}
+
+// Tuple-yielding adapters (enumerate/zip): render each (a, b) as `a:b`.
+template <class It>
+std::string seq_pairs(It&& it) {
+    return rusty::fold(std::forward<It>(it), std::string{},
+                       [](std::string acc, auto&& t) {
+                           if (!acc.empty()) acc.push_back(',');
+                           acc += std::to_string(static_cast<int64_t>(std::get<0>(t)));
+                           acc.push_back(':');
+                           acc += std::to_string(static_cast<int64_t>(std::get<1>(t)));
                            return acc;
                        });
 }
@@ -67,6 +81,12 @@ std::map<std::string, std::function<std::string()>> cases() {
             rusty::count(rusty::filter(r(1, 10), [](auto&& x) { return x % 3 == 0; }))));
     };
     m["sum"] = [] { return std::to_string(static_cast<int64_t>(rusty::sum(r(1, 10)))); };
+    m["enumerate"] = [] { return seq_pairs(rusty::enumerate(r(10, 12))); };
+    m["zip"] = [] { return seq_pairs(rusty::zip(r(1, 3), r(4, 6))); };
+    m["flat_map"] = [] {
+        return seq(rusty::flat_map(r(1, 3),
+                                   [](auto&& x) { return rusty::range_inclusive(x, x + 1); }));
+    };
     return m;
 }
 

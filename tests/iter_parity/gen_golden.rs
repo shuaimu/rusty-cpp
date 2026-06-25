@@ -21,6 +21,14 @@ fn seq(v: Vec<i64>) -> String {
         .join(",")
 }
 
+// Tuple-yielding adapters (enumerate/zip): render each (a, b) as `a:b`.
+fn pairs(v: Vec<(i64, i64)>) -> String {
+    v.iter()
+        .map(|(a, b)| format!("{}:{}", a, b))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn main() {
     let mut out: Vec<(&str, String)> = Vec::new();
     out.push(("map", seq((1..=5).map(|x| x * 2).collect())));
@@ -42,6 +50,15 @@ fn main() {
             .map(|x| x * x)
             .chain((1..=3).filter(|x| x % 2 == 1))
             .collect()),
+    ));
+    out.push((
+        "enumerate",
+        pairs((10..=12).enumerate().map(|(i, x)| (i as i64, x)).collect()),
+    ));
+    out.push(("zip", pairs((1..=3).zip(4..=6).collect())));
+    out.push((
+        "flat_map",
+        seq((1..=3).flat_map(|x| x..=x + 1).collect()),
     ));
     out.push(("fold", (1..=5).fold(0i64, |a, x| a + x).to_string()));
     out.push(("count", ((1..=10).filter(|x| x % 3 == 0).count() as i64).to_string()));
