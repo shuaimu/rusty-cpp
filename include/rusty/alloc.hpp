@@ -24,6 +24,12 @@ struct Layout {
     std::size_t size;
     std::size_t align;
 
+    // `core::alloc::Layout` derives `PartialEq`/`Eq`; mirror that so derived
+    // equality of types holding a Layout field compiles.
+    constexpr bool operator==(const Layout& other) const noexcept {
+        return size == other.size && align == other.align;
+    }
+
     // Rust-style accessor mirroring `core::alloc::Layout::alignment()`.
     // (`.size()` and `.align()` are mapped via post_transpile_patch.py
     // strip-parens, since they conflict with field names.)
