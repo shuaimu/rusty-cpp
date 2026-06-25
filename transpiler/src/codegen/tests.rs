@@ -31634,6 +31634,58 @@ fn test_extension_trait_mut_receiver_forwarding_ref_and_mut_span() {
 }
 
 #[test]
+fn test_template_struct_method_deferred_only_when_sibling_incomplete() {
+    // A class-template method statically accessing a sibling defined LATER
+    // (incomplete in C++ definition order) is DECLARED inline + DEFINED out-of-line
+    // — `template<typename T> Ret Owner<T>::m()` — after the sibling is complete.
+    // (hashbrown's `impl<T> Default for RawIter<T>` reading `RawTableInner::NEW`.)
+    let deferred = transpile_str(
+        r#"
+        pub struct RawIter<T> {
+            p: core::marker::PhantomData<T>,
+        }
+        impl<T> RawIter<T> {
+            pub fn default_x() -> u32 {
+                Inner::NEW
+            }
+        }
+        pub struct Inner;
+        impl Inner {
+            pub const NEW: u32 = 5;
+        }
+        "#,
+    );
+    assert!(
+        deferred.contains("static uint32_t default_x();")
+            && deferred.contains("uint32_t RawIter<T>::default_x()"),
+        "method accessing an INCOMPLETE sibling must defer out-of-line\nGot: {deferred}"
+    );
+
+    // The SAME method, but the sibling is defined BEFORE (complete), must stay
+    // inline — deferring a method that compiles fine inline can break it.
+    let inline = transpile_str(
+        r#"
+        pub struct Inner;
+        impl Inner {
+            pub const NEW: u32 = 5;
+        }
+        pub struct RawIter<T> {
+            p: core::marker::PhantomData<T>,
+        }
+        impl<T> RawIter<T> {
+            pub fn default_x() -> u32 {
+                Inner::NEW
+            }
+        }
+        "#,
+    );
+    assert!(
+        !inline.contains("uint32_t RawIter<T>::default_x()"),
+        "method accessing a COMPLETE sibling must stay inline (not deferred)\nGot: {inline}"
+    );
+}
+
+#[test]
 fn test_assoc_const_receiver_dispatches_to_user_iter_method() {
     // `Owner::CONST.iter()` where `CONST: Self` must dispatch to the owner's own
     // `iter()` method (the assoc-const receiver type resolves to the owner), not

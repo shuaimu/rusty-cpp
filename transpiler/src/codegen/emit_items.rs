@@ -583,8 +583,37 @@ impl CodeGen {
         self.writeln("};");
     }
 
+    /// True if `method`'s body statically accesses (`Type::item`) a SIBLING
+    /// nominal type that is still INCOMPLETE here — a crate-declared type, other
+    /// than the owner, whose definition has not yet been emitted (`defined_types`).
+    /// This is the precise trigger for deferring a CLASS-TEMPLATE method body
+    /// out-of-line: such an access is ill-formed inline (incomplete type in a
+    /// nested-name-specifier), but fine once the def is flushed after every type.
+    /// Methods that compile fine inline (no incomplete static access) are NOT
+    /// deferred, so the out-of-line template path's brittle edges aren't hit.
+    fn method_body_references_incomplete_sibling(
+        &self,
+        method: &syn::ImplItemFn,
+        owner_name: &str,
+    ) -> bool {
+        let toks = quote::ToTokens::to_token_stream(&method.block).to_string();
+        let owner_leaf = owner_name.rsplit("::").next().unwrap_or(owner_name);
+        self.local_declared_types.iter().any(|t| {
+            let leaf = t.rsplit("::").next().unwrap_or(t);
+            leaf != owner_leaf
+                && leaf.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && !self.defined_types.contains(leaf)
+                && toks.contains(&format!("{} ::", leaf))
+        })
+    }
+
     pub(super) fn emit_struct(&mut self, s: &syn::ItemStruct) {
         let name_str = s.ident.to_string();
+        // Completeness tracking for method-body deferral: a type is COMPLETE once
+        // emit_struct reaches it (structs are emitted in definition order). A
+        // sibling whose emit_struct has NOT yet run is still incomplete here, so a
+        // class-template method statically accessing it must be deferred out-of-line.
+        self.defined_types.insert(name_str.clone());
         let name = self.named_module_root_type_decl_cpp_name(&name_str);
         let has_drop_impl = self.type_has_drop_impl(&name_str);
         let merged_impl_items = self.take_impls_for_type(&name_str);
@@ -1262,14 +1291,50 @@ impl CodeGen {
                     syn::GenericParam::Type(_) | syn::GenericParam::Const(_)
                 )
             });
+            // For a CLASS-TEMPLATE struct, the out-of-line def of a deferred method
+            // needs the class's `template<T…>` prefix + an `Owner<T>::` qualifier
+            // (which also qualifies the signature's assoc-type aliases). Precompute
+            // `(owner-args, prefix-lines)` once; None for non-template structs.
+            let class_template_out_of_line: Option<(String, Vec<String>)> =
+                if struct_has_emitted_template_params {
+                    let mut prefix_params: Vec<String> = Vec::new();
+                    let mut arg_names: Vec<String> = Vec::new();
+                    for p in &s.generics.params {
+                        match p {
+                            syn::GenericParam::Type(tp) => {
+                                let n = escape_cpp_keyword(&tp.ident.to_string());
+                                prefix_params.push(format!("typename {}", n));
+                                arg_names.push(n);
+                            }
+                            syn::GenericParam::Const(cp) => {
+                                let n = escape_cpp_keyword(&cp.ident.to_string());
+                                prefix_params.push(format!("{} {}", self.map_type(&cp.ty), n));
+                                arg_names.push(n);
+                            }
+                            syn::GenericParam::Lifetime(_) => {}
+                        }
+                    }
+                    if prefix_params.is_empty() {
+                        None
+                    } else {
+                        Some((
+                            format!("<{}>", arg_names.join(", ")),
+                            vec![format!("template<{}>", prefix_params.join(", "))],
+                        ))
+                    }
+                } else {
+                    None
+                };
             let is_hoisted_local_type = self
                 .hoisted_local_type_name_scopes
                 .iter()
                 .rev()
                 .any(|scope| scope.contains(&name_str));
+            // Class templates ARE deferrable, but only SELECTIVELY (per-method,
+            // below) — a blanket defer breaks methods that compiled fine inline.
             let can_defer_struct_method_definitions = self.block_depth == 0
                 && !is_hoisted_local_type
-                && !struct_has_emitted_template_params
+                && (!struct_has_emitted_template_params || class_template_out_of_line.is_some())
                 && !self.deferred_method_definitions_stack.is_empty();
             let prev_local_out_of_line_owner = self.method_emission_out_of_line_owner.clone();
             let prev_local_skip_conflict = self.method_emission_skip_conflict_registration;
@@ -1303,7 +1368,13 @@ impl CodeGen {
                         continue;
                     }
                 }
-                if can_defer_struct_method_definitions && let syn::ImplItem::Fn(method) = impl_item
+                if can_defer_struct_method_definitions
+                    && let syn::ImplItem::Fn(method) = impl_item
+                    // Class templates defer SELECTIVELY: only a method that
+                    // statically accesses a still-incomplete sibling needs it.
+                    // (Non-template structs keep the proven blanket deferral.)
+                    && (!struct_has_emitted_template_params
+                        || self.method_body_references_incomplete_sibling(method, &name_str))
                 {
                     let prev_decl_only = self.method_emission_declaration_only;
                     let prev_out_of_line_owner = self.method_emission_out_of_line_owner.clone();
@@ -1324,7 +1395,17 @@ impl CodeGen {
 
                     let owner_cpp_name = self.named_module_root_type_decl_cpp_name(&name_str);
                     self.method_emission_declaration_only = false;
-                    self.method_emission_out_of_line_owner = Some(owner_cpp_name);
+                    // Class template: owner carries its args (`ArrayVec<T, CAP>`) so it
+                    // qualifies BOTH the def name and the signature's assoc-type
+                    // aliases (`typename ArrayVec<T,CAP>::Error`); hand emit_method the
+                    // matching `template<T…>` prefix.
+                    if let Some((args, prefix)) = class_template_out_of_line.clone() {
+                        self.method_emission_out_of_line_owner =
+                            Some(format!("{}{}", owner_cpp_name, args));
+                        self.method_emission_out_of_line_class_template_prefix = Some(prefix);
+                    } else {
+                        self.method_emission_out_of_line_owner = Some(owner_cpp_name);
+                    }
                     self.method_emission_skip_conflict_registration = true;
                     let saved_output = std::mem::take(&mut self.output);
                     let saved_indent = self.indent;
@@ -1349,6 +1430,7 @@ impl CodeGen {
                     self.method_emission_declaration_only = prev_decl_only;
                     self.method_emission_out_of_line_owner = prev_out_of_line_owner;
                     self.method_emission_skip_conflict_registration = prev_skip_conflict;
+                    self.method_emission_out_of_line_class_template_prefix = None;
 
                     self.queue_deferred_method_definition(deferred_definition);
                     continue;
@@ -1737,6 +1819,9 @@ impl CodeGen {
 
     pub(super) fn emit_enum(&mut self, e: &syn::ItemEnum) {
         let name = &e.ident;
+        // Completeness tracking (see emit_struct): enums count as complete once
+        // emitted, so a deferral trigger doesn't treat a referenced enum as incomplete.
+        self.defined_types.insert(name.to_string());
         let has_data = e.variants.iter().any(|v| !v.fields.is_empty());
         let is_local_scope = self.block_depth > 0;
         let include_unscoped = self.module_stack.is_empty() || is_local_scope;
@@ -5254,6 +5339,20 @@ impl CodeGen {
         }
         let emitted_template_key = self.emitted_template_signature_key(&emitted_generics);
         let mut method_template_prefix_lines = self.template_prefix_lines(&emitted_generics, true);
+        // Out-of-line def of a CLASS-TEMPLATE method: prepend the class's
+        // `template<T…>` prefix (recorded by the emit_struct deferral). The owner
+        // already carries `<T…>`, so the body — emitted unchanged — compiles after
+        // all sibling types are complete.
+        if self.method_emission_out_of_line_owner.is_some()
+            && let Some(class_prefix) = self
+                .method_emission_out_of_line_class_template_prefix
+                .clone()
+            && !class_prefix.is_empty()
+        {
+            let mut combined = class_prefix;
+            combined.append(&mut method_template_prefix_lines);
+            method_template_prefix_lines = combined;
+        }
         if method_template_prefix_lines.is_empty() {
             let forced_shadow_params: Vec<String> = emitted_generics
                 .params

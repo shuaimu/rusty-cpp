@@ -1363,7 +1363,17 @@ pub struct CodeGen {
     /// When set, `emit_method` emits only a declaration (`;`) with no body.
     pub(crate) method_emission_declaration_only: bool,
     /// Optional owner type for out-of-line method definition emission (`Type::method`).
+    /// For a class-template owner this carries its args (`ArrayVec<T, CAP>`) so it
+    /// qualifies both the def name and the signature's assoc-type aliases.
     pub(crate) method_emission_out_of_line_owner: Option<String>,
+    /// `template<T…>` prefix line(s) to emit before a CLASS-TEMPLATE out-of-line
+    /// method definition (set only while deferring such a method).
+    pub(crate) method_emission_out_of_line_class_template_prefix: Option<Vec<String>>,
+    /// Leaf names of types whose FULL C++ definition has already been emitted
+    /// (i.e. are COMPLETE at the current emission point). Drives completeness-aware
+    /// method-body deferral: a class-template method that statically accesses a
+    /// sibling NOT yet in this set is deferred out-of-line. See `emit_struct`.
+    pub(crate) defined_types: std::collections::HashSet<String>,
     /// Skip duplicate-signature conflict registration for synthetic second-pass
     /// emissions (for example deferred out-of-line method definitions).
     pub(crate) method_emission_skip_conflict_registration: bool,
@@ -1733,6 +1743,8 @@ impl CodeGen {
             block_depth: 0,
             method_emission_declaration_only: false,
             method_emission_out_of_line_owner: None,
+            method_emission_out_of_line_class_template_prefix: None,
+            defined_types: std::collections::HashSet::new(),
             method_emission_skip_conflict_registration: false,
             current_emit_structural_decomp: None,
             recursive_nested_fn_self_emit_stack: Vec::new(),

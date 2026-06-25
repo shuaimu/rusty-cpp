@@ -3390,8 +3390,14 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         let mut rewritten = cpp_ty.to_string();
         let mut aliases = self.current_struct_assoc_alias_idents();
         aliases.sort_by_key(|alias| std::cmp::Reverse(alias.len()));
+        // `Error` is normally left alone (it commonly names a real `Error` type,
+        // not the owner's assoc). But a deferred CLASS-TEMPLATE method's signature
+        // genuinely needs `Error` qualified to `typename Owner<T>::Error` — its
+        // `using Error = …;` lives in the body, too late for the signature. Qualify
+        // it only in that out-of-line template-def context.
+        let qualify_error = self.method_emission_out_of_line_class_template_prefix.is_some();
         for alias in aliases {
-            if alias == "Error" {
+            if alias == "Error" && !qualify_error {
                 continue;
             }
             let qualified = format!("typename {}::{}", owner, alias);
