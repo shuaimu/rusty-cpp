@@ -2479,6 +2479,35 @@ impl CodeGen {
         self.dependency_ufcs_trait_manifests = manifests;
     }
 
+    /// True when an IMPORTED dependency module already provides this trait's
+    /// lowered extension free function (same trait + method name), per its UFCS
+    /// manifest. The local crate must then SUPPRESS its own duplicate emission:
+    /// the `rusty_ext` / `<Trait>_` namespaces are shared across all modules, so
+    /// two crates that each own a same-named trait would declare the same C++
+    /// entity (`rusty_ext::<m>`) attached to two modules — a C++20-module ODR
+    /// error. Call sites resolve the global `::rusty_ext::<m>` to the imported
+    /// definition (already pulled in via `export import <dep>`), and the imported
+    /// trait is the canonical one (e.g. the `equivalent` crate's `Equivalent`,
+    /// re-declared by hashbrown), so suppression is behavior-preserving.
+    pub(crate) fn extension_trait_method_provided_by_dependency(
+        &self,
+        trait_name: &str,
+        method: &str,
+    ) -> bool {
+        // Either signal suffices: a dependency that DECLARES the trait emits its
+        // lowered free fns (the manifest's `method_owners` only tracks the
+        // `<Trait>_::m` form, NOT the `rusty_ext::m` extension form — so checking
+        // `declared_traits` is what catches blanket-impl extension traits like
+        // `Equivalent`). The guard runs only while emitting THIS crate's own copy
+        // of `trait_name`, so a dep also declaring it means a cross-crate duplicate.
+        self.dependency_ufcs_trait_manifests.iter().any(|m| {
+            m.declared_traits.iter().any(|t| t == trait_name)
+                || m.method_owners
+                    .get(method)
+                    .is_some_and(|owners| owners.iter().any(|t| t == trait_name))
+        })
+    }
+
     pub fn set_cpp_module_member_symbols(
         &mut self,
         cpp_module_member_symbols: HashMap<String, HashSet<String>>,
@@ -12335,6 +12364,22 @@ impl CodeGen {
         if !self.ufcs_declared_trait_names.contains(&trait_name) {
             return;
         }
+        // Cross-crate dedup: drop methods an imported dependency already provides
+        // (the shared `<Trait>_` namespace would otherwise declare the same C++
+        // entity in two modules — hashbrown's own `Equivalent` vs the `equivalent`
+        // crate's). See extension_trait_method_provided_by_dependency.
+        let specs: Vec<_> = specs
+            .into_iter()
+            .filter(|spec| {
+                !self.extension_trait_method_provided_by_dependency(
+                    &trait_name,
+                    &spec.method.sig.ident.to_string(),
+                )
+            })
+            .collect();
+        if specs.is_empty() {
+            return;
+        }
         self.writeln(&format!(
             "// UFCS trait migration: free functions for `impl {} for ...`",
             trait_name
@@ -12414,6 +12459,21 @@ impl CodeGen {
         // Phase 7: only crate-declared traits get UFCS decls (mirrors the
         // definition emitter, so a foreign-trait impl emits neither).
         if !self.ufcs_declared_trait_names.contains(&trait_name) {
+            return;
+        }
+        // Cross-crate dedup (mirrors the definition emitter): drop methods an
+        // imported dependency already provides — see
+        // extension_trait_method_provided_by_dependency.
+        let specs: Vec<_> = specs
+            .into_iter()
+            .filter(|spec| {
+                !self.extension_trait_method_provided_by_dependency(
+                    &trait_name,
+                    &spec.method.sig.ident.to_string(),
+                )
+            })
+            .collect();
+        if specs.is_empty() {
             return;
         }
         // Fix A part 2: when this trait participates in a MULTI-OWNER method,
@@ -12662,6 +12722,19 @@ impl CodeGen {
                         continue;
                     };
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
+                    // Suppress methods an imported dependency already provides — the
+                    // shared `<Trait>_` namespace would otherwise declare the same
+                    // C++ entity in two modules (e.g. hashbrown's own `Equivalent`
+                    // vs the `equivalent` crate's). Call sites bind the imported def.
+                    specs.retain(|spec| {
+                        !self.extension_trait_method_provided_by_dependency(
+                            &trait_name,
+                            &spec.method.sig.ident.to_string(),
+                        )
+                    });
+                    if specs.is_empty() {
+                        continue;
+                    }
                     self.writeln(&format!(
                         "// UFCS trait migration: default methods for trait `{}`",
                         trait_name
@@ -12695,6 +12768,18 @@ impl CodeGen {
                         continue;
                     };
                     self.annotate_multi_owner_default_constraints(&trait_name, &mut specs);
+                    // Suppress methods an imported dependency already provides (see
+                    // extension_trait_method_provided_by_dependency): avoids the
+                    // cross-module `<Trait>_` / `rusty_ext` ODR clash.
+                    specs.retain(|spec| {
+                        !self.extension_trait_method_provided_by_dependency(
+                            &trait_name,
+                            &spec.method.sig.ident.to_string(),
+                        )
+                    });
+                    if specs.is_empty() {
+                        continue;
+                    }
                     self.writeln(&format!("namespace {}_ {{", trait_name));
                     self.indent += 1;
                     // Fix A part 2: if this trait has a constrained (multi-owner)
@@ -12743,6 +12828,16 @@ impl CodeGen {
         let mut seen = HashSet::new();
         let mut seen_cpp_signatures = HashSet::new();
         for method in methods {
+            // Suppress methods an imported dependency already provides: the shared
+            // `rusty_ext` namespace would otherwise declare the same C++ entity in
+            // two modules (hashbrown's own `Equivalent::equivalent` vs the
+            // `equivalent` crate's). Call sites bind the imported definition.
+            if self.extension_trait_method_provided_by_dependency(
+                trait_name,
+                &method.method.sig.ident.to_string(),
+            ) {
+                continue;
+            }
             let key = format!(
                 "{}|{}|{}",
                 method.method.sig.ident,
@@ -13442,7 +13537,15 @@ impl CodeGen {
         let mut seen = HashSet::new();
         let mut seen_cpp_signatures = HashSet::new();
         let mut emitted_any = false;
-        for (_, method) in &methods_to_emit {
+        for (trait_name, method) in &methods_to_emit {
+            // Suppress methods an imported dependency already provides (cross-crate
+            // rusty_ext ODR clash — see extension_trait_method_provided_by_dependency).
+            if self.extension_trait_method_provided_by_dependency(
+                trait_name,
+                &method.method.sig.ident.to_string(),
+            ) {
+                continue;
+            }
             let key = format!(
                 "{}|{}|{}",
                 method.method.sig.ident,
