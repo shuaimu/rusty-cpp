@@ -31596,6 +31596,35 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_self_sizeof_in_member_signature_becomes_dependent_template() {
+    // A member whose RETURN TYPE references the enclosing type's self-sizeof
+    // const (`Group::WIDTH` in `[Tag; Group::WIDTH]`) can't be a plain member —
+    // a member's signature isn't a complete-class context. It becomes a member
+    // template with a defaulted Self_, and `Group::WIDTH` → `Self_::WIDTH()` so
+    // the size is dependent (evaluated lazily at the call, where Group is
+    // complete). The default `Self_ = Group` keeps `Group::static_empty()` calls
+    // working with no rewrite.
+    let out = transpile_str(
+        r#"
+        struct Tag(u8);
+        struct Group(u64);
+        impl Group {
+            const WIDTH: usize = core::mem::size_of::<Self>();
+            fn static_empty() -> [Tag; Group::WIDTH] { todo!() }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("template<class Self_"),
+        "static_empty should become a member template\nGot: {out}"
+    );
+    assert!(
+        out.contains("Self_::WIDTH()"),
+        "the signature's WIDTH should be rewritten to dependent Self_::WIDTH()\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_self_sizeof_assoc_const_emits_member_function() {
     // `const WIDTH: usize = size_of::<Self>()` can't be an in-class static
     // constexpr (the class is incomplete in its own body). Emit it as a member

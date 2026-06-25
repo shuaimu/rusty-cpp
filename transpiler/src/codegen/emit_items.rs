@@ -5551,6 +5551,54 @@ impl CodeGen {
             emitted_auto_trailing_return = emitted_auto_trailing_return
                 .map(|ty| self.qualify_out_of_line_owner_assoc_aliases_in_cpp_type(&ty, owner));
         }
+        // §B signature template-defer: a member whose SIGNATURE references the
+        // enclosing type's self-sizeof const (`Group::WIDTH()`) can't be a plain
+        // member — a member's signature is NOT a complete-class context, so
+        // `sizeof(Self)` there is ill-formed while the class is still being
+        // defined (the in-class declaration). Make it a member TEMPLATE with a
+        // defaulted `Self_`: rewriting `Owner::CONST()` → `Self_::CONST()` makes
+        // the size a DEPENDENT expression, evaluated lazily at the call site
+        // where the type is complete. The default `Self_ = Owner` lets existing
+        // `Owner::method()` calls resolve unchanged (function-template default
+        // args), so no call-site rewrite is needed. Guarded to methods with no
+        // other template params (so we never emit two `template<...>` prefixes).
+        if method_template_prefix_lines.is_empty()
+            && let Some(owner_leaf) = self
+                .current_struct
+                .as_deref()
+                .map(|s| s.rsplit("::").next().unwrap_or(s).to_string())
+        {
+            // The bare const reference `Owner::CONST` is what appears in the
+            // signature here; the `CONST → CONST()` call form is added later by
+            // the finalize post-pass, which keys on `Owner::CONST` and so won't
+            // touch the `Self_::CONST()` we produce.
+            let self_const = self
+                .self_sizeof_const_fns
+                .iter()
+                .find(|(o, c)| {
+                    *o == owner_leaf && {
+                        let reference = format!("{}::{}", owner_leaf, c);
+                        emitted_return_type.contains(&reference)
+                            || params.iter().any(|p| p.contains(&reference))
+                    }
+                })
+                .map(|(_, c)| c.clone());
+            if let Some(const_name) = self_const {
+                let from = format!("{}::{}", owner_leaf, const_name);
+                let to = format!("Self_::{}()", const_name);
+                emitted_return_type = emitted_return_type.replace(&from, &to);
+                for p in params.iter_mut() {
+                    *p = p.replace(&from, &to);
+                }
+                method_template_prefix_lines.push(if out_of_line_owner.is_some() {
+                    // Out-of-line definition: default template args live on the
+                    // in-class declaration only, not the definition.
+                    "template<class Self_>".to_string()
+                } else {
+                    format!("template<class Self_ = {}>", owner_leaf)
+                });
+            }
+        }
         // Rust `const fn` → C++ `constexpr`. Fold the qualifier into the prefix
         // so it applies to every signature form below (decl + def, in-line +
         // out-of-line). Without this, a `const`-initialized associated item whose
