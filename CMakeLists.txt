@@ -500,6 +500,8 @@ set(TEST_SOURCES
     # Self-contained (no-std) rusty::fmt runtime: coverage + Rust-parity.
     tests/rusty_fmt_test.cpp
     tests/rusty_fmt_parity_test.cpp
+    # rusty iterator adapters vs Rust's own (oracle): tests/iter_parity/.
+    tests/rusty_iter_parity_test.cpp
     tests/test_traits.cpp
     tests/test_mutex.cpp
     tests/test_thread.cpp
@@ -814,6 +816,9 @@ foreach(test_source IN LISTS TEST_SOURCES)
         # from the build dir, so pass the source-tree path explicitly.
         add_test(NAME ${test_name} COMMAND ${test_executable}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/fmt_parity/golden.txt)
+    elseif(test_name STREQUAL "rusty_iter_parity_test")
+        add_test(NAME ${test_name} COMMAND ${test_executable}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/iter_parity/golden.txt)
     elseif(NOT test_name MATCHES "_bench$")
         add_test(NAME ${test_name} COMMAND ${test_executable})
     endif()
