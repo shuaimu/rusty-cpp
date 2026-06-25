@@ -31634,6 +31634,51 @@ fn test_extension_trait_mut_receiver_forwarding_ref_and_mut_span() {
 }
 
 #[test]
+fn test_generic_method_return_resolved_from_receiver_type_args() {
+    // A generic method `RawTable<T>::insert_entry(&mut self, hash: u64, value: T)
+    // -> &mut T` called on a receiver whose type resolves to `RawTable<(K,V)>`
+    // must type the binding `&mut (K,V)` — the return `T` comes from the
+    // RECEIVER's instantiation, NOT the positional `hash: u64` argument. With the
+    // wrong (call-arg) binding the `.1` tuple projection fails to compile.
+    let out = transpile_str(
+        r#"
+        pub struct RawTable<T> {
+            marker: core::marker::PhantomData<T>,
+        }
+        impl<T> RawTable<T> {
+            pub fn insert_entry(&mut self, hash: u64, value: T) -> &mut T {
+                unimplemented!()
+            }
+        }
+        pub struct Map<K, V> {
+            table: RawTable<(K, V)>,
+        }
+        pub struct Entry<'a, K, V> {
+            map: &'a mut Map<K, V>,
+            hash: u64,
+            key: K,
+        }
+        impl<'a, K, V> Entry<'a, K, V> {
+            pub fn insert(self, value: V) -> &'a mut V {
+                let table = &mut self.map.table;
+                let entry = table.insert_entry(self.hash, (self.key, value));
+                &mut entry.1
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("std::tuple<K, V>& entry ="),
+        "insert_entry's `&mut T` must resolve to `&mut (K,V)` from the receiver's \
+         RawTable<(K,V)> instantiation, not `uint64_t&` from the hash arg\nGot: {out}"
+    );
+    assert!(
+        out.contains("std::get<1>(entry)"),
+        "the `.1` projection must lower to a tuple access once `entry` is a tuple ref\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_template_struct_method_deferred_only_when_sibling_incomplete() {
     // A class-template method statically accessing a sibling defined LATER
     // (incomplete in C++ definition order) is DECLARED inline + DEFINED out-of-line

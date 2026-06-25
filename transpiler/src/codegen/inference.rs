@@ -5279,6 +5279,20 @@ impl CodeGen {
                 self.lookup_owner_method_return_type_from_receiver_type(&receiver_ty, &method)
         {
             let ret_ty = self.substitute_self_type_with_receiver_type(ret_ty, &receiver_ty);
+            // Rule B: substitute the RECEIVER's type arguments into the declared
+            // return type. `RawTable<(K,V)>::insert_entry(&mut self, hash: u64,
+            // value: T) -> &mut T` ⟹ `&mut (K,V)`. This MUST run before the
+            // weaker positional call-arg fallback below, which would otherwise
+            // bind the return `T` to the wrong argument (the `hash: u64` slot),
+            // typing the binding `u64&` and breaking the `.1` tuple projection.
+            let ret_ty = if let Some((_, subs)) =
+                self.receiver_owner_name_and_type_substitutions(&mc.receiver)
+                && !subs.is_empty()
+            {
+                self.substitute_type_params_in_type(&ret_ty, &subs)
+            } else {
+                ret_ty
+            };
             return Some(
                 self.substitute_single_unbound_return_type_param_from_call_args(ret_ty, &mc.args),
             );
