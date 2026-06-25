@@ -17445,7 +17445,7 @@ fn test_leaf513_iter_adapter_return_types_lower_to_decltype_forms() {
     );
     assert!(
         out.contains(
-            "decltype(std::declval<I>().chain(std::declval<J>())) chain_it(I left, J right)"
+            "rusty::Chain<I, J> chain_it(I left, J right)"
         ),
         "expected iter::Chain lowering, got:\n{}",
         out
@@ -31592,6 +31592,33 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
     assert!(
         out.contains("UnsafeCell<") && out.contains(">::new_("),
         "expected an engine-solved `UnsafeCell<T>::new_(...)` turbofish\nGot: {out}"
+    );
+}
+
+#[test]
+fn test_iter_chain_adapter_field_maps_to_named_rusty_chain() {
+    // `core::iter::Chain<A, B>` used as a STRUCT FIELD type must map to the named
+    // `rusty::Chain<A, B>` (an alias over what `rusty::chain(a,b)` returns), NOT
+    // the non-existent `std::iter::Chain` (hashbrown SymmetricDifference).
+    let out = transpile_str(
+        r#"
+        use core::iter::Chain;
+        struct Sym<A, B> {
+            iter: Chain<A, B>,
+        }
+        "#,
+    );
+    let field = out
+        .lines()
+        .find(|l| !l.trim_start().starts_with("//") && l.contains("Chain") && l.contains("iter"))
+        .unwrap_or("<not found>");
+    assert!(
+        field.contains("rusty::Chain<"),
+        "Chain field should map to rusty::Chain<...>\nField: {field}"
+    );
+    assert!(
+        !field.contains("std::iter::Chain"),
+        "Chain field must not map to the non-existent std::iter::Chain\nField: {field}"
     );
 }
 

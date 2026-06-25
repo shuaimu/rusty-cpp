@@ -258,6 +258,7 @@ pub fn map_std_type(rust_path: &str) -> Option<(&'static str, bool)> {
             Some(("rusty::empty_iter", true))
         }
         "iter::Once" | "core::iter::Once" | "std::iter::Once" => Some(("rusty::once_iter", true)),
+        "iter::Chain" | "core::iter::Chain" | "std::iter::Chain" => Some(("rusty::Chain", true)),
         "ops::Range" | "core::ops::Range" | "std::ops::Range" => Some(("rusty::range", true)),
         "ops::RangeInclusive" | "core::ops::RangeInclusive" | "std::ops::RangeInclusive" => {
             Some(("rusty::range_inclusive", true))

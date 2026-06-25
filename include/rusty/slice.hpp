@@ -1588,6 +1588,15 @@ decltype(auto) chain(Left&& left, Right&& right) {
     }
 }
 
+// Named type for the chain adapter (Rust `core::iter::Chain<A, B>`). The chain
+// LOGIC already exists as a factory (`chain()` / `detail::make_chain_next_iter`),
+// but a factory has no spellable type — so a `Chain<A, B>` used as a STRUCT
+// FIELD or RETURN type (e.g. hashbrown's `iter: Chain<Difference, Difference>`)
+// had nothing to map to. Expose the name as exactly what `chain(a, b)` returns,
+// so a field declared `Chain<A, B>` matches the value the constructor produces.
+template<typename Left, typename Right>
+using Chain = decltype(chain(std::declval<Left>(), std::declval<Right>()));
+
 template<typename Range, typename State, typename Func>
 decltype(auto) scan(Range&& range, State&& state, Func&& func) {
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {

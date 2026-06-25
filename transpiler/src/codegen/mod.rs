@@ -33946,10 +33946,14 @@ impl CodeGen {
                 ("Peekable", [iter_ty]) => {
                     Some(format!("decltype(std::declval<{}>().peekable())", iter_ty))
                 }
-                ("Chain", [left_ty, right_ty]) => Some(format!(
-                    "decltype(std::declval<{}>().chain(std::declval<{}>()))",
-                    left_ty, right_ty
-                )),
+                // `Chain` has a named runtime type (alias over what `rusty::chain`
+                // returns), unlike the method-decltype adapters above — use it so
+                // a `Chain<A, B>` field/return type is spellable. (`.chain()`
+                // lowers to the free `rusty::chain`, so the method-decltype form
+                // wouldn't even resolve.)
+                ("Chain", [left_ty, right_ty]) => {
+                    Some(format!("rusty::Chain<{}, {}>", left_ty, right_ty))
+                }
                 _ => None,
             };
         }
