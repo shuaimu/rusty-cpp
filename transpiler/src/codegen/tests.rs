@@ -31596,6 +31596,30 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_iter_sum_and_step_by_lower_to_free_fns() {
+    // `.sum()` / `.step_by(n)` aren't methods on the rusty range/iter types — lower
+    // them to the free fns `rusty::sum` / `rusty::step_by` (like `.count()`).
+    let out = transpile_str(
+        r#"
+        fn s() -> i64 {
+            (1..=5).sum()
+        }
+        fn t() -> Vec<i64> {
+            (0..=10).step_by(3).collect()
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::sum("),
+        "`.sum()` should lower to rusty::sum(...)\nGot: {out}"
+    );
+    assert!(
+        out.contains("rusty::step_by("),
+        "`.step_by(n)` should lower to rusty::step_by(...)\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_iter_chain_adapter_field_maps_to_named_rusty_chain() {
     // `core::iter::Chain<A, B>` used as a STRUCT FIELD type must map to the named
     // `rusty::Chain<A, B>` (an alias over what `rusty::chain(a,b)` returns), NOT

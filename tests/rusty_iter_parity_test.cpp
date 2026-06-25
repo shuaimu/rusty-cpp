@@ -6,8 +6,8 @@
 // the oracle; any divergence — or a case present on only one side — fails.
 //
 // The emitted-by-the-transpiler rusty API is used directly: free functions
-// `rusty::map/filter/chain/take/skip/rev/filter_map/fold` plus the `.step_by()`
-// / `.sum()` / `.count()` methods, over `rusty::range_inclusive(a, b)` (`a..=b`).
+// `rusty::map/filter/filter_map/chain/take/skip/rev/step_by/fold/count/sum`,
+// over `rusty::range_inclusive(a, b)` (`a..=b`).
 #include "../include/rusty/rusty.hpp"
 
 #include <cstdint>
@@ -48,6 +48,7 @@ std::map<std::string, std::function<std::string()>> cases() {
     m["take"] = [] { return seq(rusty::take(r(1, 100), 4)); };
     m["skip"] = [] { return seq(rusty::skip(r(1, 10), 7)); };
     m["rev"] = [] { return seq(rusty::rev(r(1, 5))); };
+    m["step_by"] = [] { return seq(rusty::step_by(r(0, 10), 3)); };
     m["filter_map"] = [] {
         return seq(rusty::filter_map(r(1, 6), [](auto&& x) {
             return x % 2 == 0 ? rusty::Some<int64_t>(x * 10) : rusty::None;
@@ -65,6 +66,7 @@ std::map<std::string, std::function<std::string()>> cases() {
         return std::to_string(static_cast<int64_t>(
             rusty::count(rusty::filter(r(1, 10), [](auto&& x) { return x % 3 == 0; }))));
     };
+    m["sum"] = [] { return std::to_string(static_cast<int64_t>(rusty::sum(r(1, 10)))); };
     return m;
 }
 

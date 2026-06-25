@@ -1042,6 +1042,52 @@ auto make_take_next_iter(Iter&& iter, size_t remaining) {
     return take_next_iter<stored_iter>(std::forward<Iter>(iter), remaining);
 }
 
+// Lazy `Iterator::step_by(n)`: yields the first item, then every n-th after it.
+template<typename Iter>
+class step_by_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<std::remove_reference_t<Iter>>,
+        "rusty::step_by requires next() to return an Option/optional-like value");
+
+    step_by_next_iter(Iter iter, size_t step)
+        : iter_(std::forward<Iter>(iter)), step_(step == 0 ? 1 : step) {}
+
+    step_by_next_iter into_iter() { return std::move(*this); }
+
+    auto next() {
+        using iter_type = std::remove_reference_t<Iter>;
+        using item_type = next_item_t<iter_type>;
+        using next_result = rusty::Option<item_type>;
+        if (!first_) {
+            for (size_t i = 1; i < step_; ++i) {
+                auto skip = iter_.next();
+                if (!option_like_has_value(skip)) {
+                    return next_result(rusty::None);
+                }
+            }
+        }
+        first_ = false;
+        auto item = iter_.next();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(item));
+    }
+
+private:
+    Iter iter_;
+    size_t step_;
+    bool first_ = true;
+};
+
+template<typename Iter>
+auto make_step_by_next_iter(Iter&& iter, size_t step) {
+    using stored_iter =
+        std::conditional_t<std::is_lvalue_reference_v<Iter>, Iter, std::decay_t<Iter>>;
+    return step_by_next_iter<stored_iter>(std::forward<Iter>(iter), step);
+}
+
 template<typename Iter>
 auto make_skip_next_iter(Iter&& iter, size_t remaining) {
     using stored_iter =
@@ -1572,6 +1618,19 @@ decltype(auto) skip(Range&& range, size_t remaining) {
     }
 }
 
+// `Iterator::step_by(n)` — yields the first item then every n-th. (The range
+// types don't carry their own `.step_by`, so the transpiler lowers it here.)
+template<typename Range>
+decltype(auto) step_by(Range&& range, size_t step) {
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_step_by_next_iter(std::forward<Range>(range), step);
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return step_by(std::forward<Range>(range).into_iter(), step);
+    } else {
+        return step_by(iter(std::forward<Range>(range)), step);
+    }
+}
+
 template<typename Left, typename Right>
 decltype(auto) chain(Left&& left, Right&& right) {
     if constexpr (
@@ -1647,6 +1706,20 @@ size_t count(Range&& range) {
         ++n;
     }
     return n;
+}
+
+// `Iterator::sum()` — the additive identity (0) plus every item. Works over any
+// rusty iterator/range via `for_in`; the transpiler lowers `.sum()` to this.
+template<typename Range>
+auto sum(Range&& range) {
+    auto range_for = for_in(std::forward<Range>(range));
+    using Item = std::remove_cvref_t<decltype(detail::deref_if_pointer_like(
+        *std::begin(range_for)))>;
+    Item acc{};
+    for (auto&& item : range_for) {
+        acc += detail::deref_if_pointer_like(item);
+    }
+    return acc;
 }
 
 template<typename Range, typename Acc, typename Func>

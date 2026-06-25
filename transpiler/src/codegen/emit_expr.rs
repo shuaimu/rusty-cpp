@@ -6253,6 +6253,12 @@ impl CodeGen {
         if let Some(count_call) = self.try_emit_iter_count_call(mc) {
             return count_call;
         }
+        if let Some(sum_call) = self.try_emit_iter_sum_call(mc) {
+            return sum_call;
+        }
+        if let Some(step_by_call) = self.try_emit_iter_step_by_call(mc) {
+            return step_by_call;
+        }
         if let Some(for_each_call) = self.try_emit_iter_for_each_call(mc) {
             return for_each_call;
         }
@@ -17719,6 +17725,39 @@ impl CodeGen {
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
         Some(format!("rusty::count({})", receiver))
+    }
+
+    pub(super) fn try_emit_iter_sum_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "sum" || !mc.args.is_empty() {
+            return None;
+        }
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        Some(format!("rusty::sum({})", receiver))
+    }
+
+    pub(super) fn try_emit_iter_step_by_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "step_by" || mc.args.len() != 1 {
+            return None;
+        }
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let step = self.emit_expr_to_string(mc.args.first()?);
+        Some(format!("rusty::step_by({}, {})", receiver, step))
     }
 
     pub(super) fn try_emit_iter_for_each_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {

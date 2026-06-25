@@ -29,10 +29,7 @@ fn main() {
     out.push(("take", seq((1..=100).take(4).collect())));
     out.push(("skip", seq((1..=10).skip(7).collect())));
     out.push(("rev", seq((1..=5).rev().collect())));
-    // GAPS the C++ side surfaced — deferred until the runtime exposes them
-    // uniformly: `sum()` is not implemented as a method on the rusty range/iter
-    // types, and `step_by` lives on array.hpp's `Range` rather than slice.hpp's
-    // `range_inclusive`. Re-add `step_by`/`sum` cases here once fixed.
+    out.push(("step_by", seq((0..=10).step_by(3).collect())));
     out.push((
         "filter_map",
         seq((1..=6)
@@ -48,6 +45,7 @@ fn main() {
     ));
     out.push(("fold", (1..=5).fold(0i64, |a, x| a + x).to_string()));
     out.push(("count", ((1..=10).filter(|x| x % 3 == 0).count() as i64).to_string()));
+    out.push(("sum", (1..=10).sum::<i64>().to_string()));
     for (id, val) in out {
         println!("{}|{}", id, val);
     }

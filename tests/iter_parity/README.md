@@ -42,14 +42,22 @@ clang++ -std=c++23 -I include tests/rusty_iter_parity_test.cpp -o /tmp/iterp \
 ## Coverage
 
 Now: `map`, `filter`, `filter_map`, `chain` (incl. composed), `take`, `skip`,
-`rev`, `fold`, `count`.
+`rev`, `step_by`, `fold`, `count`, `sum`.
 
-## Known gaps surfaced by this harness (TODO)
+## Gaps this harness surfaced (now fixed)
 
-- **`sum()`** is not implemented as a method on the rusty range/iterator types
-  (Rust's `Iterator::sum`). Add it, then add a `sum` case here.
-- **`step_by`** lives on `array.hpp`'s `Range` rather than `slice.hpp`'s
-  `range_inclusive`, so `range_inclusive(..).step_by(n)` doesn't compile. Unify,
-  then add a `step_by` case.
+Building the C++ side revealed two runtime gaps, since closed:
+
+- **`sum()`** had no rusty equivalent — added `rusty::sum` (slice.hpp), with the
+  transpiler lowering `.sum()` → `rusty::sum(...)` (like `.count()`).
+- **`step_by`** existed only on `array.hpp`'s exclusive `Range`, so
+  `range_inclusive(..).step_by(n)` didn't compile — added a uniform
+  `rusty::step_by` adapter + free fn (slice.hpp) and the `.step_by()` → 
+  `rusty::step_by(...)` lowering.
+
+## Still TODO
+
 - Tuple-yielding adapters (`enumerate`, `zip`) and `flat_map` are not yet in the
   harness (need tuple-aware rendering on both sides).
+- Name the remaining factory-style adapters (`Map`/`Filter`/`Zip`/`Scan`) as
+  field/return types, the same recipe as `Chain`.
