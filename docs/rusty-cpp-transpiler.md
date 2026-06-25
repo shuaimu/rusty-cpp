@@ -769,6 +769,62 @@ export namespace token { struct Token { ... }; }
 
 Design rule: when Rust says "one item, many paths to it," emit C++ as "one owning module declaration surface, many importers."
 
+#### Within-Module Definition Order & Incomplete Types (Method-Body Deferral)
+
+The previous subsection is about *ownership* of a declaration across modules. This one is about *order* and *completeness* of definitions **within** a single module — a second place where valid Rust fails to compile after a naïve lowering.
+
+**Why this is never a problem in Rust.** Rust compiles a crate in order-independent phases: it first collects every item's signature (types, fields, associated consts/fns, impls) into a global resolution table, and *then* type-checks bodies with full visibility of that table. Source order is irrelevant, and a type is never "incomplete" — once collected, all of its members are known. Mutually-recursive references (`RawIter` ↔ `RawTableInner`) are normal; the only cycle Rust rejects is one of *layout/size* (a struct containing itself by value), caught by a separate check.
+
+```rust
+// Order-independent: RawIter may appear BEFORE RawTableInner in source.
+struct RawIter<T> { /* … */ }
+impl<T> Default for RawIter<T> {
+    fn default() -> Self { unsafe { RawTableInner::NEW.iter() } }   // fine
+}
+struct RawTableInner { /* … */ }
+impl RawTableInner { const NEW: Self = /* … */; }
+```
+
+**Why C++ has it.** A C++ translation unit is scanned top-to-bottom. At any point a class is either *complete* (its full `{ … }` has been seen) or *incomplete* (only forward-declared). Naming a static member like `RawTableInner::NEW` requires the type to be **complete at that point in the scan**. If `RawIter`'s method body is parsed before `RawTableInner` is defined, the reference is ill-formed:
+
+```cpp
+template<typename T> struct RawIter {
+    static RawIter<T> default_() { return RawTableInner::NEW.iter<T>(); }  // INLINE body
+};                                  // ^ error: incomplete type 'RawTableInner'
+struct RawTableInner { /* … */ };   //   named in nested-name-specifier
+```
+
+C++'s two-phase template lookup does **not** rescue this: it defers only *dependent* names (those mentioning the template parameter) to instantiation. `RawTableInner::NEW` is **non-dependent**, so it is resolved eagerly at the template's definition point — exactly where `RawTableInner` is still incomplete.
+
+**The fix: method-body deferral (declare inline, define out-of-line).** The standard C++ answer to a definition cycle is to split declaration from definition: declare the member in the class, and define it *after* every type is complete. The transpiler does this for non-template structs — it emits the method **declaration** inline and queues the **definition** into a side buffer flushed after all type definitions. The target shape (shown here for a class template, the case discussed as a gap below) is:
+
+```cpp
+template<typename T> struct RawIter {
+    static RawIter<T> default_();                 // declaration only (inline)
+};
+struct RawTableInner { /* … */ };                 // now complete
+// … flushed after all types …
+template<typename T>
+RawIter<T> RawIter<T>::default_() {               // out-of-line definition
+    return RawTableInner::NEW.iter<T>();           // RawTableInner is complete here
+}
+```
+
+This declare-inline / define-out-of-line deferral is **implemented and proven for non-template structs** (`emit_struct`'s deferral seam + `emit_method`'s out-of-line path in `codegen/emit_items.rs`): bodies are flushed after all type definitions, qualified as `Owner::method`. Out-of-line definitions placed after the class but in the same C++20 module are valid for instantiation.
+
+Extending it to a **class template** (e.g. `RawIter<T>`, hashbrown's `impl<T> Default for RawIter<T>` reading `RawTableInner::NEW`) is the natural next step, but it is a **known gap** because two extra requirements make it harder than the non-template case — both must be satisfied or the out-of-line definition is itself ill-formed:
+
+1. **Template machinery.** The definition must re-emit the class's `template<T…>` prefix and qualify the method as `Owner<T>::method` (vs. the bare `Owner::method`). Straightforward — record the class's arg list + prefix when capturing the definition.
+2. **Completeness-aware triggering — the hard part.** Deferral must fire **only for methods that actually fail inline** (those naming a not-yet-complete sibling). A blanket "defer every template method" both is unnecessary and *breaks* methods that compiled fine inline: an out-of-line signature loses the in-class context (e.g. an associated type in the return — `Result<Self, Self::Error>` — must be re-qualified to `typename Owner<T>::Error`, and assoc-alias `using`s must precede the signature, not sit in the body). Triggering on "body references *any* sibling type" over-fires (it regressed arrayvec's `TryFrom::try_from`, whose return names an assoc type); the correct trigger needs emit-time *type-completeness tracking* (defer iff the referenced sibling is still forward-declared at this point), and the out-of-line emitter must reconstruct the full in-class signature context, not just the body.
+
+So the conceptual fix is settled; the engineering is a focused future task gated on completeness tracking + full out-of-line signature-context preservation. Until then, a class-template method that names an incomplete sibling is the residual failure mode here.
+
+**Rules of thumb:**
+
+- Prefer reconstructing a valid *definition order* over reordering type definitions — mutually-recursive types have no valid total order, and out-of-line bodies are the canonical break.
+- A member body that names a *non-dependent* sibling type's static member/const is the trigger; making it dependent (the `Self_`/`.template` trick used for self-`sizeof`) does **not** help when the sibling is a fixed foreign type.
+- For non-template structs deferral is blanket per deferrable struct (proven); for class templates it must be *selective* (completeness-aware) — deferring a template method that compiled fine inline can break it via out-of-line context loss. Any change here is validated against the full parity matrix.
+
 ### 2.6 Impl Blocks
 
 Rust splits methods across multiple `impl` blocks. In C++, all methods must be declared in the class body. The transpiler must **merge all `impl` blocks** for a type into a single class definition.
