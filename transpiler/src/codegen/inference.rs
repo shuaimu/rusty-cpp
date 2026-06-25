@@ -5798,6 +5798,31 @@ impl CodeGen {
                             }));
                         }
                     }
+                    // Associated const `Owner::CONST` → the const's declared type. A
+                    // `Self` annotation (e.g. `const NEW: Self`) resolves to the path's
+                    // owner, so receiver-type dispatch (`.iter()` etc.) can find the
+                    // owner's own methods instead of falling back to a generic adapter.
+                    if let Some(const_ty) = self.lookup_associated_const_type(&path.path) {
+                        let is_self = matches!(
+                            &const_ty,
+                            syn::Type::Path(tp)
+                                if tp.qself.is_none()
+                                    && tp.path.segments.len() == 1
+                                    && tp.path.segments[0].ident == "Self"
+                        );
+                        if is_self {
+                            if let Some(owner_only) = Self::path_without_last_segment(&path.path)
+                                && !owner_only.segments.is_empty()
+                            {
+                                return Some(syn::Type::Path(syn::TypePath {
+                                    qself: None,
+                                    path: owner_only,
+                                }));
+                            }
+                        } else {
+                            return Some(const_ty);
+                        }
+                    }
                 }
                 if path.path.segments.len() != 1 {
                     return None;

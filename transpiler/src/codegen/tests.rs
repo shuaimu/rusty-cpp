@@ -31596,6 +31596,34 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_assoc_const_receiver_dispatches_to_user_iter_method() {
+    // `Owner::CONST.iter()` where `CONST: Self` must dispatch to the owner's own
+    // `iter()` method (the assoc-const receiver type resolves to the owner), not
+    // fall back to the generic `rusty::iter(...)` adapter.
+    let out = transpile_str(
+        r#"
+        struct RawTableInner;
+        impl RawTableInner {
+            const NEW: Self = RawTableInner::new_const();
+            fn new_const() -> Self { RawTableInner }
+            fn iter(&self) -> u32 { 0 }
+        }
+        fn f() -> u32 {
+            RawTableInner::NEW.iter()
+        }
+        "#,
+    );
+    assert!(
+        out.contains("RawTableInner::NEW.iter()"),
+        "assoc-const receiver should dispatch to the owner's iter()\nGot: {out}"
+    );
+    assert!(
+        !out.contains("rusty::iter(RawTableInner::NEW)"),
+        "should NOT fall back to the generic rusty::iter(...) adapter\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_iter_sum_and_step_by_lower_to_free_fns() {
     // `.sum()` / `.step_by(n)` aren't methods on the rusty range/iter types — lower
     // them to the free fns `rusty::sum` / `rusty::step_by` (like `.count()`).
