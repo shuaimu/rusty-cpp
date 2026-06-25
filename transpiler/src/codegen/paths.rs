@@ -19,6 +19,51 @@ impl CodeGen {
             .replace(" Deserializer::new_(", " de::Deserializer::new_(");
     }
 
+    /// Rewrite `Owner::NAME` value references to `Owner::NAME()` for associated
+    /// consts emitted as member functions (the self-`sizeof`/`alignof` consts —
+    /// see `self_sizeof_const_fns`). The definition site (`WIDTH() {...}`) is bare
+    /// `NAME`, so only the qualified `Owner::NAME` uses are touched.
+    pub(super) fn rewrite_self_sizeof_const_fn_calls_in_output(&mut self) {
+        if self.self_sizeof_const_fns.is_empty() {
+            return;
+        }
+        let pairs: Vec<(String, String)> = self.self_sizeof_const_fns.iter().cloned().collect();
+        let mut out = std::mem::take(&mut self.output);
+        for (owner, name) in pairs {
+            out = Self::append_call_to_qualified_const_token(&out, &format!("{}::{}", owner, name));
+        }
+        self.output = out;
+    }
+
+    /// Append `()` to each standalone occurrence of `token` (a `Owner::NAME`
+    /// const reference), skipping ones already followed by `(` (a call) or by an
+    /// identifier char (a longer name), and ones preceded by an identifier char
+    /// (a different `…Owner`). Preserves any qualified prefix (`ns::Owner::NAME`).
+    fn append_call_to_qualified_const_token(s: &str, token: &str) -> String {
+        let mut result = String::with_capacity(s.len() + 32);
+        let mut rest = s;
+        while let Some(pos) = rest.find(token) {
+            let before = &rest[..pos];
+            let after = &rest[pos + token.len()..];
+            let prev_is_ident = before
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            let next_blocks = after
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '(');
+            result.push_str(before);
+            result.push_str(token);
+            if !prev_is_ident && !next_blocks {
+                result.push_str("()");
+            }
+            rest = after;
+        }
+        result.push_str(rest);
+        result
+    }
+
     pub(super) fn normalize_private_rusty_ext_paths_in_output(&mut self) {
         if self.output.contains("\r\n") {
             self.output = self.output.replace("\r\n", "\n");

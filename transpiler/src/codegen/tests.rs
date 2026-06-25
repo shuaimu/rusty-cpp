@@ -31596,6 +31596,34 @@ fn test_unsafe_cell_new_emits_engine_solved_turbofish() {
 }
 
 #[test]
+fn test_self_sizeof_assoc_const_emits_member_function() {
+    // `const WIDTH: usize = size_of::<Self>()` can't be an in-class static
+    // constexpr (the class is incomplete in its own body). Emit it as a member
+    // FUNCTION (complete-class context) and rewrite `Group::WIDTH` uses to calls.
+    let out = transpile_str(
+        r#"
+        struct Group(u64);
+        impl Group {
+            const WIDTH: usize = core::mem::size_of::<Self>();
+            fn capacity(&self) -> usize { Group::WIDTH + 1 }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("WIDTH() {") && out.contains("size_of<Group>"),
+        "WIDTH should be a constexpr member function returning sizeof(Group)\nGot: {out}"
+    );
+    assert!(
+        !out.contains("constexpr size_t WIDTH ="),
+        "WIDTH must not be an in-class self-sizeof data member\nGot: {out}"
+    );
+    assert!(
+        out.contains("Group::WIDTH()"),
+        "Group::WIDTH value uses must be rewritten to calls\nGot: {out}"
+    );
+}
+
+#[test]
 fn is_diverging_function_path_matches_bare_imported_leaf() {
     // Qualified forms already matched; the leaf-name check resolves the
     // bare `use`-imported forms (`handle_alloc_error` / `unreachable_unchecked`).

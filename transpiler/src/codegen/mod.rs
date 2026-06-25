@@ -873,6 +873,13 @@ pub struct CodeGen {
     /// These are emitted as standalone constants since enum class can't
     /// have static members; path references are rewritten accordingly.
     pub(crate) c_like_enum_consts: HashSet<String>,
+    /// `(owner_type, const_name)` for associated consts whose initializer needs
+    /// the enclosing type complete (e.g. `const WIDTH = size_of::<Self>()`).
+    /// These are emitted as `static constexpr T NAME() {...}` member functions —
+    /// a member-function body is a complete-class context, so `sizeof(Self)` is
+    /// valid there — and `Owner::NAME` value references are rewritten to
+    /// `Owner::NAME()` in a finalize post-pass.
+    pub(crate) self_sizeof_const_fns: HashSet<(String, String)>,
     /// Tracks enum-member keys on C-like enums (e.g., "Ordering_SeqCst").
     /// Used to avoid misclassifying enum class variants as data-enum variants.
     pub(crate) c_like_enum_variants: HashSet<String>,
@@ -1596,6 +1603,7 @@ impl CodeGen {
             data_enum_variant_names: HashSet::new(),
             data_enum_variant_field_types: std::rc::Rc::new(HashMap::new()),
             c_like_enum_consts: HashSet::new(),
+            self_sizeof_const_fns: HashSet::new(),
             c_like_enum_variants: HashSet::new(),
             c_like_enum_types: HashSet::new(),
             c_like_enum_inherent_method_names: HashSet::new(),
@@ -3370,6 +3378,8 @@ impl CodeGen {
         log_emit("qualify_unqualified_ser_de_constructor_paths");
         self.normalize_private_rusty_ext_paths_in_output();
         log_emit("normalize_private_rusty_ext_paths_in_output");
+        self.rewrite_self_sizeof_const_fn_calls_in_output();
+        log_emit("rewrite_self_sizeof_const_fn_calls_in_output");
         // Cluster A completion: emit `__TemplateArgs` primary template plus
         // partial specializations for every inner struct that participated
         // in a structural decomposition. Placed at the end of the file so

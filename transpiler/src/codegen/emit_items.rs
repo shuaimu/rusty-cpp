@@ -4971,9 +4971,23 @@ impl CodeGen {
                 }
                 let ty = self.map_type(&c.ty);
                 let expr = self.emit_impl_const_expr(c);
+                // A const whose initializer needs the enclosing type COMPLETE —
+                // e.g. `const WIDTH: usize = size_of::<Self>()` — can't be an
+                // in-class `static constexpr` (the class is incomplete within its
+                // own body). Emit it as a `static constexpr` member FUNCTION: a
+                // function body is a complete-class context, so `sizeof(Self)` is
+                // valid there. `Owner::NAME` value uses are rewritten to
+                // `Owner::NAME()` in a finalize post-pass.
+                if let Some(owner_leaf) = self.const_init_requires_complete_self(&expr) {
+                    self.writeln(&format!(
+                        "static constexpr {} {}() {{ return {}; }}",
+                        ty, name, expr
+                    ));
+                    self.self_sizeof_const_fns.insert((owner_leaf, name));
+                }
                 // Self-referential const (type is the enclosing struct):
                 // split into declaration inside struct + definition after.
-                if self.is_self_referential_const_type(&ty) {
+                else if self.is_self_referential_const_type(&ty) {
                     self.writeln(&format!("static const {} {};", ty, name));
                     if let Some(ref struct_name) = self.current_struct.clone() {
                         self.deferred_self_const_defs.push(format!(

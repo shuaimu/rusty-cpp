@@ -912,6 +912,26 @@ impl CodeGen {
 
     /// Check if a const member's type is the enclosing struct (self-referential).
     /// These need split declaration (inside struct) + definition (after struct).
+    /// When an associated const's emitted initializer takes the size/alignment
+    /// of the ENCLOSING type (`size_of::<Self>()` → `rusty::mem::size_of<Group>()`,
+    /// or `sizeof(Group)`), the value can't be computed in an in-class static
+    /// initializer (the class is incomplete there). Returns the enclosing type's
+    /// leaf name so the caller can emit a member-function form + record the
+    /// `Owner::NAME → Owner::NAME()` rewrite.
+    pub(super) fn const_init_requires_complete_self(&self, emitted_expr: &str) -> Option<String> {
+        let struct_name = self.current_struct.as_deref()?;
+        let leaf = struct_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(struct_name)
+            .to_string();
+        let takes_self_layout = emitted_expr.contains(&format!("size_of<{}>", leaf))
+            || emitted_expr.contains(&format!("align_of<{}>", leaf))
+            || emitted_expr.contains(&format!("sizeof({})", leaf))
+            || emitted_expr.contains(&format!("alignof({})", leaf));
+        takes_self_layout.then_some(leaf)
+    }
+
     pub(super) fn is_self_referential_const_type(&self, ty_cpp: &str) -> bool {
         if let Some(ref struct_name) = self.current_struct {
             // Direct self-reference: const type IS the struct
