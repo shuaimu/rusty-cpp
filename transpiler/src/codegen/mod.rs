@@ -730,6 +730,12 @@ pub struct CodeGen {
     /// `T::NEEDS_DROP` → `rusty::mem::needs_drop<T>()`. Avoids the unsupported
     /// associated-const-trait emission for the blanket-impl-default case.
     pub(crate) trait_default_const_exprs: HashMap<String, (syn::Expr, String)>,
+    /// INNER enclosing-namespace segments of the UFCS helper currently being
+    /// emitted (`segments[1..]` of `<segments>::__ufcs_<Tr>`). A free function's
+    /// SIGNATURE (return/param types) that names a top-level module matching one of
+    /// these binds to the enclosing namespace instead of the global module; we
+    /// absolutize `M::` → `::M::` for those. Empty outside nested helper emission.
+    pub(crate) ufcs_helper_shadowing_segments: Vec<String>,
     /// Scoped trait paths declared in this crate/module (including traits with
     /// no default static methods). Used to avoid cross-trait fallback injection.
     pub(crate) trait_declared_paths: HashSet<String>,
@@ -1585,6 +1591,7 @@ impl CodeGen {
             callable_type_param_return_scopes: Vec::new(),
             trait_static_default_methods: HashMap::new(),
             trait_default_const_exprs: HashMap::new(),
+            ufcs_helper_shadowing_segments: Vec::new(),
             trait_declared_paths: HashSet::new(),
             trait_method_has_receiver: std::rc::Rc::new(HashMap::new()),
             module_runtime_helper_traits: HashSet::new(),
@@ -12372,6 +12379,53 @@ impl CodeGen {
     /// (body positions). The helper namespace name and module-segment spelling
     /// MUST match the decl emitter exactly, since the bridge using-declarations
     /// name `::<segments>::__ufcs_<Tr>::m`.
+    /// Absolutize a UFCS-helper SIGNATURE type (return/param) so a top-level
+    /// module that is shadowed by an inner enclosing-namespace segment resolves
+    /// globally. Only applies in nested-helper emission (when
+    /// `ufcs_helper_shadowing_segments` is set). Signature types name cross-module
+    /// types (`crate::de::value::X` → relative `de::value::X`), never the helper's
+    /// own enclosing module, so this never over-qualifies a self-reference (unlike
+    /// the body, which DOES name the enclosing module — `impls::format_u8` — and is
+    /// therefore left untouched). A top-level module M is always `::M`.
+    fn absolutize_shadowed_module_refs_in_ufcs_signature(&self, ty: &str) -> String {
+        if self.ufcs_helper_shadowing_segments.is_empty() {
+            return ty.to_string();
+        }
+        let mut result = ty.to_string();
+        for seg in &self.ufcs_helper_shadowing_segments {
+            if !self.declared_module_names.contains(seg) {
+                continue;
+            }
+            result = Self::prepend_root_to_standalone_module_prefix(&result, seg);
+        }
+        result
+    }
+
+    fn prepend_root_to_standalone_module_prefix(text: &str, module: &str) -> String {
+        let needle = format!("{}::", module);
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len() + 8);
+        let mut i = 0;
+        while i < text.len() {
+            if text[i..].starts_with(&needle) {
+                let prev_is_path_char = i > 0 && {
+                    let p = bytes[i - 1];
+                    p == b':' || p == b'_' || p.is_ascii_alphanumeric()
+                };
+                if !prev_is_path_char {
+                    out.push_str("::");
+                    out.push_str(&needle);
+                    i += needle.len();
+                    continue;
+                }
+            }
+            let ch_len = text[i..].chars().next().map_or(1, char::len_utf8);
+            out.push_str(&text[i..i + ch_len]);
+            i += ch_len;
+        }
+        out
+    }
+
     fn emit_ufcs_trait_impl_block_free_functions(
         &mut self,
         impl_block: &syn::ItemImpl,
@@ -12431,6 +12485,7 @@ impl CodeGen {
         }
         self.writeln(&format!("namespace {} {{", helper));
         self.indent += 1;
+        self.ufcs_helper_shadowing_segments = segments.iter().skip(1).cloned().collect();
         for spec in &specs {
             if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &trait_name) {
                 continue;
@@ -12438,6 +12493,7 @@ impl CodeGen {
             self.emit_extension_trait_free_function(spec);
             self.newline();
         }
+        self.ufcs_helper_shadowing_segments.clear();
         self.indent -= 1;
         self.writeln("}");
         for _ in &segments {
@@ -12567,6 +12623,7 @@ impl CodeGen {
         // Distinct escaped method names that actually emitted — one
         // using-declaration per name brings in all its overloads.
         let mut bridged: Vec<String> = Vec::new();
+        self.ufcs_helper_shadowing_segments = segments.iter().skip(1).cloned().collect();
         for spec in &specs {
             if self.ufcs_concrete_impl_signature_is_duplicate(spec, module_path, &trait_name) {
                 continue;
@@ -12581,6 +12638,7 @@ impl CodeGen {
                 }
             }
         }
+        self.ufcs_helper_shadowing_segments.clear();
         self.indent -= 1;
         self.writeln("}");
         for _ in &segments {
@@ -13914,6 +13972,7 @@ impl CodeGen {
             ));
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
+        return_type = self.absolutize_shadowed_module_refs_in_ufcs_signature(&return_type);
         self.suppress_dependent_assoc_traits_routing
             .set(prev_suppress_assoc_traits);
         if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
@@ -14068,6 +14127,7 @@ impl CodeGen {
             ));
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
+        return_type = self.absolutize_shadowed_module_refs_in_ufcs_signature(&return_type);
         self.suppress_dependent_assoc_traits_routing
             .set(prev_suppress_assoc_traits);
         if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
@@ -14219,6 +14279,7 @@ impl CodeGen {
             ));
         return_type =
             self.rewrite_extension_assoc_error_paths(&return_type, &associated_type_cpp_bindings);
+        return_type = self.absolutize_shadowed_module_refs_in_ufcs_signature(&return_type);
         self.suppress_dependent_assoc_traits_routing
             .set(prev_suppress_assoc_traits);
         if self.extension_return_type_requires_auto_fallback(&return_type, &self_cpp_ty) {
