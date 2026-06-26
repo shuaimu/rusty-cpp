@@ -10747,6 +10747,71 @@ impl CodeGen {
         }
     }
 
+    /// True iff `mc` is a `fold`/`rfold`-shaped call whose accumulator init is an
+    /// empty `Vec::new()` and whose reducer closure pushes ONLY its (unprojected)
+    /// item parameter into the accumulator — i.e. the Vec collects the receiver's
+    /// items directly, so its element type is the receiver's item type. Only this
+    /// exact shape is recovered, to avoid mis-typing folds that project or
+    /// transform the item.
+    pub(super) fn fold_like_init_recoverable(&self, mc: &syn::ExprMethodCall) -> bool {
+        if mc.args.len() != 2 {
+            return false;
+        }
+        let Some(init) = mc.args.first() else {
+            return false;
+        };
+        if !self.expr_is_empty_vec_constructor(init) {
+            return false;
+        }
+        let syn::Expr::Closure(closure) = self.peel_paren_group_expr(&mc.args[1]) else {
+            return false;
+        };
+        self.closure_accumulates_second_param_into_first(closure)
+    }
+
+    /// The `rusty::Vec<…>::new_()` accumulator init for a recoverable fold/rfold
+    /// (see `fold_like_init_recoverable`), with the element resolved via
+    /// `decltype` of the already-emitted receiver — the iterator whose items fill
+    /// the Vec. The receiver string is reused (not re-emitted), so the receiver's
+    /// move/borrow effects are tracked once; the `decltype` operand is unevaluated
+    /// in C++, so duplicating it costs no runtime move.
+    pub(super) fn build_fold_empty_vec_init_decltype(&self, receiver_cpp: &str) -> String {
+        format!(
+            "rusty::Vec<rusty::detail::associated_item_t<std::remove_cvref_t<decltype({})>>>::new_()",
+            receiver_cpp
+        )
+    }
+
+    /// A reducer closure `|acc, item| { … acc.push(item) … acc }` that pushes ONLY
+    /// its second (item) parameter, unprojected, into its first (accumulator)
+    /// parameter. Reference/tuple-destructured item params (`&elt`, `(k, v)`) and
+    /// projected pushes (`acc.push(item.0)`) are rejected — those would mis-type
+    /// the element.
+    fn closure_accumulates_second_param_into_first(&self, closure: &syn::ExprClosure) -> bool {
+        if closure.inputs.len() != 2 {
+            return false;
+        }
+        let Some(acc) = local_pat_binding_ident(&closure.inputs[0]) else {
+            return false;
+        };
+        let Some(item) = local_pat_binding_ident(&closure.inputs[1]) else {
+            return false;
+        };
+        if acc == item {
+            return false;
+        }
+        let mut collector = AccumulatorPushCollector {
+            acc: &acc,
+            push_args: Vec::new(),
+        };
+        syn::visit::Visit::visit_expr(&mut collector, &closure.body);
+        !collector.push_args.is_empty()
+            && collector
+                .push_args
+                .iter()
+                .all(|a| a.as_deref() == Some(item.as_str()))
+    }
+
     pub(super) fn infer_byte_write_expected_type_from_receiver_hint(
         &self,
         receiver: &syn::Expr,
@@ -11911,6 +11976,27 @@ impl<'ast> syn::visit::Visit<'ast> for ExtendSourceFinder<'_> {
             && let Some(arg) = mc.args.first()
         {
             self.found = Some(arg.clone());
+        }
+        syn::visit::visit_expr_method_call(self, mc);
+    }
+}
+
+/// Collects the (simple-ident) argument of every `<acc>.push(arg)` call where the
+/// receiver is the named accumulator. A non-simple-ident arg (a projection/call)
+/// is recorded as `None` so the caller rejects it.
+struct AccumulatorPushCollector<'a> {
+    acc: &'a str,
+    push_args: Vec<Option<String>>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for AccumulatorPushCollector<'_> {
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        if mc.method == "push"
+            && mc.args.len() == 1
+            && extract_simple_local_ident(&mc.receiver).as_deref() == Some(self.acc)
+        {
+            self.push_args
+                .push(mc.args.first().and_then(extract_simple_local_ident));
         }
         syn::visit::visit_expr_method_call(self, mc);
     }

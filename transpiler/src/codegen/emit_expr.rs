@@ -6301,6 +6301,9 @@ impl CodeGen {
         if let Some(fold_call) = self.try_emit_iter_fold_call(mc, expected_ty) {
             return fold_call;
         }
+        if let Some(rfold_call) = self.try_emit_iter_rfold_call(mc) {
+            return rfold_call;
+        }
         if let Some(all_call) = self.try_emit_iter_all_call(mc) {
             return all_call;
         }
@@ -17743,14 +17746,40 @@ impl CodeGen {
             return None;
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
-        let init_expected =
-            self.infer_fold_like_init_expected_type_from_method_call(mc, expected_ty, false);
-        let init = self.emit_expr_to_string_with_expected_and_move_if_needed(
-            mc.args.first()?,
-            init_expected.as_ref(),
-        );
+        // An empty `Vec::new()` accumulator that the reducer fills with the
+        // receiver's items: name the element via `decltype` of the receiver
+        // (its item type) instead of leaking `Vec<auto>`.
+        let init = if self.fold_like_init_recoverable(mc) {
+            self.build_fold_empty_vec_init_decltype(&receiver)
+        } else {
+            let init_expected =
+                self.infer_fold_like_init_expected_type_from_method_call(mc, expected_ty, false);
+            self.emit_expr_to_string_with_expected_and_move_if_needed(
+                mc.args.first()?,
+                init_expected.as_ref(),
+            )
+        };
         let reducer = self.emit_expr_maybe_move(mc.args.iter().nth(1)?);
         Some(format!("rusty::fold({}, {}, {})", receiver, init, reducer))
+    }
+
+    /// `rfold` with an empty `Vec::new()` accumulator the reducer fills with the
+    /// receiver's items: emit `receiver.rfold(Vec<decltype-elem>::new_(), reducer)`
+    /// so the accumulator element is named via `decltype` of the receiver rather
+    /// than leaking `Vec<auto>`. Only intercepts that exact recoverable shape;
+    /// otherwise returns None so the generic method emission handles `rfold`
+    /// normally (and emits the receiver exactly once).
+    pub(super) fn try_emit_iter_rfold_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        if mc.method != "rfold" || mc.args.len() != 2 {
+            return None;
+        }
+        if !self.fold_like_init_recoverable(mc) {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let init = self.build_fold_empty_vec_init_decltype(&receiver);
+        let reducer = self.emit_expr_maybe_move(mc.args.iter().nth(1)?);
+        Some(format!("{}.rfold({}, {})", receiver, init, reducer))
     }
 
     pub(super) fn try_emit_iter_try_fold_call(
