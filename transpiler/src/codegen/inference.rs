@@ -5338,28 +5338,21 @@ impl CodeGen {
             .collect::<Vec<_>>()
             .join("::");
 
-        // std/core allocator entrypoints return raw byte pointers.
-        if (matches!(
-            joined.as_str(),
-            "alloc"
-                | "rusty::alloc::alloc"
-                | "std::alloc::alloc"
-                | "core::alloc::alloc"
-                | "alloc::alloc"
-                | "alloc_zeroed"
-                | "rusty::alloc::alloc_zeroed"
-                | "std::alloc::alloc_zeroed"
-                | "core::alloc::alloc_zeroed"
-                | "alloc::alloc_zeroed"
-        ) && call.args.len() == 1)
-            || (matches!(
-                joined.as_str(),
-                "realloc"
-                    | "rusty::alloc::realloc"
-                    | "std::alloc::realloc"
-                    | "core::alloc::realloc"
-                    | "alloc::realloc"
-            ) && call.args.len() == 3)
+        // std/core allocator entrypoints return raw byte pointers. Key on the
+        // LAST path segment + arg count so any module path or alias resolves —
+        // `std::alloc::alloc`, `alloc::alloc`, a bare `alloc`, AND an aliased
+        // `rust::alloc` (`use alloc::alloc::{self as rust}`, as in unsafe_libyaml).
+        // The distinctive names + arg arity (alloc/alloc_zeroed take a Layout;
+        // realloc takes ptr+Layout+size) keep this from matching unrelated calls,
+        // and the prior bare-`alloc` entry already accepted any `alloc(x)`.
+        let last_seg = path_expr
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        if (matches!(last_seg.as_str(), "alloc" | "alloc_zeroed") && call.args.len() == 1)
+            || (last_seg == "realloc" && call.args.len() == 3)
         {
             return Some(parse_quote!(*mut u8));
         }
