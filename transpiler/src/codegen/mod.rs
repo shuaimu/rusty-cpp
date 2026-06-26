@@ -11158,6 +11158,84 @@ impl CodeGen {
         }
     }
 
+    /// For a generic nested fn, the type params that are NOT deducible from any
+    /// parameter type but are fixed by a `where X: Iterator<Item = T>` bound.
+    /// Rust's `T` there is `X::Item`, not an arg-deducible param, so the C++20
+    /// template lambda can't take it as `<typename T>`; instead the body binds
+    /// `using T = associated_item_t<X>;`. Returns `(T, derivation-cpp)` pairs.
+    fn nested_fn_derived_type_param_usings(
+        &self,
+        f: &syn::ItemFn,
+        type_params: &HashSet<String>,
+    ) -> Vec<(String, String)> {
+        let appears_in_a_param = |name: &str| {
+            let one: HashSet<String> = std::iter::once(name.to_string()).collect();
+            f.sig.inputs.iter().any(|arg| {
+                matches!(arg, syn::FnArg::Typed(pt)
+                    if self.type_contains_named_type_params(&pt.ty, &one))
+            })
+        };
+        let mut usings: Vec<(String, String)> = Vec::new();
+        let Some(wc) = &f.sig.generics.where_clause else {
+            return usings;
+        };
+        for pred in &wc.predicates {
+            let syn::WherePredicate::Type(pt) = pred else {
+                continue;
+            };
+            let syn::Type::Path(bounded) = &pt.bounded_ty else {
+                continue;
+            };
+            let Some(bounded_name) = bounded.path.segments.last().map(|s| s.ident.to_string())
+            else {
+                continue;
+            };
+            for bound in &pt.bounds {
+                let syn::TypeParamBound::Trait(tb) = bound else {
+                    continue;
+                };
+                let Some(last) = tb.path.segments.last() else {
+                    continue;
+                };
+                if last.ident != "Iterator" {
+                    continue;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    continue;
+                };
+                for a in &args.args {
+                    let syn::GenericArgument::AssocType(at) = a else {
+                        continue;
+                    };
+                    if at.ident != "Item" {
+                        continue;
+                    }
+                    let syn::Type::Path(item_tp) = &at.ty else {
+                        continue;
+                    };
+                    let Some(item_name) =
+                        item_tp.path.segments.last().map(|s| s.ident.to_string())
+                    else {
+                        continue;
+                    };
+                    if type_params.contains(&item_name)
+                        && !appears_in_a_param(&item_name)
+                        && !usings.iter().any(|(p, _)| p == &item_name)
+                    {
+                        usings.push((
+                            item_name,
+                            format!(
+                                "rusty::detail::associated_item_t<std::remove_cvref_t<{}>>",
+                                bounded_name
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        usings
+    }
+
     fn emit_nested_function(&mut self, f: &syn::ItemFn) {
         let name = escape_cpp_keyword(&f.sig.ident.to_string());
         let return_type = self.map_return_type(&f.sig.output);
@@ -11171,6 +11249,36 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
+        // A GENERIC local fn becomes a C++20 template lambda so its type params
+        // survive (the old `[](auto&…)` form dropped them, breaking any body use
+        // of `T`/`State<T>`). Params that appear in a parameter type are DEDUCIBLE
+        // → template-lambda params; params fixed only by a `where X:
+        // Iterator<Item=T>` bound are DERIVED → bound by a `using T = …;` at the
+        // body top (since `T = X::Item` can't be deduced from the args).
+        let is_generic_nested_fn = !nested_type_params.is_empty();
+        let derived_type_param_usings = self.nested_fn_derived_type_param_usings(f, &nested_type_params);
+        let derived_type_params: HashSet<String> = derived_type_param_usings
+            .iter()
+            .map(|(p, _)| p.clone())
+            .collect();
+        let deducible_type_params: Vec<String> = f
+            .sig
+            .generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Type(tp) => {
+                    let n = tp.ident.to_string();
+                    (!derived_type_params.contains(&n)).then_some(n)
+                }
+                _ => None,
+            })
+            .collect();
+        // Only switch a generic local fn to the C++20 template-lambda form when it
+        // has a DERIVED type param (`T = X::Item`) the old `[](auto&…)` form can't
+        // name. Generic fns without one (their type params never appear as a type
+        // in the body) keep the simpler `auto`-param form that already worked.
+        let use_template_lambda = is_generic_nested_fn && !derived_type_param_usings.is_empty();
         // Item 8: detect self-recursion in the body so we can lower it as
         // a Y-combinator. Rust's nested `fn` items can name themselves
         // (they resolve like top-level fns), but a C++ `auto`-deduced
@@ -11195,7 +11303,20 @@ impl CodeGen {
         }
         for arg in &f.sig.inputs {
             if let syn::FnArg::Typed(pat_type) = arg {
-                let ty = if !nested_type_params.is_empty()
+                let ty = if use_template_lambda
+                    && !derived_type_params.is_empty()
+                    && self.type_contains_named_type_params(&pat_type.ty, &derived_type_params)
+                {
+                    // Param mentions a DERIVED type param (`T = X::Item`), which is
+                    // not a template-lambda param — keep the `auto&` fallback.
+                    Self::nested_generic_param_fallback_cpp_type(&pat_type.ty)
+                } else if use_template_lambda
+                    && self.type_contains_named_type_params(&pat_type.ty, &nested_type_params)
+                {
+                    // Param mentions only DEDUCIBLE type params (e.g. `&mut II`) —
+                    // resolve to the real type so the template lambda deduces them.
+                    self.resolve_param_cpp_type(&pat_type.ty)
+                } else if !nested_type_params.is_empty()
                     && self.type_contains_named_type_params(&pat_type.ty, &nested_type_params)
                 {
                     Self::nested_generic_param_fallback_cpp_type(&pat_type.ty)
@@ -11222,7 +11343,14 @@ impl CodeGen {
             && !return_type.contains("/* TODO:")
             && !type_string_has_auto_placeholder(&return_type)
             && !self.mapped_assoc_type_contains_unbound_placeholder(&return_type);
-        let ret_annotation = if return_type == "void" || !return_type_is_concrete {
+        // A generic nested fn's return type (e.g. `State<T>`) references its
+        // DERIVED param `T`, which is bound by a `using` only inside the body — so
+        // a trailing return type can't name it. Omit it and let the body's
+        // `return` statements deduce it.
+        let ret_annotation = if return_type == "void"
+            || !return_type_is_concrete
+            || use_template_lambda
+        {
             String::new()
         } else {
             format!(" -> {}", return_type)
@@ -11230,8 +11358,10 @@ impl CodeGen {
 
         // SafeFn signature can't represent the Y-combinator's extra
         // `__self` param cleanly (the inner-call signature embeds itself);
-        // fall back to the plain `auto` form for recursive nested fns.
+        // fall back to the plain `auto` form for recursive nested fns. A generic
+        // nested fn must be a C++20 template lambda, which SafeFn can't wrap.
         let can_emit_safe_fn = !is_self_recursive
+            && !use_template_lambda
             && return_type_is_concrete
             && !param_types
                 .iter()
@@ -11245,12 +11375,31 @@ impl CodeGen {
             ));
         } else {
             let capture = if needs_sibling_capture { "&" } else { "" };
+            // C++20 template lambda for a generic local fn: deducible type params
+            // become the lambda's template parameter list.
+            let template_decl = if use_template_lambda && !deducible_type_params.is_empty() {
+                format!(
+                    "<{}>",
+                    deducible_type_params
+                        .iter()
+                        .map(|p| format!("typename {}", p))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                String::new()
+            };
             self.writeln(&format!(
-                "const auto {} = [{}]({}){} {{",
-                name, capture, params, ret_annotation
+                "const auto {} = [{}]{}({}){} {{",
+                name, capture, template_decl, params, ret_annotation
             ));
         }
         self.indent += 1;
+        // Bind each DERIVED type param (`T = X::Item`) so the body's references to
+        // it resolve. Emitted first so subsequent body statements can use it.
+        for (param, derivation) in &derived_type_param_usings {
+            self.writeln(&format!("using {} = {};", param, derivation));
+        }
         self.push_return_value_scope(&return_type);
         self.push_return_type_hint(&f.sig.output);
         self.push_param_bindings(&f.sig.inputs);
