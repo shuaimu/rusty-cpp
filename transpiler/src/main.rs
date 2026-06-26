@@ -1435,6 +1435,15 @@ fn run_cargo_expand_with_workspace_fallback(
     }
 
     let initial_stderr = String::from_utf8_lossy(&initial.stderr);
+    // A target that requires a cargo feature we don't enable — e.g. smallvec's
+    // `debugger_visualizer` integration test ("requires the features:
+    // debugger_visualizer") — is legitimately not expandable in this config. It is
+    // NOT a workspace mismatch, and routing it through the workspace/isolated
+    // retry can recurse into a cargo-resolver stack overflow that aborts the whole
+    // crate run. Return the failed output so the caller skips just this target.
+    if initial_stderr.contains("requires the features") {
+        return Ok(initial);
+    }
     if !is_workspace_mismatch(&initial_stderr) {
         return Ok(initial);
     }

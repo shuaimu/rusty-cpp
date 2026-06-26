@@ -5286,7 +5286,7 @@ impl CodeGen {
             // bind the return `T` to the wrong argument (the `hash: u64` slot),
             // typing the binding `u64&` and breaking the `.1` tuple projection.
             let ret_ty = if let Some((_, subs)) =
-                self.receiver_owner_name_and_type_substitutions(&mc.receiver)
+                self.owner_name_and_type_substitutions_from_receiver_type(&receiver_ty)
                 && !subs.is_empty()
             {
                 self.substitute_type_params_in_type(&ret_ty, &subs)

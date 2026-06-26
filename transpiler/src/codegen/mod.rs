@@ -8910,6 +8910,29 @@ impl CodeGen {
         substitutions: &HashMap<String, syn::Type>,
     ) -> syn::Type {
         fn recurse(ty: &mut syn::Type, substitutions: &HashMap<String, syn::Type>) {
+            thread_local! {
+                static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+            }
+            // A substitution whose VALUE re-introduces the substituted param (a
+            // self-referential map like `{T: …T…}`, produced when a receiver type's
+            // own arg names match its declared param) makes the `<V>::Tail` re-walk
+            // below expand without bound — a stack overflow on deep substitutions
+            // (smallvec). Cap the recursion: real type nesting never approaches this.
+            let depth = DEPTH.with(|d| {
+                let v = d.get() + 1;
+                d.set(v);
+                v
+            });
+            struct DepthGuard;
+            impl Drop for DepthGuard {
+                fn drop(&mut self) {
+                    DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+                }
+            }
+            let _guard = DepthGuard;
+            if depth > 64 {
+                return;
+            }
             match ty {
                 syn::Type::Path(tp) => {
                     if tp.qself.is_none() {
@@ -26770,7 +26793,19 @@ impl CodeGen {
         receiver: &syn::Expr,
     ) -> Option<(String, HashMap<String, syn::Type>)> {
         let receiver_ty = self.infer_simple_expr_type(receiver)?;
-        let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        self.owner_name_and_type_substitutions_from_receiver_type(&receiver_ty)
+    }
+
+    /// Same as `receiver_owner_name_and_type_substitutions` but from an
+    /// ALREADY-INFERRED receiver type. Callers that have already run
+    /// `infer_simple_expr_type` on the receiver MUST use this — re-inferring (the
+    /// expr-taking variant) double-walks a method chain and recurses to a stack
+    /// overflow on deep chains (smallvec).
+    fn owner_name_and_type_substitutions_from_receiver_type(
+        &self,
+        receiver_ty: &syn::Type,
+    ) -> Option<(String, HashMap<String, syn::Type>)> {
+        let receiver_ty = self.peel_reference_paren_group_type(receiver_ty);
         let syn::Type::Path(tp) = receiver_ty else {
             return None;
         };
@@ -26843,6 +26878,15 @@ impl CodeGen {
             let Some(concrete_ty) = provided_iter.next() else {
                 break;
             };
+            // Skip a SELF-REFERENTIAL mapping `{P: …P…}` — a receiver whose own arg
+            // re-introduces the param it instantiates (e.g. `SmallVec<A>` where the
+            // declared param is also `A`). Substituting `P` with a type that
+            // contains `P` is a degenerate fixpoint that `substitute_type_params_in_type`
+            // expands without bound (a stack overflow on smallvec). A genuine
+            // instantiation like `{T: (K,V)}` is unaffected.
+            if self.type_mentions_named_type_param(&concrete_ty, param) {
+                continue;
+            }
             substitutions.insert(param.clone(), concrete_ty);
         }
 
