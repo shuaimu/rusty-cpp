@@ -4806,6 +4806,32 @@ impl CodeGen {
             .collect()
     }
 
+    /// Local GENERIC `type X<T> = …` aliases in a function body. C++ forbids
+    /// in-function templates, so these must be hoisted to namespace scope (where
+    /// `template<typename T> using X = …` is legal). Non-generic local aliases are
+    /// fine in-function and are NOT hoisted.
+    pub(super) fn collect_hoistable_local_generic_type_aliases_in_block(
+        &self,
+        block: &syn::Block,
+    ) -> Vec<syn::ItemType> {
+        block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Item(syn::Item::Type(t)) => {
+                    let has_generics = t.generics.params.iter().any(|param| {
+                        matches!(
+                            param,
+                            syn::GenericParam::Type(_) | syn::GenericParam::Const(_)
+                        )
+                    });
+                    has_generics.then_some(t.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(super) fn collect_hoistable_local_enums_in_block(&self, block: &syn::Block) -> Vec<syn::ItemEnum> {
         let local_impl_template_targets: HashSet<String> = block
             .stmts

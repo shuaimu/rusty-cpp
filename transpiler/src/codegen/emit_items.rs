@@ -303,15 +303,30 @@ impl CodeGen {
                 &outer_function_params,
             )
         });
+        // Local generic `type X<T> = …` aliases are illegal in-function (C++ has no
+        // block-scope templates) — hoist them to namespace scope too. Only those
+        // not referencing an outer function param (which wouldn't be in scope at
+        // namespace level) are hoistable.
+        let mut hoisted_local_aliases =
+            self.collect_hoistable_local_generic_type_aliases_in_block(&f.block);
+        hoisted_local_aliases.retain(|t| {
+            !Self::local_type_items_reference_names(
+                &f.block,
+                &t.ident.to_string(),
+                &outer_function_params,
+            )
+        });
         let mut hoisted_local_type_names: HashSet<String> = hoisted_local_generic_structs
             .iter()
             .map(|s| s.ident.to_string())
             .collect();
         hoisted_local_type_names.extend(hoisted_local_enums.iter().map(|e| e.ident.to_string()));
+        hoisted_local_type_names.extend(hoisted_local_aliases.iter().map(|t| t.ident.to_string()));
         if !hoisted_local_type_names.is_empty() {
             self.push_type_param_scope(&f.sig.generics);
             self.hoisted_local_type_name_scopes
                 .push(hoisted_local_type_names.clone());
+            self.emit_hoisted_local_generic_type_aliases(&hoisted_local_aliases);
             self.emit_hoisted_local_enums_for_block(&f.block, &hoisted_local_enums);
             self.emit_hoisted_local_generic_structs_for_block(
                 &f.block,
@@ -5233,19 +5248,40 @@ impl CodeGen {
         } else {
             self.collect_hoistable_local_generic_structs_in_block(&method.block)
         };
+        // Local generic `type X<T> = …` aliases (e.g. tree_reduce's `State<T>`) are
+        // illegal in-function; hoist them to namespace scope like the structs/enums.
+        let hoisted_local_aliases = if declaration_only {
+            Vec::new()
+        } else {
+            let outer_method_params =
+                Self::generic_type_or_const_param_names(&method.sig.generics);
+            let mut a = self.collect_hoistable_local_generic_type_aliases_in_block(&method.block);
+            a.retain(|t| {
+                !Self::local_type_items_reference_names(
+                    &method.block,
+                    &t.ident.to_string(),
+                    &outer_method_params,
+                )
+            });
+            a
+        };
         let mut hoisted_local_type_names: HashSet<String> = hoisted_local_generic_structs
             .iter()
             .map(|s| s.ident.to_string())
             .collect();
         hoisted_local_type_names.extend(hoisted_local_enums.iter().map(|e| e.ident.to_string()));
+        hoisted_local_type_names.extend(hoisted_local_aliases.iter().map(|t| t.ident.to_string()));
         if !declaration_only
-            && (!hoisted_local_enums.is_empty() || !hoisted_local_generic_structs.is_empty())
+            && (!hoisted_local_enums.is_empty()
+                || !hoisted_local_generic_structs.is_empty()
+                || !hoisted_local_aliases.is_empty())
         {
             self.push_type_param_scope(&method.sig.generics);
             if !hoisted_local_type_names.is_empty() {
                 self.hoisted_local_type_name_scopes
                     .push(hoisted_local_type_names.clone());
             }
+            self.emit_hoisted_local_generic_type_aliases(&hoisted_local_aliases);
             self.emit_hoisted_local_enums_for_block(&method.block, &hoisted_local_enums);
             self.emit_hoisted_local_generic_structs_for_block(
                 &method.block,

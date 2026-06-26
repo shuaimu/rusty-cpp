@@ -11518,6 +11518,9 @@ impl CodeGen {
             syn::Stmt::Item(syn::Item::Enum(e)) => {
                 !hoisted_type_names.contains(&e.ident.to_string())
             }
+            syn::Stmt::Item(syn::Item::Type(t)) => {
+                !hoisted_type_names.contains(&t.ident.to_string())
+            }
             syn::Stmt::Item(syn::Item::Impl(impl_block)) => {
                 Self::local_impl_target_type_name(impl_block)
                     .map_or(true, |name| !hoisted_type_names.contains(&name))
@@ -11525,6 +11528,16 @@ impl CodeGen {
             _ => true,
         });
         filtered
+    }
+
+    /// Emit hoisted local generic type aliases at namespace scope. Each goes
+    /// through `emit_item`, which at namespace scope (block_depth 0) produces the
+    /// legal `template<typename T> using X = …;` form — unlike the illegal
+    /// in-function template the block-scope path would emit.
+    fn emit_hoisted_local_generic_type_aliases(&mut self, aliases: &[syn::ItemType]) {
+        for alias in aliases {
+            self.emit_item(&syn::Item::Type(alias.clone()));
+        }
     }
 
     fn emit_hoisted_local_enums_for_block(
