@@ -5011,6 +5011,38 @@ impl CodeGen {
         ))
     }
 
+    /// A raw-pointer intrinsic (`p.write(v)`, `p.read()`, …) on a raw-pointer
+    /// receiver has a dedicated `rusty::ptr::*` lowering later in
+    /// `emit_method_call_expr_to_string`. It must NOT be intercepted by the UFCS
+    /// trait dispatch when a DEPENDENCY happens to declare a same-named trait
+    /// method (e.g. itoa's `Sealed::write`), which classifies the name `TraitOnly`
+    /// and would emit a `Sealed_::write_(p, v)` dispatch — a hard error on a
+    /// pointer (no member `write_`; the `Sealed_` namespace isn't visible
+    /// cross-module). Mirrors the receiver test used by those lowerings.
+    fn method_call_is_raw_pointer_intrinsic(
+        &self,
+        mc: &syn::ExprMethodCall,
+        method_name: &str,
+    ) -> bool {
+        if !matches!(
+            method_name,
+            "write"
+                | "read"
+                | "write_unaligned"
+                | "read_unaligned"
+                | "write_volatile"
+                | "read_volatile"
+                | "write_bytes"
+        ) {
+            return false;
+        }
+        if self.is_expr_raw_pointer_like(&mc.receiver) {
+            return true;
+        }
+        let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+        Self::emitted_pointer_add_or_offset_call(&raw_receiver)
+    }
+
     pub(super) fn emit_method_call_expr_to_string(
         &self,
         mc: &syn::ExprMethodCall,
@@ -5060,6 +5092,7 @@ impl CodeGen {
                 self.ufcs_method_classes.get(&method_name),
                 Some(crate::transpile::MethodNameClass::TraitOnly)
             ) && !Self::method_prefers_runtime_helper_namespace(&method_name)
+                && !self.method_call_is_raw_pointer_intrinsic(mc, &method_name)
             {
                 // Only intercept when a CONCRETE impl actually emits a
                 // `<Tr>_::m` free function (the owner map is built from
