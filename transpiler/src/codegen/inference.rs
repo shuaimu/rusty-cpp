@@ -10179,21 +10179,6 @@ impl CodeGen {
         Some(bound_path)
     }
 
-    pub(super) fn infer_method_turbofish_type_arg_from_call_arg(
-        &self,
-        mc: &syn::ExprMethodCall,
-        emitted_args: &[String],
-        type_param_idx: usize,
-    ) -> Option<String> {
-        let call_arg_cpp = emitted_args.get(type_param_idx).cloned().or_else(|| {
-            mc.args
-                .iter()
-                .nth(type_param_idx)
-                .map(|arg| self.emit_expr_maybe_move(arg))
-        })?;
-        Some(format!("std::remove_cvref_t<decltype(({}))>", call_arg_cpp))
-    }
-
     pub(super) fn infer_serde_access_method_template_type_from_expected(
         &self,
         method_name: &str,

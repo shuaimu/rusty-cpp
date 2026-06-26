@@ -13115,6 +13115,47 @@ fn test_leaf41543333333327171_nonself_method_turbofish_const_args_are_preserved(
 }
 
 #[test]
+fn test_method_turbofish_trailing_infer_is_truncated_not_positionally_filled() {
+    // `drop_inner_table::<T, _>(&alloc, layout)`: `T` is explicit (used only in
+    // the body, deducible from nothing), `_` is the allocator `A` (deducible from
+    // the `alloc` argument). The turbofish slot does NOT line up with an argument
+    // — `T` consumes none — so positionally filling the `_` from arg 1 would bind
+    // `A` to the layout's type. A TRAILING `_` must instead be omitted, keeping
+    // the concrete prefix `<T>` and letting C++ deduce `A` from `&self.alloc`.
+    let out = transpile_str(
+        r#"
+        pub struct TableLayout { size: usize }
+        pub struct Inner { mask: usize }
+        impl Inner {
+            pub unsafe fn drop_inner_table<T, A>(&mut self, alloc: &A, table_layout: TableLayout) {
+                let _ = (alloc, table_layout);
+            }
+        }
+        pub struct Table<T, A> {
+            inner: Inner,
+            alloc: A,
+            marker: core::marker::PhantomData<T>,
+        }
+        impl<T, A> Table<T, A> {
+            const LAYOUT: TableLayout = TableLayout { size: 8 };
+            pub unsafe fn clear(&mut self) {
+                self.inner.drop_inner_table::<T, _>(&self.alloc, Self::LAYOUT);
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("drop_inner_table<T>(this->alloc,"),
+        "trailing `_` must truncate to `<T>` (A deduced from the alloc arg), not be \
+         positionally filled with the layout's type\nGot: {out}"
+    );
+    assert!(
+        !out.contains("drop_inner_table<T, std::remove_cvref_t<decltype"),
+        "the `_` must NOT be positionally filled from the (misaligned) call arg\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_leaf41542_field_name_collision_with_method_is_renamed() {
     let out = transpile_str(
         r#"

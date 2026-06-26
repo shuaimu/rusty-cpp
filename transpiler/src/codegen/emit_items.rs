@@ -6616,17 +6616,53 @@ impl CodeGen {
         emitted_args: &[String],
     ) -> Option<String> {
         let turbofish = mc.turbofish.as_ref()?;
+        let is_infer = |arg: &syn::GenericArgument| match arg {
+            syn::GenericArgument::Type(t) => matches!(t, syn::Type::Infer(_)),
+            syn::GenericArgument::Const(c) => matches!(c, syn::Expr::Infer(_)),
+            _ => false,
+        };
+        let type_const: Vec<&syn::GenericArgument> = turbofish
+            .args
+            .iter()
+            .filter(|a| {
+                matches!(
+                    a,
+                    syn::GenericArgument::Type(_) | syn::GenericArgument::Const(_)
+                )
+            })
+            .collect();
+        // A TRAILING run of `_` placeholders (nothing concrete follows the first
+        // `_`) can be omitted entirely: C++ deduces those params from the call
+        // arguments, and the turbofish slot need not line up with an argument
+        // position — `drop_inner_table::<T, _>(&alloc, layout)` has an explicit `T`
+        // that consumes no argument, so positionally filling the `_` (`A`) from the
+        // layout arg would bind the allocator to the wrong type. Truncating at the
+        // first such `_` keeps the concrete prefix (`<T>`) and lets deduction
+        // supply the rest. A `_` FOLLOWED by a concrete arg (e.g. a const generic,
+        // `extend_from_iter::<_, true>`) must instead be filled — C++ has no
+        // skip-a-leading-slot syntax and the trailing concrete arg can't be deduced
+        // away — so fall back to the positional `decltype(arg)` fill there.
+        let truncate_at = type_const
+            .iter()
+            .position(|a| is_infer(a))
+            .filter(|&fi| !type_const.iter().skip(fi + 1).any(|a| !is_infer(a)));
         let mut mapped_args: Vec<String> = Vec::new();
         let mut type_param_idx = 0usize;
-        for arg in turbofish.args.iter() {
+        for (i, arg) in type_const.iter().enumerate() {
+            if Some(i) == truncate_at {
+                break;
+            }
             match arg {
                 syn::GenericArgument::Type(t) => {
                     if matches!(t, syn::Type::Infer(_)) {
-                        mapped_args.push(self.infer_method_turbofish_type_arg_from_call_arg(
-                            mc,
-                            emitted_args,
-                            type_param_idx,
-                        )?);
+                        let call_arg = emitted_args.get(type_param_idx).cloned().or_else(|| {
+                            mc.args
+                                .iter()
+                                .nth(type_param_idx)
+                                .map(|a| self.emit_expr_maybe_move(a))
+                        })?;
+                        mapped_args
+                            .push(format!("std::remove_cvref_t<decltype(({}))>", call_arg));
                     } else {
                         mapped_args.push(self.map_type(t));
                     }
