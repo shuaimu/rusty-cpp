@@ -13156,6 +13156,68 @@ fn test_method_turbofish_trailing_infer_is_truncated_not_positionally_filled() {
 }
 
 #[test]
+fn test_blanket_trait_default_const_resolves_at_type_param_use_site() {
+    // A trait associated const with a default body + blanket impl
+    // (`SizedTypeProperties::NEEDS_DROP = mem::needs_drop::<Self>()`). The trait is
+    // skipped (assoc-const traits unsupported), so a type-param access `T::NEEDS_DROP`
+    // must resolve to the default body with `Self` → `T`, not a bogus member access.
+    let out = transpile_str(
+        r#"
+        pub trait SizedTypeProperties: Sized {
+            const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
+            const IS_ZERO_SIZED: bool = core::mem::size_of::<Self>() == 0;
+        }
+        impl<T> SizedTypeProperties for T {}
+        pub struct Bucket;
+        impl Bucket {
+            pub fn drop_elem<T>(&self) {
+                if T::NEEDS_DROP {
+                    let _ = T::IS_ZERO_SIZED;
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::mem::needs_drop<T>()"),
+        "T::NEEDS_DROP must lower to the default body mem::needs_drop::<T>()\nGot: {out}"
+    );
+    assert!(
+        out.contains("rusty::mem::size_of<T>() == 0"),
+        "T::IS_ZERO_SIZED must lower to mem::size_of::<T>() == 0\nGot: {out}"
+    );
+    assert!(
+        !out.contains("T::NEEDS_DROP"),
+        "the bogus member access must be gone\nGot: {out}"
+    );
+}
+
+#[test]
+fn test_drop_in_place_method_on_raw_pointer_lowers_to_free_fn() {
+    // `<*mut T>::drop_in_place()` as a method on a raw-pointer receiver has no C++
+    // member form — lower to the free function `rusty::ptr::drop_in_place(ptr)`.
+    let out = transpile_str(
+        r#"
+        pub struct Bucket<T> { ptr: core::ptr::NonNull<T> }
+        impl<T> Bucket<T> {
+            pub fn as_ptr(&self) -> *mut T { self.ptr.as_ptr() }
+            pub unsafe fn drop_it(&self) {
+                self.as_ptr().drop_in_place();
+            }
+        }
+        "#,
+    );
+    assert!(
+        out.contains("rusty::ptr::drop_in_place("),
+        "drop_in_place on a raw pointer must lower to the free fn\nGot: {out}"
+    );
+    assert!(
+        !out.contains("->drop_in_place()"),
+        "the bogus member call must be gone\nGot: {out}"
+    );
+}
+
+#[test]
 fn test_leaf41542_field_name_collision_with_method_is_renamed() {
     let out = transpile_str(
         r#"

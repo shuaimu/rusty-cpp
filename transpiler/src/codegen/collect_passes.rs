@@ -3125,6 +3125,17 @@ impl CodeGen {
                         .or_insert_with(|| scoped_trait_name.clone());
                     let mut static_defaults = Vec::new();
                     for trait_item in &t.items {
+                        // Associated CONSTS with a default body: record `NAME →
+                        // (body, trait)` so a type-param access `T::NAME` lowers to
+                        // the default body (the trait itself is skipped — see the
+                        // interface_traits TODO). First declaration wins.
+                        if let syn::TraitItem::Const(c) = trait_item
+                            && let Some((_, default_expr)) = &c.default
+                        {
+                            self.trait_default_const_exprs
+                                .entry(c.ident.to_string())
+                                .or_insert_with(|| (default_expr.clone(), trait_name.clone()));
+                        }
                         if let syn::TraitItem::Fn(method) = trait_item {
                             let has_default = method.default.is_some();
                             let has_receiver =

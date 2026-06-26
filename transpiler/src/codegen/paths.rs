@@ -2603,7 +2603,45 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         self.rewrite_seed_ctor_path_string(&emitted)
     }
 
+    /// A `T::CONST` access where `CONST` is a trait associated const with a
+    /// default body (`SizedTypeProperties::NEEDS_DROP = mem::needs_drop::<Self>()`)
+    /// and `T` is a generic type parameter (which cannot carry an inherent member
+    /// of that name) lowers to the default body with the trait's `Self` replaced by
+    /// `T` — `T::NEEDS_DROP` → `(rusty::mem::needs_drop<T>())`. The trait itself is
+    /// not emitted (associated-const traits are skipped), so without this the
+    /// dependent access becomes a bogus member of a concrete type at instantiation
+    /// (`std::tuple<…>::NEEDS_DROP`).
+    pub(super) fn try_emit_trait_default_const_path(&self, path: &syn::Path) -> Option<String> {
+        if path.segments.len() != 2 {
+            return None;
+        }
+        let owner = path.segments[0].ident.to_string();
+        let const_name = path.segments[1].ident.to_string();
+        let (body, _trait) = self.trait_default_const_exprs.get(&const_name)?;
+        // Only for an owner that cannot define the member itself: a generic type
+        // parameter in scope, or `Self`. A concrete type keeps the normal
+        // `Type::CONST` path (it may define or override the const).
+        if !(self.is_type_param_in_scope(&owner) || owner == "Self") {
+            return None;
+        }
+        let mut substituted = body.clone();
+        if owner != "Self" {
+            use syn::visit_mut::VisitMut;
+            let mut rewriter = super::TypeParamPathRewriter {
+                replacements: std::collections::HashMap::from([(
+                    "Self".to_string(),
+                    owner.clone(),
+                )]),
+            };
+            rewriter.visit_expr_mut(&mut substituted);
+        }
+        Some(format!("({})", self.emit_expr_to_string(&substituted)))
+    }
+
     pub(super) fn emit_expr_path_to_string(&self, path: &syn::Path) -> String {
+        if let Some(rendered) = self.try_emit_trait_default_const_path(path) {
+            return rendered;
+        }
         let joined = path
             .segments
             .iter()

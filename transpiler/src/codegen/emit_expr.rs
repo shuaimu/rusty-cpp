@@ -8184,6 +8184,23 @@ impl CodeGen {
                 receiver, args[0], args[1]
             );
         }
+        // `<*mut T>::drop_in_place()` runs T's destructor through a raw pointer.
+        // As a METHOD on a raw-pointer receiver it has no C++ member equivalent
+        // (`ptr->drop_in_place()` looks for a member of the pointee) — lower it to
+        // the free function `rusty::ptr::drop_in_place(ptr)`, matching the
+        // path-call form `ptr::drop_in_place(ptr)`.
+        if method_name == "drop_in_place"
+            && args.is_empty()
+            && self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::ptr::drop_in_place({})", receiver);
+        }
         if matches!(method_name.as_str(), "add" | "offset" | "sub")
             && args.len() == 1
             && self.is_expr_raw_pointer_like(&mc.receiver)

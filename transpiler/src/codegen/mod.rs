@@ -722,6 +722,14 @@ pub struct CodeGen {
     /// Trait default static methods (no receiver) keyed by scoped trait path.
     /// Used to inject these methods into implementing types.
     pub(crate) trait_static_default_methods: HashMap<String, Vec<syn::ImplItemFn>>,
+    /// Trait associated CONSTS that have a default body, keyed by const name →
+    /// (default body, declaring trait name). A type-param access `T::NAME` (which
+    /// cannot resolve to an inherent member) is emitted as the default body with
+    /// the trait's `Self` substituted by the owner — e.g. hashbrown's
+    /// `SizedTypeProperties::NEEDS_DROP = mem::needs_drop::<Self>()`, so
+    /// `T::NEEDS_DROP` → `rusty::mem::needs_drop<T>()`. Avoids the unsupported
+    /// associated-const-trait emission for the blanket-impl-default case.
+    pub(crate) trait_default_const_exprs: HashMap<String, (syn::Expr, String)>,
     /// Scoped trait paths declared in this crate/module (including traits with
     /// no default static methods). Used to avoid cross-trait fallback injection.
     pub(crate) trait_declared_paths: HashSet<String>,
@@ -1576,6 +1584,7 @@ impl CodeGen {
             trait_bound_type_param_scopes: Vec::new(),
             callable_type_param_return_scopes: Vec::new(),
             trait_static_default_methods: HashMap::new(),
+            trait_default_const_exprs: HashMap::new(),
             trait_declared_paths: HashSet::new(),
             trait_method_has_receiver: std::rc::Rc::new(HashMap::new()),
             module_runtime_helper_traits: HashSet::new(),
