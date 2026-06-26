@@ -5080,6 +5080,22 @@ impl CodeGen {
             let op = if mc.method == "force_add" { "+" } else { "*" };
             return format!("(({}) {} ({}))", receiver, op, rhs);
         }
+        // c2rust's `ops::ForceInto::force_into<U>(self) -> U` — a checked
+        // `TryInto` conversion. Like force_add it must be intercepted before the
+        // UFCS dispatch (the member fallback `x.force_into()` hard-errors on a
+        // scalar — "member reference base type 'unsigned long' is not a structure").
+        // Lower to the value, cast to the expected target type when known; C++
+        // integer conversions otherwise apply implicitly at the use site.
+        if mc.method == "force_into" && mc.args.is_empty() {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            if let Some(ty) = expected_ty {
+                let cpp_ty = self.map_type(ty);
+                if cpp_ty != "auto" && !type_string_has_auto_placeholder(&cpp_ty) {
+                    return format!("static_cast<{}>({})", cpp_ty, receiver);
+                }
+            }
+            return format!("({})", receiver);
+        }
         // UFCS Phase 3 (book § 3.2.3): a method whose name is a *trait-only*
         // method of one of THIS crate's traits lowers to a free call
         // `m(recv, args)` (resolved via the `<Tr>_` namespace + `using`s in
@@ -8400,7 +8416,7 @@ impl CodeGen {
         }
         if matches!(
             method_name.as_str(),
-            "wrapping_add" | "wrapping_sub" | "wrapping_mul"
+            "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "wrapping_div" | "wrapping_rem"
         ) && args.len() == 1
             && !self.is_expr_raw_pointer_like(&mc.receiver)
         {
@@ -8414,6 +8430,10 @@ impl CodeGen {
                 "wrapping_add" => "+",
                 "wrapping_sub" => "-",
                 "wrapping_mul" => "*",
+                // Unsigned division/remainder never wrap (no overflow except /0,
+                // which traps in Rust too), so the plain operators are exact.
+                "wrapping_div" => "/",
+                "wrapping_rem" => "%",
                 _ => unreachable!(),
             };
             // C++ unsigned arithmetic wraps naturally; cast to size_t to ensure unsigned
