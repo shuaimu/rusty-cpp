@@ -21483,14 +21483,24 @@ impl CodeGen {
                 if self.path_matches_c_like_enum_const(&owner, &last_ident) {
                     self.emit_path_to_string(path)
                 } else {
-                    let variant = path
+                    let raw_variant = path
                         .segments
                         .last()
-                        .map(|seg| {
-                            self.canonical_variant_name(&seg.ident.to_string())
-                                .to_string()
-                        })
+                        .map(|seg| seg.ident.to_string())
                         .unwrap_or_default();
+                    // A `use OtherEnum::Variant as Alias` constructor alias must
+                    // NOT rewrite a qualified `Enum::Variant` whose named owner
+                    // genuinely has this variant. E.g. matching
+                    // `FoldWhile::Continue` while `use Result::{Ok as Continue}`
+                    // is in scope must stay `Continue` (→ `FoldWhile_Continue`),
+                    // not resolve through the alias to `Ok` (→ wrong
+                    // `FoldWhile_Ok`). The alias still applies to bare/unqualified
+                    // variant patterns (handled in the `else` branch below).
+                    let variant = if self.enum_has_variant_name(&owner, &raw_variant) {
+                        raw_variant
+                    } else {
+                        self.canonical_variant_name(&raw_variant).to_string()
+                    };
                     let Some(enum_path) = Self::path_without_last_segment(path) else {
                         return self.emit_path_to_string(path);
                     };
