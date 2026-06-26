@@ -10222,6 +10222,16 @@ impl CodeGen {
             {
                 continue;
             }
+            // The method receiver is emitted as `self_`. A move-closure capturing
+            // `self` must name it `self_` in the init-capture — otherwise
+            // `lookup_local_binding_cpp_name` returns the verbatim Rust `self`,
+            // emitting `self = std::move(self)` whose RHS is undeclared in the
+            // lambda ("use of undeclared identifier 'self'"). The body already
+            // refers to the receiver as `self_`.
+            if rust_name == "self" {
+                cpp_names.push("self_".to_string());
+                continue;
+            }
             let Some(cpp_name) = self.lookup_local_binding_cpp_name(&rust_name) else {
                 continue;
             };
