@@ -2648,6 +2648,29 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             .map(|s| s.ident.to_string())
             .collect::<Vec<_>>()
             .join("::");
+        // A trait comparison method used as a VALUE (a function reference, e.g.
+        // `it.merge_join_by(other, Ord::cmp)` / `k_smallest_relaxed_by(k, Ord::cmp)`).
+        // Emitted verbatim, `Ord::cmp` is an undeclared identifier in C++. Lower to
+        // a comparator lambda over the same `rusty::cmp` runtime helper the CALL
+        // form `Ord::cmp(a, b)` targets (emit_expr.rs ~16226). The call form is
+        // intercepted before reaching here, so this only fires on the value form.
+        match joined.as_str() {
+            "Ord::cmp" | "core::cmp::Ord::cmp" | "std::cmp::Ord::cmp" => {
+                return "[](auto&& __a, auto&& __b) { return rusty::cmp::cmp(\
+                        std::forward<decltype(__a)>(__a), \
+                        std::forward<decltype(__b)>(__b)); }"
+                    .to_string();
+            }
+            "PartialOrd::partial_cmp"
+            | "core::cmp::PartialOrd::partial_cmp"
+            | "std::cmp::PartialOrd::partial_cmp" => {
+                return "[](auto&& __a, auto&& __b) { return rusty::partial_cmp(\
+                        std::forward<decltype(__a)>(__a), \
+                        std::forward<decltype(__b)>(__b)); }"
+                    .to_string();
+            }
+            _ => {}
+        }
         if path.segments.len() == 1
             && path.segments[0].ident == "Self"
             && let Some(current) = &self.current_struct
