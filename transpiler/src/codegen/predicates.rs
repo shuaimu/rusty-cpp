@@ -1705,7 +1705,17 @@ impl CodeGen {
                 }
                 if matches!(
                     method.as_str(),
-                    "add" | "offset" | "sub" | "wrapping_add" | "wrapping_sub" | "wrapping_offset"
+                    "add"
+                        | "offset"
+                        | "sub"
+                        | "wrapping_add"
+                        | "wrapping_sub"
+                        | "wrapping_offset"
+                        // `<*const T>::cast::<U>()` / `<*mut T>::cast()` returns a raw
+                        // pointer exactly when the receiver is one (NonNull::cast →
+                        // NonNull is correctly rejected by the recursion). Lets a
+                        // `p.cast::<U>().write(v)` chain reach the ptr-intrinsic lowering.
+                        | "cast"
                 ) {
                     return self.is_expr_raw_pointer_like(&mc.receiver);
                 }
