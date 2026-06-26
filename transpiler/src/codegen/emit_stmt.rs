@@ -1549,6 +1549,36 @@ impl CodeGen {
         self.writeln("}");
     }
 
+    /// For `let a = if let Some(v) = X { v } else { diverge }`, the type to give
+    /// the (pre-block) result variable `a`: the scrutinee's Some-payload type
+    /// `std::remove_cvref_t<decltype((X).unwrap())>`, which is in scope — unlike
+    /// `decltype(v)`, where `v` is bound only inside the if-let block. Only fires
+    /// when the then-tail is exactly the `Some(v)` payload binding.
+    pub(super) fn if_let_some_payload_result_decl_type(
+        &self,
+        if_expr: &syn::ExprIf,
+        then_tail: &syn::Expr,
+    ) -> Option<String> {
+        let syn::Expr::Let(let_expr) = if_expr.cond.as_ref() else {
+            return None;
+        };
+        let binding = self.simple_some_payload_binding_name(&let_expr.pat)?;
+        let syn::Expr::Path(p) = self.peel_paren_group_expr(then_tail) else {
+            return None;
+        };
+        if p.qself.is_some()
+            || p.path.segments.len() != 1
+            || p.path.segments[0].ident != binding
+        {
+            return None;
+        }
+        let scrutinee_cpp = self.emit_expr_to_string(&let_expr.expr);
+        Some(format!(
+            "std::remove_cvref_t<decltype(({}).unwrap())>",
+            scrutinee_cpp
+        ))
+    }
+
     pub(super) fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
         self.register_local_binding_pattern(pat);
@@ -3660,6 +3690,14 @@ impl CodeGen {
                     self.infer_data_enum_owner_type_from_variant_ctor_expr(then_tail)
                 {
                     self.writeln(&format!("{} {} {{}};", enum_owner_ty, cpp_name));
+                } else if let Some(payload_decl) =
+                    self.if_let_some_payload_result_decl_type(if_expr, then_tail)
+                {
+                    // `let a = if let Some(v) = X { v } else { diverge }`: the result
+                    // var is declared OUTSIDE the if-let block, so `decltype(v)`
+                    // (v is block-local) is undefined. Type it from the scrutinee's
+                    // payload instead — `decltype(X.unwrap())` — which is in scope.
+                    self.writeln(&format!("{} {} {{}};", payload_decl, cpp_name));
                 } else {
                     let then_tail_str = self.emit_expr_to_string(then_tail);
                     self.writeln(&format!("decltype({}) {} {{}};", then_tail_str, cpp_name));
