@@ -2347,9 +2347,10 @@ impl CodeGen {
                         })?;
                         Some(parse_quote!(rusty::detail::associated_item_t<#owner_ty>))
                     }
-                    "ArrayVec" | "IntoIter" | "Iter" | "Vec" | "array" | "span" | "range"
-                    | "range_inclusive" | "range_from" | "range_to" | "range_to_inclusive"
-                    | "Range" | "RangeInclusive" | "RangeFrom" | "RangeTo" | "RangeToInclusive" => {
+                    "ArrayVec" | "IntoIter" | "VecIntoIter" | "Iter" | "Vec" | "array" | "span"
+                    | "range" | "range_inclusive" | "range_from" | "range_to"
+                    | "range_to_inclusive" | "Range" | "RangeInclusive" | "RangeFrom" | "RangeTo"
+                    | "RangeToInclusive" => {
                         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
                             return None;
                         };
