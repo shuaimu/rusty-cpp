@@ -396,6 +396,42 @@ struct associated_item_impl<Container, false, true> {
 template<typename Container>
 using associated_item_t = typename associated_item_impl<Container>::type;
 
+// First template type argument of a class template, else void.
+template<typename T>
+struct first_type_arg {
+    using type = void;
+};
+template<template<typename...> class Tmpl, typename First, typename... Rest>
+struct first_type_arg<Tmpl<First, Rest...>> {
+    using type = First;
+};
+
+// Item type for a container the transpiler can't introspect — a user-defined
+// wrapper (e.g. smallvec's `SmallVec<A>`) that exposes neither an `Item` alias nor
+// a `value_type`. Such a wrapper holds the elements of its first type argument, so
+// its item is that argument's item: recurse via `associated_item_t<First>`
+// (`SmallVec<std::array<u32,2>>` → `associated_item_t<std::array<u32,2>>` → `u32`).
+// When there is no type argument to recurse into, map to the container itself — a
+// COMPLETE type that simply fails the downstream `is_same_v` comparisons. (`void`
+// would ill-form `std::remove_reference_t`/reference uses.) Recursion terminates at
+// the first arg that has an Item/value_type, or at a non-template leaf.
+template<typename Container, typename First = typename first_type_arg<Container>::type>
+struct unknown_container_item {
+    using type = associated_item_t<First>;
+};
+template<typename Container>
+struct unknown_container_item<Container, void> {
+    using type = Container;
+};
+
+// `<C, false, false>`: neither an `Item` alias nor a `value_type`. Avoids the
+// undefined-primary hard error ("implicit instantiation of undefined template")
+// for such a container.
+template<typename Container>
+struct associated_item_impl<Container, false, false> {
+    using type = typename unknown_container_item<Container>::type;
+};
+
 template<typename T>
 constexpr size_t type_level_size() {
     using Raw = std::remove_cv_t<std::remove_reference_t<T>>;
