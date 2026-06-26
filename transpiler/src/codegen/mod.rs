@@ -1022,6 +1022,17 @@ pub struct CodeGen {
     /// (for example `let mut v = ArrayVec::<_, 3>::new(); v.push(x);`).
     /// Used to recover `_` generic arguments in constructor call sites.
     pub(crate) local_placeholder_type_hints: Vec<HashMap<String, syn::Type>>,
+    /// Scoped raw-C++ element overrides for empty collection locals whose element
+    /// type is NOT nameable as a `syn::Type` — because it is the item type of an
+    /// `auto`-typed iterator chain (e.g. `let v = Vec::new(); v.extend(it.take(n))`
+    /// where `it` is a `cons_tuples(...)` chain clang deduces but we never name).
+    /// The engine's authoritative answer there is `decltype(value)`, which has no
+    /// `syn::Type` spelling, so it is carried here as a raw string instead of in
+    /// `local_placeholder_type_hints`. Maps owner local → (base Rust ident whose
+    /// `decltype` names the source iterator/value, wrap_in_associated_item). The
+    /// base name is resolved to its C++ binding lazily at the constructor emission
+    /// (by which point the earlier-declared base is in scope).
+    pub(crate) collection_decltype_element_overrides: Vec<HashMap<String, (String, bool)>>,
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     pub(crate) local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
@@ -1673,6 +1684,7 @@ impl CodeGen {
             mutable_pointer_aliased_vars: std::collections::HashSet::new(),
             repeat_elem_type_hints: HashMap::new(),
             local_placeholder_type_hints: Vec::new(),
+            collection_decltype_element_overrides: Vec::new(),
             local_bindings: Vec::new(),
             local_shadowed_binding_types: Vec::new(),
             in_progress_local_initializers: Vec::new(),

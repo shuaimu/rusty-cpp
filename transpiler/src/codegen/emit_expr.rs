@@ -624,7 +624,11 @@ impl CodeGen {
                 }
             }
         }
+        let decltype_element_overrides =
+            self.collect_collection_decltype_element_overrides(&block.stmts, &placeholder_hints);
         self.local_placeholder_type_hints.push(placeholder_hints);
+        self.collection_decltype_element_overrides
+            .push(decltype_element_overrides);
         self.local_bindings.push(HashMap::new());
         self.local_shadowed_binding_types.push(HashMap::new());
         self.local_cpp_bindings.push(HashMap::new());
@@ -881,6 +885,7 @@ impl CodeGen {
         self.local_manually_drop_bindings.pop();
         self.recursive_nested_fns_in_scope.pop();
         self.local_placeholder_type_hints.pop();
+        self.collection_decltype_element_overrides.pop();
         self.reassigned_vars = prev;
         self.consuming_method_receiver_vars = prev_consuming;
         self.mutable_pointer_aliased_vars = prev_mutable_pointer_aliased;
@@ -12457,6 +12462,13 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // Empty `Vec::new()`/`with_capacity` whose element is the item type of an
+        // `auto`-typed iterator chain (recovered from a later `.extend(...)`): emit
+        // the element via `decltype` instead of leaking `Vec<auto>`. This is the
+        // engine's authoritative answer for a type C++ can only name via decltype.
+        if let Some(emitted) = self.try_emit_empty_collection_ctor_with_decltype_element(call) {
+            return emitted;
+        }
         // Item 8: recursive-nested-fn → Y-combinator call shape. When the
         // call's func is a bare ident matching either the body of the
         // currently-emitting recursive nested fn (use `__self(__self,…)`)

@@ -10488,6 +10488,19 @@ impl CodeGen {
         if let Some(item) = self.infer_iter_item_type_from_expr(expr) {
             return Some(item);
         }
+        if let Some(item) = self.infer_iter_item_type_from_generic_param_receiver(expr) {
+            return Some(item);
+        }
+        self.infer_iter_item_type_via_runtime_associated_item(expr)
+    }
+
+    /// Generic-iterator-parameter case for `infer_iter_item_type_with_generic_fallback`:
+    /// a bare local/param whose type is an in-scope generic type parameter
+    /// `P` (e.g. `fn f<I: Iterator>(i: I)` → `I::Item`).
+    fn infer_iter_item_type_from_generic_param_receiver(
+        &self,
+        expr: &syn::Expr,
+    ) -> Option<syn::Type> {
         let peeled = self.peel_paren_group_expr(expr);
         let syn::Expr::Path(p) = peeled else {
             return None;
@@ -10507,6 +10520,231 @@ impl CodeGen {
             return None;
         }
         Some(parse_quote!(#recv_ty::Item))
+    }
+
+    /// Final iterator-item fallback for a CONCRETE typed iterator whose adapter
+    /// chain the structural pass (`infer_iter_item_type_from_expr`) could not
+    /// resolve — e.g. `product_iter.take(n)` where `product_iter` is an
+    /// itertools `ConsTuples`/`MultiProduct`. Peel the item-preserving adapters
+    /// and references to a base sub-expression whose TYPE we can name, then
+    /// defer item extraction to the runtime trait: `associated_item_t<Base>`.
+    /// The `array.hpp` recursive fallback resolves wrapper iterators
+    /// (`Take<Inner>`, `Filter<Inner>`, …) down to a type that exposes `Item`,
+    /// so we never need to know the wrapper's own item rule here. Only reached
+    /// in genuine iterator contexts (`.extend(arg)` / fold-all receivers — see
+    /// `type_solver::collect_expr_constraints`), never on `push` value args.
+    fn infer_iter_item_type_via_runtime_associated_item(
+        &self,
+        expr: &syn::Expr,
+    ) -> Option<syn::Type> {
+        let mut base = self.peel_paren_group_expr(expr);
+        loop {
+            match base {
+                syn::Expr::MethodCall(mc)
+                    if Self::is_item_preserving_iter_adapter(&mc.method.to_string()) =>
+                {
+                    base = self.peel_paren_group_expr(&mc.receiver);
+                }
+                syn::Expr::Reference(r) => base = self.peel_paren_group_expr(&r.expr),
+                _ => break,
+            }
+        }
+        let base_ty = self.infer_simple_expr_type(base)?;
+        let base_ty = self.peel_reference_paren_group_type(&base_ty).clone();
+        if !self.type_is_placeholder_hint_candidate_allow_scoped_generics(&base_ty) {
+            return None;
+        }
+        Some(parse_quote!(rusty::detail::associated_item_t<#base_ty>))
+    }
+
+    /// Iterator adapters whose `Item` type equals their source iterator's
+    /// `Item` (so we can peel them when walking to a nameable base type).
+    /// Item-CHANGING adapters (`map`, `enumerate`, `zip`, `cloned`, `copied`,
+    /// `flatten`, …) are deliberately excluded — those are handled
+    /// structurally by `infer_iter_item_type_from_expr`.
+    fn is_item_preserving_iter_adapter(method: &str) -> bool {
+        matches!(
+            method,
+            "take"
+                | "skip"
+                | "by_ref"
+                | "fuse"
+                | "peekable"
+                | "rev"
+                | "filter"
+                | "take_while"
+                | "skip_while"
+                | "step_by"
+                | "inspect"
+        )
+    }
+
+    /// Build the raw-C++ `decltype` element overrides (see
+    /// `collection_decltype_element_overrides`) for empty `Vec::new()` locals in
+    /// `stmts` whose element could NOT be resolved as a `syn::Type` (i.e. they
+    /// are absent from `placeholder_hints`). For `let v = Vec::new(); …
+    /// v.extend(SRC)`, where `SRC` peels — through item-preserving adapters and
+    /// references — to a base local declared BEFORE `v`, the element is the item
+    /// type of that base iterator. Since the base is an `auto`-deduced iterator
+    /// chain with no nameable type, the element is recorded as a `decltype`
+    /// recovery rather than a concrete type: this is the engine's authoritative
+    /// answer for a type C++ can name only via `decltype`, not a fallback to
+    /// `auto`.
+    pub(super) fn collect_collection_decltype_element_overrides(
+        &self,
+        stmts: &[syn::Stmt],
+        placeholder_hints: &std::collections::HashMap<String, syn::Type>,
+    ) -> std::collections::HashMap<String, (String, bool)> {
+        use std::collections::HashMap;
+        let mut overrides: HashMap<String, (String, bool)> = HashMap::new();
+        // First top-level `let NAME` index, to verify a recovered base is
+        // declared before the collection it feeds (so `decltype(base)` is in
+        // scope at the collection's construction).
+        let mut let_index: HashMap<String, usize> = HashMap::new();
+        for (i, stmt) in stmts.iter().enumerate() {
+            if let syn::Stmt::Local(local) = stmt
+                && let Some(name) = local_pat_binding_ident(&local.pat)
+            {
+                let_index.entry(name).or_insert(i);
+            }
+        }
+        for (i, stmt) in stmts.iter().enumerate() {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            let Some(name) = local_pat_binding_ident(&local.pat) else {
+                continue;
+            };
+            if placeholder_hints.contains_key(&name) {
+                continue;
+            }
+            let Some(init) = &local.init else {
+                continue;
+            };
+            if !self.expr_is_empty_vec_constructor(&init.expr) {
+                continue;
+            }
+            // First `name.extend(SRC)` anywhere in the block.
+            let mut finder = ExtendSourceFinder {
+                target: &name,
+                found: None,
+            };
+            for s in stmts {
+                syn::visit::Visit::visit_stmt(&mut finder, s);
+                if finder.found.is_some() {
+                    break;
+                }
+            }
+            let Some(src) = finder.found else {
+                continue;
+            };
+            let Some(base) = self.peel_iter_source_to_base_local(&src) else {
+                continue;
+            };
+            if base == name {
+                continue;
+            }
+            // The base must be declared before this collection (or be a
+            // non-block-local binding — a parameter or outer local — in which
+            // case it is always in scope at the construction site).
+            if let Some(&base_idx) = let_index.get(&base)
+                && base_idx >= i
+            {
+                continue;
+            }
+            overrides.insert(name, (base, true));
+        }
+        overrides
+    }
+
+    /// `Vec::new()` / `Vec::with_capacity(..)` with no explicit element turbofish
+    /// (`Vec::<T>::new()` already names its element, so it is not a candidate).
+    fn expr_is_empty_vec_constructor(&self, expr: &syn::Expr) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Call(call) = expr else {
+            return false;
+        };
+        if super::type_solver::owner_constructor_head(call).as_deref() != Some("Vec") {
+            return false;
+        }
+        let syn::Expr::Path(p) = call.func.as_ref() else {
+            return false;
+        };
+        !p.path
+            .segments
+            .iter()
+            .any(|seg| !matches!(seg.arguments, syn::PathArguments::None))
+    }
+
+    /// Peel item-preserving iterator adapters and references from an iterator
+    /// expression down to a base local identifier (the iterator whose `decltype`
+    /// names it). Returns None when the source bottoms out at a non-trivial
+    /// expression (e.g. an item-changing `map`, or an inline call) — those are
+    /// left for later increments, flagged by the strict-auto guard rather than
+    /// silently emitted as `auto`.
+    fn peel_iter_source_to_base_local(&self, expr: &syn::Expr) -> Option<String> {
+        let mut e = self.peel_paren_group_expr(expr);
+        loop {
+            match e {
+                syn::Expr::MethodCall(mc)
+                    if Self::is_item_preserving_iter_adapter(&mc.method.to_string()) =>
+                {
+                    e = self.peel_paren_group_expr(&mc.receiver);
+                }
+                syn::Expr::Reference(r) => e = self.peel_paren_group_expr(&r.expr),
+                _ => break,
+            }
+        }
+        extract_simple_local_ident(e)
+    }
+
+    /// Resolve an empty collection local's `decltype` element override to a raw
+    /// C++ element string, used at the collection's constructor emission. The
+    /// base local (declared earlier) is resolved to its C++ binding here, by
+    /// which point it is in scope.
+    pub(super) fn lookup_collection_decltype_element(&self, owner_name: &str) -> Option<String> {
+        let (base, wrap) = self
+            .collection_decltype_element_overrides
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(owner_name))?
+            .clone();
+        let base_cpp = self
+            .lookup_local_binding_cpp_name(&base)
+            .unwrap_or_else(|| escape_cpp_keyword(&base));
+        let dt = format!("std::remove_cvref_t<decltype({})>", base_cpp);
+        if wrap {
+            Some(format!("rusty::detail::associated_item_t<{}>", dt))
+        } else {
+            Some(dt)
+        }
+    }
+
+    /// When the in-progress local's empty `Vec::new()`/`with_capacity` has a
+    /// `decltype` element override (its element is an un-nameable iterator-item
+    /// type), emit the constructor with that raw element instead of leaking
+    /// `Vec<auto>`. Returns None otherwise so normal emission proceeds.
+    pub(super) fn try_emit_empty_collection_ctor_with_decltype_element(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<String> {
+        let owner_name = self.in_progress_local_initializers.last()?.clone();
+        if super::type_solver::owner_constructor_head(call).as_deref() != Some("Vec") {
+            return None;
+        }
+        let elem = self.lookup_collection_decltype_element(&owner_name)?;
+        let syn::Expr::Path(p) = call.func.as_ref() else {
+            return None;
+        };
+        let method = p.path.segments.last()?.ident.to_string();
+        match method.as_str() {
+            "new" | "new_" | "default" => Some(format!("rusty::Vec<{}>::new_()", elem)),
+            "with_capacity" if call.args.len() == 1 => {
+                let arg = self.emit_expr_to_string(call.args.first()?);
+                Some(format!("rusty::Vec<{}>::with_capacity({})", elem, arg))
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn infer_byte_write_expected_type_from_receiver_hint(
@@ -11643,5 +11881,37 @@ impl CodeGen {
         }
         self.soften_incomplete_nominal_param_type(ty, &mapped)
             .unwrap_or(mapped)
+    }
+}
+
+/// The simple binding identifier of a `let` pattern (`let x` / `let x: T`),
+/// or None for destructuring / wildcard / ref patterns.
+fn local_pat_binding_ident(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Ident(pi) if pi.subpat.is_none() => Some(pi.ident.to_string()),
+        syn::Pat::Type(pt) => local_pat_binding_ident(&pt.pat),
+        _ => None,
+    }
+}
+
+/// Finds the first `<target>.extend(SRC)` method call in a statement tree and
+/// captures its `SRC` argument. Used to recover the element type of an empty
+/// collection from the iterator it is later extended with.
+struct ExtendSourceFinder<'a> {
+    target: &'a str,
+    found: Option<syn::Expr>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ExtendSourceFinder<'_> {
+    fn visit_expr_method_call(&mut self, mc: &'ast syn::ExprMethodCall) {
+        if self.found.is_none()
+            && mc.method == "extend"
+            && mc.args.len() == 1
+            && extract_simple_local_ident(&mc.receiver).as_deref() == Some(self.target)
+            && let Some(arg) = mc.args.first()
+        {
+            self.found = Some(arg.clone());
+        }
+        syn::visit::visit_expr_method_call(self, mc);
     }
 }
