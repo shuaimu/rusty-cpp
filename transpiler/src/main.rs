@@ -2559,7 +2559,7 @@ struct ModuleStepOutcome {
 // When any input is uncertain (an import that wasn't keyed), the unit is left
 // uncached and rebuilt. A miss is only slow; a wrong hit would be unsound, so
 // we bias toward misses.
-const MODULE_CACHE_SCHEMA: u32 = 1;
+const MODULE_CACHE_SCHEMA: u32 = 2;
 
 fn module_cache_enabled() -> bool {
     matches!(
@@ -2666,6 +2666,24 @@ fn module_cache_env_hash(
     h.update(MODULE_CACHE_SCHEMA.to_le_bytes());
     h.update(clang_version.as_bytes());
     h.update([0u8]);
+    // Transpiler identity: a transpiler change must invalidate cached BMIs/objects.
+    // The cache is keyed on the `.cppm` bytes, but the work dir's `.cppm` can be
+    // reused without re-transpilation, so the cached unit could otherwise survive a
+    // semantics-changing transpiler edit. The embedded git revision marks the
+    // committed source; the binary's own mtime catches uncommitted rebuilds (cargo
+    // rewrites the binary only when sources actually change → no spurious misses).
+    h.update(env!("RUSTY_CPP_GIT_HASH").as_bytes());
+    h.update([0u8]);
+    h.update(env!("RUSTY_CPP_GIT_DIRTY").as_bytes());
+    h.update([0u8]);
+    if let Ok(exe) = std::env::current_exe()
+        && let Ok(meta) = fs::metadata(&exe)
+        && let Ok(mtime) = meta.modified()
+        && let Ok(since) = mtime.duration_since(std::time::UNIX_EPOCH)
+    {
+        h.update(since.as_nanos().to_le_bytes());
+        h.update([0u8]);
+    }
     h.update(cxx_standard.as_bytes());
     h.update([0u8]);
     h.update(portable_intrinsics_define.as_bytes());

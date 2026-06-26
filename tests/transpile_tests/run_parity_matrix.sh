@@ -105,9 +105,10 @@ CONTINUE_ON_FAIL=0
 # Content-addressed module BMI/object cache + shared CARGO_TARGET_DIR (enables
 # RUSTY_CPP_MODULE_CACHE for the per-crate parity-test invocations). OPT-IN via
 # --cache. The caches are content-addressed (BMI keyed on the .cppm bytes +
-# transitive imports + clang/flags; cargo target deduped by cargo's own
-# fingerprint), so a crate whose transpiled output CHANGES gets a cache miss and
-# is rebuilt — never a stale artifact. Default OFF because the win is modest:
+# transitive imports + clang/flags + the TRANSPILER REVISION (git hash + dirty +
+# binary mtime); cargo target deduped by cargo's own fingerprint), so a crate
+# whose transpiled output CHANGES — or a transpiler rebuild that could re-emit it —
+# gets a cache miss and is rebuilt, never a stale artifact. Default OFF; win modest:
 # the caches skip the cargo stages + the C++ build, but the (uncached) Stage-C
 # transpile dominates, so a warm run is only ~10% faster than cold (16-crate
 # matrix: ~21 vs ~23.5 min), while the cold/first run pays cargo-lock
