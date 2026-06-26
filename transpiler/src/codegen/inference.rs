@@ -10747,6 +10747,67 @@ impl CodeGen {
         }
     }
 
+    /// `assert_equal(A, B)` (itertools): emit `A`, then `B` with the sibling-item
+    /// context set to `A`'s item type, so an empty `Vec::new()` inside `B` adopts
+    /// `A`'s item type (the two iterables are compared element-wise) rather than
+    /// leaking `Vec<auto>`. Recognized by the function's last path segment.
+    pub(super) fn try_emit_assert_equal_call(&self, call: &syn::ExprCall) -> Option<String> {
+        if call.args.len() != 2 {
+            return None;
+        }
+        let syn::Expr::Path(p) = call.func.as_ref() else {
+            return None;
+        };
+        if p.path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .as_deref()
+            != Some("assert_equal")
+        {
+            return None;
+        }
+        let func_cpp = self.emit_expr_to_string(call.func.as_ref());
+        let a_cpp = self.emit_expr_maybe_move(&call.args[0]);
+        let sibling = format!(
+            "rusty::detail::associated_item_t<std::remove_cvref_t<decltype({})>>",
+            a_cpp
+        );
+        let prev = self.assert_equal_sibling_item.replace(Some(sibling));
+        let b_cpp = self.emit_expr_maybe_move(&call.args[1]);
+        *self.assert_equal_sibling_item.borrow_mut() = prev;
+        Some(format!("{}({}, {})", func_cpp, a_cpp, b_cpp))
+    }
+
+    /// An empty `Vec::new()`/`new`/`default` (no element turbofish) emitted while
+    /// the `assert_equal` sibling-item context is set: emit the default-constructed
+    /// sibling item type (which is itself the expected Vec) — e.g.
+    /// `std::remove_cvref_t<associated_item_t<decltype(A)>>{}`.
+    pub(super) fn try_emit_assert_equal_sibling_empty_vec(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<String> {
+        let sibling = self.assert_equal_sibling_item.borrow().clone()?;
+        if super::type_solver::owner_constructor_head(call).as_deref() != Some("Vec") {
+            return None;
+        }
+        let syn::Expr::Path(p) = call.func.as_ref() else {
+            return None;
+        };
+        let method = p.path.segments.last()?.ident.to_string();
+        if !matches!(method.as_str(), "new" | "new_" | "default") {
+            return None;
+        }
+        if p.path
+            .segments
+            .iter()
+            .any(|seg| !matches!(seg.arguments, syn::PathArguments::None))
+        {
+            return None;
+        }
+        Some(format!("std::remove_cvref_t<{}>{{}}", sibling))
+    }
+
     /// True iff `mc` is a `fold`/`rfold`-shaped call whose accumulator init is an
     /// empty `Vec::new()` and whose reducer closure pushes ONLY its (unprojected)
     /// item parameter into the accumulator — i.e. the Vec collects the receiver's

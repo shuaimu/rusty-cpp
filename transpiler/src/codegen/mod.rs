@@ -1033,6 +1033,13 @@ pub struct CodeGen {
     /// base name is resolved to its C++ binding lazily at the constructor emission
     /// (by which point the earlier-declared base is in scope).
     pub(crate) collection_decltype_element_overrides: Vec<HashMap<String, (String, bool)>>,
+    /// Transient during emission of an itertools `assert_equal(A, B)` second
+    /// argument: the raw-C++ item type of `A` (`associated_item_t<decltype(A)>`).
+    /// `assert_equal` compares the two iterables element-wise, so an empty
+    /// `Vec::new()` appearing in `B` has the same type as `A`'s items — emitted
+    /// as that default-constructed type instead of leaking `Vec<auto>`. A
+    /// `RefCell` because expression emission is `&self`.
+    pub(crate) assert_equal_sibling_item: std::cell::RefCell<Option<String>>,
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     pub(crate) local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
@@ -1685,6 +1692,7 @@ impl CodeGen {
             repeat_elem_type_hints: HashMap::new(),
             local_placeholder_type_hints: Vec::new(),
             collection_decltype_element_overrides: Vec::new(),
+            assert_equal_sibling_item: std::cell::RefCell::new(None),
             local_bindings: Vec::new(),
             local_shadowed_binding_types: Vec::new(),
             in_progress_local_initializers: Vec::new(),

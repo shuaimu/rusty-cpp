@@ -12472,6 +12472,16 @@ impl CodeGen {
         if let Some(emitted) = self.try_emit_empty_collection_ctor_with_decltype_element(call) {
             return emitted;
         }
+        // An empty `Vec::new()` inside an itertools `assert_equal(A, B)` second
+        // arg: its type equals `A`'s item type (element-wise comparison).
+        if let Some(emitted) = self.try_emit_assert_equal_sibling_empty_vec(call) {
+            return emitted;
+        }
+        // `assert_equal(A, B)` itself: emit A, then B with the sibling-item context
+        // set so empty Vecs inside B adopt A's item type.
+        if let Some(emitted) = self.try_emit_assert_equal_call(call) {
+            return emitted;
+        }
         // Item 8: recursive-nested-fn → Y-combinator call shape. When the
         // call's func is a bare ident matching either the body of the
         // currently-emitting recursive nested fn (use `__self(__self,…)`)
