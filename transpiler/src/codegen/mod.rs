@@ -605,6 +605,13 @@ pub struct CodeGen {
     /// (`Clone`, `Display`, …) keeps the non-UFCS lowering for it. Populated in
     /// `emit_file`.
     pub(crate) ufcs_declared_trait_names: std::collections::HashSet<String>,
+    /// UFCS: crate-declared trait name → its declared method names (required +
+    /// default). Folded into the per-crate manifest so a downstream crate's
+    /// cross-crate dedup is METHOD-AWARE (avoids a same-named-but-unrelated
+    /// dependency trait — e.g. the ubiquitous private `Sealed` — suppressing this
+    /// crate's free functions). Populated in `emit_file`.
+    pub(crate) ufcs_declared_trait_methods:
+        std::collections::BTreeMap<String, Vec<String>>,
     /// UFCS Phase 7: method name → crate-declared traits whose CONCRETE
     /// (non-generic) impls emit a `<Tr>_::m` free function. When exactly
     /// one trait owns a name, the method-call shim qualifies its free call to
@@ -1564,6 +1571,7 @@ impl CodeGen {
             is_dependency_module: false,
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
+            ufcs_declared_trait_methods: std::collections::BTreeMap::new(),
             ufcs_method_trait_owners: HashMap::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
             ufcs_def_dedupe_seen: std::collections::HashSet::new(),
@@ -2295,10 +2303,18 @@ impl CodeGen {
             })
             .collect();
         declared_types.sort_by(|a, b| a.name.cmp(&b.name).then(a.module_path.cmp(&b.module_path)));
+        // Method-aware dedup metadata: only the traits THIS crate declares.
+        let declared_trait_methods: std::collections::BTreeMap<String, Vec<String>> = self
+            .ufcs_declared_trait_methods
+            .iter()
+            .filter(|(name, _)| self.ufcs_declared_trait_names.contains(*name))
+            .map(|(name, methods)| (name.clone(), methods.clone()))
+            .collect();
         crate::transpile::UfcsTraitManifest {
             version: 1,
             module: module.to_string(),
             declared_traits,
+            declared_trait_methods,
             method_owners,
             declared_types,
         }
@@ -2522,14 +2538,19 @@ impl CodeGen {
         trait_name: &str,
         method: &str,
     ) -> bool {
-        // Either signal suffices: a dependency that DECLARES the trait emits its
-        // lowered free fns (the manifest's `method_owners` only tracks the
-        // `<Trait>_::m` form, NOT the `rusty_ext::m` extension form — so checking
-        // `declared_traits` is what catches blanket-impl extension traits like
-        // `Equivalent`). The guard runs only while emitting THIS crate's own copy
-        // of `trait_name`, so a dep also declaring it means a cross-crate duplicate.
+        // METHOD-AWARE: a dependency suppresses THIS crate's copy only if it
+        // declares a trait of the same NAME that also provides the same METHOD
+        // (`declared_trait_methods` — captures both required + default methods, so
+        // it catches blanket-impl extension traits like `Equivalent` that
+        // `method_owners`, restricted to CONCRETE `<Trait>_::m` impls, misses),
+        // or a concrete impl owner records it. The bare-name check this replaces
+        // wrongly suppressed an unrelated dependency trait of the SAME name — the
+        // ubiquitous private `Sealed` (anyhow/indexmap/itoa/quote/syn all declare
+        // one), which silently dropped ryu's `Sealed::is_nonfinite/...` free fns.
         self.dependency_ufcs_trait_manifests.iter().any(|m| {
-            m.declared_traits.iter().any(|t| t == trait_name)
+            m.declared_trait_methods
+                .get(trait_name)
+                .is_some_and(|methods| methods.iter().any(|x| x == method))
                 || m.method_owners
                     .get(method)
                     .is_some_and(|owners| owners.iter().any(|t| t == trait_name))
@@ -2873,6 +2894,8 @@ impl CodeGen {
         // UFCS Phase 7: scope emission to crate-declared traits.
         self.ufcs_declared_trait_names =
             crate::transpile::collect_declared_trait_names(&file.items);
+        self.ufcs_declared_trait_methods =
+            crate::transpile::collect_declared_trait_methods(&file.items);
         // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls
         // emit a `<Tr>_::m` free function, for shim qualification.
         self.ufcs_method_trait_owners = crate::transpile::collect_concrete_trait_impl_method_owners(

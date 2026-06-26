@@ -22,6 +22,13 @@ pub struct UfcsTraitManifest {
     /// Trait names this crate DECLARES (for `use dep::Tr` recognition).
     #[serde(default)]
     pub declared_traits: Vec<String>,
+    /// Declared trait name → the method names it declares (required + default).
+    /// Lets a downstream crate's UFCS dedup be METHOD-AWARE: a dep declaring a
+    /// trait of the same NAME (e.g. the ubiquitous private `Sealed`) must not
+    /// suppress THIS crate's same-named-but-unrelated trait's free functions
+    /// unless the dep's trait actually provides the same method.
+    #[serde(default)]
+    pub declared_trait_methods: BTreeMap<String, Vec<String>>,
     /// Method name → owning trait names, restricted to actually-emitted
     /// `<Tr>_::m` free functions.
     #[serde(default)]
@@ -307,6 +314,46 @@ fn collect_declared_trait_names_into(
             syn::Item::Mod(m) => {
                 if let Some((_, nested)) = &m.content {
                     collect_declared_trait_names_into(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Trait name → the method names it DECLARES (required + default), across all
+/// modules. Feeds the per-crate UFCS manifest so a downstream crate's dedup can
+/// be METHOD-AWARE — a dependency declaring a same-NAMED but unrelated trait
+/// (the ubiquitous private `Sealed`) must not suppress this crate's free
+/// functions unless that dependency's trait actually provides the same method.
+pub fn collect_declared_trait_methods(
+    items: &[syn::Item],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    collect_declared_trait_methods_into(items, &mut out);
+    out
+}
+
+fn collect_declared_trait_methods_into(
+    items: &[syn::Item],
+    out: &mut std::collections::BTreeMap<String, Vec<String>>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Trait(t) => {
+                let entry = out.entry(t.ident.to_string()).or_insert_with(Vec::new);
+                for ti in &t.items {
+                    if let syn::TraitItem::Fn(f) = ti {
+                        let name = f.sig.ident.to_string();
+                        if !entry.contains(&name) {
+                            entry.push(name);
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, nested)) = &m.content {
+                    collect_declared_trait_methods_into(nested, out);
                 }
             }
             _ => {}
@@ -2588,6 +2635,10 @@ mod tests {
             version: 1,
             module: "depmod".to_string(),
             declared_traits: vec!["Greet".to_string()],
+            declared_trait_methods: std::collections::BTreeMap::from([(
+                "Greet".to_string(),
+                vec!["hello".to_string()],
+            )]),
             method_owners: std::collections::BTreeMap::from([(
                 "hello".to_string(),
                 vec!["Greet".to_string()],
