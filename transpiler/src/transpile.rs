@@ -290,7 +290,7 @@ pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameC
 /// (Phase-1): serde_bytes only; widening this list also widens the wrap and its
 /// re-qualification in lockstep.
 pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
-    matches!(crate_name, "serde_bytes")
+    matches!(crate_name, "serde_bytes" | "hashbrown")
 }
 
 /// Short names of every trait this crate DECLARES (`trait Tr { … }`), recursing

@@ -3970,15 +3970,26 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         )?)
     };
     let mut flattened_dependency_aliases: HashMap<String, String> = HashMap::new();
+    // A namespace-wrapped dependency keeps its crate prefix: a reference to
+    // `hashbrown::X` must resolve to (relative) `hashbrown::X` — i.e. `::hashbrown::X`
+    // from the consumer's global scope — not the stripped global `::X`, whose
+    // namespaces are now empty under the wrap. A non-wrapped dep strips to `::X`.
+    let alias_target = |root: &str| -> String {
+        if transpile::crate_is_namespace_wrapped(root) {
+            root.to_string()
+        } else {
+            String::new()
+        }
+    };
     for dep in &dependency_targets {
         for root in &dep.extern_crate_roots {
-            flattened_dependency_aliases.insert(root.clone(), String::new());
+            flattened_dependency_aliases.insert(root.clone(), alias_target(root));
         }
     }
     for root in &non_library_dependency_roots {
         flattened_dependency_aliases
             .entry(root.clone())
-            .or_insert_with(String::new);
+            .or_insert_with(|| alias_target(root));
     }
     // Include the root crate's own extern roots so dependency transpilation can
     // resolve back-edges like `serde -> serde_core` when parity is run for
@@ -3986,8 +3997,8 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
     let normalized_root_crate = crate_name.replace('-', "_");
     if is_external_crate_root_candidate(&normalized_root_crate) {
         flattened_dependency_aliases
-            .entry(normalized_root_crate)
-            .or_insert_with(String::new);
+            .entry(normalized_root_crate.clone())
+            .or_insert_with(|| alias_target(&normalized_root_crate));
     }
     for target in &targets {
         if !matches!(target.kind, metadata::TargetKind::Lib) {
@@ -3997,7 +4008,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
         if is_external_crate_root_candidate(root) {
             flattened_dependency_aliases
                 .entry(root.to_string())
-                .or_insert_with(String::new);
+                .or_insert_with(|| alias_target(root));
         }
     }
     let mut root_to_module_import: HashMap<String, String> = HashMap::new();

@@ -632,6 +632,71 @@ void extend_panic();
 5. Merge `impl` methods into owning type declarations before emitting inline module bodies.
    This avoids invalid free-function fallbacks for methods that should live on the type.
 
+#### Per-Crate Namespace Wrapping & the Cross-Crate Ownership Map
+
+Rust namespaces by **crate**: `hashbrown::set::Difference` and `indexmap::set::Difference`
+are unrelated types that never clash, because every path is rooted at its crate. C++ has no
+such rooting — a `namespace set` emitted by one module and a `namespace set` emitted by
+another **merge** into a single `::set`. So the moment two dependencies share a module name
+(`set`, `map`, `iter`, `error` — extremely common) and one `import`s the other, their
+same-named members collide:
+
+```rust
+// crate hashbrown            // crate indexmap (depends on hashbrown)
+mod set {                     mod set {
+    struct Difference<T,S>;       mod iter { struct Difference<T,S>; }
+}                                 pub use self::iter::Difference;   // re-export
+                              }
+```
+
+```cpp
+// from module hashbrown
+namespace set { template<class T,class S> struct Difference { … }; }   // hashbrown's
+// from module indexmap, after `import hashbrown;`
+namespace set { export using ::set::iter::Difference; }  // ERROR: ::set already has a
+                                                         // (different) `Difference`
+```
+
+`hashbrown` compiles in isolation; `indexmap` breaks *only* because it imports hashbrown and
+both define `::set`. The same root cause also mis-qualifies plain references — indexmap names
+hashbrown's `hash_table::HashTable` as `::hash_table::HashTable` (a namespace that, post-fix,
+belongs to `::hashbrown`) and re-declares hashbrown's `TryReserveError` locally.
+
+**Solution — wrap every crate's purview in `namespace <crate> { … }`.** Then
+`::hashbrown::set::Difference` and `::indexmap::set::Difference` are distinct, exactly as in
+Rust. The wrap itself (`wrap_module_purview_in_crate_namespace`) is a textual insertion after
+`export module …;` and its `import` lines; the work is the **re-qualification** it forces,
+which must move in lockstep (the three rules below). The set of wrapped crates is gated by
+`crate_is_namespace_wrapped`.
+
+1. **Self-crate references** → `::<crate>::…`. A wrapped crate's own items live under
+   `namespace <crate>`, so an unqualified or crate-rooted self reference (`indexmap::set::…`,
+   or a bare `set::…` resolved against the crate root) must be emitted absolutely as
+   `::<crate>::set::…` rather than escaping to the global `::set`.
+
+2. **Cross-crate references** → `::<owner>::…`. When crate A names a type owned by a wrapped
+   dependency B, it must emit `::B::<module-path>::<name>`. This is what makes
+   `hash_table::HashTable` resolve to `::hashbrown::hash_table::HashTable` and suppresses the
+   spurious local re-declaration / re-export forward-decl.
+
+3. **The cross-crate ownership map** is the keystone that powers rule 2. Its data already
+   flows through the **UFCS trait manifest** (§3.2.7): each manifest carries the emitting
+   crate's name (`module`) and its `declared_types` (each with a within-crate `module_path`
+   and `arity`). When a downstream crate merges a dependency manifest whose crate is
+   namespace-wrapped, it records, for every declared type, the fully-qualified owner path
+   `::<manifest.module>::<declared_type.module_path>::<name>` into its type→module-path map
+   (`local_type_module_path`). Path emission then re-qualifies any reference to that name
+   through this map. A type the consuming crate declares **itself** always wins (local
+   declarations are collected first and are never overwritten), so genuine shadowing is
+   preserved.
+
+Because rules 1–3 are entangled, the wrap is widened **incrementally and matrix-gated**: build
+the ownership map first (inert until a dependency is actually wrapped), then wrap a near-leaf
+crate (e.g. `hashbrown`) and re-qualify its consumers, then widen crate-by-crate, and finally
+flip `crate_is_namespace_wrapped` to all and delete the allowlist. Crates whose module names
+never collide with a dependency are unaffected by the wrap in practice; the mechanism exists so
+that collisions *cannot* happen regardless of how common a module name is.
+
 #### Cross-Module Declarations/Definitions: Rust vs C++
 
 Rust and C++ modules look similar at a distance, but they have different ownership rules for declarations. This difference is a frequent source of parity failures when lowering expanded crates.

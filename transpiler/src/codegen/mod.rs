@@ -1934,10 +1934,7 @@ impl CodeGen {
         let mut wrapped = self.output[wrap_start..wrap_end].to_string();
         let exclusive = self.crate_exclusive_top_namespaces();
         for ns in &exclusive {
-            wrapped = wrapped.replace(
-                &format!("::{}::", ns),
-                &format!("::{}::{}::", crate_name, ns),
-            );
+            wrapped = Self::requalify_top_level_namespace(&wrapped, &crate_name, ns, "::");
         }
         let exclusive_set: HashSet<&String> = exclusive.iter().collect();
         let shared_bridge_ns: Vec<String> = Self::ufcs_bridge_top_namespaces(&wrapped)
@@ -1945,10 +1942,7 @@ impl CodeGen {
             .filter(|ns| !exclusive_set.contains(ns))
             .collect();
         for ns in &shared_bridge_ns {
-            wrapped = wrapped.replace(
-                &format!("::{}::__ufcs_", ns),
-                &format!("::{}::{}::__ufcs_", crate_name, ns),
-            );
+            wrapped = Self::requalify_top_level_namespace(&wrapped, &crate_name, ns, "::__ufcs_");
         }
         // Rule 3 — crate-root re-exported types referenced bare. A `pub use
         // bytes::Bytes;` re-export is a crate-root name (`::<crate>::Bytes`
@@ -1987,11 +1981,28 @@ impl CodeGen {
                     crate_root_types.insert(name.to_string());
                 }
             }
+            // Bare crate-root re-export `using ::TryReserveError;` — a crate-root
+            // TYPE pulled in by name (declared at the crate root, no module). Under
+            // the wrap it lives at `::<crate>::TryReserveError`.
+            if let Some(rest) = trimmed.strip_prefix("using ::")
+                && let Some(name) = rest.trim().strip_suffix(';')
+                && !name.contains("::")
+                && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            {
+                crate_root_types.insert(name.to_string());
+            }
         }
         let mut crate_root_types: Vec<String> = crate_root_types.into_iter().collect();
         crate_root_types.sort();
         for ty in &crate_root_types {
             wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, ty);
+        }
+        // Catch EXCLUSIVE-namespace references at non-`::`-trailing boundaries that
+        // Rule 1's `::<ns>::` needle missed — `namespace map = ::map;`, `::map<…>`.
+        // `requalify_crate_root_symbol` is boundary-aware on both sides, so it leaves
+        // an already-qualified `::<crate>::map` (preceded by an ident) untouched.
+        for ns in &exclusive {
+            wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, ns);
         }
         self.output.replace_range(wrap_start..wrap_end, &wrapped);
     }
@@ -2017,6 +2028,44 @@ impl CodeGen {
                 || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
             out.push_str(&text[i..pos]);
             if before_ok && after_ok {
+                out.push_str(&repl);
+            } else {
+                out.push_str(&needle);
+            }
+            i = after;
+        }
+        out.push_str(&text[i..]);
+        out
+    }
+
+    /// Re-qualify a top-level namespace reference `::<ns>::…` -> `::<crate>::<ns>::…`,
+    /// but ONLY when the leading `::` is at a token boundary (not preceded by an
+    /// identifier char or another `:`). This leaves a NESTED occurrence alone —
+    /// `rusty::alloc::` must NOT become `rusty::hashbrown::alloc::` just because the
+    /// crate also owns a top-level `::alloc::`. `needle_suffix` is appended to the
+    /// `::<ns>` stem (`"::"` for a whole-namespace rewrite, `"::__ufcs_"` for the
+    /// UFCS-bridge rewrite). Single left-to-right pass — never re-scans its own
+    /// output, so it cannot double-prefix.
+    fn requalify_top_level_namespace(
+        text: &str,
+        crate_name: &str,
+        ns: &str,
+        needle_suffix: &str,
+    ) -> String {
+        let needle = format!("::{}{}", ns, needle_suffix);
+        let repl = format!("::{}::{}{}", crate_name, ns, needle_suffix);
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while let Some(rel) = text[i..].find(&needle) {
+            let pos = i + rel;
+            let after = pos + needle.len();
+            let before_ok = pos == 0
+                || !(bytes[pos - 1].is_ascii_alphanumeric()
+                    || bytes[pos - 1] == b'_'
+                    || bytes[pos - 1] == b':');
+            out.push_str(&text[i..pos]);
+            if before_ok {
                 out.push_str(&repl);
             } else {
                 out.push_str(&needle);
@@ -2536,12 +2585,38 @@ impl CodeGen {
             // THIS crate declares wins (collect ran first → it is in
             // local_declared_types), and we never overwrite an existing entry.
             for dt in &m.declared_types {
-                if dt.module_path.is_empty() || self.local_declared_types.contains(&dt.name) {
+                if self.local_declared_types.contains(&dt.name) {
                     continue;
+                }
+                // Cross-crate ownership map (§2.5 "Per-Crate Namespace Wrapping & the
+                // Cross-Crate Ownership Map"): when the dependency crate is
+                // namespace-wrapped, record the FULLY-QUALIFIED owner path
+                // `<crate>[::<module_path>]` so a reference to its type resolves to
+                // `::<crate>::…::<name>` instead of colliding at the shared global
+                // `::<module_path>`. Non-wrapped deps keep the legacy bare module path
+                // (and still skip crate-root types, which need no qualification while
+                // everything lives at global scope).
+                let owner_module_path =
+                    if crate::transpile::crate_is_namespace_wrapped(&m.module) {
+                        if dt.module_path.is_empty() {
+                            m.module.clone()
+                        } else {
+                            format!("{}::{}", m.module, dt.module_path)
+                        }
+                    } else if dt.module_path.is_empty() {
+                        continue;
+                    } else {
+                        dt.module_path.clone()
+                    };
+                if std::env::var_os("RUSTY_CPP_DBG_XCRATE").is_some() {
+                    eprintln!(
+                        "[XCRATE] {}::{} -> ::{}::{}",
+                        m.module, dt.name, owner_module_path, dt.name
+                    );
                 }
                 self.local_type_module_path
                     .entry(dt.name.clone())
-                    .or_insert_with(|| dt.module_path.clone());
+                    .or_insert_with(|| owner_module_path.clone());
                 if dt.arity > 0 {
                     let placeholder: Vec<String> =
                         (0..dt.arity).map(|i| format!("__dep_T{}", i)).collect();
@@ -2549,7 +2624,7 @@ impl CodeGen {
                         .entry(dt.name.clone())
                         .or_insert_with(|| placeholder.clone());
                     self.declared_type_params
-                        .entry(format!("{}::{}", dt.module_path, dt.name))
+                        .entry(format!("{}::{}", owner_module_path, dt.name))
                         .or_insert(placeholder);
                 }
             }
