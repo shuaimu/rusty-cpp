@@ -12554,6 +12554,52 @@ impl CodeGen {
         Some(format!("{}({}, {})", func, ptr_arg, len_arg))
     }
 
+    /// `<ScalarType>::from(x)` (a widening/primitive conversion, e.g.
+    /// `ptrdiff_t::from(i32::MAX)`) → `static_cast<ScalarType>(x)`. Rust's
+    /// primitive `From` is just a numeric conversion, but the C++ scalar type is
+    /// not a class, so `ScalarType::from(...)` is ill-formed.
+    pub(super) fn try_emit_scalar_from_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(p) = call.func.as_ref() else {
+            return None;
+        };
+        if p.qself.is_some() || call.args.len() != 1 || p.path.segments.len() < 2 {
+            return None;
+        }
+        if p.path.segments.last()?.ident != "from" {
+            return None;
+        }
+        let mut owner_path = p.path.clone();
+        owner_path.segments = p
+            .path
+            .segments
+            .iter()
+            .take(p.path.segments.len() - 1)
+            .cloned()
+            .collect();
+        // A scalar conversion owner is a plain type name with no generic args.
+        if !matches!(
+            owner_path.segments.last()?.arguments,
+            syn::PathArguments::None
+        ) {
+            return None;
+        }
+        let owner_cpp = self.map_type(&syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: owner_path,
+        }));
+        // A scalar type (`ptrdiff_t`, `int32_t`, …) is global; map_type may have
+        // namespace-qualified it (`yaml::ptrdiff_t`). Cast to the bare scalar name.
+        let owner_bare = owner_cpp.rsplit("::").next().unwrap_or(&owner_cpp).trim();
+        if !Self::is_scalar_into_target_cpp_type(&owner_bare.replace(' ', "")) {
+            return None;
+        }
+        Some(format!(
+            "static_cast<{}>({})",
+            owner_bare,
+            self.emit_expr_to_string(&call.args[0])
+        ))
+    }
+
     pub(super) fn emit_call_expr_to_string(
         &self,
         call: &syn::ExprCall,
@@ -12579,6 +12625,10 @@ impl CodeGen {
         // `slice::from_raw_parts[_mut]` — feed the result's element type to the
         // pointer-arg cast so `span<T>` deduces instead of `span<void>`.
         if let Some(emitted) = self.try_emit_slice_from_raw_parts_call(call, expected_ty) {
+            return emitted;
+        }
+        // `<ScalarType>::from(x)` (primitive conversion) → `static_cast<ScalarType>(x)`.
+        if let Some(emitted) = self.try_emit_scalar_from_call(call) {
             return emitted;
         }
         // `assert_equal(A, B)` itself: emit A, then B with the sibling-item context
