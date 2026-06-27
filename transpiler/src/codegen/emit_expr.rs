@@ -11054,7 +11054,16 @@ impl CodeGen {
         if owner_cpp.starts_with("rusty::Vec<") && method == "from_iter" && args.len() == 1 {
             return Some(format!("rusty::collect_range({})", args[0]));
         }
-        Some(format!("{}::{}({})", owner_cpp, method, args.join(", ")))
+        // A static/associated call's owner must be the BARE class type. An unsized
+        // owner (e.g. indexmap's `Slice<T>`, only ever held by reference) maps to
+        // `const Slice<T>&`; `const Slice<T>&::from_slice(..)` is ill-formed. Strip
+        // the leading `const` and trailing `&`/`*` for the `Owner::method` spelling.
+        let bare_owner = owner_cpp
+            .trim()
+            .trim_start_matches("const ")
+            .trim_end_matches(|c| matches!(c, '&' | '*' | ' '))
+            .trim();
+        Some(format!("{}::{}({})", bare_owner, method, args.join(", ")))
     }
 
     pub(super) fn try_emit_omitted_assoc_static_call_with_arg_decltype(
