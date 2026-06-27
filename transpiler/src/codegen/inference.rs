@@ -11373,6 +11373,16 @@ impl CodeGen {
                 self.lookup_declared_type_key_for_base(mapped_base, base)
             })?;
         let params = self.declared_type_params.get(&type_key)?;
+        // Guard against a stale/colliding `declared_type_params` entry: for `Self`,
+        // the struct's own type parameters are exactly the enclosing impl's generics,
+        // so every one must be in scope here. If a recovered name is NOT in scope
+        // (e.g. the bare key "Bucket" registered `["T"]` from indexmap's set-module
+        // `Bucket<T>` view, colliding with `map::Bucket<K,V>`), the entry is wrong —
+        // bail so `Self` falls back to the bare injected-class-name spelling.
+        let path_is_self = path.segments.first().is_some_and(|seg| seg.ident == "Self");
+        if path_is_self && !params.iter().all(|p| self.is_type_param_in_scope(p)) {
+            return None;
+        }
         let defaults = self.declared_type_param_defaults_for_path(path);
         if params.is_empty() {
             return None;
