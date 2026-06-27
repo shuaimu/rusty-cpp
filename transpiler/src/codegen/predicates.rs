@@ -1716,6 +1716,11 @@ impl CodeGen {
                         // NonNull is correctly rejected by the recursion). Lets a
                         // `p.cast::<U>().write(v)` chain reach the ptr-intrinsic lowering.
                         | "cast"
+                        // `<*const T>::cast_mut()` / `<*mut T>::cast_const()` also
+                        // return a raw pointer iff the receiver is one — keeps a
+                        // chain like `p.as_ptr().cast_mut().cast()` ptr-like.
+                        | "cast_mut"
+                        | "cast_const"
                 ) {
                     return self.is_expr_raw_pointer_like(&mc.receiver);
                 }

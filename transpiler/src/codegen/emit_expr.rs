@@ -8044,6 +8044,22 @@ impl CodeGen {
             };
             return format!("({} == nullptr)", receiver);
         }
+        // `<*const T>::cast_mut()` / `<*mut T>::cast_const()` as method calls on a
+        // raw pointer — C++ raw pointers carry no const in the value category here,
+        // so route through the same `rusty::ptr::cast_{mut,const}` helpers the path
+        // form uses. (Path/UFCS form is handled separately near line 13504.)
+        if matches!(method_name.as_str(), "cast_mut" | "cast_const")
+            && args.is_empty()
+            && self.is_expr_raw_pointer_like(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::ptr::{}({})", method_name, receiver);
+        }
         if method_name == "cast" && args.is_empty() && self.is_expr_raw_pointer_like(&mc.receiver) {
             // Target type: explicit turbofish `ptr.cast::<U>()` first; otherwise
             // try the expected_ty (Rust `let x: *mut U = ptr.cast()` and similar
