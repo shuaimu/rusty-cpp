@@ -648,6 +648,12 @@ pub struct CodeGen {
     /// `rewrite_extension_self_assoc_cpp_type`. Set on the template-`Self` body
     /// only (NOT concrete-impl free functions, where `Self_` is not in scope).
     pub(crate) ufcs_template_self_body: bool,
+    /// True while emitting a UFCS extension-trait free-function BODY (emitted at
+    /// the synthetic global `<Tr>_` namespace). Path-expr emissions are then
+    /// absolutized for nested-local type references (e.g. `Tag::EMPTY` →
+    /// `::control::tag::Tag::EMPTY`) since the local module's siblings aren't in
+    /// scope at `<Tr>_`. Extends serde_core "Fix B" (self/param/return) to bodies.
+    pub(crate) ufcs_free_fn_body: bool,
     /// UFCS cross-crate (book § 3.2.7): dependency trait manifests, merged into
     /// the classifier maps in `emit_file` so calls to a dependency's trait
     /// methods classify + qualify. Empty in single-crate / flag-off mode.
@@ -1594,6 +1600,7 @@ impl CodeGen {
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
             ufcs_def_dedupe_seen: std::collections::HashSet::new(),
             ufcs_template_self_body: false,
+            ufcs_free_fn_body: false,
             dependency_ufcs_trait_manifests: Vec::new(),
             ufcs_trait_module_prefix: HashMap::new(),
             inference: None,
@@ -2429,7 +2436,7 @@ impl CodeGen {
         out
     }
 
-    fn qualify_nested_local_types_in_type_string(&self, s: &str) -> String {
+    pub(super) fn qualify_nested_local_types_in_type_string(&self, s: &str) -> String {
         if self.local_type_module_path.is_empty() {
             return s.to_string();
         }
@@ -14579,6 +14586,8 @@ impl CodeGen {
         // only — a concrete-impl free function has no `Self_` template param.
         let prev_ufcs_template_self_body = self.ufcs_template_self_body;
         self.ufcs_template_self_body = method_spec.self_is_template_param;
+        let prev_ufcs_free_fn_body = self.ufcs_free_fn_body;
+        self.ufcs_free_fn_body = true;
         self.push_type_param_scope(&free_generics);
         // Trait-static call resolution (`Error::invalid_value(…)` → `E::invalid_value(…)`,
         // where `E: Error` is inferred as `Self`) reads the trait→param bound map on the
@@ -14861,6 +14870,7 @@ impl CodeGen {
         self.current_struct_assoc_cpp_types.pop();
         self.current_struct = prev_struct;
         self.ufcs_template_self_body = prev_ufcs_template_self_body;
+        self.ufcs_free_fn_body = prev_ufcs_free_fn_body;
         self.indent -= 1;
         self.writeln("}");
         self.pop_type_param_scope();

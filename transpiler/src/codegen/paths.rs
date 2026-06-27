@@ -2639,6 +2639,20 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
     }
 
     pub(super) fn emit_expr_path_to_string(&self, path: &syn::Path) -> String {
+        let rendered = self.emit_expr_path_to_string_inner(path);
+        // Inside a UFCS extension-trait free-function body (emitted at the global
+        // `<Tr>_` namespace), nested-local type references in a path — e.g.
+        // `Tag::EMPTY`, where `Tag` lives in `control::tag` — must be absolutized,
+        // since the local module's siblings aren't visible at `<Tr>_`. Safe: only
+        // identifiers known as nested-local types are rewritten, idempotently.
+        if self.ufcs_free_fn_body {
+            self.qualify_nested_local_types_in_type_string(&rendered)
+        } else {
+            rendered
+        }
+    }
+
+    fn emit_expr_path_to_string_inner(&self, path: &syn::Path) -> String {
         if let Some(rendered) = self.try_emit_trait_default_const_path(path) {
             return rendered;
         }
