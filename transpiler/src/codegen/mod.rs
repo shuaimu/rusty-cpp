@@ -1992,6 +1992,32 @@ impl CodeGen {
                 crate_root_types.insert(name.to_string());
             }
         }
+        // Gap (b): crate-root TYPES this crate declares but never re-exports — e.g.
+        // either's `Either_Left` data-enum variant struct, referenced bare as
+        // `::Either_Left`. Crate-root declarations sit at COLUMN 0 of the wrapped
+        // purview (the wrap inserts `namespace <crate> {` without re-indenting, and
+        // nested-module declarations are indented), so a column-0 `struct`/`class`/
+        // `enum` is the crate's own root type and must resolve to `::<crate>::<Type>`.
+        for line in wrapped.lines() {
+            if line.starts_with([' ', '\t']) {
+                continue;
+            }
+            let decl = line.strip_prefix("export ").unwrap_or(line);
+            let after_kw = decl
+                .strip_prefix("struct ")
+                .or_else(|| decl.strip_prefix("class "))
+                .or_else(|| decl.strip_prefix("enum class "))
+                .or_else(|| decl.strip_prefix("enum "));
+            if let Some(after_kw) = after_kw {
+                let name: String = after_kw
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                    crate_root_types.insert(name);
+                }
+            }
+        }
         let mut crate_root_types: Vec<String> = crate_root_types.into_iter().collect();
         crate_root_types.sort();
         for ty in &crate_root_types {
