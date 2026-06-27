@@ -19449,6 +19449,7 @@ impl CodeGen {
             syn::Pat::TupleStruct(ts) => {
                 // Pattern like `Shape::Circle(r)` → [](const Shape_Circle& _v) { auto r = _v._0; ... }
                 let cpp_type = self.visit_pattern_cpp_type(&ts.path, variant_ctx, visit_value_name);
+                let cpp_type = self.visit_variant_deduced_type(cpp_type);
                 let Some(binding_stmts) =
                     self.tuple_struct_binding_stmts(&ts.path, &ts.elems, "_v", variant_ctx)
                 else {
@@ -19467,7 +19468,13 @@ impl CodeGen {
                 } else {
                     format!("const {}& _v", cpp_type)
                 };
-                self.output.push_str(&format!("[&]({}) {{", visit_param));
+                let visit_tmpl = if visit_param.contains("__Vs") {
+                    "<typename... __Vs>"
+                } else {
+                    ""
+                };
+                self.output
+                    .push_str(&format!("[&]{}({}) {{", visit_tmpl, visit_param));
                 self.push_pattern_ref_binding_scope(&arm.pat);
 
                 if !binding_stmts.is_empty() || arm.guard.is_some() {
@@ -19499,6 +19506,7 @@ impl CodeGen {
             syn::Pat::Struct(ps) => {
                 // Pattern like `Shape::Rect { w, h }` → [](const Shape_Rect& _v) { ... }
                 let cpp_type = self.visit_pattern_cpp_type(&ps.path, variant_ctx, visit_value_name);
+                let cpp_type = self.visit_variant_deduced_type(cpp_type);
 
                 self.write_indent();
                 let visit_param =
@@ -19507,7 +19515,13 @@ impl CodeGen {
                     } else {
                         format!("const {}& _v", cpp_type)
                     };
-                self.output.push_str(&format!("[&]({}) {{\n", visit_param));
+                let visit_tmpl = if visit_param.contains("__Vs") {
+                    "<typename... __Vs>"
+                } else {
+                    ""
+                };
+                self.output
+                    .push_str(&format!("[&]{}({}) {{\n", visit_tmpl, visit_param));
                 self.push_pattern_ref_binding_scope(&arm.pat);
                 self.indent += 1;
 
@@ -19558,13 +19572,20 @@ impl CodeGen {
             syn::Pat::Path(pp) => {
                 // Unit variant: `Shape::None` → [](const Shape_None&) { ... }
                 let cpp_type = self.visit_pattern_cpp_type(&pp.path, variant_ctx, visit_value_name);
+                let cpp_type = self.visit_variant_deduced_type(cpp_type);
+                let visit_tmpl = if cpp_type.contains("__Vs") {
+                    "<typename... __Vs>"
+                } else {
+                    ""
+                };
 
                 self.write_indent();
                 if visit_mutably {
-                    self.output.push_str(&format!("[&]({}&) {{\n", cpp_type));
+                    self.output
+                        .push_str(&format!("[&]{}({}&) {{\n", visit_tmpl, cpp_type));
                 } else {
                     self.output
-                        .push_str(&format!("[&](const {}&) {{\n", cpp_type));
+                        .push_str(&format!("[&]{}(const {}&) {{\n", visit_tmpl, cpp_type));
                 }
                 self.push_pattern_ref_binding_scope(&arm.pat);
                 self.indent += 1;

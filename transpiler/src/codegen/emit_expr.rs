@@ -2739,6 +2739,7 @@ impl CodeGen {
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     let cpp_type = scoped.visit_pattern_cpp_type(&ts.path, variant_ctx, Some("_m"));
+                    let cpp_type = scoped.visit_variant_deduced_type(cpp_type);
                     let Some(binding_stmts) =
                         scoped.tuple_struct_binding_stmts(&ts.path, &ts.elems, "_v", variant_ctx)
                     else {
@@ -2808,6 +2809,7 @@ impl CodeGen {
                 }
                 syn::Pat::Path(pp) => {
                     let cpp_type = scoped.visit_pattern_cpp_type(&pp.path, variant_ctx, Some("_m"));
+                    let cpp_type = scoped.visit_variant_deduced_type(cpp_type);
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str = scoped.emit_expr_to_string(guard);
                         let visit_param = if borrow_payload {
@@ -2845,6 +2847,7 @@ impl CodeGen {
                 }
                 syn::Pat::Struct(ps) => {
                     let cpp_type = scoped.visit_pattern_cpp_type(&ps.path, variant_ctx, Some("_m"));
+                    let cpp_type = scoped.visit_variant_deduced_type(cpp_type);
                     let mut binding_stmts = Vec::new();
                     let mut supported = true;
                     for field_pat in &ps.fields {
@@ -3044,7 +3047,44 @@ impl CodeGen {
             }
             scoped.pop_pattern_ref_binding_scope();
         }
-        parts.join(", ")
+        parts
+            .iter()
+            .map(|p| {
+                // A std::visit lambda whose parameter type was rewritten to the
+                // arg-deducing form `Base<__Vs...>` needs a C++20 template-lambda
+                // header so the pack is deduced from the actual alternative.
+                if p.contains("__Vs") {
+                    p.replacen("[&](", "[&]<typename... __Vs>(", 1)
+                } else {
+                    p.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Rewrite a variant struct type `Base<args...>` into `Base<__Vs...>` so a
+    /// `std::visit` lambda DEDUCES the enum's type arguments instead of spelling
+    /// them out — spelling them out leaks generic parameters that aren't in scope
+    /// at the match site (e.g. a method-introduced `Q` from `map.entry_ref(&T)`).
+    /// Pairs with the `__Vs` post-process above. Non-templated types are unchanged.
+    pub(super) fn visit_variant_deduced_type(&self, cpp_type: String) -> String {
+        // Only deduce args for a CONCRETE user variant-struct type spelled with
+        // explicit args (`Enum_Variant<args...>`). Leave already-generic forms
+        // alone: std type traits (`std::variant_alternative_t<0, decltype(_m)>`),
+        // anything routed through `decltype(...)`, etc. — they don't leak params.
+        if cpp_type.starts_with("std::")
+            || cpp_type.contains("variant_alternative")
+            || cpp_type.contains("decltype(")
+        {
+            return cpp_type;
+        }
+        match cpp_type.find('<') {
+            Some(idx) if cpp_type.trim_end().ends_with('>') => {
+                format!("{}<__Vs...>", &cpp_type[..idx])
+            }
+            _ => cpp_type,
+        }
     }
 
     pub(super) fn try_emit_runtime_entry_probe_expr(&self, expr: &syn::Expr) -> Option<String> {
