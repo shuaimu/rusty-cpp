@@ -7416,7 +7416,22 @@ impl CodeGen {
                 if let syn::Item::Fn(f) = nested {
                     let fn_name = f.sig.ident.to_string();
                     let escaped_fn = escape_cpp_keyword(&fn_name);
-                    let qualified = format!("{}::{}", mod_cpp_name, escaped_fn);
+                    // Qualify with the FULL ancestor namespace path, not just the
+                    // immediate module. A function in `alloc::inner` must be recorded
+                    // as `alloc::inner::do_alloc`, otherwise a call from a sibling
+                    // namespace (`raw`) emits the relative `inner::do_alloc`, which is
+                    // undeclared there. `mod_cpp_name` alone drops the ancestors.
+                    let escaped_scope = self
+                        .module_stack
+                        .iter()
+                        .map(|seg| escape_cpp_keyword(seg))
+                        .collect::<Vec<String>>()
+                        .join("::");
+                    let qualified = if escaped_scope.is_empty() {
+                        format!("{}::{}", mod_cpp_name, escaped_fn)
+                    } else {
+                        format!("{}::{}::{}", escaped_scope, mod_cpp_name, escaped_fn)
+                    };
                     let entry = self.module_qualified_functions.entry(fn_name);
                     match entry {
                         std::collections::hash_map::Entry::Vacant(e) => {
