@@ -7276,7 +7276,13 @@ impl CodeGen {
             return receiver;
         }
         if matches!(method_name.as_str(), "as_ptr" | "as_mut_ptr") && args.is_empty() {
+            // Expose the expected pointer's element type to the receiver emission so
+            // a return-only-`T` method-template receiver can recover its turbofish.
+            let prev_as_ptr_elem = self.as_ptr_expected_element.borrow().clone();
+            *self.as_ptr_expected_element.borrow_mut() =
+                self.expected_pointer_element_type(expected_ty);
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            *self.as_ptr_expected_element.borrow_mut() = prev_as_ptr_elem;
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
                 format!("({})", raw_receiver)
             } else {

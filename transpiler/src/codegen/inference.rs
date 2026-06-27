@@ -372,6 +372,19 @@ impl CodeGen {
             .iter()
             .all(|param| self.is_type_param_in_scope(param))
         {
+            // The declared param name isn't a visible C++ template parameter at
+            // this call site. Fallback: a SINGLE return-only param consumed via
+            // `.as_ptr()` is pinned by the expected pointer's element type
+            // (`data_end<T>() -> NonNull<T>`; `as_ptr` gives `*T`, so `T` == the
+            // element). Recovers the turbofish that name-based scope can't.
+            if type_params.len() == 1
+                && let Some(elem) = self.as_ptr_expected_element.borrow().clone()
+            {
+                let elem_cpp = self.map_type(&elem);
+                if elem_cpp != "auto" && !type_string_has_auto_placeholder(&elem_cpp) {
+                    return Some(format!("<{}>", elem_cpp));
+                }
+            }
             return None;
         }
 
@@ -381,6 +394,18 @@ impl CodeGen {
             .collect::<Vec<String>>()
             .join(", ");
         Some(format!("<{}>", mapped_params))
+    }
+
+    /// The element type of an expected raw-pointer type (`*mut u8` → `u8`).
+    pub(super) fn expected_pointer_element_type(
+        &self,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<syn::Type> {
+        let ty = expected_ty?;
+        if let syn::Type::Ptr(ptr) = self.peel_reference_paren_group_type(ty) {
+            return Some((*ptr.elem).clone());
+        }
+        None
     }
 
     pub(super) fn resolve_known_free_function_expr_path(&self, path: &syn::Path) -> Option<String> {

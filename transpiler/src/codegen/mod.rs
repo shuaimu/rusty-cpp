@@ -1046,6 +1046,12 @@ pub struct CodeGen {
     /// as that default-constructed type instead of leaking `Vec<auto>`. A
     /// `RefCell` because expression emission is `&self`.
     pub(crate) assert_equal_sibling_item: std::cell::RefCell<Option<String>>,
+    /// While emitting the RECEIVER of `.as_ptr()`/`.as_mut_ptr()`, the element
+    /// type of the call's expected pointer type (`*mut u8` → `u8`). Lets a
+    /// return-only-`T` method-template receiver (`data_end<T>() -> NonNull<T>`,
+    /// `T` not in scope) recover its turbofish: `as_ptr` strips one container
+    /// layer, so `T` == this element.
+    pub(crate) as_ptr_expected_element: std::cell::RefCell<Option<syn::Type>>,
     /// Scoped local bindings for expected-type propagation in expression emission.
     /// `None` means the binding exists but has no explicit type annotation.
     pub(crate) local_bindings: Vec<HashMap<String, Option<syn::Type>>>,
@@ -1700,6 +1706,7 @@ impl CodeGen {
             local_placeholder_type_hints: Vec::new(),
             collection_decltype_element_overrides: Vec::new(),
             assert_equal_sibling_item: std::cell::RefCell::new(None),
+            as_ptr_expected_element: std::cell::RefCell::new(None),
             local_bindings: Vec::new(),
             local_shadowed_binding_types: Vec::new(),
             in_progress_local_initializers: Vec::new(),
