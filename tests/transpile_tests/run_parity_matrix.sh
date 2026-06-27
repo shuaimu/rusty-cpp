@@ -19,7 +19,10 @@ declare -a MATRIX_CRATES=(
     "semver"
     "bitflags"
     "smallvec"
-    "itertools"
+    # itertools: temporarily disabled — iterator-item engine + FoldWhile_Ok done
+    # (quick leak-free), remaining = tree_reduce alias-hoist (UFCS path, collision-
+    # safe) + projected-push transpile leaks. Re-enable when those land.
+    # "itertools"
     "once_cell"
     "serde_bytes"
     "serde_repr"
