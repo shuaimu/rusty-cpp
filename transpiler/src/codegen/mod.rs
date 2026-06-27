@@ -1932,7 +1932,50 @@ impl CodeGen {
         let wrap_end = self.output.len()
             - format!("}} // namespace {}\n", crate_name).len();
         let mut wrapped = self.output[wrap_start..wrap_end].to_string();
-        let exclusive = self.crate_exclusive_top_namespaces();
+        let mut exclusive = self.crate_exclusive_top_namespaces();
+        // Gap (c): own top-level modules that hold no TYPE — so they are absent from
+        // the type-keyed exclusive set — but do exist (e.g. bitflags's `external`,
+        // which holds only functions/impls). A crate-root `namespace X {` block sits
+        // at column 0 of the wrap purview; add it so `::X::` self-references
+        // re-qualify to `::<crate>::X::`. (Namespace ALIASES `namespace X = …;` are
+        // skipped — they don't own a scope.)
+        {
+            // Modules owned by an UNWRAPPED dependency stay at global scope, so a
+            // namespace this crate SHARES with one (serde_bytes's `de`/`ser`, also
+            // serde_core's) must NOT be re-qualified — its references resolve to the
+            // dependency. (A WRAPPED dep's types are already `::<dep>::…`-qualified, so
+            // no ambiguity; its module names don't need excluding.) Gap (a) — a crate
+            // that declares its OWN types in such a shared namespace — is not solved
+            // here; this only avoids hijacking a pure-dependency namespace.
+            let dep_top_modules: HashSet<&str> = self
+                .dependency_ufcs_trait_manifests
+                .iter()
+                .filter(|m| !crate::transpile::crate_is_namespace_wrapped(&m.module))
+                .flat_map(|m| m.declared_types.iter())
+                .filter_map(|dt| dt.module_path.split("::").next())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let mut col0_namespaces: HashSet<String> = HashSet::new();
+            for line in wrapped.lines() {
+                if line.starts_with([' ', '\t']) {
+                    continue;
+                }
+                if let Some(rest) = line.strip_prefix("namespace ") {
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty()
+                        && rest[name.len()..].trim_start().starts_with('{')
+                        && !exclusive.contains(&name)
+                        && !dep_top_modules.contains(name.as_str())
+                    {
+                        col0_namespaces.insert(name);
+                    }
+                }
+            }
+            exclusive.extend(col0_namespaces);
+        }
         for ns in &exclusive {
             wrapped = Self::requalify_top_level_namespace(&wrapped, &crate_name, ns, "::");
         }
