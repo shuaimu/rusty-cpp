@@ -690,12 +690,27 @@ which must move in lockstep (the three rules below). The set of wrapped crates i
    declarations are collected first and are never overwritten), so genuine shadowing is
    preserved.
 
-Because rules 1–3 are entangled, the wrap is widened **incrementally and matrix-gated**: build
-the ownership map first (inert until a dependency is actually wrapped), then wrap a near-leaf
-crate (e.g. `hashbrown`) and re-qualify its consumers, then widen crate-by-crate, and finally
-flip `crate_is_namespace_wrapped` to all and delete the allowlist. Crates whose module names
-never collide with a dependency are unaffected by the wrap in practice; the mechanism exists so
-that collisions *cannot* happen regardless of how common a module name is.
+Because rules 1–3 are entangled, the wrap is applied **selectively and widened
+incrementally, matrix-gated** — not flipped on for every crate at once. A measurement
+(2026-06-27) wrapping *all* crates regressed 11 of 14 passing crates, because the
+self-re-qualification has gaps that each need their own handling:
+
+- **Shared namespaces.** Rule 1 deliberately re-qualifies only *exclusive* namespaces (those
+  holding a type THIS crate declares), because a namespace shared with a dependency — serde's
+  `de`/`ser` vs serde_core's `de`/`ser` — must keep resolving to the dependency. Naively
+  re-qualifying every top-level `::<ns>::` breaks that.
+- **Declared crate-root types.** Rule 3 collects crate-root types only from re-export shapes
+  (`export using ns::T`, dropped imports, `using ::T;`). A type the crate *declares* at its
+  root but never re-exports (either's `Either_Left`) is missed and escapes to global.
+- **Non-type-holding own modules.** A module that holds only functions/impls (bitflags's
+  `external`) is absent from the exclusive set (which is keyed on declared *types*), so its
+  `::external::` self-references are not re-qualified.
+
+So the wrap is enabled per-crate via `crate_is_namespace_wrapped` for crates that actually
+collide (serde_bytes; hashbrown, which collides with indexmap on `set`/`map`/`iter`). Reaching
+a universal wrap — where collisions *cannot* happen regardless of module name — requires
+closing the three gaps above first, then widening one crate at a time. Crates whose module
+names never collide with a dependency need no wrap in the meantime.
 
 #### Cross-Module Declarations/Definitions: Rust vs C++
 

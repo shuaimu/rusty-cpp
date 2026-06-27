@@ -290,6 +290,14 @@ pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameC
 /// (Phase-1): serde_bytes only; widening this list also widens the wrap and its
 /// re-qualification in lockstep.
 pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
+    // Applied SELECTIVELY to crates that actually collide (a shared module name with
+    // an imported dependency). serde_bytes (Phase 1) and hashbrown (collides with
+    // indexmap on `set`/`map`/`iter`). A flip-to-ALL was measured (2026-06-27) and
+    // regresses 11/14 crates: the self-re-qualification needs per-pattern work it
+    // does not yet do — re-qualifying a namespace SHARED with a dependency (serde's
+    // `de` vs serde_core's `de`) the way Rule 1 deliberately avoids, declared
+    // crate-root TYPES (either's `Either_Left`), and non-type-holding own modules
+    // (bitflags's `external`). Widen one crate at a time, matrix-gated.
     matches!(crate_name, "serde_bytes" | "hashbrown")
 }
 
