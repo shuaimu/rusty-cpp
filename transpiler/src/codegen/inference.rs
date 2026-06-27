@@ -10752,17 +10752,7 @@ impl CodeGen {
     /// `f(args)` to `f.call_unsafe(args)`. Safe `fn` pointers (→ rusty::SafeFn)
     /// are callable directly and are left alone.
     pub(super) fn try_emit_unsafe_fn_call(&self, call: &syn::ExprCall) -> Option<String> {
-        let syn::Expr::Path(p) = call.func.as_ref() else {
-            return None;
-        };
-        if p.qself.is_some() || p.path.segments.len() != 1 {
-            return None;
-        }
-        let callee_ty = self.infer_simple_expr_type(call.func.as_ref())?;
-        let syn::Type::BareFn(bf) = self.peel_reference_paren_group_type(&callee_ty) else {
-            return None;
-        };
-        if bf.unsafety.is_none() {
+        if !self.callee_is_unsafe_fn_value(call.func.as_ref()) {
             return None;
         }
         let callee_cpp = self.emit_expr_to_string(call.func.as_ref());
@@ -10772,6 +10762,49 @@ impl CodeGen {
             .map(|a| self.emit_expr_maybe_move(a))
             .collect();
         Some(format!("{}.call_unsafe({})", callee_cpp, args.join(", ")))
+    }
+
+    /// Whether a CALL's callee expression is a value of `unsafe fn` type (→
+    /// `rusty::UnsafeFn<…>`, which has no `operator()`). Two shapes:
+    /// (a) a single-ident value typed as `unsafe fn` (e.g. an if-let-bound
+    ///     `Option<unsafe fn>` payload); and
+    /// (b) `recv.expect(..)` / `recv.unwrap()` where `recv: Option<unsafe fn>`
+    ///     (the unsafe_libyaml `(*emitter).write_handler.expect(..)(args)` shape).
+    fn callee_is_unsafe_fn_value(&self, callee: &syn::Expr) -> bool {
+        let is_unsafe_bare_fn = |ty: &syn::Type| {
+            let peeled = self.peel_reference_paren_group_type(ty);
+            if matches!(peeled, syn::Type::BareFn(bf) if bf.unsafety.is_some()) {
+                return true;
+            }
+            // Resolve a fn-pointer type ALIAS (e.g. `yaml_write_handler_t = unsafe fn(..)`).
+            self.resolve_type_alias_once(peeled).is_some_and(|resolved| {
+                matches!(
+                    self.peel_reference_paren_group_type(&resolved),
+                    syn::Type::BareFn(bf) if bf.unsafety.is_some()
+                )
+            })
+        };
+        if let syn::Expr::Path(p) = callee
+            && p.qself.is_none()
+            && p.path.segments.len() == 1
+            && let Some(ty) = self.infer_simple_expr_type(callee)
+            && is_unsafe_bare_fn(&ty)
+        {
+            return true;
+        }
+        if let syn::Expr::MethodCall(mc) = callee
+            && mc.args.iter().all(|a| matches!(a, syn::Expr::Lit(_)))
+            && matches!(
+                mc.method.to_string().as_str(),
+                "expect" | "unwrap" | "unwrap_unchecked"
+            )
+            && let Some(recv_ty) = self.infer_simple_expr_type(&mc.receiver)
+            && let Some(payload) = self.option_or_result_ok_payload_type(&recv_ty)
+            && is_unsafe_bare_fn(&payload)
+        {
+            return true;
+        }
+        false
     }
 
     /// `assert_equal(A, B)` (itertools): emit `A`, then `B` with the sibling-item

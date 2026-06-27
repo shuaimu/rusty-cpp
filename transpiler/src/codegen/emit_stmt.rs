@@ -1275,7 +1275,7 @@ impl CodeGen {
     /// `Some(true)` for `&mut` (use `.as_mut().unwrap()` to keep a mut-ref
     /// payload).
     /// The payload type of an `Option<T>` / `Result<T, _>` (the first type arg).
-    fn option_or_result_ok_payload_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+    pub(super) fn option_or_result_ok_payload_type(&self, ty: &syn::Type) -> Option<syn::Type> {
         let peeled = self.peel_reference_paren_group_type(ty);
         let syn::Type::Path(tp) = peeled else {
             return None;
