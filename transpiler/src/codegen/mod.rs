@@ -19074,7 +19074,13 @@ impl CodeGen {
             syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Ident(_) | syn::Pat::Range(_) => true,
             syn::Pat::Path(pp) => !self.path_pattern_requires_visit(&pp.path, variant_ctx),
             syn::Pat::Or(or_pat) => or_pat.cases.iter().all(|case| match case {
-                syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Range(_) => true,
+                // `Pat::Ident` in an or-pattern is always a CONSTANT (a unit
+                // C-like-enum variant by bare name) — you can't bind differing
+                // names across or-cases — so it's switch-compatible like the
+                // top-level arm above.
+                syn::Pat::Lit(_) | syn::Pat::Wild(_) | syn::Pat::Ident(_) | syn::Pat::Range(_) => {
+                    true
+                }
                 syn::Pat::Path(pp) => !self.path_pattern_requires_visit(&pp.path, variant_ctx),
                 _ => false,
             }),

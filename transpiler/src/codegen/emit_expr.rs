@@ -1662,6 +1662,14 @@ impl CodeGen {
         Some(format!("std::string_view({})", literal))
     }
 
+    /// The switch case label for a bare ident that names a UNIQUE C-like-enum
+    /// variant (e.g. glob-imported `YAML_UTF8_ENCODING` → `yaml_encoding_t::YAML_UTF8_ENCODING`).
+    /// `None` for a real binding ident (which becomes the `default:` catch-all).
+    fn bare_c_like_enum_const_case_label(&self, name: &str) -> Option<String> {
+        let owner = self.unique_c_like_enum_owner_for_variant_name(name)?;
+        Some(format!("{}::{}", owner, name))
+    }
+
     pub(super) fn emit_match_as_switch(
         &mut self,
         scrutinee: &str,
@@ -1714,10 +1722,33 @@ impl CodeGen {
                                     labels.push(val);
                                 }
                             }
+                            // Bare C-like-enum variant by name (glob-imported), e.g.
+                            // `YAML_UTF16LE_ENCODING | YAML_UTF16BE_ENCODING`.
+                            syn::Pat::Ident(pi) if pi.subpat.is_none() => {
+                                if let Some(val) =
+                                    self.bare_c_like_enum_const_case_label(&pi.ident.to_string())
+                                    && !seen_in_or.contains(&val)
+                                {
+                                    seen_in_or.insert(val.clone());
+                                    labels.push(val);
+                                }
+                            }
                             _ => {}
                         }
                     }
                     labels
+                }
+                // A bare ident that names a unique C-like-enum constant is a CASE,
+                // not a binding catch-all (`default`).
+                syn::Pat::Ident(pi)
+                    if pi.subpat.is_none()
+                        && self
+                            .bare_c_like_enum_const_case_label(&pi.ident.to_string())
+                            .is_some() =>
+                {
+                    vec![self
+                        .bare_c_like_enum_const_case_label(&pi.ident.to_string())
+                        .unwrap()]
                 }
                 _ => vec!["default".to_string()],
             };
