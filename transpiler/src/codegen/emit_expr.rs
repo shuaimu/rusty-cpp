@@ -12477,6 +12477,11 @@ impl CodeGen {
         if let Some(emitted) = self.try_emit_assert_equal_sibling_empty_vec(call) {
             return emitted;
         }
+        // Calling an `unsafe fn` value (→ rusty::UnsafeFn, which has no call
+        // operator by design): lower `f(args)` to `f.call_unsafe(args)`.
+        if let Some(emitted) = self.try_emit_unsafe_fn_call(call) {
+            return emitted;
+        }
         // `assert_equal(A, B)` itself: emit A, then B with the sibling-item context
         // set so empty Vecs inside B adopt A's item type.
         if let Some(emitted) = self.try_emit_assert_equal_call(call) {

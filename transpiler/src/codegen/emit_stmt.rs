@@ -1274,6 +1274,53 @@ impl CodeGen {
     /// `std::as_const(...).unwrap()` to keep a const-ref payload), and
     /// `Some(true)` for `&mut` (use `.as_mut().unwrap()` to keep a mut-ref
     /// payload).
+    /// The payload type of an `Option<T>` / `Result<T, _>` (the first type arg).
+    fn option_or_result_ok_payload_type(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let peeled = self.peel_reference_paren_group_type(ty);
+        let syn::Type::Path(tp) = peeled else {
+            return None;
+        };
+        let seg = tp.path.segments.last()?;
+        if !matches!(seg.ident.to_string().as_str(), "Option" | "Result") {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+            return None;
+        };
+        args.args.iter().find_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t.clone()),
+            _ => None,
+        })
+    }
+
+    /// For `if let Some(name) = SCRUTINEE` where SCRUTINEE is `Option<fn ptr>` /
+    /// `Result<fn ptr, _>`, the fn-pointer payload type — so the bound `name` is
+    /// typed and a later `name(args)` call can detect an `unsafe fn` and lower it
+    /// to `.call_unsafe(args)`. Returns None for non-fn-pointer payloads (which
+    /// stay untyped, preserving prior behavior).
+    fn if_let_some_binding_fn_pointer_type(
+        &self,
+        binding_pat: Option<&syn::Pat>,
+        scrutinee_expr: &syn::Expr,
+        name: &str,
+    ) -> Option<syn::Type> {
+        // `binding_pat` is the PAYLOAD pattern (the inner `x` of `Some(x)`/`Ok(x)`),
+        // not the `Some(..)` wrapper — it must be a simple ident binding `name`.
+        let syn::Pat::Ident(pi) = binding_pat? else {
+            return None;
+        };
+        if pi.subpat.is_some() || pi.ident != name {
+            return None;
+        }
+        let scrutinee_ty = self.infer_simple_expr_type(scrutinee_expr)?;
+        let payload = self.option_or_result_ok_payload_type(&scrutinee_ty)?;
+        matches!(
+            self.peel_reference_paren_group_type(&payload),
+            syn::Type::BareFn(_)
+        )
+        .then_some(payload)
+    }
+
     pub(super) fn emit_if_let_body(
         &mut self,
         cond: &str,
@@ -1448,7 +1495,13 @@ impl CodeGen {
             let mut local_types = HashMap::new();
             let mut local_consts = HashMap::new();
             for rust_name in binding_map.keys() {
-                local_types.insert(rust_name.clone(), None);
+                // Register the Some/Ok payload type for fn-pointer if-let bindings
+                // (rare) so a later `binding(args)` call can detect an `unsafe fn`
+                // (→ rusty::UnsafeFn) and lower it to `.call_unsafe(args)`. Other
+                // bindings stay untyped, exactly as before.
+                let ty =
+                    self.if_let_some_binding_fn_pointer_type(binding_pat, scrutinee_expr, rust_name);
+                local_types.insert(rust_name.clone(), ty);
                 local_consts.insert(rust_name.clone(), false);
             }
             self.local_bindings.push(local_types);

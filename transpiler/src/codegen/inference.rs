@@ -10747,6 +10747,33 @@ impl CodeGen {
         }
     }
 
+    /// A call whose callee is a single-ident value of `unsafe fn` type (which
+    /// maps to `rusty::UnsafeFn<…>`, providing no `operator()` by design): lower
+    /// `f(args)` to `f.call_unsafe(args)`. Safe `fn` pointers (→ rusty::SafeFn)
+    /// are callable directly and are left alone.
+    pub(super) fn try_emit_unsafe_fn_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(p) = call.func.as_ref() else {
+            return None;
+        };
+        if p.qself.is_some() || p.path.segments.len() != 1 {
+            return None;
+        }
+        let callee_ty = self.infer_simple_expr_type(call.func.as_ref())?;
+        let syn::Type::BareFn(bf) = self.peel_reference_paren_group_type(&callee_ty) else {
+            return None;
+        };
+        if bf.unsafety.is_none() {
+            return None;
+        }
+        let callee_cpp = self.emit_expr_to_string(call.func.as_ref());
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|a| self.emit_expr_maybe_move(a))
+            .collect();
+        Some(format!("{}.call_unsafe({})", callee_cpp, args.join(", ")))
+    }
+
     /// `assert_equal(A, B)` (itertools): emit `A`, then `B` with the sibling-item
     /// context set to `A`'s item type, so an empty `Vec::new()` inside `B` adopts
     /// `A`'s item type (the two iterables are compared element-wise) rather than
