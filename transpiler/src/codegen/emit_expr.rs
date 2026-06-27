@@ -12516,6 +12516,44 @@ impl CodeGen {
         Some(format!("{}({})", seed, args.join(", ")))
     }
 
+    /// `slice::from_raw_parts[_mut](ptr, len)` → `rusty::from_raw_parts[_mut](ptr, len)`
+    /// (a `std::span<T>`). The slice element `T` lives only in the RESULT type
+    /// (`&[T]` / `&mut [T]`), so without it the `.cast()` on the pointer argument
+    /// defaults to `void*` and `span<void>` fails to instantiate. Recover `T` from
+    /// the call's expected type and feed `*const T` / `*mut T` as the pointer arg's
+    /// expected type, so the cast lands on `T*` and the span element deduces.
+    pub(super) fn try_emit_slice_from_raw_parts_call(
+        &self,
+        call: &syn::ExprCall,
+        expected_ty: Option<&syn::Type>,
+    ) -> Option<String> {
+        let syn::Expr::Path(p) = call.func.as_ref() else {
+            return None;
+        };
+        if !Self::is_slice_view_constructor_path(&p.path) || call.args.len() != 2 {
+            return None;
+        }
+        let is_mut = p
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "from_raw_parts_mut");
+        let elem_ty = extract_slice_element_type_for_hint(expected_ty?)?;
+        let ptr_expected: syn::Type = if is_mut {
+            syn::parse_quote!(*mut #elem_ty)
+        } else {
+            syn::parse_quote!(*const #elem_ty)
+        };
+        let ptr_arg = self.emit_expr_to_string_with_expected(&call.args[0], Some(&ptr_expected));
+        let len_arg = self.emit_expr_to_string(&call.args[1]);
+        let func = if is_mut {
+            "rusty::from_raw_parts_mut"
+        } else {
+            "rusty::from_raw_parts"
+        };
+        Some(format!("{}({}, {})", func, ptr_arg, len_arg))
+    }
+
     pub(super) fn emit_call_expr_to_string(
         &self,
         call: &syn::ExprCall,
@@ -12536,6 +12574,11 @@ impl CodeGen {
         // Calling an `unsafe fn` value (→ rusty::UnsafeFn, which has no call
         // operator by design): lower `f(args)` to `f.call_unsafe(args)`.
         if let Some(emitted) = self.try_emit_unsafe_fn_call(call) {
+            return emitted;
+        }
+        // `slice::from_raw_parts[_mut]` — feed the result's element type to the
+        // pointer-arg cast so `span<T>` deduces instead of `span<void>`.
+        if let Some(emitted) = self.try_emit_slice_from_raw_parts_call(call, expected_ty) {
             return emitted;
         }
         // `assert_equal(A, B)` itself: emit A, then B with the sibling-item context
