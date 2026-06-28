@@ -3824,8 +3824,94 @@ impl CodeGen {
                         self.collect_local_declared_types(nested_items, &nested_path);
                     }
                 }
+                syn::Item::Use(u) if matches!(u.vis, syn::Visibility::Public(_)) => {
+                    // A `pub use ignored_any::IgnoredAny;` makes a type accessible at THIS
+                    // (public, shorter) module. Record it in the cross-crate manifest surface
+                    // so a consumer requalifies the re-export path it actually references
+                    // (`de::IgnoredAny`) rather than the deep declaration path
+                    // (`de::ignored_any::IgnoredAny`). Manifest-only — own qualification untouched.
+                    self.record_reexported_manifest_types(module_path, &u.tree);
+                }
                 _ => {}
             }
+        }
+    }
+
+    fn record_reexported_manifest_types(&mut self, module_path: &[String], tree: &syn::UseTree) {
+        // via_local_path=false: a bare top-level `pub use Ok;` re-exports a glob-imported
+        // EXTERNAL name (rusty::Ok), which must NOT be mapped into this crate's surface.
+        // Only a name reached THROUGH a local module path (`pub use ignored_any::IgnoredAny`)
+        // names a type this crate actually owns at this module.
+        self.record_reexported_inner(module_path, tree, false);
+    }
+
+    fn record_reexported_inner(
+        &mut self,
+        module_path: &[String],
+        tree: &syn::UseTree,
+        via_local_path: bool,
+    ) {
+        match tree {
+            syn::UseTree::Path(p) => {
+                // A re-export rooted at a runtime/external crate (`pub use rusty::Ok`) or a
+                // namespace-wrapped dependency does NOT make a LOCAL type accessible here.
+                let root = p.ident.to_string();
+                if matches!(
+                    root.as_str(),
+                    "rusty" | "std" | "core" | "alloc" | "proc_macro"
+                ) || crate::transpile::crate_is_namespace_wrapped(&root)
+                {
+                    return;
+                }
+                self.record_reexported_inner(module_path, &p.tree, true)
+            }
+            syn::UseTree::Group(g) => {
+                for item in &g.items {
+                    self.record_reexported_inner(module_path, item, via_local_path);
+                }
+            }
+            syn::UseTree::Name(n) if via_local_path => {
+                self.record_manifest_reexport(module_path, &n.ident.to_string())
+            }
+            syn::UseTree::Rename(r) if via_local_path => {
+                self.record_manifest_reexport(module_path, &r.rename.to_string())
+            }
+            _ => {}
+        }
+    }
+
+    fn record_manifest_reexport(&mut self, module_path: &[String], name: &str) {
+        // Only TYPE-like names (Capitalized); module/function re-exports aren't requalifiable
+        // types. Keep the SHORTEST (most-public) path so a re-export wins over a deep decl.
+        if module_path.is_empty()
+            || !name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        {
+            return;
+        }
+        // A crate often re-exports a RUNTIME/std type through a local-looking path
+        // (`pub use crate::lib::result::Result;`). These map to `rusty::…`, are NOT the
+        // crate's own types, and must never enter its manifest surface — recording them
+        // mis-qualifies them to the re-export module (e.g. `private_::Ok`) on the
+        // self-manifest back-edge.
+        if matches!(
+            name,
+            "Result" | "Option" | "Ok" | "Err" | "Some" | "None" | "Box" | "Vec"
+                | "String" | "Cow" | "Rc" | "Arc" | "Cell" | "RefCell"
+        ) {
+            return;
+        }
+        let escaped_path = module_path
+            .iter()
+            .map(|segment| escape_cpp_keyword(segment))
+            .collect::<Vec<_>>()
+            .join("::");
+        let shorter = match self.manifest_type_module_path.get(name) {
+            Some(existing) => escaped_path.split("::").count() < existing.split("::").count(),
+            None => true,
+        };
+        if shorter {
+            self.manifest_type_module_path
+                .insert(name.to_string(), escaped_path);
         }
     }
 
