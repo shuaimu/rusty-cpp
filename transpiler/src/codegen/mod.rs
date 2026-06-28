@@ -2870,9 +2870,6 @@ impl CodeGen {
     /// types are in the map, so the consumer's same-named modules are never touched; the
     /// boundary check stops it re-prefixing an already-correct `::serde_core::de::…`.
     fn requalify_wrapped_dep_refs(&mut self) {
-        if self.local_type_module_path.is_empty() {
-            return;
-        }
         let mut repls: Vec<(String, String)> = Vec::new();
         for (ty, path) in &self.local_type_module_path {
             let crate_seg = path.split("::").next().unwrap_or_default();
@@ -2884,6 +2881,22 @@ impl CodeGen {
                 continue;
             }
             repls.push((format!("::{}::{}", sub, ty), format!("::{}::{}", path, ty)));
+        }
+        // UFCS dispatch BRIDGE namespaces (`<Trait>_`) of a wrapped dependency live at the
+        // dep's crate ROOT (`serde_core::SeqAccess_`), which the type loop above skips
+        // (empty sub-path). A consumer's dispatch references them BARE (`SeqAccess_::…`),
+        // assuming global scope. Requalify each dep trait's bridge to `<crate>::<Trait>_`.
+        // boundary_replace_path skips already-qualified forms (preceding `:`) and stops at
+        // identifier boundaries, so `SeqAccess_` followed by `::` is matched but
+        // `SeqAccess_Helper` is not.
+        for m in &self.dependency_ufcs_trait_manifests {
+            if !crate::transpile::crate_is_namespace_wrapped(&m.module) {
+                continue;
+            }
+            for tr in &m.declared_traits {
+                let bridge = format!("{}_", tr);
+                repls.push((bridge.clone(), format!("{}::{}", m.module, bridge)));
+            }
         }
         if repls.is_empty() {
             return;
