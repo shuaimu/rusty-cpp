@@ -703,6 +703,12 @@ pub struct CodeGen {
     pub(crate) deferred_self_const_defs: Vec<String>,
     /// Modules whose function pass was deferred for later emission.
     pub(crate) deferred_module_items: Vec<syn::ItemMod>,
+    /// Crate-root `pub use de::Deserialize`-style trait re-exports for a namespace-WRAPPED
+    /// crate, deferred to the END of the purview (after the trait classes are defined)
+    /// and emitted only for paths whose leaf is an exported class — so importers resolve
+    /// `<crate>::Deserialize` without an ordering error or over-triggering on non-class
+    /// traits (bitflags's `traits::Bits`). Stores the relative `de::Deserialize` path.
+    pub(crate) deferred_crate_root_trait_reexports: Vec<String>,
     /// Dedup keys for merged impl methods by type.
     /// Prevents duplicate C++ method emissions when expanded Rust yields
     /// overlapping inherent impl methods with the same callable signature.
@@ -1619,6 +1625,7 @@ impl CodeGen {
             defer_module_functions_recursively: false,
             deferred_self_const_defs: Vec::new(),
             deferred_module_items: Vec::new(),
+            deferred_crate_root_trait_reexports: Vec::new(),
             impl_method_conflict_keys: HashMap::new(),
             inherent_impl_method_names: HashMap::new(),
             operator_renames: HashMap::new(),
@@ -2834,6 +2841,34 @@ impl CodeGen {
     /// module prefix, and is seeded into the emitted set so owner-map pruning
     /// keeps it (the dependency emitted it). Dependency traits are NOT added to
     /// `ufcs_declared_trait_names` — this crate must not re-emit them.
+    /// Emit the deferred crate-root trait re-exports (`pub use de::Deserialize`) for a
+    /// namespace-wrapped crate, AFTER the purview's items so the target class is already
+    /// declared, and ONLY when the leaf names a class in this crate's output (skips
+    /// non-class traits like bitflags's `traits::Bits`). Lets importers resolve
+    /// `<crate>::Deserialize` (= the re-exported `<crate>::de::Deserialize`).
+    fn flush_deferred_crate_root_trait_reexports(&mut self) {
+        if self.deferred_crate_root_trait_reexports.is_empty() {
+            return;
+        }
+        let Some(crate_name) = self.crate_name.clone() else {
+            return;
+        };
+        let paths = std::mem::take(&mut self.deferred_crate_root_trait_reexports);
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for path in paths {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let leaf = path.rsplit("::").next().unwrap_or(&path);
+            let is_class = self.output.contains(&format!("class {} {{", leaf))
+                || self.output.contains(&format!("class {} :", leaf))
+                || self.output.contains(&format!("class {};", leaf));
+            if is_class {
+                self.writeln(&format!("export using ::{}::{};", crate_name, path));
+            }
+        }
+    }
+
     fn merge_dependency_ufcs_trait_manifests(&mut self) {
         let manifests = std::mem::take(&mut self.dependency_ufcs_trait_manifests);
         for m in &manifests {
@@ -3738,6 +3773,9 @@ impl CodeGen {
             self.newline();
         }
         log_emit("emit_extension_trait_free_functions_for_scope");
+
+        self.flush_deferred_crate_root_trait_reexports();
+        log_emit("flush_deferred_crate_root_trait_reexports");
 
         // Interface+adapter (§ 3.2.9): emit TraitAdapter<U> specializations
         // for `impl Trait for U` where both Trait and U are locally defined.

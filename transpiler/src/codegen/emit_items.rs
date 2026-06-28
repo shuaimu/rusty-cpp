@@ -4425,6 +4425,27 @@ impl CodeGen {
                 continue;
             }
             if self.is_skipped_module_trait_import(&resolved_path) {
+                // For a namespace-WRAPPED crate, a crate-root `pub use de::Deserialize`
+                // re-export must be EMITTED so downstream crates resolve
+                // `<crate>::Deserialize` — the trait class lives at
+                // `<crate>::de::Deserialize`. (Unwrapped crates keep skipping it: the
+                // trait isn't directly representable and global lookup found it.)
+                if is_pub
+                    && self.module_stack.is_empty()
+                    && self.block_depth == 0
+                    && !resolved_path.contains(" = ")
+                    && resolved_path.contains("::")
+                    && self
+                        .crate_name
+                        .as_deref()
+                        .is_some_and(|c| crate::transpile::crate_is_namespace_wrapped(c))
+                {
+                    // Defer to the end of the purview (ordering) + class-filter at flush.
+                    let tgt = resolved_path.trim_start_matches("::").to_string();
+                    self.deferred_crate_root_trait_reexports.push(tgt);
+                    self.writeln(&format!("// Rust-only (re-export deferred): using {};", resolved_path));
+                    continue;
+                }
                 self.writeln(&format!("// Rust-only: using {};", resolved_path));
                 continue;
             }
