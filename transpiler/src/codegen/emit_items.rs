@@ -4782,6 +4782,48 @@ impl CodeGen {
                     {
                         self.emit_namespace_using_import(ns);
                     }
+                    // A `using namespace` only enables UNqualified lookup of the variant
+                    // structs (EnumName_Variant). A namespace-WRAPPED crate re-exporting a data
+                    // enum to a PARENT module (serde_core's `pub use self::content::Content`
+                    // lifting `private_::content::Content` up to `private_`) must ALSO bring the
+                    // flattened variant structs into that parent, so a downstream crate that
+                    // references the enum at its re-export location resolves the QUALIFIED
+                    // variant (`serde_core::private_::Content_Str`). The enum is SCOPED, so its
+                    // bare name isn't in data_enum_types — look it up by the full (scoped) path.
+                    // Gated to wrapped crates so the passing flag-on crates are untouched.
+                    if self
+                        .crate_name
+                        .as_deref()
+                        .is_some_and(|c| crate::transpile::crate_is_namespace_wrapped(c))
+                        && let Some((ns, _)) = using_path.rsplit_once("::")
+                    {
+                        // data_enum_variants_by_enum keys the module path UNescaped
+                        // (`private::content::Content`) while using_path is escaped
+                        // (`private_::content::Content`), so match by the enum leaf + its
+                        // immediate parent segment rather than the full string.
+                        let segs: Vec<&str> = ns.trim_start_matches("::").split("::").collect();
+                        let parent = segs.last().copied().unwrap_or("");
+                        let variants = self
+                            .data_enum_variants_by_enum
+                            .iter()
+                            .find(|(k, _)| {
+                                let ks: Vec<&str> = k.split("::").collect();
+                                ks.last().copied() == Some(imported_name)
+                                    && ks.len() >= 2
+                                    && ks[ks.len() - 2] == parent
+                            })
+                            .map(|(_, v)| v.clone());
+                        if let Some(variants) = variants {
+                            let mut vs: Vec<String> = variants.into_iter().collect();
+                            vs.sort();
+                            for v in vs {
+                                self.writeln(&format!(
+                                    "{}using {}::{}_{};",
+                                    export_prefix, ns, imported_name, v
+                                ));
+                            }
+                        }
+                    }
                 }
                 UseImportAction::Raw(statement) => {
                     if let Some(alias_name) = parse_namespace_alias_name(&statement) {
