@@ -2082,38 +2082,21 @@ impl CodeGen {
             wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, ns);
         }
         // Gap (a) part 2: now that the `rusty_ext` DEFINITIONS live at global scope,
-        // make every `rusty_ext` REFERENCE in the purview absolute-global so it
-        // resolves there. Revert any Rule-1 re-qualification (`::<crate>::de::rusty_ext`
-        // -> `::de::rusty_ext`), then absolutize the relative form (`de::rusty_ext`
-        // -> `::de::rusty_ext`), which inside `namespace <crate>` would otherwise bind
-        // to the now-empty `<crate>::de::rusty_ext`.
-        for parent in ["de::", "ser::", ""] {
-            wrapped = wrapped.replace(
-                &format!("::{}::{}rusty_ext", crate_name, parent),
-                &format!("::{}rusty_ext", parent),
-            );
-        }
-        for path in ["de::rusty_ext", "ser::rusty_ext"] {
-            wrapped = Self::absolutize_global_path(&wrapped, path);
-        }
+        // normalize every `rusty_ext` REFERENCE in the purview to absolute-global (at
+        // any nesting depth) so it resolves there — reverting Rule-1's over-qualification
+        // and absolutizing the relative form (which inside `namespace <crate>` would
+        // otherwise bind to the now-empty `<crate>::…::rusty_ext`).
+        wrapped = Self::globalize_rusty_ext_refs(&wrapped, &crate_name);
         // The relocated `rusty_ext` blocks reference PURVIEW types the same way the
         // purview does (`::de::value::BoolDeserializer` is `serde_core::de::value::…`),
-        // so apply the SAME exclusive-namespace re-qualification to them — keeping
-        // `rusty_ext` itself global (the revert + absolutize below).
+        // so apply the SAME exclusive-namespace re-qualification to them — then
+        // globalize their own `rusty_ext` references (recursive dispatch).
         if !global_rusty_ext.is_empty() {
             for ns in &exclusive {
                 global_rusty_ext =
                     Self::requalify_top_level_namespace(&global_rusty_ext, &crate_name, ns, "::");
             }
-            for parent in ["de::", "ser::", ""] {
-                global_rusty_ext = global_rusty_ext.replace(
-                    &format!("::{}::{}rusty_ext", crate_name, parent),
-                    &format!("::{}rusty_ext", parent),
-                );
-            }
-            for path in ["de::rusty_ext", "ser::rusty_ext"] {
-                global_rusty_ext = Self::absolutize_global_path(&global_rusty_ext, path);
-            }
+            global_rusty_ext = Self::globalize_rusty_ext_refs(&global_rusty_ext, &crate_name);
         }
         self.output.replace_range(wrap_start..wrap_end, &wrapped);
         // Emit the relocated `rusty_ext` blocks at global scope, AFTER the wrap's
@@ -2130,78 +2113,54 @@ impl CodeGen {
         }
     }
 
-    /// Prepend `::` to a RELATIVE occurrence of `path` (at a token-start boundary —
-    /// not preceded by an identifier char or `:`), making it resolve at global
-    /// scope. Leaves already-absolute (`::path`) and mid-path (`X::path`) alone.
-    fn absolutize_global_path(text: &str, path: &str) -> String {
-        let bytes = text.as_bytes();
-        let mut out = String::with_capacity(text.len());
-        let mut i = 0;
-        while let Some(rel) = text[i..].find(path) {
-            let pos = i + rel;
-            let before_ok = pos == 0
-                || !(bytes[pos - 1].is_ascii_alphanumeric()
-                    || bytes[pos - 1] == b'_'
-                    || bytes[pos - 1] == b':');
-            out.push_str(&text[i..pos]);
-            if before_ok {
-                out.push_str("::");
-            }
-            out.push_str(path);
-            i = pos + path.len();
-        }
-        out.push_str(&text[i..]);
-        out
-    }
-
-    /// Relocate the purview's `namespace rusty_ext { … }` blocks to global scope.
-    /// Returns `(purview_without_them, the_blocks_re_wrapped_in_their_parent)`.
-    /// The output is consistently indented, so a `namespace rusty_ext {` at column
-    /// `n` runs to the first `}` at column `n`. The block's column-0 enclosing
-    /// `namespace de {`/`ser {` (if any) is re-created around it at global scope.
+    /// Relocate the purview's `namespace rusty_ext { … }` blocks to global scope,
+    /// at ANY nesting depth (`de::rusty_ext`, `de::value::rusty_ext`, …). Returns
+    /// `(purview_without_them, the_blocks_re_wrapped_in_their_full_parent_path)`.
+    /// The output is 4-space-per-level indented, so a `namespace rusty_ext {` at
+    /// indent `n` runs to the first `}` at indent `n`, and `ns_path[L]` tracks the
+    /// enclosing namespace name at level `L` (every ancestor of a namespace is a
+    /// namespace, so the level→name map is exact for these blocks).
     fn relocate_rusty_ext_blocks(wrapped: &str) -> (String, String) {
         let lines: Vec<&str> = wrapped.lines().collect();
         let mut purview = String::with_capacity(wrapped.len());
         let mut global = String::new();
-        let mut current_top: Option<String> = None;
+        let mut ns_path: Vec<String> = Vec::new();
         let mut i = 0;
         while i < lines.len() {
             let line = lines[i];
             let trimmed = line.trim_start();
             let indent = line.len() - trimmed.len();
+            let level = indent / 4;
             if trimmed == "namespace rusty_ext {" {
-                let parent = if indent == 0 { None } else { current_top.clone() };
                 let close = format!("{}}}", " ".repeat(indent));
                 let mut j = i + 1;
                 while j < lines.len() && lines[j] != close {
                     j += 1;
                 }
                 if j < lines.len() {
-                    let block = lines[i..=j].join("\n");
-                    match parent {
-                        Some(p) => {
-                            global.push_str(&format!("namespace {} {{\n{}\n}}\n", p, block))
-                        }
-                        None => {
-                            global.push_str(&block);
-                            global.push('\n');
-                        }
+                    let parents: Vec<String> =
+                        ns_path.iter().take(level).cloned().collect();
+                    let mut block = lines[i..=j].join("\n");
+                    for p in parents.iter().rev() {
+                        block = format!("namespace {} {{\n{}\n}}", p, block);
                     }
+                    global.push_str(&block);
+                    global.push('\n');
                     i = j + 1;
                     continue;
                 }
                 // Unmatched close — leave the block in place (fall through).
-            } else if indent == 0 {
-                if let Some(rest) = trimmed.strip_prefix("namespace ") {
-                    let name: String = rest
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-                    if !name.is_empty() && rest[name.len()..].trim_start().starts_with('{') {
-                        current_top = Some(name);
-                    }
-                } else if trimmed.starts_with('}') {
-                    current_top = None;
+            } else if let Some(rest) = trimmed.strip_prefix("namespace ") {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty()
+                    && rest[name.len()..].trim_start().starts_with('{')
+                    && ns_path.len() >= level
+                {
+                    ns_path.truncate(level);
+                    ns_path.push(name);
                 }
             }
             purview.push_str(line);
@@ -2209,6 +2168,73 @@ impl CodeGen {
             i += 1;
         }
         (purview, global)
+    }
+
+    /// Normalize EVERY `rusty_ext`-segment reference path to absolute-global: strip a
+    /// leading `<crate>::` qualifier (Rule-1 over-qualified `::<crate>::de::…::rusty_ext`)
+    /// and ensure a leading `::` (relative `de::…::rusty_ext`). `rusty_ext` is the
+    /// extension-dispatch namespace, unified at global scope by `relocate_rusty_ext_blocks`;
+    /// every reference to it must resolve there regardless of nesting depth. The
+    /// `namespace rusty_ext {` DECLARATIONS are left alone (`rusty_ext` is preceded by a
+    /// space there, not `::`).
+    fn globalize_rusty_ext_refs(text: &str, crate_name: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut scan = 0;
+        while let Some(rel) = text[scan..].find("rusty_ext") {
+            let rt_pos = scan + rel;
+            let after = rt_pos + "rusty_ext".len();
+            let preceded = rt_pos >= 2 && &text[rt_pos - 2..rt_pos] == "::";
+            let after_ok = after >= text.len()
+                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+            if !preceded || !after_ok {
+                out.push_str(&text[scan..after]);
+                scan = after;
+                continue;
+            }
+            // Walk back over `::<ident>` segments to the path start.
+            let mut seg_starts = vec![rt_pos];
+            let mut p = rt_pos;
+            loop {
+                if p >= 2 && &text[p - 2..p] == "::" {
+                    let sep = p - 2;
+                    let mut s = sep;
+                    while s > 0 && (bytes[s - 1].is_ascii_alphanumeric() || bytes[s - 1] == b'_')
+                    {
+                        s -= 1;
+                    }
+                    if s == sep {
+                        // Leading `::` (absolute) — no segment before it.
+                        p = sep;
+                        break;
+                    }
+                    seg_starts.push(s);
+                    p = s;
+                } else {
+                    break;
+                }
+            }
+            let path_start = p;
+            let segs: Vec<&str> = seg_starts
+                .iter()
+                .rev()
+                .map(|&s| {
+                    let mut e = s;
+                    while e < text.len()
+                        && (bytes[e].is_ascii_alphanumeric() || bytes[e] == b'_')
+                    {
+                        e += 1;
+                    }
+                    &text[s..e]
+                })
+                .collect();
+            let start_idx = usize::from(segs.first() == Some(&crate_name));
+            out.push_str(&text[scan..path_start]);
+            out.push_str(&format!("::{}", segs[start_idx..].join("::")));
+            scan = after;
+        }
+        out.push_str(&text[scan..]);
+        out
     }
 
     /// Re-qualify bare crate-root references `::<sym>` -> `::<crate>::<sym>`.
