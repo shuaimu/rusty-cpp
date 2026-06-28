@@ -298,7 +298,10 @@ pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
     // `de` vs serde_core's `de`) the way Rule 1 deliberately avoids, declared
     // crate-root TYPES (either's `Either_Left`), and non-type-holding own modules
     // (bitflags's `external`). Widen one crate at a time, matrix-gated.
-    matches!(crate_name, "serde_bytes" | "hashbrown" | "either" | "bitflags")
+    matches!(
+        crate_name,
+        "serde_bytes" | "hashbrown" | "either" | "bitflags" | "serde_core"
+    )
 }
 
 /// Short names of every trait this crate DECLARES (`trait Tr { … }`), recursing

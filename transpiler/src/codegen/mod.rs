@@ -1938,9 +1938,15 @@ impl CodeGen {
         // global nor a crate-qualified reference finds all members. Pull the purview's
         // `rusty_ext` blocks back out to global scope so they merge with the
         // fragment's; `global_rusty_ext` is re-emitted just before the wrap below.
-        let (cleaned, mut global_rusty_ext, rusty_ext_skeletons) =
-            Self::relocate_rusty_ext_blocks(&wrapped);
-        wrapped = cleaned;
+        // Do NOT relocate `rusty_ext` out of the purview. It is defined entirely in the
+        // purview (forward-decls + defs, all scopes), so leaving it wrapped means its
+        // references requalify like any other purview namespace (`::de::rusty_ext::X` →
+        // `::serde_core::de::rusty_ext::X` via Rule 1 below) and resolve in-place. The
+        // earlier relocate-to-global approach had to re-declare every purview entity the
+        // blocks reference (types, `__ufcs_`/`X_` bridges, usings, free fns) and never
+        // converged (serde_core stuck at 19 errors across every variant).
+        let mut global_rusty_ext = String::new();
+        let rusty_ext_skeletons = String::new();
         let mut exclusive = self.crate_exclusive_top_namespaces();
         // Gap (c): own top-level modules that hold no TYPE — so they are absent from
         // the type-keyed exclusive set — but do exist (e.g. bitflags's `external`,
@@ -2082,42 +2088,81 @@ impl CodeGen {
         for ns in &exclusive {
             wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, ns);
         }
-        // Gap (a) part 2: now that the `rusty_ext` DEFINITIONS live at global scope,
-        // normalize every `rusty_ext` REFERENCE in the purview to absolute-global (at
-        // any nesting depth) so it resolves there — reverting Rule-1's over-qualification
-        // and absolutizing the relative form (which inside `namespace <crate>` would
-        // otherwise bind to the now-empty `<crate>::…::rusty_ext`).
-        wrapped = Self::globalize_rusty_ext_refs(&wrapped, &crate_name);
-        // The relocated `rusty_ext` blocks reference PURVIEW types the same way the
-        // purview does (`::de::value::BoolDeserializer` is `serde_core::de::value::…`),
-        // so apply the SAME exclusive-namespace re-qualification to them — then
-        // globalize their own `rusty_ext` references (recursive dispatch).
-        if !global_rusty_ext.is_empty() {
-            for ns in &exclusive {
-                global_rusty_ext =
-                    Self::requalify_top_level_namespace(&global_rusty_ext, &crate_name, ns, "::");
-            }
-            global_rusty_ext = Self::globalize_rusty_ext_refs(&global_rusty_ext, &crate_name);
-        }
+        // Gap (a): `rusty_ext` stays IN the purview (not relocated), so its references
+        // must NOT be globalized — Rule 1 above already requalified `::de::rusty_ext::X`
+        // to `::serde_core::de::rusty_ext::X`, which is exactly where the wrapped
+        // definitions live. (globalize_rusty_ext_refs is retained for reference but no
+        // longer applied.)
+        let _ = (&global_rusty_ext, &rusty_ext_skeletons);
         self.output.replace_range(wrap_start..wrap_end, &wrapped);
-        // Emit the relocated `rusty_ext` blocks at global scope, AFTER the wrap's
-        // closing `}`. They reference purview types (`::serde_core::de::value::…`),
-        // which must be DECLARED first — so they go after `namespace <crate> {…}`, not
-        // before it. The purview's own references to these blocks are calls in
-        // template bodies, resolved at instantiation (end of TU), so the later
-        // definition is fine.
-        if !global_rusty_ext.is_empty() {
-            if !self.output.ends_with('\n') {
-                self.output.push('\n');
+        // Co-locate the GLOBAL hardcoded rusty_ext runtime prelude with the WRAPPED
+        // per-type overloads. The prelude (`deserialize`/`deserialize_any`/
+        // `deserialize_in_place` dispatchers, `serialize_value`/`forward_serializer`) is
+        // emitted in the global module fragment's `extern "C++"` block — it can't move
+        // into the module (shared cross-module linkage). The per-type extension overloads
+        // live in the wrapped purview (`<crate>::de::rusty_ext::…`). A qualified
+        // `<crate>::…::rusty_ext::deserialize_any` reference must see BOTH for overload
+        // resolution, so import the global dispatchers into the wrapped namespace via
+        // using-declarations. (Templates → instantiation-time lookup, so a trailing
+        // bridge after the wrap is in scope.)
+        // `<ns>::rusty_ext::<member>` is referenced as a WHOLE word (so `serialize`
+        // doesn't match `serialize_value`).
+        let referenced = |ns: &str, member: &str| -> bool {
+            let needle = format!("{}::rusty_ext::{}", ns, member);
+            let bytes = self.output.as_bytes();
+            let mut from = 0;
+            while let Some(rel) = self.output[from..].find(&needle) {
+                let end = from + rel + needle.len();
+                let after_ok = end >= self.output.len()
+                    || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_');
+                if after_ok {
+                    return true;
+                }
+                from = from + rel + needle.len();
             }
-            self.output.push_str(&global_rusty_ext);
+            false
+        };
+        // Global hardcoded rusty_ext prelude members: free-fn dispatchers (using-decl) and
+        // the `detail` sub-namespace (namespace-alias).
+        let de_fns = ["deserialize", "deserialize_any", "deserialize_in_place"];
+        let ser_fns = ["serialize", "serialize_value", "forward_serializer"];
+        let mut de_usings = String::new();
+        for f in de_fns {
+            if referenced("de", f) {
+                de_usings.push_str(&format!("using ::de::rusty_ext::{};\n", f));
+            }
         }
-        // Emit the empty forward-decl skeletons BEFORE the wrap (at insert_pos, ahead of
-        // `namespace <crate> {`) so the purview's qualified-id references to the
-        // relocated `…::rusty_ext` namespaces parse; members resolve against the full
-        // definitions appended above at template-instantiation time.
-        if !rusty_ext_skeletons.is_empty() {
-            self.output.insert_str(insert_pos, &rusty_ext_skeletons);
+        if referenced("de", "detail") {
+            de_usings.push_str("namespace detail = ::de::rusty_ext::detail;\n");
+        }
+        let mut ser_usings = String::new();
+        for f in ser_fns {
+            if referenced("ser", f) {
+                ser_usings.push_str(&format!("using ::ser::rusty_ext::{};\n", f));
+            }
+        }
+        if referenced("ser", "detail") {
+            ser_usings.push_str("namespace detail = ::ser::rusty_ext::detail;\n");
+        }
+        // Emit the bridge at the TOP of the purview (just inside `namespace <crate> {`).
+        // The references are NON-dependent qualified-ids (`::<crate>::de::rusty_ext::
+        // deserialize_in_place`) resolved at PARSE time, so the using-declaration must
+        // precede them. Per-type overloads added later in the purview merge into the set.
+        let mut bridge = String::new();
+        if !de_usings.is_empty() {
+            bridge.push_str(&format!(
+                "namespace de {{ namespace rusty_ext {{\n{}}} }}\n",
+                de_usings
+            ));
+        }
+        if !ser_usings.is_empty() {
+            bridge.push_str(&format!(
+                "namespace ser {{ namespace rusty_ext {{\n{}}} }}\n",
+                ser_usings
+            ));
+        }
+        if !bridge.is_empty() {
+            self.output.insert_str(wrap_start, &bridge);
         }
     }
 
