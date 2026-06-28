@@ -1938,7 +1938,8 @@ impl CodeGen {
         // global nor a crate-qualified reference finds all members. Pull the purview's
         // `rusty_ext` blocks back out to global scope so they merge with the
         // fragment's; `global_rusty_ext` is re-emitted just before the wrap below.
-        let (cleaned, mut global_rusty_ext) = Self::relocate_rusty_ext_blocks(&wrapped);
+        let (cleaned, mut global_rusty_ext, rusty_ext_skeletons) =
+            Self::relocate_rusty_ext_blocks(&wrapped);
         wrapped = cleaned;
         let mut exclusive = self.crate_exclusive_top_namespaces();
         // Gap (c): own top-level modules that hold no TYPE — so they are absent from
@@ -2111,19 +2112,29 @@ impl CodeGen {
             }
             self.output.push_str(&global_rusty_ext);
         }
+        // Emit the empty forward-decl skeletons BEFORE the wrap (at insert_pos, ahead of
+        // `namespace <crate> {`) so the purview's qualified-id references to the
+        // relocated `…::rusty_ext` namespaces parse; members resolve against the full
+        // definitions appended above at template-instantiation time.
+        if !rusty_ext_skeletons.is_empty() {
+            self.output.insert_str(insert_pos, &rusty_ext_skeletons);
+        }
     }
 
     /// Relocate the purview's `namespace rusty_ext { … }` blocks to global scope,
     /// at ANY nesting depth (`de::rusty_ext`, `de::value::rusty_ext`, …). Returns
-    /// `(purview_without_them, the_blocks_re_wrapped_in_their_full_parent_path)`.
-    /// The output is 4-space-per-level indented, so a `namespace rusty_ext {` at
-    /// indent `n` runs to the first `}` at indent `n`, and `ns_path[L]` tracks the
-    /// enclosing namespace name at level `L` (every ancestor of a namespace is a
-    /// namespace, so the level→name map is exact for these blocks).
-    fn relocate_rusty_ext_blocks(wrapped: &str) -> (String, String) {
+    /// `(purview_without_them, full_defs_re_wrapped_in_parent_path, fwd_decl_skeletons)`.
+    /// The defs reference purview types so they emit AFTER the purview; the purview
+    /// references THEIR namespaces, so an empty `namespace …{ namespace rusty_ext {} }`
+    /// skeleton emits BEFORE the purview to break the ordering cycle. 4-space-per-level
+    /// indented, so a `namespace rusty_ext {` at indent `n` runs to the first `}` at
+    /// indent `n`; `ns_path[L]` tracks the enclosing namespace name at level `L`.
+    fn relocate_rusty_ext_blocks(wrapped: &str) -> (String, String, String) {
         let lines: Vec<&str> = wrapped.lines().collect();
         let mut purview = String::with_capacity(wrapped.len());
         let mut global = String::new();
+        let mut skeleton_set: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         let mut ns_path: Vec<String> = Vec::new();
         let mut i = 0;
         while i < lines.len() {
@@ -2141,11 +2152,14 @@ impl CodeGen {
                     let parents: Vec<String> =
                         ns_path.iter().take(level).cloned().collect();
                     let mut block = lines[i..=j].join("\n");
+                    let mut skel = String::from("namespace rusty_ext {}");
                     for p in parents.iter().rev() {
                         block = format!("namespace {} {{\n{}\n}}", p, block);
+                        skel = format!("namespace {} {{ {} }}", p, skel);
                     }
                     global.push_str(&block);
                     global.push('\n');
+                    skeleton_set.insert(skel);
                     i = j + 1;
                     continue;
                 }
@@ -2167,7 +2181,11 @@ impl CodeGen {
             purview.push('\n');
             i += 1;
         }
-        (purview, global)
+        let skeletons: String = skeleton_set
+            .into_iter()
+            .map(|s| format!("{}\n", s))
+            .collect();
+        (purview, global, skeletons)
     }
 
     /// Normalize EVERY `rusty_ext`-segment reference path to absolute-global: strip a
