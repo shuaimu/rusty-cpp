@@ -298,10 +298,13 @@ pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
     // `de` vs serde_core's `de`) the way Rule 1 deliberately avoids, declared
     // crate-root TYPES (either's `Either_Left`), and non-type-holding own modules
     // (bitflags's `external`). Widen one crate at a time, matrix-gated.
-    matches!(
-        crate_name,
-        "serde_bytes" | "hashbrown" | "either" | "bitflags" | "serde_core"
-    )
+    // serde_core wraps cleanly (no-relocate + rusty_ext prelude using-bridge, commit
+    // 7ec41ed) but its CONSUMERS need cross-crate requalification of the now-wrapped API:
+    // `serde` is a re-export facade (`pub use serde_core::{de,ser,Deserialize,…}`) and
+    // surfaces ~19 redefinition / `serde_core::X` not-found errors when serde_core wraps.
+    // Kept out of the gate until that cross-crate re-export layer is built; the wrap
+    // mechanism itself is dormant-but-present for serde_core/serde.
+    matches!(crate_name, "serde_bytes" | "hashbrown" | "either" | "bitflags")
 }
 
 /// Short names of every trait this crate DECLARES (`trait Tr { … }`), recursing
