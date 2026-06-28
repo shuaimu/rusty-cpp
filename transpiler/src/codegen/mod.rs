@@ -1932,6 +1932,14 @@ impl CodeGen {
         let wrap_end = self.output.len()
             - format!("}} // namespace {}\n", crate_name).len();
         let mut wrapped = self.output[wrap_start..wrap_end].to_string();
+        // Gap (a): `rusty_ext` (the UFCS extension-method dispatch namespace) is
+        // emitted in BOTH the global module fragment AND the purview. Wrapping the
+        // purview half under `namespace <crate>` SPLITS the namespace, so neither a
+        // global nor a crate-qualified reference finds all members. Pull the purview's
+        // `rusty_ext` blocks back out to global scope so they merge with the
+        // fragment's; `global_rusty_ext` is re-emitted just before the wrap below.
+        let (cleaned, mut global_rusty_ext) = Self::relocate_rusty_ext_blocks(&wrapped);
+        wrapped = cleaned;
         let mut exclusive = self.crate_exclusive_top_namespaces();
         // Gap (c): own top-level modules that hold no TYPE — so they are absent from
         // the type-keyed exclusive set — but do exist (e.g. bitflags's `external`,
@@ -2073,7 +2081,134 @@ impl CodeGen {
         for ns in &exclusive {
             wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, ns);
         }
+        // Gap (a) part 2: now that the `rusty_ext` DEFINITIONS live at global scope,
+        // make every `rusty_ext` REFERENCE in the purview absolute-global so it
+        // resolves there. Revert any Rule-1 re-qualification (`::<crate>::de::rusty_ext`
+        // -> `::de::rusty_ext`), then absolutize the relative form (`de::rusty_ext`
+        // -> `::de::rusty_ext`), which inside `namespace <crate>` would otherwise bind
+        // to the now-empty `<crate>::de::rusty_ext`.
+        for parent in ["de::", "ser::", ""] {
+            wrapped = wrapped.replace(
+                &format!("::{}::{}rusty_ext", crate_name, parent),
+                &format!("::{}rusty_ext", parent),
+            );
+        }
+        for path in ["de::rusty_ext", "ser::rusty_ext"] {
+            wrapped = Self::absolutize_global_path(&wrapped, path);
+        }
+        // The relocated `rusty_ext` blocks reference PURVIEW types the same way the
+        // purview does (`::de::value::BoolDeserializer` is `serde_core::de::value::…`),
+        // so apply the SAME exclusive-namespace re-qualification to them — keeping
+        // `rusty_ext` itself global (the revert + absolutize below).
+        if !global_rusty_ext.is_empty() {
+            for ns in &exclusive {
+                global_rusty_ext =
+                    Self::requalify_top_level_namespace(&global_rusty_ext, &crate_name, ns, "::");
+            }
+            for parent in ["de::", "ser::", ""] {
+                global_rusty_ext = global_rusty_ext.replace(
+                    &format!("::{}::{}rusty_ext", crate_name, parent),
+                    &format!("::{}rusty_ext", parent),
+                );
+            }
+            for path in ["de::rusty_ext", "ser::rusty_ext"] {
+                global_rusty_ext = Self::absolutize_global_path(&global_rusty_ext, path);
+            }
+        }
         self.output.replace_range(wrap_start..wrap_end, &wrapped);
+        // Emit the relocated `rusty_ext` blocks at global scope, AFTER the wrap's
+        // closing `}`. They reference purview types (`::serde_core::de::value::…`),
+        // which must be DECLARED first — so they go after `namespace <crate> {…}`, not
+        // before it. The purview's own references to these blocks are calls in
+        // template bodies, resolved at instantiation (end of TU), so the later
+        // definition is fine.
+        if !global_rusty_ext.is_empty() {
+            if !self.output.ends_with('\n') {
+                self.output.push('\n');
+            }
+            self.output.push_str(&global_rusty_ext);
+        }
+    }
+
+    /// Prepend `::` to a RELATIVE occurrence of `path` (at a token-start boundary —
+    /// not preceded by an identifier char or `:`), making it resolve at global
+    /// scope. Leaves already-absolute (`::path`) and mid-path (`X::path`) alone.
+    fn absolutize_global_path(text: &str, path: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while let Some(rel) = text[i..].find(path) {
+            let pos = i + rel;
+            let before_ok = pos == 0
+                || !(bytes[pos - 1].is_ascii_alphanumeric()
+                    || bytes[pos - 1] == b'_'
+                    || bytes[pos - 1] == b':');
+            out.push_str(&text[i..pos]);
+            if before_ok {
+                out.push_str("::");
+            }
+            out.push_str(path);
+            i = pos + path.len();
+        }
+        out.push_str(&text[i..]);
+        out
+    }
+
+    /// Relocate the purview's `namespace rusty_ext { … }` blocks to global scope.
+    /// Returns `(purview_without_them, the_blocks_re_wrapped_in_their_parent)`.
+    /// The output is consistently indented, so a `namespace rusty_ext {` at column
+    /// `n` runs to the first `}` at column `n`. The block's column-0 enclosing
+    /// `namespace de {`/`ser {` (if any) is re-created around it at global scope.
+    fn relocate_rusty_ext_blocks(wrapped: &str) -> (String, String) {
+        let lines: Vec<&str> = wrapped.lines().collect();
+        let mut purview = String::with_capacity(wrapped.len());
+        let mut global = String::new();
+        let mut current_top: Option<String> = None;
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+            if trimmed == "namespace rusty_ext {" {
+                let parent = if indent == 0 { None } else { current_top.clone() };
+                let close = format!("{}}}", " ".repeat(indent));
+                let mut j = i + 1;
+                while j < lines.len() && lines[j] != close {
+                    j += 1;
+                }
+                if j < lines.len() {
+                    let block = lines[i..=j].join("\n");
+                    match parent {
+                        Some(p) => {
+                            global.push_str(&format!("namespace {} {{\n{}\n}}\n", p, block))
+                        }
+                        None => {
+                            global.push_str(&block);
+                            global.push('\n');
+                        }
+                    }
+                    i = j + 1;
+                    continue;
+                }
+                // Unmatched close — leave the block in place (fall through).
+            } else if indent == 0 {
+                if let Some(rest) = trimmed.strip_prefix("namespace ") {
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() && rest[name.len()..].trim_start().starts_with('{') {
+                        current_top = Some(name);
+                    }
+                } else if trimmed.starts_with('}') {
+                    current_top = None;
+                }
+            }
+            purview.push_str(line);
+            purview.push('\n');
+            i += 1;
+        }
+        (purview, global)
     }
 
     /// Re-qualify bare crate-root references `::<sym>` -> `::<crate>::<sym>`.
