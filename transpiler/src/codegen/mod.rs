@@ -852,6 +852,13 @@ pub struct CodeGen {
     /// `de::value::private_::MapAsEnum<A>`. Global-scope types are absent (empty
     /// path) → never qualified, so the passing flag-on crates are untouched.
     pub(crate) local_type_module_path: HashMap<String, String>,
+    /// Cross-crate MANIFEST surface: every declared type → its canonical (first non-empty)
+    /// module path, WITHOUT `local_type_module_path`'s ambiguity-blanking. Decoupled so a
+    /// crate-root re-export (`pub use de::IgnoredAny`) can't blank a type out of the
+    /// dependency manifest (where consumers requalify it) while the blanking still protects
+    /// the crate's OWN qualification (`size_hint`). The manifest's `declared_types` is built
+    /// from THIS map.
+    pub(crate) manifest_type_module_path: HashMap<String, String>,
     /// Unit struct type names (scoped and unscoped) available for value-constructor
     /// lowering (`Foo` in value position -> `Foo{}`).
     pub(crate) unit_struct_types: HashSet<String>,
@@ -1659,6 +1666,7 @@ impl CodeGen {
             emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
             local_type_module_path: HashMap::new(),
+            manifest_type_module_path: HashMap::new(),
             unit_struct_types: HashSet::new(),
             extension_trait_impl_methods: HashMap::new(),
             extension_method_names: HashSet::new(),
@@ -2671,7 +2679,7 @@ impl CodeGen {
         // unambiguous module path, plus its generic-TYPE-param arity, so a
         // downstream crate can qualify + arity-complete a re-exported reference.
         let mut declared_types: Vec<crate::transpile::UfcsDeclaredType> = self
-            .local_type_module_path
+            .manifest_type_module_path
             .iter()
             .filter(|(_, module_path)| !module_path.is_empty())
             .map(|(name, module_path)| {
@@ -8826,6 +8834,13 @@ impl CodeGen {
                 .map(|segment| escape_cpp_keyword(segment))
                 .collect::<Vec<_>>()
                 .join("::");
+            // Cross-crate manifest surface: keep the FIRST non-empty (real) module path —
+            // no ambiguity-blanking — so re-exported types stay requalifiable by consumers.
+            if !escaped_path.is_empty() {
+                self.manifest_type_module_path
+                    .entry(type_name.to_string())
+                    .or_insert_with(|| escaped_path.clone());
+            }
             match self.local_type_module_path.get(type_name) {
                 Some(existing) if existing != &escaped_path => {
                     self.local_type_module_path
