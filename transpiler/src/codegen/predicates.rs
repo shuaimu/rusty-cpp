@@ -675,6 +675,27 @@ impl CodeGen {
         if self.module_name.is_some() && alias == "fmt" && target == "rusty::fmt" {
             return true;
         }
+        // A consumer re-exporting a namespace-WRAPPED DEPENDENCY's SAME-NAMED module it
+        // also declares (serde's own `mod de`/`value`/`private_` + `pub use serde_core::de`):
+        // the whole-module alias `namespace de = ::…::de;` would REDEFINE the consumer's
+        // own `namespace de`. Skip it — the dep's items are requalified individually
+        // (requalify_wrapped_dep_refs). The discriminator (vs a crate's own self-re-export
+        // of a like-named submodule, e.g. serde_core's `size_hint`) is that the alias names
+        // a module owned by a WRAPPED DEPENDENCY (some ownership-map path of a wrapped
+        // crate has it as a segment) — true for serde's de/value/private_, not serde_core's
+        // own size_hint.
+        if self.declared_module_names.contains(alias)
+            && target.ends_with(&format!("::{}", alias))
+        {
+            let alias_is_wrapped_dep_module = self.local_type_module_path.values().any(|p| {
+                let first = p.split("::").next().unwrap_or_default();
+                crate::transpile::crate_is_namespace_wrapped(first)
+                    && p.split("::").any(|seg| seg == alias)
+            });
+            if alias_is_wrapped_dep_module {
+                return true;
+            }
+        }
         target == alias
     }
 
