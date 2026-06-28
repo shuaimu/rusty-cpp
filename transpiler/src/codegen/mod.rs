@@ -1932,19 +1932,15 @@ impl CodeGen {
         let wrap_end = self.output.len()
             - format!("}} // namespace {}\n", crate_name).len();
         let mut wrapped = self.output[wrap_start..wrap_end].to_string();
-        // Gap (a): `rusty_ext` (the UFCS extension-method dispatch namespace) is
-        // emitted in BOTH the global module fragment AND the purview. Wrapping the
-        // purview half under `namespace <crate>` SPLITS the namespace, so neither a
-        // global nor a crate-qualified reference finds all members. Pull the purview's
-        // `rusty_ext` blocks back out to global scope so they merge with the
-        // fragment's; `global_rusty_ext` is re-emitted just before the wrap below.
-        // Do NOT relocate `rusty_ext` out of the purview. It is defined entirely in the
-        // purview (forward-decls + defs, all scopes), so leaving it wrapped means its
-        // references requalify like any other purview namespace (`::de::rusty_ext::X` →
-        // `::serde_core::de::rusty_ext::X` via Rule 1 below) and resolve in-place. The
-        // earlier relocate-to-global approach had to re-declare every purview entity the
-        // blocks reference (types, `__ufcs_`/`X_` bridges, usings, free fns) and never
-        // converged (serde_core stuck at 19 errors across every variant).
+        // Gap (a): `rusty_ext` (the UFCS extension-dispatch namespace). Do NOT relocate it
+        // out of the purview — it is defined entirely in the purview (forward-decls + defs,
+        // all scopes), so leaving it wrapped means its references requalify like any other
+        // purview namespace (`::de::rusty_ext::X` → `::<crate>::de::rusty_ext::X` via Rule 1
+        // below) and resolve in-place. The ONLY genuinely-global piece is the hardcoded
+        // rusty_ext runtime prelude (in the fragment's `extern "C++"`), bridged in below.
+        // (The earlier relocate-to-global approach — `relocate_rusty_ext_blocks` /
+        // `globalize_rusty_ext_refs`, now unused — had to re-declare every purview entity
+        // the blocks reference and never converged: serde_core stuck at 19 errors.)
         let mut global_rusty_ext = String::new();
         let rusty_ext_skeletons = String::new();
         let mut exclusive = self.crate_exclusive_top_namespaces();
