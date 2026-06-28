@@ -2444,6 +2444,12 @@ impl CodeGen {
         //
         // The wrap is implemented as a post-emit text transform on
         // `self.output` so emit sites don't need to know about it.
+        // Generic cross-crate fix: a consumer references a namespace-WRAPPED dependency's
+        // items via the crate-STRIPPED path (`::de::Unexpected`) — where they lived when
+        // the dep was global. Requalify them to the dep's true wrapped path
+        // (`::serde_core::de::Unexpected`) from the ownership map. Runs for every crate.
+        self.requalify_wrapped_dep_refs();
+
         // We insert `namespace <crate> {` immediately after the
         // module declaration's import block, and append the closing
         // `}` at the end.
@@ -2824,6 +2830,21 @@ impl CodeGen {
                         if !already_absolute {
                             out.insert_str(cut, "::");
                         }
+                    } else {
+                        // CRATE-STRIPPED reference to a namespace-WRAPPED dependency's type
+                        // (`::de::Unexpected` for a type the ownership map records as
+                        // `serde_core::de::Unexpected`): rewrite the stripped module prefix
+                        // to the full crate-qualified one. Only the dep's own types are in
+                        // the map, so the consumer's same-named modules are never touched.
+                        let crate_seg = path.split("::").next().unwrap_or_default();
+                        if crate::transpile::crate_is_namespace_wrapped(crate_seg) {
+                            let sub = path[crate_seg.len()..].trim_start_matches("::");
+                            let stripped = format!("::{}::", sub);
+                            if !sub.is_empty() && out.ends_with(&stripped) {
+                                let cut = out.len() - stripped.len();
+                                out.replace_range(cut.., &format!("::{}::", path));
+                            }
+                        }
                     }
                 }
                 out.push_str(ident);
@@ -2832,6 +2853,66 @@ impl CodeGen {
                 i += 1;
             }
         }
+        out
+    }
+
+    /// Generic consumer-side fix: rewrite every crate-STRIPPED reference to a
+    /// namespace-WRAPPED dependency's type (`::de::Unexpected`) to its true wrapped path
+    /// (`::serde_core::de::Unexpected`), driven by the ownership map. Only the dep's own
+    /// types are in the map, so the consumer's same-named modules are never touched; the
+    /// boundary check stops it re-prefixing an already-correct `::serde_core::de::…`.
+    fn requalify_wrapped_dep_refs(&mut self) {
+        if self.local_type_module_path.is_empty() {
+            return;
+        }
+        let mut repls: Vec<(String, String)> = Vec::new();
+        for (ty, path) in &self.local_type_module_path {
+            let crate_seg = path.split("::").next().unwrap_or_default();
+            if !crate::transpile::crate_is_namespace_wrapped(crate_seg) {
+                continue;
+            }
+            let sub = path[crate_seg.len()..].trim_start_matches("::");
+            if sub.is_empty() {
+                continue;
+            }
+            repls.push((format!("::{}::{}", sub, ty), format!("::{}::{}", path, ty)));
+        }
+        if repls.is_empty() {
+            return;
+        }
+        // Longest stripped form first (`::de::value::X` before any shorter overlap).
+        repls.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        let mut output = std::mem::take(&mut self.output);
+        for (from, to) in &repls {
+            if output.contains(from.as_str()) {
+                output = Self::boundary_replace_path(&output, from, to);
+            }
+        }
+        self.output = output;
+    }
+
+    /// Replace `from` (a `::ns::Ident` path) with `to`, only where `from` sits at
+    /// identifier boundaries: the char before the leading `::` is non-identifier/non-`:`
+    /// (so the tail of `::serde_core::de::Ident` is not matched) and the char after the
+    /// trailing identifier is non-identifier.
+    fn boundary_replace_path(text: &str, from: &str, to: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while let Some(rel) = text[i..].find(from) {
+            let pos = i + rel;
+            let after = pos + from.len();
+            let before_ok = pos == 0 || {
+                let c = bytes[pos - 1];
+                !(c.is_ascii_alphanumeric() || c == b'_' || c == b':')
+            };
+            let after_ok = after >= text.len()
+                || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
+            out.push_str(&text[i..pos]);
+            out.push_str(if before_ok && after_ok { to } else { from });
+            i = after;
+        }
+        out.push_str(&text[i..]);
         out
     }
 
@@ -3663,6 +3744,12 @@ impl CodeGen {
         }
         log_emit("emit_top_level_module_namespace_aliases");
 
+        let dep_private_aliases = self.emit_wrapped_dep_private_aliases();
+        if !dep_private_aliases.is_empty() {
+            self.output.push_str(&dep_private_aliases);
+        }
+        log_emit("emit_wrapped_dep_private_aliases");
+
         if self.emit_forward_decl_namespace_alias_imports(&file.items) {
             self.newline();
         }
@@ -4065,6 +4152,42 @@ impl CodeGen {
             out.push_str(" {}\n");
         }
         out.push('\n');
+        out
+    }
+
+    /// Declare `namespace <dep>_private = ::<dep>::private_;` for each namespace-WRAPPED
+    /// dependency this crate imports. A consumer (serde) references a wrapped dep's
+    /// `__private` items via the flattened `<dep>_private::X` path (e.g.
+    /// `serde_core_private::Content`); these are emitted directly in bodies, so a plain
+    /// C++ namespace alias — not the import-only alias map — is what resolves them.
+    fn emit_wrapped_dep_private_aliases(&self) -> String {
+        let mut roots: Vec<String> = self
+            .name_resolver
+            .external_crate_roots()
+            .filter(|r| crate::transpile::crate_is_namespace_wrapped(r))
+            .cloned()
+            .collect();
+        roots.sort();
+        roots.dedup();
+        let mut out = String::new();
+        for root in roots {
+            // Only when the dep actually HAS a `private_` module (some declared type lives
+            // there, per the ownership map) — never alias to a non-existent
+            // `::<dep>::private_`. (A body-text guard fails here: the prologue is emitted
+            // before the body, so `self.output` doesn't yet contain the references.)
+            let private_mod = format!("{}::private_", root);
+            let has_private = self
+                .local_type_module_path
+                .values()
+                .any(|p| *p == private_mod || p.starts_with(&format!("{}::", private_mod)));
+            if !has_private {
+                continue;
+            }
+            out.push_str(&format!("namespace {}_private = ::{}::private_;\n", root, root));
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
         out
     }
 

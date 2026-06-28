@@ -92,6 +92,11 @@ impl NameResolver {
         self.external_crate_aliases.get(root)
     }
 
+    /// The external-crate roots this crate imports (keys of the alias map).
+    pub(crate) fn external_crate_roots(&self) -> impl Iterator<Item = &String> {
+        self.external_crate_aliases.keys()
+    }
+
     /// Record `alias -> target`. First writer wins (matches the `or_insert`
     /// semantics of the maps this replaces); self-edges are ignored.
     pub(crate) fn add_alias(&mut self, alias: String, target: String) {
