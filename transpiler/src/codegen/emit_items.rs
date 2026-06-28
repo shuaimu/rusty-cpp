@@ -3161,7 +3161,12 @@ impl CodeGen {
             if wrap_in_anon_ns {
                 self.writeln("namespace {");
             }
-            self.writeln(&format!("class {} {{", trait_name));
+            let cls_export = if self.should_export_item(&t.vis, &trait_name_str) {
+                "export "
+            } else {
+                ""
+            };
+            self.writeln(&format!("{}class {} {{", cls_export, trait_name));
             self.writeln("public:");
             self.indent += 1;
             self.writeln(&format!("virtual ~{}() noexcept(false) {{}}", trait_name));
@@ -3384,12 +3389,21 @@ impl CodeGen {
         if wrap_in_anon_ns {
             self.writeln("namespace {");
         }
-        // Open the abstract base class.
+        // Open the abstract base class. A pub trait in module mode is `export`ed so
+        // downstream crates can `using ::<crate>::<Trait>;` re-export it (the prefix
+        // goes on the template line when the class is templated).
+        let cls_export = if self.should_export_item(&t.vis, &trait_name_str) {
+            "export "
+        } else {
+            ""
+        };
         if !trait_template_prefix.is_empty() {
             // Strip the trailing newline since writeln adds its own.
-            self.writeln(&trait_template_prefix.trim_end());
+            self.writeln(&format!("{}{}", cls_export, trait_template_prefix.trim_end()));
+            self.writeln(&format!("class {}{} {{", trait_name, bases));
+        } else {
+            self.writeln(&format!("{}class {}{} {{", cls_export, trait_name, bases));
         }
-        self.writeln(&format!("class {}{} {{", trait_name, bases));
         self.writeln("public:");
         self.indent += 1;
         // Use noexcept(false) so derived Adapter classes whose value_
