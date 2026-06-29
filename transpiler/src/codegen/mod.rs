@@ -879,6 +879,16 @@ pub struct CodeGen {
     /// also route through `rusty_ext::...` unless a method is a known runtime
     /// helper (`size_hint`, `left`, `right`, `write_hex`).
     pub(crate) local_extension_method_names: HashSet<String>,
+    /// C++ MODULE path (`de`, `ser`, `de::value`, `""` for root) → the method names this crate
+    /// ACTUALLY emits as `<module>::rusty_ext::` free functions there (recorded at the point of
+    /// emission in `emit_extension_trait_free_functions`). Surfaced in the UFCS manifest as
+    /// `rusty_ext_methods_by_module` so a consumer's cross-crate rusty_ext bridge imports a method
+    /// ONLY from the exact module the dep emits it in — NOT every declared trait method, and not
+    /// at a guessed module. (A REQUIRED method may stay a member with no rusty_ext free function,
+    /// or live in a different module than the consumer references it through — bridging either
+    /// would name a non-existent `::<dep>::<module>::rusty_ext::<method>`.)
+    pub(crate) emitted_rusty_ext_methods_by_module:
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Module scopes (`""` for root, otherwise `a::b`) where extension
     /// free-function forward declarations were already emitted.
     pub(crate) emitted_extension_forward_decl_scopes: HashSet<String>,
@@ -1678,6 +1688,7 @@ impl CodeGen {
             extension_trait_impl_methods: HashMap::new(),
             extension_method_names: HashSet::new(),
             local_extension_method_names: HashSet::new(),
+            emitted_rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             emitted_extension_forward_decl_scopes: HashSet::new(),
             emitted_extension_impl_scopes: HashSet::new(),
             forward_declared_function_paths: HashSet::new(),
@@ -1890,6 +1901,126 @@ impl CodeGen {
     /// is a non-module build and we leave it alone (the user's
     /// build is via `#include` rather than `import`, and the global
     /// namespace shape is what they want).
+    /// Cross-crate UFCS extension-method bridge. A wrapped DEPENDENCY's trait methods
+    /// (e.g. serde_core's `MapAccess::next_key_seed`) are emitted as
+    /// `::<dep>::<module>::rusty_ext::<method>` free functions in the DEP's purview. A consumer
+    /// that CALLS such a method lowers it to the local-assuming `<module>::rusty_ext::<method>`,
+    /// which does not exist locally — and since `<module>::rusty_ext` is a CONCRETE (non-dependent)
+    /// namespace, the missing member is a HARD error, not a SFINAE soft-fail. Emit a
+    /// using-declaration pulling the dependency's definition into the consumer's
+    /// `<module>::rusty_ext` so the reference resolves.
+    ///
+    /// Runs for EVERY crate, BEFORE the crate-namespace wrap: a wrapped consumer's wrap then
+    /// engulfs this block (→ `<crate>::<module>::rusty_ext`); an unwrapped consumer keeps it at
+    /// global scope, where its own `<module>::rusty_ext` lives. Methods are sourced from the UFCS
+    /// manifest — `method_owners` ∪ `declared_trait_methods`, because REQUIRED methods (like
+    /// `next_key_seed`) are emitted as dispatchers that never land in `method_owners` and appear
+    /// only in `declared_trait_methods`. The `referenced` guard limits the bridge to methods the
+    /// consumer actually calls (all of which a dep that DECLARES the owning trait emits at
+    /// de/ser::rusty_ext); the hardcoded de/ser runtime-prelude names are already global, so they
+    /// are skipped. Mirrors the serde_bytes `Tr_` trait bridge one level down (method free fns).
+    fn emit_cross_crate_rusty_ext_bridge(&mut self) {
+        if self.dependency_ufcs_trait_manifests.is_empty() {
+            return;
+        }
+        const PRELUDE_DE: [&str; 3] = ["deserialize", "deserialize_any", "deserialize_in_place"];
+        const PRELUDE_SER: [&str; 3] = ["serialize", "serialize_value", "forward_serializer"];
+        // C++ module path → the using-declarations to splice into its `rusty_ext` namespace.
+        let usings_by_module: std::collections::BTreeMap<String, String> = {
+            // `<module>::rusty_ext::<member>` referenced as a WHOLE word in the emitted output.
+            let referenced = |module: &str, member: &str| -> bool {
+                let needle = format!("{}::rusty_ext::{}", module, member);
+                let bytes = self.output.as_bytes();
+                let mut from = 0;
+                while let Some(rel) = self.output[from..].find(&needle) {
+                    let end = from + rel + needle.len();
+                    if end >= self.output.len()
+                        || !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                    {
+                        return true;
+                    }
+                    from = from + rel + needle.len();
+                }
+                false
+            };
+            let mut by_module: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
+            for dep in &self.dependency_ufcs_trait_manifests {
+                if !crate::transpile::crate_is_namespace_wrapped(&dep.module) {
+                    continue;
+                }
+                for (module, methods) in &dep.rusty_ext_methods_by_module {
+                    if module.is_empty() {
+                        continue; // root-level rusty_ext: nothing to wrap a using-decl in
+                    }
+                    for meth in methods.iter().map(String::as_str) {
+                        if PRELUDE_DE.contains(&meth) || PRELUDE_SER.contains(&meth) {
+                            continue; // global runtime prelude, already in scope
+                        }
+                        // Bridge a method ONLY where the consumer actually references it AT THIS
+                        // dep module. A method the consumer DEFINES resolves locally (the dep's
+                        // overload merges into the set harmlessly), and a method the dep emits in
+                        // a DIFFERENT module than the consumer references it through is naturally
+                        // skipped — `referenced(module, …)` only matches the dep's true module, so
+                        // we never name a non-existent `::<dep>::<module>::rusty_ext::<method>`.
+                        if !referenced(module, meth) {
+                            continue;
+                        }
+                        by_module.entry(module.clone()).or_default().push_str(&format!(
+                            "using ::{}::{}::rusty_ext::{};\n",
+                            dep.module, module, meth
+                        ));
+                    }
+                }
+            }
+            by_module
+        };
+        if usings_by_module.is_empty() {
+            return;
+        }
+        // Wrap each module's using-declarations in its (possibly nested) namespace path +
+        // `rusty_ext`, e.g. `de::value` → `namespace de { namespace value { namespace rusty_ext {…}}}`.
+        let mut bridge = String::new();
+        for (module, usings) in &usings_by_module {
+            let opens: String = module
+                .split("::")
+                .map(|seg| format!("namespace {} {{ ", seg))
+                .collect();
+            let closes: String = module.split("::").map(|_| " }").collect();
+            bridge.push_str(&format!(
+                "{}namespace rusty_ext {{\n{}}}{}\n",
+                opens, usings, closes
+            ));
+        }
+        // Insert at the module purview start (after `export module …;` and the import block),
+        // mirroring wrap_module_purview_in_crate_namespace's insertion point so a later wrap
+        // engulfs it.
+        let Some(export_idx) = self.output.find("\nexport module ") else {
+            return;
+        };
+        let after_export = export_idx + 1;
+        let Some(line_end_rel) = self.output[after_export..].find('\n') else {
+            return;
+        };
+        let mut insert_pos = after_export + line_end_rel + 1;
+        loop {
+            let remaining = &self.output[insert_pos..];
+            let Some(line_end) = remaining.find('\n') else {
+                break;
+            };
+            let trimmed = remaining[..line_end].trim_start();
+            if trimmed.is_empty()
+                || trimmed.starts_with("import ")
+                || trimmed.starts_with("export import ")
+            {
+                insert_pos += line_end + 1;
+                continue;
+            }
+            break;
+        }
+        self.output.insert_str(insert_pos, &bridge);
+    }
+
     fn wrap_module_purview_in_crate_namespace(&mut self, crate_name: String) {
         let Some(export_idx) = self.output.find("\nexport module ") else {
             return;
@@ -2465,6 +2596,12 @@ impl CodeGen {
         // (`::serde_core::de::Unexpected`) from the ownership map. Runs for every crate.
         self.requalify_wrapped_dep_refs();
 
+        // Bridge cross-crate UFCS extension methods (a wrapped dependency's trait methods that
+        // this crate CALLS but does not define). Runs BEFORE the wrap so a wrapped consumer's
+        // wrap engulfs the bridge block (→ `<crate>::<module>::rusty_ext`) while an unwrapped
+        // consumer keeps it at global scope (where its own `<module>::rusty_ext` lives).
+        self.emit_cross_crate_rusty_ext_bridge();
+
         // We insert `namespace <crate> {` immediately after the
         // module declaration's import block, and append the closing
         // `}` at the end.
@@ -2736,6 +2873,11 @@ impl CodeGen {
             })
             .collect();
         declared_modules.sort();
+        let rusty_ext_methods_by_module: std::collections::BTreeMap<String, Vec<String>> = self
+            .emitted_rusty_ext_methods_by_module
+            .iter()
+            .map(|(module, methods)| (module.clone(), methods.iter().cloned().collect()))
+            .collect();
         crate::transpile::UfcsTraitManifest {
             version: 1,
             module: module.to_string(),
@@ -2746,6 +2888,7 @@ impl CodeGen {
             hygiene_aliases,
             declared_macros,
             declared_modules,
+            rusty_ext_methods_by_module,
         }
     }
 
@@ -13783,6 +13926,16 @@ impl CodeGen {
         self.writeln("namespace rusty_ext {");
         self.indent += 1;
 
+        // The C++ module path this `rusty_ext` block lives in (`""` for root, else `de`, `ser`,
+        // `de::value`, …), C++-escaped per segment to match `declared_modules`. Methods emitted
+        // below are recorded under it for the cross-crate bridge.
+        let rusty_ext_cpp_module = self
+            .module_stack
+            .iter()
+            .map(|s| escape_cpp_keyword(s))
+            .collect::<Vec<_>>()
+            .join("::");
+
         let mut seen = HashSet::new();
         let mut seen_cpp_signatures = HashSet::new();
         for method in methods {
@@ -13810,6 +13963,10 @@ impl CodeGen {
             {
                 continue;
             }
+            self.emitted_rusty_ext_methods_by_module
+                .entry(rusty_ext_cpp_module.clone())
+                .or_default()
+                .insert(escape_cpp_keyword(&method.method.sig.ident.to_string()));
             self.emit_extension_trait_free_function(method);
             self.newline();
         }

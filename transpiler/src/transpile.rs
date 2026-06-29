@@ -65,6 +65,16 @@ pub struct UfcsTraitManifest {
     /// Separate from declared_types so module-vs-type is unambiguous.
     #[serde(default)]
     pub declared_modules: Vec<String>,
+    /// C++ MODULE path (`de`, `ser`, `de::value`, `""` root) → the method names this crate emits
+    /// as `<module>::rusty_ext::` free functions there. A consumer's cross-crate rusty_ext bridge
+    /// imports a method ONLY from the exact module the dep emits it in
+    /// (`using ::<dep>::<module>::rusty_ext::<m>;`) — never every declared trait method, and never
+    /// at a guessed module. A REQUIRED method may remain a member with no rusty_ext free function
+    /// (e.g. Serializer::serialize_bytes), or be emitted in a different module than the consumer
+    /// references it through; either would make a guessed bridge name a non-existent member.
+    /// Populated from `emitted_rusty_ext_methods_by_module`.
+    #[serde(default)]
+    pub rusty_ext_methods_by_module: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// One entry of `UfcsTraitManifest::declared_types` (book § 3.2.7): cross-crate
@@ -2684,6 +2694,7 @@ mod tests {
             hygiene_aliases: std::collections::BTreeMap::new(),
             declared_macros: Vec::new(),
             declared_modules: Vec::new(),
+            rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();
