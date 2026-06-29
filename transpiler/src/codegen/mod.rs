@@ -2140,6 +2140,16 @@ impl CodeGen {
             }
             exclusive.extend(col0_namespaces);
         }
+        // A namespace whose name matches a known EXTERNAL-CRATE ROOT belongs to a DEPENDENCY, not
+        // this crate — never requalify it to `::<crate>::<dep>::…`. This guards against a phantom
+        // `<dep>::…` entry in the type map making a dependency name look exclusive (e.g. serde_core
+        // picks up a `serde::private_` path and, once `serde` is itself wrapped under universal,
+        // Rule 1 would rewrite `::serde::` → `::serde_core::serde::`, which doesn't exist).
+        {
+            let dep_roots: HashSet<String> =
+                self.name_resolver.external_crate_roots().cloned().collect();
+            exclusive.retain(|ns| !dep_roots.contains(ns));
+        }
         for ns in &exclusive {
             if ns == &crate_name {
                 // The crate's SELF-NAMED module (`mod arrayvec` in crate `arrayvec`): `::arrayvec::X`
@@ -4506,6 +4516,18 @@ impl CodeGen {
         roots.dedup();
         let mut out = String::new();
         for root in roots {
+            // Only when the crate ACTUALLY imports the dependency module. `external_crate_roots`
+            // can carry a name the crate never imports — serde_core picks up `serde` under
+            // universal wrapping but imports only `rusty` — and without a real `import <root>;`
+            // the alias's `::<root>::private_` does not resolve (the namespace isn't visible).
+            // The prologue (with imports) is already in `self.output` at this point.
+            let root_imported = self.output.contains(&format!("\nimport {};", root))
+                || self.output.contains(&format!("\nexport import {};", root))
+                || self.output.contains(&format!("\nimport {}.", root))
+                || self.output.contains(&format!("\nexport import {}.", root));
+            if !root_imported {
+                continue;
+            }
             // Only when the dep actually HAS a `private_` module (some declared type lives
             // there, per the ownership map) — never alias to a non-existent
             // `::<dep>::private_`. (A body-text guard fails here: the prologue is emitted
