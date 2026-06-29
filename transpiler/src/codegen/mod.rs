@@ -7962,6 +7962,21 @@ impl CodeGen {
             if !emitted_modules.insert(mod_name.clone()) {
                 continue;
             }
+            // A glob-only module (`pub mod __private228 { pub use crate::private::* }`) is
+            // emitted as a namespace ALIAS by emit_mod (wrapped crates). Skip its empty
+            // forward-decl namespace here — a namespace alias cannot coexist with a namespace
+            // definition (redefinition error).
+            if self
+                .crate_name
+                .as_deref()
+                .is_some_and(|c| crate::transpile::crate_is_namespace_wrapped(c))
+                && nested_items.len() == 1
+                && let syn::Item::Use(u) = &nested_items[0]
+                && matches!(u.vis, syn::Visibility::Public(_))
+                && self.glob_use_target_namespace(&u.tree).is_some()
+            {
+                continue;
+            }
             // Look up potential rename from pre-scan collision detection
             let scope_prefix = self.module_stack.join("::");
             let qualified_mod = if scope_prefix.is_empty() {

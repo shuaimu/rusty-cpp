@@ -4100,6 +4100,37 @@ impl CodeGen {
         }
     }
 
+    /// If `tree` is a glob path (`crate::private::*`, `self::foo::*`) rooted at THIS crate,
+    /// return the escaped C++ namespace it globs (`private_`). Returns None for non-glob,
+    /// external-crate, or `super::` paths (the latter needs relative resolution we skip).
+    pub(super) fn glob_use_target_namespace(&self, tree: &syn::UseTree) -> Option<String> {
+        let mut segs: Vec<String> = Vec::new();
+        let mut cur = tree;
+        loop {
+            match cur {
+                syn::UseTree::Path(p) => {
+                    segs.push(p.ident.to_string());
+                    cur = &p.tree;
+                }
+                syn::UseTree::Glob(_) => break,
+                _ => return None,
+            }
+        }
+        while matches!(segs.first().map(String::as_str), Some("crate" | "self")) {
+            segs.remove(0);
+        }
+        let root = segs.first()?;
+        if matches!(root.as_str(), "super" | "std" | "core" | "alloc" | "rusty" | "proc_macro") {
+            return None;
+        }
+        Some(
+            segs.iter()
+                .map(|s| escape_cpp_keyword(s))
+                .collect::<Vec<_>>()
+                .join("::"),
+        )
+    }
+
     pub(super) fn emit_mod(&mut self, m: &syn::ItemMod) {
         // Skip #[cfg(test)] modules — test code is not transpiled into production output
         if Self::has_cfg_test(&m.attrs) {
@@ -4129,6 +4160,34 @@ impl CodeGen {
             } else {
                 ""
             };
+        // A glob-only module (`pub mod __private228 { pub use crate::private::* }`) is a pure
+        // re-export shell. Emit it as a namespace ALIAS so qualified access
+        // (`__private228::Content`) resolves to the globbed module — otherwise the namespace
+        // emits with no nameable members and a consumer referencing it fails. Wrapped crates
+        // only, so the passing flag-on crates are untouched.
+        if self
+            .crate_name
+            .as_deref()
+            .is_some_and(|c| crate::transpile::crate_is_namespace_wrapped(c))
+            && let Some((_, items)) = &m.content
+            && items.len() == 1
+            && let syn::Item::Use(u) = &items[0]
+            && matches!(u.vis, syn::Visibility::Public(_))
+            && let Some(target) = self.glob_use_target_namespace(&u.tree)
+            && target != mod_cpp_name
+        {
+            // Namespace ALIAS — it is exported across the module boundary (an importer sees
+            // `<crate>::__private228` resolve to the globbed namespace), which a `using
+            // namespace` directive is NOT. The empty `namespace __private228 {}` skeleton that
+            // would otherwise collide (alias-vs-definition redefinition) is suppressed for
+            // glob-only modules in the forward-decl pass (emit_item_forward_decls).
+            self.writeln(&format!(
+                "{}namespace {} = {};",
+                export_mod_namespace_prefix, mod_cpp_name, target
+            ));
+            return;
+        }
+
         let has_inline_content = m.content.is_some();
 
         if let Some(ref parent_module) = self.module_name.clone() {
