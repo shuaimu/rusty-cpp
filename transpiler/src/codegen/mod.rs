@@ -2141,7 +2141,14 @@ impl CodeGen {
             exclusive.extend(col0_namespaces);
         }
         for ns in &exclusive {
-            wrapped = Self::requalify_top_level_namespace(&wrapped, &crate_name, ns, "::");
+            if ns == &crate_name {
+                // The crate's SELF-NAMED module (`mod arrayvec` in crate `arrayvec`): `::arrayvec::X`
+                // is ambiguous — `arrayvec` is both the crate-namespace prefix (the transpiler emits
+                // `crate::` as `::<crate>::`) and a module name. Disambiguate by X.
+                wrapped = self.requalify_self_named_module(&wrapped, &crate_name);
+            } else {
+                wrapped = Self::requalify_top_level_namespace(&wrapped, &crate_name, ns, "::");
+            }
         }
         let exclusive_set: HashSet<&String> = exclusive.iter().collect();
         let shared_bridge_ns: Vec<String> = Self::ufcs_bridge_top_namespaces(&wrapped)
@@ -2235,6 +2242,15 @@ impl CodeGen {
         // `requalify_crate_root_symbol` is boundary-aware on both sides, so it leaves
         // an already-qualified `::<crate>::map` (preceded by an ident) untouched.
         for ns in &exclusive {
+            // Skip a module whose name EQUALS the crate name (arrayvec's `arrayvec`): the
+            // `::<ns>::` pass above already produced the correct `::arrayvec::arrayvec::X`
+            // (crate::module), but this bare-`::arrayvec` pass would re-qualify the LEADING
+            // crate segment — `::arrayvec` at column 0 is preceded by nothing, so the boundary
+            // guard can't tell it from a bare module ref — tripling it to
+            // `::arrayvec::arrayvec::arrayvec::X`.
+            if ns == &crate_name {
+                continue;
+            }
             wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, ns);
         }
         // Rule 4 — crate-root FREE FUNCTIONS referenced bare as `::<fn>`. A wrapped crate's own
@@ -2477,6 +2493,48 @@ impl CodeGen {
     /// Skips `mod::<sym>` (the leading `::` follows an identifier or `:`) and
     /// longer identifiers (`<sym>` must be a whole token). Single pass over the
     /// original text (no re-scan), so it can't double-prefix its own output.
+    /// Requalify references to a crate's SELF-NAMED module (`mod arrayvec` in crate `arrayvec`).
+    /// `::<crate>::X` is ambiguous: `<crate>` is BOTH the crate-namespace prefix the transpiler
+    /// emits for `crate::` AND the module's own name. Disambiguate on X:
+    ///   - X is a top-level crate name (sibling module / crate-root item, e.g. `array_string`) →
+    ///     `::<crate>::X` is already the crate-qualified path; leave it.
+    ///   - otherwise X is a MEMBER of the self-named module → `::<crate>::<crate>::X`.
+    /// Boundary-aware on the leading `::<crate>` (same rule as requalify_crate_root_symbol), and a
+    /// single left-to-right pass over the input — never re-scans its own output.
+    fn requalify_self_named_module(&self, text: &str, crate_name: &str) -> String {
+        let lead = format!("::{}::", crate_name);
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while let Some(rel) = text[i..].find(&lead) {
+            let pos = i + rel;
+            let before_ok = pos == 0
+                || !(bytes[pos - 1].is_ascii_alphanumeric()
+                    || bytes[pos - 1] == b'_'
+                    || bytes[pos - 1] == b':'
+                    || bytes[pos - 1] == b'>');
+            let seg_start = pos + lead.len();
+            let mut seg_end = seg_start;
+            while seg_end < bytes.len()
+                && (bytes[seg_end].is_ascii_alphanumeric() || bytes[seg_end] == b'_')
+            {
+                seg_end += 1;
+            }
+            let x = &text[seg_start..seg_end];
+            let x_is_top_level =
+                self.declared_item_names.contains(x) || self.declared_module_names.contains(x);
+            out.push_str(&text[i..pos]);
+            if before_ok && !x.is_empty() && !x_is_top_level {
+                out.push_str(&format!("::{}::{}::", crate_name, crate_name));
+            } else {
+                out.push_str(&lead);
+            }
+            i = seg_start;
+        }
+        out.push_str(&text[i..]);
+        out
+    }
+
     fn requalify_crate_root_symbol(text: &str, crate_name: &str, sym: &str) -> String {
         let needle = format!("::{}", sym);
         let repl = format!("::{}::{}", crate_name, sym);
