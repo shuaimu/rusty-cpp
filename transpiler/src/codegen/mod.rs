@@ -16345,6 +16345,25 @@ impl CodeGen {
     }
 
 
+    /// True if `target` (a `::`-joined path like `serde_core::__private228`) names a module of
+    /// a namespace-WRAPPED dependency — recognized via the dep's manifest hygiene-alias shells.
+    /// Lets `use dep::mod as alias` emit a NAMESPACE alias (not a type alias) for a dep module
+    /// whose hygiene-numbered name isn't in the consumer's own declared modules.
+    fn target_is_wrapped_dep_module(&self, target: &str) -> bool {
+        let parts: Vec<&str> = target.split("::").collect();
+        if parts.len() < 2 {
+            return false;
+        }
+        let root = parts[0];
+        let leaf = *parts.last().unwrap();
+        if !crate::transpile::crate_is_namespace_wrapped(root) {
+            return false;
+        }
+        self.dependency_ufcs_trait_manifests
+            .iter()
+            .any(|m| m.module == root && m.hygiene_aliases.contains_key(leaf))
+    }
+
     fn namespace_alias_statement_for_module_import(&self, using_path: &str) -> Option<String> {
         let trimmed = using_path.trim();
         if trimmed.is_empty() {
@@ -16370,6 +16389,16 @@ impl CodeGen {
             }
             let escaped_alias = escape_cpp_keyword(alias);
             if self.matches_declared_module_path(target) {
+                let escaped_target = self.escape_and_rename_qualified_name(target);
+                return Some(format!("namespace {} = ::{};", escaped_alias, escaped_target));
+            }
+            // A wrapped DEPENDENCY's module — `use serde_core::__private as serde_core_private`
+            // expands to a hygiene shell (`serde_core::__private228`) that is NOT one of the
+            // consumer's declared modules, so the checks above miss it and it would emit as a
+            // (broken) TYPE alias to a namespace. Recognize the dep's module via its manifest
+            // and emit a NAMESPACE alias; requalify_wrapped_dep_refs then rewrites the shell
+            // target to its canonical (`::serde_core::__private228` → `::serde_core::private_`).
+            if self.target_is_wrapped_dep_module(target) {
                 let escaped_target = self.escape_and_rename_qualified_name(target);
                 return Some(format!("namespace {} = ::{};", escaped_alias, escaped_target));
             }
