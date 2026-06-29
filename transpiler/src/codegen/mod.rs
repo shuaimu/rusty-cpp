@@ -15979,6 +15979,30 @@ impl CodeGen {
         let root_is_private_alias = root_variants
             .iter()
             .any(|variant| variant.ends_with("_private"));
+        // A wrapped-DEPENDENCY private alias (`serde_core_private`, i.e. the wrapped dep
+        // `serde_core` + `_private`) is authoritatively resolved by the NameResolver's
+        // crate-qualified edge (`serde_core_private → serde_core::private_`), NOT by the
+        // scope-import binding below — that binding carries the stale crate-STRIPPED Rust
+        // import target (`__private228`, serde_core's hygiene shell), which then collides
+        // with the consumer's own empty `__private228` glob shell. Resolving through
+        // resolve_prefix here keeps a re-export-of-a-re-export (`pub use self::content::Content`
+        // where `content::Content` itself re-exports `serde_core_private::Content`) in step
+        // with emit_use's main path, which already emits the crate-qualified form.
+        if let Some(dep) = root.strip_suffix("_private")
+            && crate::transpile::crate_is_namespace_wrapped(dep)
+        {
+            let resolved = self.name_resolver.resolve_prefix(&lookup_path);
+            if resolved != lookup_path {
+                return if had_leading_colon && !resolved.starts_with("::") {
+                    format!("::{}", resolved)
+                } else {
+                    resolved
+                };
+            }
+            // No NameResolver edge recorded — leave the emitted C++ namespace alias
+            // (`namespace serde_core_private = ::serde_core::private_;`) to resolve it.
+            return using_path.to_string();
+        }
         let mut bound_target = self
             .resolve_scope_import_binding_path(root)
             .or_else(|| self.resolve_scope_import_binding_path_for_scope("", root))
