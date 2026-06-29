@@ -52,6 +52,12 @@ pub struct UfcsTraitManifest {
     /// number-matching — the same role hygiene contexts play in rustc's crate metadata.
     #[serde(default)]
     pub hygiene_aliases: BTreeMap<String, String>,
+    /// `macro_rules!` names this crate exports, so a consumer can recognize and skip a
+    /// re-exported dependency macro (no C++ entity to alias). Note: `cargo expand` strips
+    /// `macro_rules!`, so this is usually empty and the consumer falls back to a
+    /// not-in-surface heuristic in is_macro_rules_import.
+    #[serde(default)]
+    pub declared_macros: Vec<String>,
 }
 
 /// One entry of `UfcsTraitManifest::declared_types` (book § 3.2.7): cross-crate
@@ -2669,6 +2675,7 @@ mod tests {
             )]),
             declared_types: Vec::new(),
             hygiene_aliases: std::collections::BTreeMap::new(),
+            declared_macros: Vec::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();

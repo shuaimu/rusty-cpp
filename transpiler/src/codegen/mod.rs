@@ -2718,6 +2718,11 @@ impl CodeGen {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        // `macro_rules!` names this crate exports, so a consumer can recognize and skip a
+        // re-exported dependency macro (no C++ entity to alias).
+        let mut declared_macros: Vec<String> =
+            self.macro_rules_names.iter().cloned().collect();
+        declared_macros.sort();
         crate::transpile::UfcsTraitManifest {
             version: 1,
             module: module.to_string(),
@@ -2726,6 +2731,7 @@ impl CodeGen {
             method_owners,
             declared_types,
             hygiene_aliases,
+            declared_macros,
         }
     }
 

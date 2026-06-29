@@ -808,8 +808,42 @@ impl CodeGen {
 
     pub(super) fn is_macro_rules_import(&self, path: &str) -> bool {
         let normalized = normalize_use_import_path(path);
-        let last = normalized.split("::").last().unwrap_or(normalized);
-        self.macro_rules_names.contains(last)
+        let trimmed = normalized.trim_start_matches("::");
+        let last = trimmed.rsplit("::").next().unwrap_or(trimmed);
+        if self.macro_rules_names.contains(last) {
+            return true;
+        }
+        let segs: Vec<&str> = trimmed.split("::").collect();
+        if segs.len() < 2 || !crate::transpile::crate_is_namespace_wrapped(segs[0]) {
+            return false;
+        }
+        let Some(dep) = self
+            .dependency_ufcs_trait_manifests
+            .iter()
+            .find(|m| m.module == segs[0])
+        else {
+            return false;
+        };
+        // Cross-crate: a re-exported DEPENDENCY macro recognized via the dep's manifest.
+        if dep.declared_macros.iter().any(|mac| mac == last) {
+            return true;
+        }
+        // `cargo expand` STRIPS `macro_rules!`, so a re-exported dep macro can't reach
+        // declared_macros. Fallback for a crate-root re-export `<dep>::<snake_case>` (serde's
+        // `pub use serde_core::forward_to_deserialize_any`): if the leaf is NOT in the dep's
+        // manifest surface (no hygiene shell, trait, type, or module segment), it has no C++
+        // entity — a (stripped) macro or otherwise unresolvable re-export. Skip it.
+        if segs.len() == 2 && last.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+            let in_surface = dep.hygiene_aliases.contains_key(last)
+                || dep.declared_traits.iter().any(|t| t == last)
+                || dep.declared_types.iter().any(|d| {
+                    d.name == last || d.module_path.split("::").any(|seg| seg == last)
+                });
+            if !in_surface {
+                return true;
+            }
+        }
+        false
     }
 
     pub(super) fn should_skip_unresolved_bare_import(&self, path: &str) -> bool {
