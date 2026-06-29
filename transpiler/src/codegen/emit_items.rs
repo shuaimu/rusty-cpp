@@ -4815,7 +4815,24 @@ impl CodeGen {
                             emitted_as_module_import = true;
                         }
                         if !emitted_as_module_import {
-                            self.writeln(&format!("{}using {};", export_prefix, using_path));
+                            // A plain import of a wrapped DEPENDENCY's MODULE
+                            // (`use serde_core_private::size_hint` → serde_core::private_::size_hint)
+                            // must emit a NAMESPACE alias — a using-declaration "cannot refer to a
+                            // namespace". target_is_wrapped_dep_module recognizes the crate-qualified
+                            // dep module (M1); this is the plain-import branch that the
+                            // namespace-alias-statement path doesn't cover.
+                            let ut = using_path.trim_start_matches("::");
+                            if !ut.contains(" = ") && self.target_is_wrapped_dep_module(ut) {
+                                let leaf = ut.rsplit("::").next().unwrap_or(ut);
+                                self.writeln(&format!(
+                                    "{}namespace {} = ::{};",
+                                    export_prefix,
+                                    escape_cpp_keyword(leaf),
+                                    ut
+                                ));
+                            } else {
+                                self.writeln(&format!("{}using {};", export_prefix, using_path));
+                            }
                         }
                     }
                     let cow_target =

@@ -3393,6 +3393,16 @@ impl CodeGen {
         module_path: &[String],
         modules: &HashSet<String>,
     ) {
+        self.record_module_path_alias_inner(tree, module_path, modules, &[]);
+    }
+
+    fn record_module_path_alias_inner(
+        &mut self,
+        tree: &syn::UseTree,
+        module_path: &[String],
+        modules: &HashSet<String>,
+        path_prefix: &[String],
+    ) {
         match tree {
             syn::UseTree::Rename(r) => {
                 let target_seg = r.ident.to_string();
@@ -3400,28 +3410,58 @@ impl CodeGen {
                 if matches!(target_seg.as_str(), "self" | "super" | "crate") || alias == "_" {
                     return;
                 }
-                // Resolve the single-segment rename target relative to the
-                // current module (child) or the crate root (sibling/top-level).
+                let alias_full = if module_path.is_empty() {
+                    alias.clone()
+                } else {
+                    format!("{}::{}", module_path.join("::"), alias)
+                };
+                // CROSS-CRATE (refactor step M2): `use serde_core::__private as serde_core_private`
+                // is rooted at a namespace-WRAPPED dependency, so the rename targets the DEP's
+                // module. Record the FULL crate-qualified target so resolving `serde_core_private::X`
+                // lands in the dependency — never a same-named LOCAL module (the cross-crate
+                // stripping bug). Resolve a hygiene shell (`__private228`) to its canonical at
+                // recording time so the edge points directly at the real module
+                // (`serde_core::private_`). M1's complete module recognition keeps the resulting
+                // crate-qualified module references emitting as namespace aliases (no cascade).
+                if let Some(root) = path_prefix.first() {
+                    if crate::transpile::crate_is_namespace_wrapped(root) {
+                        let full_target = match self
+                            .dependency_ufcs_trait_manifests
+                            .iter()
+                            .find(|m| &m.module == root)
+                            .and_then(|dep| dep.hygiene_aliases.get(&target_seg))
+                        {
+                            Some(canonical) => format!("{}::{}", root, canonical),
+                            None => path_prefix
+                                .iter()
+                                .cloned()
+                                .chain(std::iter::once(target_seg))
+                                .collect::<Vec<_>>()
+                                .join("::"),
+                        };
+                        self.name_resolver.add_alias(alias_full, full_target);
+                        return;
+                    }
+                }
+                // Resolve the single-segment rename target relative to the current module (child)
+                // or the crate root (sibling/top-level), against the LOCAL module set.
                 let mut child = module_path.to_vec();
                 child.push(target_seg.clone());
                 for cand in [child.join("::"), target_seg.clone()] {
                     if modules.contains(&cand) {
-                        let alias_full = if module_path.is_empty() {
-                            alias.clone()
-                        } else {
-                            format!("{}::{}", module_path.join("::"), alias)
-                        };
                         self.name_resolver.add_alias(alias_full, cand);
                         return;
                     }
                 }
             }
             syn::UseTree::Path(p) => {
-                self.record_module_path_alias_from_use_tree(&p.tree, module_path, modules);
+                let mut next = path_prefix.to_vec();
+                next.push(p.ident.to_string());
+                self.record_module_path_alias_inner(&p.tree, module_path, modules, &next);
             }
             syn::UseTree::Group(g) => {
                 for t in &g.items {
-                    self.record_module_path_alias_from_use_tree(t, module_path, modules);
+                    self.record_module_path_alias_inner(t, module_path, modules, path_prefix);
                 }
             }
             _ => {}
