@@ -337,7 +337,10 @@ pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
     // surfaces ~19 redefinition / `serde_core::X` not-found errors when serde_core wraps.
     // Kept out of the gate until that cross-crate re-export layer is built; the wrap
     // mechanism itself is dormant-but-present for serde_core/serde.
-    matches!(crate_name, "serde_bytes" | "hashbrown" | "either" | "bitflags")
+    matches!(
+        crate_name,
+        "serde_bytes" | "hashbrown" | "either" | "bitflags" | "serde_core"
+    )
 }
 
 /// Short names of every trait this crate DECLARES (`trait Tr { … }`), recursing
