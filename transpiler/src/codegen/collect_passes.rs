@@ -3819,6 +3819,14 @@ impl CodeGen {
                 }
                 syn::Item::Mod(m) => {
                     if let Some((_, nested_items)) = &m.content {
+                        // Record a NESTED module (leaf → escaped parent path) in the manifest
+                        // surface so a consumer requalifies a crate-stripped submodule path it
+                        // references (`private_::string`, `de::rusty_ext`) to
+                        // `serde_core::private_::string`. Type-less modules (`string`,
+                        // `size_hint`) have no declared_types to carry them otherwise.
+                        if !module_path.is_empty() {
+                            self.record_manifest_module(module_path, &m.ident.to_string());
+                        }
                         let mut nested_path = module_path.to_vec();
                         nested_path.push(m.ident.to_string());
                         self.collect_local_declared_types(nested_items, &nested_path);
@@ -3912,6 +3920,26 @@ impl CodeGen {
         if shorter {
             self.manifest_type_module_path
                 .insert(name.to_string(), escaped_path);
+        }
+    }
+
+    /// Record a NESTED module (escaped leaf → escaped parent path) in the manifest surface,
+    /// so a consumer requalifies a crate-stripped submodule path (`private_::string`,
+    /// `de::rusty_ext`) to `<crate>::private_::string`. Unlike record_manifest_reexport this
+    /// allows lowercase (module) names. Keep the SHORTEST (most-public) parent path.
+    fn record_manifest_module(&mut self, module_path: &[String], mod_name: &str) {
+        let escaped_path = module_path
+            .iter()
+            .map(|segment| escape_cpp_keyword(segment))
+            .collect::<Vec<_>>()
+            .join("::");
+        let name = escape_cpp_keyword(mod_name);
+        let shorter = match self.manifest_type_module_path.get(&name) {
+            Some(existing) => escaped_path.split("::").count() < existing.split("::").count(),
+            None => true,
+        };
+        if shorter {
+            self.manifest_type_module_path.insert(name, escaped_path);
         }
     }
 

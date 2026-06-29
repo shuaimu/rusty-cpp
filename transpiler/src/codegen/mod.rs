@@ -3014,6 +3014,14 @@ impl CodeGen {
                 if self.local_declared_types.contains(&dt.name) {
                     continue;
                 }
+                // The crate's OWN module of the same name takes precedence over a dep's
+                // entry — critical on the self-manifest back-edge, where a recorded nested
+                // submodule (`private_::de`) would otherwise mis-qualify the crate's own
+                // top-level `de` to `private_::de`. A genuine consumer still requalifies a
+                // dep submodule it does NOT itself declare (serde's `private_::string`).
+                if self.declared_module_names.contains(&dt.name) {
+                    continue;
+                }
                 // Cross-crate ownership map (§2.5 "Per-Crate Namespace Wrapping & the
                 // Cross-Crate Ownership Map"): when the dependency crate is
                 // namespace-wrapped, record the FULLY-QUALIFIED owner path
