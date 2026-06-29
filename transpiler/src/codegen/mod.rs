@@ -859,6 +859,12 @@ pub struct CodeGen {
     /// the crate's OWN qualification (`size_hint`). The manifest's `declared_types` is built
     /// from THIS map.
     pub(crate) manifest_type_module_path: HashMap<String, String>,
+    /// HYGIENE-ALIAS table (book § 32): a glob-only re-export shell module name (e.g. the
+    /// macro-hygiene-numbered `__private228`) → the C++-escaped namespace it aliases
+    /// (`private_`). Emitted into this crate's manifest so consumers can resolve a reference
+    /// to the shell THROUGH the linkage rather than by matching crate-local hygiene numbers —
+    /// the transpiler's analog of hygiene contexts carried in rustc `.rmeta`.
+    pub(crate) hygiene_module_aliases: HashMap<String, String>,
     /// Unit struct type names (scoped and unscoped) available for value-constructor
     /// lowering (`Foo` in value position -> `Foo{}`).
     pub(crate) unit_struct_types: HashSet<String>,
@@ -1667,6 +1673,7 @@ impl CodeGen {
             local_declared_types: HashSet::new(),
             local_type_module_path: HashMap::new(),
             manifest_type_module_path: HashMap::new(),
+            hygiene_module_aliases: HashMap::new(),
             unit_struct_types: HashSet::new(),
             extension_trait_impl_methods: HashMap::new(),
             extension_method_names: HashSet::new(),
@@ -2703,6 +2710,14 @@ impl CodeGen {
             .filter(|(name, _)| self.ufcs_declared_trait_names.contains(*name))
             .map(|(name, methods)| (name.clone(), methods.clone()))
             .collect();
+        // HYGIENE-ALIAS table (book § 32): glob-only re-export shells → the namespace they
+        // alias, so a consumer resolves a hygiene-numbered module reference through the
+        // recorded linkage instead of by matching crate-local expansion numbers.
+        let hygiene_aliases: std::collections::BTreeMap<String, String> = self
+            .hygiene_module_aliases
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         crate::transpile::UfcsTraitManifest {
             version: 1,
             module: module.to_string(),
@@ -2710,6 +2725,7 @@ impl CodeGen {
             declared_trait_methods,
             method_owners,
             declared_types,
+            hygiene_aliases,
         }
     }
 
@@ -2896,6 +2912,16 @@ impl CodeGen {
             for tr in &m.declared_traits {
                 let bridge = format!("{}_", tr);
                 repls.push((bridge.clone(), format!("{}::{}", m.module, bridge)));
+            }
+            // HYGIENE-ALIAS resolution (book § 32, the .rmeta analog): a consumer references a
+            // dependency's macro-hygiene-numbered re-export shell (`serde_core::__private228`)
+            // whose crate-local number it can't predict. Resolve it through the recorded
+            // shell→canonical linkage: `<crate>::__private228` → `<crate>::private_`.
+            for (shell, canonical) in &m.hygiene_aliases {
+                repls.push((
+                    format!("::{}::{}", m.module, shell),
+                    format!("::{}::{}", m.module, canonical),
+                ));
             }
         }
         if repls.is_empty() {

@@ -3827,6 +3827,27 @@ impl CodeGen {
                         if !module_path.is_empty() {
                             self.record_manifest_module(module_path, &m.ident.to_string());
                         }
+                        // HYGIENE-ALIAS (book § 32): a glob-only re-export shell
+                        // (`pub mod __private228 { pub use crate::private::* }`) is a
+                        // macro-hygiene artifact whose body just re-globs the canonical module.
+                        // Record shell→canonical so a consumer resolves `<crate>::__private228`
+                        // through the linkage (the .rmeta analog) rather than by matching the
+                        // crate-local hygiene number.
+                        if nested_items.len() == 1
+                            && let syn::Item::Use(u) = &nested_items[0]
+                            && matches!(u.vis, syn::Visibility::Public(_))
+                            && let Some(target) = self.glob_use_target_namespace(&u.tree)
+                        {
+                            let mut full: Vec<String> = module_path
+                                .iter()
+                                .map(|s| escape_cpp_keyword(s))
+                                .collect();
+                            full.push(escape_cpp_keyword(&m.ident.to_string()));
+                            let shell = full.join("::");
+                            if shell != target {
+                                self.hygiene_module_aliases.insert(shell, target);
+                            }
+                        }
                         let mut nested_path = module_path.to_vec();
                         nested_path.push(m.ident.to_string());
                         self.collect_local_declared_types(nested_items, &nested_path);

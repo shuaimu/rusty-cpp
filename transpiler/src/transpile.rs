@@ -42,6 +42,16 @@ pub struct UfcsTraitManifest {
     /// path are listed.
     #[serde(default)]
     pub declared_types: Vec<UfcsDeclaredType>,
+    /// HYGIENE-ALIAS table (book § 32): a glob-only re-export shell module → the
+    /// C++-escaped namespace it aliases. `cargo expand` serializes macro-hygiene
+    /// `SyntaxContext`s into name suffixes (`__private228` is `__private` from one
+    /// expansion context, whose body is just `pub use crate::private::*`). The numbers
+    /// are crate-local, so a consumer's `serde_core::__private228` never matches the
+    /// dependency's emission. This is the transpiler's `.rmeta` analog: it records the
+    /// shell→canonical linkage ONCE so consumers resolve through it instead of by brittle
+    /// number-matching — the same role hygiene contexts play in rustc's crate metadata.
+    #[serde(default)]
+    pub hygiene_aliases: BTreeMap<String, String>,
 }
 
 /// One entry of `UfcsTraitManifest::declared_types` (book § 3.2.7): cross-crate
@@ -2658,6 +2668,7 @@ mod tests {
                 vec!["Greet".to_string()],
             )]),
             declared_types: Vec::new(),
+            hygiene_aliases: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();

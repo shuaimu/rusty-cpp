@@ -2872,7 +2872,100 @@ Move + use   : ERROR
 
 ---
 
-*Document version: 1.6*
-*Last updated: January 2026*
+## 32. Macro Hygiene & the Cross-Crate Manifest
+
+> Advanced / internals. This explains a class of cross-crate name-resolution bug that
+> arises specifically from how the transpiler ingests Rust, and the metadata-based
+> design that resolves it the way `rustc` does natively.
+
+### The symptom: names like `__private228`
+
+When the transpiler translates a crate that uses derive macros (serde is the canonical
+example), the expanded output contains modules with numeric-suffixed names:
+
+```rust
+pub mod __private {            // serde's internal API, one hygiene context
+    pub use crate::private::doc;
+    pub use core::result::Result;
+}
+pub mod __private228 {         // the SAME name from a DIFFERENT hygiene context
+    pub use crate::private::*; //  ← body is just a glob of the real `private` module
+}
+```
+
+A downstream crate then references `serde_core::__private228::Content`, but serde_core
+may have emitted that module under a *different* number (or none) — so the C++ lookup
+fails with `no member named '__private228' in namespace 'serde_core'`.
+
+### Why the number exists (and why real Rust never has this problem)
+
+Rust tracks macro hygiene as **opaque metadata, not as part of the name**. Every
+identifier is a pair `(Symbol, SyntaxContext)`: `Symbol` is the text (`__private`),
+`SyntaxContext` is an interned id recording which macro expansion(s) introduced the token.
+The two `__private` modules above share a `Symbol` and differ only in `SyntaxContext`;
+the compiler stores them keyed by `(name, ctxt)` and resolves references by matching
+*both*. No renaming ever happens, and cross-crate references resolve through the
+dependency's crate metadata (`.rmeta`), which serializes the module tree **with hygiene
+contexts intact**. There is no text to line up, so there is nothing to mismatch.
+
+The transpiler, however, does not operate on the token stream — it consumes
+**`cargo expand` output, which is plain Rust _text_**. Plain text has nowhere to store a
+`SyntaxContext`, and you cannot emit two `pub mod __private` siblings in one file. So the
+expansion **serializes the hygiene context into the name** — the `228` is a syntax-context
+id rendered as a suffix. Because each crate is expanded independently, the counters are
+crate-local and unrelated: serde's `__private228` and serde_core's emission don't agree.
+
+**The number is a lossy text serialization of something Rust keeps as metadata.**
+
+### The design: a hygiene-alias table in the manifest (the `.rmeta` analog)
+
+The fix does *not* try to make the numbers match. Instead it mirrors what `rustc` does —
+record the linkage once, carry it in metadata, and resolve through it:
+
+1. **Record (producer).** During collection, a glob-only re-export shell — a module whose
+   entire body is one `pub use <path>::*` — is recognized as hygiene noise for `<path>`.
+   The transpiler records `shell → canonical` (`__private228 → private_`) in
+   `hygiene_module_aliases`.
+2. **Persist (metadata).** That map is emitted into the crate's
+   `UfcsTraitManifest.hygiene_aliases` — the transpiler's analog of the hygiene linkage in
+   `.rmeta`.
+3. **Resolve (consumer).** When a downstream crate merges a dependency's manifest, the
+   requalification pass rewrites any reference to the dependency's shell through the
+   recorded linkage: `serde_core::__private228::X` → `serde_core::private_::X`. The
+   consumer never needs to know — or match — the crate-local hygiene number.
+
+Within the producing crate, the shell is additionally emitted as a C++ namespace **alias**
+(`namespace __private228 = private_;`) so the crate's *own* references resolve and the alias
+is exported across the C++20 module boundary (a `using namespace` directive is *not*
+exported and would not suffice).
+
+### Two tiers of fidelity
+
+- **Tier 1 — structural recovery (implemented).** Infer the `shell → canonical` relation
+  from the expanded text: a `__private<digits>` module whose body is a glob of `<base>` is
+  noise for `<base>`. Reliable for the re-export-shell shape hygiene produces, and enough to
+  resolve serde against serde_core.
+- **Tier 2 — hygiene-faithful (future).** Because the transpiler controls the expand step,
+  it can read the ground truth: `rustc -Zunpretty=expanded,hygiene` annotates every
+  identifier with its real `SyntaxContext`. That output is not valid Rust (it can't be
+  `syn`-parsed), but a side-channel pass can extract the true `(name, ctxt) → canonical`
+  map and feed it alongside the normal expanded source — swapping inference for ground
+  truth while keeping the same manifest seam.
+
+### Why not just preserve hygiene end-to-end?
+
+The fully Rust-equivalent fix is to never flatten hygiene to text — carry
+`(Symbol, SyntaxContext)` through the whole pipeline and resolve by pair, as `rustc` does.
+But the transpiler is fundamentally "`syn` over expanded *text*," and text cannot hold a
+context, so that is a large rearchitecture. The manifest hygiene-alias table is the
+pragmatic equivalent: hygiene is lost at the `syn` boundary, but the *linkage* is
+reconstructed once and persisted in metadata — exactly the role `.rmeta` plays — giving
+Rust-like cross-crate resolution without brittle number-matching.
+
+---
+
+*Document version: 1.7*
+*Last updated: June 2026*
+*Section 32 (macro hygiene & cross-crate manifest) added June 2026*
 *Reorganized: Raw pointer discussion moved to dedicated Section 24 in Part VIII*
 *Early examples now use references instead of pointers to match Rust's safe-by-default model*
