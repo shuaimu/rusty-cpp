@@ -339,7 +339,15 @@ pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
     // mechanism itself is dormant-but-present for serde_core/serde.
     matches!(
         crate_name,
-        "serde_bytes" | "hashbrown" | "either" | "bitflags" | "serde_core" | "semver"
+        "serde_bytes"
+            | "hashbrown"
+            | "either"
+            | "bitflags"
+            | "serde_core"
+            | "semver"
+            | "take_mut"
+            | "smallvec"
+            | "pollster"
     )
 }
 

@@ -2237,6 +2237,30 @@ impl CodeGen {
         for ns in &exclusive {
             wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, ns);
         }
+        // Rule 4 — crate-root FREE FUNCTIONS referenced bare as `::<fn>`. A wrapped crate's own
+        // crate-root function (take_mut's `take`/`take_or_recover`, smallvec's `infallible`) is
+        // emitted at column 0 and called from its own body as a global-qualified `::take`, which
+        // misses once that body sits under `namespace <crate>`. Requalify `::<fn>` →
+        // `::<crate>::<fn>`. Source: declared_item_names (crate-root Item::Fn/Struct/… names)
+        // filtered to lowercase-initial names that are NOT modules (Rule 1's domain) — i.e. free
+        // functions / consts; crate-root TYPES are uppercase and handled by Rule 3 above. Names
+        // are C++-escaped to match emission, and requalify_crate_root_symbol is boundary-aware:
+        // it leaves `.take(` (method call) and `dep::take` (qualified) untouched and never
+        // double-prefixes `::<crate>::take`.
+        let mut crate_root_fns: Vec<String> = self
+            .declared_item_names
+            .iter()
+            .filter(|n| {
+                n.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                    && !self.declared_module_names.contains(n.as_str())
+            })
+            .cloned()
+            .collect();
+        crate_root_fns.sort();
+        for name in &crate_root_fns {
+            wrapped =
+                Self::requalify_crate_root_symbol(&wrapped, &crate_name, &escape_cpp_keyword(name));
+        }
         // Gap (a): `rusty_ext` stays IN the purview (not relocated), so its references
         // must NOT be globalized — Rule 1 above already requalified `::de::rusty_ext::X`
         // to `::serde_core::de::rusty_ext::X`, which is exactly where the wrapped
@@ -2462,10 +2486,15 @@ impl CodeGen {
         while let Some(rel) = text[i..].find(&needle) {
             let pos = i + rel;
             let after = pos + needle.len();
+            // A leading global `::sym` is not preceded by a path/qualifier continuation. Besides
+            // ident/`_`/`:` (a `foo::`/`x::` qualified name), reject `>` — an out-of-line member
+            // qualifier after a template close (`ByteArray<N>::deserialize`) ends in `>::`, NOT a
+            // bare global ref; requalifying it would inject `::<crate>::` into the member name.
             let before_ok = pos == 0
                 || !(bytes[pos - 1].is_ascii_alphanumeric()
                     || bytes[pos - 1] == b'_'
-                    || bytes[pos - 1] == b':');
+                    || bytes[pos - 1] == b':'
+                    || bytes[pos - 1] == b'>');
             let after_ok = after >= text.len()
                 || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
             out.push_str(&text[i..pos]);
@@ -2502,10 +2531,15 @@ impl CodeGen {
         while let Some(rel) = text[i..].find(&needle) {
             let pos = i + rel;
             let after = pos + needle.len();
+            // A leading global `::sym` is not preceded by a path/qualifier continuation. Besides
+            // ident/`_`/`:` (a `foo::`/`x::` qualified name), reject `>` — an out-of-line member
+            // qualifier after a template close (`ByteArray<N>::deserialize`) ends in `>::`, NOT a
+            // bare global ref; requalifying it would inject `::<crate>::` into the member name.
             let before_ok = pos == 0
                 || !(bytes[pos - 1].is_ascii_alphanumeric()
                     || bytes[pos - 1] == b'_'
-                    || bytes[pos - 1] == b':');
+                    || bytes[pos - 1] == b':'
+                    || bytes[pos - 1] == b'>');
             out.push_str(&text[i..pos]);
             if before_ok {
                 out.push_str(&repl);
