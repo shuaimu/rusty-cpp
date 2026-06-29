@@ -349,6 +349,7 @@ pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
             | "smallvec"
             | "pollster"
             | "arrayvec"
+            | "cfg_if"
     )
 }
 

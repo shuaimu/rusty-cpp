@@ -2346,8 +2346,12 @@ fn append_parity_runner_main(
     // as the `--rusty-single-test` string key; only the C++ call expression is
     // prefixed. Non-wrapped crates emit wrappers at global scope → empty prefix
     // → unchanged.
-    let wrapper_prefix = if transpile::crate_is_namespace_wrapped(crate_name) {
-        format!("{}::", crate_name)
+    // Normalize the crate name to its C++ MODULE/namespace form (Rust `-` → `_`): the emitted
+    // module is `namespace cfg_if`, not `cfg-if` (a hyphen is invalid in a C++ qualified-id —
+    // `cfg-if::X` parses as the subtraction `cfg - if::X`).
+    let crate_ns = crate_name.replace('-', "_");
+    let wrapper_prefix = if transpile::crate_is_namespace_wrapped(&crate_ns) {
+        format!("{}::", crate_ns)
     } else {
         String::new()
     };

@@ -2277,6 +2277,31 @@ impl CodeGen {
             wrapped =
                 Self::requalify_crate_root_symbol(&wrapped, &crate_name, &escape_cpp_keyword(name));
         }
+        // Rule 5 — cross-crate (xcrate) test-harness self-references. The harness emits helper
+        // functions named `rusty_libtest_<…>` and calls them via a global `::rusty_libtest_<…>()`.
+        // Once the xcrate test file is wrapped in `namespace <crate>`, the definitions move under
+        // it but the `::`-qualified calls miss in the global namespace. These names are
+        // harness-generated (absent from declared_item_names, so Rule 4 doesn't cover them);
+        // collect them from the wrapped text and requalify `::rusty_libtest_<x>` ->
+        // `::<crate>::rusty_libtest_<x>`. No-op for the crate module (it has no such symbols).
+        let harness_fns: std::collections::BTreeSet<String> = {
+            let mut set = std::collections::BTreeSet::new();
+            let hb = wrapped.as_bytes();
+            let mut hi = 0;
+            while let Some(rel) = wrapped[hi..].find("rusty_libtest_") {
+                let start = hi + rel;
+                let mut end = start;
+                while end < hb.len() && (hb[end].is_ascii_alphanumeric() || hb[end] == b'_') {
+                    end += 1;
+                }
+                set.insert(wrapped[start..end].to_string());
+                hi = end;
+            }
+            set
+        };
+        for f in &harness_fns {
+            wrapped = Self::requalify_crate_root_symbol(&wrapped, &crate_name, f);
+        }
         // Gap (a): `rusty_ext` stays IN the purview (not relocated), so its references
         // must NOT be globalized — Rule 1 above already requalified `::de::rusty_ext::X`
         // to `::serde_core::de::rusty_ext::X`, which is exactly where the wrapped
