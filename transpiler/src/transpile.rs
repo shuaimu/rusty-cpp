@@ -58,6 +58,13 @@ pub struct UfcsTraitManifest {
     /// not-in-surface heuristic in is_macro_rules_import.
     #[serde(default)]
     pub declared_macros: Vec<String>,
+    /// Every MODULE this crate declares, as `::`-joined C++-escaped crate-relative paths
+    /// (`de`, `de::value`, `private_`, `private_::size_hint`). Lets a consumer recognize a
+    /// crate-qualified reference to a wrapped dependency's module (`serde_core::private_::size_hint`)
+    /// as a NAMESPACE — so a `use` of it emits a namespace alias, not a (broken) type alias.
+    /// Separate from declared_types so module-vs-type is unambiguous.
+    #[serde(default)]
+    pub declared_modules: Vec<String>,
 }
 
 /// One entry of `UfcsTraitManifest::declared_types` (book § 3.2.7): cross-crate
@@ -2676,6 +2683,7 @@ mod tests {
             declared_types: Vec::new(),
             hygiene_aliases: std::collections::BTreeMap::new(),
             declared_macros: Vec::new(),
+            declared_modules: Vec::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();

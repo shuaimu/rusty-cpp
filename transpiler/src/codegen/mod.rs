@@ -2723,6 +2723,19 @@ impl CodeGen {
         let mut declared_macros: Vec<String> =
             self.macro_rules_names.iter().cloned().collect();
         declared_macros.sort();
+        // Every module this crate declares, C++-escaped (`private::content` → `private_::content`)
+        // so a consumer can recognize a crate-qualified reference to it as a NAMESPACE.
+        let mut declared_modules: Vec<String> = self
+            .declared_module_paths
+            .iter()
+            .map(|p| {
+                p.split("::")
+                    .map(escape_cpp_keyword)
+                    .collect::<Vec<_>>()
+                    .join("::")
+            })
+            .collect();
+        declared_modules.sort();
         crate::transpile::UfcsTraitManifest {
             version: 1,
             module: module.to_string(),
@@ -2732,6 +2745,7 @@ impl CodeGen {
             declared_types,
             hygiene_aliases,
             declared_macros,
+            declared_modules,
         }
     }
 
@@ -16351,10 +16365,12 @@ impl CodeGen {
     }
 
 
-    /// True if `target` (a `::`-joined path like `serde_core::__private228`) names a module of
-    /// a namespace-WRAPPED dependency — recognized via the dep's manifest hygiene-alias shells.
-    /// Lets `use dep::mod as alias` emit a NAMESPACE alias (not a type alias) for a dep module
-    /// whose hygiene-numbered name isn't in the consumer's own declared modules.
+    /// True if `target` (a `::`-joined path like `serde_core::private_::size_hint`) names a
+    /// module of a namespace-WRAPPED dependency — recognized via the dep's manifest, by either a
+    /// hygiene-alias shell (`__private228`) or a declared module path (`private_::size_hint`).
+    /// Lets a `use dep::mod as alias` (or a resolved reference to one) emit a NAMESPACE alias
+    /// rather than a (broken) type alias. The complete module recognition here is what keeps the
+    /// crate-qualified alias resolution (record_module_path_alias) from cascading.
     fn target_is_wrapped_dep_module(&self, target: &str) -> bool {
         let parts: Vec<&str> = target.split("::").collect();
         if parts.len() < 2 {
@@ -16365,9 +16381,12 @@ impl CodeGen {
         if !crate::transpile::crate_is_namespace_wrapped(root) {
             return false;
         }
-        self.dependency_ufcs_trait_manifests
-            .iter()
-            .any(|m| m.module == root && m.hygiene_aliases.contains_key(leaf))
+        let rel = parts[1..].join("::");
+        self.dependency_ufcs_trait_manifests.iter().any(|m| {
+            m.module == root
+                && (m.hygiene_aliases.contains_key(leaf)
+                    || m.declared_modules.iter().any(|md| *md == rel))
+        })
     }
 
     fn namespace_alias_statement_for_module_import(&self, using_path: &str) -> Option<String> {
