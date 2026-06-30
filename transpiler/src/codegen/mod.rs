@@ -2949,10 +2949,28 @@ impl CodeGen {
         // Cross-crate type metadata (§ 3.2.7): every crate-declared type with an
         // unambiguous module path, plus its generic-TYPE-param arity, so a
         // downstream crate can qualify + arity-complete a re-exported reference.
+        // Modules are recorded into `manifest_type_module_path` too (record_manifest_module, for
+        // submodule requalification) — but a module is NOT a type. If one leaks into declared_types
+        // a consumer qualifies a same-named LOCAL binding to the module path: indexmap's `iter`
+        // module makes a serde_core parameter named `iter` emit as `::indexmap::map::iter`. Exclude
+        // any entry whose full path is itself a declared module.
+        let declared_module_set: HashSet<String> = self
+            .declared_module_paths
+            .iter()
+            .map(|p| {
+                p.split("::")
+                    .map(escape_cpp_keyword)
+                    .collect::<Vec<_>>()
+                    .join("::")
+            })
+            .collect();
         let mut declared_types: Vec<crate::transpile::UfcsDeclaredType> = self
             .manifest_type_module_path
             .iter()
-            .filter(|(_, module_path)| !module_path.is_empty())
+            .filter(|(name, module_path)| {
+                !module_path.is_empty()
+                    && !declared_module_set.contains(&format!("{}::{}", module_path, name))
+            })
             .map(|(name, module_path)| {
                 let arity = self
                     .declared_type_params
