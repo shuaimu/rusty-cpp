@@ -1061,6 +1061,32 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         let mut joined: String;
         let mut force_leading_colon = path.leading_colon.is_some();
         let original_force_leading_colon = force_leading_colon;
+        // Rust's default hasher `RandomState` (a std::hash / std::collections::hash_map re-export)
+        // has no no-std equivalent; map it to hashbrown's default hasher so `IndexMap<T, S =
+        // RandomState>` and friends get a valid, default-constructible default (they build on
+        // hashbrown). `std::hash` itself is emitted as a `struct` shim, so `std::hash::RandomState`
+        // would otherwise be ill-formed (a member of a class template, not a namespace).
+        if matches!(
+            segments.join("::").as_str(),
+            "RandomState"
+                | "hash::RandomState"
+                | "std::hash::RandomState"
+                | "collections::hash_map::RandomState"
+                | "std::collections::hash_map::RandomState"
+        ) {
+            return "::hashbrown::DefaultHashBuilder".to_string();
+        }
+        // `Ord::min(a,b)` / `Ord::max(a,b)` are UFCS calls on the `Ord` trait (no receiver); the
+        // trait itself isn't a C++ entity, so lower the function path to std::min / std::max.
+        match segments.join("::").as_str() {
+            "Ord::min" | "cmp::Ord::min" | "core::cmp::Ord::min" | "std::cmp::Ord::min" => {
+                return "std::min".to_string();
+            }
+            "Ord::max" | "cmp::Ord::max" | "core::cmp::Ord::max" | "std::cmp::Ord::max" => {
+                return "std::max".to_string();
+            }
+            _ => {}
+        }
         while segments
             .first()
             .is_some_and(|seg| matches!(seg.as_str(), "crate"))
