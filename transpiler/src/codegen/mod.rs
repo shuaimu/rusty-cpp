@@ -1950,9 +1950,6 @@ impl CodeGen {
                     continue;
                 }
                 for (module, methods) in &dep.rusty_ext_methods_by_module {
-                    if module.is_empty() {
-                        continue; // root-level rusty_ext: nothing to wrap a using-decl in
-                    }
                     for meth in methods.iter().map(String::as_str) {
                         if PRELUDE_DE.contains(&meth) || PRELUDE_SER.contains(&meth) {
                             continue; // global runtime prelude, already in scope
@@ -1966,10 +1963,19 @@ impl CodeGen {
                         if !referenced(module, meth) {
                             continue;
                         }
-                        by_module.entry(module.clone()).or_default().push_str(&format!(
-                            "using ::{}::{}::rusty_ext::{};\n",
-                            dep.module, module, meth
-                        ));
+                        // ROOT-level dep rusty_ext (`module == ""`, e.g. the `equivalent` crate's
+                        // `Equivalent::equivalent`, which hashbrown CALLS but does not implement)
+                        // bridges into the consumer's OWN root rusty_ext with no module segment:
+                        // `using ::equivalent::rusty_ext::equivalent;`.
+                        let dep_path = if module.is_empty() {
+                            format!("::{}::rusty_ext::{}", dep.module, meth)
+                        } else {
+                            format!("::{}::{}::rusty_ext::{}", dep.module, module, meth)
+                        };
+                        by_module
+                            .entry(module.clone())
+                            .or_default()
+                            .push_str(&format!("using {};\n", dep_path));
                     }
                 }
             }
@@ -1982,6 +1988,11 @@ impl CodeGen {
         // `rusty_ext`, e.g. `de::value` → `namespace de { namespace value { namespace rusty_ext {…}}}`.
         let mut bridge = String::new();
         for (module, usings) in &usings_by_module {
+            if module.is_empty() {
+                // ROOT-level: no module namespace to wrap in, just the consumer's root rusty_ext.
+                bridge.push_str(&format!("namespace rusty_ext {{\n{}}}\n", usings));
+                continue;
+            }
             let opens: String = module
                 .split("::")
                 .map(|seg| format!("namespace {} {{ ", seg))
