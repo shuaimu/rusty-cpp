@@ -844,6 +844,11 @@ pub struct CodeGen {
     /// Local type names declared in this file (scoped and unscoped).
     /// Used to distinguish true extension impls from local-type impls.
     pub(crate) local_declared_types: HashSet<String>,
+    /// Type names declared at the crate ROOT (module_path empty). Such a name is the canonical
+    /// definition: a bare reference to it must resolve to the root, NOT be qualified to a
+    /// same-named alias in a sibling submodule (indexmap's `set::Bucket<T>` alias vs the root
+    /// `struct Bucket<K,V>`). Consulted by the unique-nonlocal-type-path resolver to bail out.
+    pub(crate) root_declared_type_names: HashSet<String>,
     /// UFCS § 3.2.7 / serde_core Fix B: bare type name → its declaration module
     /// path (e.g. `MapAsEnum` → `de::value::private_`), recorded ONLY for types
     /// declared inside a nested module. UFCS free functions emit at GLOBAL
@@ -1681,6 +1686,7 @@ impl CodeGen {
             user_deref_targets: HashMap::new(),
             emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
+            root_declared_type_names: HashSet::new(),
             local_type_module_path: HashMap::new(),
             manifest_type_module_path: HashMap::new(),
             hygiene_module_aliases: HashMap::new(),
@@ -3154,6 +3160,9 @@ impl CodeGen {
                     i += 1;
                 }
                 let ident = &s[start..i];
+                if std::env::var_os("RUSTY_CPP_DBG_BUCKET").is_some() && ident == "Bucket" {
+                    eprintln!("[QUAL] Bucket local={:?}", self.local_type_module_path.get("Bucket"));
+                }
                 let already_qualified = start >= 2 && &s[start - 2..start] == "::";
                 if let Some(path) = self.local_type_module_path.get(ident)
                     && !path.is_empty()
@@ -9246,6 +9255,11 @@ impl CodeGen {
 
     fn record_local_declared_type(&mut self, module_path: &[String], type_name: &str) {
         self.local_declared_types.insert(type_name.to_string());
+        if module_path.is_empty() {
+            // Declared at the crate ROOT → the canonical owner of this bare name. A bare reference
+            // must resolve here, never be requalified to a same-named sibling-submodule alias.
+            self.root_declared_type_names.insert(type_name.to_string());
+        }
         if !module_path.is_empty() {
             // serde_core Fix B: record the (escaped) module path so UFCS free
             // functions (emitted at global scope) can qualify this nested type.

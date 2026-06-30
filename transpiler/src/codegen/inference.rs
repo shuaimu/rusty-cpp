@@ -11018,6 +11018,11 @@ impl CodeGen {
         {
             return None;
         }
+        // Root-declared name → canonical; never requalify a bare reference to a sibling-submodule
+        // alias of the same name (indexmap's root `Bucket<K,V>` vs `set::Bucket<T>`).
+        if self.root_declared_type_names.contains(name) {
+            return None;
+        }
 
         let mut scoped_matches: Vec<&str> = self
             .local_declared_types
@@ -11069,6 +11074,13 @@ impl CodeGen {
                 .next()
                 .is_some_and(|ch| ch.is_ascii_uppercase())
         {
+            return None;
+        }
+        // A name declared at the crate ROOT is canonical: a bare reference resolves to the root
+        // definition under the namespace wrap, so it must NOT be requalified to a same-named
+        // sibling-submodule alias (indexmap's root `struct Bucket<K,V>` vs `set::Bucket<T>` — the
+        // emittable-filter would otherwise leave `set::Bucket` as the lone "unique" match).
+        if self.root_declared_type_names.contains(name) {
             return None;
         }
         let _resolution_guard =
