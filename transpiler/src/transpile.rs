@@ -319,38 +319,24 @@ pub fn classify_method_names(items: &[syn::Item]) -> HashMap<String, MethodNameC
 /// (so a `class ser::Serialize` etc. doesn't ODR-collide with the same-named
 /// namespace in an imported dependency — see
 /// `wrap_module_purview_in_crate_namespace`). Post-wrap, references to the
-/// crate's own items must be qualified to `::<crate>::…`. Currently narrow
-/// (Phase-1): serde_bytes only; widening this list also widens the wrap and its
-/// re-qualification in lockstep.
+/// crate's own items must be qualified to `::<crate>::…`. UNIVERSAL: every
+/// transpiled crate is wrapped (the parity matrix is 14/0/1 under the flip).
 pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
-    // Applied SELECTIVELY to crates that actually collide (a shared module name with
-    // an imported dependency). serde_bytes (Phase 1) and hashbrown (collides with
-    // indexmap on `set`/`map`/`iter`). A flip-to-ALL was measured (2026-06-27) and
-    // regresses 11/14 crates: the self-re-qualification needs per-pattern work it
-    // does not yet do — re-qualifying a namespace SHARED with a dependency (serde's
-    // `de` vs serde_core's `de`) the way Rule 1 deliberately avoids, declared
-    // crate-root TYPES (either's `Either_Left`), and non-type-holding own modules
-    // (bitflags's `external`). Widen one crate at a time, matrix-gated.
-    // serde_core wraps cleanly (no-relocate + rusty_ext prelude using-bridge, commit
-    // 7ec41ed) but its CONSUMERS need cross-crate requalification of the now-wrapped API:
-    // `serde` is a re-export facade (`pub use serde_core::{de,ser,Deserialize,…}`) and
-    // surfaces ~19 redefinition / `serde_core::X` not-found errors when serde_core wraps.
-    // Kept out of the gate until that cross-crate re-export layer is built; the wrap
-    // mechanism itself is dormant-but-present for serde_core/serde.
-    matches!(
-        crate_name,
-        "serde_bytes"
-            | "hashbrown"
-            | "either"
-            | "bitflags"
-            | "serde_core"
-            | "semver"
-            | "take_mut"
-            | "smallvec"
-            | "pollster"
-            | "arrayvec"
-            | "cfg_if"
-    )
+    // Universal namespace wrapping. Every transpiled crate is emitted inside
+    // `namespace <crate> { … }` so its modules never ODR-collide with a same-named
+    // module in an imported dependency (serde's `de` vs serde_core's `de`). A clean
+    // flip-to-ALL required the full self-requalification rule set in
+    // `wrap_module_purview_in_crate_namespace` (Rules 1-5: exclusive namespaces, UFCS
+    // bridges, crate-root re-exported types, crate-root free fns, test-harness symbols),
+    // the dep-name-never-self guard (a dependency name is never requalified to
+    // `::<crate>::<dep>`), and cross-crate re-export resolution so a wrapped facade
+    // (serde) re-exporting a wrapped dependency's sub-submodule member (serde_core's
+    // `de::ignored_any::IgnoredAny`) qualifies to the dependency instead of being
+    // dropped as unresolved. Validated 14/0/1 on the parity matrix (serde_yaml is a
+    // pre-existing known-fail unrelated to wrapping). The `crate_name` param is retained
+    // for a future per-crate opt-out, but no crate currently needs one.
+    let _ = crate_name;
+    true
 }
 
 /// Short names of every trait this crate DECLARES (`trait Tr { … }`), recursing

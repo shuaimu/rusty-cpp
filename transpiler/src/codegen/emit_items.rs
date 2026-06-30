@@ -4370,6 +4370,44 @@ impl CodeGen {
         }
     }
 
+    /// If `path` (crate-relative, e.g. `de::ignored_any::IgnoredAny`) names a member of a module
+    /// that a wrapped DEPENDENCY declares but THIS crate does NOT, qualify it to the dependency:
+    /// `serde_core::de::ignored_any::IgnoredAny`. Rescues a facade re-export of a dependency's
+    /// sub-submodule member that would otherwise resolve to this crate's nonexistent same-named
+    /// path (and be dropped). Leaves already-qualified / `namespace …` / `… = …` / single-segment /
+    /// own-top-level-module paths alone.
+    pub(super) fn qualify_wrapped_dep_submodule_path(&self, path: &str) -> String {
+        if path.starts_with("::")
+            || path.starts_with("namespace ")
+            || path.contains(" = ")
+            || !path.contains("::")
+        {
+            return path.to_string();
+        }
+        let Some((module, _leaf)) = path.rsplit_once("::") else {
+            return path.to_string();
+        };
+        // A module THIS crate declares (its own top-level `de`) keeps resolving in place.
+        let declared_locally = self.declared_module_paths.iter().any(|p| {
+            p.split("::")
+                .map(escape_cpp_keyword)
+                .collect::<Vec<_>>()
+                .join("::")
+                == module
+        });
+        if declared_locally {
+            return path.to_string();
+        }
+        for m in &self.dependency_ufcs_trait_manifests {
+            if crate::transpile::crate_is_namespace_wrapped(&m.module)
+                && m.declared_modules.iter().any(|md| md == module)
+            {
+                return format!("{}::{}", m.module, path);
+            }
+        }
+        path.to_string()
+    }
+
     pub(super) fn emit_use(&mut self, u: &syn::ItemUse) {
         let is_pub = matches!(u.vis, syn::Visibility::Public(_));
 
@@ -4427,6 +4465,13 @@ impl CodeGen {
             let resolved_path = self.resolve_unqualified_local_import_path(&path);
             let resolved_path = self.strip_current_crate_prefix_from_import_path(&resolved_path);
             let resolved_path = self.resolve_nested_local_reexport_path(&resolved_path);
+            // A re-export of a wrapped DEPENDENCY's SUB-submodule member that this facade does not
+            // replicate (serde re-exports serde_core's `de::ignored_any::IgnoredAny`; the path
+            // resolves crate-relative to `de::ignored_any::IgnoredAny`, which this crate has no
+            // such module for, so it would be DROPPED as "Rust-only unresolved"). If the module
+            // prefix is a wrapped dependency's declared module that this crate does NOT declare,
+            // qualify it to the dependency so the using-declaration resolves and is emitted.
+            let resolved_path = self.qualify_wrapped_dep_submodule_path(&resolved_path);
             // Own-crate imports are redundant in flat libtest targets (the
             // crate's items are visible via `import <crate>;`) and ill-formed
             // for macro-only names; skip them rather than emit a `using`

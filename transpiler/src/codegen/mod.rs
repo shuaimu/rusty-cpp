@@ -3188,6 +3188,37 @@ impl CodeGen {
             }
             repls.push((format!("::{}::{}", sub, ty), format!("::{}::{}", path, ty)));
         }
+        // A wrapped dependency's type referenced at its CRATE-RELATIVE module path. serde
+        // re-exports serde_core's IgnoredAny, which lives in serde_core's `de::ignored_any`
+        // SUB-submodule — the reference comes out as the dep-relative `::de::ignored_any::
+        // IgnoredAny`, this crate's nonexistent same-named path (the facade re-exports the TYPE
+        // but not the submodule structure). Qualify it to the dependency — UNLESS this crate
+        // declares that module locally (then the path is genuinely its own, e.g. serde's own
+        // top-level `de`, whose re-exports resolve in place).
+        let local_modules: HashSet<String> = self
+            .declared_module_paths
+            .iter()
+            .map(|p| {
+                p.split("::")
+                    .map(escape_cpp_keyword)
+                    .collect::<Vec<_>>()
+                    .join("::")
+            })
+            .collect();
+        for m in &self.dependency_ufcs_trait_manifests {
+            if !crate::transpile::crate_is_namespace_wrapped(&m.module) {
+                continue;
+            }
+            for dt in &m.declared_types {
+                if dt.module_path.is_empty() || local_modules.contains(&dt.module_path) {
+                    continue;
+                }
+                repls.push((
+                    format!("::{}::{}", dt.module_path, dt.name),
+                    format!("::{}::{}::{}", m.module, dt.module_path, dt.name),
+                ));
+            }
+        }
         // UFCS dispatch BRIDGE namespaces (`<Trait>_`) of a wrapped dependency live at the
         // dep's crate ROOT (`serde_core::SeqAccess_`), which the type loop above skips
         // (empty sub-path). A consumer's dispatch references them BARE (`SeqAccess_::…`),
