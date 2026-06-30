@@ -4472,6 +4472,17 @@ impl CodeGen {
             // prefix is a wrapped dependency's declared module that this crate does NOT declare,
             // qualify it to the dependency so the using-declaration resolves and is emitted.
             let resolved_path = self.qualify_wrapped_dep_submodule_path(&resolved_path);
+            // `pub use core::primitive::u8;` (and `std::primitive::*`) re-exports a PRIMITIVE type.
+            // In C++ those are global builtins (`uint8_t`, …), so the re-export is meaningless and
+            // `using core::primitive::u8;` would name a nonexistent `core::primitive` namespace.
+            if let Some(rest) = resolved_path
+                .strip_prefix("core::primitive::")
+                .or_else(|| resolved_path.strip_prefix("std::primitive::"))
+                && !rest.contains("::")
+            {
+                self.writeln(&format!("// Rust-only primitive re-export: using {};", resolved_path));
+                continue;
+            }
             // Own-crate imports are redundant in flat libtest targets (the
             // crate's items are visible via `import <crate>;`) and ill-formed
             // for macro-only names; skip them rather than emit a `using`

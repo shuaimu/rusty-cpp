@@ -42228,6 +42228,13 @@ struct Formatter {\n\
             }\n\
             return Result::Ok(std::make_tuple());\n\
         }\n\
+        Result finish_non_exhaustive() {\n\
+            if (formatter) {\n\
+                if (!first) { formatter->out_ += \", \"; }\n\
+                formatter->out_ += \".. }\";\n\
+            }\n\
+            return Result::Ok(std::make_tuple());\n\
+        }\n\
     };\n\
     template<typename... Args>\n\
     static Result debug_tuple_field1_finish(Args&&...) { return Result::Ok(std::make_tuple()); }\n\
