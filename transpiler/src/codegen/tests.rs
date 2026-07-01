@@ -3160,6 +3160,27 @@ fn test_backward_collect_target_from_struct_field_consumption() {
 }
 
 #[test]
+fn test_assoc_method_path_mapper_lowers_to_forwarding_lambda() {
+    // indexmap get_disjoint_mut: `indices.map(Some)` + `key_values.map(Option::unwrap)`
+    // — path-callable mappers must lower to lambdas; a raw `Option::unwrap`
+    // is not a valid C++ callable ("use of undeclared identifier 'Option'").
+    let out = transpile_str(
+        r#"
+        pub fn t(indices: [usize; 3]) -> [usize; 3] {
+            let wrapped = indices.map(Some);
+            wrapped.map(Option::unwrap)
+        }
+    "#,
+    );
+    assert!(
+        !out.contains("Option::unwrap"),
+        "assoc-method mapper must not emit a raw path:\n{out}"
+    );
+    assert!(out.contains(".unwrap(); }"), "{out}");
+    assert!(out.contains("rusty::Some(std::forward"), "{out}");
+}
+
+#[test]
 fn test_keyword_named_loop_binding_escapes_consistently() {
     // indexmap update_index loop: `for ((new, old), entry) in …` — the
     // keyword-named binding must be escaped at BOTH the declaration

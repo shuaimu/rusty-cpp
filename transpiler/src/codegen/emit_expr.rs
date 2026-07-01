@@ -6450,7 +6450,17 @@ impl CodeGen {
                 || self.should_lower_swap_method_call_to_index_swap(&mc.receiver))
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
-            let mapper = self.emit_expr_maybe_move(&mc.args[0]);
+            // Path-callable mappers (`Some`, `Option::unwrap`) need their
+            // dedicated lowering — a raw path is not a valid C++ callable.
+            let mapper = self
+                .try_emit_assoc_method_path_as_forwarding_lambda(&mc.args[0])
+                .or_else(|| {
+                    self.infer_iter_item_type_with_generic_fallback(&mc.receiver)
+                        .and_then(|item_ty| {
+                            self.try_emit_path_callable_arg_to_target(&mc.args[0], &item_ty)
+                        })
+                })
+                .unwrap_or_else(|| self.emit_expr_maybe_move(&mc.args[0]));
             return format!("rusty::map({}, {})", receiver, mapper);
         }
         if let Some(try_fold_call) = self.try_emit_iter_try_fold_call(mc, expected_ty) {
@@ -9204,7 +9214,59 @@ impl CodeGen {
                 target_cpp, target_cpp
             ));
         }
-        None
+        self.try_emit_assoc_method_path_as_forwarding_lambda(arg)
+    }
+
+    /// `Owner::method` passed as a callable value (`key_values.map(Option::unwrap)`,
+    /// indexmap get_disjoint_mut) — a receiver-taking associated method lowered
+    /// to a type-agnostic forwarding lambda: `.method()` on each element. A raw
+    /// `Option::unwrap` in C++ is neither qualified nor a bound member
+    /// ("use of undeclared identifier 'Option'"). Conversion traits whose
+    /// lowering needs the TARGET type (From/Into/AsRef/TryFrom/TryInto) are
+    /// excluded — the typed arms above own them.
+    pub(super) fn try_emit_assoc_method_path_as_forwarding_lambda(
+        &self,
+        arg: &syn::Expr,
+    ) -> Option<String> {
+        let path_expr = match self.peel_paren_group_expr(arg) {
+            syn::Expr::Path(path) => path,
+            _ => return None,
+        };
+        if path_expr.qself.is_some() || path_expr.path.segments.len() != 2 {
+            return None;
+        }
+        if !path_expr
+            .path
+            .segments
+            .iter()
+            .all(|seg| seg.arguments.is_empty())
+        {
+            return None;
+        }
+        let owner = path_expr.path.segments[0].ident.to_string();
+        let method = path_expr.path.segments[1].ident.to_string();
+        if matches!(
+            owner.as_str(),
+            "From" | "Into" | "AsRef" | "AsMut" | "TryFrom" | "TryInto"
+        ) {
+            return None;
+        }
+        let owner_is_type_like = owner.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+        let method_is_value_like = method.chars().next().is_some_and(|c| c.is_ascii_lowercase());
+        if !owner_is_type_like || !method_is_value_like {
+            return None;
+        }
+        // Known owner: the runtime core wrappers, or a locally-declared type.
+        let owner_is_known = matches!(owner.as_str(), "Option" | "Result" | "Box")
+            || self.simple_ident_is_known_type_name(&owner);
+        if !owner_is_known {
+            return None;
+        }
+        let escaped_method = escape_cpp_keyword(&method);
+        Some(format!(
+            "[](auto&& _v) -> decltype(auto) {{ return std::forward<decltype(_v)>(_v).{}(); }}",
+            escaped_method
+        ))
     }
 
     pub(super) fn try_emit_data_enum_variant_map_callable_with_target(
@@ -17976,6 +18038,18 @@ impl CodeGen {
                 None,
                 expected_return_rt.as_ref(),
             )
+        } else if let Some(callable) = self
+            .infer_iter_item_type_with_generic_fallback(&mc.receiver)
+            .and_then(|item_ty| {
+                self.try_emit_path_callable_arg_to_target(mc.args.first()?, &item_ty)
+            })
+            .or_else(|| {
+                // Path-callable mappers (`Some`, `Option::unwrap`) need their
+                // dedicated lowering — a raw path is not a valid C++ callable.
+                self.try_emit_assoc_method_path_as_forwarding_lambda(mc.args.first()?)
+            })
+        {
+            callable
         } else {
             self.emit_call_arg_with_pass_style(mc.args.first()?, None, None, false, None)
         };
@@ -18048,6 +18122,10 @@ impl CodeGen {
                 self.try_emit_path_callable_arg_to_target(mc.args.first()?, item_ty)
         {
             callable
+        } else if let Some(forwarding) =
+            self.try_emit_assoc_method_path_as_forwarding_lambda(mc.args.first()?)
+        {
+            forwarding
         } else {
             self.emit_call_arg_with_pass_style(mc.args.first()?, None, None, false, None)
         };
