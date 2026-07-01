@@ -11063,6 +11063,37 @@ impl CodeGen {
             .trim_start_matches("const ")
             .trim_end_matches(|c| matches!(c, '&' | '*' | ' '))
             .trim();
+        // The owner derived from the expected type can be a BARE, ambiguous leaf:
+        // indexmap has both `map::slice::Slice<K,V>` and `set::slice::Slice<T>`, so a
+        // bare `Slice<K,V>` fails to resolve in a scope that isn't a descendant of the
+        // declaring module ("no template named 'Slice'; did you mean 'set::Slice'?").
+        // When the func path itself carries a qualified owner
+        // (`crate::map::Slice::from_slice`), render that owner and splice its
+        // qualification onto the expected-type's turbofish args, preserving the
+        // disambiguation the Rust source had.
+        let bare_owner_base = bare_owner.split('<').next().unwrap_or("").trim();
+        if !bare_owner_base.trim_start_matches("::").contains("::")
+            && func_path.segments.len() >= 3
+        {
+            let keep = func_path.segments.len() - 1;
+            let mut owner_only = func_path.clone();
+            owner_only.segments = func_path.segments.iter().take(keep).cloned().collect();
+            let qualified = self.emit_path_to_string(&owner_only);
+            let qualified_base = qualified.split('<').next().unwrap_or("").trim();
+            if qualified_base.trim_start_matches("::").contains("::")
+                && qualified_base.rsplit("::").next()
+                    == Some(bare_owner_base.trim_start_matches("::"))
+            {
+                let args_suffix = &bare_owner[bare_owner_base.len()..];
+                return Some(format!(
+                    "{}{}::{}({})",
+                    qualified_base,
+                    args_suffix,
+                    method,
+                    args.join(", ")
+                ));
+            }
+        }
         Some(format!("{}::{}({})", bare_owner, method, args.join(", ")))
     }
 
