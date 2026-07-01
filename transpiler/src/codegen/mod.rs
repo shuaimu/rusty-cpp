@@ -31090,6 +31090,26 @@ impl CodeGen {
                     (owner_name == "SpannedDeserializer")
                         .then_some("::de::SpannedDeserializer".to_string())
                 })
+        } else if owner_idx == 0 && owner_path.segments.len() == 1 && owner_args_omitted {
+            // A bare owner that resolved through the module-SUBTREE scan
+            // (set's `IntoIter::new(..)` under module_stack ["set"] → declared
+            // key `set::iter::IntoIter`) must be emitted QUALIFIED: the
+            // assoc-type bridge emits a method-local
+            // `using IntoIter = typename IndexSet<T, S>::IntoIter;` that
+            // shadows the bare template name, so `IntoIter<T>::new_`
+            // mis-binds to the non-template alias ("'T' does not refer to a
+            // value"). `set::iter::IntoIter<T>::new_` is immune to the shadow.
+            // Gated to subtree-resolved keys only (key ≠ exact scoped key ≠
+            // bare name) so previously-working emissions stay byte-identical.
+            self.declared_type_key_for_path(&owner_path)
+                .filter(|key| {
+                    key.contains("::")
+                        && *key != owner_name
+                        && *key != self.scoped_type_key(&owner_name)
+                })
+                .and_then(|key| syn::parse_str::<syn::Path>(&key).ok())
+                .map(|qualified_path| self.emit_path_to_string(&qualified_path))
+                .filter(|qualified| !qualified.is_empty() && qualified.contains("::"))
         } else {
             None
         };
@@ -35039,6 +35059,33 @@ impl CodeGen {
             let scoped = self.scoped_type_key(&segments[0]);
             if scoped != segments[0] {
                 candidates.push(scoped);
+            }
+            // A bare name declared in a DESCENDANT of the current module —
+            // imported via `use self::child::X;`, e.g. indexmap set's
+            // `use self::slice::Slice;` — must resolve to that descendant's
+            // params before the globally-ambiguous bare key: the bare key
+            // holds whichever same-named type registered FIRST (map's 2-param
+            // `Slice<K, V>`), and recovering ITS params from the set context
+            // fabricates `Slice<T, S>` ("too many template arguments for
+            // class template 'Slice'"). Scan the current module's subtree,
+            // then each ancestor's subtree, for a UNIQUE scoped tail match;
+            // ambiguity falls through to the bare key (unchanged behavior).
+            if !self.module_stack.is_empty() {
+                let needle = format!("::{}", segments[0]);
+                for depth in (1..=self.module_stack.len()).rev() {
+                    let prefix = format!("{}::", self.module_stack[..depth].join("::"));
+                    let mut subtree_matches: Vec<&String> = self
+                        .declared_type_params
+                        .keys()
+                        .filter(|key| key.starts_with(&prefix) && key.ends_with(&needle))
+                        .collect();
+                    subtree_matches.sort();
+                    subtree_matches.dedup();
+                    if subtree_matches.len() == 1 {
+                        candidates.push(subtree_matches[0].clone());
+                        break;
+                    }
+                }
             }
             candidates.push(segments[0].clone());
         } else {

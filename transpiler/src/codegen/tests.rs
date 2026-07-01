@@ -3160,6 +3160,55 @@ fn test_backward_collect_target_from_struct_field_consumption() {
 }
 
 #[test]
+fn test_bare_owner_args_resolve_via_module_subtree_not_global_bare_key() {
+    // indexmap's set module: `Slice::from_slice(..)` written under `mod set`
+    // must recover set::slice::Slice's params (<T>), not the globally-bare
+    // key's first registrant (map's 2-param Slice<K, V>) — which fabricated
+    // `Slice<T, S>` ("too many template arguments for class template").
+    let out = transpile_str(
+        r#"
+        pub mod map {
+            pub mod slice {
+                pub struct Slice<K, V> {
+                    pub entries: Vec<(K, V)>,
+                }
+            }
+        }
+        pub mod set {
+            pub mod slice {
+                pub struct Slice<T> {
+                    pub entries: Vec<T>,
+                }
+                impl<T> Slice<T> {
+                    pub(crate) fn from_slice(entries: Vec<T>) -> Self {
+                        Slice { entries }
+                    }
+                }
+            }
+            use self::slice::Slice;
+            pub struct IndexSet<T, S> {
+                entries: Vec<T>,
+                hasher: S,
+            }
+            impl<T, S> IndexSet<T, S> {
+                pub fn as_slice(&self) -> Slice<T> {
+                    Slice::from_slice(self.entries.clone())
+                }
+            }
+        }
+    "#,
+    );
+    assert!(
+        !out.contains("Slice<T, S>::from_slice"),
+        "bare owner must not recover the wrong module's param arity:\n{out}"
+    );
+    assert!(
+        out.contains("Slice<T>::from_slice"),
+        "bare owner must resolve to the current module subtree's Slice<T>:\n{out}"
+    );
+}
+
+#[test]
 fn test_leaf41543333333327271_zeroed_uses_expected_type_for_maybe_uninit_receiver() {
     let out = transpile_str(
         r#"
