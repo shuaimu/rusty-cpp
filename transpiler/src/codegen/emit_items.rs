@@ -13,7 +13,15 @@ impl CodeGen {
                 matches!(ty.as_ref(), syn::Type::Tuple(tuple) if tuple.elems.is_empty())
                     || (allow_non_unit && {
                         self.push_type_param_scope(&f.sig.generics);
-                        let mapped = self.map_type(ty);
+                        // Use the SAME mapping the signature emission below uses
+                        // (`map_return_type`), not `map_type`. In return position,
+                        // `map_return_type` lowers `impl Fn/FnMut/FnOnce(..) -> ..` to a
+                        // concrete `std::function<..>` / `rusty::Function<..>`, whereas
+                        // `map_type` yields `const auto&` (an auto placeholder). Using
+                        // `map_type` here wrongly classifies such a fn as
+                        // non-forward-declarable, so its call in the earlier emission
+                        // phase can't see it (binds to a same-named namespace).
+                        let mapped = self.map_return_type(&f.sig.output);
                         self.pop_type_param_scope();
                         !type_string_has_auto_placeholder(&mapped)
                     })

@@ -3203,16 +3203,44 @@ impl CodeGen {
     }
 
     pub(super) fn map_return_type(&self, output: &syn::ReturnType) -> String {
-        match output {
-            syn::ReturnType::Default => "void".to_string(),
-            syn::ReturnType::Type(_, ty) => {
-                if self.is_explicit_unit_type(ty) {
-                    "void".to_string()
-                } else {
-                    self.map_type(ty)
+        let ty = match output {
+            syn::ReturnType::Default => return "void".to_string(),
+            syn::ReturnType::Type(_, ty) => ty,
+        };
+        if self.is_explicit_unit_type(ty) {
+            return "void".to_string();
+        }
+        // A return type of `impl Fn/FnMut/FnOnce(..) -> ..` (a closure) must map to a
+        // CONCRETE, forward-declarable type (`std::function<..>` / `rusty::Function<..>`),
+        // NOT the `const auto&` that `map_type` uses in argument position. `const auto&`
+        // here is doubly wrong: (a) it makes the function non-forward-declarable, so a
+        // call emitted in the earlier "types" phase can't see the definition (emitted in
+        // the later "functions" phase) and the unqualified name binds to a same-named
+        // imported namespace ("unexpected namespace name 'equivalent'"); and (b) it
+        // returns a dangling reference to the function-local closure. `map_type`'s
+        // argument-vs-return heuristic (`module_name.is_some() && nesting == 0`) cannot
+        // tell a return type from an argument, so resolve the Fn-family case here.
+        let mut inner: &syn::Type = ty.as_ref();
+        loop {
+            match inner {
+                syn::Type::Group(g) => inner = g.elem.as_ref(),
+                syn::Type::Paren(p) => inner = p.elem.as_ref(),
+                _ => break,
+            }
+        }
+        if let syn::Type::ImplTrait(it) = inner {
+            for bound in &it.bounds {
+                if let syn::TypeParamBound::Trait(tb) = bound {
+                    if let Some(concrete) = self.try_map_fn_trait(tb) {
+                        return concrete;
+                    }
+                    // First trait bound isn't Fn-family (e.g. `impl Iterator`);
+                    // fall through to the normal impl-Trait handling in map_type.
+                    break;
                 }
             }
         }
+        self.map_type(ty)
     }
 
     pub(super) fn type_mentions_named_type_param(&self, ty: &syn::Type, name: &str) -> bool {
