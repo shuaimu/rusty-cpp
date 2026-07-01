@@ -189,7 +189,7 @@ fn analyze_file(
     }
 
     // Parse the C++ file with include paths and defines
-    let ast = parser::parse_cpp_file_with_includes_defines_and_args(
+    let mut ast = parser::parse_cpp_file_with_includes_defines_and_args(
         path,
         &all_include_paths,
         defines,
@@ -392,6 +392,14 @@ fn analyze_file(
     let const_propagation_violations =
         analysis::const_propagation::check_const_propagation(&ast.functions, &ast.classes);
     violations.extend(const_propagation_violations);
+
+    // Header declarations remain available through HeaderCache, but their
+    // implementations should not be analyzed as part of this translation unit.
+    ast.functions.retain(|function| {
+        let function_file = std::fs::canonicalize(&function.location.file)
+            .unwrap_or_else(|_| PathBuf::from(&function.location.file));
+        function_file == main_file_canonical
+    });
 
     // Build intermediate representation with safety context
     let mut ir = ir::build_ir_with_safety_context(ast, safety_context.clone())?;
