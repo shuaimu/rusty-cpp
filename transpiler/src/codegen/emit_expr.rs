@@ -19358,6 +19358,17 @@ impl CodeGen {
             // lambda parameters require distinct names.
             return (format!("auto _closure_wild{}", index), None);
         }
+        // A TYPED reference-pattern param `&i: &usize` is `Pat::Type` wrapping a
+        // `Pat::Reference`; unwrap the annotation so the reference-binding path below
+        // (which binds `i` via `deref_if_pointer_like`) still fires. Without this the
+        // binding is dropped: the param is emitted as an anonymous `_` while the body
+        // still references `i` (indexmap's `move |&i: &usize| entries[i]…`).
+        let pat = match pat {
+            syn::Pat::Type(pt) if matches!(pt.pat.as_ref(), syn::Pat::Reference(_)) => {
+                pt.pat.as_ref()
+            }
+            other => other,
+        };
         // Tuple/struct destructuring can't be used in C++ lambda parameters.
         // Emit a temp parameter and destructure in the body.
         if Self::closure_param_needs_body_destructure(pat) {
