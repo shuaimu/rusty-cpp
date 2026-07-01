@@ -4750,6 +4750,54 @@ impl CodeGen {
                 out.insert(key);
             }
         }
+        // Cross-crate dependency `rusty_ext` free functions. A blanket/orphan trait
+        // impl in a dependency (e.g. `equivalent`'s `Equivalent::equivalent`, the
+        // blanket `impl<Q> Equivalent<K> for Q`) has no concrete host type in the
+        // dep, so it is emitted as a crate-wrapped free function
+        // `::<dep>::rusty_ext::<method>`, not a member. A consumer that CALLS it
+        // must qualify to that absolute path — an unqualified `rusty_ext::<m>` is
+        // shadowed by any active `using namespace <mod>;` that pulls in a nested
+        // `<mod>::rusty_ext` (indexmap's `get_index_of` under `using namespace
+        // map::slice;`). Register the dep path (mirroring the bridge at
+        // `emit_cross_crate_rusty_ext_bridge`) so the resolver qualifies it.
+        //
+        // Coherence guard: never register a method name this crate already knows a
+        // `rusty_ext` path for (local impl or free-fn metadata). That keeps a
+        // locally-defined method resolving to its own path and only adds paths for
+        // methods that are exclusively cross-crate (like `equivalent`). Two deps
+        // exposing the same name stay ambiguous → resolver returns None → unchanged.
+        const CROSS_CRATE_PRELUDE: [&str; 6] = [
+            "deserialize",
+            "deserialize_any",
+            "deserialize_in_place",
+            "serialize",
+            "serialize_value",
+            "forward_serializer",
+        ];
+        let locally_known_method_names: HashSet<String> = out
+            .iter()
+            .filter_map(|path| path.rsplit("::").next().map(str::to_string))
+            .collect();
+        for dep in &self.dependency_ufcs_trait_manifests {
+            if !crate::transpile::crate_is_namespace_wrapped(&dep.module) {
+                continue;
+            }
+            for (module, methods) in &dep.rusty_ext_methods_by_module {
+                for meth in methods {
+                    if CROSS_CRATE_PRELUDE.contains(&meth.as_str())
+                        || locally_known_method_names.contains(meth)
+                    {
+                        continue;
+                    }
+                    let dep_path = if module.is_empty() {
+                        format!("{}::rusty_ext::{}", dep.module, meth)
+                    } else {
+                        format!("{}::{}::rusty_ext::{}", dep.module, module, meth)
+                    };
+                    out.insert(dep_path);
+                }
+            }
+        }
         out
     }
 
