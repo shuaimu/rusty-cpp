@@ -3160,6 +3160,35 @@ fn test_backward_collect_target_from_struct_field_consumption() {
 }
 
 #[test]
+fn test_keyword_named_loop_binding_escapes_consistently() {
+    // indexmap update_index loop: `for ((new, old), entry) in …` — the
+    // keyword-named binding must be escaped at BOTH the declaration
+    // (loop head / destructure prelude, `new_`) and every body use;
+    // a verbatim loop-var registration desyncs them (`std::move(new)`).
+    let out = transpile_str(
+        r#"
+        fn f(a: usize) -> usize { a }
+        pub fn t1() {
+            for new in 0..3 {
+                let _ = f(new);
+            }
+        }
+        pub fn t2(start: usize, v: Vec<usize>) {
+            for (new, old) in (start..).zip(v) {
+                let _ = f(new);
+                let _ = f(old);
+            }
+        }
+    "#,
+    );
+    assert!(
+        !out.contains("auto&& new :") && !out.contains("std::move(new)"),
+        "keyword-named loop bindings must be escaped at decl and use:\n{out}"
+    );
+    assert!(out.contains("new_"), "{out}");
+}
+
+#[test]
 fn test_guarded_match_with_early_fn_return_lowers_to_statement_expr() {
     // indexmap's try_simplify_range: a guarded Bound match whose `_` arm
     // RETURNS FROM THE FUNCTION (`return None`, type Option<Range<usize>>)

@@ -24274,7 +24274,10 @@ impl CodeGen {
 
     fn emit_pat_to_string(&self, pat: &syn::Pat) -> String {
         match pat {
-            syn::Pat::Ident(pi) => pi.ident.to_string(),
+            // C++ keyword-named Rust bindings (`new`, `default`, …) must be
+            // escaped in declaration position — a raw `for (auto&& new : …)`
+            // is a parse error and desyncs from the escaped use sites.
+            syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
             syn::Pat::Wild(_) => "_".to_string(),
             syn::Pat::Tuple(pt) => {
                 let elems: Vec<String> = pt

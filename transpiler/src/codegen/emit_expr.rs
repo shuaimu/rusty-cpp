@@ -657,12 +657,16 @@ impl CodeGen {
             let loop_vars = std::mem::take(&mut self.pending_loop_var_bindings);
             if let Some(scope) = self.local_cpp_bindings.last_mut() {
                 for name in &loop_vars {
-                    scope.insert(name.clone(), name.clone());
+                    // Register the ESCAPED C++ name: the loop head / destructure
+                    // prelude declare keyword-named bindings escaped (`new` →
+                    // `new_`), so a verbatim registration desyncs every body
+                    // use (`std::move(new)` — parse error).
+                    scope.insert(name.clone(), escape_cpp_keyword(name));
                 }
             }
             if let Some(used) = self.local_cpp_names_used.last_mut() {
                 for name in &loop_vars {
-                    used.insert(name.clone());
+                    used.insert(escape_cpp_keyword(name));
                 }
             }
         }
