@@ -2791,15 +2791,13 @@ impl CodeGen {
             &trait_names,
         );
         self.output = inject_rusty_module_import_if_needed(&self.output);
-        // `vec::IntoIter` (e.g. in itertools test return types) maps to
-        // `rusty::port::vec::IntoIter`, which the umbrella `rusty` module does
-        // not alias — its declaration must be imported directly from its
-        // owning module to be nameable.
-        self.output = inject_module_import_if_referenced(
-            &self.output,
-            "rusty::port::vec::IntoIter",
-            "import vec_port.vec.into_iter;",
-        );
+        // General Layer 1 (std-port imports): every referenced deep member of a
+        // ported std module (`rusty::port::vec::Drain`, `::IntoIter`, …) needs its
+        // OWNING sub-module imported directly — the `vec_port` umbrella re-exports
+        // `vec_port.vec` but not its sub-sub-modules, so the member declarations are
+        // otherwise unnameable. Keyed on the transpiled sub-modules that exist
+        // (see `transpiled/vec_port/`).
+        self.output = inject_vec_port_member_imports(&self.output);
         // Strict-auto backstop (unconditional): if any `auto` placeholder leaked
         // into a C++ template-argument position (e.g. `rusty::Vec<auto>::new_()`
         // from a `Vec::new()` whose element type could not be inferred), fail
@@ -38069,6 +38067,29 @@ fn inject_rusty_module_import_if_needed(output: &str) -> String {
 /// it is already imported. Used for runtime types that live in a specific
 /// transpiled std-port module and are not aliased by the umbrella `rusty`
 /// module (e.g. `rusty::port::vec::IntoIter` → `import vec_port.vec.into_iter;`).
+/// General Layer 1 (std-port imports): inject the direct module import for a
+/// referenced `rusty::port::vec::<Member>` deep type ONLY when that member's
+/// declaration is not already reachable via the `vec_port` umbrella (which
+/// re-exports `vec_port.vec`). Most members (`Drain`, `SetLenOnDrop`, …) are
+/// declared in the parent `vec_port.vec` module itself, so they are visible
+/// through the ambient `import rusty;` chain and must NOT be imported from a
+/// sub-sub-module — those (`vec_port.vec.drain`, …) are not part of the built
+/// module set, so importing them fails with "module not found". Only members
+/// whose *definition* lives solely in a sub-module (currently `IntoIter`) need
+/// the direct import. Keyed on `transpiled/vec_port/`.
+fn inject_vec_port_member_imports(output: &str) -> String {
+    const VEC_PORT_SUBMODULE_MEMBERS: &[(&str, &str)] = &[("IntoIter", "into_iter")];
+    let mut out = output.to_string();
+    for (member, submodule) in VEC_PORT_SUBMODULE_MEMBERS {
+        let needle = format!("rusty::port::vec::{}", member);
+        if out.contains(&needle) {
+            let import_line = format!("import vec_port.vec.{};", submodule);
+            out = inject_module_import_if_referenced(&out, &needle, &import_line);
+        }
+    }
+    out
+}
+
 fn inject_module_import_if_referenced(output: &str, needle: &str, import_line: &str) -> String {
     if output.contains(&format!("\n{}\n", import_line)) {
         return output.to_string();

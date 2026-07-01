@@ -1058,6 +1058,28 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
 
     pub(super) fn emit_path_to_string(&self, path: &syn::Path) -> String {
         let mut segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        // General Layer 1 Stage B: expand a `use <std-mod>::{self}` MODULE self-alias
+        // whose target is a std/alloc/core module, so a bare `vec::Drain` (from
+        // `use alloc::vec::{self, Vec}`, which binds `vec` → `std::vec`) reaches the
+        // std-port seam below and maps to `rusty::port::vec::Drain`. Narrowly scoped:
+        // only leading aliases that resolve to a std/alloc/core module path are
+        // rewritten (other bindings are left to the existing resolution), and only
+        // when there is a following segment (a bare `vec` alone is left untouched).
+        if segments.len() >= 2
+            && path.leading_colon.is_none()
+            && let Some(bound) = self.resolve_scope_import_binding_path(&segments[0])
+        {
+            let bound_trimmed = bound.trim_start_matches("::");
+            let bound_segs: Vec<&str> = bound_trimmed.split("::").filter(|s| !s.is_empty()).collect();
+            if matches!(bound_segs.first().copied(), Some("std" | "alloc" | "core"))
+                && bound_segs.len() >= 2
+            {
+                let mut expanded: Vec<String> =
+                    bound_segs.iter().map(|s| s.to_string()).collect();
+                expanded.extend(segments[1..].iter().cloned());
+                segments = expanded;
+            }
+        }
         let mut joined: String;
         let mut force_leading_colon = path.leading_colon.is_some();
         let original_force_leading_colon = force_leading_colon;
@@ -2541,6 +2563,24 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 segments[1].as_str(),
                 "time" | "path" | "ffi" | "env" | "process"
             );
+        // General Layer 1 (std-port mapping): a PORTED std module's deep member types
+        // (`vec::Drain`, `vec::IntoIter`, …) are transpiled into the `rusty::port::<mod>`
+        // namespace, NOT `rusty::<mod>` (the naive rewrite below yields e.g.
+        // `rusty::vec::Drain`, which does not exist — clang: "did you mean
+        // 'rusty::port::vec::Drain'?"). Fires for ANY std/alloc/core root: the
+        // `use alloc::vec::{self}` module self-alias resolves `vec` → `std::vec`
+        // (alloc→std), so `std::vec::Drain` must map too, not just `alloc::vec::Drain`.
+        // Ergonomic top-level types (Vec, String, …) keep their `rusty::<Type>` aliases
+        // via dedicated special cases before this point and are excluded here.
+        if segments.len() >= 3 && matches!(segments[0].as_str(), "std" | "core" | "alloc") {
+            let module = &segments[1..segments.len() - 1];
+            let type_name = segments.last().expect("len >= 3");
+            if let Some(port_ns) = ported_std_module_port_namespace(module)
+                && !is_ergonomic_top_level_std_type(type_name)
+            {
+                return format!("{}::{}", port_ns, escape_cpp_keyword(type_name));
+            }
+        }
         if segments.len() >= 2
             && (matches!(segments[0].as_str(), "core" | "alloc") || is_std_rusty_submodule)
         {
@@ -3586,4 +3626,39 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
         base
     }
+}
+
+/// General Layer 1 std-port registry: maps a ported std/alloc module path (the
+/// segments between the `std`/`alloc`/`core` root and the type name) to the
+/// transpiled `rusty::port::<…>` namespace its member types are declared in.
+/// Extend one line per ported module — see `transpiled/<mod>_port/` and the
+/// `-l<mod>_port` link list in `main.rs`. Only DEEP member types route here;
+/// ergonomic top-level types keep their `rusty::<Type>` aliases
+/// (`is_ergonomic_top_level_std_type`).
+fn ported_std_module_port_namespace(module: &[String]) -> Option<&'static str> {
+    let segs: Vec<&str> = module.iter().map(|s| s.as_str()).collect();
+    match segs.as_slice() {
+        ["vec"] => Some("rusty::port::vec"),
+        _ => None,
+    }
+}
+
+/// Std types that keep an ergonomic top-level `rusty::<Type>` alias (handled by
+/// dedicated special cases in `map_type`), so they must NOT be rewritten to the
+/// deep `rusty::port::…::<Type>` spelling by the std-port seam.
+fn is_ergonomic_top_level_std_type(name: &str) -> bool {
+    matches!(
+        name,
+        "Vec" | "String"
+            | "Box"
+            | "Rc"
+            | "Arc"
+            | "HashMap"
+            | "HashSet"
+            | "BTreeMap"
+            | "BTreeSet"
+            | "VecDeque"
+            | "BinaryHeap"
+            | "LinkedList"
+    )
 }
