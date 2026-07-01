@@ -3160,6 +3160,50 @@ fn test_backward_collect_target_from_struct_field_consumption() {
 }
 
 #[test]
+fn test_guarded_match_with_early_fn_return_lowers_to_statement_expr() {
+    // indexmap's try_simplify_range: a guarded Bound match whose `_` arm
+    // RETURNS FROM THE FUNCTION (`return None`, type Option<Range<usize>>)
+    // while the match itself yields usize. The IIFE-lambda lowering binds the
+    // `return` to the lambda ("no viable conversion from Option<...> to
+    // size_t"); the runtime-match delegation must route it to the
+    // statement-expression lowering where `return` stays a function return.
+    let out = transpile_str(
+        r#"
+        use core::ops::{Bound, Range, RangeBounds};
+        pub(crate) fn try_simplify_range<R>(range: R, len: usize) -> Option<Range<usize>>
+        where
+            R: RangeBounds<usize>,
+        {
+            let start = match range.start_bound() {
+                Bound::Unbounded => 0,
+                Bound::Included(&i) if i <= len => i,
+                Bound::Excluded(&i) if i < len => i + 1,
+                _ => return None,
+            };
+            let end = match range.end_bound() {
+                Bound::Unbounded => len,
+                Bound::Excluded(&i) if i <= len => i,
+                Bound::Included(&i) if i < len => i + 1,
+                _ => return None,
+            };
+            if start > end {
+                return None;
+            }
+            Some(start..end)
+        }
+    "#,
+    );
+    assert!(
+        out.contains("const auto start = ({"),
+        "guarded early-return match must lower to a statement expression:\n{out}"
+    );
+    assert!(
+        !out.contains("-> size_t { auto&& _m"),
+        "the IIFE-lambda lowering must not host the function-level return:\n{out}"
+    );
+}
+
+#[test]
 fn test_bare_owner_args_resolve_via_module_subtree_not_global_bare_key() {
     // indexmap's set module: `Slice::from_slice(..)` written under `mod set`
     // must recover set::slice::Slice's params (<T>), not the globally-bare

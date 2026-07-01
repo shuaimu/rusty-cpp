@@ -2378,10 +2378,32 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
         variant_ctx: Option<&VariantTypeContext>,
     ) -> Option<String> {
+        self.emit_match_expr_switch_statement_expr_with_arm_mode(
+            match_expr,
+            expected_ty,
+            variant_ctx,
+            false,
+        )
+    }
+
+    /// `allow_guarded_variant_arms` is set ONLY by the runtime-match
+    /// delegation (`emit_runtime_match_expr`): it enables TupleStruct-pattern
+    /// arms and guard lowering for the fn-return-vs-match-value shape the
+    /// IIFE lambda cannot host. The general entry keeps them off so
+    /// Result/Option payload matches keep their historical routing to the
+    /// runtime-match / unwrap-call lowerings.
+    pub(super) fn emit_match_expr_switch_statement_expr_with_arm_mode(
+        &self,
+        match_expr: &syn::ExprMatch,
+        expected_ty: Option<&syn::Type>,
+        variant_ctx: Option<&VariantTypeContext>,
+        allow_guarded_variant_arms: bool,
+    ) -> Option<String> {
         if std::env::var_os("RUSTY_CPP_DISABLE_MATCH_SWITCH_STATEMENT_EXPR").is_some() {
             return None;
         }
         if expected_ty.is_none() {
+            if std::env::var_os("RUSTY_CPP_DBG_MSE").is_some() { eprintln!("[mse] bail: expected none"); }
             return None;
         }
         let match_contains_early_return_or_try =
@@ -2534,10 +2556,61 @@ impl CodeGen {
                     body_expr
                 )
             };
+            // Rust guard semantics: pattern bindings are in scope for the
+            // guard, and a FAILED guard falls through without matching (the
+            // next arm stays eligible). Wrap the arm body in the guard
+            // condition — bindings are spliced before it by each pattern arm
+            // below, and `_m_matched` is only set inside the guard.
+            let arm_body_stmt = if let (true, Some((_, guard_expr))) =
+                (allow_guarded_variant_arms, &arm.guard)
+            {
+                let guard_cpp = self.emit_expr_to_string(guard_expr);
+                if guard_cpp.trim().is_empty() {
+                    return None;
+                }
+                format!("if ({}) {{ {} }}", guard_cpp, arm_body_stmt)
+            } else {
+                arm_body_stmt
+            };
 
             match &arm.pat {
                 syn::Pat::Wild(_) => {
                     out.push_str(&format!("if (!_m_matched) {{ {} }} ", arm_body_stmt));
+                }
+                // Variant patterns with payload bindings (`Bound::Included(&i)`,
+                // indexmap's try_simplify_range). Without this arm the whole
+                // statement-expression lowering bailed and the match fell to the
+                // IIFE-lambda path — which mis-lowers an early-return arm
+                // (`_ => return None`) into a `return` FROM THE LAMBDA, yielding
+                // "no viable conversion from Option<Range<usize>> to size_t".
+                // The statement-expression keeps `return` a real function return.
+                syn::Pat::TupleStruct(_) if allow_guarded_variant_arms => {
+                    let mut binding_stmts = Vec::new();
+                    let Some(cond) = self.collect_runtime_match_binding_stmts_and_condition(
+                        &arm.pat,
+                        "_m",
+                        &mut binding_stmts,
+                        variant_ctx,
+                    ) else {
+                        if std::env::var_os("RUSTY_CPP_DBG_MSE").is_some() { eprintln!("[mse] bail: tuplestruct helper none"); }
+                        return None;
+                    };
+                    let bindings = if binding_stmts.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} ", binding_stmts.join(" "))
+                    };
+                    if let Some(cond) = cond {
+                        out.push_str(&format!(
+                            "if (!_m_matched && ({})) {{ {}{} }} ",
+                            cond, bindings, arm_body_stmt
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "if (!_m_matched) {{ {}{} }} ",
+                            bindings, arm_body_stmt
+                        ));
+                    }
                 }
                 syn::Pat::Lit(lit) => {
                     let val = self.emit_lit(&lit.lit);

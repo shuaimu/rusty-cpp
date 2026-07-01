@@ -344,6 +344,55 @@ impl CodeGen {
         };
         let force_size_t_return = runtime_match_expected.is_none()
             && self.should_force_size_t_visit_return_for_bound_match(match_expr, expected_ty);
+        // An arm that RETURNS FROM THE ENCLOSING FUNCTION (`_ => return None`)
+        // cannot live inside this IIFE-lambda lowering — its `return` would
+        // bind to the lambda ("no viable conversion from Option<Range<usize>>
+        // to size_t", indexmap's try_simplify_range). When guards force the
+        // fallthrough-arm shape (which the try-style lowerings can't take
+        // either) AND the function's return type provably differs from the
+        // match's value type (the shape where the lambda-bound `return` is a
+        // hard type error — same-typed early returns keep the historical
+        // lambda lowering), delegate to the statement-expression lowering,
+        // where `return` stays a real function return. Thread this lowering's
+        // own resolved value type — including the forced-size_t Bound
+        // heuristic — as the expected type.
+        if self.match_expr_has_explicit_return_arm(match_expr)
+            && match_expr.arms.iter().any(|arm| arm.guard.is_some())
+        {
+            let usize_ty: syn::Type = parse_quote!(usize);
+            let stmt_expr_expected = if force_size_t_return {
+                Some(&usize_ty)
+            } else {
+                runtime_match_expected
+            };
+            let fn_return_differs_from_match_value = match (
+                self.current_return_type_hint(),
+                stmt_expr_expected,
+            ) {
+                (Some(fn_ret), Some(match_val)) => {
+                    let fn_ret_cpp = self.map_type(fn_ret);
+                    let match_val_cpp = self.map_type(match_val);
+                    !fn_ret_cpp.is_empty()
+                        && !match_val_cpp.is_empty()
+                        && fn_ret_cpp != "auto"
+                        && match_val_cpp != "auto"
+                        && fn_ret_cpp != match_val_cpp
+                }
+                _ => false,
+            };
+            if fn_return_differs_from_match_value {
+                if let Some(lowered) = self
+                    .emit_match_expr_switch_statement_expr_with_arm_mode(
+                        match_expr,
+                        stmt_expr_expected,
+                        variant_ctx,
+                        true,
+                    )
+                {
+                    return Some(lowered);
+                }
+            }
+        }
         let callable_passthrough_arm = self.match_expr_has_callable_passthrough_arm(match_expr);
         let runtime_match_return_annotation = if force_size_t_return {
             " -> size_t".to_string()
