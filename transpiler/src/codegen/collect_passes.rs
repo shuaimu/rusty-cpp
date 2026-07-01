@@ -9538,6 +9538,69 @@ impl CodeGen {
                 out,
                 rust_to_cpp,
             ),
+            syn::Pat::Or(or_pat) => {
+                // An irrefutable (let) or-pattern binds the SAME names in every arm.
+                // Handle the `Ok(i) | Err(i)` idiom (Result<T,T>, e.g. from
+                // `binary_search`'s "index whether found or not"): the bound value is
+                // the same regardless of which variant matched, so extract it with a
+                // variant-neutral ternary. Every arm must be a single-field Ok/Err
+                // tuple-struct binding one ident, all the same name.
+                let arms: Vec<&syn::Pat> = or_pat.cases.iter().collect();
+                let mut binding_ident: Option<&syn::Pat> = None;
+                let mut binding_name: Option<String> = None;
+                let mut has_ok = false;
+                let mut has_err = false;
+                let mut well_formed = arms.len() == 2;
+                for arm in &arms {
+                    let syn::Pat::TupleStruct(ts) = *arm else {
+                        well_formed = false;
+                        break;
+                    };
+                    let (Some(variant), true) = (
+                        ts.path.segments.last().map(|s| s.ident.to_string()),
+                        ts.elems.len() == 1,
+                    ) else {
+                        well_formed = false;
+                        break;
+                    };
+                    let Some(inner @ syn::Pat::Ident(pi)) = ts.elems.first() else {
+                        well_formed = false;
+                        break;
+                    };
+                    let name = pi.ident.to_string();
+                    match &binding_name {
+                        Some(existing) if *existing != name => {
+                            well_formed = false;
+                            break;
+                        }
+                        None => {
+                            binding_name = Some(name);
+                            binding_ident = Some(inner);
+                        }
+                        _ => {}
+                    }
+                    match variant.as_str() {
+                        "Ok" => has_ok = true,
+                        "Err" => has_err = true,
+                        _ => {
+                            well_formed = false;
+                            break;
+                        }
+                    }
+                }
+                if !well_formed || !has_ok || !has_err {
+                    return false;
+                }
+                let base = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                let value_expr =
+                    format!("({b}.is_ok() ? ({b}).unwrap() : ({b}).unwrap_err())", b = base);
+                self.collect_pattern_binding_stmts_with_cpp_name_map(
+                    binding_ident.expect("checked well_formed"),
+                    &value_expr,
+                    out,
+                    rust_to_cpp,
+                )
+            }
             _ => false,
         }
     }
