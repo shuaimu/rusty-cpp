@@ -4189,9 +4189,23 @@ impl CodeGen {
             // namespace` directive is NOT. The empty `namespace __private228 {}` skeleton that
             // would otherwise collide (alias-vs-definition redefinition) is suppressed for
             // glob-only modules in the forward-decl pass (emit_item_forward_decls).
+            //
+            // A PUBLIC glob-re-export module (`pub mod hash_table { pub use crate::table::*; }`,
+            // hashbrown's public API surface) is a public path OTHER crates name as
+            // `<crate>::hash_table::HashTable`, so its alias must be EXPORTED — not only serde's
+            // `__private*` shells that `export_mod_namespace_prefix` is gated on. An un-exported
+            // alias is invisible across the module boundary (clang: "declaration of 'hash_table'
+            // must be imported from module 'hashbrown' before it is required"). Rust `pub` → C++
+            // module `export`; the broadened export is scoped to the ALIAS only (the
+            // namespace-definition emissions below keep the narrower prefix).
+            let alias_export_prefix = if self.module_name.is_some() && is_pub {
+                "export "
+            } else {
+                ""
+            };
             self.writeln(&format!(
                 "{}namespace {} = {};",
-                export_mod_namespace_prefix, mod_cpp_name, target
+                alias_export_prefix, mod_cpp_name, target
             ));
             return;
         }
