@@ -2020,6 +2020,14 @@ impl CodeGen {
                         // Skip to avoid malformed spellings like `std::usize`.
                     } else {
                         if !self.current_module_declares_type_name_exact(&local_name)
+                            // A crate-ROOT-declared name is canonical: never requalify a bare
+                            // forward-decl reference to a same-named sibling-submodule alias via
+                            // scope import bindings. indexmap declares root `struct Bucket<K,V>`
+                            // AND `set`'s `type Bucket<T>=super::Bucket<T,()>`; without this guard
+                            // a `Bucket<K,V>` param in a forward-decl signature (but NOT the
+                            // definition — this block is `in_forward_decl_signature`-only) is
+                            // spelled `set::Bucket<K,V>` (2 args to a 1-param alias).
+                            && !self.root_declared_type_names.contains(&local_name)
                             && let Some(bound_target) = self
                                 .resolve_scope_import_binding_path(&local_name)
                                 .or_else(|| {

@@ -1206,6 +1206,18 @@ impl CodeGen {
             return None;
         }
         let escaped_leaf = escape_cpp_keyword(leaf);
+        // A crate-ROOT-declared name is canonical: `crate::Bucket` resolves to the
+        // crate-root type, never a same-named sibling-submodule alias. A root type is
+        // recorded BARE in local_declared_types (no `::`), so the `ends_with("::Bucket")`
+        // candidate scan below would otherwise pick `set::Bucket` (indexmap's 1-param
+        // `type Bucket<T> = super::Bucket<T,()>` alias) as the lone match and emit
+        // `using ::indexmap::set::Bucket;` — shadowing the root 2-param `Bucket` so a
+        // later `Bucket<K,V>` fails with "too many template arguments for alias".
+        if self.root_declared_type_names.contains(leaf)
+            || self.root_declared_type_names.contains(escaped_leaf.as_str())
+        {
+            return None;
+        }
         let mut candidates: Vec<String> = self
             .local_declared_types
             .iter()
