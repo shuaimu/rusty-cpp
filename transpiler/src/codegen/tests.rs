@@ -3114,6 +3114,52 @@ fn test_leaf415432_assume_init_uses_expected_type_for_maybe_uninit_receiver() {
 }
 
 #[test]
+fn test_backward_collect_target_from_struct_field_consumption() {
+    // indexmap's `IntoKeys::new/clone`: the collect target — and through it
+    // the mapper closure's return type and the `MaybeUninit::uninit()` field
+    // owner — is pinned ONLY by the consuming struct field's declared type
+    // (`iter: vec::IntoIter<Bucket<K, MaybeUninit<V>>>`). Without the
+    // backward hop the owner degrades to ill-formed `MaybeUninit<auto>`.
+    let out = transpile_str(
+        r#"
+        use std::mem::MaybeUninit;
+        use std::vec;
+        pub struct Bucket<K, V> {
+            pub hash: u64,
+            pub key: K,
+            pub value: V,
+        }
+        pub struct IntoKeys<K, V> {
+            iter: vec::IntoIter<Bucket<K, MaybeUninit<V>>>,
+        }
+        impl<K, V> IntoKeys<K, V> {
+            pub(crate) fn new(entries: Vec<Bucket<K, V>>) -> Self {
+                let entries = entries
+                    .into_iter()
+                    .map(|Bucket { hash, key, .. }| Bucket {
+                        hash,
+                        key,
+                        value: MaybeUninit::uninit(),
+                    })
+                    .collect::<Vec<_>>();
+                Self {
+                    iter: entries.into_iter(),
+                }
+            }
+        }
+    "#,
+    );
+    assert!(
+        out.contains("rusty::MaybeUninit<V>::uninit()"),
+        "collect target must flow backward from the consuming field into the mapper's struct-literal field:\n{out}"
+    );
+    assert!(
+        !out.contains("MaybeUninit<auto>"),
+        "no `<auto>` owner may survive the backward flow:\n{out}"
+    );
+}
+
+#[test]
 fn test_leaf41543333333327271_zeroed_uses_expected_type_for_maybe_uninit_receiver() {
     let out = transpile_str(
         r#"
@@ -5800,14 +5846,16 @@ fn test_leaf5130_iter_map_untyped_param_single_deref_collapses_in_map_context() 
         }
         "#,
     );
+    // The mapper may or may not carry an explicit return annotation /
+    // std::move wrap (the expected element type now flows into the closure —
+    // see `try_emit_iter_map_call`); the invariant is that the copy-deref
+    // `*v` collapsed to a pass-through.
+    assert!(out.contains("rusty::map(rusty::iter(v), [&](auto&& v)"), "{out}");
     assert!(
-        out.contains("rusty::map(rusty::iter(v), [&](auto&& v) { return v; })"),
+        out.contains("{ return v; }") || out.contains("{ return std::move(v); }"),
         "{out}"
     );
-    assert!(
-        !out.contains("rusty::map(rusty::iter(v), [&](auto&& v) { return *v; })"),
-        "{out}"
-    );
+    assert!(!out.contains("return *v;"), "{out}");
 }
 
 #[test]
@@ -5821,17 +5869,15 @@ fn test_leaf5130_iter_map_untyped_param_double_deref_collapses_one_layer() {
     );
     // Double-deref `**v` may be `return *v;` (one collapsed) or
     // `return rusty::detail::deref_if_pointer_like(v);` (runtime helper).
+    // The mapper may carry an explicit return annotation (the expected element
+    // type now flows into the closure — see `try_emit_iter_map_call`).
+    assert!(out.contains("rusty::map(rusty::iter(v), [&](auto&& v)"), "{out}");
     assert!(
-        out.contains("rusty::map(rusty::iter(v), [&](auto&& v) { return *v; })")
-            || out.contains(
-                "rusty::map(rusty::iter(v), [&](auto&& v) { return rusty::detail::deref_if_pointer_like(v); })"
-            ),
+        out.contains("{ return *v; }")
+            || out.contains("{ return rusty::detail::deref_if_pointer_like(v); }"),
         "{out}"
     );
-    assert!(
-        !out.contains("rusty::map(rusty::iter(v), [&](auto&& v) { return **v; })"),
-        "{out}"
-    );
+    assert!(!out.contains("return **v;"), "{out}");
 }
 
 #[test]

@@ -3828,6 +3828,7 @@ impl CodeGen {
                         module_path,
                         &s.ident.to_string(),
                         &s.generics,
+                        true,
                     );
                 }
                 syn::Item::Union(u) => {
@@ -3836,6 +3837,7 @@ impl CodeGen {
                         module_path,
                         &u.ident.to_string(),
                         &u.generics,
+                        true,
                     );
                 }
                 syn::Item::Enum(e) => {
@@ -3844,6 +3846,7 @@ impl CodeGen {
                         module_path,
                         &e.ident.to_string(),
                         &e.generics,
+                        true,
                     );
                     self.record_data_enum_variant_metadata(module_path, e);
                     self.record_c_like_enum_variant_consts(module_path, e);
@@ -3854,6 +3857,7 @@ impl CodeGen {
                         module_path,
                         &t.ident.to_string(),
                         &t.generics,
+                        false,
                     );
                     self.record_type_alias_target(module_path, t);
                 }

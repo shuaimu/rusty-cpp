@@ -566,6 +566,16 @@ impl CodeGen {
                 &mut placeholder_hints,
             );
             block_profile_mark("augment_owner_local_type_hints_from_solver");
+            // Backward pass: un-annotated `let x = ....collect()` whose target
+            // type only the consuming struct field pins
+            // (`Self { iter: x.into_iter() }`). Fill-only; see the pass doc.
+            self.augment_collect_local_type_hints_from_struct_literal_consumption(
+                &block.stmts,
+                &mut placeholder_hints,
+            );
+            block_profile_mark(
+                "augment_collect_local_type_hints_from_struct_literal_consumption",
+            );
             // Two-parameter generic owners (HashMap, BTreeMap) need
             // both K and V from their `insert(K, V)` usage. The
             // single-inner pipeline above handles only Vec&lt;T&gt;-shaped
@@ -17940,7 +17950,22 @@ impl CodeGen {
             .and_then(|ty| self.extract_iter_item_type_from_type(ty))
             .or_else(|| self.expected_vec_element_type(expected_ty).cloned());
         let mapper = if let syn::Expr::Closure(closure) = mapper_arg {
-            self.emit_closure_to_string_with_iterator_map_context(closure)
+            // Thread the expected item type into the mapper's return position
+            // (mirrors `try_emit_fixed_array_map_call`): a struct-literal tail
+            // whose generic associated-call fields are pinned only by the
+            // collect target (`Bucket { .., value: MaybeUninit::uninit() }`
+            // under `iter: vec::IntoIter<Bucket<K, MaybeUninit<V>>>`) needs
+            // the element type as the closure's expected return.
+            let expected_return_rt = expected_item_ty
+                .as_ref()
+                .map(|ty| syn::ReturnType::Type(Default::default(), Box::new(ty.clone())));
+            let map_param_scope = self.collect_closure_param_names_for_scope(closure);
+            self.emit_closure_to_string_with_param_scopes(
+                closure,
+                Some(map_param_scope),
+                None,
+                expected_return_rt.as_ref(),
+            )
         } else if let Some(item_ty) = expected_item_ty.as_ref()
             && let Some(callable) =
                 self.try_emit_path_callable_arg_to_target(mc.args.first()?, item_ty)

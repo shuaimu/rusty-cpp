@@ -27,6 +27,43 @@ fn all_type_params_return_only(
         })
 }
 
+/// `vec::IntoIter<E>` (any path spelling with a `vec` segment before the
+/// tail) → `E`. Restricted to Vec's iterator so an `x.into_iter()`
+/// consumption back-maps to `Vec<E>` soundly — other collections'
+/// single-argument `IntoIter<T>` (hash_set, binary_heap, …) do not come
+/// from a `Vec<T>` source.
+fn vec_into_iter_element_type(ty: &syn::Type) -> Option<&syn::Type> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let last = tp.path.segments.last()?;
+    if last.ident != "IntoIter" {
+        return None;
+    }
+    if !tp
+        .path
+        .segments
+        .iter()
+        .rev()
+        .skip(1)
+        .any(|seg| seg.ident == "vec")
+    {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    let mut type_args = args.args.iter().filter_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    });
+    let elem = type_args.next()?;
+    if type_args.next().is_some() {
+        return None;
+    }
+    Some(elem)
+}
+
 impl CodeGen {
     // ============================================================
     // Bridge between the type inference engine (`type_solver`) and
@@ -3418,6 +3455,27 @@ impl CodeGen {
                 return Some(inferred);
             }
             return None;
+        }
+
+        // Backward-inferred collect target: `let x = <iter>....collect()` /
+        // `collect::<Vec<_>>()`. The consumption-scan pass
+        // (`augment_collect_local_type_hints_from_struct_literal_consumption`)
+        // resolves the full target type from the consuming struct field's
+        // declared type; pass it through verbatim so the init emission gains
+        // the expected type Rust derived backward. Skipped when the turbofish
+        // is fully concrete — that shape needs no hint.
+        if let syn::Expr::MethodCall(mc) = init_expr
+            && mc.method == "collect"
+            && mc.args.is_empty()
+        {
+            let turbofish_fully_concrete = mc.turbofish.as_ref().is_some_and(|turbofish| {
+                !turbofish.args.iter().any(|arg| {
+                    matches!(arg, syn::GenericArgument::Type(ty) if self.type_contains_infer(ty))
+                })
+            });
+            if !turbofish_fully_concrete {
+                return Some(hint.clone());
+            }
         }
 
         let call = match init_expr {
@@ -10509,6 +10567,180 @@ impl CodeGen {
             return None;
         }
         Some(parse_quote!(Vec<#elem>))
+    }
+
+    /// Backward local-type hints from struct-literal field consumption
+    /// (fill-only: writes only names no earlier pass resolved).
+    ///
+    /// ```ignore
+    /// let entries = <iter>.map(|..| Bucket { .., value: MaybeUninit::uninit() })
+    ///     .collect::<Vec<_>>();
+    /// Self { iter: entries.into_iter() }   // iter: vec::IntoIter<Bucket<K, MaybeUninit<V>>>
+    /// ```
+    ///
+    /// Rust resolves `collect`'s target — and through it the mapper closure's
+    /// return type — BACKWARD from the consuming field's declared type.
+    /// Without that hop the mapper's struct-literal fields whose generic
+    /// argument only the consumer pins degrade to `<auto>` owners
+    /// (`MaybeUninit<auto>::uninit()`, ill-formed C++) — indexmap's
+    /// `IntoKeys/IntoValues::new/clone`. For each un-annotated
+    /// `let <ident> = ....collect()` (turbofish absent or still holding `_`),
+    /// scan the block for struct-literal fields consuming the local as `x` or
+    /// `x.into_iter()`; resolve the field's declared type
+    /// (`lookup_struct_literal_field_type`, which substitutes the literal's
+    /// type args); back-map `vec::IntoIter<E>` → `Vec<E>` for the `into_iter`
+    /// shape. A unique, fully-resolved result becomes the local's placeholder
+    /// hint, so the init emission gains an expected type: the collect lowers
+    /// to `Vec<E>::from_iter(...)` and the mapper closure gains expected
+    /// return `E` (`try_emit_iter_map_call`). In-scope generic params are
+    /// deliberately permitted — the point is resolving generic-impl methods —
+    /// matching `infer_fold_vec_accumulator_expected_type` above. Conflicting
+    /// consumptions and shadowed re-bindings poison the name (no hint).
+    pub(super) fn augment_collect_local_type_hints_from_struct_literal_consumption(
+        &self,
+        stmts: &[syn::Stmt],
+        hints: &mut HashMap<String, syn::Type>,
+    ) {
+        let mut candidate_counts: HashMap<String, usize> = HashMap::new();
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else {
+                continue;
+            };
+            let syn::Pat::Ident(pat_ident) = &local.pat else {
+                continue;
+            };
+            if pat_ident.subpat.is_some() {
+                continue;
+            }
+            let name = pat_ident.ident.to_string();
+            if hints.contains_key(&name) {
+                continue; // fill-only
+            }
+            let Some(init) = local.init.as_ref() else {
+                continue;
+            };
+            let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(&init.expr) else {
+                continue;
+            };
+            if mc.method != "collect" || !mc.args.is_empty() {
+                continue;
+            }
+            if let Some(turbofish) = mc.turbofish.as_ref() {
+                let has_infer = turbofish.args.iter().any(|arg| {
+                    matches!(arg, syn::GenericArgument::Type(ty) if self.type_contains_infer(ty))
+                });
+                if !has_infer {
+                    continue; // fully concrete target → existing turbofish path handles it
+                }
+            }
+            *candidate_counts.entry(name).or_insert(0) += 1;
+        }
+        // A shadowed re-binding makes a name-keyed hint ambiguous — drop it.
+        let names: HashSet<String> = candidate_counts
+            .into_iter()
+            .filter(|(_, n)| *n == 1)
+            .map(|(name, _)| name)
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+
+        struct Scan<'g> {
+            cg: &'g CodeGen,
+            names: HashSet<String>,
+            // None = poisoned by conflicting consumptions.
+            found: HashMap<String, Option<syn::Type>>,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Scan<'_> {
+            fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+                for field in &node.fields {
+                    let syn::Member::Named(member_ident) = &field.member else {
+                        continue;
+                    };
+                    let value = self.cg.peel_paren_group_expr(&field.expr);
+                    let (local_name, via_into_iter) = match value {
+                        syn::Expr::Path(p)
+                            if p.qself.is_none()
+                                && p.path.segments.len() == 1
+                                && p.path.segments[0].arguments.is_empty() =>
+                        {
+                            (p.path.segments[0].ident.to_string(), false)
+                        }
+                        syn::Expr::MethodCall(inner)
+                            if inner.method == "into_iter"
+                                && inner.args.is_empty()
+                                && inner.turbofish.is_none() =>
+                        {
+                            match self.cg.peel_paren_group_expr(&inner.receiver) {
+                                syn::Expr::Path(p)
+                                    if p.qself.is_none()
+                                        && p.path.segments.len() == 1
+                                        && p.path.segments[0].arguments.is_empty() =>
+                                {
+                                    (p.path.segments[0].ident.to_string(), true)
+                                }
+                                _ => continue,
+                            }
+                        }
+                        _ => continue,
+                    };
+                    if !self.names.contains(&local_name) {
+                        continue;
+                    }
+                    let Some(field_ty) = self.cg.lookup_struct_literal_field_type(
+                        node,
+                        &member_ident.to_string(),
+                        None,
+                    ) else {
+                        continue;
+                    };
+                    let candidate: syn::Type = if via_into_iter {
+                        let peeled = self.cg.peel_reference_paren_group_type(&field_ty);
+                        let Some(elem) = vec_into_iter_element_type(peeled) else {
+                            continue;
+                        };
+                        parse_quote!(Vec<#elem>)
+                    } else {
+                        field_ty
+                    };
+                    if !self
+                        .cg
+                        .type_is_placeholder_hint_candidate_allow_scoped_generics(&candidate)
+                    {
+                        continue;
+                    }
+                    use std::collections::hash_map::Entry;
+                    match self.found.entry(local_name) {
+                        Entry::Vacant(slot) => {
+                            slot.insert(Some(candidate));
+                        }
+                        Entry::Occupied(mut slot) => {
+                            let same = slot.get().as_ref().is_some_and(|prev| {
+                                quote::quote!(#prev).to_string()
+                                    == quote::quote!(#candidate).to_string()
+                            });
+                            if !same {
+                                slot.insert(None);
+                            }
+                        }
+                    }
+                }
+                syn::visit::visit_expr_struct(self, node);
+            }
+        }
+        let mut scan = Scan {
+            cg: self,
+            names,
+            found: HashMap::new(),
+        };
+        for stmt in stmts {
+            syn::visit::Visit::visit_stmt(&mut scan, stmt);
+        }
+        for (name, ty) in scan.found {
+            if let Some(ty) = ty {
+                hints.insert(name, ty);
+            }
+        }
     }
 
     /// Iterator item type of `expr`, falling back to `P::Item` when the

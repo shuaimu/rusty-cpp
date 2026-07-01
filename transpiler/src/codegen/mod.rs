@@ -779,6 +779,14 @@ pub struct CodeGen {
     /// Generic type parameters declared by local type name (scoped and unscoped).
     /// Used to recover omitted template arguments in associated-path expressions.
     pub(crate) declared_type_params: HashMap<String, Vec<String>>,
+    /// Plain-name `declared_type_params` keys recorded by a struct/enum/union
+    /// DEFINITION (not a `type` alias). A definition takes the plain-name key
+    /// over an alias even when the alias was collected first — indexmap's
+    /// `set` module aliases `type Bucket<T> = super::Bucket<T, ()>` before the
+    /// root `struct Bucket<K, V>` is reached, and first-wins would leave the
+    /// struct's params recorded NOWHERE (root types get no scoped key),
+    /// mis-pairing field substitutions (`T => K`).
+    pub(crate) declared_type_params_from_definition: HashSet<String>,
     /// Cluster C: for each (host_type_name, method_ident) keyed pair, record
     /// a list of `(concrete_marker_name, host_class_param_name)` substitutions
     /// that should be applied to the absorbed method's signature. Populated
@@ -1673,6 +1681,7 @@ impl CodeGen {
             module_runtime_helper_trait_methods: HashMap::new(),
             enum_type_params: HashMap::new(),
             declared_type_params: HashMap::new(),
+            declared_type_params_from_definition: HashSet::new(),
             parallel_impl_substitutions: HashMap::new(),
             parallel_impl_nested_marker_text_subs: HashMap::new(),
             method_structural_decompositions: HashMap::new(),
@@ -3671,6 +3680,7 @@ impl CodeGen {
         self.constructor_template_hints.clear();
         self.enum_type_params.clear();
         self.declared_type_params.clear();
+        self.declared_type_params_from_definition.clear();
         self.declared_type_param_kinds.clear();
         self.declared_type_param_defaults.clear();
         self.method_emission_declaration_only = false;
@@ -9426,6 +9436,7 @@ impl CodeGen {
         module_path: &[String],
         type_name: &str,
         generics: &syn::Generics,
+        is_definition: bool,
     ) {
         let type_params: Vec<String> = generics
             .params
@@ -9466,15 +9477,34 @@ impl CodeGen {
             return;
         }
 
-        self.declared_type_params
-            .entry(type_name.to_string())
-            .or_insert_with(|| type_params.clone());
-        self.declared_type_param_kinds
-            .entry(type_name.to_string())
-            .or_insert_with(|| param_kinds.clone());
-        self.declared_type_param_defaults
-            .entry(type_name.to_string())
-            .or_insert_with(|| param_defaults.clone());
+        // Definition precedence for the plain-name key: a struct/enum/union
+        // definition overwrites an alias-recorded entry (the FIRST definition
+        // wins among definitions; aliases only fill vacancies). See the
+        // `declared_type_params_from_definition` field doc for the indexmap
+        // `Bucket` collision this prevents.
+        let plain_key_owned_by_definition = self
+            .declared_type_params_from_definition
+            .contains(type_name);
+        if is_definition && !plain_key_owned_by_definition {
+            self.declared_type_params
+                .insert(type_name.to_string(), type_params.clone());
+            self.declared_type_param_kinds
+                .insert(type_name.to_string(), param_kinds.clone());
+            self.declared_type_param_defaults
+                .insert(type_name.to_string(), param_defaults.clone());
+            self.declared_type_params_from_definition
+                .insert(type_name.to_string());
+        } else if !is_definition {
+            self.declared_type_params
+                .entry(type_name.to_string())
+                .or_insert_with(|| type_params.clone());
+            self.declared_type_param_kinds
+                .entry(type_name.to_string())
+                .or_insert_with(|| param_kinds.clone());
+            self.declared_type_param_defaults
+                .entry(type_name.to_string())
+                .or_insert_with(|| param_defaults.clone());
+        }
         if !module_path.is_empty() {
             let scoped_key = format!("{}::{}", module_path.join("::"), type_name);
             self.declared_type_params
