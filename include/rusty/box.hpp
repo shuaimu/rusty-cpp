@@ -262,6 +262,17 @@ public:
         }
     }
 
+    // Rust Box::as_mut / Box::as_ref — borrow the boxed value.
+    // @lifetime: (&'a mut) -> &'a mut
+    T& as_mut() {
+        return *ptr;
+    }
+
+    // @lifetime: (&'a) -> &'a
+    const T& as_ref() const {
+        return *ptr;
+    }
+
     // Arrow operator - access members
     // @lifetime: (&'a) -> &'a
     T* operator->() {
