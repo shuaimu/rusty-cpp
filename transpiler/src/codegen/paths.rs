@@ -1860,6 +1860,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         // Handle numeric MAX/MIN constants early so alias-heavy modules
         // don't short-circuit this through later path-specialization
         // branches.
+        if let Some(fn_value) = Self::try_emit_primitive_assoc_fn_value(&segments) {
+            return fn_value;
+        }
         if let Some(max_expr) = self.try_emit_numeric_limits_path(path, &segments) {
             return max_expr;
         }
@@ -2384,6 +2387,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         }
         if joined == "core::panicking::panic" {
             return "rusty::panicking::panic".to_string();
+        }
+        if let Some(fn_value) = Self::try_emit_primitive_assoc_fn_value(&segments) {
+            return fn_value;
         }
         if let Some(max_expr) = self.try_emit_numeric_limits_path(path, &segments) {
             return max_expr;

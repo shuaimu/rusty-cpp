@@ -18872,6 +18872,21 @@ impl CodeGen {
         )
     }
 
+    /// `u64::from_str_radix` in VALUE position (a fn passed as an argument:
+    /// `parse_unsigned_int(v, u64::from_str_radix)`) — the call form lowers
+    /// to `rusty::from_str_radix<T>(...)`, so the value form wraps the same
+    /// helper in a lambda.
+    pub(super) fn try_emit_primitive_assoc_fn_value(segments: &[String]) -> Option<String> {
+        if segments.len() != 2 || segments[1] != "from_str_radix" {
+            return None;
+        }
+        let target_cpp = rust_primitive_cast_target_cpp_type(&segments[0])?;
+        Some(format!(
+            "[](std::string_view __s, uint32_t __r) {{ return rusty::from_str_radix<{}>(__s, __r); }}",
+            target_cpp
+        ))
+    }
+
     pub(super) fn try_emit_numeric_limits_path(
         &self,
         path: &syn::Path,
