@@ -43499,7 +43499,16 @@ auto partial_cmp(const A& a, const B& b) {\n\
 }\n\
 namespace fmt {\n\
 // Error and Result are defined in rusty/fmt.hpp\n\
-struct Arguments {};\n\
+// Carries prerendered text: `write!(w, ...)` sites lower their\n\
+// format_args!() through std::format, so Arguments accepts the\n\
+// resulting string and Write::write_fmt forwards it to write_str.\n\
+struct Arguments {\n\
+    std::string text;\n\
+    Arguments() = default;\n\
+    Arguments(std::string s) : text(std::move(s)) {}\n\
+    Arguments(std::string_view s) : text(s) {}\n\
+    Arguments(const char* s) : text(s ? s : \"\") {}\n\
+};\n\
 enum class Alignment { Left, Right, Center };\n\
 struct DebugList {\n\
     template<typename... Args>\n\
