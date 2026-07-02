@@ -52,12 +52,6 @@ pub fn extract_annotations(entity: &Entity) -> Option<FunctionSignature> {
     if let Some(comment) = entity.get_comment() {
         if let Some(sig) = parse_lifetime_annotations(&comment, name.clone()) {
             return Some(sig);
-        } else {
-            debug_println!(
-                "DEBUG: Found comment but no lifetime annotation for function '{}': {}",
-                name,
-                comment
-            );
         }
         // Comment exists but no lifetime annotation found, fall through to source reading
     }
@@ -80,11 +74,6 @@ fn read_lifetime_from_source(entity: &Entity, name: &str) -> Option<FunctionSign
     let file = file_location.file?;
     let file_path = file.get_path();
     let entity_line = file_location.line as usize;
-    debug_println!(
-        "DEBUG: reading comments in function: '{}' at line: {}",
-        name,
-        entity_line
-    );
     // Read the source file
     let file_handle = File::open(&file_path).ok()?;
     let reader = BufReader::new(file_handle);

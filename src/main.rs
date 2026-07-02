@@ -263,8 +263,6 @@ fn analyze_file(
     let mut violations = Vec::new();
     debug_println!("DEBUG: Found {} functions in AST", ast.functions.len());
 
-    // println!("DEBUG: Found {} functions in AST", ast.functions.len()); //TEMPORARY CODE:: REMOVE BEFORE PUSHING
-
     // Canonical path of the file being checked. Used to filter out function
     // bodies that libclang surfaced via imports/headers — those should be
     // analyzed when THEIR own file is the check target, not re-analyzed
@@ -332,8 +330,6 @@ fn analyze_file(
                 "DEBUG: Function '{}' is marked safe, performing checks",
                 function.name
             );
-            // //REMOVE BEFORE PUSHING
-            // println!("DEBUG: Function '{}' is marked safe, performing checks", function.name);
             // Check for pointer operations (pass the function's safety mode)
             let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(
                 function,

@@ -26,10 +26,8 @@ pub struct HeaderCache {
 
 /// Strip template parameters from a name (e.g., "Option<T>" -> "Option")
 fn strip_template_params(name: &str) -> String {
-    // println!("DEBUG: Stripping template parameters from '{}'", name);
     if let Some(pos) = name.find('<') {
         let stripped_name = name[..pos].to_string();
-        // println!("DEBUG: Name after stripping: '{}'", stripped_name);
         return stripped_name;
     } else {
         name.to_string()
@@ -618,24 +616,13 @@ impl HeaderCache {
             | EntityKind::Constructor
             | EntityKind::FunctionTemplate => {
                 // Extract lifetime annotations
-                debug_println!("ALVIN DEBUG ANALYSIS: EXTRACTING ANNOTATIONS");
                 if let Some(mut sig) = extract_annotations(entity) {
                     // Always use qualified name for all functions to avoid namespace collisions
                     // This ensures functions like ns1::helper and ns2::helper are distinguished
                     let qualified_name = crate::parser::ast_visitor::get_qualified_name(entity);
                     // Update the signature name to use qualified name
                     sig.name = qualified_name.clone();
-                    debug_println!(
-                        "ALVIN DEBUG ANALYSIS: Found function '{}' with signature {:?} in header",
-                        sig.name,
-                        sig
-                    );
                     self.insert_signature(qualified_name, sig);
-                } else {
-                    debug_println!(
-                        "ALVIN DEBUG ANALYSIS: No annotations found for function '{}'",
-                        entity.get_name().unwrap_or("<unnamed>".to_string())
-                    );
                 }
 
                 // Extract safety annotations from the entity itself
