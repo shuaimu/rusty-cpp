@@ -3009,6 +3009,12 @@ impl CodeGen {
                 if let Some(variant) = tail.strip_prefix("FpCategory::") {
                     return Some(format!("rusty::num::FpCategory_{}", variant));
                 }
+                // std::num error types port to rusty::num — a raw
+                // `std::num::ParseIntError` names a nonexistent C++
+                // namespace (serde_yaml's from_str_radix fn-pointer slots).
+                if matches!(tail, "ParseIntError" | "ParseFloatError") {
+                    return Some(format!("rusty::num::{}", tail));
+                }
             }
         }
         None

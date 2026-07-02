@@ -129,6 +129,16 @@ using FpCategory = std::variant<
     FpCategory_Subnormal,
     FpCategory_Normal>;
 
+/// std::num::ParseIntError / ParseFloatError ports — opaque error markers
+/// (serde_yaml threads ParseIntError through `from_str_radix` fn pointers
+/// without inspecting it).
+struct ParseIntError {
+    constexpr bool operator==(const ParseIntError&) const noexcept { return true; }
+};
+struct ParseFloatError {
+    constexpr bool operator==(const ParseFloatError&) const noexcept { return true; }
+};
+
 } // namespace rusty::num
 
 // Checked arithmetic helpers (Rust integer methods returning Option<T>)
