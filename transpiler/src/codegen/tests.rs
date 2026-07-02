@@ -3160,6 +3160,27 @@ fn test_backward_collect_target_from_struct_field_consumption() {
 }
 
 #[test]
+fn test_deref_assigned_local_binding_drops_const() {
+    // indexmap update_index: `let index = table.find_mut(..).expect(..); *index = new;`
+    // — a `&mut`-holding binding whose type inference fails must still drop
+    // `const`, or the deref-assign fails ("cannot assign to return value
+    // because function 'deref_if_pointer_like<...>' returns a const value").
+    let out = transpile_str(
+        r#"
+        pub fn update(v: &mut Vec<usize>, old: usize, new: usize) {
+            let index = v.iter_mut().find(|i| **i == old).expect("index not found");
+            *index = new;
+        }
+    "#,
+    );
+    assert!(
+        !out.contains("const auto index"),
+        "deref-assigned binding must not be const:\n{out}"
+    );
+    assert!(out.contains("auto index"), "{out}");
+}
+
+#[test]
 fn test_assoc_method_path_mapper_lowers_to_forwarding_lambda() {
     // indexmap get_disjoint_mut: `indices.map(Some)` + `key_values.map(Option::unwrap)`
     // — path-callable mappers must lower to lambdas; a raw `Option::unwrap`

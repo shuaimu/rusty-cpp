@@ -1050,6 +1050,11 @@ pub struct CodeGen {
     /// Used for reference rebinding detection: if a `let mut r: &T` variable
     /// is reassigned, emit it as a pointer instead of a reference.
     pub(crate) reassigned_vars: std::collections::HashSet<String>,
+    /// Locals appearing as deref-assignment targets (`*x = …`) in the current
+    /// block: a `&mut T`-holding binding whose type inference failed must still
+    /// drop `const` — `const auto index = ….expect(…); *index = new;` fails
+    /// with "cannot assign … returns a const value" (indexmap update_index).
+    pub(crate) deref_assigned_vars: std::collections::HashSet<String>,
     /// Variables used more than once in the current block.
     /// std::move is skipped for these to avoid use-after-move errors.
     pub(crate) multi_use_vars: std::collections::HashSet<String>,
@@ -1747,6 +1752,7 @@ impl CodeGen {
             emitted_alias_impl_decl_keys: HashSet::new(),
             emitted_alias_impl_def_keys: HashSet::new(),
             reassigned_vars: std::collections::HashSet::new(),
+            deref_assigned_vars: std::collections::HashSet::new(),
             multi_use_vars: std::collections::HashSet::new(),
             consuming_method_receiver_vars: std::collections::HashSet::new(),
             mutable_pointer_aliased_vars: std::collections::HashSet::new(),
@@ -3751,6 +3757,7 @@ impl CodeGen {
         self.trait_bound_type_param_scopes.clear();
         self.callable_type_param_return_scopes.clear();
         self.reassigned_vars.clear();
+        self.deref_assigned_vars.clear();
         self.consuming_method_receiver_vars.clear();
         self.mutable_pointer_aliased_vars.clear();
         self.in_progress_local_initializers.clear();
@@ -45205,6 +45212,53 @@ fn collect_reassigned_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<Str
         collect_assignments_in_stmt(stmt, &mut result);
     }
     result
+}
+
+/// Locals used as deref-assignment targets (`*x = …`, possibly through
+/// parens/groups) anywhere in the block — see `deref_assigned_vars`.
+fn collect_deref_assigned_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<String> {
+    struct Scan {
+        found: std::collections::HashSet<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for Scan {
+        fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+            let mut target = node.left.as_ref();
+            loop {
+                match target {
+                    syn::Expr::Paren(p) => target = p.expr.as_ref(),
+                    syn::Expr::Group(g) => target = g.expr.as_ref(),
+                    _ => break,
+                }
+            }
+            if let syn::Expr::Unary(unary) = target
+                && matches!(unary.op, syn::UnOp::Deref(_))
+            {
+                let mut inner = unary.expr.as_ref();
+                loop {
+                    match inner {
+                        syn::Expr::Paren(p) => inner = p.expr.as_ref(),
+                        syn::Expr::Group(g) => inner = g.expr.as_ref(),
+                        _ => break,
+                    }
+                }
+                if let syn::Expr::Path(path) = inner
+                    && path.qself.is_none()
+                    && path.path.segments.len() == 1
+                {
+                    self.found
+                        .insert(path.path.segments[0].ident.to_string());
+                }
+            }
+            syn::visit::visit_expr_assign(self, node);
+        }
+    }
+    let mut scan = Scan {
+        found: std::collections::HashSet::new(),
+    };
+    for stmt in stmts {
+        syn::visit::Visit::visit_stmt(&mut scan, stmt);
+    }
+    scan.found
 }
 
 /// Collect locals whose addresses are cast into mutable raw pointers in the

@@ -2359,6 +2359,7 @@ impl CodeGen {
                     || is_consumed
                     || init_is_ptr_read
                     || self.mutable_pointer_aliased_vars.contains(&name_str)
+                    || self.deref_assigned_vars.contains(&name_str)
                     || inferred_mut_reference_binding
                     || init_returns_mut_reference
                     || init_returns_reference_binding

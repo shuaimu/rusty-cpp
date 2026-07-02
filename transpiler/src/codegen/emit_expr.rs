@@ -517,6 +517,8 @@ impl CodeGen {
         // Pre-scan: find variables that are reassigned (for reference rebinding detection)
         let reassigned = collect_reassigned_vars(&block.stmts);
         block_profile_mark("collect_reassigned_vars");
+        let deref_assigned = collect_deref_assigned_vars(&block.stmts);
+        block_profile_mark("collect_deref_assigned_vars");
         let consuming =
             self.collect_consuming_method_receiver_vars_with_signature_hints(&block.stmts);
         block_profile_mark("collect_consuming_method_receiver_vars_with_signature_hints");
@@ -612,6 +614,8 @@ impl CodeGen {
             }
         }
         let prev = std::mem::replace(&mut self.reassigned_vars, reassigned);
+        let prev_deref_assigned =
+            std::mem::replace(&mut self.deref_assigned_vars, deref_assigned);
         let prev_consuming = std::mem::replace(&mut self.consuming_method_receiver_vars, consuming);
         let prev_mutable_pointer_aliased = std::mem::replace(
             &mut self.mutable_pointer_aliased_vars,
@@ -901,6 +905,7 @@ impl CodeGen {
         self.local_placeholder_type_hints.pop();
         self.collection_decltype_element_overrides.pop();
         self.reassigned_vars = prev;
+        self.deref_assigned_vars = prev_deref_assigned;
         self.consuming_method_receiver_vars = prev_consuming;
         self.mutable_pointer_aliased_vars = prev_mutable_pointer_aliased;
         self.repeat_elem_type_hints = prev_repeat_hints;
