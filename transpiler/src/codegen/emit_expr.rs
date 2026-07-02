@@ -2593,7 +2593,9 @@ impl CodeGen {
                 // (`_ => return None`) into a `return` FROM THE LAMBDA, yielding
                 // "no viable conversion from Option<Range<usize>> to size_t".
                 // The statement-expression keeps `return` a real function return.
-                syn::Pat::TupleStruct(_) if allow_guarded_variant_arms => {
+                syn::Pat::TupleStruct(_) | syn::Pat::Struct(_)
+                    if allow_guarded_variant_arms =>
+                {
                     let mut binding_stmts = Vec::new();
                     let Some(cond) = self.collect_runtime_match_binding_stmts_and_condition(
                         &arm.pat,

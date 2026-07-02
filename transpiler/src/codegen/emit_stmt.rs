@@ -356,9 +356,7 @@ impl CodeGen {
         // where `return` stays a real function return. Thread this lowering's
         // own resolved value type — including the forced-size_t Bound
         // heuristic — as the expected type.
-        if self.match_expr_has_explicit_return_arm(match_expr)
-            && match_expr.arms.iter().any(|arm| arm.guard.is_some())
-        {
+        if self.match_expr_has_explicit_return_arm(match_expr) {
             let usize_ty: syn::Type = parse_quote!(usize);
             let stmt_expr_expected = if force_size_t_return {
                 Some(&usize_ty)

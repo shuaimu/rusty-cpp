@@ -3160,6 +3160,49 @@ fn test_backward_collect_target_from_struct_field_consumption() {
 }
 
 #[test]
+fn test_unguarded_return_arm_match_with_differing_types_lowers_to_statement_expr() {
+    // indexmap TryReserveError Display::fmt: `let reason = match &self.kind {
+    // Std(e) => return Display::fmt(e, f), CapacityOverflow => "...",
+    // AllocError { .. } => "..." }` — no guards, but the return arm's type
+    // (fmt::Result) differs from the match value (&str); the IIFE lambda
+    // would bind the return to itself. Also covers Pat::Struct arms.
+    let out = transpile_str(
+        r#"
+        use core::fmt;
+        pub struct E2;
+        pub enum Kind {
+            Std(E2),
+            CapacityOverflow,
+            AllocError { layout: usize },
+        }
+        pub struct Err2 {
+            kind: Kind,
+        }
+        impl fmt::Display for E2 {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("std")
+            }
+        }
+        impl fmt::Display for Err2 {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let reason = match &self.kind {
+                    Kind::Std(e) => return fmt::Display::fmt(e, f),
+                    Kind::CapacityOverflow => " because capacity exceeded the maximum",
+                    Kind::AllocError { .. } => " because the allocator returned an error",
+                };
+                f.write_str("memory allocation failed")?;
+                f.write_str(reason)
+            }
+        }
+    "#,
+    );
+    assert!(
+        out.contains("const auto reason = ({"),
+        "no-guard return-arm match with differing types must lower to a statement expression:\n{out}"
+    );
+}
+
+#[test]
 fn test_generic_alias_field_expected_fills_vec_element() {
     // indexmap Core::new: `entries: Vec::new()` under field type
     // `Entries<K, V> = Vec<Bucket<K, V>>` (a generic ALIAS) — the
