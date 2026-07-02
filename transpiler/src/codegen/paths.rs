@@ -1561,6 +1561,38 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 if lower_ident_self_alias {
                     break;
                 }
+                // Idempotence guard: when the path ALREADY begins with the
+                // binding's full target, the alias has been expanded by an
+                // earlier stage — re-applying it stutters self-referential
+                // renames (`use crate::libyaml::error as libyaml;` turns
+                // `libyaml::error::Mark` into `libyaml::error::error::Mark`
+                // on every extra pass; serde_yaml fix_mark emitted a TRIPLE).
+                let target_segments: Vec<&str> = bound_target
+                    .trim_start_matches("::")
+                    .split("::")
+                    .filter(|seg| !seg.is_empty())
+                    // `segments` is already crate-stripped; normalize the
+                    // target the same way so the prefix comparison holds
+                    // (bound_target is spelled `crate::libyaml::error`).
+                    .skip_while(|seg| *seg == "crate" || *seg == "self")
+                    .collect();
+                let already_expanded = target_segments.len() > 1
+                    && segments.len() >= target_segments.len()
+                    && segments
+                        .iter()
+                        .take(target_segments.len())
+                        .map(String::as_str)
+                        .eq(target_segments.iter().copied());
+                if already_expanded {
+                    // The same-named C++ namespace alias
+                    // (`namespace libyaml = ::libyaml::error;`) is in scope
+                    // where this path is emitted — a RELATIVE spelling would
+                    // resolve the leading segment through the alias and
+                    // double-apply it (`(::libyaml::error)::error::Mark`).
+                    // Absolute qualification is immune.
+                    force_leading_colon = true;
+                    break;
+                }
                 let mut rewritten: Vec<String> = bound_target
                     .split("::")
                     .filter(|seg| !seg.is_empty())
