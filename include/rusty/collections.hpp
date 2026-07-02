@@ -35,6 +35,17 @@ struct TryReserveError {
 
     constexpr Kind kind_of() const noexcept { return kind; }
 
+    // std::collections::TryReserveError implements PartialEq/Eq (Rust >= 1.57);
+    // derived PartialEq on wrapper enums (indexmap's TryReserveErrorKind::Std
+    // payload) compares these with `==`.
+    constexpr bool operator==(const TryReserveError& other) const noexcept {
+        return kind == other.kind && layout_size == other.layout_size
+            && layout_align == other.layout_align;
+    }
+    constexpr bool operator!=(const TryReserveError& other) const noexcept {
+        return !(*this == other);
+    }
+
     // From conversions for rusty::from_into.
     static constexpr TryReserveError from(Kind k) noexcept {
         return TryReserveError(k);
