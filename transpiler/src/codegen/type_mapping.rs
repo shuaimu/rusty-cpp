@@ -2706,10 +2706,15 @@ impl CodeGen {
                 if self.module_name.is_some() && self.type_arg_nesting.get() == 0 {
                     // Check if any bound is a mutable trait (e.g., fmt::Write,
                     // io::Write) — these need `auto&` not `const auto&`.
+                    // `FnMut`/`FnOnce` too: their call requires non-const access
+                    // (hashbrown's `find(hash, eq: impl FnMut(&T) -> bool)` param
+                    // emitted `const auto&` cannot invoke a `mutable` lambda —
+                    // "no matching function for call to object of type 'const
+                    // (lambda ...)'" from indexmap's find_mut closures).
                     let has_mutable_trait = it.bounds.iter().any(|b| {
                         if let syn::TypeParamBound::Trait(tb) = b {
                             let last = tb.path.segments.last().map(|s| s.ident.to_string());
-                            matches!(last.as_deref(), Some("Write"))
+                            matches!(last.as_deref(), Some("Write" | "FnMut" | "FnOnce"))
                         } else {
                             false
                         }
