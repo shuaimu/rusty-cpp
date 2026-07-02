@@ -7994,11 +7994,6 @@ impl CodeGen {
                     return false;
                 };
                 let last_name = last.ident.to_string();
-                if matches!(last.arguments, syn::PathArguments::None) {
-                    // Bare or module-qualified direct naming (`T`,
-                    // `mapping::IntoIter`) stores the named type inline.
-                    return names.contains(&last_name);
-                }
                 let arg_types: Vec<&syn::Type> = match &last.arguments {
                     syn::PathArguments::AngleBracketed(args) => args
                         .args
@@ -8011,7 +8006,10 @@ impl CodeGen {
                     _ => Vec::new(),
                 };
                 if arg_types.is_empty() {
-                    return false;
+                    // Bare or module-qualified direct naming (`T`,
+                    // `mapping::IntoIter`, `VacantEntry<'a>` — lifetime-only
+                    // args are still direct naming) stores the type inline.
+                    return names.contains(&last_name);
                 }
                 if Self::segment_payload_is_pointer_indirect(&last.ident)
                     || matches!(last_name.as_str(), "PhantomData" | "NonNull")
@@ -8019,8 +8017,13 @@ impl CodeGen {
                     return false;
                 }
                 // A LOCAL wrapper stores our names inline only if it stores its
-                // OWN params inline (recursive, cycle-guarded).
-                let local_wrapper_inline = if self.local_declared_types.contains(&last_name) {
+                // OWN params inline (recursive, cycle-guarded). Only a
+                // single-segment name can refer to the local type — a
+                // qualified foreign path (`vec::IntoIter<...>`) colliding on
+                // the bare name must stay in the unknown/conservative arm.
+                let local_wrapper_inline = if tp.path.segments.len() == 1
+                    && self.local_declared_types.contains(&last_name)
+                {
                     if visiting.contains(&last_name) {
                         false
                     } else {
