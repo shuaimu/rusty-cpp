@@ -3061,6 +3061,7 @@ impl CodeGen {
                     name: name.clone(),
                     module_path: module_path.clone(),
                     arity,
+                    args_inline: self.declared_type_generic_args_inline(name, module_path),
                 }
             })
             .collect();
@@ -5185,6 +5186,11 @@ impl CodeGen {
             })
             .collect();
         let known_modules: HashSet<String> = module_names.iter().cloned().collect();
+        // SUBTREE names: the pre-pass forward-declares nested submodule types
+        // too (map::slice::Slice reachable as map::Slice via re-export), so a
+        // reference to one is fwd-satisfiable — a top-level-only set made
+        // those references look strict and fabricated mutual module cycles
+        // (indexmap inner↔map).
         let forward_declable_types_by_module: HashMap<String, HashSet<String>> = inline_modules
             .iter()
             .filter_map(|(_, item)| {
@@ -5196,20 +5202,8 @@ impl CodeGen {
                     return None;
                 };
                 let mut names: HashSet<String> = HashSet::new();
-                for nested_item in module_items {
-                    match nested_item {
-                        syn::Item::Struct(s) => {
-                            names.insert(s.ident.to_string());
-                        }
-                        syn::Item::Enum(e) => {
-                            names.insert(e.ident.to_string());
-                        }
-                        syn::Item::Union(u) => {
-                            names.insert(u.ident.to_string());
-                        }
-                        _ => {}
-                    }
-                }
+                let mut subtree_modules: HashSet<String> = HashSet::new();
+                Self::collect_module_subtree_names(module_items, &mut names, &mut subtree_modules);
                 if names.is_empty() {
                     None
                 } else {
@@ -5278,6 +5272,9 @@ impl CodeGen {
                     let mut dep_list: Vec<String> = deps.iter().cloned().collect();
                     dep_list.sort();
                     eprintln!("[module-deps] {} -> {:?}", module_item.ident, dep_list);
+                    let mut strict_list: Vec<String> = strict_deps.iter().cloned().collect();
+                    strict_list.sort();
+                    eprintln!("[module-deps-strict] {} -> {:?}", module_item.ident, strict_list);
                 }
                 for dep in deps {
                     let Some(&dep_pos) = name_to_pos.get(&dep) else {
@@ -5447,8 +5444,308 @@ impl CodeGen {
         );
         log_order("delay_inline_modules_for_type_dependencies(second)");
         Self::delay_functions_after_non_function_items(&mut final_ordered);
+        // Mutual strict cycles (value↔mapping: Value_Mapping stores Mapping
+        // inline while mapping's iterator/entry types instantiate Value) have
+        // NO valid whole-module order — split the earlier module and reopen
+        // its namespace after the later one for the items that need it.
+        self.split_mutual_strict_cycle_modules(&mut final_ordered);
+        log_order("split_mutual_strict_cycle_modules");
         log_order("done");
         final_ordered
+    }
+
+    /// Detect top-level module pairs whose STRICT (by-value completeness)
+    /// dependencies are mutual, and split each direction: the EARLIER module
+    /// keeps only the items the later one needs; its items that strictly need
+    /// the LATER module move into a synthesized second `mod` (same name — C++
+    /// namespaces reopen) inserted after the later module. Then the later
+    /// module's items that strictly need names declared by that MOVED chunk
+    /// are extracted the same way, giving the interleave
+    /// `M#1 → L#1 → M#2 → L#2` (serde_yaml: mapping::{Mapping} →
+    /// value::{Value,…} → mapping::{IntoIter,entries} → value::{de}).
+    fn split_mutual_strict_cycle_modules<'a>(&self, items: &mut Vec<&'a syn::Item>) {
+        let module_positions: Vec<(usize, String)> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, item)| match item {
+                syn::Item::Mod(m) if m.content.is_some() => Some((pos, m.ident.to_string())),
+                _ => None,
+            })
+            .collect();
+        if module_positions.len() < 2 {
+            return;
+        }
+        let known_modules: HashSet<String> = module_positions
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect();
+        let forward_declable_types_by_module: HashMap<String, HashSet<String>> = items
+            .iter()
+            .filter_map(|item| {
+                let syn::Item::Mod(m) = item else { return None };
+                let (_, nested) = m.content.as_ref()?;
+                let mut names: HashSet<String> = HashSet::new();
+                let mut subtree_modules: HashSet<String> = HashSet::new();
+                Self::collect_module_subtree_names(nested, &mut names, &mut subtree_modules);
+                (!names.is_empty()).then(|| (m.ident.to_string(), names))
+            })
+            .collect();
+
+        let strict_deps_of = |module_item: &syn::ItemMod,
+                              scan_items: &[syn::Item]|
+         -> HashSet<String> {
+            let mut deps = HashSet::new();
+            let mut subtree_types: HashSet<String> = HashSet::new();
+            let mut subtree_modules: HashSet<String> = HashSet::new();
+            if let Some((_, nested)) = &module_item.content {
+                Self::collect_module_subtree_names(nested, &mut subtree_types, &mut subtree_modules);
+            }
+            *self.module_dep_scope.borrow_mut() = Some(ModuleDepScope {
+                current_module: module_item.ident.to_string(),
+                subtree_types,
+                subtree_modules,
+            });
+            self.collect_scope_module_strict_type_dependencies(
+                scan_items,
+                &known_modules,
+                &forward_declable_types_by_module,
+                &mut deps,
+            );
+            *self.module_dep_scope.borrow_mut() = None;
+            deps.remove(&module_item.ident.to_string());
+            deps
+        };
+
+        // Full-module strict deps.
+        let mut module_strict: HashMap<String, HashSet<String>> = HashMap::new();
+        for (pos, name) in &module_positions {
+            let syn::Item::Mod(m) = items[*pos] else { continue };
+            let Some((_, nested)) = &m.content else { continue };
+            module_strict.insert(name.clone(), strict_deps_of(m, nested));
+        }
+
+        // First mutual pair in emission order (one split per rebuild keeps
+        // this pass simple; nested/multiple cycles converge across levels).
+        let mut mutual: Option<(usize, usize, String, String)> = None;
+        'outer: for (i, (pos_e, name_e)) in module_positions.iter().enumerate() {
+            for (pos_l, name_l) in module_positions.iter().skip(i + 1) {
+                let e_needs_l = module_strict
+                    .get(name_e)
+                    .is_some_and(|d| d.contains(name_l));
+                let l_needs_e = module_strict
+                    .get(name_l)
+                    .is_some_and(|d| d.contains(name_e));
+                if e_needs_l && l_needs_e {
+                    mutual = Some((*pos_e, *pos_l, name_e.clone(), name_l.clone()));
+                    break 'outer;
+                }
+            }
+        }
+        let Some((pos_e, pos_l, name_e, name_l)) = mutual else {
+            return;
+        };
+        let syn::Item::Mod(mod_e) = items[pos_e] else { return };
+        let Some((_, e_items)) = &mod_e.content else { return };
+
+        // Partition E: chunk2 = items strictly needing L (per-item scan with
+        // E's own use-imports as context), then a fixpoint pulling in items
+        // that store a chunk2-declared type inline.
+        let e_uses: Vec<syn::Item> = e_items
+            .iter()
+            .filter(|it| matches!(it, syn::Item::Use(_)))
+            .cloned()
+            .collect();
+        let mut in_chunk2: Vec<bool> = e_items
+            .iter()
+            .map(|it| {
+                if matches!(it, syn::Item::Use(_)) {
+                    return false;
+                }
+                let mut scan: Vec<syn::Item> = e_uses.clone();
+                scan.push(it.clone());
+                strict_deps_of(mod_e, &scan).contains(&name_l)
+            })
+            .collect();
+        loop {
+            let chunk2_names: HashSet<String> = e_items
+                .iter()
+                .zip(in_chunk2.iter())
+                .filter(|(_, inc)| **inc)
+                .filter_map(|(it, _)| Self::item_top_level_type_name(it))
+                .collect();
+            if chunk2_names.is_empty() {
+                break;
+            }
+            let mut changed = false;
+            let mut visiting = HashSet::new();
+            for (idx, it) in e_items.iter().enumerate() {
+                if in_chunk2[idx] || matches!(it, syn::Item::Use(_)) {
+                    continue;
+                }
+                let stores = match it {
+                    syn::Item::Struct(s) => s.fields.iter().any(|f| {
+                        self.syn_type_stores_names_inline(&f.ty, &chunk2_names, &mut visiting)
+                    }),
+                    syn::Item::Enum(e) => e.variants.iter().any(|v| {
+                        v.fields.iter().any(|f| {
+                            self.syn_type_stores_names_inline(&f.ty, &chunk2_names, &mut visiting)
+                        })
+                    }),
+                    _ => false,
+                };
+                if stores {
+                    in_chunk2[idx] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // Impl blocks follow their type.
+        let chunk2_names: HashSet<String> = e_items
+            .iter()
+            .zip(in_chunk2.iter())
+            .filter(|(_, inc)| **inc)
+            .filter_map(|(it, _)| Self::item_top_level_type_name(it))
+            .collect();
+        for (idx, it) in e_items.iter().enumerate() {
+            if in_chunk2[idx] {
+                continue;
+            }
+            if let syn::Item::Impl(imp) = it
+                && let syn::Type::Path(tp) = imp.self_ty.as_ref()
+                && let Some(last) = tp.path.segments.last()
+                && chunk2_names.contains(&last.ident.to_string())
+            {
+                in_chunk2[idx] = true;
+            }
+        }
+        let has_chunk1_types = e_items
+            .iter()
+            .zip(in_chunk2.iter())
+            .any(|(it, inc)| !*inc && Self::item_top_level_type_name(it).is_some());
+        let has_chunk2 = in_chunk2.iter().any(|inc| *inc);
+        if !has_chunk1_types || !has_chunk2 {
+            return;
+        }
+
+        let make_mod = |base: &syn::ItemMod, keep: &dyn Fn(usize) -> bool| -> &'a syn::Item {
+            let mut cloned = base.clone();
+            if let Some((_, nested)) = &mut cloned.content {
+                let source = nested.clone();
+                nested.clear();
+                for (idx, item) in source.into_iter().enumerate() {
+                    if matches!(item, syn::Item::Use(_)) || keep(idx) {
+                        nested.push(item);
+                    }
+                }
+            }
+            Box::leak(Box::new(syn::Item::Mod(cloned)))
+        };
+        let in_chunk2_e = in_chunk2.clone();
+        let e_chunk1 = make_mod(mod_e, &|idx| !in_chunk2_e[idx]);
+        let e_chunk2 = make_mod(mod_e, &|idx| in_chunk2_e[idx]);
+
+        items[pos_e] = e_chunk1;
+        items.insert(pos_l + 1, e_chunk2);
+        if std::env::var_os("RUSTY_CPP_DEBUG_MODULE_DEPS").is_some() {
+            eprintln!(
+                "[module-split] {} -> {}#1 + {}#2 (after {})",
+                name_e, name_e, name_e, name_l
+            );
+        }
+
+        // Second direction: extract L items that strictly need the MOVED
+        // chunk (they reference E but their targets now live after them).
+        let pos_l = pos_l; // unchanged: insert was after it
+        let syn::Item::Mod(mod_l) = items[pos_l] else { return };
+        let Some((_, l_items)) = &mod_l.content else { return };
+        let moved_names = chunk2_names;
+        let l_uses: Vec<syn::Item> = l_items
+            .iter()
+            .filter(|it| matches!(it, syn::Item::Use(_)))
+            .cloned()
+            .collect();
+        let l_in_chunk2: Vec<bool> = l_items
+            .iter()
+            .map(|it| {
+                if matches!(it, syn::Item::Use(_)) {
+                    return false;
+                }
+                // Whole-item strict scan hitting E, restricted to names the
+                // moved chunk declares (module-qualified fields inside nested
+                // submodules included via the subtree scan).
+                let mut scan: Vec<syn::Item> = l_uses.clone();
+                scan.push(it.clone());
+                if !strict_deps_of(mod_l, &scan).contains(&name_e) {
+                    return false;
+                }
+                let mut names_hit = false;
+                let mut visiting = HashSet::new();
+                let mut check_fields = |nested_items: &[syn::Item]| {
+                    for nested in nested_items {
+                        match nested {
+                            syn::Item::Struct(s) => {
+                                if s.fields.iter().any(|f| {
+                                    self.syn_type_stores_names_inline(
+                                        &f.ty,
+                                        &moved_names,
+                                        &mut visiting,
+                                    )
+                                }) {
+                                    names_hit = true;
+                                }
+                            }
+                            syn::Item::Enum(e) => {
+                                if e.variants.iter().any(|v| {
+                                    v.fields.iter().any(|f| {
+                                        self.syn_type_stores_names_inline(
+                                            &f.ty,
+                                            &moved_names,
+                                            &mut visiting,
+                                        )
+                                    })
+                                }) {
+                                    names_hit = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                };
+                match it {
+                    syn::Item::Struct(_) | syn::Item::Enum(_) => {
+                        check_fields(std::slice::from_ref(it))
+                    }
+                    syn::Item::Mod(sub) => {
+                        if let Some((_, sub_items)) = &sub.content {
+                            check_fields(sub_items);
+                        }
+                    }
+                    _ => {}
+                }
+                names_hit
+            })
+            .collect();
+        let l_has_chunk1_types = l_items
+            .iter()
+            .zip(l_in_chunk2.iter())
+            .any(|(it, inc)| !*inc && Self::item_top_level_type_name(it).is_some());
+        if !l_in_chunk2.iter().any(|inc| *inc) || !l_has_chunk1_types {
+            return;
+        }
+        let l_chunk1 = make_mod(mod_l, &|idx| !l_in_chunk2[idx]);
+        let l_chunk2 = make_mod(mod_l, &|idx| l_in_chunk2[idx]);
+        items[pos_l] = l_chunk1;
+        // After E#2 (which sits at pos_l + 1).
+        items.insert(pos_l + 2, l_chunk2);
+        if std::env::var_os("RUSTY_CPP_DEBUG_MODULE_DEPS").is_some() {
+            eprintln!(
+                "[module-split] {} -> {}#1 + {}#2 (after {}#2)",
+                name_l, name_l, name_l, name_e
+            );
+        }
     }
 
     /// A `const X: LocalAggregate = LocalAggregate { .. }` needs its struct/union
@@ -6012,7 +6309,32 @@ impl CodeGen {
                     continue;
                 }
                 let module_ref = items.remove(idx);
-                items.insert(last_dep_pos, module_ref);
+                // Stable arrival order: several modules hopping over the SAME
+                // sibling type all target the same position; a plain insert
+                // reverses their relative (topo) order. Land after any inline
+                // modules already sitting there instead (value::tagged must
+                // stay ahead of value::ser after both hop over Value) — but
+                // never past one that needs this module's types complete.
+                let mut insert_pos = last_dep_pos;
+                while insert_pos < items.len()
+                    && matches!(items[insert_pos], syn::Item::Mod(m) if m.content.is_some())
+                {
+                    let item_key = items[insert_pos] as *const syn::Item as usize;
+                    let module_cache = module_path_reference_cache
+                        .entry(module_name.clone())
+                        .or_default();
+                    let blocks = *module_cache.entry(item_key).or_insert_with(|| {
+                        Self::item_requires_complete_module_path_type(
+                            items[insert_pos],
+                            &module_name,
+                        )
+                    });
+                    if blocks {
+                        break;
+                    }
+                    insert_pos += 1;
+                }
+                items.insert(insert_pos, module_ref);
                 // Re-check the same index after shifting.
                 continue;
             }
@@ -7405,6 +7727,31 @@ impl CodeGen {
         if matches!(segments[0].as_str(), "std" | "core" | "alloc") {
             return;
         }
+        // A use-path rooted at an EXTERNAL crate (`use serde::de::Deserializer;`)
+        // never binds to local modules — matching its middle segments or leaf
+        // against same-named siblings (`de`) fabricated import attributions and
+        // false ordering edges (serde_yaml: value::tagged -> value::de). In
+        // 2018-edition Rust a use-path head that is not crate/self/super and
+        // not a local module IS an extern crate.
+        if !matches!(segments[0].as_str(), "crate" | "self" | "super")
+            && !known_modules.contains(&segments[0])
+        {
+            return;
+        }
+        // A crate-ROOT-declared type is the canonical owner of its bare name
+        // (the Bucket principle): binding `use crate::Bucket;` to a module
+        // whose subtree merely re-aliases the name (indexmap set's
+        // `type Bucket<T> = super::Bucket<T, ()>`) fabricates strict edges
+        // to that module. Root items need no module edge — the item-level
+        // ordering passes handle them.
+        {
+            let imported_leaf = segments.last().cloned().unwrap_or_default();
+            if self.root_declared_type_names.contains(alias)
+                || self.root_declared_type_names.contains(&imported_leaf)
+            {
+                return;
+            }
+        }
         // Subtree shadowing: `use self::error::Error;` inside `mod libyaml`
         // names libyaml's OWN nested module — treating `self` like `crate`
         // matched the next segment against ROOT module names and bound the
@@ -7442,10 +7789,17 @@ impl CodeGen {
             {
                 start_idx += 1;
             }
-            segments[start_idx..]
-                .iter()
-                .find(|segment| known_modules.contains(*segment))
-                .cloned()
+            // Only scan deeper segments when the path is locally rooted: a
+            // foreign head (`serde::de::…`) with a middle segment matching a
+            // local sibling (`de`) is not a local import.
+            if start_idx == 0 {
+                None
+            } else {
+                segments[start_idx..]
+                    .iter()
+                    .find(|segment| known_modules.contains(*segment))
+                    .cloned()
+            }
         };
         if module_root.is_none() {
             // Re-exported aliases like `use crate::de::DeString;` can ultimately
@@ -7570,6 +7924,223 @@ impl CodeGen {
         }
     }
 
+    /// Does this crate-declared generic type store its TYPE args inline in the
+    /// emitted C++ class (directly, or transitively through another
+    /// inline-storing type)? Drives the manifest `args_inline` flag consumers
+    /// use to decide whether a FIELD of this type needs its args COMPLETE.
+    fn declared_type_generic_args_inline(&self, name: &str, module_path: &str) -> bool {
+        let Some(params) = self.declared_type_params.get(name) else {
+            return false;
+        };
+        if params.is_empty() {
+            return false;
+        }
+        let params: HashSet<String> = params.iter().cloned().collect();
+        let mut visiting: HashSet<String> = HashSet::new();
+        self.type_field_types_for_inline_check(name, module_path)
+            .iter()
+            .any(|ty| self.syn_type_stores_names_inline(ty, &params, &mut visiting))
+    }
+
+    /// Field types of a declared struct (scoped key preferred) plus all data
+    /// enum variant payload types.
+    fn type_field_types_for_inline_check(&self, name: &str, module_path: &str) -> Vec<syn::Type> {
+        let mut out: Vec<syn::Type> = Vec::new();
+        let scoped_key = if module_path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}::{}", module_path, name)
+        };
+        if let Some(fields) = self
+            .struct_field_types
+            .get(&scoped_key)
+            .or_else(|| self.struct_field_types.get(name))
+        {
+            out.extend(fields.values().cloned());
+        }
+        let bare_prefix = format!("{}::", name);
+        let scoped_prefix = format!("{}::", scoped_key);
+        for (key, field_types) in self.data_enum_variant_field_types.iter() {
+            if key.starts_with(&bare_prefix) || key.starts_with(&scoped_prefix) {
+                out.extend(field_types.iter().cloned());
+            }
+        }
+        out
+    }
+
+    /// True when `ty` stores any of `names` (generic param idents) INLINE:
+    /// named directly by value, inside a tuple/array, or as an arg of a
+    /// wrapper that itself stores args inline. Pointer positions (&/*/fn) and
+    /// pointer-backed wrappers (Vec/Box/maps) never count. Unknown foreign
+    /// wrappers count (conservative — transpiled iterators can hold
+    /// decltype members that instantiate their args).
+    fn syn_type_stores_names_inline(
+        &self,
+        ty: &syn::Type,
+        names: &HashSet<String>,
+        visiting: &mut HashSet<String>,
+    ) -> bool {
+        match ty {
+            syn::Type::Reference(_) | syn::Type::Ptr(_) | syn::Type::BareFn(_) => false,
+            syn::Type::Group(g) => self.syn_type_stores_names_inline(&g.elem, names, visiting),
+            syn::Type::Paren(p) => self.syn_type_stores_names_inline(&p.elem, names, visiting),
+            syn::Type::Tuple(t) => t
+                .elems
+                .iter()
+                .any(|e| self.syn_type_stores_names_inline(e, names, visiting)),
+            syn::Type::Array(a) => self.syn_type_stores_names_inline(&a.elem, names, visiting),
+            syn::Type::Path(tp) => {
+                let Some(last) = tp.path.segments.last() else {
+                    return false;
+                };
+                let last_name = last.ident.to_string();
+                if matches!(last.arguments, syn::PathArguments::None) {
+                    // Bare or module-qualified direct naming (`T`,
+                    // `mapping::IntoIter`) stores the named type inline.
+                    return names.contains(&last_name);
+                }
+                let arg_types: Vec<&syn::Type> = match &last.arguments {
+                    syn::PathArguments::AngleBracketed(args) => args
+                        .args
+                        .iter()
+                        .filter_map(|a| match a {
+                            syn::GenericArgument::Type(t) => Some(t),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if arg_types.is_empty() {
+                    return false;
+                }
+                if Self::segment_payload_is_pointer_indirect(&last.ident)
+                    || matches!(last_name.as_str(), "PhantomData" | "NonNull")
+                {
+                    return false;
+                }
+                // A LOCAL wrapper stores our names inline only if it stores its
+                // OWN params inline (recursive, cycle-guarded).
+                let local_wrapper_inline = if self.local_declared_types.contains(&last_name) {
+                    if visiting.contains(&last_name) {
+                        false
+                    } else {
+                        visiting.insert(last_name.clone());
+                        let wrapper_module = self
+                            .manifest_type_module_path
+                            .get(&last_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        let inline = self
+                            .declared_type_params
+                            .get(&last_name)
+                            .is_some_and(|params| !params.is_empty())
+                            && {
+                                let wrapper_params: HashSet<String> = self
+                                    .declared_type_params
+                                    .get(&last_name)
+                                    .cloned()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .collect();
+                                self.type_field_types_for_inline_check(
+                                    &last_name,
+                                    &wrapper_module,
+                                )
+                                .iter()
+                                .any(|f| {
+                                    self.syn_type_stores_names_inline(
+                                        f,
+                                        &wrapper_params,
+                                        visiting,
+                                    )
+                                })
+                            };
+                        visiting.remove(&last_name);
+                        inline
+                    }
+                } else {
+                    // Unknown/foreign wrapper: conservative — assume inline.
+                    true
+                };
+                if !local_wrapper_inline {
+                    return false;
+                }
+                arg_types
+                    .iter()
+                    .any(|t| self.syn_type_stores_names_inline(t, names, visiting))
+            }
+            _ => false,
+        }
+    }
+
+    /// Dep-manifest answer to "does this cross-crate wrapper store its args
+    /// behind a pointer?" — `Some(true)` only when the manifests say
+    /// `args_inline == false` unambiguously (crate-qualified match wins; an
+    /// unqualified name needs a unanimous answer across deps). `None` = no
+    /// knowledge, caller stays conservative.
+    pub(super) fn dep_manifest_wrapper_payload_is_pointer_indirect(
+        &self,
+        path: &syn::Path,
+        segment: &syn::PathSegment,
+    ) -> Option<bool> {
+        if self.dependency_ufcs_trait_manifests.is_empty() {
+            return None;
+        }
+        let seg_name = segment.ident.to_string();
+        let first = path.segments.first()?.ident.to_string();
+        let mut candidates: Vec<bool> = Vec::new();
+        for manifest in &self.dependency_ufcs_trait_manifests {
+            for dt in &manifest.declared_types {
+                if dt.name != seg_name {
+                    continue;
+                }
+                if manifest.module == first {
+                    return Some(!dt.args_inline);
+                }
+                candidates.push(dt.args_inline);
+            }
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+        if candidates.iter().all(|inline| !inline) {
+            return Some(true);
+        }
+        if candidates.iter().all(|inline| *inline) {
+            return Some(false);
+        }
+        None
+    }
+
+    /// Wrappers whose C++ runtime stores the payload behind a pointer, so a
+    /// field declaration instantiates fine with the payload merely forward
+    /// declared. Used by the STRICT member-ordering pass: payloads under these
+    /// contribute no completeness edge. Inline-storage wrappers (`Option`,
+    /// tuples, arrays, user structs) stay hard.
+    fn segment_payload_is_pointer_indirect(ident: &syn::Ident) -> bool {
+        matches!(
+            ident.to_string().as_str(),
+            "Vec"
+                | "VecDeque"
+                | "Box"
+                | "Rc"
+                | "Arc"
+                | "Weak"
+                | "HashMap"
+                | "HashSet"
+                | "BTreeMap"
+                | "BTreeSet"
+                | "BinaryHeap"
+                | "IndexMap"
+                | "IndexSet"
+                | "LinkedList"
+        )
+    }
+    // NOTE: iterator families (Iter/IntoIter/Keys/...) are deliberately NOT
+    // classified indirect: transpiled cross-crate iterators can hold
+    // decltype-typed members that instantiate Bucket<K,V> (and thus K/V) at
+    // field-declaration time (indexmap's map::IntoIter<Value, Value>).
+
 
 
     /// Crate roots that are never a local sibling module: the standard library
@@ -7587,6 +8158,11 @@ impl CodeGen {
         forward_declable_types_by_module: &HashMap<String, HashSet<String>>,
         imported_name_to_module: &HashMap<String, String>,
         allow_forward_declable_type_skip: bool,
+        // In expression member-access positions (`Type::member(...)` inside a
+        // body emitted in the definitions phase) a forward-declared type is
+        // enough even though the path continues past the type segment; type
+        // positions (`module::Type::Assoc`) must keep the exact-tail gate.
+        allow_member_path_skip: bool,
         out: &mut HashSet<String>,
     ) {
         let Some(first) = path.segments.first() else {
@@ -7772,8 +8348,9 @@ impl CodeGen {
             && forward_declable_types_by_module
                 .get(&module_name)
                 .is_some_and(|types| types.contains(&type_name))
-            && resolved_type_segment_index
-                .is_some_and(|type_idx| path.segments.len() <= type_idx + 1)
+            && (allow_member_path_skip
+                || resolved_type_segment_index
+                    .is_some_and(|type_idx| path.segments.len() <= type_idx + 1))
         {
             return;
         }
@@ -11698,6 +12275,43 @@ impl CodeGen {
         } else {
             emitted
         }
+    }
+
+    /// Rust `place = local;` MOVES the local (or it is Copy, where a
+    /// `std::move` still copies for trivially-copyable C++ types). Without
+    /// the move, assigning a local holding a move-only value (a variant with
+    /// a String alternative: `self.state = state;`) selects the deleted copy
+    /// assignment. Reference-like bindings are left alone.
+    fn maybe_move_local_binding_assignment_rhs(
+        &self,
+        expr: &syn::Expr,
+        emitted: String,
+    ) -> String {
+        if emitted.trim_start().starts_with("std::move(") {
+            return emitted;
+        }
+        let syn::Expr::Path(path) = self.peel_paren_group_expr(expr) else {
+            return emitted;
+        };
+        if path.path.segments.len() != 1 || path.qself.is_some() {
+            return emitted;
+        }
+        let name = path.path.segments[0].ident.to_string();
+        if self.lookup_local_binding_type(&name).is_none()
+            || self.is_local_reference_binding_in_scope(&name)
+            || self.is_reference_binding_lowered_to_pointer_storage(&name)
+        {
+            return emitted;
+        }
+        // Only wrap when the emitted text is still the plain binding name —
+        // any lowering that rewrote the expression knows better than we do.
+        let cpp_name = self
+            .lookup_local_binding_cpp_name(&name)
+            .unwrap_or_else(|| escape_cpp_keyword(&name));
+        if emitted.trim() != cpp_name {
+            return emitted;
+        }
+        format!("std::move({})", emitted)
     }
 
     fn expr_is_unborrowed_pattern_binding(&self, expr: &syn::Expr) -> bool {
@@ -23969,6 +24583,62 @@ impl CodeGen {
 
 
 
+
+    /// Condition for an `if let` whose pattern is a BINDING-LESS data-enum
+    /// variant test (`State::FoundTag(_)`, `State::CheckForTag`, or an
+    /// or-pattern of those). The Option/Result surfaces don't apply — the
+    /// scrutinee is a std::variant, so the test is `variant_holds<Enum_Var>`.
+    /// Returns None for Option/Result patterns or patterns that bind.
+    fn if_let_binding_less_variant_condition(
+        &self,
+        pat: &syn::Pat,
+        scrutinee: &str,
+    ) -> Option<String> {
+        let variant_cond = |path: &syn::Path| -> Option<String> {
+            let last = path.segments.last()?.ident.to_string();
+            if matches!(last.as_str(), "Some" | "None" | "Ok" | "Err") {
+                return None;
+            }
+            if path.segments.len() < 2 {
+                return None;
+            }
+            let cpp_type = path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("_");
+            Some(format!(
+                "rusty::detail::variant_holds<{}>(rusty::detail::deref_if_pointer({}))",
+                cpp_type, scrutinee
+            ))
+        };
+        match pat {
+            syn::Pat::TupleStruct(ts)
+                if ts
+                    .elems
+                    .iter()
+                    .all(|e| matches!(e, syn::Pat::Wild(_))) =>
+            {
+                variant_cond(&ts.path)
+            }
+            syn::Pat::Path(pp) => variant_cond(&pp.path),
+            syn::Pat::Or(op) => {
+                let conds: Option<Vec<String>> = op
+                    .cases
+                    .iter()
+                    .map(|case| self.if_let_binding_less_variant_condition(case, scrutinee))
+                    .collect();
+                let conds = conds?;
+                if conds.is_empty() {
+                    None
+                } else {
+                    Some(conds.join(" || "))
+                }
+            }
+            _ => None,
+        }
+    }
 
     fn option_like_pattern_surface_for_expr(
         &self,

@@ -367,8 +367,11 @@ impl CodeGen {
             || self.is_force_exported_reexport_target(item_name)
     }
 
-    pub(super) fn should_prefix_named_module_root_type(type_name: &str) -> bool {
-        matches!(type_name, "Buffer")
+    pub(super) fn should_prefix_named_module_root_type(_type_name: &str) -> bool {
+        // Crate roots are namespace-wrapped, so a root type like itoa's
+        // `Buffer` cannot collide across crates; the `{crate}_{Type}`
+        // flattening this gated would strip the namespace consumers need.
+        false
     }
 
     /// Check if attributes contain `#[test]`.

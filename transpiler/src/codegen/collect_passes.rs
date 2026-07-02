@@ -1001,6 +1001,11 @@ impl CodeGen {
                     );
                 }
                 syn::Item::Fn(f) => {
+                    // Signature positions only need the type NAMEABLE: the
+                    // per-module pre-pass forward-declares structs and emits
+                    // data-enum variant aliases up front, so a fwd-declarable
+                    // param/return type must not force a completeness edge
+                    // (that fabricated the de<->loader style module cycles).
                     for input in &f.sig.inputs {
                         let syn::FnArg::Typed(pat_ty) = input else {
                             continue;
@@ -1010,7 +1015,7 @@ impl CodeGen {
                             known_modules,
                             forward_declable_types_by_module,
                             &imported_name_to_module,
-                            true,
+                            false,
                             out,
                         );
                     }
@@ -1020,7 +1025,7 @@ impl CodeGen {
                             known_modules,
                             forward_declable_types_by_module,
                             &imported_name_to_module,
-                            true,
+                            false,
                             out,
                         );
                     }
@@ -1053,16 +1058,23 @@ impl CodeGen {
                                 );
                             }
                             syn::ImplItem::Type(t) => {
+                                // An associated type becomes a member alias
+                                // (`using Output = value::Value;`) — its RHS
+                                // only needs the name declared, so a
+                                // fwd-declarable target must not force a
+                                // completeness edge (mapping→value cycle).
                                 self.collect_type_module_dependencies_strict(
                                     &t.ty,
                                     known_modules,
                                     forward_declable_types_by_module,
                                     &imported_name_to_module,
-                                    true,
+                                    false,
                                     out,
                                 );
                             }
                             syn::ImplItem::Fn(method) => {
+                                // See Item::Fn above: signatures need names,
+                                // not complete types, under the pre-pass.
                                 for input in &method.sig.inputs {
                                     let syn::FnArg::Typed(pat_ty) = input else {
                                         continue;
@@ -1072,7 +1084,7 @@ impl CodeGen {
                                         known_modules,
                                         forward_declable_types_by_module,
                                         &imported_name_to_module,
-                                        true,
+                                        false,
                                         out,
                                     );
                                 }
@@ -1082,7 +1094,7 @@ impl CodeGen {
                                         known_modules,
                                         forward_declable_types_by_module,
                                         &imported_name_to_module,
-                                        true,
+                                        false,
                                         out,
                                     );
                                 }
@@ -1154,13 +1166,17 @@ impl CodeGen {
                     self.known_modules,
                     self.imported_name_to_module,
                 ) {
+                    // allow_skip=true: `Type::member` in a (phase-2) body is
+                    // satisfied once the pre-pass has declared the type; only
+                    // names with no early declaration force ordering.
                     self.codegen
                         .record_path_module_dependency_for_hard_dependencies(
                             path,
                             self.known_modules,
                             self.forward_declable_types_by_module,
                             self.imported_name_to_module,
-                            false,
+                            true,
+                            true,
                             self.out,
                         );
                 }
@@ -1201,13 +1217,17 @@ impl CodeGen {
                     self.known_modules,
                     self.imported_name_to_module,
                 ) {
+                    // allow_skip=true: `Type::member` in a (phase-2) body is
+                    // satisfied once the pre-pass has declared the type; only
+                    // names with no early declaration force ordering.
                     self.codegen
                         .record_path_module_dependency_for_hard_dependencies(
                             path,
                             self.known_modules,
                             self.forward_declable_types_by_module,
                             self.imported_name_to_module,
-                            false,
+                            true,
+                            true,
                             self.out,
                         );
                 }
@@ -1634,12 +1654,29 @@ impl CodeGen {
     ) {
         match ty {
             syn::Type::Path(tp) => {
+                // `<Mapping as IntoIterator>::IntoIter` — the projection's
+                // C++ lowering names a type owned by the qself's module, so
+                // the qself type carries the dependency (the trait path does
+                // not resolve locally).
+                if let Some(qself) = &tp.qself {
+                    self.collect_type_module_dependencies_with_rehardening(
+                        &qself.ty,
+                        known_modules,
+                        forward_declable_types_by_module,
+                        imported_name_to_module,
+                        require_complete_types,
+                        allow_rehardening_when_soft,
+                        strict_member_ordering,
+                        out,
+                    );
+                }
                 self.record_path_module_dependency_for_hard_dependencies(
                     &tp.path,
                     known_modules,
                     forward_declable_types_by_module,
                     imported_name_to_module,
                     !require_complete_types,
+                    false,
                     out,
                 );
                 for segment in &tp.path.segments {
@@ -1648,10 +1685,29 @@ impl CodeGen {
                     };
                     let (nested_require_complete, nested_allow_rehardening_when_soft) =
                         if strict_member_ordering {
-                            (
-                                require_complete_types || allow_rehardening_when_soft,
-                                allow_rehardening_when_soft,
-                            )
+                            // A by-value field only needs its payload complete when
+                            // the wrapper stores it inline. Pointer-backed containers
+                            // (Box/Vec/maps/...) compile against a forward declaration
+                            // — treating their payloads as strict fabricates module
+                            // cycles (loader{Vec<(de::Event,_)>} ↔ de{Iterable(Loader)})
+                            // whose fallback order then breaks the GENUINE inline edge.
+                            // Cross-crate wrappers answer via their manifest's
+                            // args_inline (transpiled iterators store args inline
+                            // through decltype members; IndexMap does not).
+                            if Self::segment_payload_is_pointer_indirect(&segment.ident)
+                                || self
+                                    .dep_manifest_wrapper_payload_is_pointer_indirect(
+                                        &tp.path, segment,
+                                    )
+                                    .unwrap_or(false)
+                            {
+                                (false, false)
+                            } else {
+                                (
+                                    require_complete_types || allow_rehardening_when_soft,
+                                    allow_rehardening_when_soft,
+                                )
+                            }
                         } else {
                             match Self::segment_generic_payload_dependency_mode(&segment.ident) {
                                 GenericPayloadDependencyMode::NonHardTransitive => (false, false),
@@ -1839,6 +1895,7 @@ impl CodeGen {
                         self.forward_declable_types_by_module,
                         self.imported_name_to_module,
                         true,
+                        false,
                         self.out,
                     );
                 visit::visit_path(self, path);
@@ -1892,6 +1949,7 @@ impl CodeGen {
                         self.forward_declable_types_by_module,
                         self.imported_name_to_module,
                         true,
+                        false,
                         self.out,
                     );
                 visit::visit_path(self, path);
@@ -8107,6 +8165,31 @@ impl CodeGen {
         let mut result = collect_consuming_method_receiver_vars(stmts);
         for stmt in stmts {
             self.collect_value_call_argument_locals_in_stmt(stmt, &mut result);
+        }
+        // `place = local;` consumes the local (Rust moves assignment RHS
+        // places). A `const auto` binding would turn that emitted
+        // `std::move(local)` into a copy — deleted for variants holding
+        // move-only alternatives (`this->state = std::move(state)`).
+        struct AssignRhsLocals<'a> {
+            result: &'a mut HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for AssignRhsLocals<'_> {
+            fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
+                if let syn::Expr::Path(path) = assign.right.as_ref()
+                    && path.qself.is_none()
+                    && path.path.segments.len() == 1
+                {
+                    self.result
+                        .insert(path.path.segments[0].ident.to_string());
+                }
+                visit::visit_expr_assign(self, assign);
+            }
+        }
+        let mut visitor = AssignRhsLocals {
+            result: &mut result,
+        };
+        for stmt in stmts {
+            visitor.visit_stmt(stmt);
         }
         result
     }

@@ -24224,7 +24224,10 @@ fn test_leaf5153_fp_category_imported_alias_uses_runtime_variant_types() {
 }
 
 #[test]
-fn test_leaf5153_named_module_root_buffer_is_prefixed() {
+fn test_leaf5153_named_module_root_buffer_is_not_flattened() {
+    // Crate roots are namespace-wrapped, so a root `Buffer` keeps its
+    // plain name; the old `{crate}_{Type}` flattening stripped the
+    // namespace consumers qualify through.
     let out = transpile_str_module(
         r#"
         pub struct Buffer {
@@ -24238,14 +24241,13 @@ fn test_leaf5153_named_module_root_buffer_is_prefixed() {
     "#,
         "itoa",
     );
-    assert!(out.contains("export struct itoa_Buffer;"), "{out}");
-    assert!(out.contains("export struct itoa_Buffer {"), "{out}");
-    assert!(out.contains("itoa_Buffer itoa_Buffer::new_()"), "{out}");
-    assert!(!out.contains("Buffer Buffer::new_()"), "{out}");
+    assert!(out.contains("export struct Buffer {"), "{out}");
+    assert!(out.contains("Buffer Buffer::new_()"), "{out}");
+    assert!(!out.contains("itoa_Buffer"), "{out}");
 }
 
 #[test]
-fn test_leaf5153_external_root_buffer_path_uses_prefixed_module_type() {
+fn test_leaf5153_external_root_buffer_path_keeps_crate_namespace() {
     let file: syn::File = syn::parse_str(
         r#"
         extern crate itoa;
@@ -24257,11 +24259,13 @@ fn test_leaf5153_external_root_buffer_path_uses_prefixed_module_type() {
     .unwrap();
     let mut cg = CodeGen::new();
     let mut aliases = HashMap::new();
-    aliases.insert("itoa".to_string(), String::new());
+    // Namespace-wrapped deps keep their crate prefix (main.rs alias_target).
+    aliases.insert("itoa".to_string(), "itoa".to_string());
     cg.set_external_crate_module_aliases(aliases);
     cg.emit_file(&file, Some("serde_json"));
     let out = cg.into_output();
-    assert!(out.contains("itoa_Buffer::new_()"), "{out}");
+    assert!(out.contains("itoa::Buffer::new_()"), "{out}");
+    assert!(!out.contains("itoa_Buffer"), "{out}");
     assert!(!out.contains("static_cast<void>(Buffer::new_())"), "{out}");
 }
 
@@ -34804,4 +34808,121 @@ fn test_flat_umbrella_reexport_does_not_bind_deep_sibling_same_named_type() {
         Some("modx::sub::Widget"),
         "one-level re-export resolution must be preserved"
     );
+}
+
+#[test]
+fn test_mutual_module_cycle_orders_by_inline_field_edge() {
+    // de<->loader shape: loader's signature/body references to de are
+    // satisfiable via the pre-pass (fwd decls + early variant alias), while
+    // de's variant payload stores Loader INLINE — the only genuine
+    // completeness edge. The false reverse edges (Vec payload, method
+    // params, body member paths) must not force de before loader.
+    let out = transpile_str_module(
+        r#"
+        pub mod de {
+            use crate::loader::Loader;
+            pub enum Progress {
+                Nothing,
+                Iterable(Loader),
+            }
+        }
+        pub mod loader {
+            use crate::de::Progress;
+            pub struct Loader {
+                pub count: usize,
+                pub marks: Vec<(crate::de::Progress, usize)>,
+            }
+            impl Loader {
+                pub fn new(progress: Progress) -> Loader {
+                    let _ = progress;
+                    Loader { count: 0, marks: Vec::new() }
+                }
+            }
+        }
+    "#,
+        "cycle_order",
+    );
+    let loader_def = out
+        .find("struct Loader {")
+        .expect("Loader definition missing");
+    let iterable_def = out
+        .find("struct Progress_Iterable {")
+        .expect("Progress_Iterable definition missing");
+    assert!(
+        loader_def < iterable_def,
+        "Loader must be complete before Progress_Iterable stores it inline:\n{out}"
+    );
+}
+
+#[test]
+fn test_assignment_from_plain_local_moves_rhs() {
+    // `self.state = state;` — Rust assignment moves the local; without
+    // std::move the C++ variant with a move-only alternative selects its
+    // deleted copy assignment.
+    let out = transpile_str(
+        r#"
+        enum State {
+            Nothing,
+            Found(String),
+        }
+        struct Holder {
+            state: State,
+        }
+        impl Holder {
+            fn put(&mut self, other: State) {
+                let state = other;
+                self.state = state;
+            }
+        }
+    "#,
+    );
+    assert!(
+        out.contains("this->state = std::move(state)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn test_if_let_expression_variant_test_uses_variant_holds_not_is_some() {
+    // `x = if let State::Found(_) = self.state {..} else {..}` — the
+    // expression-form if-let lowerings must test the data-enum variant, not
+    // call the Option surface on a std::variant scrutinee.
+    let out = transpile_str(
+        r#"
+        enum State {
+            Nothing,
+            Waiting,
+            Found(String),
+        }
+        struct Holder {
+            state: State,
+        }
+        impl Holder {
+            fn advance(&mut self) -> i32 {
+                let n = if let State::Found(_) = self.state { 1 } else { 0 };
+                let m = if let State::Nothing | State::Waiting = self.state {
+                    let bump = 2;
+                    bump
+                } else {
+                    3
+                };
+                n + m
+            }
+        }
+    "#,
+    );
+    // Single-variant test lowers via the index() IIFE path; the or-pattern
+    // multi-statement form goes through the variant_holds condition.
+    assert!(
+        out.contains("rusty::detail::variant_holds<State_Found>")
+            || out.contains(".index() == 2"),
+        "{out}"
+    );
+    assert!(
+        out.contains("rusty::detail::variant_holds<State_Nothing>")
+            && out.contains("rusty::detail::variant_holds<State_Waiting>"),
+        "{out}"
+    );
+    assert!(!out.contains("_iflet_scrutinee.is_some()"), "{out}");
+    assert!(!out.contains("_iflet.is_some()"), "{out}");
 }

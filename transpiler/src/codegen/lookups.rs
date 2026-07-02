@@ -1895,6 +1895,31 @@ impl CodeGen {
         self.struct_field_types
             .get(&scoped)
             .and_then(|fields| fields.get(field_name).cloned())
+            .map(|ty| self.qualify_field_type_in_declaring_scope(&scoped, ty))
+            .or_else(|| {
+                if struct_name.contains("::") {
+                    return None;
+                }
+                // Rust resolves a bare struct name through the CURRENT
+                // scope's imports first: ser.rs's `use crate::libyaml::
+                // emitter::{Scalar, …}` names EMITTER's Scalar even though
+                // parser declares one too — the bare-key fallback below is
+                // last-registrant-wins and returned the wrong owner's
+                // fields (`tag: Option<Tag>` instead of `Option<String>`).
+                let scope_chain = self.module_stack.join("::");
+                let bound = self
+                    .resolve_scope_import_binding_target_for_exact_scope(&scope_chain, struct_name)
+                    .or_else(|| {
+                        self.resolve_scope_import_binding_target_for_exact_scope("", struct_name)
+                    })?;
+                let bound = bound.trim().trim_start_matches("::");
+                let key = bound.strip_prefix("crate::").unwrap_or(bound);
+                let fields = self.struct_field_types.get(key)?;
+                fields
+                    .get(field_name)
+                    .cloned()
+                    .map(|ty| self.qualify_field_type_in_declaring_scope(key, ty))
+            })
             .or_else(|| {
                 if struct_name.contains("::") {
                     return None;
@@ -1908,12 +1933,16 @@ impl CodeGen {
                                 .rsplit("::")
                                 .next()
                                 .is_some_and(|tail| tail == struct_name_tail))
-                        .then_some(fields)
+                        .then_some((key, fields))
                     })
                     .collect::<Vec<_>>();
-                qualified_tail_matches.dedup_by(|a, b| std::ptr::eq(*a, *b));
+                qualified_tail_matches.dedup_by(|a, b| std::ptr::eq(a.1, b.1));
                 if qualified_tail_matches.len() == 1 {
-                    qualified_tail_matches[0].get(field_name).cloned()
+                    let (key, fields) = qualified_tail_matches[0];
+                    fields
+                        .get(field_name)
+                        .cloned()
+                        .map(|ty| self.qualify_field_type_in_declaring_scope(key, ty))
                 } else {
                     None
                 }
@@ -1922,6 +1951,7 @@ impl CodeGen {
                 self.struct_field_types
                     .get(struct_name)
                     .and_then(|fields| fields.get(field_name).cloned())
+                    .map(|ty| self.qualify_field_type_in_declaring_scope(struct_name, ty))
             })
             .or_else(|| {
                 let mut tail_matches = self
@@ -1931,16 +1961,107 @@ impl CodeGen {
                         key.rsplit("::")
                             .next()
                             .is_some_and(|tail| tail == struct_name_tail)
-                            .then_some(fields)
+                            .then_some((key, fields))
                     })
                     .collect::<Vec<_>>();
-                tail_matches.dedup_by(|a, b| std::ptr::eq(*a, *b));
+                tail_matches.dedup_by(|a, b| std::ptr::eq(a.1, b.1));
                 if tail_matches.len() == 1 {
-                    tail_matches[0].get(field_name).cloned()
+                    let (key, fields) = tail_matches[0];
+                    fields
+                        .get(field_name)
+                        .cloned()
+                        .map(|ty| self.qualify_field_type_in_declaring_scope(key, ty))
                 } else {
                     None
                 }
             })
+    }
+
+    /// A stored field type is spelled with the DECLARING module's imports in
+    /// scope (`Option<Tag>` in libyaml/emitter.rs where `use crate::libyaml::
+    /// tag::Tag;` resolves it). Re-emitting it verbatim in a FOREIGN module
+    /// (ser.rs assigning `scalar.tag`) loses that context — the bare name
+    /// then falls to heuristics that mis-attributed it (`::ser::Tag`).
+    /// Resolve single-segment type-path idents through the declaring
+    /// module's scope bindings before handing the type to the caller;
+    /// unresolvable idents (generic params, locally-declared names,
+    /// primitives) stay untouched.
+    pub(super) fn qualify_field_type_in_declaring_scope(
+        &self,
+        struct_key: &str,
+        mut ty: syn::Type,
+    ) -> syn::Type {
+        let declaring_module = match struct_key.rsplit_once("::") {
+            Some((module, _)) => module.to_string(),
+            None => String::new(),
+        };
+        if declaring_module.is_empty() {
+            return ty;
+        }
+        struct DeclScopeQualifier<'a> {
+            cg: &'a CodeGen,
+            declaring_module: &'a str,
+        }
+        impl syn::visit_mut::VisitMut for DeclScopeQualifier<'_> {
+            fn visit_type_path_mut(&mut self, tp: &mut syn::TypePath) {
+                // Recurse into generic arguments first.
+                syn::visit_mut::visit_type_path_mut(self, tp);
+                if tp.qself.is_some() || tp.path.segments.len() != 1 {
+                    return;
+                }
+                let name = tp.path.segments[0].ident.to_string();
+                if !name.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+                    || types::map_primitive_type(&name).is_some()
+                {
+                    return;
+                }
+                // A type the declaring module itself declares resolves
+                // in place at any emission site via the scoped key.
+                let declared_here = format!("{}::{}", self.declaring_module, name);
+                if self.cg.local_declared_types.contains(&declared_here) {
+                    return;
+                }
+                let Some(bound) = self
+                    .cg
+                    .resolve_scope_import_binding_target_for_exact_scope(
+                        self.declaring_module,
+                        &name,
+                    )
+                else {
+                    return;
+                };
+                let bound = bound.trim().trim_start_matches("::");
+                if bound.is_empty() || bound.contains(' ') || bound.ends_with("::*") {
+                    return;
+                }
+                // Only rewrite through CRATE-ROOTED targets (`crate::libyaml
+                // ::tag::Tag`): a relative/`super` target re-resolved in the
+                // consuming scope can capture a same-named sibling ALIAS of
+                // different arity (indexmap's `set::Bucket<T>` vs the root
+                // `Bucket<K, V>` — "too many template arguments").
+                if bound != "crate"
+                    && !bound.starts_with("crate::")
+                {
+                    return;
+                }
+                let Ok(mut new_path) = syn::parse_str::<syn::Path>(bound) else {
+                    return;
+                };
+                // Preserve the original segment's generic arguments.
+                if let (Some(last_new), Some(orig)) =
+                    (new_path.segments.last_mut(), tp.path.segments.last())
+                {
+                    last_new.arguments = orig.arguments.clone();
+                }
+                tp.path = new_path;
+            }
+        }
+        let mut qualifier = DeclScopeQualifier {
+            cg: self,
+            declaring_module: &declaring_module,
+        };
+        syn::visit_mut::VisitMut::visit_type_mut(&mut qualifier, &mut ty);
+        ty
     }
 
     pub(super) fn lookup_struct_field_cpp_name(&self, struct_name: &str, field_name: &str) -> Option<String> {
@@ -2090,6 +2211,31 @@ impl CodeGen {
         } else {
             Some(self.substitute_type_params_in_type(&expected, &substitutions))
         }
+    }
+
+    /// Does the receiver's resolved owner type declare `method_name` as an
+    /// INHERENT method in this crate? Used to keep method-call syntax when a
+    /// blanket name lowering (str::as_bytes → rusty::as_bytes) would hijack a
+    /// local type's own method (libyaml::cstr::CStr::to_bytes).
+    pub(super) fn receiver_declares_inherent_method(
+        &self,
+        receiver: &syn::Expr,
+        method_name: &str,
+    ) -> bool {
+        let Some((owner, _)) = self.receiver_owner_name_and_type_substitutions(receiver) else {
+            return false;
+        };
+        let owner_tail = owner.rsplit("::").next().unwrap_or(owner.as_str());
+        self.inherent_impl_method_names
+            .iter()
+            .any(|(known_owner, methods)| {
+                if !methods.contains(method_name) {
+                    return false;
+                }
+                known_owner == &owner
+                    || known_owner == owner_tail
+                    || known_owner.ends_with(&format!("::{}", owner_tail))
+            })
     }
 
     pub(super) fn lookup_unique_c_like_owner_with_method(&self, method_name: &str) -> Option<String> {

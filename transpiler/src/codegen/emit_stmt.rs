@@ -4215,18 +4215,28 @@ impl CodeGen {
 
         if let syn::Expr::Let(let_expr) = &*if_expr.cond {
             let scrutinee = self.emit_expr_to_string(&let_expr.expr);
-            let (some_check, _none, unwrap, _neg) =
-                self.option_like_pattern_surface_for_expr(&let_expr.expr);
             self.writeln(&format!("auto&& _iflet_scrutinee = {};", scrutinee));
-            self.writeln(&format!("if (_iflet_scrutinee.{}()) {{", some_check));
-            self.indent += 1;
-            self.push_transient_statement_scope();
-            self.emit_if_let_statement_scope_bindings(
-                &let_expr.pat,
-                "_iflet_scrutinee",
-                unwrap,
-                scrutinee.ends_with(".as_mut()"),
-            );
+            if let Some(variant_cond) =
+                self.if_let_binding_less_variant_condition(&let_expr.pat, "_iflet_scrutinee")
+            {
+                // Data-enum variant test with no bindings: the Option surface
+                // (`.is_some()`) does not exist on the variant scrutinee.
+                self.writeln(&format!("if ({}) {{", variant_cond));
+                self.indent += 1;
+                self.push_transient_statement_scope();
+            } else {
+                let (some_check, _none, unwrap, _neg) =
+                    self.option_like_pattern_surface_for_expr(&let_expr.expr);
+                self.writeln(&format!("if (_iflet_scrutinee.{}()) {{", some_check));
+                self.indent += 1;
+                self.push_transient_statement_scope();
+                self.emit_if_let_statement_scope_bindings(
+                    &let_expr.pat,
+                    "_iflet_scrutinee",
+                    unwrap,
+                    scrutinee.ends_with(".as_mut()"),
+                );
+            }
         } else {
             let cond = self.emit_expr_to_string(&if_expr.cond);
             self.writeln(&format!("if ({}) {{", cond));
@@ -4317,17 +4327,25 @@ impl CodeGen {
         if let syn::Expr::Let(let_expr) = &*if_expr.cond {
             // if let Some(x) = expr { ... } else { ... }
             let scrutinee = self.emit_expr_to_string(&let_expr.expr);
-            let (some_check, _none_check, unwrap_method, _negated) =
-                self.option_like_pattern_surface_for_expr(&let_expr.expr);
-            // Extract the binding name from the pattern
-            let binding = self.extract_if_let_binding_name(&let_expr.pat);
             parts.push(format!("auto&& _iflet_scrutinee = {};", scrutinee));
-            parts.push(format!("if (_iflet_scrutinee.{}()) {{", some_check));
-            if let Some(name) = &binding {
-                parts.push(format!(
-                    "auto {} = _iflet_scrutinee.{}();",
-                    name, unwrap_method
-                ));
+            if let Some(variant_cond) =
+                self.if_let_binding_less_variant_condition(&let_expr.pat, "_iflet_scrutinee")
+            {
+                // Data-enum variant test with no bindings: the Option surface
+                // (`.is_some()`) does not exist on the variant scrutinee.
+                parts.push(format!("if ({}) {{", variant_cond));
+            } else {
+                let (some_check, _none_check, unwrap_method, _negated) =
+                    self.option_like_pattern_surface_for_expr(&let_expr.expr);
+                // Extract the binding name from the pattern
+                let binding = self.extract_if_let_binding_name(&let_expr.pat);
+                parts.push(format!("if (_iflet_scrutinee.{}()) {{", some_check));
+                if let Some(name) = &binding {
+                    parts.push(format!(
+                        "auto {} = _iflet_scrutinee.{}();",
+                        name, unwrap_method
+                    ));
+                }
             }
         } else {
             let cond = self.emit_expr_to_string(&if_expr.cond);

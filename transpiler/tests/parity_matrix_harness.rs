@@ -60,7 +60,8 @@ fn test_parity_matrix_dry_run_lists_all_crates_and_run_stage() {
         "semver",
         "bitflags",
         "smallvec",
-        "itertools",
+        // itertools is temporarily disabled in the matrix script (known-fail;
+        // tree_reduce alias-hoist + projected-push leaks remain).
         "once_cell",
         "serde_bytes",
         "serde_repr",

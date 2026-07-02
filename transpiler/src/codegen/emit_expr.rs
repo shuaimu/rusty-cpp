@@ -5640,7 +5640,10 @@ impl CodeGen {
                 return format!("{}{}assume_init()", receiver, member_op);
             }
         }
-        if mc.method == "len" && mc.args.is_empty() {
+        if mc.method == "len"
+            && mc.args.is_empty()
+            && !self.receiver_declares_inherent_method(&mc.receiver, "len")
+        {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.receiver_is_lazy_wrapper_type(&mc.receiver) {
                 if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -5771,11 +5774,20 @@ impl CodeGen {
         }
         // Rust `str::as_bytes()` → `rusty::as_bytes()`.
         // In C++, std::string_view doesn't have as_bytes(), so we use a helper.
-        if mc.method == "as_bytes" && mc.args.is_empty() {
+        // A LOCAL type declaring its own method keeps method-call syntax
+        // (libyaml::cstr::CStr::to_bytes) — the str helper only owns the name
+        // for string-like receivers.
+        if mc.method == "as_bytes"
+            && mc.args.is_empty()
+            && !self.receiver_declares_inherent_method(&mc.receiver, "as_bytes")
+        {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::as_bytes({})", receiver);
         }
-        if mc.method == "to_bytes" && mc.args.is_empty() {
+        if mc.method == "to_bytes"
+            && mc.args.is_empty()
+            && !self.receiver_declares_inherent_method(&mc.receiver, "to_bytes")
+        {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             return format!("rusty::as_bytes({})", receiver);
         }
@@ -17768,6 +17780,7 @@ impl CodeGen {
                     expected_ty.as_ref(),
                 );
                 let right = self.maybe_move_owned_pattern_binding_value(&a.right, right);
+                let right = self.maybe_move_local_binding_assignment_rhs(&a.right, right);
                 if let Some(name) = delayed_init_local {
                     let left = self
                         .lookup_local_binding_cpp_name(&name)

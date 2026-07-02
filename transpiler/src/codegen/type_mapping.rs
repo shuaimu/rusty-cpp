@@ -1907,11 +1907,15 @@ impl CodeGen {
                     let has_variant_name_shadow = self
                         .current_struct_has_data_enum_variant_named(&local_name)
                         || self.any_data_enum_variant_named(&local_name);
+                    // Scope-to-current-module only when the CURRENT module
+                    // actually declares the shadowed type. The bare-name
+                    // conditions matched declarations from OTHER modules and
+                    // fabricated `::ser::Tag` for serde_yaml's ser.rs (which
+                    // declares no Tag — the shadow was MaybeTag::Tag, the
+                    // type was libyaml::tag::Tag from a foreign field decl).
                     if has_variant_name_shadow
                         && (self.current_module_declares_type_name_exact(&local_name)
-                            || self.local_declared_types.contains(&local_name)
                             || self.local_declared_types.contains(&scoped_local_name)
-                            || self.type_alias_targets.contains_key(&local_name)
                             || self.type_alias_targets.contains_key(&scoped_local_name))
                     {
                         let module_scope = self.module_stack.join("::");

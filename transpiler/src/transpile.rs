@@ -105,6 +105,18 @@ pub struct UfcsDeclaredType {
     /// Number of generic TYPE params (lifetimes/consts excluded), e.g. 1 for
     /// `BytesDeserializer<E>`.
     pub arity: usize,
+    /// Whether the emitted C++ class stores its generic TYPE args inline
+    /// (`Bucket<K, V> { K key; }`, or transitively via another inline-storing
+    /// type), so a consumer FIELD of this type requires the args COMPLETE at
+    /// declaration. `false` = pointer-backed (`IndexMap`'s Vec storage) — a
+    /// forward declaration of the args suffices. Consumers must treat a
+    /// MISSING entry (older manifests) as `true` (conservative).
+    #[serde(default = "default_args_inline")]
+    pub args_inline: bool,
+}
+
+fn default_args_inline() -> bool {
+    true
 }
 
 fn default_ufcs_trait_manifest_version() -> u32 {
