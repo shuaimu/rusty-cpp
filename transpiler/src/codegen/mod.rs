@@ -16689,6 +16689,35 @@ impl CodeGen {
         let Some((root, remainder)) = lookup_path.split_once("::") else {
             return using_path.to_string();
         };
+        // A use-import target is CRATE-ROOTED (Rust 2018): when the path
+        // already names a real crate module (or sits under one), its root
+        // segment must not re-resolve through a sibling `use … as` binding
+        // recorded in the same scope. `use crate::libyaml::{emitter, error
+        // as libyaml};` inside `mod error` otherwise turns the emitter
+        // member's target `libyaml::emitter` into `(libyaml::error)::
+        // emitter` — the rename shadows the real module for EXPRESSION
+        // paths, but never for use-targets.
+        let names_real_module_path = {
+            let matches_declared = |candidate: &str| {
+                candidate == lookup_path
+                    || (lookup_path.starts_with(candidate)
+                        && lookup_path[candidate.len()..].starts_with("::"))
+            };
+            self.declared_module_paths.iter().any(|m| {
+                if matches_declared(m) {
+                    return true;
+                }
+                let escaped = m
+                    .split("::")
+                    .map(escape_cpp_keyword)
+                    .collect::<Vec<_>>()
+                    .join("::");
+                escaped != *m && matches_declared(&escaped)
+            })
+        };
+        if names_real_module_path {
+            return using_path.to_string();
+        }
         let root_variants = Self::scope_binding_key_variants(root);
         let root_is_private_alias = root_variants
             .iter()
@@ -17763,11 +17792,15 @@ impl CodeGen {
         if resolved_normalized == normalized {
             return None;
         }
-        if has_leading_colon {
-            Some(format!("::{}", resolved_normalized))
-        } else {
-            Some(resolved_normalized.to_string())
-        }
+        // The descendant resolution walked the CRATE-GLOBAL module subtree,
+        // so the remapped path is crate-rooted by construction — spell it
+        // absolutely even when the input was relative. A relative head
+        // re-resolves through same-named local C++ namespace aliases:
+        // serde_yaml's `mod error` (`namespace libyaml = ::libyaml::error;`)
+        // hijacked the relative `libyaml::error::Error` variant field into
+        // `(::libyaml::error)::error::Error` ("no member named 'error'").
+        let _ = has_leading_colon;
+        Some(format!("::{}", resolved_normalized))
     }
 
     fn try_resolve_nested_local_type_path(&self, path: &str) -> Option<String> {
@@ -36299,6 +36332,20 @@ impl CodeGen {
         let mut rewritten = self.rewrite_cpp_import_bound_type_spelling(&bound);
         if let Some(resolved_nested) = self.try_resolve_nested_local_type_path(&rewritten) {
             rewritten = resolved_nested;
+        }
+        // The binding was resolved through ANOTHER module's scope (`mod
+        // libyaml`'s `use self::error::Error;` re-export), so the result is
+        // crate-rooted knowledge. Spell it absolutely when its root is a
+        // crate module: a relative head re-resolves through same-named local
+        // C++ namespace aliases — serde_yaml's `mod error` (`namespace
+        // libyaml = ::libyaml::error;`) hijacked the relative
+        // `libyaml::error::Error` variant field into `(::libyaml::error)::
+        // error::Error` ("no member named 'error'").
+        if !rewritten.starts_with("::") {
+            let root = rewritten.split("::").next().unwrap_or("");
+            if !root.is_empty() && self.declared_module_names.contains(root) {
+                rewritten = format!("::{}", rewritten);
+            }
         }
         Some(rewritten)
     }

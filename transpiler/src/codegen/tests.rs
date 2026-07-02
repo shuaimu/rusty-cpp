@@ -3457,6 +3457,102 @@ fn test_module_topo_by_value_dep_wins_over_subtree_name_noise() {
 }
 
 #[test]
+fn test_grouped_use_rename_does_not_pollute_sibling_or_crate_rooted_paths() {
+    // serde_yaml's `mod error`: `use crate::libyaml::{emitter, error as
+    // libyaml};` — a grouped use whose RENAME member shadows the root
+    // `libyaml` module for expression paths. Two corruptions guarded here:
+    // (1) the SIBLING member's target `libyaml::emitter` re-resolved through
+    // the rename → `namespace emitter = ::libyaml::error::emitter;`
+    // (use-targets are crate-rooted; the rename never applies); (2) a
+    // `crate::…` path re-entering emit_path_to_string re-resolved its head
+    // through the scope-chain binding → the stuttered
+    // `::libyaml::error::error::Error`. Needs a SECOND type named `Error`
+    // in the crate (libyaml::emitter::Error) to reproduce — with one, the
+    // accidental agreement hid it.
+    let out = transpile_str(
+        r#"
+        mod error {
+            use crate::libyaml::{emitter, error as libyaml};
+            pub(crate) enum ErrorImpl {
+                Libyaml(libyaml::Error),
+                Emit(emitter::Error),
+                Other(u64),
+            }
+            pub(crate) fn wrap(e: libyaml::Error) -> ErrorImpl {
+                ErrorImpl::Libyaml(e)
+            }
+        }
+        mod libyaml {
+            pub(crate) mod emitter {
+                pub(crate) enum Error {
+                    Broken(u64),
+                }
+            }
+            pub(crate) mod error {
+                pub(crate) struct Error {
+                    pub code: u64,
+                }
+            }
+        }
+    "#,
+    );
+    assert!(
+        !out.contains("error::error::Error"),
+        "crate-rooted path must not re-resolve through the scope-local rename (stutter):\n{out}"
+    );
+    assert!(
+        !out.contains("namespace emitter = ::libyaml::error::emitter;"),
+        "sibling group member must bind to the real module, not through the rename:\n{out}"
+    );
+    assert!(
+        out.contains("namespace emitter = ::libyaml::emitter;"),
+        "sibling group member must emit the crate-rooted namespace alias:\n{out}"
+    );
+    assert!(
+        out.contains("wrap(::libyaml::error::Error e)"),
+        "renamed-alias param must spell the absolute un-stuttered type:\n{out}"
+    );
+}
+
+#[test]
+fn test_scope_bound_reexport_resolution_spells_absolute_path() {
+    // The variant field `libyaml::Error` resolves through `mod libyaml`'s
+    // OWN `use self::error::Error;` re-export (try_map_scope_bound_type_path
+    // consults the OTHER module's scope bindings) — crate-global knowledge,
+    // so the spelling must be absolute. The relative `libyaml::error::Error`
+    // it used to emit was hijacked wherever a same-named local C++ namespace
+    // alias is in scope (serde_yaml's `mod error`).
+    let out = transpile_str(
+        r#"
+        mod error {
+            pub(crate) enum ErrorImpl {
+                Libyaml(libyaml::Error),
+            }
+            pub(crate) struct Pos {}
+        }
+        mod libyaml {
+            pub(crate) mod emitter {
+                pub(crate) enum Error {}
+            }
+            pub(crate) mod error {
+                pub(crate) struct Error {}
+                pub(crate) struct Mark {}
+            }
+            use self::error::Error;
+        }
+    "#,
+    );
+    assert!(
+        out.contains("::libyaml::error::Error _0;"),
+        "re-export-resolved variant field must be absolute:\n{out}"
+    );
+    assert!(
+        !out.contains(" libyaml::error::Error _0;"),
+        "re-export-resolved variant field must not be relative:\n{out}"
+    );
+}
+
+#[test]
 fn test_self_expanding_alias_rewrite_spells_absolute_path() {
     // `use crate::libyaml::error as libyaml;` inside `mod error`: expanding
     // `libyaml::Error` to the full module path yields a RELATIVE spelling

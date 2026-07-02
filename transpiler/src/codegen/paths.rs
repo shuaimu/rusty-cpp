@@ -1367,6 +1367,16 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 if !rebuilt.is_empty() && rebuilt != segments {
                     segments = rebuilt;
                     joined = segments.join("::");
+                    // The descendant rebind resolved through CRATE-GLOBAL
+                    // module-subtree knowledge, so the rebuilt path is
+                    // crate-rooted by construction. Spell it absolutely: a
+                    // relative head re-resolves through same-named local
+                    // C++ namespace aliases (serde_yaml's `mod error` holds
+                    // `namespace libyaml = ::libyaml::error;`, turning a
+                    // relative `libyaml::error::Error` variant field into
+                    // `(::libyaml::error)::error::Error` — "no member named
+                    // 'error'").
+                    force_leading_colon = true;
                 }
             }
         }
@@ -1656,6 +1666,14 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 if !rebuilt.is_empty() && rebuilt != segments {
                     segments = rebuilt;
                     joined = segments.join("::");
+                    // Same rationale as the pre-loop rebind above: the
+                    // descendant resolution is crate-global, so the rebuilt
+                    // spelling is crate-rooted — a relative head would
+                    // re-resolve through same-named local C++ namespace
+                    // aliases (serde_yaml `mod error`'s `namespace libyaml =
+                    // ::libyaml::error;` hijacking the ErrorImpl_Libyaml
+                    // variant field).
+                    force_leading_colon = true;
                 }
             }
         }
@@ -2024,17 +2042,44 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                         let Some(first_local) = resolved.first().cloned() else {
                             break;
                         };
-                        let (bound_target, from_root_scope) = if let Some(bound_target) =
+                        // A `crate::…` path resolves ONLY against crate-root
+                        // items (the comment above is the semantics): the
+                        // scope-CHAIN lookup used to run as a fallback here
+                        // and re-applied a module-local rename to the root
+                        // module it shadows — inside serde_yaml's `mod error`
+                        // (`use crate::libyaml::error as libyaml;`),
+                        // `crate::libyaml::error::Error` re-expanded through
+                        // the local `libyaml` binding into the stuttered
+                        // `::libyaml::error::error::Error`.
+                        let Some(bound_target) =
                             self.resolve_scope_import_binding_path_for_scope("", &first_local)
-                        {
-                            (bound_target, true)
-                        } else if let Some(bound_target) =
-                            self.resolve_scope_import_binding_path(&first_local)
-                        {
-                            (bound_target, false)
-                        } else {
+                        else {
                             break;
                         };
+                        let from_root_scope = true;
+                        // Idempotence guard (mirrors the relative-path loop):
+                        // when the path already begins with the binding's
+                        // crate-stripped target, an earlier stage expanded it
+                        // — re-applying would stutter.
+                        let already_expanded = {
+                            let target_segments: Vec<&str> = bound_target
+                                .trim_start_matches("::")
+                                .split("::")
+                                .filter(|seg| !seg.is_empty())
+                                .skip_while(|seg| *seg == "crate" || *seg == "self")
+                                .collect();
+                            target_segments.len() > 1
+                                && resolved.len() >= target_segments.len()
+                                && resolved
+                                    .iter()
+                                    .take(target_segments.len())
+                                    .map(String::as_str)
+                                    .eq(target_segments.iter().copied())
+                        };
+                        if already_expanded {
+                            crate_force_leading_colon = true;
+                            break;
+                        }
                         if from_root_scope && !self.module_stack.is_empty() {
                             crate_force_leading_colon = true;
                         }
