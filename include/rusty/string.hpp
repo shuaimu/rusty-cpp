@@ -30,6 +30,23 @@ class str;
 // @safe
 // Rust-like owned String type
 // Manages a heap-allocated, growable UTF-8 string
+/// std::string::FromUtf8Error port: carries the offending bytes
+/// (serde_core's `e.into_bytes()`), Display via to_string, source() like
+/// io::Error. String::from_utf8 errors with this type.
+struct FromUtf8Error {
+    std::vector<uint8_t> bytes_;
+
+    static FromUtf8Error from_raw(const unsigned char* data, size_t len) {
+        FromUtf8Error e;
+        e.bytes_.assign(data, data + len);
+        return e;
+    }
+    std::vector<uint8_t> into_bytes() { return std::move(bytes_); }
+    const std::vector<uint8_t>& as_bytes() const { return bytes_; }
+    std::string to_string() const { return "invalid utf-8 sequence"; }
+    Option<const void*&> source() const { return Option<const void*&>{None}; }
+};
+
 class String {
 private:
     static bool is_valid_utf8_bytes(const unsigned char* data, size_t len) {
@@ -182,13 +199,14 @@ public:
     }
 
     template<typename Bytes>
-    static rusty::Result<String, String> from_utf8(Bytes&& bytes) {
+    static rusty::Result<String, FromUtf8Error> from_utf8(Bytes&& bytes) {
         if constexpr (requires { bytes.data(); bytes.size(); }) {
             const auto* raw = bytes.data();
             const size_t len = static_cast<size_t>(bytes.size());
             const auto* data = reinterpret_cast<const unsigned char*>(raw);
             if (!is_valid_utf8_bytes(data, len)) {
-                return rusty::Result<String, String>::Err(String::from("invalid utf-8"));
+                return rusty::Result<String, FromUtf8Error>::Err(
+                    FromUtf8Error::from_raw(data, len));
             }
             String s;
             if (len > 0) {
@@ -199,9 +217,9 @@ public:
                 s.len_ = len;
                 s.ensure_null_terminated();
             }
-            return rusty::Result<String, String>::Ok(std::move(s));
+            return rusty::Result<String, FromUtf8Error>::Ok(std::move(s));
         }
-        return rusty::Result<String, String>::Err(String::from("unsupported from_utf8 input"));
+        return rusty::Result<String, FromUtf8Error>::Err(FromUtf8Error{});
     }
     
     // Move constructor (String is move-only)

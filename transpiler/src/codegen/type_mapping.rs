@@ -3017,6 +3017,17 @@ impl CodeGen {
                 }
             }
         }
+        // alloc::string::FromUtf8Error ports to rusty::FromUtf8Error — the
+        // error type of rusty::String::from_utf8 (serde_yaml's
+        // ErrorImpl::FromUtf8 payload emitted `std::string::FromUtf8Error`,
+        // a nonexistent member of basic_string).
+        for prefix in ["std::string::", "alloc::string::", "core::string::", "string::"] {
+            if let Some(tail) = normalized.strip_prefix(prefix) {
+                if tail == "FromUtf8Error" {
+                    return Some("rusty::FromUtf8Error".to_string());
+                }
+            }
+        }
         None
     }
 
