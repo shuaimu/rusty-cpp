@@ -4752,7 +4752,7 @@ impl CodeGen {
         let mut referenced: HashSet<String> = HashSet::new();
         for variant in &e.variants {
             for field in &variant.fields {
-                Self::collect_type_referenced_idents(&field.ty, &mut referenced);
+                Self::collect_hoist_relevant_type_idents(&field.ty, &mut referenced);
             }
         }
         !referenced.iter().any(|name| {
@@ -4761,6 +4761,75 @@ impl CodeGen {
                     .local_declared_types
                     .iter()
                     .any(|local| local.ends_with(&format!("::{}", name)))
+        })
+    }
+
+    /// Like `collect_type_referenced_idents`, but a multi-segment path rooted
+    /// at std/alloc/core/libc counts as NON-local even when its tail collides
+    /// with a crate-local name — indexmap's `TryReserveErrorKind::Std(
+    /// alloc::collections::TryReserveError)` must not read as a reference to
+    /// indexmap's own `TryReserveError` struct (which kept the enum, and the
+    /// struct wrapping it, out of the early-hoist set: the struct's definition
+    /// then trailed the class bodies whose inline methods return it —
+    /// "invalid application of 'sizeof' to an incomplete type" in
+    /// rusty::Result's storage).
+    fn collect_hoist_relevant_type_idents(ty: &syn::Type, out: &mut HashSet<String>) {
+        if let syn::Type::Path(tp) = ty {
+            if tp.qself.is_none()
+                && tp.path.segments.len() >= 2
+                && tp
+                    .path
+                    .segments
+                    .first()
+                    .is_some_and(|seg| {
+                        matches!(
+                            seg.ident.to_string().as_str(),
+                            "std" | "alloc" | "core" | "libc"
+                        )
+                    })
+            {
+                // Still scan the GENERIC ARGUMENTS (Vec<LocalType> is local).
+                for seg in &tp.path.segments {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        for arg in &args.args {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                Self::collect_hoist_relevant_type_idents(inner, out);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        Self::collect_type_referenced_idents(ty, out);
+    }
+
+    /// Variant-ordering Part B (struct extension): a non-generic struct whose
+    /// field types reference no crate-local types EXCEPT names in
+    /// `allowed_local` (already-hoisted enums / earlier hoisted structs) can
+    /// be hoisted alongside them — indexmap's `TryReserveError { kind:
+    /// TryReserveErrorKind }` rides on its hoisted kind enum.
+    fn struct_is_early_hoistable(
+        &self,
+        s: &syn::ItemStruct,
+        allowed_local: &HashSet<String>,
+    ) -> bool {
+        if s.generics.params.iter().any(|p| {
+            matches!(p, syn::GenericParam::Type(_) | syn::GenericParam::Const(_))
+        }) {
+            return false;
+        }
+        let mut referenced: HashSet<String> = HashSet::new();
+        for field in &s.fields {
+            Self::collect_hoist_relevant_type_idents(&field.ty, &mut referenced);
+        }
+        !referenced.iter().any(|name| {
+            !allowed_local.contains(name)
+                && (self.local_declared_types.contains(name)
+                    || self
+                        .local_declared_types
+                        .iter()
+                        .any(|local| local.ends_with(&format!("::{}", name))))
         })
     }
 
@@ -4826,37 +4895,67 @@ impl CodeGen {
             }
         }
 
+        // Exclusion fixpoint over the COMBINED candidate set: a candidate whose
+        // impls reference a local NON-candidate type is dropped; references to
+        // other candidates (and their variant helper structs) are fine — the
+        // whole group hoists together (indexmap's TryReserveErrorKind mentions
+        // TryReserveError and vice versa; single-pass scanning dropped both
+        // because each saw the other before it was admitted).
+        let enum_candidates = candidates.clone();
         for item in items {
-            let syn::Item::Impl(imp) = item else {
-                continue;
-            };
-            let Some(target) = Self::impl_self_type_path(imp.self_ty.as_ref()) else {
-                continue;
-            };
-            let Some(target_name) = target.path.segments.last().map(|s| s.ident.to_string())
-            else {
-                continue;
-            };
-            if !candidates.contains(&target_name) {
-                continue;
-            }
-            let mut refs: HashSet<String> = HashSet::new();
-            {
-                let mut collector = IdentCollector { out: &mut refs };
-                for impl_item in &imp.items {
-                    syn::visit::Visit::visit_impl_item(&mut collector, impl_item);
+            if let syn::Item::Struct(st) = item {
+                if self.struct_is_early_hoistable(st, &enum_candidates) {
+                    candidates.insert(st.ident.to_string());
                 }
             }
-            let own_variant_prefix = format!("{}_", target_name);
-            let references_other_local = refs.iter().any(|name| {
-                if *name == target_name || name.starts_with(&own_variant_prefix) {
-                    return false;
+        }
+        loop {
+            let mut removed_any = false;
+            for item in items {
+                let syn::Item::Impl(imp) = item else {
+                    continue;
+                };
+                let Some(target) = Self::impl_self_type_path(imp.self_ty.as_ref()) else {
+                    continue;
+                };
+                let Some(target_name) =
+                    target.path.segments.last().map(|s| s.ident.to_string())
+                else {
+                    continue;
+                };
+                if !candidates.contains(&target_name) {
+                    continue;
                 }
-                self.name_is_crate_local_type(name)
-            });
-            if references_other_local {
-                candidates.remove(&target_name);
+                let mut refs: HashSet<String> = HashSet::new();
+                {
+                    let mut collector = IdentCollector { out: &mut refs };
+                    for impl_item in &imp.items {
+                        syn::visit::Visit::visit_impl_item(&mut collector, impl_item);
+                    }
+                }
+                let references_other_local = refs.iter().any(|name| {
+                    if candidates.contains(name)
+                        || candidates
+                            .iter()
+                            .any(|c| name.starts_with(&format!("{}_", c)))
+                    {
+                        return false;
+                    }
+                    self.name_is_crate_local_type(name)
+                });
+                if references_other_local {
+                    candidates.remove(&target_name);
+                    removed_any = true;
+                }
             }
+            if !removed_any {
+                break;
+            }
+        }
+        if std::env::var_os("RUSTY_CPP_DBG_HOIST").is_some() {
+            let mut sorted: Vec<&String> = candidates.iter().collect();
+            sorted.sort();
+            eprintln!("[hoist] candidates={:?}", sorted);
         }
         candidates
     }
@@ -4911,6 +5010,7 @@ impl CodeGen {
             let (early_enums, rest): (Vec<&syn::Item>, Vec<&syn::Item>) =
                 result.into_iter().partition(|item| {
                     matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()) || early_hoistable_data_enums.contains(&e.ident.to_string()))
+                        || matches!(item, syn::Item::Struct(st) if early_hoistable_data_enums.contains(&st.ident.to_string()))
                 });
             let mut final_result = Vec::with_capacity(early_enums.len() + rest.len());
             final_result.extend(early_enums);
@@ -5125,6 +5225,7 @@ impl CodeGen {
         let (early_enums, rest): (Vec<&syn::Item>, Vec<&syn::Item>) =
             ordered.into_iter().partition(|item| {
                 matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()) || early_hoistable_data_enums.contains(&e.ident.to_string()))
+                        || matches!(item, syn::Item::Struct(st) if early_hoistable_data_enums.contains(&st.ident.to_string()))
             });
         let mut final_ordered = Vec::with_capacity(early_enums.len() + rest.len());
         final_ordered.extend(early_enums);
@@ -5156,6 +5257,7 @@ impl CodeGen {
         let (early_enums, rest): (Vec<&syn::Item>, Vec<&syn::Item>) =
             final_ordered.into_iter().partition(|item| {
                 matches!(item, syn::Item::Enum(e) if e.variants.iter().all(|v| v.fields.is_empty()) || early_hoistable_data_enums.contains(&e.ident.to_string()))
+                        || matches!(item, syn::Item::Struct(st) if early_hoistable_data_enums.contains(&st.ident.to_string()))
             });
         let mut final_ordered = Vec::with_capacity(early_enums.len() + rest.len());
         final_ordered.extend(early_enums);

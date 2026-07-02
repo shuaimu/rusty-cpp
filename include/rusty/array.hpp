@@ -894,19 +894,48 @@ decltype(auto) as_ref_ptr(const T& value) {
     }
 }
 
+// Lazy zip view — Rust's `a.zip(b)` semantics. Eager vector
+// materialization hangs on unbounded sides (indexmap's
+// `(start..).zip(end..)` shift loops zip two `range_from`s and are
+// bounded only by the OUTER zip with the entries vector).
+template<typename Left, typename Right>
+struct zip_view {
+    Left left;
+    Right right;
+
+    using left_iter = decltype(std::begin(std::declval<Left&>()));
+    using left_sent = decltype(std::end(std::declval<Left&>()));
+    using right_iter = decltype(std::begin(std::declval<Right&>()));
+    using right_sent = decltype(std::end(std::declval<Right&>()));
+    using LeftElem = std::decay_t<decltype(*std::begin(std::declval<Left&>()))>;
+    using RightElem = std::decay_t<decltype(*std::begin(std::declval<Right&>()))>;
+    using value_type = std::tuple<LeftElem, RightElem>;
+
+    struct sentinel {};
+    struct iterator {
+        left_iter lit;
+        left_sent lend;
+        right_iter rit;
+        right_sent rend;
+        value_type operator*() const { return value_type(*lit, *rit); }
+        iterator& operator++() {
+            ++lit;
+            ++rit;
+            return *this;
+        }
+        bool operator==(sentinel) const { return !(lit != lend) || !(rit != rend); }
+        bool operator!=(sentinel s) const { return !(*this == s); }
+    };
+    iterator begin() {
+        return iterator{std::begin(left), std::end(left), std::begin(right), std::end(right)};
+    }
+    sentinel end() { return sentinel{}; }
+};
+
 template<typename Left, typename Right>
 auto zip(Left&& left, Right&& right) {
-    using LeftElem = std::decay_t<decltype(*std::begin(left))>;
-    using RightElem = std::decay_t<decltype(*std::begin(right))>;
-    std::vector<std::tuple<LeftElem, RightElem>> out;
-    auto left_it = std::begin(left);
-    auto left_end = std::end(left);
-    auto right_it = std::begin(right);
-    auto right_end = std::end(right);
-    for (; left_it != left_end && right_it != right_end; ++left_it, ++right_it) {
-        out.emplace_back(*left_it, *right_it);
-    }
-    return out;
+    return zip_view<std::decay_t<Left>, std::decay_t<Right>>{
+        std::forward<Left>(left), std::forward<Right>(right)};
 }
 
 /// Unified length helper for transpiled `.len()` calls.
@@ -2195,6 +2224,22 @@ struct range_from {
         ++start;
         return rusty::Option<T>(current);
     }
+
+    /// C++ iteration surface: an unbounded counting iterator. Consumers
+    /// (rusty::zip, range-for) terminate via the OTHER zipped side or an
+    /// explicit break — matching Rust's lazy `start..` semantics.
+    struct unbounded_iterator {
+        T cur;
+        T operator*() const { return cur; }
+        unbounded_iterator& operator++() {
+            ++cur;
+            return *this;
+        }
+        bool operator==(std::unreachable_sentinel_t) const { return false; }
+        bool operator!=(std::unreachable_sentinel_t) const { return true; }
+    };
+    unbounded_iterator begin() const { return unbounded_iterator{start}; }
+    std::unreachable_sentinel_t end() const { return {}; }
 
     /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
     /// `start..` is unbounded, so this mirrors an effectively-infinite count.

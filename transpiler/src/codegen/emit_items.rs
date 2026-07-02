@@ -1,12 +1,59 @@
 use super::*;
 
 impl CodeGen {
+    /// Resolve crate-LOCAL type aliases in a forward-declaration's parameter
+    /// list. A C++ type alias cannot be forward-declared, and the function
+    /// forward-decl block precedes the module bodies where the aliases are
+    /// emitted — unsafe_libyaml's `yaml_parser_set_input(.., handler:
+    /// yaml_read_handler_t, ..)` fwd-decl referenced
+    /// `::unsafe_libyaml::yaml::yaml_read_handler_t` two thousand lines
+    /// before `export using yaml_read_handler_t = rusty::UnsafeFn<...>;`
+    /// ("no type named 'yaml_read_handler_t' in namespace ..."). Spelling the
+    /// alias's UNDERLYING type in the fwd-decl sidesteps the ordering;
+    /// the later definition still uses the alias.
+    fn resolve_local_alias_fn_inputs(
+        &self,
+        inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]>,
+    ) -> syn::punctuated::Punctuated<syn::FnArg, syn::Token![,]> {
+        // ONLY function-pointer aliases are substituted: a struct alias's
+        // target can rely on the struct forward declarations, and blanket
+        // substitution corrupts signatures (a `&mut Indices` param lost its
+        // reference and emitted by-value `HashTable<size_t>`). A BareFn
+        // target has nothing to forward-declare — spell it out.
+        fn substitute(cg: &CodeGen, ty: &syn::Type) -> Option<syn::Type> {
+            match ty {
+                syn::Type::Reference(r) => {
+                    let inner = substitute(cg, &r.elem)?;
+                    let mut out = r.clone();
+                    out.elem = Box::new(inner);
+                    Some(syn::Type::Reference(out))
+                }
+                syn::Type::Paren(p) => substitute(cg, &p.elem),
+                syn::Type::Group(g) => substitute(cg, &g.elem),
+                _ => {
+                    let resolved = cg.resolve_type_alias_once(ty)?;
+                    matches!(resolved, syn::Type::BareFn(_)).then_some(resolved)
+                }
+            }
+        }
+        let mut resolved = inputs.clone();
+        for arg in resolved.iter_mut() {
+            if let syn::FnArg::Typed(pat_ty) = arg {
+                if let Some(ty) = substitute(self, &pat_ty.ty) {
+                    pat_ty.ty = Box::new(ty);
+                }
+            }
+        }
+        resolved
+    }
+
     pub(super) fn emit_function_forward_decl(&mut self, f: &syn::ItemFn, allow_non_unit: bool) -> bool {
         // Skip Rust libtest scaffolding and #[test] entrypoints in forward declarations.
         // Those are emitted via dedicated test-wrapper paths, not as top-level functions.
         if self.is_rust_libtest_main(f) || Self::has_test_attr(&f.attrs) {
             return false;
         }
+        let alias_resolved_inputs = self.resolve_local_alias_fn_inputs(&f.sig.inputs);
         let can_forward_declare = match &f.sig.output {
             syn::ReturnType::Default => true,
             syn::ReturnType::Type(_, ty) => {
@@ -64,8 +111,8 @@ impl CodeGen {
         } else {
             self.map_return_type(&f.sig.output)
         };
-        let mut params = self.map_fn_params(&f.sig.inputs);
-        let mut param_types = self.map_fn_param_types(&f.sig.inputs);
+        let mut params = self.map_fn_params(&alias_resolved_inputs);
+        let mut param_types = self.map_fn_param_types(&alias_resolved_inputs);
         let mut signature_has_unresolved_scoped_paths = self
             .forward_decl_type_spelling_has_unresolved_scoped_path(&return_type)
             || self.forward_decl_type_spelling_has_unresolved_scoped_path(&param_types);
@@ -79,8 +126,8 @@ impl CodeGen {
             } else {
                 self.map_return_type(&f.sig.output)
             };
-            let fallback_params = self.map_fn_params(&f.sig.inputs);
-            let fallback_param_types = self.map_fn_param_types(&f.sig.inputs);
+            let fallback_params = self.map_fn_params(&alias_resolved_inputs);
+            let fallback_param_types = self.map_fn_param_types(&alias_resolved_inputs);
             let fallback_has_unresolved = self
                 .forward_decl_type_spelling_has_unresolved_scoped_path(&fallback_return_type)
                 || self
