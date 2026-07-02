@@ -2452,10 +2452,69 @@ fn ensure_rusty_modules_pcm_dir(include_dir: &Path) -> Option<PathBuf> {
     let pcm_flat_dir = cache_root.join("pcm");
     let rusty_pcm_marker = pcm_flat_dir.join("rusty.pcm");
 
-    // Cache hit: if the marker .pcm exists AND it's newer than the
-    // source .cppm files we care about, reuse the existing cache.
+    // Cache hit: the marker .pcm must exist AND be at least as new as every
+    // runtime source that feeds the umbrella module (textually included
+    // headers under include/, port module interfaces under transpiled/, and
+    // CMakeLists.txt itself). A stale pcm is worse than a miss: `import
+    // rusty;` then deserializes an OLD class definition which clang merges
+    // with the NEW textual include in the same TU — duplicate overload sets
+    // ("call to 'from_utf8' is ambiguous") with line numbers from the
+    // pre-edit header. The Ninja re-build below is incremental, so a
+    // freshness rebuild only recompiles what the edit actually touched.
     if rusty_pcm_marker.exists() {
-        return Some(pcm_flat_dir);
+        // Prefer the stamp written after our last (re)build attempt: when a
+        // rebuild turns out to be a Ninja no-op (mtime-only touch, or an
+        // edited source no target consumes) the pcm keeps its old mtime and
+        // comparing against it would re-trigger the build on every call.
+        let freshness_stamp = cache_root.join("freshness.stamp");
+        let marker_mtime = fs::metadata(&freshness_stamp)
+            .and_then(|m| m.modified())
+            .ok()
+            .or_else(|| {
+                fs::metadata(&rusty_pcm_marker)
+                    .and_then(|m| m.modified())
+                    .ok()
+            });
+        let mut newest_source: Option<std::time::SystemTime> = fs::metadata(
+            repo_root.join("CMakeLists.txt"),
+        )
+        .and_then(|m| m.modified())
+        .ok();
+        let mut stack = vec![repo_root.join("include"), repo_root.join("transpiled")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let relevant = matches!(
+                    p.extension().and_then(|s| s.to_str()),
+                    Some("hpp") | Some("h") | Some("cppm")
+                );
+                if !relevant {
+                    continue;
+                }
+                if let Ok(modified) = fs::metadata(&p).and_then(|m| m.modified()) {
+                    newest_source = Some(match newest_source {
+                        Some(existing) if existing >= modified => existing,
+                        _ => modified,
+                    });
+                }
+            }
+        }
+        match (marker_mtime, newest_source) {
+            (Some(marker), Some(source)) if marker >= source => {
+                return Some(pcm_flat_dir);
+            }
+            (Some(_), None) => return Some(pcm_flat_dir),
+            _ => {
+                eprintln!(
+                    "  rusty module cache is older than runtime sources; rebuilding..."
+                );
+            }
+        }
     }
 
     fs::create_dir_all(&cmake_build_dir).ok()?;
@@ -2463,26 +2522,29 @@ fn ensure_rusty_modules_pcm_dir(include_dir: &Path) -> Option<PathBuf> {
 
     // Configure CMake (Ninja generator + clang).  If clang isn't
     // available the matrix would fail anyway since module precompile
-    // also requires clang.
-    let cmake_configure = std::process::Command::new("cmake")
-        .arg("-G")
-        .arg("Ninja")
-        .arg("-DCMAKE_BUILD_TYPE=Release")
-        .arg("-DCMAKE_CXX_COMPILER=clang++")
-        .arg(&repo_root)
-        .current_dir(&cmake_build_dir)
-        .output()
-        .ok()?;
-    if !cmake_configure.status.success() {
-        eprintln!(
-            "  Warning: CMake configure for rusty module cache failed:\n{}",
-            String::from_utf8_lossy(&cmake_configure.stderr)
-                .lines()
-                .take(5)
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        return None;
+    // also requires clang. Skip when the build tree is already
+    // configured (freshness rebuilds only need the incremental build).
+    if !cmake_build_dir.join("CMakeCache.txt").is_file() {
+        let cmake_configure = std::process::Command::new("cmake")
+            .arg("-G")
+            .arg("Ninja")
+            .arg("-DCMAKE_BUILD_TYPE=Release")
+            .arg("-DCMAKE_CXX_COMPILER=clang++")
+            .arg(&repo_root)
+            .current_dir(&cmake_build_dir)
+            .output()
+            .ok()?;
+        if !cmake_configure.status.success() {
+            eprintln!(
+                "  Warning: CMake configure for rusty module cache failed:\n{}",
+                String::from_utf8_lossy(&cmake_configure.stderr)
+                    .lines()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            return None;
+        }
     }
 
     let cmake_build = std::process::Command::new("cmake")
@@ -2526,6 +2588,9 @@ fn ensure_rusty_modules_pcm_dir(include_dir: &Path) -> Option<PathBuf> {
     }
 
     if rusty_pcm_marker.exists() {
+        // Record that the cache was validated/rebuilt against the current
+        // sources; the freshness check above compares against this stamp.
+        let _ = fs::write(cache_root.join("freshness.stamp"), b"");
         Some(pcm_flat_dir)
     } else {
         None
