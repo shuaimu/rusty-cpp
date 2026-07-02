@@ -116,10 +116,20 @@ impl NameResolver {
         }
         let leading = path.starts_with("::");
         let mut cur = path.trim_start_matches("::").to_string();
-        // Fixpoint with a hard iteration cap as a cycle guard.
+        // Fixpoint with a hard iteration cap as a cycle guard. Each alias
+        // edge applies AT MOST ONCE per resolution: a SELF-REFERENTIAL
+        // rename (`use crate::libyaml::error as libyaml;` inside a module —
+        // target `libyaml::error` begins with the alias `libyaml`) would
+        // otherwise re-match its own output every iteration
+        // (`libyaml::Mark` → `libyaml::error::error::…::Mark`, serde_yaml's
+        // fix_mark).
+        let mut used: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for _ in 0..32 {
-            match self.rewrite_once(&cur) {
-                Some(next) => cur = next,
+            match self.rewrite_once(&cur, &used) {
+                Some((next, alias)) => {
+                    used.insert(alias);
+                    cur = next;
+                }
                 None => break,
             }
         }
@@ -130,9 +140,16 @@ impl NameResolver {
         }
     }
 
-    fn rewrite_once(&self, path: &str) -> Option<String> {
+    fn rewrite_once<'a>(
+        &'a self,
+        path: &str,
+        used: &std::collections::HashSet<&str>,
+    ) -> Option<(String, &'a str)> {
         let mut best: Option<(&str, &str)> = None;
         for (alias, target) in &self.alias_edges {
+            if used.contains(alias.as_str()) {
+                continue;
+            }
             let is_prefix = path == alias
                 || (path.starts_with(alias.as_str()) && path[alias.len()..].starts_with("::"));
             if is_prefix && best.is_none_or(|(b, _)| alias.len() > b.len()) {
@@ -141,9 +158,9 @@ impl NameResolver {
         }
         let (alias, target) = best?;
         if path == alias {
-            Some(target.to_string())
+            Some((target.to_string(), alias))
         } else {
-            Some(format!("{}{}", target, &path[alias.len()..]))
+            Some((format!("{}{}", target, &path[alias.len()..]), alias))
         }
     }
 }
