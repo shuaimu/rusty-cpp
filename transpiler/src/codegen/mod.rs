@@ -3354,9 +3354,20 @@ impl CodeGen {
                 if dt.module_path.is_empty() || local_modules.contains(&dt.module_path) {
                     continue;
                 }
+                let qualified = format!("::{}::{}::{}", m.module, dt.module_path, dt.name);
                 repls.push((
                     format!("::{}::{}", dt.module_path, dt.name),
-                    format!("::{}::{}::{}", m.module, dt.module_path, dt.name),
+                    qualified.clone(),
+                ));
+                // The same reference comes out CRATE-RELATIVE
+                // (`de::value::StrDeserializer`) when an import-derived
+                // spelling loses the dep head; boundary_replace_path rejects
+                // a preceding `:`, so already-qualified forms are untouched,
+                // and the local_modules guard above keeps genuinely-local
+                // paths (a consumer-declared `de::value`) out of the rewrite.
+                repls.push((
+                    format!("{}::{}", dt.module_path, dt.name),
+                    qualified,
                 ));
             }
         }
