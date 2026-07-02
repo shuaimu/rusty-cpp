@@ -195,29 +195,28 @@ impl SafetyContext {
             // This prevents "Node" from matching "yaml::Node" (bug #8)
         }
 
-        // If the function is a method (contains "::"), check if the class is annotated
-        // E.g., for "rrr::Alarm::add", check if "rrr::Alarm" or "Alarm" is annotated
+        // If the function is scoped (contains "::"), check enclosing scopes
+        // from most-specific to least-specific. This covers both class-level
+        // annotations (`rusty::Box`) and namespace-level annotations (`rusty`).
         if func_name.contains("::") {
-            // Try to extract the class name by removing the method name
-            if let Some(last_colon) = func_name.rfind("::") {
-                let class_name = &func_name[..last_colon];
-
-                // Check if the class has an annotation
-                let class_query = FunctionSignature::from_name_only(class_name.to_string());
+            let parts: Vec<&str> = func_name.split("::").collect();
+            for scope_len in (1..parts.len()).rev() {
+                let scope_name = parts[..scope_len].join("::");
+                let scope_query = FunctionSignature::from_name_only(scope_name.clone());
                 for (sig, mode) in &self.function_overrides {
-                    if sig.matches(&class_query) {
+                    if sig.matches(&scope_query) {
                         return *mode;
                     }
 
                     // Bug #8 fix: Careful suffix matching
                     let sig_is_qualified = sig.name.contains("::");
-                    let class_is_qualified = class_name.contains("::");
+                    let scope_is_qualified = scope_name.contains("::");
 
-                    // Note: If sig_is_qualified && !class_is_qualified, we DON'T match anymore.
-                    // This prevents an unqualified "Node" from matching "yaml::Node" annotation.
-                    if sig_is_qualified && class_is_qualified {
-                        if sig.name.ends_with(&format!("::{}", class_name))
-                            || class_name.ends_with(&format!("::{}", sig.name))
+                    // Note: If sig_is_qualified && !scope_is_qualified, we DON'T match.
+                    // This prevents unqualified calls from matching arbitrary qualified scopes.
+                    if sig_is_qualified && scope_is_qualified {
+                        if sig.name.ends_with(&format!("::{}", scope_name))
+                            || scope_name.ends_with(&format!("::{}", sig.name))
                         {
                             return *mode;
                         }
@@ -494,6 +493,7 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
             // Forward declarations (class Foo;) should consume the annotation without applying it
             // This prevents the annotation from carrying over to the next declaration
             let is_forward_decl = is_forward_declaration(&accumulated_line);
+            let is_function_decl = is_function_declaration(&accumulated_line);
 
             if is_forward_decl && pending_annotation.is_some() {
                 // Forward declarations should NOT have annotations (they have no body)
@@ -507,6 +507,33 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                 accumulated_line.clear();
                 accumulating_for_annotation = false;
                 continue; // Skip to next line
+            }
+
+            // `@unsafe` / `@safe` can also target a local block or a single
+            // statement inside a function. The text pre-pass only records
+            // declarations for cross-function safety lookup; local blocks are
+            // represented later by the AST visitor as EnterUnsafe/ExitUnsafe.
+            // Consume these annotations here so they do not drift forward and
+            // accidentally attach to the next function-like declaration.
+            let is_standalone_block = accumulated_line.trim_start().starts_with('{');
+            let is_single_statement = !is_namespace_decl
+                && !is_class_decl
+                && !is_function_decl
+                && accumulated_line.trim_end().ends_with(';');
+            if pending_annotation.is_some() && (is_standalone_block || is_single_statement) {
+                debug_println!(
+                    "DEBUG SAFETY: Annotation consumed by single {}: {}",
+                    if is_standalone_block {
+                        "block"
+                    } else {
+                        "statement"
+                    },
+                    &accumulated_line
+                );
+                pending_annotation.take();
+                accumulated_line.clear();
+                accumulating_for_annotation = false;
+                continue;
             }
 
             // If we have a pending annotation and a complete declaration, apply it
@@ -530,6 +557,22 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                         );
                         // Also push namespace to context stack for qualifying nested function annotations.
                         if let Some(ns_name) = extract_namespace_name(&accumulated_line) {
+                            if ns_name != ANON_NAMESPACE_MARKER {
+                                let qualified_name =
+                                    match qualified_name_from_stack(&class_context_stack) {
+                                        Some(prefix) => format!("{}::{}", prefix, ns_name),
+                                        None => ns_name.clone(),
+                                    };
+                                let signature =
+                                    FunctionSignature::from_name_only(qualified_name.clone());
+                                context.function_overrides.push((signature, annotation));
+                                debug_println!(
+                                    "DEBUG SAFETY: Set namespace '{}' to {:?}",
+                                    qualified_name,
+                                    annotation
+                                );
+                            }
+
                             let net = accumulated_line.matches('{').count() as i32
                                 - accumulated_line.matches('}').count() as i32;
                             if net > 0 {
@@ -566,11 +609,10 @@ pub fn parse_safety_annotations(path: &Path) -> Result<SafetyContext, String> {
                             let net = accumulated_line.matches('{').count() as i32
                                 - accumulated_line.matches('}').count() as i32;
                             if net > 0 {
-                                class_context_stack
-                                    .push((class_name.clone(), current_depth));
+                                class_context_stack.push((class_name.clone(), current_depth));
                             }
                         }
-                    } else if is_function_declaration(&accumulated_line) {
+                    } else if is_function_decl {
                         // Function declaration - extract function signature (name + params) and apply ONLY to this function
                         if let Some(func_name) = extract_function_name(&accumulated_line) {
                             // Bug #8 fix: Build qualified function name using class context.
@@ -762,6 +804,21 @@ fn extract_namespace_name(line: &str) -> Option<String> {
 
 /// Check if a line looks like a function declaration
 fn is_function_declaration(line: &str) -> bool {
+    if let Some(paren_pos) = line.find('(') {
+        let before_paren = line[..paren_pos].trim();
+
+        // Obvious expression/declaration statements with calls are not
+        // function declarations. Without this guard, a local annotation like
+        // `// @unsafe` before `T* p = ::new (...) T(...);` is mis-recorded as
+        // a function annotation for `::new`.
+        if before_paren.starts_with("return ")
+            || before_paren.contains(" = ")
+            || before_paren.contains("::new")
+        {
+            return false;
+        }
+    }
+
     // First check if it's a template class/struct declaration (NOT a function)
     // Pattern: "template<...> class ..." or "template<...> struct ..."
     // We need to check if "class" or "struct" appears AFTER the template parameters (after '>')
@@ -1233,6 +1290,66 @@ namespace myapp {
     }
 
     #[test]
+    fn test_namespace_annotation_applies_to_nested_class_methods() {
+        let code = r#"
+// @safe
+namespace rusty {
+
+template<typename T>
+class Box {
+public:
+    static Box make(T value) { return Box(); }
+    T& operator*();
+};
+
+} // namespace rusty
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".hpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        assert_eq!(
+            context.get_function_safety("rusty::Box::make"),
+            SafetyMode::Safe,
+            "safe namespace should cover unannotated methods in nested classes"
+        );
+        assert_eq!(
+            context.get_function_safety("rusty::Box::operator*"),
+            SafetyMode::Safe,
+            "safe namespace should cover operators in nested classes"
+        );
+    }
+
+    #[test]
+    fn test_class_annotation_overrides_namespace_scope() {
+        let code = r#"
+// @safe
+namespace myapp {
+
+// @unsafe
+class UnsafeClass {
+public:
+    void method();
+};
+
+} // namespace myapp
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".cpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        assert_eq!(
+            context.get_function_safety("myapp::UnsafeClass::method"),
+            SafetyMode::Unsafe,
+            "class-level @unsafe should override enclosing @safe namespace"
+        );
+    }
+
+    #[test]
     fn test_function_safe_annotation() {
         let code = r#"
 // Default is unsafe
@@ -1531,6 +1648,79 @@ inline void unsafe_helper() {
             context.get_function_safety("outer::unsafe_helper"),
             SafetyMode::Unsafe,
             "@unsafe on a function inside an anonymous namespace must override the outer @safe namespace"
+        );
+    }
+
+    #[test]
+    fn test_unsafe_block_inside_safe_method_does_not_mark_method_unsafe() {
+        let code = r#"
+// @safe
+namespace rusty {
+
+template<typename T>
+class Box {
+    T* ptr;
+public:
+    T& operator*() {
+        // @unsafe
+        {
+            return *ptr;
+        }
+    }
+};
+
+}
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".hpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        assert_eq!(
+            context.get_function_safety("rusty::Box::operator*"),
+            SafetyMode::Safe,
+            "a local @unsafe block is an implementation detail; it must not \
+             make the containing safe method unsafe to call"
+        );
+    }
+
+    #[test]
+    fn test_unsafe_statement_inside_safe_function_does_not_create_function_annotation() {
+        let code = r#"
+// @safe
+namespace rusty {
+
+template<typename T>
+class Box {
+public:
+    static Box new_in(T value) {
+        auto raw = value;
+        // @unsafe { placement-new into freshly allocated raw bytes }
+        T* p = ::new (static_cast<void*>(raw)) T(value);
+        return Box(p);
+    }
+};
+
+}
+"#;
+
+        let mut file = NamedTempFile::with_suffix(".hpp").unwrap();
+        file.write_all(code.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let context = parse_safety_annotations(file.path()).unwrap();
+        assert_eq!(
+            context.get_function_safety("rusty::Box::new_in"),
+            SafetyMode::Safe,
+            "a local @unsafe statement must be consumed locally, not recorded \
+             as an unsafe function annotation"
+        );
+        assert_eq!(
+            context.get_function_safety("rusty::Box::::new"),
+            SafetyMode::Safe,
+            "placement-new syntax must not synthesize a bogus unsafe function \
+             annotation"
         );
     }
 }

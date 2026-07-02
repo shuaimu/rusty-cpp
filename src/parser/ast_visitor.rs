@@ -219,8 +219,7 @@ fn check_for_unsafe_annotation(entity: &Entity) -> bool {
             return false;
         }
         let is_line_comment = trimmed.starts_with("//");
-        let is_block_comment_single_line =
-            trimmed.contains("/*") && trimmed.contains("*/");
+        let is_block_comment_single_line = trimmed.contains("/*") && trimmed.contains("*/");
         let is_block_comment_open = trimmed.starts_with("/*") || trimmed.starts_with("*");
         if !is_line_comment && !is_block_comment_single_line && !is_block_comment_open {
             return false;
@@ -343,9 +342,7 @@ pub fn get_qualified_name(entity: &Entity) -> String {
                     }
                 }
             }
-            EntityKind::ClassDecl
-            | EntityKind::StructDecl
-            | EntityKind::ClassTemplate => {
+            EntityKind::ClassDecl | EntityKind::StructDecl | EntityKind::ClassTemplate => {
                 if crossed_function_body {
                     // Local-method-body type — skip the enclosing class.
                 } else if let Some(parent_name) = parent.get_name() {
@@ -484,6 +481,7 @@ pub struct Variable {
     pub name: String,
     pub type_name: String,
     pub is_reference: bool,
+    pub is_rvalue_reference: bool,
     #[allow(dead_code)]
     pub is_pointer: bool,
     pub is_const: bool,
@@ -1282,8 +1280,10 @@ pub fn extract_variable(entity: &Entity) -> Variable {
     let type_info = entity.get_type().unwrap();
     let type_name = type_to_string(&type_info);
 
+    let type_kind = type_info.get_kind();
+    let is_rvalue_reference = matches!(type_kind, TypeKind::RValueReference);
     let is_reference = matches!(
-        type_info.get_kind(),
+        type_kind,
         TypeKind::LValueReference | TypeKind::RValueReference
     );
     let is_pointer = matches!(type_info.get_kind(), TypeKind::Pointer);
@@ -1320,6 +1320,7 @@ pub fn extract_variable(entity: &Entity) -> Variable {
         name,
         type_name,
         is_reference,
+        is_rvalue_reference,
         is_pointer,
         is_const,
         is_unique_ptr,
@@ -1459,8 +1460,7 @@ fn source_line_has_initializer(line: &str, name: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = line[start..].find(name) {
         let abs = start + pos;
-        let before_ok = abs == 0
-            || !is_ident_byte(bytes[abs - 1]);
+        let before_ok = abs == 0 || !is_ident_byte(bytes[abs - 1]);
         let after = abs + name_bytes.len();
         let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
         if before_ok && after_ok {

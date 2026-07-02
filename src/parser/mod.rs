@@ -187,8 +187,8 @@ pub fn parse_cpp_file_with_includes_defines_and_args(
                     .windows(2)
                     .any(|pair| pair[0] == "-x" && pair[1] == "c++-module");
 
-            let recoverable =
-                first_error_text.contains("AstDeserialization") || first_error_text.contains("Crash");
+            let recoverable = first_error_text.contains("AstDeserialization")
+                || first_error_text.contains("Crash");
             if !has_module_args || !recoverable {
                 return Err(format!("Failed to parse file: {:?}", first_error));
             }

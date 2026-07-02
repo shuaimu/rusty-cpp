@@ -509,17 +509,15 @@ fn transpile_crate(
     // against a previous run surface changes in the slot count.
     let slot_manifest_path = output_dir.join("rusty_hand_slots.md");
     let slot_manifest = slots::format_manifest(&hand_slots);
-    std::fs::write(&slot_manifest_path, &slot_manifest).map_err(|e| {
-        format!(
-            "Failed to write {}: {}",
-            slot_manifest_path.display(),
-            e
-        )
-    })?;
+    std::fs::write(&slot_manifest_path, &slot_manifest)
+        .map_err(|e| format!("Failed to write {}: {}", slot_manifest_path.display(), e))?;
 
     println!("\nGenerated {}", cmake_path.display());
     if hand_slots.is_empty() {
-        println!("Slot manifest: 0 slots — see {}", slot_manifest_path.display());
+        println!(
+            "Slot manifest: 0 slots — see {}",
+            slot_manifest_path.display()
+        );
     } else {
         println!(
             "Slot manifest: {} slot(s) across {} file(s) — see {}",
@@ -1562,10 +1560,11 @@ fn cpp_has_invalid_codegen_pattern(cpp: &str) -> bool {
     // Match either standalone `<auto>` or `<auto,` to catch first or
     // intermediate positions. False positives possible in string
     // literals or comments but they're rare.
-    cpp.contains("<auto>") || cpp.contains("<auto,") || cpp.contains(", auto>")
+    cpp.contains("<auto>")
+        || cpp.contains("<auto,")
+        || cpp.contains(", auto>")
         || cpp.contains(", auto,")
 }
-
 
 fn ensure_no_external_crate_todos(label: &str, cpp: &str, cppm_path: &Path) -> Result<(), String> {
     let unresolved = collect_external_crate_todo_markers(cpp);
@@ -2499,7 +2498,11 @@ fn run_stage_d_module_build(
             if unit.is_test_target || unit.is_dependency {
                 eprintln!(
                     "  Skipping {} '{}' (module): depends on skipped module",
-                    if unit.is_test_target { "test target" } else { "dependency" },
+                    if unit.is_test_target {
+                        "test target"
+                    } else {
+                        "dependency"
+                    },
                     unit.module_name
                 );
                 skipped_test_modules.insert(unit.module_name.clone());
@@ -2554,7 +2557,11 @@ fn run_stage_d_module_build(
                     .unwrap_or_else(|| "(no error line)".to_string());
                 eprintln!(
                     "  Skipping {} '{}' (module): precompile failed — {}",
-                    if unit.is_test_target { "test target" } else { "dependency" },
+                    if unit.is_test_target {
+                        "test target"
+                    } else {
+                        "dependency"
+                    },
                     unit.module_name,
                     first_err.chars().take(120).collect::<String>()
                 );
@@ -2622,7 +2629,11 @@ fn run_stage_d_module_build(
                     .unwrap_or_else(|| "(no error line)".to_string());
                 eprintln!(
                     "  Skipping {} '{}' (object): compile failed — {}",
-                    if unit.is_test_target { "test target" } else { "dependency" },
+                    if unit.is_test_target {
+                        "test target"
+                    } else {
+                        "dependency"
+                    },
                     unit.module_name,
                     first_err.chars().take(120).collect::<String>()
                 );
@@ -2663,7 +2674,13 @@ fn run_stage_d_module_build(
             let kept: Vec<RunnerTestEntry> = test_entries
                 .iter()
                 .enumerate()
-                .filter_map(|(idx, e)| if drop_indices.contains(&idx) { None } else { Some(e.clone()) })
+                .filter_map(|(idx, e)| {
+                    if drop_indices.contains(&idx) {
+                        None
+                    } else {
+                        Some(e.clone())
+                    }
+                })
                 .collect();
             test_entries = kept;
         }
@@ -2676,9 +2693,7 @@ fn run_stage_d_module_build(
     }
     let mut imported_targets: BTreeSet<String> = BTreeSet::new();
     for artifact in generated_cppm_files {
-        if !artifact.is_dependency
-            && !skipped_test_modules.contains(&artifact.module_name)
-        {
+        if !artifact.is_dependency && !skipped_test_modules.contains(&artifact.module_name) {
             imported_targets.insert(artifact.module_name.clone());
         }
     }
@@ -3584,8 +3599,7 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             // (quickcheck, rand, etc.) should be skipped, not fail the
             // whole parity test. The lib and dependency targets still
             // fail on unresolved externals because they're essential.
-            let is_skippable_target =
-                matches!(target.kind, metadata::TargetKind::Test);
+            let is_skippable_target = matches!(target.kind, metadata::TargetKind::Test);
             if args.incremental_transpile && cppm_path.exists() {
                 let reused = std::fs::read_to_string(&cppm_path).map_err(|e| {
                     format!(

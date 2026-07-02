@@ -826,10 +826,7 @@ impl Calc {
         content.contains(": limit(limit)"),
         "missing init list head: {content}"
     );
-    assert!(
-        content.contains("seen("),
-        "missing seen init: {content}"
-    );
+    assert!(content.contains("seen("), "missing seen init: {content}");
     // Regular method continues to emit normally.
     assert!(
         content.contains("bool over() const"),
@@ -994,7 +991,8 @@ pub fn make_widget(x: i32) -> Widget { Widget { x } }
     let close_pos = cpp.find("} // namespace foo::bar").unwrap();
     assert!(
         open_pos < struct_pos && struct_pos < close_pos,
-        "ordering wrong: open={open_pos} struct={struct_pos} close={close_pos}\n{cpp}"    );
+        "ordering wrong: open={open_pos} struct={struct_pos} close={close_pos}\n{cpp}"
+    );
 }
 
 #[test]
@@ -1049,11 +1047,7 @@ fn test_cxx_namespace_off_by_default() {
     let input = dir.path().join("flat_test.rs");
     let output_path = dir.path().join("flat_test.cppm");
 
-    std::fs::write(
-        &input,
-        "pub struct Widget { pub x: i32 }\n",
-    )
-    .unwrap();
+    std::fs::write(&input, "pub struct Widget { pub x: i32 }\n").unwrap();
 
     let output = transpiler_bin()
         .arg(input.to_str().unwrap())
@@ -1082,11 +1076,7 @@ fn test_auto_namespace_derives_from_module_name() {
     let input = dir.path().join("auto_ns.rs");
     let output_path = dir.path().join("auto_ns.cppm");
 
-    std::fs::write(
-        &input,
-        "pub struct Widget { pub x: i32 }\n",
-    )
-    .unwrap();
+    std::fs::write(&input, "pub struct Widget { pub x: i32 }\n").unwrap();
 
     let output = transpiler_bin()
         .arg(input.to_str().unwrap())
@@ -1115,7 +1105,8 @@ fn test_auto_namespace_derives_from_module_name() {
     );
     assert!(
         !cpp.contains("export namespace btree_port::btree::map"),
-        "should be plain `namespace`, not `export namespace`:\n{cpp}"    );
+        "should be plain `namespace`, not `export namespace`:\n{cpp}"
+    );
 }
 
 #[test]
@@ -1168,11 +1159,7 @@ fn test_auto_namespace_explicit_override_wins() {
     let input = dir.path().join("override.rs");
     let output_path = dir.path().join("override.cppm");
 
-    std::fs::write(
-        &input,
-        "pub struct Widget { pub x: i32 }\n",
-    )
-    .unwrap();
+    std::fs::write(&input, "pub struct Widget { pub x: i32 }\n").unwrap();
 
     let output = transpiler_bin()
         .arg(input.to_str().unwrap())
@@ -1194,5 +1181,6 @@ fn test_auto_namespace_explicit_override_wins() {
     );
     assert!(
         !cpp.contains("namespace btree_port::btree::map {"),
-        "auto-derived namespace should not be used when explicit is given:\n{cpp}"    );
+        "auto-derived namespace should not be used when explicit is given:\n{cpp}"
+    );
 }

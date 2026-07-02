@@ -256,8 +256,10 @@ pub fn format_manifest(slots: &[Slot]) -> String {
         count_distinct_files(slots)
     ));
     if slots.is_empty() {
-        out.push_str("_No slots detected. The transpiler did not emit any \
-                      TODO/skipped markers in this run._\n");
+        out.push_str(
+            "_No slots detected. The transpiler did not emit any \
+                      TODO/skipped markers in this run._\n",
+        );
         return out;
     }
     out.push_str("## Marker kind summary\n\n");
@@ -281,10 +283,7 @@ pub fn format_manifest(slots: &[Slot]) -> String {
     for (file, file_slots) in by_file {
         out.push_str(&format!("### `{}`\n\n", file));
         for slot in file_slots {
-            let sym = slot
-                .enclosing_symbol
-                .as_deref()
-                .unwrap_or("<file scope>");
+            let sym = slot.enclosing_symbol.as_deref().unwrap_or("<file scope>");
             out.push_str(&format!(
                 "- **L{}** `{}` ({}) — `{}`\n",
                 slot.line,

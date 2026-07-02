@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::annotations::{FunctionSignature, extract_annotations};
+use super::annotations::{FunctionSignature, extract_annotations, parse_lifetime_annotations};
 use super::external_annotations::ExternalAnnotations;
 use super::safety_annotations::{SafetyMode, parse_entity_safety};
 
@@ -26,11 +26,104 @@ pub struct HeaderCache {
 
 /// Strip template parameters from a name (e.g., "Option<T>" -> "Option")
 fn strip_template_params(name: &str) -> String {
+    // println!("DEBUG: Stripping template parameters from '{}'", name);
     if let Some(pos) = name.find('<') {
-        name[..pos].to_string()
+        let stripped_name = name[..pos].to_string();
+        // println!("DEBUG: Name after stripping: '{}'", stripped_name);
+        return stripped_name;
     } else {
         name.to_string()
     }
+}
+
+fn qualified_name_from_scope_stack(scope_stack: &[(String, i32)]) -> Option<String> {
+    let parts: Vec<&str> = scope_stack
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("::"))
+    }
+}
+
+fn is_namespace_line(line: &str) -> bool {
+    (line.starts_with("namespace ") || line.contains(" namespace ")) && line.contains('{')
+}
+
+fn extract_namespace_name(line: &str) -> Option<String> {
+    let namespace_pos = line.find("namespace")?;
+    let after_namespace = line[namespace_pos + "namespace".len()..].trim_start();
+    let name: String = after_namespace
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+
+    if name.is_empty() { None } else { Some(name) }
+}
+
+fn is_class_line(line: &str) -> bool {
+    (line.starts_with("class ")
+        || line.starts_with("struct ")
+        || line.contains(" class ")
+        || line.contains(" struct "))
+        && line.contains('{')
+}
+
+fn extract_class_name_for_lifetime_scan(line: &str) -> Option<String> {
+    let keyword = if let Some(pos) = line.find("class ") {
+        (pos, "class")
+    } else if let Some(pos) = line.find("struct ") {
+        (pos, "struct")
+    } else {
+        return None;
+    };
+
+    let after_keyword = line[keyword.0 + keyword.1.len()..].trim_start();
+    let raw_name: String = after_keyword
+        .chars()
+        .take_while(|c| {
+            c.is_alphanumeric()
+                || *c == '_'
+                || *c == ':'
+                || *c == '<'
+                || *c == '>'
+                || *c == '&'
+                || *c == ','
+                || *c == ' '
+                || *c == '*'
+        })
+        .collect();
+    let first_name = raw_name.split_whitespace().next()?;
+    let simple_name = first_name.rsplit("::").next().unwrap_or(first_name);
+
+    Some(strip_template_params(simple_name))
+}
+
+fn extract_annotated_function_name(line: &str) -> Option<String> {
+    if !line.contains('(') {
+        return None;
+    }
+
+    let before_paren = line.split('(').next()?.trim_end();
+    if before_paren.is_empty() {
+        return None;
+    }
+
+    if let Some(operator_pos) = before_paren.rfind("operator") {
+        return Some(before_paren[operator_pos..].trim().to_string());
+    }
+
+    let token = before_paren.split_whitespace().last()?;
+    let simple_name = token.rsplit("::").next().unwrap_or(token);
+    let name = strip_template_params(simple_name)
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '~')
+        .to_string();
+
+    if name.is_empty() { None } else { Some(name) }
 }
 
 impl HeaderCache {
@@ -52,6 +145,22 @@ impl HeaderCache {
     /// Get a function signature by name
     pub fn get_signature(&self, func_name: &str) -> Option<&FunctionSignature> {
         self.signatures.get(func_name)
+    }
+
+    fn insert_signature(&mut self, qualified_name: String, sig: FunctionSignature) {
+        if sig.return_lifetime.is_none() {
+            if let Some(existing) = self.signatures.get(&qualified_name) {
+                if existing.return_lifetime.is_some() {
+                    debug_println!(
+                        "DEBUG HEADER: Preserving existing lifetime signature for '{}'",
+                        qualified_name
+                    );
+                    return;
+                }
+            }
+        }
+
+        self.signatures.insert(qualified_name, sig);
     }
 
     /// Parse a header file and extract all annotated function signatures
@@ -98,6 +207,8 @@ impl HeaderCache {
             } else {
                 debug_println!("DEBUG HEADER: Parsed external annotations from header");
             }
+
+            self.parse_lifetime_annotations_from_text(&content);
         }
 
         // Initialize Clang
@@ -209,6 +320,74 @@ impl HeaderCache {
         }
 
         Ok(())
+    }
+
+    fn parse_lifetime_annotations_from_text(&mut self, content: &str) {
+        let mut pending_lifetime: Option<String> = None;
+        let mut scope_stack: Vec<(String, i32)> = Vec::new();
+        let mut current_depth = 0i32;
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("//") && trimmed.contains("@lifetime:") {
+                pending_lifetime = Some(trimmed.to_string());
+                continue;
+            }
+
+            if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("#") {
+                continue;
+            }
+
+            let opens = trimmed.matches('{').count() as i32;
+            let closes = trimmed.matches('}').count() as i32;
+
+            if let Some(comment) = pending_lifetime.take() {
+                if let Some(func_name) = extract_annotated_function_name(trimmed) {
+                    let qualified_name = match qualified_name_from_scope_stack(&scope_stack) {
+                        Some(prefix) => format!("{}::{}", prefix, func_name),
+                        None => func_name.clone(),
+                    };
+
+                    if let Some(mut sig) = parse_lifetime_annotations(&comment, func_name.clone()) {
+                        sig.name = qualified_name.clone();
+                        debug_println!(
+                            "DEBUG HEADER: Text lifetime annotation '{}' -> {:?}",
+                            qualified_name,
+                            sig
+                        );
+                        self.insert_signature(qualified_name, sig);
+                    }
+                } else if !trimmed.ends_with(';') && !trimmed.contains('{') {
+                    pending_lifetime = Some(comment);
+                }
+            }
+
+            if is_namespace_line(trimmed) {
+                if let Some(ns_name) = extract_namespace_name(trimmed) {
+                    if !ns_name.is_empty() {
+                        scope_stack.push((ns_name, current_depth + opens));
+                    }
+                }
+            } else if is_class_line(trimmed) {
+                if let Some(class_name) = extract_class_name_for_lifetime_scan(trimmed) {
+                    scope_stack.push((class_name, current_depth + opens));
+                }
+            }
+
+            current_depth += opens - closes;
+            if current_depth < 0 {
+                current_depth = 0;
+            }
+
+            while let Some((_, push_depth)) = scope_stack.last() {
+                if *push_depth > current_depth {
+                    scope_stack.pop();
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
     /// Parse headers from a C++ source file's includes
@@ -439,14 +618,24 @@ impl HeaderCache {
             | EntityKind::Constructor
             | EntityKind::FunctionTemplate => {
                 // Extract lifetime annotations
+                debug_println!("ALVIN DEBUG ANALYSIS: EXTRACTING ANNOTATIONS");
                 if let Some(mut sig) = extract_annotations(entity) {
                     // Always use qualified name for all functions to avoid namespace collisions
                     // This ensures functions like ns1::helper and ns2::helper are distinguished
                     let qualified_name = crate::parser::ast_visitor::get_qualified_name(entity);
-
                     // Update the signature name to use qualified name
                     sig.name = qualified_name.clone();
-                    self.signatures.insert(qualified_name, sig);
+                    debug_println!(
+                        "ALVIN DEBUG ANALYSIS: Found function '{}' with signature {:?} in header",
+                        sig.name,
+                        sig
+                    );
+                    self.insert_signature(qualified_name, sig);
+                } else {
+                    debug_println!(
+                        "ALVIN DEBUG ANALYSIS: No annotations found for function '{}'",
+                        entity.get_name().unwrap_or("<unnamed>".to_string())
+                    );
                 }
 
                 // Extract safety annotations from the entity itself

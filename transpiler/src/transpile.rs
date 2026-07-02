@@ -541,8 +541,7 @@ pub fn transpile_full_with_options(
                     || trimmed.contains("operator<")
                     || trimmed.contains("operator>")
                     || trimmed.contains("operator!="));
-            if is_defaulted_declarator
-                && prev_trimmed.as_ref().is_some_and(|prev| prev == &trimmed)
+            if is_defaulted_declarator && prev_trimmed.as_ref().is_some_and(|prev| prev == &trimmed)
             {
                 continue;
             }
@@ -1630,10 +1629,8 @@ mod tests {
         assert!(
             output.contains("add(1, 2)")
                 || output.contains("::add(1, 2)")
-                || output
-                    .contains("::add(static_cast<int32_t>(1), static_cast<int32_t>(2))")
-                || output
-                    .contains("add(static_cast<int32_t>(1), static_cast<int32_t>(2))"),
+                || output.contains("::add(static_cast<int32_t>(1), static_cast<int32_t>(2))")
+                || output.contains("add(static_cast<int32_t>(1), static_cast<int32_t>(2))"),
             "{output}"
         );
     }
@@ -1733,8 +1730,7 @@ mod tests {
         // the first argument inside the lambda.
         assert!(
             output.contains("rusty_ext::tap_err(result,")
-                || (output.contains("rusty_ext::tap_err(")
-                    && output.contains("})(result")),
+                || (output.contains("rusty_ext::tap_err(") && output.contains("})(result")),
             "{output}"
         );
         assert!(!output.contains("rusty::tap_err("));

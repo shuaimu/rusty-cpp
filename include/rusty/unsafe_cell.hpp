@@ -94,7 +94,7 @@ public:
 
     // Consume the cell and return the inner value by move.
     // Mirrors Rust's UnsafeCell::into_inner(self) -> T.
-    T into_inner() {
+    T into_inner() && {
         return std::move(value);
     }
 

@@ -80,7 +80,12 @@ fn normalize_constructor_name(name: &str) -> Option<String> {
             }
         }
         None
-    } else if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    } else if name
+        .chars()
+        .next()
+        .map(|c| c.is_uppercase())
+        .unwrap_or(false)
+    {
         Some(name.to_string())
     } else {
         None
@@ -639,7 +644,7 @@ fn convert_function(
                 VariableType::UniquePtr(param.type_name.clone()),
                 OwnershipState::Owned,
             )
-        } else if param.is_reference {
+        } else if param.is_reference && !param.is_rvalue_reference {
             if param.is_const {
                 (
                     VariableType::Reference(param.type_name.clone()),
@@ -2492,6 +2497,7 @@ mod tests {
             name: name.to_string(),
             type_name: type_name.to_string(),
             is_reference: false,
+            is_rvalue_reference: false,
             is_pointer: false,
             is_const: false,
             is_unique_ptr,

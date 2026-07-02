@@ -239,16 +239,31 @@ fn analyze_file(
         }
 
         // Also skip the project's include/ directory (third-party headers like rusty::Box)
-        if file_path.contains("/include/rusty/") || file_path.contains("/include/unified_") {
+        if file_path.contains("/include/rusty/")
+            || file_path.starts_with("include/rusty/")
+            || file_path.contains("/include/unified_")
+            || file_path.starts_with("include/unified_")
+        {
             return true;
         }
 
         false
     }
 
+    fn is_header_file(file_path: &str) -> bool {
+        matches!(
+            Path::new(file_path)
+                .extension()
+                .and_then(|ext| ext.to_str()),
+            Some("h" | "hh" | "hpp" | "hxx")
+        )
+    }
+
     // Check for unsafe pointer operations and unsafe propagation in safe functions
     let mut violations = Vec::new();
     debug_println!("DEBUG: Found {} functions in AST", ast.functions.len());
+
+    // println!("DEBUG: Found {} functions in AST", ast.functions.len()); //TEMPORARY CODE:: REMOVE BEFORE PUSHING
 
     // Canonical path of the file being checked. Used to filter out function
     // bodies that libclang surfaced via imports/headers — those should be
@@ -268,28 +283,8 @@ fn analyze_file(
             );
             continue;
         }
-
-        // Only analyze bodies whose source file matches the TU being checked.
-        // Functions from imported modules / other files have their own check
-        // pass; analyzing them here just produces duplicate findings.
         let fn_file = std::fs::canonicalize(&function.location.file)
             .unwrap_or_else(|_| PathBuf::from(&function.location.file));
-        if fn_file != main_file_canonical {
-            debug_println!(
-                "DEBUG: Skipping cross-file function '{}' from {} (current TU is {})",
-                function.name,
-                function.location.file,
-                main_file_canonical.display()
-            );
-            continue;
-        }
-
-        debug_println!(
-            "DEBUG: Processing function '{}' from '{}' with {} statements",
-            function.name,
-            function.location.file,
-            function.body.len()
-        );
 
         // TEMPORARY WORKAROUND: Treat all operator overloads as unsafe
         // This bypasses annotation matching issues with template operators
@@ -307,11 +302,38 @@ fn analyze_file(
             );
         }
 
+        // Only analyze bodies whose source file matches the TU being checked,
+        // except for safe inline/header functions. Header bodies are part of
+        // the included API contract and must be validated when a TU includes
+        // them. Non-header cross-file bodies (modules/other .cpp files) have
+        // their own check pass; analyzing them here creates duplicate findings.
+        let is_current_tu = fn_file == main_file_canonical;
+        let should_check_header_body = is_header_file(&function.location.file)
+            && function_safety == parser::safety_annotations::SafetyMode::Safe;
+        if !is_current_tu && !should_check_header_body {
+            debug_println!(
+                "DEBUG: Skipping cross-file function '{}' from {} (current TU is {})",
+                function.name,
+                function.location.file,
+                main_file_canonical.display()
+            );
+            continue;
+        }
+
+        debug_println!(
+            "DEBUG: Processing function '{}' from '{}' with {} statements",
+            function.name,
+            function.location.file,
+            function.body.len()
+        );
+
         if safety_context.should_check_function(&function.name) && !is_operator {
             debug_println!(
                 "DEBUG: Function '{}' is marked safe, performing checks",
                 function.name
             );
+            // //REMOVE BEFORE PUSHING
+            // println!("DEBUG: Function '{}' is marked safe, performing checks", function.name);
             // Check for pointer operations (pass the function's safety mode)
             let pointer_errors = analysis::pointer_safety::check_parsed_function_for_pointers(
                 function,
