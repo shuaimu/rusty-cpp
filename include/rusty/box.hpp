@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <concepts>
+#include <iterator>     // for std::begin/std::end/std::distance (Box::from(span))
 #include <new>          // for placement new
+#include <span>         // boxed-slice model: Box<std::span<T>>
 #include <string_view>
 #include <type_traits>  // for std::enable_if, std::is_convertible, std::is_same
 #include <utility>  // for std::move, std::forward
@@ -20,6 +22,24 @@
 
 // @safe
 namespace rusty {
+
+namespace detail {
+// Boxed-slice detection for Box<std::span<T>> (the C++ model of Rust's
+// `Box<[T]>`) — gates Box::from(slice).
+template<typename S>
+struct is_std_span : std::false_type {};
+template<typename E, std::size_t N>
+struct is_std_span<std::span<E, N>> : std::true_type {};
+template<typename S>
+inline constexpr bool is_std_span_v = is_std_span<S>::value;
+
+template<typename S>
+struct span_element {};
+template<typename E, std::size_t N>
+struct span_element<std::span<E, N>> {
+    using type = E;
+};
+} // namespace detail
 
 template<typename Container>
 auto as_slice(Container&& container);
@@ -56,6 +76,10 @@ private:
     }
 
 public:
+    // Detection marker for type-erasure wrappers (rusty::io::DynWrite
+    // unwraps a Box argument to dispatch on the inner writer).
+    using rusty_box_inner = T;
+
     // Constructors
     // No default constructor - Box must always own a value (non-nullable)
     Box() = delete;
@@ -118,6 +142,29 @@ public:
     // @lifetime: owned
     static Box make(T value) requires std::is_default_constructible_v<A> {
         return new_(std::move(value));
+    }
+
+    // Rust `Box<[T]>::from(&[T])` — copies the slice into fresh owned
+    // storage. C++ models a boxed slice as Box<std::span<T>>: the Box owns
+    // the span OBJECT, so the copied element buffer cannot ride the Box's
+    // destructor and is intentionally leaked (bounded by the number of
+    // parsed events; value-parity is what the parity harness observes).
+    // @lifetime: owned
+    template<typename Src>
+    static Box from(Src&& src)
+        requires std::is_default_constructible_v<A>
+            && rusty::detail::is_std_span_v<T>
+            && requires { std::begin(src); std::end(src); }
+    {
+        using Elem = std::remove_const_t<typename rusty::detail::span_element<T>::type>;
+        const auto len = static_cast<std::size_t>(
+            std::distance(std::begin(src), std::end(src)));
+        Elem* buf = len != 0 ? new Elem[len] : nullptr;
+        std::size_t i = 0;
+        for (auto&& v : src) {
+            buf[i++] = static_cast<Elem>(v);
+        }
+        return new_(T(buf, len));
     }
 
     // No copy constructor - Box cannot be copied

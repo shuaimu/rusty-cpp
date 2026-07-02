@@ -674,6 +674,152 @@ auto write_fmt(Writer* writer, FmtArg&& fmt_arg) {
     return write_fmt(*writer, std::forward<FmtArg>(fmt_arg));
 }
 
+// ── DynWrite: type-erased owning writer (Rust `Box<dyn io::Write>`) ─────
+//
+// Owns any concrete writer behind a vtable of plain function pointers, so
+// `Box<dyn Write + 'a>` fields/params (serde_yaml's Emitter) get a real
+// writer type instead of a `void*` that cannot dispatch. Dispatches through
+// the io::write/write_all free functions, so it works for any writer those
+// support (member write_all, member write_, byte-sink containers, …).
+class DynWrite {
+    struct VTable {
+        Result<size_t> (*write)(void*, std::span<const uint8_t>);
+        Result<std::tuple<>> (*write_all)(void*, std::span<const uint8_t>);
+        Result<std::tuple<>> (*flush)(void*);
+        void (*drop)(void*);
+    };
+
+    // A stored `rusty::Box<Inner>` dispatches on the INNER writer (a Box has
+    // no write members of its own; the transpiled `Emitter::new_(Box::new_(
+    // w))` argument converts through the owning constructor below).
+    template<typename W>
+    static decltype(auto) dispatch_target(void* obj) {
+        W& stored = *static_cast<W*>(obj);
+        if constexpr (requires { typename W::rusty_box_inner; }) {
+            return (*stored);
+        } else {
+            return (stored);
+        }
+    }
+
+    template<typename W>
+    static const VTable* vtable_for() {
+        static const VTable table = VTable{
+            [](void* obj, std::span<const uint8_t> buf) {
+                return io::write(dispatch_target<W>(obj), buf);
+            },
+            [](void* obj, std::span<const uint8_t> buf) {
+                return io::write_all(dispatch_target<W>(obj), buf);
+            },
+            [](void* obj) {
+                decltype(auto) w = dispatch_target<W>(obj);
+                if constexpr (requires { { w.flush() }; }) {
+                    (void)w.flush();
+                }
+                return Result<std::tuple<>>::ok(std::make_tuple());
+            },
+            [](void* obj) { delete static_cast<W*>(obj); },
+        };
+        return &table;
+    }
+
+    void* obj_ = nullptr;
+    const VTable* vtable_ = nullptr;
+
+public:
+    DynWrite() = default;
+
+    // Owning by-value construction from any concrete writer (the transpiled
+    // `Box::new_(writer)` argument moves through here).
+    template<typename W>
+        requires (!std::is_same_v<std::remove_cvref_t<W>, DynWrite>)
+    DynWrite(W&& writer)
+        : obj_(new std::remove_cvref_t<W>(std::forward<W>(writer))),
+          vtable_(vtable_for<std::remove_cvref_t<W>>()) {}
+
+    DynWrite(const DynWrite&) = delete;
+    DynWrite& operator=(const DynWrite&) = delete;
+    DynWrite(DynWrite&& other) noexcept
+        : obj_(other.obj_), vtable_(other.vtable_) {
+        other.obj_ = nullptr;
+        other.vtable_ = nullptr;
+    }
+    DynWrite& operator=(DynWrite&& other) noexcept {
+        if (this != &other) {
+            reset();
+            obj_ = other.obj_;
+            vtable_ = other.vtable_;
+            other.obj_ = nullptr;
+            other.vtable_ = nullptr;
+        }
+        return *this;
+    }
+    ~DynWrite() { reset(); }
+
+    void reset() {
+        if (obj_ != nullptr) {
+            vtable_->drop(obj_);
+            obj_ = nullptr;
+            vtable_ = nullptr;
+        }
+    }
+
+    bool is_some() const { return obj_ != nullptr; }
+
+    Result<size_t> write(std::span<const uint8_t> buf) {
+        if (obj_ == nullptr) {
+            return Result<size_t>::err(
+                Error(Error::Kind::InvalidInput, "DynWrite: empty writer"));
+        }
+        return vtable_->write(obj_, buf);
+    }
+    Result<std::tuple<>> write_all(std::span<const uint8_t> buf) {
+        if (obj_ == nullptr) {
+            return Result<std::tuple<>>::err(
+                Error(Error::Kind::InvalidInput, "DynWrite: empty writer"));
+        }
+        return vtable_->write_all(obj_, buf);
+    }
+    Result<std::tuple<>> flush() {
+        if (obj_ == nullptr) {
+            return Result<std::tuple<>>::err(
+                Error(Error::Kind::InvalidInput, "DynWrite: empty writer"));
+        }
+        return vtable_->flush(obj_);
+    }
+
+    // Rust's dyn-box DOWNCAST idiom `Box::from_raw(Box::into_raw(dyn_box)
+    // .cast::<W>())` (serde_yaml Serializer::into_inner recovering the
+    // concrete writer). `into_raw()` releases the erased storage as a handle
+    // whose `cast<W>()` re-derives the concrete writer pointer: the owning
+    // constructor stored the transpiled `Box::new_(w)` argument as a
+    // `rusty::Box<W>`, so the caller-asserted W unwraps through it (matching
+    // Rust, where the cast's soundness is the caller's promise).
+    struct RawHandle {
+        void* obj_ = nullptr;
+
+        template<typename W>
+        W* cast() && {
+            if (obj_ == nullptr) {
+                return nullptr;
+            }
+            auto* stored = static_cast<rusty::Box<W>*>(obj_);
+            W* inner = stored->into_raw();
+            delete stored;
+            obj_ = nullptr;
+            return inner;
+        }
+    };
+
+    RawHandle into_raw() && {
+        RawHandle handle{obj_};
+        // The handle now owns the storage; drop only the vtable identity.
+        obj_ = nullptr;
+        vtable_ = nullptr;
+        return handle;
+    }
+};
+
 // ── copy ───────────────────────────────────────────────
 
 /// Copy all bytes from reader to writer.
