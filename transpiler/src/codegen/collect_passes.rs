@@ -4778,6 +4778,23 @@ impl CodeGen {
             "serialize_value",
             "forward_serializer",
         ];
+        // The std iterator-entry surface + name-only-hint collisions from
+        // `skip_unqualified_cross_source_fallback` (emit_expr.rs): these are
+        // "never user extension shims" — registering a dep's same-named
+        // rusty_ext method makes the RESOLVER qualify them (serde_core built
+        // in the serde_yaml context resolved `into_iter` to
+        // `::indexmap::map::slice::rusty_ext::into_iter` — 12 errors), which
+        // bypasses the dedicated iterator lowering entirely.
+        const CROSS_CRATE_NAME_ONLY_COLLISIONS: [&str; 8] = [
+            "get",
+            "newline",
+            "whitespace",
+            "write",
+            "write_",
+            "into_iter",
+            "iter",
+            "iter_mut",
+        ];
         let locally_known_method_names: HashSet<String> = out
             .iter()
             .filter_map(|path| path.rsplit("::").next().map(str::to_string))
@@ -4789,6 +4806,7 @@ impl CodeGen {
             for (module, methods) in &dep.rusty_ext_methods_by_module {
                 for meth in methods {
                     if CROSS_CRATE_PRELUDE.contains(&meth.as_str())
+                        || CROSS_CRATE_NAME_ONLY_COLLISIONS.contains(&meth.as_str())
                         || locally_known_method_names.contains(meth)
                     {
                         continue;
