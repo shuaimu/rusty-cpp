@@ -616,6 +616,11 @@ pub struct CodeGen {
     /// (`Clone`, `Display`, …) keeps the non-UFCS lowering for it. Populated in
     /// `emit_file`.
     pub(crate) ufcs_declared_trait_names: std::collections::HashSet<String>,
+    pub(crate) ufcs_declared_trait_modules: std::collections::BTreeMap<String, String>,
+    /// Traits whose RuntimeHelper struct was actually EMITTED (generic
+    /// traits and non-module builds skip it) — gates the manifest's
+    /// declared_trait_modules so consumers never route to a missing helper.
+    pub(crate) emitted_runtime_helper_traits: std::collections::HashSet<String>,
     /// UFCS: crate-declared trait name → its declared method names (required +
     /// default). Folded into the per-crate manifest so a downstream crate's
     /// cross-crate dedup is METHOD-AWARE (avoids a same-named-but-unrelated
@@ -1699,6 +1704,8 @@ impl CodeGen {
             is_dependency_module: false,
             ufcs_method_classes: HashMap::new(),
             ufcs_declared_trait_names: std::collections::HashSet::new(),
+            ufcs_declared_trait_modules: std::collections::BTreeMap::new(),
+            emitted_runtime_helper_traits: std::collections::HashSet::new(),
             ufcs_declared_trait_methods: std::collections::BTreeMap::new(),
             ufcs_method_trait_owners: HashMap::new(),
             ufcs_emitted_trait_methods: std::collections::HashSet::new(),
@@ -3145,6 +3152,12 @@ impl CodeGen {
             version: 1,
             module: module.to_string(),
             declared_traits,
+            declared_trait_modules: self
+                .ufcs_declared_trait_modules
+                .iter()
+                .filter(|(name, _)| self.emitted_runtime_helper_traits.contains(*name))
+                .map(|(name, path)| (name.clone(), path.clone()))
+                .collect(),
             declared_trait_methods,
             method_owners,
             declared_types,
@@ -3977,6 +3990,8 @@ impl CodeGen {
         // UFCS Phase 7: scope emission to crate-declared traits.
         self.ufcs_declared_trait_names =
             crate::transpile::collect_declared_trait_names(&file.items);
+        self.ufcs_declared_trait_modules =
+            crate::transpile::collect_declared_trait_modules(&file.items);
         self.ufcs_declared_trait_methods =
             crate::transpile::collect_declared_trait_methods(&file.items);
         // UFCS Phase 7: method → crate-declared traits whose CONCRETE impls

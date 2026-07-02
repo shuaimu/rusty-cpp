@@ -3809,12 +3809,10 @@ impl CodeGen {
         if default_methods.is_empty() {
             return false;
         }
-        if !default_methods
-            .iter()
-            .any(|method| matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_))))
-        {
-            return false;
-        }
+        // Receiver-based defaults AND no-receiver statics are both emittable
+        // (statics as Self_-templated helper members) — a trait with ONLY
+        // static defaults (serde de::Error's invalid_value family) still
+        // gets its helper so non-overriding impls can route through it.
         let self_assoc_type_placeholders: Vec<String> = t
             .items
             .iter()
@@ -3827,39 +3825,52 @@ impl CodeGen {
             })
             .collect();
         let trait_name = t.ident.to_string();
+        self.emitted_runtime_helper_traits.insert(trait_name.clone());
         let helper_struct_name = format!("{}RuntimeHelper", escape_cpp_keyword(&trait_name));
-        let mut helper_method_names = HashSet::new();
-        for method in &default_methods {
-            let raw_name = method.sig.ident.to_string();
-            helper_method_names.insert(raw_name.clone());
-            helper_method_names.insert(escape_cpp_keyword(&raw_name));
-            helper_method_names.insert(Self::escape_cpp_method_name(&raw_name));
+        let has_receiver_default = default_methods
+            .iter()
+            .any(|method| matches!(method.sig.inputs.first(), Some(syn::FnArg::Receiver(_))));
+        // Registering the helper as the trait's runtime TYPE serves the
+        // receiver-dispatch rewrites; a trait with ONLY static defaults
+        // (serde de::Error) must NOT be registered — generic call sites
+        // (`E::invalid_length`) would resolve the trait NAME to the helper
+        // and bind `<de::ErrorRuntimeHelper>` where `<E>` belongs. Its
+        // helper is reached explicitly (`Helper::method<Concrete>(...)`).
+        if has_receiver_default {
+            let mut helper_method_names = HashSet::new();
+            for method in &default_methods {
+                let raw_name = method.sig.ident.to_string();
+                helper_method_names.insert(raw_name.clone());
+                helper_method_names.insert(escape_cpp_keyword(&raw_name));
+                helper_method_names.insert(Self::escape_cpp_method_name(&raw_name));
+            }
+            self.module_runtime_helper_trait_type_names
+                .insert(trait_name.clone(), helper_struct_name.clone());
+            self.module_runtime_helper_trait_type_names.insert(
+                self.scoped_type_key(&trait_name),
+                helper_struct_name.clone(),
+            );
+            for key in [
+                trait_name.clone(),
+                self.scoped_type_key(&trait_name),
+                helper_struct_name.clone(),
+                self.scoped_type_key(&helper_struct_name),
+            ] {
+                self.module_runtime_helper_trait_methods
+                    .insert(key, helper_method_names.clone());
+            }
+            self.module_runtime_helper_traits
+                .insert(helper_struct_name.clone());
+            self.module_runtime_helper_traits
+                .insert(self.scoped_type_key(&helper_struct_name));
         }
-        self.module_runtime_helper_trait_type_names
-            .insert(trait_name.clone(), helper_struct_name.clone());
-        self.module_runtime_helper_trait_type_names.insert(
-            self.scoped_type_key(&trait_name),
-            helper_struct_name.clone(),
-        );
-        for key in [
-            trait_name.clone(),
-            self.scoped_type_key(&trait_name),
-            helper_struct_name.clone(),
-            self.scoped_type_key(&helper_struct_name),
-        ] {
-            self.module_runtime_helper_trait_methods
-                .insert(key, helper_method_names.clone());
-        }
-        self.module_runtime_helper_traits
-            .insert(helper_struct_name.clone());
-        self.module_runtime_helper_traits
-            .insert(self.scoped_type_key(&helper_struct_name));
 
         self.writeln(&format!(
             "// Module-mode trait fallback for default methods on {}",
             t.ident
         ));
-        self.writeln(&format!("struct {} {{", helper_struct_name));
+        let helper_export = if self.module_name.is_some() { "export " } else { "" };
+        self.writeln(&format!("{}struct {} {{", helper_export, helper_struct_name));
         self.indent += 1;
 
         let mut emitted_any = false;
@@ -3868,10 +3879,13 @@ impl CodeGen {
                 continue;
             };
             let Some(syn::FnArg::Receiver(receiver)) = method.sig.inputs.first() else {
-                self.writeln(&format!(
-                    "// Rust-only trait default method skipped (no receiver): {}",
-                    method.sig.ident
-                ));
+                // NO-receiver provided method (a trait STATIC default like
+                // serde de::Error::invalid_value): Self can't be deduced from
+                // a receiver, so emit an explicit Self_-templated static —
+                // a non-overriding impl routes through
+                // `Helper::method<ConcreteSelf>(args)`.
+                self.emit_trait_static_default_helper_method(method, default_body);
+                emitted_any = true;
                 continue;
             };
 
@@ -4022,6 +4036,55 @@ impl CodeGen {
     /// type `U`). Each override delegates to the corresponding
     /// `rusty_ext::method_name(value_, args...)` free function emitted
     /// earlier in this scope.
+    /// A trait's NO-receiver provided method (`fn invalid_value(unexp, exp)
+    /// -> Self { Error::custom(...) }`) as an explicit Self_-templated static
+    /// inside the RuntimeHelper struct: `Helper::invalid_value<Concrete>(...)`
+    /// serves impls (including cross-crate consumers) that don't override it.
+    fn emit_trait_static_default_helper_method(
+        &mut self,
+        method: &syn::TraitItemFn,
+        default_body: &syn::Block,
+    ) {
+        let mut params: Vec<String> = Vec::new();
+        for (idx, arg) in method.sig.inputs.iter().enumerate() {
+            let syn::FnArg::Typed(pat_type) = arg else {
+                continue;
+            };
+            let name = match pat_type.pat.as_ref() {
+                syn::Pat::Ident(pi) => escape_cpp_keyword(&pi.ident.to_string()),
+                _ => format!("_arg{}", idx),
+            };
+            params.push(format!("auto {}", name));
+        }
+        self.writeln("template<typename Self_>");
+        let prev_struct = self.current_struct.clone();
+        self.current_struct = Some("Self_".to_string());
+        let mut self_scope = HashSet::new();
+        self_scope.insert("Self_".to_string());
+        self.type_param_scopes.push(self_scope);
+        self.callable_type_param_return_scopes.push(HashMap::new());
+        let mapped_return_type = self.map_return_type(&method.sig.output);
+        self.writeln(&format!(
+            "static {} {}({}) {{",
+            mapped_return_type,
+            escape_cpp_keyword(&method.sig.ident.to_string()),
+            params.join(", ")
+        ));
+        self.indent += 1;
+        self.push_return_value_scope(&mapped_return_type);
+        self.push_return_type_hint(&method.sig.output);
+        self.push_param_bindings(&method.sig.inputs);
+        self.emit_block(default_body);
+        self.pop_param_bindings();
+        self.pop_return_type_hint();
+        self.pop_return_value_scope();
+        self.indent -= 1;
+        self.writeln("}");
+        self.type_param_scopes.pop();
+        self.callable_type_param_return_scopes.pop();
+        self.current_struct = prev_struct;
+    }
+
     pub(super) fn emit_trait_adapter_specializations(
         &mut self,
         trait_name: &str,

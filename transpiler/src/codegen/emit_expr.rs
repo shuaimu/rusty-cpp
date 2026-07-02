@@ -5039,6 +5039,89 @@ impl CodeGen {
         ))
     }
 
+    /// `LocalError::invalid_value(unexp, exp)` where the local impl doesn't
+    /// override the DEP trait's PROVIDED STATIC: dispatch to the member when
+    /// it exists, else to the declaring crate's RuntimeHelper templated
+    /// static (`::serde_core::de::ErrorRuntimeHelper::invalid_value<Owner>`).
+    /// The if-constexpr keeps overridden statics (invalid_type) on the
+    /// member without needing local-override bookkeeping.
+    fn try_emit_dep_trait_static_default_call(&self, call: &syn::ExprCall) -> Option<String> {
+        let syn::Expr::Path(func_path) = call.func.as_ref() else {
+            return None;
+        };
+        if func_path.qself.is_some() || func_path.path.segments.len() < 2 {
+            return None;
+        }
+        let method = func_path.path.segments.last()?.ident.to_string();
+        let owner_seg = func_path.path.segments.iter().nth_back(1)?;
+        if !matches!(owner_seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let owner_name = owner_seg.ident.to_string();
+        // Owner must be a LOCALLY-declared type (a dep's own types keep the
+        // plain spelling — their members exist in the dep).
+        if !self.local_declared_types.contains(&owner_name) {
+            return None;
+        }
+        // Some dependency trait must declare the method AND carry its module
+        // path (manifest declared_trait_modules).
+        let mut helper: Option<(String, String, String)> = None;
+        for m in &self.dependency_ufcs_trait_manifests {
+            for (trait_name, methods) in &m.declared_trait_methods {
+                if !methods.iter().any(|mm| mm == &method) {
+                    continue;
+                }
+                let Some(module_path) = m.declared_trait_modules.get(trait_name) else {
+                    continue;
+                };
+                if helper.is_some() {
+                    return None; // ambiguous across deps/traits — stay safe
+                }
+                helper = Some((m.module.clone(), module_path.clone(), trait_name.clone()));
+            }
+        }
+        let (dep, module_path, trait_name) = helper?;
+        let owner_cpp = {
+            let owner_path: Vec<String> = func_path
+                .path
+                .segments
+                .iter()
+                .take(func_path.path.segments.len() - 1)
+                .map(|seg| seg.ident.to_string())
+                .collect();
+            let joined = owner_path.join("::");
+            let ty: syn::Type = syn::parse_str(&joined).ok()?;
+            self.map_type(&ty)
+        };
+        if owner_cpp.contains("auto") || type_string_has_auto_placeholder(&owner_cpp) {
+            return None;
+        }
+        let helper_path = if module_path.is_empty() {
+            format!("::{}::{}RuntimeHelper", dep, escape_cpp_keyword(&trait_name))
+        } else {
+            format!(
+                "::{}::{}::{}RuntimeHelper",
+                dep,
+                module_path,
+                escape_cpp_keyword(&trait_name)
+            )
+        };
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|arg| self.emit_expr_maybe_move(arg))
+            .collect();
+        let args = args.join(", ");
+        let escaped_method = escape_cpp_keyword(&method);
+        Some(format!(
+            "[&]<typename __Owner = {owner}>() -> decltype(auto) {{ if constexpr (requires {{ __Owner::{m}({args}); }}) {{ return __Owner::{m}({args}); }} else {{ return {helper}::template {m}<__Owner>({args}); }} }}()",
+            owner = owner_cpp,
+            m = escaped_method,
+            args = args,
+            helper = helper_path
+        ))
+    }
+
     pub(super) fn try_emit_visit_method_fallback_call(
         &self,
         mc: &syn::ExprMethodCall,
@@ -14109,6 +14192,9 @@ impl CodeGen {
             }
         }
         if let Some(emitted) = self.try_emit_arc_from_assoc_call(call, expected_ty) {
+            return emitted;
+        }
+        if let Some(emitted) = self.try_emit_dep_trait_static_default_call(call) {
             return emitted;
         }
 

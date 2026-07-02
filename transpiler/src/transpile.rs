@@ -22,6 +22,12 @@ pub struct UfcsTraitManifest {
     /// Trait names this crate DECLARES (for `use dep::Tr` recognition).
     #[serde(default)]
     pub declared_traits: Vec<String>,
+    /// Trait name → `::`-joined C++-escaped declaration-module path (empty
+    /// for crate root). Lets a consumer route a trait's PROVIDED STATIC
+    /// (`Error::invalid_value` when the local impl lacks the override) to the
+    /// declaring crate's `<Trait>RuntimeHelper::method<LocalSelf>(...)`.
+    #[serde(default)]
+    pub declared_trait_modules: std::collections::BTreeMap<String, String>,
     /// Declared trait name → the method names it declares (required + default).
     /// Lets a downstream crate's UFCS dedup be METHOD-AWARE: a dep declaring a
     /// trait of the same NAME (e.g. the ubiquitous private `Sealed`) must not
@@ -371,6 +377,50 @@ pub fn crate_is_namespace_wrapped(crate_name: &str) -> bool {
 /// Short names of every trait this crate DECLARES (`trait Tr { … }`), recursing
 /// into inline modules. Used to scope UFCS lowering + emission to crate-declared
 /// traits (prelude/std-trait impls are left to the non-UFCS path).
+/// Trait name → escaped module path, for the manifest's
+/// `declared_trait_modules` (first declaration wins on rare name reuse).
+pub fn collect_declared_trait_modules(
+    items: &[syn::Item],
+) -> std::collections::BTreeMap<String, String> {
+    fn walk(
+        items: &[syn::Item],
+        path: &mut Vec<String>,
+        out: &mut std::collections::BTreeMap<String, String>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Trait(t) => {
+                    out.entry(t.ident.to_string())
+                        .or_insert_with(|| path.join("::"));
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, nested)) = &m.content {
+                        let seg = m.ident.to_string();
+                        // Minimal escape matching codegen's module spelling
+                        // (private/mut_/etc get a trailing underscore).
+                        let escaped = match seg.as_str() {
+                            "private" | "mut" | "new" | "delete" | "default"
+                            | "register" | "template" | "typename" | "union"
+                            | "unsigned" | "signed" | "int" | "char" | "float"
+                            | "double" | "namespace" | "operator" | "class" => {
+                                format!("{}_", seg)
+                            }
+                            _ => seg,
+                        };
+                        path.push(escaped);
+                        walk(nested, path, out);
+                        path.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(items, &mut Vec::new(), &mut out);
+    out
+}
+
 pub fn collect_declared_trait_names(items: &[syn::Item]) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     collect_declared_trait_names_into(items, &mut out);
@@ -2706,6 +2756,7 @@ mod tests {
         // `import`, so the dependency's `<Tr>_` is reached bare. The manifest's
         // job is CLASSIFICATION (member-call → UFCS free call).
         let manifest = UfcsTraitManifest {
+            declared_trait_modules: std::collections::BTreeMap::new(),
             version: 1,
             module: "depmod".to_string(),
             declared_traits: vec!["Greet".to_string()],
