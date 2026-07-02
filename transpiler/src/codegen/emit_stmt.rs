@@ -1074,6 +1074,32 @@ impl CodeGen {
         let (_, _, option_unwrap_method, _) =
             self.option_like_pattern_surface_for_expr(scrutinee_expr);
 
+        // Binding-less data-enum variant tests (incl. or-patterns:
+        // `if let State::CheckForTag | State::CheckForDuplicateTag = self.state`)
+        // must test the variant — the Option surface (`.is_some()`) does not
+        // exist on the std::variant scrutinee. Single-eval storage keeps
+        // or-pattern conditions from re-evaluating an effectful scrutinee.
+        if !matches!(&*let_expr.pat, syn::Pat::TupleStruct(ts) if ts.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "Some" | "Ok" | "Err")))
+            && let Some(variant_cond) = self
+                .if_let_binding_less_variant_condition(&let_expr.pat, "_iflet_scrutinee")
+        {
+            if first {
+                self.writeln("{");
+            } else {
+                self.output.push_str("{\n");
+            }
+            self.indent += 1;
+            self.writeln(&format!("auto&& _iflet_scrutinee = {};", scrutinee));
+            self.writeln(&format!("if ({}) {{", variant_cond));
+            self.indent += 1;
+            self.emit_block(then_branch);
+            self.indent -= 1;
+            self.emit_if_let_else(else_branch);
+            self.indent -= 1;
+            self.writeln("}");
+            return;
+        }
+
         match &*let_expr.pat {
             syn::Pat::TupleStruct(ts) => {
                 let path_str = ts

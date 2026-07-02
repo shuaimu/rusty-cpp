@@ -381,6 +381,30 @@ public:
         }
     }
     
+    // Rust `String::insert(idx, ch)` — `ch` is a char (UTF-32); encode and
+    // splice. Transpiled call sites pass `U'!'`-style char32_t literals.
+    void insert(size_t idx, char32_t ch) {
+        char buf[5] = {0, 0, 0, 0, 0};
+        uint32_t cp = static_cast<uint32_t>(ch);
+        size_t n = 0;
+        if (cp < 0x80) {
+            buf[n++] = static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            buf[n++] = static_cast<char>(0xC0 | (cp >> 6));
+            buf[n++] = static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            buf[n++] = static_cast<char>(0xE0 | (cp >> 12));
+            buf[n++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            buf[n++] = static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            buf[n++] = static_cast<char>(0xF0 | (cp >> 18));
+            buf[n++] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            buf[n++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            buf[n++] = static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        insert(idx, buf);
+    }
+
     // Insert string at position
     void insert(size_t idx, const char* str) {
         if (!str) return;

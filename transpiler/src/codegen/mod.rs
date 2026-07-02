@@ -873,6 +873,11 @@ pub struct CodeGen {
     /// into a cycle and source-order fallback (incomplete `Mark` by-value use).
     /// RefCell because dependency recorders take `&self` at ~50 call sites.
     pub(crate) module_dep_scope: std::cell::RefCell<Option<ModuleDepScope>>,
+    /// Scopes whose namespace was SPLIT into two blocks (mutual strict
+    /// cycles): the per-scope extension-fn dump must fire in the LAST block —
+    /// the first block precedes the sibling module the inline bodies
+    /// instantiate. Entries are consumed on the first (skipped) close.
+    pub(crate) split_deferred_extension_scopes: std::cell::RefCell<HashSet<String>>,
     /// Ambient if-let binding → (scrutinee C++, unwrap method) stack for
     /// constructor-hint collection. `emit_constructor_hint_arg_cpp` spelled
     /// every if-let binding as `_iflet.unwrap_err()` — a SCOPE-DEPENDENT
@@ -1747,6 +1752,7 @@ impl CodeGen {
             emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
             module_dep_scope: std::cell::RefCell::new(None),
+            split_deferred_extension_scopes: std::cell::RefCell::new(HashSet::new()),
             iflet_hint_scrutinees: std::cell::RefCell::new(Vec::new()),
             root_declared_type_names: HashSet::new(),
             local_type_module_path: HashMap::new(),
@@ -5555,11 +5561,117 @@ impl CodeGen {
             .filter(|it| matches!(it, syn::Item::Use(_)))
             .cloned()
             .collect();
+        // E types whose FIELDS mention L at all (any position — even through
+        // pointer-backed wrappers): touching one from an inline body can
+        // instantiate L transitively (Mapping{IndexMap<Value, Value>}).
+        let l_adjacent_types: HashSet<String> = e_items
+            .iter()
+            .filter_map(|it| {
+                let name = Self::item_top_level_type_name(it)?;
+                let mut scan: Vec<syn::Item> = e_uses.clone();
+                scan.push((*it).clone());
+                let mut deps = HashSet::new();
+                self.collect_scope_module_hard_dependencies(
+                    &scan,
+                    &known_modules,
+                    &forward_declable_types_by_module,
+                    &mut deps,
+                );
+                deps.contains(&name_l).then_some(name)
+            })
+            .collect();
         let mut in_chunk2: Vec<bool> = e_items
             .iter()
             .map(|it| {
                 if matches!(it, syn::Item::Use(_)) {
                     return false;
+                }
+                // Impl/fn items lower to free fns with INLINE phase-1 bodies.
+                // A body touching an L type (`impl Index for Value`) or an
+                // E type whose fields mention L (`v: &mut Mapping`, where
+                // Mapping holds IndexMap<Value, Value>) instantiates L
+                // TRANSITIVELY — no L name is visible to the strict scan. Such
+                // items are only usable once L exists, so they go after L.
+                let l_names = forward_declable_types_by_module.get(&name_l);
+                let type_touches_l = |ty: &syn::Type| -> bool {
+                    let mut found = false;
+                    struct NameScan<'a> {
+                        l_names: Option<&'a HashSet<String>>,
+                        l_adjacent: &'a HashSet<String>,
+                        found: &'a mut bool,
+                    }
+                    impl<'ast> Visit<'ast> for NameScan<'_> {
+                        fn visit_path(&mut self, path: &'ast syn::Path) {
+                            if let Some(last) = path.segments.last() {
+                                let name = last.ident.to_string();
+                                if self.l_names.is_some_and(|n| n.contains(&name))
+                                    || self.l_adjacent.contains(&name)
+                                {
+                                    *self.found = true;
+                                }
+                            }
+                            visit::visit_path(self, path);
+                        }
+                    }
+                    let mut scan = NameScan {
+                        l_names,
+                        l_adjacent: &l_adjacent_types,
+                        found: &mut found,
+                    };
+                    scan.visit_type(ty);
+                    found
+                };
+                fn item_sig_touches(
+                    it: &syn::Item,
+                    type_touches_l: &dyn Fn(&syn::Type) -> bool,
+                ) -> bool {
+                    match it {
+                        syn::Item::Impl(imp) => {
+                            type_touches_l(imp.self_ty.as_ref())
+                                || imp.items.iter().any(|ii| {
+                                    let syn::ImplItem::Fn(m) = ii else { return false };
+                                    m.sig.inputs.iter().any(|input| match input {
+                                        syn::FnArg::Typed(pt) => type_touches_l(&pt.ty),
+                                        syn::FnArg::Receiver(_) => false,
+                                    }) || matches!(&m.sig.output,
+                                        syn::ReturnType::Type(_, ty) if type_touches_l(ty))
+                                })
+                        }
+                        syn::Item::Fn(f) => {
+                            f.sig.inputs.iter().any(|input| match input {
+                                syn::FnArg::Typed(pt) => type_touches_l(&pt.ty),
+                                syn::FnArg::Receiver(_) => false,
+                            }) || matches!(&f.sig.output,
+                                syn::ReturnType::Type(_, ty) if type_touches_l(ty))
+                        }
+                        // A trait's UFCS free fns are emitted at the TRAIT
+                        // item (impl bodies gathered there) — its method
+                        // signatures touching L-adjacent types defer the
+                        // trait too (mapping's `trait Index` with
+                        // `v: &mut Mapping` params).
+                        syn::Item::Trait(tr) => tr.items.iter().any(|ti| {
+                            let syn::TraitItem::Fn(m) = ti else { return false };
+                            m.sig.inputs.iter().any(|input| match input {
+                                syn::FnArg::Typed(pt) => type_touches_l(&pt.ty),
+                                syn::FnArg::Receiver(_) => false,
+                            }) || matches!(&m.sig.output,
+                                syn::ReturnType::Type(_, ty) if type_touches_l(ty))
+                        }),
+                        // Impl/fn items nested in a submodule (mapping's
+                        // `mod index` holding `impl Index for str` with
+                        // `v: &mut Mapping` params) carry the same inline
+                        // instantiation burden — the whole submodule defers.
+                        syn::Item::Mod(sub) => sub
+                            .content
+                            .as_ref()
+                            .is_some_and(|(_, nested)| {
+                                nested.iter().any(|n| item_sig_touches(n, type_touches_l))
+                            }),
+                        _ => false,
+                    }
+                }
+                if item_sig_touches(it, &type_touches_l) {
+                    return true;
                 }
                 let mut scan: Vec<syn::Item> = e_uses.clone();
                 scan.push(it.clone());
@@ -5649,6 +5761,13 @@ impl CodeGen {
 
         items[pos_e] = e_chunk1;
         items.insert(pos_l + 1, e_chunk2);
+        {
+            let mut scope_path: Vec<String> = self.module_stack.clone();
+            scope_path.push(name_e.clone());
+            self.split_deferred_extension_scopes
+                .borrow_mut()
+                .insert(Self::module_scope_key(&scope_path));
+        }
         if std::env::var_os("RUSTY_CPP_DEBUG_MODULE_DEPS").is_some() {
             eprintln!(
                 "[module-split] {} -> {}#1 + {}#2 (after {})",
@@ -5740,6 +5859,13 @@ impl CodeGen {
         items[pos_l] = l_chunk1;
         // After E#2 (which sits at pos_l + 1).
         items.insert(pos_l + 2, l_chunk2);
+        {
+            let mut scope_path: Vec<String> = self.module_stack.clone();
+            scope_path.push(name_l.clone());
+            self.split_deferred_extension_scopes
+                .borrow_mut()
+                .insert(Self::module_scope_key(&scope_path));
+        }
         if std::env::var_os("RUSTY_CPP_DEBUG_MODULE_DEPS").is_some() {
             eprintln!(
                 "[module-split] {} -> {}#1 + {}#2 (after {}#2)",
@@ -15256,6 +15382,16 @@ impl CodeGen {
 
     fn emit_extension_trait_free_functions_for_scope(&mut self, module_path: &[String]) -> bool {
         let scope_key = Self::module_scope_key(module_path);
+        // A split module reopens: skip the dump in the FIRST block (its
+        // inline bodies would instantiate the not-yet-defined sibling) and
+        // fire it in the last one.
+        if self
+            .split_deferred_extension_scopes
+            .borrow_mut()
+            .remove(&scope_key)
+        {
+            return false;
+        }
         if !self.emitted_extension_impl_scopes.insert(scope_key) {
             return false;
         }
@@ -34437,6 +34573,13 @@ impl CodeGen {
         } else {
             format!("{}.{}()", scrutinee_var, fallback_some_check)
         };
+        // Binding-less data-enum variant tests (incl. or-patterns) test the
+        // variant — the Option surface does not exist on the scrutinee.
+        if let Some(variant_cond) =
+            self.if_let_binding_less_variant_condition(&let_expr.pat, scrutinee_var)
+        {
+            return (variant_cond, fallback_unwrap);
+        }
         if let Some((cond_template, _binding, unwrap)) = self.if_let_expr_condition_parts(let_expr)
         {
             (

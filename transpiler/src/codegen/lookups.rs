@@ -678,10 +678,25 @@ impl CodeGen {
         // shapes that downstream code expects to see as `Self` are unaffected.
         // Runs before owner-segment substitutions so explicit generic args at
         // the call site (e.g. `Node::<i32>::new(...)`) still propagate through.
-        let cross_impl_call = self
-            .current_struct
-            .as_deref()
-            .is_some_and(|cs| cs.rsplit("::").next() != Some(owner_tail.as_str()));
+        // A FREE-FN caller has no impl context at all — `Self` in the callee's
+        // return must still resolve to the DEFINING owner (`let cstr =
+        // CStr::from_ptr(...)` in a free fn recorded its binding as literal
+        // `Self`, defeating receiver-owner resolution downstream). Limited to
+        // owners WITHOUT type/const params: for generic owners the composed
+        // self type would drop the call site's argument recovery
+        // (ArrayString<CAP>::from), which downstream substitution handles
+        // better from the literal `Self`.
+        let owner_has_type_params = self
+            .declared_type_params
+            .get(&owner_tail)
+            .is_some_and(|params| !params.is_empty());
+        let cross_impl_call = if self.current_struct.is_none() {
+            !owner_has_type_params
+        } else {
+            self.current_struct
+                .as_deref()
+                .is_some_and(|cs| cs.rsplit("::").next() != Some(owner_tail.as_str()))
+        };
         if cross_impl_call
             && let Some(owner_self_ty) = self.compose_owner_self_type_for_lookup(&owner_tail)
         {
