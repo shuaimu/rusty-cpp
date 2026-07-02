@@ -84,6 +84,14 @@ pub struct UfcsTraitManifest {
     /// more than one enum are omitted (ambiguous).
     #[serde(default)]
     pub c_like_enum_variants: BTreeMap<String, String>,
+    /// Crate-root re-exports whose target lives in ANOTHER crate: re-exported
+    /// name → full dep-qualified target path (`de` → `serde_core::de` from
+    /// serde's `pub use serde_core::{de, ser};`). A consumer spelling
+    /// `serde::de::Visitor` must requalify to `::serde_core::de::Visitor` —
+    /// the facade's C++ namespace `de` only holds the facade's OWN additions,
+    /// not the re-exported dependency module's members.
+    #[serde(default)]
+    pub cross_crate_reexports: BTreeMap<String, String>,
 }
 
 /// One entry of `UfcsTraitManifest::declared_types` (book § 3.2.7): cross-crate
@@ -2703,6 +2711,7 @@ mod tests {
             declared_modules: Vec::new(),
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
             c_like_enum_variants: std::collections::BTreeMap::new(),
+            cross_crate_reexports: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();
@@ -2827,6 +2836,100 @@ mod tests {
         assert!(
             out.contains("::sysdep::yaml::yaml_event_type_t::YAML_GO_EVENT"),
             "cross-crate variant reference must qualify to the enum-scoped path\nGot: {out}"
+        );
+    }
+
+    #[test]
+    fn test_cross_crate_module_reexport_requalifies_facade_paths() {
+        // serde-facade shape: the FACADE crate re-exports a dependency's
+        // module at its root (`pub use core_crate::de;`), so a consumer's
+        // `facade::de::Visitor` only resolves through the dependency --
+        // the facade's own C++ `namespace de` holds just its additions.
+        let core_manifest_path =
+            std::env::temp_dir().join("rusty_ufcs_manifest_reexport_core_test.json");
+        let facade_manifest_path =
+            std::env::temp_dir().join("rusty_ufcs_manifest_reexport_facade_test.json");
+        let _ = std::fs::remove_file(&core_manifest_path);
+        let _ = std::fs::remove_file(&facade_manifest_path);
+
+        let core_src = r#"
+            pub mod de {
+                pub struct Visitor {
+                    pub id: u64,
+                }
+            }
+        "#;
+        let core_options = TranspileOptions {
+            emit_ufcs_trait_manifest_path: Some(core_manifest_path.clone()),
+            ..TranspileOptions::default()
+        };
+        let _ = transpile_full_with_options(
+            core_src,
+            Some("core_crate"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &core_options,
+        )
+        .expect("core transpile should succeed");
+
+        let facade_src = r#"
+            pub use core_crate::de;
+        "#;
+        let facade_options = TranspileOptions {
+            emit_ufcs_trait_manifest_path: Some(facade_manifest_path.clone()),
+            dependency_ufcs_trait_manifests: vec![core_manifest_path.clone()],
+            ..TranspileOptions::default()
+        };
+        let _ = transpile_full_with_options(
+            facade_src,
+            Some("facade"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &facade_options,
+        )
+        .expect("facade transpile should succeed");
+        let facade_manifest: UfcsTraitManifest = serde_json::from_str(
+            &std::fs::read_to_string(&facade_manifest_path).expect("facade manifest written"),
+        )
+        .expect("facade manifest parses");
+        assert_eq!(
+            facade_manifest.cross_crate_reexports.get("de"),
+            Some(&"core_crate::de".to_string()),
+            "facade must record the cross-crate module re-export\nGot: {facade_manifest:?}"
+        );
+
+        let consumer_src = r#"
+            pub fn probe(v: facade::de::Visitor) -> u64 {
+                v.id
+            }
+        "#;
+        let consumer_options = TranspileOptions {
+            dependency_ufcs_trait_manifests: vec![
+                core_manifest_path.clone(),
+                facade_manifest_path.clone(),
+            ],
+            ..TranspileOptions::default()
+        };
+        let out = transpile_full_with_options(
+            consumer_src,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &consumer_options,
+        )
+        .expect("consumer transpile should succeed");
+        let _ = std::fs::remove_file(&core_manifest_path);
+        let _ = std::fs::remove_file(&facade_manifest_path);
+        assert!(
+            out.contains("::core_crate::de::Visitor"),
+            "facade module path must requalify to the dependency\nGot: {out}"
+        );
+        assert!(
+            !out.contains("facade::de::Visitor"),
+            "facade-relative spelling must not survive\nGot: {out}"
         );
     }
 

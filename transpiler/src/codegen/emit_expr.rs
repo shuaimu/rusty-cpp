@@ -16645,6 +16645,11 @@ impl CodeGen {
             // runtime helpers, which SFINAE-dispatch to `.eq()` or `==`.
             ("PartialEq", "eq") if call.args.len() == 2 => "rusty::cmp::eq",
             ("PartialEq", "ne") if call.args.len() == 2 => "rusty::cmp::ne",
+            // UFCS `io::Write::write_all(writer, buf)` (serde_yaml's emitter
+            // write handler calls through the trait path on the stored boxed
+            // writer). The runtime free fn SFINAE-dispatches to a member
+            // `.write_all` (DynWrite) or falls back to chunked `write`s.
+            ("Write", "write_all") if call.args.len() == 2 => "rusty::io::write_all",
             _ => return None,
         };
 

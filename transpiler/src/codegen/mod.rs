@@ -986,6 +986,11 @@ pub struct CodeGen {
     /// Tracks enum-member keys on C-like enums (e.g., "Ordering_SeqCst").
     /// Used to avoid misclassifying enum class variants as data-enum variants.
     pub(crate) c_like_enum_variants: HashSet<String>,
+    /// The subset of `c_like_enum_variants` keys that came from FUNCTION-LOCAL
+    /// enum declarations. Crate-visible unique-owner scans skip these:
+    /// serde_yaml's fn-local `enum Nest { Sequence, Mapping }` must not
+    /// capture the crate-level type imports named `Sequence`/`Mapping`.
+    pub(crate) block_local_c_like_enum_variant_keys: HashSet<String>,
     /// C-like enum VARIANT name → the enum's crate-relative C++ path
     /// (`YAML_STREAM_START_EVENT` → `Some("yaml::yaml_event_type_t")`), or
     /// `None` once a second enum declares the same variant name (ambiguous —
@@ -1765,6 +1770,7 @@ impl CodeGen {
             data_enum_variant_field_types: std::rc::Rc::new(HashMap::new()),
             c_like_enum_consts: HashSet::new(),
             c_like_enum_variant_paths: HashMap::new(),
+            block_local_c_like_enum_variant_keys: HashSet::new(),
             self_sizeof_const_fns: HashSet::new(),
             c_like_enum_variants: HashSet::new(),
             c_like_enum_types: HashSet::new(),
@@ -3109,6 +3115,25 @@ impl CodeGen {
                     .map(|enum_path| (variant.clone(), enum_path.clone()))
             })
             .collect();
+        // Crate-root re-exports whose target lives in a DEPENDENCY crate
+        // (serde's `pub use serde_core::{de, ser};`) — a consumer's
+        // `serde::de::Visitor` must requalify to the dependency.
+        let dep_crate_names: HashSet<&str> = self
+            .dependency_ufcs_trait_manifests
+            .iter()
+            .map(|m| m.module.as_str())
+            .collect();
+        let cross_crate_reexports: std::collections::BTreeMap<String, String> = self
+            .crate_reexports
+            .iter()
+            .filter_map(|(name, prefix)| {
+                let root = prefix.split("::").next().unwrap_or("");
+                if root.is_empty() || !dep_crate_names.contains(root) {
+                    return None;
+                }
+                Some((name.clone(), format!("{}::{}", prefix, name)))
+            })
+            .collect();
         crate::transpile::UfcsTraitManifest {
             version: 1,
             module: module.to_string(),
@@ -3121,6 +3146,7 @@ impl CodeGen {
             declared_modules,
             rusty_ext_methods_by_module,
             c_like_enum_variants,
+            cross_crate_reexports,
         }
     }
 
@@ -3364,6 +3390,32 @@ impl CodeGen {
                     format!("::{}::{}::{}", m.module, enum_path, variant);
                 repls.push((format!("::{}::{}", m.module, variant), qualified.clone()));
                 repls.push((format!("{}::{}", m.module, variant), qualified));
+            }
+            // Cross-crate MODULE re-exports (serde's `pub use serde_core::
+            // {de, ser};`): `serde::de::Visitor` only resolves through the
+            // dependency's namespace — the facade's own `namespace de` holds
+            // just its private additions. Restricted to names the TARGET
+            // crate's manifest declares as a MODULE (item-level re-exports
+            // resolve through existing using-declarations).
+            for (name, target) in &m.cross_crate_reexports {
+                let Some((target_root, target_rest)) = target.split_once("::") else {
+                    continue;
+                };
+                let target_declares_module = self
+                    .dependency_ufcs_trait_manifests
+                    .iter()
+                    .find(|tm| tm.module == target_root)
+                    .is_some_and(|tm| {
+                        tm.declared_modules
+                            .iter()
+                            .any(|dm| dm == target_rest)
+                    });
+                if !target_declares_module {
+                    continue;
+                }
+                let qualified = format!("::{}", target);
+                repls.push((format!("::{}::{}", m.module, name), qualified.clone()));
+                repls.push((format!("{}::{}", m.module, name), qualified));
             }
         }
         if repls.is_empty() {
@@ -23587,6 +23639,10 @@ impl CodeGen {
         let canonical_variant = self.canonical_variant_name(variant_name).to_string();
         let mut owner_tails: HashSet<String> = HashSet::new();
         for key in &self.c_like_enum_variants {
+            // Function-local enums' variants never own a crate-level import.
+            if self.block_local_c_like_enum_variant_keys.contains(key) {
+                continue;
+            }
             let key_tail = key.rsplit("::").next().unwrap_or(key);
             // `key_tail` is `{owner}_{variant}`. BOTH the owner (e.g.
             // `yaml_parser_state_t`) and the variant (e.g.
@@ -36986,10 +37042,17 @@ impl CodeGen {
             return None;
         }
         let mapped = self.map_type(return_hint);
-        if mapped.starts_with("rusty::Result<")
-            || mapped.starts_with("rusty::io::Result<")
-            || mapped.starts_with("io::Result<")
-        {
+        // Crate-local Result ALIASES count too (`Result<rusty::Unit>` from
+        // ser.rs's `type Result<T, E = Error>`): `?` on an expression whose
+        // error type differs (emitter::Error vs error::Error) must route
+        // through RUSTY_TRY_INTO's From-conversion — the plain RUSTY_TRY
+        // early-returns the UNCONVERTED Result ("no viable conversion").
+        // TRY_INTO is also safe when both error types coincide (identity
+        // construction), so recognizing an alias never regresses.
+        let base = mapped.split('<').next().unwrap_or("");
+        let looks_like_result =
+            base == "Result" || base == "rusty::Result" || base.ends_with("::Result");
+        if looks_like_result && mapped.contains('<') {
             Some(mapped)
         } else {
             None

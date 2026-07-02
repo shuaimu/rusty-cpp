@@ -2761,10 +2761,23 @@ impl CodeGen {
             self.c_like_enum_types.insert(name_str.clone());
             self.c_like_enum_types.insert(scoped_name.clone());
             for variant in &e.variants {
-                self.c_like_enum_variants
-                    .insert(format!("{}_{}", name, variant.ident));
-                self.c_like_enum_variants
-                    .insert(format!("{}_{}", scoped_enum_name, variant.ident));
+                let bare_key = format!("{}_{}", name, variant.ident);
+                let scoped_key = format!("{}_{}", scoped_enum_name, variant.ident);
+                if is_local_scope {
+                    // A FUNCTION-LOCAL enum's variants stay registered (its
+                    // own body's match arms lower through these sets), but
+                    // must not feed crate-visible unique-owner scans:
+                    // serde_yaml's fn-local `enum Nest { Sequence, Mapping }`
+                    // otherwise captures the CRATE-LEVEL type imports named
+                    // `Sequence`/`Mapping` and rewrites them into
+                    // `value::Nest::Sequence` variant constants.
+                    self.block_local_c_like_enum_variant_keys
+                        .insert(bare_key.clone());
+                    self.block_local_c_like_enum_variant_keys
+                        .insert(scoped_key.clone());
+                }
+                self.c_like_enum_variants.insert(bare_key);
+                self.c_like_enum_variants.insert(scoped_key);
             }
             let enum_impl_items = self
                 .impl_blocks
@@ -5002,8 +5015,37 @@ impl CodeGen {
                     // Derive from the final emitted `using_path` so local scope
                     // rewrites (e.g. `scalar::Type` inside `namespace decoder`)
                     // are preserved instead of forcing global `::scalar`.
+                    // A RENAMED import (`use …::Event as YamlEvent;` →
+                    // `YamlEvent = libyaml::parser::Event`) gets NO variant
+                    // fanout: splitting the alias string on `::` fabricated
+                    // ns = "YamlEvent = libyaml::parser" and emitted `using
+                    // YamlEvent = …::Event_Alias;` per variant ("type alias
+                    // redefinition"), while canonical using-DECLARATIONS
+                    // conflict with the importing module's OWN same-named
+                    // variant structs (serde_yaml's `mod de` declares its own
+                    // `Event`). Call sites spell renamed-enum variants through
+                    // the canonical qualified path, so nothing is needed.
+                    let import_is_renamed = using_path.contains(" = ");
+                    // An import whose (requalified) target lives in a
+                    // DEPENDENCY crate must not fan out a same-named LOCAL
+                    // data enum's variants: `use serde::ser::SerializeMap;`
+                    // (the serde_core TRAIT) collides with serde_yaml's own
+                    // `enum SerializeMap` and grafted `using ::serde_core::
+                    // ser::SerializeMap_Untagged;` — the dep has no such
+                    // members.
+                    let using_target_root = using_path
+                        .trim_start_matches("::")
+                        .split("::")
+                        .next()
+                        .unwrap_or("");
+                    let import_targets_dependency = self
+                        .dependency_ufcs_trait_manifests
+                        .iter()
+                        .any(|m| m.module == using_target_root);
                     let imported_name = mapped_path.rsplit("::").next().unwrap_or(&mapped_path);
-                    if self.data_enum_types.contains(imported_name)
+                    if !import_is_renamed
+                        && !import_targets_dependency
+                        && self.data_enum_types.contains(imported_name)
                         && let Some((ns, _)) = using_path.rsplit_once("::")
                     {
                         self.emit_namespace_using_import(ns);
@@ -5017,10 +5059,12 @@ impl CodeGen {
                     // variant (`serde_core::private_::Content_Str`). The enum is SCOPED, so its
                     // bare name isn't in data_enum_types — look it up by the full (scoped) path.
                     // Gated to wrapped crates so the passing flag-on crates are untouched.
-                    if self
-                        .crate_name
-                        .as_deref()
-                        .is_some_and(|c| crate::transpile::crate_is_namespace_wrapped(c))
+                    if !import_is_renamed
+                        && !import_targets_dependency
+                        && self
+                            .crate_name
+                            .as_deref()
+                            .is_some_and(|c| crate::transpile::crate_is_namespace_wrapped(c))
                         && let Some((ns, _)) = using_path.rsplit_once("::")
                     {
                         // data_enum_variants_by_enum keys the module path UNescaped

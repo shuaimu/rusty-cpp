@@ -3553,6 +3553,48 @@ fn test_scope_bound_reexport_resolution_spells_absolute_path() {
 }
 
 #[test]
+fn test_reexport_import_chases_to_canonical_declaration() {
+    // value/ser.rs imports `Mapping` THROUGH value.rs's `pub use crate::
+    // mapping::Mapping;` — the binding target says `value::Mapping`, but
+    // namespace value also holds Value's bare-named variant factory fn
+    // `Mapping(...)`, which hides the re-export using-declaration in type
+    // contexts ("template argument for template type parameter must be a
+    // type"). The single-segment import mapping must chase the re-export to
+    // the canonical `::mapping::Mapping`.
+    let out = transpile_str(
+        r#"
+        pub mod mapping {
+            pub struct Mapping {
+                pub len: u64,
+            }
+        }
+        pub mod value {
+            pub use crate::mapping::Mapping;
+            pub enum Value {
+                Null,
+                Mapping(u64),
+            }
+            mod ser {
+                use crate::value::{Mapping, Value};
+                pub enum SerializeMap {
+                    CheckForTag,
+                    Untagged { mapping: Mapping, next_key: Option<Value> },
+                }
+            }
+        }
+    "#,
+    );
+    assert!(
+        out.contains("::mapping::Mapping mapping;"),
+        "re-export import must spell the canonical absolute declaration:\n{out}"
+    );
+    assert!(
+        !out.contains("value::Mapping mapping;"),
+        "re-export import must not spell the re-exporting namespace:\n{out}"
+    );
+}
+
+#[test]
 fn test_self_expanding_alias_rewrite_spells_absolute_path() {
     // `use crate::libyaml::error as libyaml;` inside `mod error`: expanding
     // `libyaml::Error` to the full module path yields a RELATIVE spelling
@@ -33963,11 +34005,17 @@ fn test_leaf_serde_imported_data_enum_variant_struct_is_namespace_qualified() {
     );
     // Variant struct construction may stand alone (`return content::Content_Struct{...}`)
     // or be wrapped in the enum variant ctor (`return content::Content{content::Content_Struct{...}}`).
+    // Either component may be spelled absolutely (`::content::…`) — crate-module-rooted
+    // resolutions absolutize to stay immune to same-named local aliases.
+    let has_owner_qualified_ctor = ["content::Content_Struct{", "::content::Content_Struct{"]
+        .iter()
+        .any(|variant_ctor| {
+            out.contains(&format!("return {}", variant_ctor))
+                || out.contains(&format!("return content::Content{{{}", variant_ctor))
+                || out.contains(&format!("return ::content::Content{{{}", variant_ctor))
+        });
     assert!(
-        out.contains("return content::Content_Struct{")
-            || out.contains("return ::content::Content_Struct{")
-            || out.contains("return content::Content{content::Content_Struct{")
-            || out.contains("return ::content::Content{::content::Content_Struct{"),
+        has_owner_qualified_ctor,
         "imported enum variant struct construction should stay qualified through owner module\nGot: {out}"
     );
     let user_scope_start = out

@@ -2117,6 +2117,28 @@ impl CodeGen {
                             return self
                                 .maybe_prefix_typename_for_dependent_type_path(tp, recovered);
                         }
+                        // The scope-import binding may point at a RE-EXPORT
+                        // (value/ser.rs imports `Mapping` through value.rs's
+                        // `pub use crate::mapping::Mapping;`): chase it to the
+                        // canonical declaration — the re-exporting namespace
+                        // holds a same-named bare variant FACTORY fn
+                        // (`Value_Mapping Mapping(...)`) that hides the
+                        // using-declaration in type contexts ("template
+                        // argument must be a type"). Crate-module-rooted
+                        // results spell absolutely, like every other
+                        // crate-global resolution this session.
+                        if path_str.contains("::")
+                            && let Some(reexport_target) =
+                                self.resolve_type_reexport_path_via_scope_binding(&path_str)
+                        {
+                            path_str = reexport_target;
+                        }
+                        if !path_str.starts_with("::") {
+                            let root = path_str.split("::").next().unwrap_or("");
+                            if !root.is_empty() && self.declared_module_names.contains(root) {
+                                path_str = format!("::{}", path_str);
+                            }
+                        }
                         return path_str;
                     }
                 }
@@ -2140,6 +2162,28 @@ impl CodeGen {
                                 if let Some(syn::TypeParamBound::Trait(tb)) = to.bounds.first() {
                                     if let Some(fn_type) = self.try_map_fn_trait_boxed(tb) {
                                         return fn_type;
+                                    }
+                                    // `Box<dyn io::Write + 'a>` gets the type-erased
+                                    // owning writer instead of the module-mode
+                                    // `void*` fallback (which cannot dispatch —
+                                    // serde_yaml's Emitter stores the boxed writer
+                                    // and calls write_all through it). fmt::Write
+                                    // spells its module explicitly in expanded
+                                    // code, so gate on io/bare.
+                                    let segs: Vec<String> = tb
+                                        .path
+                                        .segments
+                                        .iter()
+                                        .map(|s| s.ident.to_string())
+                                        .collect();
+                                    let is_io_write = segs.last().is_some_and(|t| t == "Write")
+                                        && (segs.len() == 1
+                                            || segs
+                                                .iter()
+                                                .nth_back(1)
+                                                .is_some_and(|m| m == "io"));
+                                    if is_io_write {
+                                        return "rusty::io::DynWrite".to_string();
                                     }
                                 }
                                 if self.module_name.is_some() {
@@ -2352,18 +2396,6 @@ impl CodeGen {
                             {
                                 base = std_base.clone();
                             }
-                            if tp
-                                .path
-                                .segments
-                                .last()
-                                .is_some_and(|seg| seg.ident == "Result")
-                                && generic_args.len() == 2
-                                && self
-                                    .declared_type_param_arity_for_owner_cpp_path(&base)
-                                    .is_some_and(|arity| arity == 1)
-                            {
-                                base = "rusty::Result".to_string();
-                            }
                             if tp.path.segments.len() == 1 {
                                 let local_name = tp.path.segments[0].ident.to_string();
                                 if self.is_local_type_name_in_scope(&local_name)
@@ -2377,6 +2409,51 @@ impl CodeGen {
                                             .current_named_module_root_type_cpp_name(&local_name)
                                             .unwrap_or_else(|| escape_cpp_keyword(&local_name));
                                     }
+                                }
+                            }
+                            if tp
+                                .path
+                                .segments
+                                .last()
+                                .is_some_and(|seg| seg.ident == "Result")
+                                && generic_args.len() == 2
+                            {
+                                // A TWO-arg bare `Result` can never target a
+                                // 1-param local alias (Rust would reject the
+                                // arity), so it is std's Result whenever the
+                                // crate declares no 2-param Result of its
+                                // own. Runs AFTER the local-name re-base
+                                // above — the crate's own 1-param `Result<T>`
+                                // aliases put `Result` in local_declared_types,
+                                // which reset base to the bare spelling that
+                                // the enclosing alias then captures ("too
+                                // many template arguments", libyaml::emitter).
+                                let declared_arity =
+                                    self.declared_type_param_arity_for_owner_cpp_path(&base);
+                                // Rust binds a bare 2-arg `Result` to a local
+                                // 2-param alias ONLY inside the module that
+                                // declares one (`type Result<T, E = Error>` in
+                                // serde_yaml's de/ser); a 0/1-param alias can
+                                // never take 2 args, and other modules' 2-param
+                                // aliases are not in scope — everywhere else
+                                // the reference is std's Result. (The bare-key
+                                // arity registration is first-registrant-wins
+                                // across the crate's several aliases, so the
+                                // lookup alone cannot decide this.)
+                                let current_module = self.module_stack.join("::");
+                                let two_param_result_declared_here =
+                                    self.declared_type_params.iter().any(|(key, params)| {
+                                        params.len() == 2
+                                            && ((key == "Result" && current_module.is_empty())
+                                                || key
+                                                    .strip_suffix("::Result")
+                                                    .is_some_and(|module| module == current_module))
+                                    });
+                                if declared_arity.is_some_and(|arity| arity == 1)
+                                    || (tp.path.segments.len() == 1
+                                        && !two_param_result_declared_here)
+                                {
+                                    base = "rusty::Result".to_string();
                                 }
                             }
                             if self.current_struct.is_some() && base.starts_with("Self::") {
