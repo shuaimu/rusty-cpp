@@ -30133,6 +30133,15 @@ impl CodeGen {
                             .as_deref()
                             .is_some_and(|current| current == expected_owner))
                 {
+                    // The expected type may be a generic ALIAS of the owner:
+                    // indexmap's `Entries<K, V> = Vec<Bucket<K, V>>` — a
+                    // `Self { entries: Vec::new() }` field otherwise leaves the
+                    // element unfilled (`rusty::Vec<auto>::new_()`). Resolve one
+                    // alias layer (with the alias's own arg substitution) and
+                    // re-match.
+                    if let Some(resolved) = self.resolve_type_alias_once(expected_ty) {
+                        return self.expected_type_generic_args_for_owner(&resolved, owner_name);
+                    }
                     return None;
                 }
                 let syn::PathArguments::AngleBracketed(args) = &last.arguments else {

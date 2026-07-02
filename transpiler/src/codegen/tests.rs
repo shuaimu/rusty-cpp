@@ -3160,6 +3160,38 @@ fn test_backward_collect_target_from_struct_field_consumption() {
 }
 
 #[test]
+fn test_generic_alias_field_expected_fills_vec_element() {
+    // indexmap Core::new: `entries: Vec::new()` under field type
+    // `Entries<K, V> = Vec<Bucket<K, V>>` (a generic ALIAS) — the
+    // expected-owner match must resolve one alias layer or the element
+    // stays unfilled (`rusty::Vec<auto>::new_()`).
+    let out = transpile_str(
+        r#"
+        pub(crate) struct Bucket<K, V> {
+            pub key: K,
+            pub value: V,
+        }
+        type Entries<K, V> = Vec<Bucket<K, V>>;
+        pub(crate) struct Core<K, V> {
+            entries: Entries<K, V>,
+        }
+        impl<K, V> Core<K, V> {
+            pub(crate) const fn new() -> Self {
+                Core {
+                    entries: Vec::new(),
+                }
+            }
+        }
+    "#,
+    );
+    assert!(
+        out.contains("rusty::Vec<Bucket<K, V>>::new_()"),
+        "alias-typed field must fill the Vec element:\n{out}"
+    );
+    assert!(!out.contains("Vec<auto>"), "{out}");
+}
+
+#[test]
 fn test_deref_assigned_local_binding_drops_const() {
     // indexmap update_index: `let index = table.find_mut(..).expect(..); *index = new;`
     // — a `&mut`-holding binding whose type inference fails must still drop
