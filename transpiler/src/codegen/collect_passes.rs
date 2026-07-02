@@ -9840,6 +9840,28 @@ impl CodeGen {
         }
     }
 
+    /// Single-binding if-let pattern → (binding ident, Result/Option unwrap
+    /// method) for scope-independent ctor-hint spelling.
+    fn single_iflet_binding_and_unwrap_method(
+        pat: &syn::Pat,
+    ) -> Option<(String, &'static str)> {
+        let syn::Pat::TupleStruct(ts) = pat else {
+            return None;
+        };
+        let method = match ts.path.segments.last()?.ident.to_string().as_str() {
+            "Err" => "unwrap_err",
+            "Ok" | "Some" => "unwrap",
+            _ => return None,
+        };
+        if ts.elems.len() != 1 {
+            return None;
+        }
+        let syn::Pat::Ident(ident) = &ts.elems[0] else {
+            return None;
+        };
+        Some((ident.ident.to_string(), method))
+    }
+
     pub(super) fn collect_constructor_arg_cpp_strings(
         &self,
         expr: &syn::Expr,
@@ -9856,8 +9878,33 @@ impl CodeGen {
 
         match expr {
             syn::Expr::If(if_expr) => {
+                // For an if-LET arm, record binding → scrutinee so ctor-hint
+                // args from the THEN branch are spelled scope-independently
+                // (`(<scrutinee>).unwrap_err()`), not as the branch-local
+                // `_iflet.unwrap_err()` — nested if-let chains re-bind
+                // `_iflet` per branch, so a spelling hoisted into the shared
+                // type hint would silently change meaning across branches
+                // (see `iflet_hint_scrutinees`).
+                let mut pushed = false;
+                if let syn::Expr::Let(let_expr) = &*if_expr.cond
+                    && let Some((binding, method)) =
+                        Self::single_iflet_binding_and_unwrap_method(&let_expr.pat)
+                {
+                    let scrutinee_cpp = self.emit_expr_maybe_move(&let_expr.expr);
+                    if !scrutinee_cpp.is_empty() {
+                        self.iflet_hint_scrutinees.borrow_mut().push((
+                            binding,
+                            scrutinee_cpp,
+                            method,
+                        ));
+                        pushed = true;
+                    }
+                }
                 if let Some(then_expr) = self.extract_single_expr_from_block(&if_expr.then_branch) {
                     self.collect_constructor_arg_cpp_strings(then_expr, out, if_let_unwrap_method);
+                }
+                if pushed {
+                    self.iflet_hint_scrutinees.borrow_mut().pop();
                 }
                 if let Some((_, else_expr)) = &if_expr.else_branch {
                     self.collect_constructor_arg_cpp_strings(else_expr, out, if_let_unwrap_method);

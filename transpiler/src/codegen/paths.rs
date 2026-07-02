@@ -1611,6 +1611,22 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                 }
                 segments = rewritten;
                 import_binding_rewrite_applied = true;
+                if self_expanding_root {
+                    // The expansion's first segment spells the SAME name as
+                    // the alias just resolved (`use crate::libyaml::error as
+                    // libyaml;` expands `libyaml::Error` to
+                    // `libyaml::error::Error`) — and the C++ namespace alias
+                    // we emit for that Rust `use` (`namespace libyaml =
+                    // ::…::libyaml::error;`) is in scope where the path is
+                    // spelled, so a RELATIVE first segment re-resolves
+                    // through the alias and stutters
+                    // (`(::libyaml::error)::error::Error` → "no member named
+                    // 'error'"). Absolute qualification is immune — same
+                    // rationale as the already_expanded guard above, which a
+                    // fresh expansion never reaches (the alias is marked
+                    // used after one resolution).
+                    force_leading_colon = true;
+                }
             }
             joined = segments.join("::");
         }

@@ -4648,6 +4648,31 @@ impl CodeGen {
                 continue;
             }
             let use_action = classify_use_import(&resolved_path);
+            // `use <dep_crate> as <alias>;` — a CRATE rename (serde_yaml's
+            // `use unsafe_libyaml as sys;`). classify_use_import would emit a
+            // TYPE alias (`using sys = unsafe_libyaml;` — ill-formed: the
+            // target is a namespace), and the external-import skip below
+            // would drop it entirely even though the dep IS transpiled (its
+            // manifest is loaded). Emit an absolute namespace alias.
+            if let Some((alias, target)) =
+                split_use_import_alias(normalize_use_import_path(&resolved_path))
+            {
+                let target = target.trim().trim_start_matches("::");
+                if !target.is_empty()
+                    && !target.contains("::")
+                    && self
+                        .dependency_ufcs_trait_manifests
+                        .iter()
+                        .any(|m| m.module == target)
+                {
+                    self.writeln(&format!(
+                        "namespace {} = ::{};",
+                        escape_cpp_keyword(alias),
+                        target
+                    ));
+                    continue;
+                }
+            }
             if is_external {
                 let allow_external_mapping = is_supported_external_import_mapping(&resolved_path);
                 if !allow_external_mapping || matches!(use_action, UseImportAction::RustOnly) {
@@ -6425,6 +6450,20 @@ impl CodeGen {
                 if path.path.segments.len() == 1 {
                     let ident = path.path.segments[0].ident.to_string();
                     if ident != "self" && self.lookup_local_binding_type(&ident).is_none() {
+                        // Prefer the scope-independent scrutinee spelling
+                        // recorded by the ctor-hint collector: `_iflet` means
+                        // a DIFFERENT binding in each nested if-let branch,
+                        // so a hint hoisted into a shared type annotation
+                        // would re-bind (see `iflet_hint_scrutinees`).
+                        if let Some((_, scrutinee, method)) = self
+                            .iflet_hint_scrutinees
+                            .borrow()
+                            .iter()
+                            .rev()
+                            .find(|(binding, _, _)| binding == &ident)
+                        {
+                            return format!("({}).{}()", scrutinee, method);
+                        }
                         if unwrap_method == IF_LET_OPTION_TAKE_VALUE_HELPER_MARKER {
                             return "rusty::detail::option_take_value(_iflet)".to_string();
                         }

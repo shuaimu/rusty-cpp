@@ -3399,6 +3399,113 @@ fn test_bare_owner_args_resolve_via_module_subtree_not_global_bare_key() {
 }
 
 #[test]
+fn test_module_topo_by_value_dep_wins_over_subtree_name_noise() {
+    // serde_yaml shape: `mod error` holds `libyaml::error::Mark` BY VALUE
+    // (genuine hard edge error → libyaml), while `mod libyaml` contains only
+    // subtree-local name noise that used to fabricate REVERSE edges — a
+    // `use self::error::…` (alias recorder read `self` like `crate` and
+    // matched its own nested `error` against the ROOT `error` module) and a
+    // locally-declared `Mapping` matching a crate re-export of a sibling
+    // module's type. The false cycle forced source-order fallback and `mod
+    // error`'s struct saw an incomplete `Mark`.
+    let out = transpile_str(
+        r#"
+        mod error {
+            use crate::libyaml::error as libyaml;
+            pub(crate) struct Pos {
+                mark: libyaml::Mark,
+                path: u64,
+            }
+        }
+        mod libyaml {
+            pub(crate) mod error {
+                pub(crate) struct Mark {
+                    pub index: u64,
+                }
+            }
+            pub(crate) mod emitter {
+                pub(crate) struct Mapping {
+                    pub anchor: u64,
+                }
+                pub(crate) enum Event {
+                    MappingStart(Mapping),
+                }
+            }
+            use self::error::Mark;
+            pub(crate) fn probe() -> Mark {
+                Mark { index: 0 }
+            }
+        }
+        pub mod mapping {
+            pub struct Mapping {
+                pub len: u64,
+            }
+        }
+        pub use crate::mapping::Mapping;
+    "#,
+    );
+    let mark_def = out
+        .find("struct Mark {")
+        .expect("Mark definition missing from output");
+    let pos_def = out
+        .find("struct Pos {")
+        .expect("Pos definition missing from output");
+    assert!(
+        mark_def < pos_def,
+        "by-value dep must order Mark's definition before Pos's:\n{out}"
+    );
+}
+
+#[test]
+fn test_self_expanding_alias_rewrite_spells_absolute_path() {
+    // `use crate::libyaml::error as libyaml;` inside `mod error`: expanding
+    // `libyaml::Error` to the full module path yields a RELATIVE spelling
+    // whose first segment re-resolves through the same-named C++ namespace
+    // alias emitted for the Rust `use` (`namespace libyaml =
+    // ::libyaml::error;`) → `(::libyaml::error)::error::Error` — "no member
+    // named 'error'". The expansion must be absolute-qualified.
+    let out = transpile_str(
+        r#"
+        mod error {
+            use crate::libyaml::error as libyaml;
+            pub(crate) struct ErrorImplLibyaml {
+                inner: libyaml::Error,
+            }
+            pub(crate) fn wrap(err: libyaml::Error) -> ErrorImplLibyaml {
+                ErrorImplLibyaml { inner: err }
+            }
+        }
+        mod libyaml {
+            pub(crate) mod error {
+                pub(crate) struct Error {
+                    pub code: u64,
+                }
+            }
+        }
+    "#,
+    );
+    let mut relative_sites = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(pos) = out[search_from..].find("libyaml::error::Error") {
+        let abs = search_from + pos;
+        let preceded_by_colon = abs >= 2 && &out[abs - 2..abs] == "::";
+        if !preceded_by_colon {
+            let line = out[..abs].matches('\n').count() + 1;
+            relative_sites.push(line);
+        }
+        search_from = abs + 1;
+    }
+    assert!(
+        relative_sites.is_empty(),
+        "expanded alias paths must be absolute (::libyaml::error::Error); found relative spellings at lines {relative_sites:?}:\n{out}"
+    );
+    assert!(
+        out.contains("::libyaml::error::Error"),
+        "expanded alias path should still appear, absolutely qualified:\n{out}"
+    );
+}
+
+#[test]
 fn test_leaf41543333333327271_zeroed_uses_expected_type_for_maybe_uninit_receiver() {
     let out = transpile_str(
         r#"
@@ -18985,7 +19092,13 @@ fn test_leaf512_forward_decl_emits_template_alias_before_alias_typed_fn_signatur
 #[test]
 fn test_leaf4154333333334_runtime_fallback_includes_str_and_char_helpers() {
     let helpers = runtime_path_fallback_helpers_text();
-    assert!(helpers.contains("using Utf8Error = rusty::String;"));
+    // Rust-faithful core::str::Utf8Error mirror (serde_yaml's display_lossy
+    // walks valid_up_to()/error_len() to re-synchronize after bad bytes).
+    assert!(helpers.contains("struct Utf8Error {"));
+    assert!(helpers.contains("std::size_t valid_up_to() const"));
+    assert!(helpers.contains("rusty::Option<std::size_t> error_len() const"));
+    assert!(helpers.contains("rusty::Result<std::string_view, Utf8Error> from_utf8(const Bytes& bytes)"));
+    assert!(helpers.contains("REPLACEMENT_CHARACTER"));
     assert!(helpers.contains("from_utf8_unchecked(Bytes&& bytes)"));
     assert!(helpers.contains("from_utf8_unchecked_mut(Bytes&& bytes)"));
     assert!(helpers.contains("struct Chars {"));
@@ -26570,6 +26683,13 @@ fn test_leaf433_if_let_expr_lowers_without_unreachable_condition() {
 
 #[test]
 fn test_leaf435_constructor_hint_recovery_uses_iflet_unwrap_type_placeholder() {
+    // The unified Either/Result hint must be SCOPE-INDEPENDENT: `_iflet`
+    // re-binds in every nested if-let branch, so `decltype((_iflet
+    // .unwrap_err()))` meant a DIFFERENT type per branch (the ternary only
+    // unified while both error shims happened to be rusty::String — either's
+    // error() test broke the moment Utf8Error became a real type). The hint
+    // re-spells each branch's scrutinee call instead: decltype is
+    // unevaluated, so re-emitting the call is free of side effects.
     let out = transpile_str(
         r#"
         enum Either<L, R> { Left(L), Right(R) }
@@ -26586,7 +26706,18 @@ fn test_leaf435_constructor_hint_recovery_uses_iflet_unwrap_type_placeholder() {
     "#,
     );
     assert!(!out.contains("decltype((std::move(error)))"));
-    assert!(out.contains("decltype((_iflet.unwrap_err()))"));
+    assert!(
+        !out.contains("Either<decltype((_iflet.unwrap_err())), decltype((_iflet.unwrap_err()))>"),
+        "Either hint slots must not alias the branch-local _iflet:\n{out}"
+    );
+    assert!(
+        out.contains("Either<decltype(((rusty::str_runtime::from_utf8("),
+        "Left slot must re-spell the from_utf8 scrutinee:\n{out}"
+    );
+    assert!(
+        out.contains(".unwrap_err())), decltype(((rusty::str_runtime::parse<int32_t>(\"x\")).unwrap_err()))>"),
+        "Right slot must re-spell the parse scrutinee:\n{out}"
+    );
 }
 
 #[test]

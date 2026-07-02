@@ -75,6 +75,15 @@ pub struct UfcsTraitManifest {
     /// Populated from `emitted_rusty_ext_methods_by_module`.
     #[serde(default)]
     pub rusty_ext_methods_by_module: std::collections::BTreeMap<String, Vec<String>>,
+    /// C-like enum VARIANT name → the enum's crate-relative C++ path
+    /// (`YAML_STREAM_START_EVENT` → `yaml::yaml_event_type_t`). Rust re-exports
+    /// variants into scope (`pub use yaml_event_type_t::*;` chained through
+    /// crate-root globs), so a consumer can spell `dep::VARIANT`; C++
+    /// enum-class variants only resolve through the ENUM-qualified path
+    /// (`::dep::yaml::yaml_event_type_t::VARIANT`). Variant names declared by
+    /// more than one enum are omitted (ambiguous).
+    #[serde(default)]
+    pub c_like_enum_variants: BTreeMap<String, String>,
 }
 
 /// One entry of `UfcsTraitManifest::declared_types` (book § 3.2.7): cross-crate
@@ -1002,7 +1011,6 @@ pub fn transpile_full_with_options(
         }
     }
     let mut output_str = codegen.into_output();
-    println!("RUSTY_DEDUP_TRACE_X9Z called len={}", output_str.len());
     // Generic dedup of consecutive identical `= default;` operator lines.
     // `#[derive(Eq, PartialEq, Ord, PartialOrd)]` lowers each pair (Eq +
     // PartialEq → operator==, Ord + PartialOrd → operator<=>) to the same
@@ -2694,6 +2702,7 @@ mod tests {
             declared_macros: Vec::new(),
             declared_modules: Vec::new(),
             rusty_ext_methods_by_module: std::collections::BTreeMap::new(),
+            c_like_enum_variants: std::collections::BTreeMap::new(),
         };
         let path = std::env::temp_dir().join("rusty_ufcs_manifest_consume_test.json");
         std::fs::write(&path, serde_json::to_string(&manifest).unwrap()).unwrap();
@@ -2740,6 +2749,84 @@ mod tests {
         assert!(
             !without.contains("Greet_::hello"),
             "without the manifest there must be no UFCS free call for hello\nGot: {without}"
+        );
+    }
+
+    #[test]
+    fn test_cross_crate_c_like_enum_variants_roundtrip_and_crate_rename_alias() {
+        // Producer: a C-like enum's variants land in the manifest with the
+        // enum-qualified crate-relative path (Rust variant glob re-exports
+        // make bare variants crate-visible; C++ enum classes don't).
+        let dep_src = r#"
+            pub mod yaml {
+                pub enum yaml_event_type_t {
+                    YAML_NO_EVENT,
+                    YAML_GO_EVENT,
+                }
+                pub use self::yaml_event_type_t::*;
+            }
+            pub use crate::yaml::*;
+        "#;
+        let manifest_path =
+            std::env::temp_dir().join("rusty_ufcs_manifest_variant_roundtrip_test.json");
+        let _ = std::fs::remove_file(&manifest_path);
+        let options = TranspileOptions {
+            emit_ufcs_trait_manifest_path: Some(manifest_path.clone()),
+            ..TranspileOptions::default()
+        };
+        let _ = transpile_full_with_options(
+            dep_src,
+            Some("sysdep"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &options,
+        )
+        .expect("dep transpile should succeed");
+        let manifest: UfcsTraitManifest = serde_json::from_str(
+            &std::fs::read_to_string(&manifest_path).expect("manifest must be written"),
+        )
+        .expect("manifest must parse");
+        assert_eq!(
+            manifest.c_like_enum_variants.get("YAML_GO_EVENT"),
+            Some(&"yaml::yaml_event_type_t".to_string()),
+            "producer must record the variant's enum-qualified path\nGot: {manifest:?}"
+        );
+
+        // Consumer: `use sysdep as sys;` is a CRATE rename → a namespace
+        // alias (not `using sys = sysdep;`), and `sys::YAML_GO_EVENT`
+        // qualifies through the manifest to the enum-scoped C++ path.
+        let consumer_src = r#"
+            use sysdep as sys;
+            pub fn check(t: u32) -> bool {
+                t == sys::YAML_GO_EVENT as u32
+            }
+        "#;
+        let consume_options = TranspileOptions {
+            dependency_ufcs_trait_manifests: vec![manifest_path.clone()],
+            ..TranspileOptions::default()
+        };
+        let out = transpile_full_with_options(
+            consumer_src,
+            Some("consumer"),
+            &UserTypeMap::default(),
+            &HashSet::new(),
+            None,
+            &consume_options,
+        )
+        .expect("consumer transpile should succeed");
+        let _ = std::fs::remove_file(&manifest_path);
+        assert!(
+            out.contains("namespace sys = ::sysdep;"),
+            "crate rename import must emit an absolute namespace alias\nGot: {out}"
+        );
+        assert!(
+            !out.contains("using sys = sysdep;"),
+            "crate rename import must not emit a type alias\nGot: {out}"
+        );
+        assert!(
+            out.contains("::sysdep::yaml::yaml_event_type_t::YAML_GO_EVENT"),
+            "cross-crate variant reference must qualify to the enum-scoped path\nGot: {out}"
         );
     }
 

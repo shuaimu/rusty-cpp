@@ -138,6 +138,17 @@ pub(crate) enum GenericParamDefault {
     Const(syn::Expr),
 }
 
+/// See `module_dep_scope`: subtree-local name context for one root module
+/// during module-dependency edge collection.
+#[derive(Clone)]
+pub(crate) struct ModuleDepScope {
+    pub(crate) current_module: String,
+    /// Struct/enum/union/type-alias idents declared anywhere in the subtree.
+    pub(crate) subtree_types: HashSet<String>,
+    /// Names of nested modules anywhere in the subtree.
+    pub(crate) subtree_modules: HashSet<String>,
+}
+
 struct NonlocalTypeResolutionGuard<'a> {
     in_progress: &'a std::cell::RefCell<HashSet<String>>,
     name: String,
@@ -852,6 +863,29 @@ pub struct CodeGen {
     /// Local type names declared in this file (scoped and unscoped).
     /// Used to distinguish true extension impls from local-type impls.
     pub(crate) local_declared_types: HashSet<String>,
+    /// Ambient scope for module-dependency collection (`order_items_for_emission`
+    /// topo sort): while collecting edges for root module X, holds X's name plus
+    /// the type and nested-module names declared anywhere in X's subtree. Names
+    /// that resolve WITHIN the subtree (`self::error::Error`, a locally declared
+    /// `Mapping`) must not be attributed to same-named sibling root modules or
+    /// crate re-exports — serde_yaml's `mod libyaml` grew false hard edges to
+    /// root `error`/`mapping`/`value` that way, forcing the module topo sort
+    /// into a cycle and source-order fallback (incomplete `Mark` by-value use).
+    /// RefCell because dependency recorders take `&self` at ~50 call sites.
+    pub(crate) module_dep_scope: std::cell::RefCell<Option<ModuleDepScope>>,
+    /// Ambient if-let binding → (scrutinee C++, unwrap method) stack for
+    /// constructor-hint collection. `emit_constructor_hint_arg_cpp` spelled
+    /// every if-let binding as `_iflet.unwrap_err()` — a SCOPE-DEPENDENT
+    /// alias: in either's `if let Err(e) = from_utf8(..) { Err(Left(e)) }
+    /// else if let Err(e) = parse(..) { Err(Right(e)) } else { Ok(()) }`,
+    /// the unified `Either<decltype(..), decltype(..)>` spelling re-binds to
+    /// whichever branch's `_iflet` is local, so the three branches disagree
+    /// (it only compiled while both error shims happened to be
+    /// rusty::String). Re-spelling the binding as
+    /// `(<scrutinee>).unwrap_err()` is scope-independent — decltype is
+    /// unevaluated, so re-emitting the call is side-effect-free. Innermost
+    /// entry wins (nested if-let chains shadow).
+    pub(crate) iflet_hint_scrutinees: std::cell::RefCell<Vec<(String, String, &'static str)>>,
     /// Type names declared at the crate ROOT (module_path empty). Such a name is the canonical
     /// definition: a bare reference to it must resolve to the root, NOT be qualified to a
     /// same-named alias in a sibling submodule (indexmap's `set::Bucket<T>` alias vs the root
@@ -952,6 +986,13 @@ pub struct CodeGen {
     /// Tracks enum-member keys on C-like enums (e.g., "Ordering_SeqCst").
     /// Used to avoid misclassifying enum class variants as data-enum variants.
     pub(crate) c_like_enum_variants: HashSet<String>,
+    /// C-like enum VARIANT name → the enum's crate-relative C++ path
+    /// (`YAML_STREAM_START_EVENT` → `Some("yaml::yaml_event_type_t")`), or
+    /// `None` once a second enum declares the same variant name (ambiguous —
+    /// dropped from the manifest). Feeds `UfcsTraitManifest::
+    /// c_like_enum_variants` so a consumer can qualify `dep::VARIANT` (a Rust
+    /// variant glob re-export) to the enum-scoped C++ spelling.
+    pub(crate) c_like_enum_variant_paths: HashMap<String, Option<String>>,
     /// C-like enum type names (scoped and unscoped Rust paths).
     /// Used to route inherent method calls through free-function lowering.
     pub(crate) c_like_enum_types: HashSet<String>,
@@ -1700,6 +1741,8 @@ impl CodeGen {
             user_deref_targets: HashMap::new(),
             emitted_scoped_type_aliases: HashSet::new(),
             local_declared_types: HashSet::new(),
+            module_dep_scope: std::cell::RefCell::new(None),
+            iflet_hint_scrutinees: std::cell::RefCell::new(Vec::new()),
             root_declared_type_names: HashSet::new(),
             local_type_module_path: HashMap::new(),
             manifest_type_module_path: HashMap::new(),
@@ -1721,6 +1764,7 @@ impl CodeGen {
             data_enum_variant_names: HashSet::new(),
             data_enum_variant_field_types: std::rc::Rc::new(HashMap::new()),
             c_like_enum_consts: HashSet::new(),
+            c_like_enum_variant_paths: HashMap::new(),
             self_sizeof_const_fns: HashSet::new(),
             c_like_enum_variants: HashSet::new(),
             c_like_enum_types: HashSet::new(),
@@ -3053,6 +3097,18 @@ impl CodeGen {
             .iter()
             .map(|(module, methods)| (module.clone(), methods.iter().cloned().collect()))
             .collect();
+        // Unambiguous C-like enum variants (Rust glob re-exports make bare
+        // variants crate-visible; a consumer must qualify them to the C++
+        // enum-scoped path).
+        let c_like_enum_variants: std::collections::BTreeMap<String, String> = self
+            .c_like_enum_variant_paths
+            .iter()
+            .filter_map(|(variant, owner)| {
+                owner
+                    .as_ref()
+                    .map(|enum_path| (variant.clone(), enum_path.clone()))
+            })
+            .collect();
         crate::transpile::UfcsTraitManifest {
             version: 1,
             module: module.to_string(),
@@ -3064,6 +3120,7 @@ impl CodeGen {
             declared_macros,
             declared_modules,
             rusty_ext_methods_by_module,
+            c_like_enum_variants,
         }
     }
 
@@ -3294,6 +3351,19 @@ impl CodeGen {
                     format!("::{}::{}", m.module, shell),
                     format!("::{}::{}", m.module, canonical),
                 ));
+            }
+            // Cross-crate C-LIKE ENUM VARIANTS: Rust variant glob re-exports
+            // (`pub use yaml_event_type_t::*;` chained to the crate root) let a
+            // consumer spell `unsafe_libyaml::YAML_STREAM_START_EVENT`; the C++
+            // enum-class variant only resolves through the ENUM-scoped path.
+            // Both relative and absolute crate-prefixed spellings are rewritten
+            // (boundary_replace_path rejects a preceding `:`, so the relative
+            // form needs its own entry).
+            for (variant, enum_path) in &m.c_like_enum_variants {
+                let qualified =
+                    format!("::{}::{}::{}", m.module, enum_path, variant);
+                repls.push((format!("::{}::{}", m.module, variant), qualified.clone()));
+                repls.push((format!("{}::{}", m.module, variant), qualified));
             }
         }
         if repls.is_empty() {
@@ -4960,6 +5030,40 @@ impl CodeGen {
         candidates
     }
 
+    /// Collect type and nested-module names declared anywhere within a module
+    /// subtree (transitively through nested `mod` items). Feeds
+    /// `ModuleDepScope` so dependency collection can shadow-resolve
+    /// subtree-local names instead of attributing them to sibling root modules.
+    fn collect_module_subtree_names(
+        items: &[syn::Item],
+        types: &mut HashSet<String>,
+        modules: &mut HashSet<String>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Struct(s) => {
+                    types.insert(s.ident.to_string());
+                }
+                syn::Item::Enum(e) => {
+                    types.insert(e.ident.to_string());
+                }
+                syn::Item::Union(u) => {
+                    types.insert(u.ident.to_string());
+                }
+                syn::Item::Type(t) => {
+                    types.insert(t.ident.to_string());
+                }
+                syn::Item::Mod(m) => {
+                    modules.insert(m.ident.to_string());
+                    if let Some((_, nested)) = &m.content {
+                        Self::collect_module_subtree_names(nested, types, modules);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn order_items_for_emission<'a>(
         &self,
         items: &'a [syn::Item],
@@ -5080,6 +5184,23 @@ impl CodeGen {
                 let mut deps: HashSet<String> = HashSet::new();
                 let mut strict_deps: HashSet<String> = HashSet::new();
                 if let Some((_, module_items)) = &module_item.content {
+                    // Subtree-shadowing context: names declared anywhere inside
+                    // THIS module (nested types/modules) resolve locally and
+                    // must not become edges to same-named root modules.
+                    {
+                        let mut subtree_types: HashSet<String> = HashSet::new();
+                        let mut subtree_modules: HashSet<String> = HashSet::new();
+                        Self::collect_module_subtree_names(
+                            module_items,
+                            &mut subtree_types,
+                            &mut subtree_modules,
+                        );
+                        *self.module_dep_scope.borrow_mut() = Some(ModuleDepScope {
+                            current_module: module_item.ident.to_string(),
+                            subtree_types,
+                            subtree_modules,
+                        });
+                    }
                     if !hard_only {
                         self.collect_scope_module_dependencies(
                             module_items,
@@ -5099,6 +5220,7 @@ impl CodeGen {
                         &forward_declable_types_by_module,
                         &mut strict_deps,
                     );
+                    *self.module_dep_scope.borrow_mut() = None;
                 }
                 if hard_only && std::env::var_os("RUSTY_CPP_DEBUG_MODULE_DEPS").is_some() {
                     let mut dep_list: Vec<String> = deps.iter().cloned().collect();
@@ -7231,6 +7353,20 @@ impl CodeGen {
         if matches!(segments[0].as_str(), "std" | "core" | "alloc") {
             return;
         }
+        // Subtree shadowing: `use self::error::Error;` inside `mod libyaml`
+        // names libyaml's OWN nested module — treating `self` like `crate`
+        // matched the next segment against ROOT module names and bound the
+        // alias to a same-named sibling (`error`), fabricating a hard edge
+        // and a false ordering cycle. `self::…` always resolves within the
+        // module being collected.
+        if segments[0] == "self"
+            && let Some(scope) = self.module_dep_scope.borrow().as_ref()
+        {
+            imported_name_to_module
+                .entry(alias.to_string())
+                .or_insert_with(|| scope.current_module.clone());
+            return;
+        }
         let mut module_root = if known_modules.contains(&segments[0]) {
             Some(segments[0].clone())
         } else if matches!(segments[0].as_str(), "crate" | "self" | "super")
@@ -7284,6 +7420,26 @@ impl CodeGen {
                     .iter()
                     .find(|segment| known_modules.contains(*segment))
                     .cloned();
+            }
+        }
+        if module_root.is_none()
+            && let Some(scope) = self.module_dep_scope.borrow().as_ref()
+        {
+            // Subtree shadowing: an import whose leaf is declared inside the
+            // module being collected resolves locally — do not let the
+            // unique-sibling-owner scans below attribute it to a same-named
+            // type in another root module.
+            let imported_leaf = segments.last().cloned().unwrap_or_default();
+            if scope.subtree_types.contains(alias)
+                || scope.subtree_types.contains(&imported_leaf)
+                || segments
+                    .first()
+                    .is_some_and(|seg| scope.subtree_modules.contains(seg))
+            {
+                imported_name_to_module
+                    .entry(alias.to_string())
+                    .or_insert_with(|| scope.current_module.clone());
+                return;
             }
         }
         if module_root.is_none() {
@@ -7389,6 +7545,25 @@ impl CodeGen {
         let mut resolved_module: Option<String> = None;
         let mut resolved_type_name: Option<String> = None;
         let mut resolved_type_segment_index: Option<usize> = None;
+
+        // Subtree shadowing (see `module_dep_scope`): inside the module being
+        // collected, `self::…`, a path rooted at one of its OWN nested modules,
+        // or a bare name it declares all resolve locally. Attributing them to
+        // same-named sibling root modules / crate re-exports fabricated hard
+        // edges (serde_yaml: `mod libyaml` → root `error`/`mapping`) and forced
+        // the module topo sort into a false cycle.
+        if let Some(scope) = self.module_dep_scope.borrow().as_ref() {
+            // A bare name (or `Type::assoc` owner) declared in the subtree
+            // shadows any same-named root re-export, so no segment-count
+            // guard on the types check.
+            let subtree_local = first_name == "self"
+                || scope.subtree_modules.contains(&first_name)
+                || scope.subtree_types.contains(&first_name);
+            if subtree_local {
+                out.insert(scope.current_module.clone());
+                return;
+            }
+        }
 
         if known_modules.contains(&first_name) && segment_count > 1 {
             resolved_module = Some(first_name.clone());
@@ -7561,6 +7736,15 @@ impl CodeGen {
         out: &mut HashSet<String>,
     ) {
         if segments.is_empty() {
+            return;
+        }
+
+        // Subtree shadowing (see `module_dep_scope`): `use self::x::*` or a
+        // glob through one of this module's OWN nested modules stays local.
+        if let Some(scope) = self.module_dep_scope.borrow().as_ref()
+            && (segments[0] == "self" || scope.subtree_modules.contains(&segments[0]))
+        {
+            out.insert(scope.current_module.clone());
             return;
         }
 
@@ -9438,6 +9622,29 @@ impl CodeGen {
                 self.c_like_enum_variants
                     .insert(format!("{}::{}", module_path.join("::"), key));
             }
+        }
+        // Manifest metadata: bare variant → the enum's crate-relative C++
+        // path, first-owner-wins with ambiguity poisoning (two enums sharing
+        // a variant name → None → omitted from the manifest).
+        let escaped_module_path = module_path
+            .iter()
+            .map(|segment| escape_cpp_keyword(segment))
+            .collect::<Vec<_>>()
+            .join("::");
+        let qualified_enum = if escaped_module_path.is_empty() {
+            enum_name.clone()
+        } else {
+            format!("{}::{}", escaped_module_path, enum_name)
+        };
+        for variant in &e.variants {
+            self.c_like_enum_variant_paths
+                .entry(variant.ident.to_string())
+                .and_modify(|existing| {
+                    if existing.as_deref() != Some(qualified_enum.as_str()) {
+                        *existing = None;
+                    }
+                })
+                .or_insert_with(|| Some(qualified_enum.clone()));
         }
     }
 
@@ -38180,14 +38387,8 @@ impl CodeGen {
 /// and at worst a hard error. Matches by trimmed line content so leading
 /// indentation is ignored.
 fn dedup_consecutive_defaulted_operators(output: &str) -> String {
-    let _ = std::fs::write(
-        "/tmp/dedup_trace.log",
-        format!("called, output_len={}\n", output.len()),
-    );
-    eprintln!("[dedup-trace] called, output_len={}", output.len());
     let mut out = String::with_capacity(output.len());
     let mut prev_trimmed: Option<String> = None;
-    let mut dedup_count = 0;
     for line in output.split_inclusive('\n') {
         let trimmed = line.trim().to_string();
         // Only dedup defaulted-declarator lines so we never drop ordinary
@@ -38201,13 +38402,11 @@ fn dedup_consecutive_defaulted_operators(output: &str) -> String {
         if is_defaulted_declarator
             && prev_trimmed.as_ref().is_some_and(|prev| prev == &trimmed)
         {
-            dedup_count += 1;
             continue;
         }
         out.push_str(line);
         prev_trimmed = Some(trimmed);
     }
-    eprintln!("[dedup-trace] removed {} duplicates", dedup_count);
     out
 }
 
@@ -43273,62 +43472,81 @@ rusty::Result<T, std::tuple<>> parse_hex(const Input& input) {\n\
     }\n\
 }\n\
 namespace str_runtime {\n\
-using Utf8Error = rusty::String;\n\
-inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {\n\
+// Mirrors core::str::Utf8Error: byte index of the valid prefix plus the\n\
+// invalid-sequence length (None = input ended in the middle of a sequence).\n\
+struct Utf8Error {\n\
+    std::size_t valid_up_to_ = 0;\n\
+    long long error_len_ = -1;\n\
+    std::size_t valid_up_to() const { return valid_up_to_; }\n\
+    rusty::Option<std::size_t> error_len() const {\n\
+        if (error_len_ < 0) { return rusty::Option<std::size_t>(rusty::None); }\n\
+        return rusty::Option<std::size_t>(static_cast<std::size_t>(error_len_));\n\
+    }\n\
+    rusty::String to_string() const { return rusty::String::from(\"invalid utf-8 sequence\"); }\n\
+    constexpr bool operator==(const Utf8Error&) const = default;\n\
+};\n\
+// Rust-faithful UTF-8 validation: on failure reports where the valid prefix\n\
+// ends and how many bytes the broken sequence spans (-1 error_len = the\n\
+// input ended prematurely, Rust's error_len() == None).\n\
+inline Utf8Error validate_utf8(const unsigned char* data, std::size_t len, bool& ok) {\n\
     std::size_t i = 0;\n\
+    ok = true;\n\
     while (i < len) {\n\
         const auto byte = data[i];\n\
         if (byte <= 0x7F) {\n\
             ++i;\n\
             continue;\n\
         }\n\
+        std::size_t need;\n\
         if ((byte >> 5) == 0x6) {\n\
-            if (i + 1 >= len) return false;\n\
-            const auto b1 = data[i + 1];\n\
-            if ((b1 & 0xC0) != 0x80 || byte < 0xC2) return false;\n\
-            i += 2;\n\
-            continue;\n\
+            if (byte < 0xC2) { ok = false; return Utf8Error{i, 1}; }\n\
+            need = 1;\n\
+        } else if ((byte >> 4) == 0xE) {\n\
+            need = 2;\n\
+        } else if ((byte >> 3) == 0x1E) {\n\
+            if (byte > 0xF4) { ok = false; return Utf8Error{i, 1}; }\n\
+            need = 3;\n\
+        } else {\n\
+            ok = false;\n\
+            return Utf8Error{i, 1};\n\
         }\n\
-        if ((byte >> 4) == 0xE) {\n\
-            if (i + 2 >= len) return false;\n\
-            const auto b1 = data[i + 1];\n\
-            const auto b2 = data[i + 2];\n\
-            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return false;\n\
-            if (byte == 0xE0 && b1 < 0xA0) return false;\n\
-            if (byte == 0xED && b1 >= 0xA0) return false;\n\
-            i += 3;\n\
-            continue;\n\
+        for (std::size_t k = 1; k <= need; ++k) {\n\
+            if (i + k >= len) { ok = false; return Utf8Error{i, -1}; }\n\
+            const auto cont = data[i + k];\n\
+            bool cont_ok = (cont & 0xC0) == 0x80;\n\
+            if (k == 1) {\n\
+                if (byte == 0xE0) cont_ok = cont >= 0xA0 && cont <= 0xBF;\n\
+                else if (byte == 0xED) cont_ok = cont >= 0x80 && cont <= 0x9F;\n\
+                else if (byte == 0xF0) cont_ok = cont >= 0x90 && cont <= 0xBF;\n\
+                else if (byte == 0xF4) cont_ok = cont >= 0x80 && cont <= 0x8F;\n\
+            }\n\
+            if (!cont_ok) { ok = false; return Utf8Error{i, static_cast<long long>(k)}; }\n\
         }\n\
-        if ((byte >> 3) == 0x1E) {\n\
-            if (i + 3 >= len) return false;\n\
-            const auto b1 = data[i + 1];\n\
-            const auto b2 = data[i + 2];\n\
-            const auto b3 = data[i + 3];\n\
-            if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return false;\n\
-            if (byte == 0xF0 && b1 < 0x90) return false;\n\
-            if (byte == 0xF4 && b1 >= 0x90) return false;\n\
-            if (byte > 0xF4) return false;\n\
-            i += 4;\n\
-            continue;\n\
-        }\n\
-        return false;\n\
+        i += need + 1;\n\
     }\n\
-    return true;\n\
+    return Utf8Error{};\n\
+}\n\
+inline bool is_valid_utf8(const unsigned char* data, std::size_t len) {\n\
+    bool ok = true;\n\
+    (void)validate_utf8(data, len, ok);\n\
+    return ok;\n\
 }\n\
 template<typename Bytes>\n\
-rusty::Result<std::string_view, rusty::String> from_utf8(const Bytes& bytes) {\n\
+rusty::Result<std::string_view, Utf8Error> from_utf8(const Bytes& bytes) {\n\
     if constexpr (requires { bytes.data(); bytes.size(); }) {\n\
         const auto* raw = bytes.data();\n\
         const std::size_t len = static_cast<std::size_t>(bytes.size());\n\
         const auto* data = reinterpret_cast<const unsigned char*>(raw);\n\
-        if (!is_valid_utf8(data, len)) {\n\
-            return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from(\"invalid utf-8\"));\n\
+        bool ok = true;\n\
+        const auto err = validate_utf8(data, len, ok);\n\
+        if (!ok) {\n\
+            return rusty::Result<std::string_view, Utf8Error>::Err(err);\n\
         }\n\
-        return rusty::Result<std::string_view, rusty::String>::Ok(\n\
+        return rusty::Result<std::string_view, Utf8Error>::Ok(\n\
             std::string_view(reinterpret_cast<const char*>(raw), len)\n\
         );\n\
     }\n\
-    return rusty::Result<std::string_view, rusty::String>::Err(rusty::String::from(\"unsupported from_utf8 input\"));\n\
+    return rusty::Result<std::string_view, Utf8Error>::Err(Utf8Error{});\n\
 }\n\
 template<typename Bytes>\n\
 std::string_view from_utf8_unchecked(Bytes&& bytes) {\n\
@@ -43670,6 +43888,8 @@ inline SplitIter split(const S& value, char32_t delim) {\n\
 }\n\
 }\n\
 namespace char_runtime {\n\
+// Rust `char::REPLACEMENT_CHARACTER` (U+FFFD).\n\
+inline constexpr char32_t REPLACEMENT_CHARACTER = static_cast<char32_t>(0xFFFD);\n\
 inline rusty::Option<char32_t> from_u32(uint32_t value) {\n\
     if (value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) {\n\
         return rusty::Option<char32_t>(rusty::None);\n\

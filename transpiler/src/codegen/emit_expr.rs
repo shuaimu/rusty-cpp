@@ -18989,6 +18989,18 @@ impl CodeGen {
             }
             _ => return None,
         };
+        // `char` assoc consts ride the same primitive-owner path shapes
+        // (`char::REPLACEMENT_CHARACTER`, `core::char::MAX`, …); the keyword
+        // escape alone would spell a nonexistent `char_::…`.
+        if owner == "char" || owner == "char_" {
+            return match member {
+                "REPLACEMENT_CHARACTER" => {
+                    Some("rusty::char_runtime::REPLACEMENT_CHARACTER".to_string())
+                }
+                "MAX" => Some("static_cast<char32_t>(0x10FFFF)".to_string()),
+                _ => None,
+            };
+        }
         let (cpp_ty, num_bits, num_sig_bits, num_exp_bits, exp_mask, exp_bias, exp_offset) =
             match owner {
                 "f32" => ("float", 32, 23, 8, 255, 127, 150),
