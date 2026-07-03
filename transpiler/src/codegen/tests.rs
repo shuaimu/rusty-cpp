@@ -18108,19 +18108,12 @@ fn test_leaf513_iter_adapter_return_types_lower_to_decltype_forms() {
     // Vec::IntoIter return type may use `.into_iter()` decltype directly
     // or be bridged via `rusty::iter(...)`.
     assert!(
-        out.contains("decltype(std::declval<rusty::Vec<T>>().into_iter()) vec_into_iter_ty()")
-            || out.contains(
-                "decltype(rusty::iter(std::declval<rusty::Vec<T>>())) vec_into_iter_ty()"
-            ),
+        out.contains("::rusty::port::vec::IntoIter<T> vec_into_iter_ty()"),
         "expected rusty::vec::IntoIter lowering, got:\n{}",
         out
     );
     assert!(
-        out.contains(
-            "decltype(std::declval<rusty::Vec<T>>().into_iter()) alloc_vec_into_iter_ty()"
-        ) || out.contains(
-            "decltype(rusty::iter(std::declval<rusty::Vec<T>>())) alloc_vec_into_iter_ty()"
-        ),
+        out.contains("::rusty::port::vec::IntoIter<T> alloc_vec_into_iter_ty()"),
         "expected alloc::vec::IntoIter lowering, got:\n{}",
         out
     );

@@ -91,6 +91,7 @@ export module rusty;
 // `import rusty;` exposes the full surface.
 export import rusty.async;
 export import vec_port.vec;
+export import vec_port.vec.into_iter;  // named vec::IntoIter<T> (transpiler maps Rust vec::IntoIter directly to it)
 export import btree_port.btree.map;  // namespace: btree_port::btree::map
 export import btree_port.btree.set;  // namespace: btree_port::btree::set
 export import rc_port;

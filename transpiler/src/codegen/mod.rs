@@ -34350,6 +34350,41 @@ impl CodeGen {
             );
         }
         if type_string_has_auto_placeholder(&ty) {
+            let target_is_mut_ptr = match target_ty_override {
+                Some(syn::Type::Ptr(p)) => p.mutability.is_some(),
+                _ => matches!(cast.ty.as_ref(), syn::Type::Ptr(p) if p.mutability.is_some()),
+            };
+            // In `x as *mut _` the source is a pointer in all but the
+            // int-to-pointer shape — inference often can't classify
+            // cross-crate fields (libyaml's `(*parser).problem`), so only a
+            // POSITIVELY-numeric source skips the const-strip.
+            let source_is_numeric_scalar = self
+                .infer_simple_expr_type(&cast.expr)
+                .map(|src_ty| {
+                    self.map_type(self.peel_reference_paren_group_type(&src_ty))
+                })
+                .is_some_and(|mapped| {
+                    is_numeric_cpp_scalar_type(
+                        mapped.trim_start_matches("const ").trim(),
+                    )
+                });
+            if target_is_mut_ptr
+                && !source_is_numeric_scalar
+                && !source_is_explicit_reference
+                && !self.is_expr_reference_like(&cast.expr)
+            {
+                // `x as *mut _`: the pointee is inferred, but the MUTABILITY
+                // is explicit in the source. Emitting the operand verbatim
+                // keeps a const pointee, so downstream deduction
+                // (NonNull<T>::new_, Box::from_raw) sees `const signed char`
+                // where Rust inferred `i8`. Strip const from the source
+                // pointer; a no-op const_cast on an already-mut pointer is
+                // harmless. (Reference-like sources keep the address-of
+                // lowering in the branch below.)
+                return format!(
+                    "const_cast<std::remove_const_t<std::remove_pointer_t<std::remove_cvref_t<decltype(({expr}))>>>*>({expr})",
+                );
+            }
             if target_is_pointer_type
                 && self.is_expr_reference_like(&cast.expr)
                 && !source_is_explicit_reference
@@ -37054,8 +37089,17 @@ impl CodeGen {
                             "IntoIter".to_string(),
                         ]
                 {
+                    // Name the vec_port consuming iterator DIRECTLY. The old
+                    // `decltype(rusty::iter(std::declval<rusty::Vec<T>>()))`
+                    // spelling instantiates at signature position — in a
+                    // template class member's declared return type it fires
+                    // at CLASS instantiation and completes T via the iter
+                    // dispatch's ADL probes (indexmap Core::split_splice
+                    // completed Bucket<Value, Value> while serde_yaml's
+                    // Value was still forward-declared). Naming a class
+                    // template never instantiates it.
                     return Some(format!(
-                        "decltype(rusty::iter(std::declval<rusty::Vec<{}>>()))",
+                        "::rusty::port::vec::IntoIter<{}>",
                         mapped_args[0]
                     ));
                 }
@@ -38469,6 +38513,21 @@ impl CodeGen {
                         format!(
                             "rusty::to_string_view({})",
                             self.emit_expr_maybe_move(string_expr)
+                        )
+                    } else if variant == "Bytes" {
+                        // Unexpected::Bytes(&'a [u8]): Rust deref-coerces
+                        // through Box/Rc/Arc-wrapped slices (`&scalar.value`
+                        // with value: Box<[u8]> passes the boxed slice, not
+                        // the box's address). deref_if_pointer_like is the
+                        // identity for already-slice-shaped values.
+                        let bytes_expr = if let syn::Expr::Reference(reference) = arg_expr {
+                            self.peel_paren_group_expr(&reference.expr)
+                        } else {
+                            arg_expr
+                        };
+                        format!(
+                            "rusty::detail::deref_if_pointer_like({})",
+                            self.emit_expr_maybe_move(bytes_expr)
                         )
                     } else {
                         self.emit_expr_maybe_move(arg_expr)
