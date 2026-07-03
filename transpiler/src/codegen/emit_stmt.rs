@@ -382,6 +382,92 @@ impl CodeGen {
         }
     }
 
+    /// A ` -> std::tuple<...>` return annotation for an un-annotated
+    /// tuple-valued runtime match, inferred per slot across arms: a slot
+    /// types from any arm where it is `Some(<pattern binding>)` (→
+    /// Option of the binding's payload type), a bare pattern binding, or
+    /// an expression the simple inferencer understands. Bare `None`
+    /// slots contribute nothing — they are exactly what the annotation
+    /// exists to type.
+    fn infer_runtime_match_tuple_annotation(
+        &self,
+        match_expr: &syn::ExprMatch,
+    ) -> Option<String> {
+        let scrutinee_ty = self
+            .infer_simple_expr_type(&match_expr.expr)
+            .or_else(|| self.infer_local_binding_type_from_initializer(&match_expr.expr))?;
+        let mut arity: Option<usize> = None;
+        let mut arm_data: Vec<(HashMap<String, syn::Type>, syn::ExprTuple)> = Vec::new();
+        for arm in &match_expr.arms {
+            if self.is_expr_diverging(&arm.body) {
+                continue;
+            }
+            let value = self
+                .extract_match_arm_value_expr(&arm.body)
+                .unwrap_or(&arm.body);
+            let syn::Expr::Tuple(tuple) = self.peel_paren_group_expr(value) else {
+                return None;
+            };
+            match arity {
+                Some(n) if n != tuple.elems.len() => return None,
+                None => arity = Some(tuple.elems.len()),
+                _ => {}
+            }
+            let mut env = HashMap::new();
+            self.bind_pattern_types_into_env(&arm.pat, &scrutinee_ty, &mut env);
+            arm_data.push((env, tuple.clone()));
+        }
+        let arity = arity?;
+        if arity == 0 || arm_data.is_empty() {
+            return None;
+        }
+        let clean_cpp = |ty: &syn::Type| -> Option<String> {
+            let cpp = self.map_type(ty);
+            (!cpp.is_empty() && cpp != "auto" && !type_string_has_auto_placeholder(&cpp))
+                .then_some(cpp)
+        };
+        let mut slot_cpp: Vec<Option<String>> = vec![None; arity];
+        for (env, tuple) in &arm_data {
+            for (idx, slot) in slot_cpp.iter_mut().enumerate() {
+                if slot.is_some() {
+                    continue;
+                }
+                let elem = self.peel_paren_group_expr(&tuple.elems[idx]);
+                if let syn::Expr::Call(call) = elem
+                    && let syn::Expr::Path(fp) = call.func.as_ref()
+                    && fp.path.segments.last().is_some_and(|seg| seg.ident == "Some")
+                    && call.args.len() == 1
+                    && let syn::Expr::Path(ap) = self.peel_paren_group_expr(&call.args[0])
+                    && ap.path.segments.len() == 1
+                    && let Some(inner_ty) =
+                        env.get(&ap.path.segments[0].ident.to_string())
+                {
+                    if let Some(inner_cpp) = clean_cpp(inner_ty) {
+                        *slot = Some(format!(
+                            "rusty::Option<std::remove_cvref_t<{}>>",
+                            inner_cpp
+                        ));
+                    }
+                } else if let syn::Expr::Path(ap) = elem
+                    && ap.path.segments.len() == 1
+                    && let Some(ty) = env.get(&ap.path.segments[0].ident.to_string())
+                {
+                    if let Some(cpp) = clean_cpp(ty) {
+                        *slot = Some(format!("std::remove_cvref_t<{}>", cpp));
+                    }
+                } else if !expr_is_option_none_constructor(elem)
+                    && let Some(ty) = self.infer_simple_expr_type(&tuple.elems[idx])
+                {
+                    if let Some(cpp) = clean_cpp(&ty) {
+                        *slot = Some(format!("std::remove_cvref_t<{}>", cpp));
+                    }
+                }
+            }
+        }
+        let slots: Option<Vec<String>> = slot_cpp.into_iter().collect();
+        Some(format!(" -> std::tuple<{}>", slots?.join(", ")))
+    }
+
     /// Any arm pattern (including or-pattern cases) naming an
     /// Option/Result variant (`Some`/`None`/`Ok`/`Err`).
     fn match_arms_reference_option_result_variants(&self, arms: &[syn::Arm]) -> bool {
@@ -504,6 +590,16 @@ impl CodeGen {
             } else {
                 typed
             }
+        };
+        // Un-annotated tuple-valued match: infer per-slot types across arms
+        // (a `None` slot types from a sibling's `Some(<pattern binding>)`,
+        // the binding from the arm pattern's payload) so the lambda's
+        // return deduction can't lock onto None_t.
+        let runtime_match_return_annotation = if runtime_match_return_annotation.is_empty() {
+            self.infer_runtime_match_tuple_annotation(match_expr)
+                .unwrap_or(runtime_match_return_annotation)
+        } else {
+            runtime_match_return_annotation
         };
         let scrutinee_borrows_payload =
             self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
