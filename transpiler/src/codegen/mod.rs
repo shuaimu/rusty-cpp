@@ -33716,7 +33716,17 @@ impl CodeGen {
         // imported alias (`use content::Content;`), qualify through the bound
         // target path so variant structs resolve as `content::Content_Variant`.
         let mut bound_target_cpp_override: Option<String> = None;
-        let enum_base_path = if enum_base_path.segments.len() == 1 {
+        let enum_base_path = if enum_base_path.segments.len() == 1
+            && !self.current_module_declares_type_name_exact(
+                &enum_base_path.segments[0].ident.to_string(),
+            )
+        // The current module's OWN enum declaration wins over any use-alias
+        // binding: libyaml::emitter declares `enum Error` while other files
+        // import crate::error::Error — the any-scope unique-binding fallback
+        // must not requalify the local enum through another file's import
+        // (spelled `error::Error_Libyaml`, resolving to the sibling
+        // libyaml::error namespace where no such variant struct exists).
+        {
             let local_name = enum_base_path.segments[0].ident.to_string();
             let scope_key = self.module_stack.join("::");
             let mut bound_target = self

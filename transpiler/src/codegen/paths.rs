@@ -1078,6 +1078,24 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                     bound_segs.iter().map(|s| s.to_string()).collect();
                 expanded.extend(segments[1..].iter().cloned());
                 segments = expanded;
+            } else if bound_segs.len() >= 2
+                && segments[0]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase())
+                && bound_segs.last().copied() == Some(segments[0].as_str())
+            {
+                // A module self-import (`use crate::value::tagged;`) binds the
+                // tail module name to its full path. A free-fn call through
+                // the alias (`tagged::check_for_tag(...)`) emitted verbatim
+                // resolves against the CURRENT namespace in C++ —
+                // serde_yaml::ser has no `tagged` sibling, so expand to the
+                // bound module path (the variant-struct speller already
+                // resolves through the same bindings).
+                let mut expanded: Vec<String> =
+                    bound_segs.iter().map(|s| s.to_string()).collect();
+                expanded.extend(segments[1..].iter().cloned());
+                segments = expanded;
             }
         }
         let mut joined: String;

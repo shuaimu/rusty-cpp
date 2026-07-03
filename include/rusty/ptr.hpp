@@ -32,6 +32,7 @@
 #include <cstddef>  // for std::ptrdiff_t
 #include <cstring>
 #include <memory>
+#include <span>
 #include <type_traits>
 #include <utility>
 #include "mem.hpp"
@@ -94,6 +95,18 @@ public:
     // @unsafe
     static constexpr NonNull<T> from(T* ptr) noexcept {
         return NonNull<T>(ptr);
+    }
+
+    // Rust `NonNull::from(&[u8])` builds a fat pointer to the slice DATA
+    // (`.cast::<E>()` then yields the data pointer). The `&[u8]` borrow
+    // arrives in C++ as a std::span value; capture its data pointer —
+    // pointing at the span OBJECT would make a later cast() reinterpret
+    // the span header as elements.
+    // @unsafe
+    template<typename E, std::size_t N>
+        requires (std::is_same_v<std::remove_const_t<E>, std::remove_const_t<T>>)
+    static constexpr NonNull<T> from(std::span<E, N> s) noexcept {
+        return NonNull<T>(const_cast<T*>(s.data()));
     }
 
     // Overload accepting an existing NonNull<T> — identity, used by

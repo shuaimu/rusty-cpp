@@ -9168,6 +9168,12 @@ impl CodeGen {
                         .and_then(
                             |arg_ty| match self.peel_reference_paren_group_type(&arg_ty) {
                                 syn::Type::Ptr(ptr) => Some(self.map_type(&ptr.elem)),
+                                // `NonNull::from(&[u8])` — Rust's fat pointer to
+                                // the slice data; the element-typed NonNull pairs
+                                // with the runtime's span-data `from` overload.
+                                syn::Type::Slice(slice) if method_name == "from" => {
+                                    Some(self.map_type(&slice.elem))
+                                }
                                 _ => None,
                             },
                         );
