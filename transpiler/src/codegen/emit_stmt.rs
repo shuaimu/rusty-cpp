@@ -505,11 +505,17 @@ impl CodeGen {
                 typed
             }
         };
-        let payload_source = if self.runtime_match_scrutinee_borrows_payload(&match_expr.expr) {
+        let scrutinee_borrows_payload =
+            self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
+        let payload_source = if scrutinee_borrows_payload {
             "std::as_const(_m)"
         } else {
             "_m"
         };
+        // Owned scrutinee: Rust MOVES by-value pattern payloads into their
+        // bindings, so arm-body uses may std::move them. Only a borrowing
+        // scrutinee keeps the bindings references.
+        let match_bindings_are_refs = scrutinee_borrows_payload;
         let arm_expected_ty = runtime_match_expected;
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
         let mut out = format!(
@@ -519,6 +525,8 @@ impl CodeGen {
 
         let mut saw_runtime_pattern = false;
         for (idx, arm) in match_expr.arms.iter().enumerate() {
+            let arm_bindings_are_refs = match_bindings_are_refs
+                || !self.runtime_match_enum_is_type_param_free(&arm.pat, variant_ctx);
             match &arm.pat {
                 syn::Pat::TupleStruct(ts) => {
                     if let Some((cond_method, unwrap_method)) =
@@ -642,10 +650,11 @@ impl CodeGen {
                         saw_runtime_pattern = true;
                         let cond_expr = cond.unwrap_or_else(|| "true".to_string());
                         let body = {
-                            let emitted = self.emit_expr_with_try_style_binding_scope(
+                            let emitted = self.emit_expr_with_try_style_binding_scope_with_ref_mode(
                                 &arm.body,
                                 arm_expected_ty,
                                 &binding_map,
+                                arm_bindings_are_refs,
                             );
                             self.maybe_wrap_variant_constructor_with_expected_enum(
                                 &arm.body,
@@ -698,10 +707,11 @@ impl CodeGen {
                     saw_runtime_pattern = true;
                     let cond_expr = cond.unwrap_or_else(|| "true".to_string());
                     let body = {
-                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                        let emitted = self.emit_expr_with_try_style_binding_scope_with_ref_mode(
                             &arm.body,
                             arm_expected_ty,
                             &binding_map,
+                            arm_bindings_are_refs,
                         );
                         self.maybe_wrap_variant_constructor_with_expected_enum(
                             &arm.body,
@@ -738,10 +748,11 @@ impl CodeGen {
                 syn::Pat::Wild(_) => {
                     let binding_map = HashMap::new();
                     let body = {
-                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                        let emitted = self.emit_expr_with_try_style_binding_scope_with_ref_mode(
                             &arm.body,
                             arm_expected_ty,
                             &binding_map,
+                            arm_bindings_are_refs,
                         );
                         self.maybe_wrap_variant_constructor_with_expected_enum(
                             &arm.body,
@@ -858,10 +869,11 @@ impl CodeGen {
                         out.push_str(&format!("const auto& {} = _m; ", cpp_name));
                     }
                     let body = {
-                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                        let emitted = self.emit_expr_with_try_style_binding_scope_with_ref_mode(
                             &arm.body,
                             arm_expected_ty,
                             &binding_map,
+                            arm_bindings_are_refs,
                         );
                         self.maybe_wrap_variant_constructor_with_expected_enum(
                             &arm.body,
@@ -908,10 +920,11 @@ impl CodeGen {
                     saw_runtime_pattern = true;
                     let cond_expr = cond.unwrap_or_else(|| "true".to_string());
                     let body = {
-                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                        let emitted = self.emit_expr_with_try_style_binding_scope_with_ref_mode(
                             &arm.body,
                             arm_expected_ty,
                             &binding_map,
+                            arm_bindings_are_refs,
                         );
                         self.maybe_wrap_variant_constructor_with_expected_enum(
                             &arm.body,
@@ -983,10 +996,11 @@ impl CodeGen {
                     };
                     let binding_map = HashMap::new();
                     let body = {
-                        let emitted = self.emit_expr_with_try_style_binding_scope(
+                        let emitted = self.emit_expr_with_try_style_binding_scope_with_ref_mode(
                             &arm.body,
                             arm_expected_ty,
                             &binding_map,
+                            arm_bindings_are_refs,
                         );
                         self.maybe_wrap_variant_constructor_with_expected_enum(
                             &arm.body,

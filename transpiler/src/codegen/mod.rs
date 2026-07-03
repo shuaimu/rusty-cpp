@@ -23558,6 +23558,50 @@ impl CodeGen {
         false
     }
 
+    /// By-value payload bindings of a CONSUMED match may move only when
+    /// the matched enum is DECLARED with no type params: a generic payload
+    /// (`Either<L, R>` with `L = int&`) may instantiate to a reference,
+    /// where `std::move` turns the lvalue an `Option<T&>`-style
+    /// reconstruction needs into a prvalue. A concrete enum's
+    /// reference-ish fields (span/view) emit by value in C++, so moving
+    /// them is a copy — harmless. Runtime enums (Option/Result/Either)
+    /// are not in `declared_type_params` and stay conservative.
+    fn runtime_match_enum_is_type_param_free(
+        &self,
+        pat: &syn::Pat,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        // Non-generic declarations never enter `declared_type_params`
+        // (the recorder early-returns on empty params), so the oracle is:
+        // declared item AND absent from the type-param map.
+        let declared_and_param_free = |name: &str| {
+            self.declared_item_names.contains(name)
+                && !self.declared_type_params.contains_key(name)
+        };
+        if let Some(ctx) = variant_ctx {
+            if !ctx.template_args.is_empty() {
+                return false;
+            }
+            let tail = ctx.enum_name.rsplit("::").next().unwrap_or(&ctx.enum_name);
+            return declared_and_param_free(tail);
+        }
+        let path = match pat {
+            syn::Pat::TupleStruct(ts) => &ts.path,
+            syn::Pat::Struct(ps) => &ps.path,
+            _ => return false,
+        };
+        if path.segments.len() < 2 {
+            return false;
+        }
+        let owner = path
+            .segments
+            .iter()
+            .nth_back(1)
+            .map(|seg| seg.ident.to_string())
+            .unwrap_or_default();
+        declared_and_param_free(&owner)
+    }
+
     fn runtime_match_scrutinee_borrows_payload(&self, expr: &syn::Expr) -> bool {
         let expr = self.peel_paren_group_expr(expr);
         if matches!(expr, syn::Expr::Reference(_)) || self.is_expr_reference_like(expr) {
