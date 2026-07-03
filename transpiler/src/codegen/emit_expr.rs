@@ -6008,7 +6008,12 @@ impl CodeGen {
                             .infer_simple_expr_type(&idx.expr)
                             .as_ref()
                             .is_some_and(|ty| self.type_is_string_view_like(ty))
-                );
+                )
+                // The emitted subscript-view lowering itself: a slice_from
+                // result is a view, never an io::Read (Read::bytes is the
+                // only non-string Rust .bytes()); shadowed rebind locals
+                // defeat the type-based checks above.
+                || receiver.trim_start().starts_with("rusty::slice_from(");
             if receiver_is_string_like {
                 // Rust str::bytes() iterates u8 — a byte span over the view
                 // is range-compatible with every iterator consumer.
