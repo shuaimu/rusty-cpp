@@ -22069,7 +22069,25 @@ impl CodeGen {
             Some(variant_name.as_str()),
             &format!("#{}", field_index),
         );
-        if self.data_enum_variant_field_requires_cycle_rewrite(&enum_name, &field_key) {
+        // A payload behind a SOURCE-level pointer wrapper
+        // (`Value::Tagged(Box<TaggedValue>)`) binds through the wrapper the
+        // same way cycle-rewritten fields do: Rust auto-derefs the binding at
+        // every use (`tagged.value`), so the C++ binding unwraps up front —
+        // otherwise field access hits the Box ("did you mean '->'?").
+        let source_field_is_pointer_wrapper = self
+            .data_enum_variant_field_types
+            .get(&format!("{}::{}", enum_name, variant_name))
+            .and_then(|fields| fields.get(field_index))
+            .is_some_and(|ty| {
+                let peeled = self.peel_reference_paren_group_type(ty);
+                matches!(peeled, syn::Type::Path(tp)
+                    if tp.path.segments.last().is_some_and(|seg| {
+                        matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc")
+                    }))
+            });
+        if source_field_is_pointer_wrapper
+            || self.data_enum_variant_field_requires_cycle_rewrite(&enum_name, &field_key)
+        {
             format!("rusty::detail::deref_if_pointer_like({})", field_expr)
         } else {
             field_expr
