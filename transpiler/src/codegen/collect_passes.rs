@@ -10182,6 +10182,52 @@ impl CodeGen {
         }
     }
 
+    /// Idents a pattern binds BY VALUE (no `ref`, not behind `&`) —
+    /// move-on-use candidates when the match consumes its scrutinee.
+    pub(super) fn collect_pattern_value_binding_names(
+        &self,
+        pat: &syn::Pat,
+        out: &mut HashSet<String>,
+    ) {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                if pi.by_ref.is_none() && pi.ident != "_" {
+                    let name = pi.ident.to_string();
+                    if !self.pattern_ident_is_const_value(&name) {
+                        out.insert(name);
+                    }
+                }
+                if let Some((_, subpat)) = &pi.subpat {
+                    self.collect_pattern_value_binding_names(subpat, out);
+                }
+            }
+            syn::Pat::Tuple(tuple_pat) => {
+                for elem in &tuple_pat.elems {
+                    self.collect_pattern_value_binding_names(elem, out);
+                }
+            }
+            syn::Pat::TupleStruct(ts) => {
+                for elem in &ts.elems {
+                    self.collect_pattern_value_binding_names(elem, out);
+                }
+            }
+            syn::Pat::Struct(ps) => {
+                for field in &ps.fields {
+                    self.collect_pattern_value_binding_names(&field.pat, out);
+                }
+            }
+            syn::Pat::Or(or_pat) => {
+                for case in &or_pat.cases {
+                    self.collect_pattern_value_binding_names(case, out);
+                }
+            }
+            syn::Pat::Type(pt) => self.collect_pattern_value_binding_names(&pt.pat, out),
+            syn::Pat::Paren(p) => self.collect_pattern_value_binding_names(&p.pat, out),
+            // Pat::Reference / Pat::Slice bindings bind borrowed — skip.
+            _ => {}
+        }
+    }
+
     pub(super) fn collect_pattern_ref_binding_names(&self, pat: &syn::Pat, out: &mut HashSet<String>) {
         match pat {
             syn::Pat::Ident(pi) => {

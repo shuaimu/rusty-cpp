@@ -2222,12 +2222,37 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
         variant_ctx: Option<&VariantTypeContext>,
     ) -> String {
+        self.emit_match_expr_switch_with_consumed_scrutinee(arms, expected_ty, variant_ctx, false)
+    }
+
+    pub(super) fn emit_match_expr_switch_with_consumed_scrutinee(
+        &self,
+        arms: &[syn::Arm],
+        expected_ty: Option<&syn::Type>,
+        variant_ctx: Option<&VariantTypeContext>,
+        scrutinee_is_consumed_place: bool,
+    ) -> String {
         let tuple_literal_hints = self.collect_switch_match_tuple_literal_hints(arms);
         let mut parts = Vec::new();
         for arm in arms {
             let arm_value_expr = self
                 .extract_match_arm_value_expr(&arm.body)
                 .unwrap_or(&arm.body);
+            // A consumed scrutinee's by-value pattern bindings move at
+            // their arm-body uses (`Tag(string) => Out::Some2(string)` —
+            // Rust moves the payload out of the matched value).
+            let pushed_movable_frame = if scrutinee_is_consumed_place {
+                let mut names = HashSet::new();
+                self.collect_pattern_value_binding_names(&arm.pat, &mut names);
+                if names.is_empty() {
+                    false
+                } else {
+                    self.movable_match_binding_scopes.borrow_mut().push(names);
+                    true
+                }
+            } else {
+                false
+            };
             let body = {
                 let emitted = if let (Some(hints), syn::Expr::Tuple(tuple)) = (
                     tuple_literal_hints.as_ref(),
@@ -2243,6 +2268,9 @@ impl CodeGen {
                     expected_ty,
                 )
             };
+            if pushed_movable_frame {
+                self.movable_match_binding_scopes.borrow_mut().pop();
+            }
             // Detect diverging (never-returning) arm bodies to avoid `return <void>;`
             let diverging = self.is_expr_diverging(&arm.body);
             let ret_prefix = if diverging { "" } else { "return " };
@@ -19069,11 +19097,21 @@ impl CodeGen {
             let return_clause = expected_ty
                 .map(|ty| format!(" -> {}", self.map_type(ty)))
                 .unwrap_or_default();
+            let scrutinee_is_consumed_place = !self.expr_is_reference_yielding(&match_expr.expr)
+                && matches!(
+                    self.peel_paren_group_expr(&match_expr.expr),
+                    syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1
+                );
             return format!(
                 "[&](){} {{ auto&& _m = {}; {} }}()",
                 return_clause,
                 scrutinee,
-                self.emit_match_expr_switch(&match_expr.arms, expected_ty, variant_ctx.as_ref())
+                self.emit_match_expr_switch_with_consumed_scrutinee(
+                    &match_expr.arms,
+                    expected_ty,
+                    variant_ctx.as_ref(),
+                    scrutinee_is_consumed_place,
+                )
             );
         }
         // Item 11: when type inference can't see the scrutinee's tuple shape

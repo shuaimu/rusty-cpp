@@ -240,7 +240,8 @@ impl CodeGen {
             return false;
         }
         let name = path.path.segments[0].ident.to_string();
-        if self.is_pattern_ref_binding_in_scope(&name)
+        if (self.is_pattern_ref_binding_in_scope(&name)
+            || self.is_movable_match_binding_in_scope(&name))
             && !self.is_local_reference_binding_in_scope(&name)
         {
             return true;
@@ -251,6 +252,15 @@ impl CodeGen {
                 syn::Type::Reference(_)
             )
         })
+    }
+
+    /// See `movable_match_binding_scopes` — a by-value binding of a match
+    /// that consumes its scrutinee, movable at its arm-body uses.
+    pub(super) fn is_movable_match_binding_in_scope(&self, name: &str) -> bool {
+        self.movable_match_binding_scopes
+            .borrow()
+            .iter()
+            .any(|frame| frame.contains(name))
     }
 
     pub(super) fn should_move_local_binding_for_owned_expected_value(

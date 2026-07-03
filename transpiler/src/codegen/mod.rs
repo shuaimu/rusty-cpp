@@ -1060,6 +1060,11 @@ pub struct CodeGen {
     /// `return <binding>` — the pointer-wrapper payload unwrap must be
     /// SKIPPED for them (the wrapper itself is what's returned).
     pub(crate) pointer_unwrap_suppressed_bindings: std::cell::RefCell<HashSet<String>>,
+    /// Per-arm frames of pattern names bound BY VALUE while a runtime match
+    /// CONSUMES its scrutinee — uses of these names in the arm body may
+    /// `std::move` (Rust moves the payload out of the matched value).
+    /// RefCell because the textual match emitters run under `&self`.
+    pub(crate) movable_match_binding_scopes: std::cell::RefCell<Vec<HashSet<String>>>,
     /// Tuple-struct arity metadata keyed by local type name (scoped and unscoped).
     /// Used for constructor-callable lowering (for example `opt.map(TupleStruct)`).
     pub(crate) tuple_struct_arities: HashMap<String, usize>,
@@ -1808,6 +1813,7 @@ impl CodeGen {
             struct_reference_fields: HashMap::new(),
             struct_nonpub_fields: HashMap::new(),
             pointer_unwrap_suppressed_bindings: std::cell::RefCell::new(HashSet::new()),
+            movable_match_binding_scopes: std::cell::RefCell::new(Vec::new()),
             tuple_struct_arities: HashMap::new(),
             function_arg_pass_styles: std::rc::Rc::new(HashMap::new()),
             function_arg_expected_types: std::rc::Rc::new(HashMap::new()),
@@ -3942,6 +3948,7 @@ impl CodeGen {
         self.local_function_bindings.clear();
         self.local_type_bindings.clear();
         self.hoisted_local_type_name_scopes.clear();
+        self.movable_match_binding_scopes.borrow_mut().clear();
         self.self_receiver_ref_scopes.clear();
         self.pattern_ref_bindings.clear();
         self.deref_method_scopes.clear();

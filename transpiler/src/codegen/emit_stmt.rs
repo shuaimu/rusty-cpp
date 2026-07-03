@@ -192,8 +192,13 @@ impl CodeGen {
                         && arm_cpp != fn_ret_cpp
                     {
                         let rust_name = pat_ident.ident.to_string();
-                        let cpp_name = escape_cpp_keyword(&rust_name);
+                        // Emit the scrutinee BEFORE allocating the binding's
+                        // C++ name: `let event = match event { … }` must read
+                        // the OUTER `event`, and the new binding needs a
+                        // shadow name (`event_shadow1`) — a bare re-decl of
+                        // the same name is a C++ redefinition error.
                         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+                        let cpp_name = self.allocate_local_cpp_name(&rust_name);
                         let variant_ctx =
                             self.infer_variant_type_context_from_expr(&match_expr.expr);
                         let decl = format!("{} {};", arm_cpp, cpp_name);
