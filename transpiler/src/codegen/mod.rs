@@ -1056,6 +1056,10 @@ pub struct CodeGen {
     /// Fields declared WITHOUT any `pub` (fully module-private). Used to
     /// approximate Rust field visibility for Deref-vs-direct resolution.
     pub(crate) struct_nonpub_fields: HashMap<String, HashSet<String>>,
+    /// Binding names whose enclosing if-let/arm body is a single identity
+    /// `return <binding>` — the pointer-wrapper payload unwrap must be
+    /// SKIPPED for them (the wrapper itself is what's returned).
+    pub(crate) pointer_unwrap_suppressed_bindings: std::cell::RefCell<HashSet<String>>,
     /// Tuple-struct arity metadata keyed by local type name (scoped and unscoped).
     /// Used for constructor-callable lowering (for example `opt.map(TupleStruct)`).
     pub(crate) tuple_struct_arities: HashMap<String, usize>,
@@ -1803,6 +1807,7 @@ impl CodeGen {
             struct_field_cpp_names: std::rc::Rc::new(HashMap::new()),
             struct_reference_fields: HashMap::new(),
             struct_nonpub_fields: HashMap::new(),
+            pointer_unwrap_suppressed_bindings: std::cell::RefCell::new(HashSet::new()),
             tuple_struct_arities: HashMap::new(),
             function_arg_pass_styles: std::rc::Rc::new(HashMap::new()),
             function_arg_expected_types: std::rc::Rc::new(HashMap::new()),
@@ -22226,6 +22231,13 @@ impl CodeGen {
                         matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc")
                     }))
             });
+        // An identity-return binding keeps the wrapper: `if let
+        // E::Shared(err) = x { return err; }` returns the Arc itself — the
+        // up-front unwrap would strand the pointee where the wrapper is
+        // expected (serde_yaml error::shared).
+        if !self.pointer_unwrap_suppressed_bindings.borrow().is_empty() {
+            return field_expr;
+        }
         if source_field_is_pointer_wrapper
             || self.data_enum_variant_field_requires_cycle_rewrite(&enum_name, &field_key)
         {

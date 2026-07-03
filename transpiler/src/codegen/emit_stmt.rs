@@ -304,6 +304,25 @@ impl CodeGen {
         }
     }
 
+    /// `{ return <ident>; }` or `{ <ident> }` (a single identity
+    /// return/tail) → the ident.
+    fn block_single_return_ident(block: &syn::Block) -> Option<String> {
+        if block.stmts.len() != 1 {
+            return None;
+        }
+        let ident_of = |expr: &syn::Expr| match expr {
+            syn::Expr::Path(p) if p.path.segments.len() == 1 && p.qself.is_none() => {
+                Some(p.path.segments[0].ident.to_string())
+            }
+            _ => None,
+        };
+        match &block.stmts[0] {
+            syn::Stmt::Expr(syn::Expr::Return(ret), _) => ident_of(ret.expr.as_deref()?),
+            syn::Stmt::Expr(expr, None) => ident_of(expr),
+            _ => None,
+        }
+    }
+
     pub(super) fn emit_control_flow_with_return_scope<F>(&mut self, preserve_tail_returns: bool, emit: F)
     where
         F: FnOnce(&mut Self),
@@ -995,15 +1014,26 @@ impl CodeGen {
         let variant_ctx = self.infer_variant_type_context_from_expr(scrutinee_expr);
         let mut binding_stmts = Vec::new();
         let mut binding_map = HashMap::new();
-        let Some(cond_opt) = self
-            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
-                pat,
-                source_expr,
-                &mut binding_stmts,
-                &mut binding_map,
-                variant_ctx.as_ref(),
-            )
-        else {
+        // Identity-return then-branch (`{ return <binding>; }`): the bound
+        // payload is returned AS its wrapper type — suppress the pointer
+        // unwrap while collecting this pattern's bindings.
+        let identity_return = Self::block_single_return_ident(then_branch);
+        if let Some(name) = &identity_return {
+            self.pointer_unwrap_suppressed_bindings
+                .borrow_mut()
+                .insert(name.clone());
+        }
+        let collected = self.collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+            pat,
+            source_expr,
+            &mut binding_stmts,
+            &mut binding_map,
+            variant_ctx.as_ref(),
+        );
+        if identity_return.is_some() {
+            self.pointer_unwrap_suppressed_bindings.borrow_mut().clear();
+        }
+        let Some(cond_opt) = collected else {
             return false;
         };
         let cond = cond_opt.unwrap_or_else(|| "true".to_string());
