@@ -5358,6 +5358,68 @@ impl CodeGen {
         if let Some(to_owned_call) = self.try_emit_to_owned_method_call(mc) {
             return to_owned_call;
         }
+        // Rust auto-derefs Box/Rc/Arc for method calls: `self.0.location()`
+        // on `Error(Box<ErrorImpl>)` calls ErrorImpl::location. When the
+        // receiver is a SELF field whose declared type is a pointer wrapper
+        // and the POINTEE declares the method, route through the deref
+        // (member syntax on the wrapper only sees Box's own methods).
+        if let syn::Expr::Field(field) = self.peel_paren_group_expr(&mc.receiver)
+            && matches!(
+                field.base.as_ref(),
+                syn::Expr::Path(p) if p.path.is_ident("self")
+            )
+            && let Some(current) = self.current_struct.as_deref()
+        {
+            let field_name = match &field.member {
+                syn::Member::Named(ident) => ident.to_string(),
+                syn::Member::Unnamed(idx) => format!("_{}", idx.index),
+            };
+            let owner_tail = current.rsplit("::").next().unwrap_or(current);
+            let pointee_declares_method = self
+                .lookup_struct_field_type(owner_tail, &field_name)
+                .map(|ty| self.peel_reference_paren_group_type(&ty).clone())
+                .and_then(|ty| match ty {
+                    syn::Type::Path(tp) => {
+                        let seg = tp.path.segments.last()?;
+                        if !matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc") {
+                            return None;
+                        }
+                        let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                            return None;
+                        };
+                        let pointee = args.args.iter().find_map(|arg| match arg {
+                            syn::GenericArgument::Type(t) => Some(t),
+                            _ => None,
+                        })?;
+                        let pointee_tail = match self.peel_reference_paren_group_type(pointee) {
+                            syn::Type::Path(ptp) => {
+                                ptp.path.segments.last().map(|s| s.ident.to_string())
+                            }
+                            _ => None,
+                        }?;
+                        self.lookup_owner_method_has_receiver(
+                            &pointee_tail,
+                            &mc.method.to_string(),
+                        )
+                    }
+                    _ => None,
+                })
+                .is_some();
+            if pointee_declares_method {
+                let receiver = self.emit_expr_to_string(&mc.receiver);
+                let args: Vec<String> = mc
+                    .args
+                    .iter()
+                    .map(|arg| self.emit_expr_maybe_move(arg))
+                    .collect();
+                return format!(
+                    "rusty::detail::deref_if_pointer_like({}).{}({})",
+                    receiver,
+                    Self::escape_cpp_method_name(&mc.method.to_string()),
+                    args.join(", ")
+                );
+            }
+        }
         if let Some(into_owned_call) = self.try_emit_into_owned_method_call(mc) {
             return into_owned_call;
         }
