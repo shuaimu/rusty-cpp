@@ -11163,6 +11163,22 @@ impl CodeGen {
             return None;
         }
         let rust_method_name = func_path.segments.last()?.ident.to_string();
+        // The expected type describes the call's RESULT; spelling it as the
+        // OWNER is only sound when the method returns Self with the owner's
+        // own params (new/default). A staging constructor whose declared
+        // return re-parameterizes the owner (`impl<T> Owned<T> { fn
+        // new_uninit() -> Owned<MaybeUninit<T>, T> }`) would get
+        // T=MaybeUninit<PP> — keep the source turbofish (the emitted class
+        // template's defaulted params complete it).
+        if let Some(ret_ty) = self.lookup_owner_method_return_type_for_template_inference(
+            &owner_seg.ident.to_string(),
+            &rust_method_name,
+        ) && !self.assoc_return_owner_args_are_plain_params(
+            &owner_seg.ident.to_string(),
+            ret_ty,
+        ) {
+            return None;
+        }
         if self.data_enum_types.contains(&expected_last)
             && self
                 .data_enum_variants_by_enum

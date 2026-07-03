@@ -32041,6 +32041,58 @@ impl CodeGen {
         Some(mapped)
     }
 
+    /// True when `ret_ty`'s head is NOT the owner, or when it is the owner
+    /// applied to nothing but plain in-scope type params. False for staging
+    /// constructors whose declared return re-parameterizes the owner
+    /// (`impl<T> Owned<T> { fn new_uninit() -> Owned<MaybeUninit<T>, T> }`):
+    /// for those, an expected/result-derived owner spelling would
+    /// instantiate the impl's params with the staging types.
+    pub(super) fn assoc_return_owner_args_are_plain_params(
+        &self,
+        owner_name: &str,
+        ret_ty: &syn::Type,
+    ) -> bool {
+        match self.peel_reference_paren_group_type(ret_ty) {
+            syn::Type::Path(tp) => tp.path.segments.last().is_none_or(|seg| {
+                if seg.ident != *owner_name {
+                    return true; // return isn't the owner — unrelated
+                }
+                match &seg.arguments {
+                    syn::PathArguments::None => true,
+                    syn::PathArguments::AngleBracketed(args) => {
+                        // Positional check against the OWNER'S OWN declared
+                        // params (`Map<K, V>` on `impl<K, V> Map<K, V>` is
+                        // plain; `Owned<MaybeUninit<T>, T>` is not). The
+                        // call SITE's scope is irrelevant here.
+                        let owner_params = self.declared_type_params.get(owner_name);
+                        let mut type_arg_idx = 0usize;
+                        args.args.iter().all(|arg| match arg {
+                            syn::GenericArgument::Type(syn::Type::Path(p)) => {
+                                let idx = type_arg_idx;
+                                type_arg_idx += 1;
+                                p.path.get_ident().is_some_and(|ident| {
+                                    let name = ident.to_string();
+                                    owner_params.is_some_and(|params| {
+                                        params.get(idx).is_some_and(|param| *param == name)
+                                            || params.iter().any(|param| *param == name)
+                                    })
+                                })
+                            }
+                            syn::GenericArgument::Type(_) => {
+                                type_arg_idx += 1;
+                                false
+                            }
+                            syn::GenericArgument::Lifetime(_) => true,
+                            _ => false,
+                        })
+                    }
+                    _ => true,
+                }
+            }),
+            _ => true,
+        }
+    }
+
     fn emit_call_func_with_owner_template_recovery(
         &self,
         call: &syn::ExprCall,
@@ -32477,6 +32529,21 @@ impl CodeGen {
         {
             // Preserve mapped runtime/static paths (e.g. futures_timer::Delay::new)
             // rather than forcing omitted-owner generic recovery on the Rust source path.
+            return base_func;
+        }
+        // Explicit turbofish + a declared return whose owner-args are NOT the
+        // plain param list (`impl<T> Owned<T> { fn new_uninit() ->
+        // Owned<MaybeUninit<T>, T> }`): the binding/expected type
+        // parameterizes the RETURN, not the owner — expected-derived
+        // recovery would spell the result type as the owner (T becomes
+        // MaybeUninit<PP> inside; serde_yaml's double-MaybeUninit staging
+        // bug). Keep the source turbofish; the emitted class template's
+        // defaulted params complete it.
+        if owner_has_explicit_args
+            && let Some(ret_ty) = self
+                .lookup_owner_method_return_type_for_template_inference(&owner_name, &method_name)
+            && !self.assoc_return_owner_args_are_plain_params(&owner_name, ret_ty)
+        {
             return base_func;
         }
         if !owner_has_placeholder_arg
