@@ -20102,8 +20102,18 @@ impl CodeGen {
             };
             let seg = tp.path.segments.last()?;
             let seg_name = seg.ident.to_string();
-            let resolved = self.resolve_type_alias_tail(&seg_name);
-            if !matches!(resolved, "Result" | "Option") {
+            let target = self.type_alias_targets.get(&seg_name)?;
+            let target_peeled = self.peel_reference_paren_group_type(target);
+            let syn::Type::Path(target_path) = target_peeled else {
+                return None;
+            };
+            let target_tail = target_path
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default();
+            if !matches!(target_tail.as_str(), "Result" | "Option") {
                 return None;
             }
             let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
