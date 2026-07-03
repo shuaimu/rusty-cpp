@@ -27866,12 +27866,66 @@ impl CodeGen {
                 } else {
                     None
                 }
-            })?;
+            });
+        let Some(base_ty) = base_ty else {
+            // UNRESOLVABLE base type. For a call through a multi-segment path
+            // (a cross-crate fn like sys::yaml_emitter_initialize — return
+            // types of dep fns aren't visible) or a local whose binding type
+            // is unknown, emit a per-field dispatch: direct member when it
+            // exists, deref-coerce otherwise (unsafe_libyaml's Success.fail
+            // lives on the Deref target Failure). Identity-safe when the
+            // receiver has the field.
+            let cross_crate_call = matches!(
+                self.peel_paren_group_expr(base_expr),
+                syn::Expr::Call(call)
+                    if matches!(call.func.as_ref(), syn::Expr::Path(p) if p.path.segments.len() >= 2)
+            );
+            let unknown_local = matches!(
+                self.peel_paren_group_expr(base_expr),
+                syn::Expr::Path(p)
+                    if p.path.segments.len() == 1
+                        && self
+                            .lookup_local_binding_cpp_name(&p.path.segments[0].ident.to_string())
+                            .is_some()
+                        && self
+                            .lookup_local_binding_type(&p.path.segments[0].ident.to_string())
+                            .is_none()
+            );
+            if cross_crate_call || unknown_local {
+                let field_cpp = escape_cpp_keyword(field_name);
+                return Some(format!(
+                    "[&](auto&& __r) -> decltype(auto) {{ if constexpr (requires {{ (__r.{f}); }}) {{ return (__r.{f}); }} else {{ return ((*__r).{f}); }} }}({base})",
+                    f = field_cpp,
+                    base = base_for_field
+                ));
+            }
+            return None;
+        };
         let base_ty = self.peel_reference_paren_group_type(&base_ty);
         let syn::Type::Path(tp) = base_ty else {
             return None;
         };
         let base_struct = tp.path.segments.last()?.ident.to_string();
+        // Cross-crate receiver: the dep's struct fields and Deref impls are
+        // invisible in this transpile (serde_yaml can't see that
+        // unsafe_libyaml's Success derefs to Failure, which owns `fail`).
+        // Emit a per-field dispatch: take the direct member when it exists,
+        // deref-coerce otherwise. Safe for both `.ok` (direct) and `.fail`
+        // (through Deref) on the same wrapper.
+        if !self.local_declared_types.contains(&base_struct)
+            && self.lookup_struct_field_type(&base_struct, field_name).is_none()
+            && self
+                .dependency_ufcs_trait_manifests
+                .iter()
+                .any(|m| m.declared_types.iter().any(|dt| dt.name == base_struct))
+        {
+            let field_cpp = escape_cpp_keyword(field_name);
+            return Some(format!(
+                "[&](auto&& __r) -> decltype(auto) {{ if constexpr (requires {{ (__r.{f}); }}) {{ return (__r.{f}); }} else {{ return ((*__r).{f}); }} }}({base})",
+                f = field_cpp,
+                base = base_for_field
+            ));
+        }
         // Only coerce when the field is NOT on the base's own struct.
         if self.lookup_struct_field_type(&base_struct, field_name).is_some() {
             return None;

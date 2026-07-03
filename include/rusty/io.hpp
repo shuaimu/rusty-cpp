@@ -839,6 +839,14 @@ Result<uint64_t> copy(R& reader, W& writer) {
     return Result<uint64_t>::ok(total);
 }
 
+// Rust `std::io::sink()` — a Write impl that discards all bytes.
+struct Sink {
+    size_t write_(std::span<const uint8_t> buf) { return buf.size(); }
+    void write_all(std::span<const uint8_t>) {}
+    void flush() {}
+};
+inline Sink sink() { return Sink{}; }
+
 } // namespace io
 } // namespace rusty
 
