@@ -21499,7 +21499,7 @@ impl CodeGen {
             if arm.guard.is_some() {
                 return false;
             }
-            if self.or_arm_binds_whole_borrowed_scrutinee(&arm.pat, &match_expr.expr) {
+            if self.or_arm_binds_whole_borrowed_scrutinee(&arm.pat, &match_expr.expr, &arm.body) {
                 return false;
             }
             if matches!(&arm.pat, syn::Pat::Wild(_)) {
@@ -23704,23 +23704,91 @@ impl CodeGen {
     }
 
     /// `s @ Content::String(_)`-style or-cases bind the WHOLE scrutinee;
-    /// on a BORROWED place the binding is a reference the downstream
-    /// tuple slots must preserve — a shape the or-ternary lowering
-    /// doesn't model. Owned scrutinees move the binding instead (fine).
+    /// on a BORROWED place that binding is a reference — and a
+    /// VALUE-position use in the arm body (`(s, None)` tuple slot, a
+    /// by-value ctor arg) would copy the pointee, which the or-ternary
+    /// lowering can't avoid. Reference-ish uses (method receiver, field
+    /// base, deref operand) are fine — serde_yaml's borrowed-@ matches
+    /// stay on this path.
     fn or_arm_binds_whole_borrowed_scrutinee(
         &self,
         pat: &syn::Pat,
         scrutinee: &syn::Expr,
+        body: &syn::Expr,
     ) -> bool {
         let syn::Pat::Or(or_pat) = self.peel_pat_type_ref_paren(pat) else {
             return false;
         };
-        or_pat.cases.iter().any(|case| {
-            matches!(
-                self.peel_pat_type_ref_paren(case),
-                syn::Pat::Ident(pi) if pi.subpat.is_some()
-            )
-        }) && self.runtime_match_scrutinee_borrows_payload(scrutinee)
+        let mut whole_names = HashSet::new();
+        for case in &or_pat.cases {
+            if let syn::Pat::Ident(pi) = self.peel_pat_type_ref_paren(case)
+                && pi.subpat.is_some()
+            {
+                whole_names.insert(pi.ident.to_string());
+            }
+        }
+        if whole_names.is_empty() || !self.runtime_match_scrutinee_borrows_payload(scrutinee) {
+            return false;
+        }
+        fn ident_of(x: &syn::Expr) -> Option<String> {
+            match x {
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                    Some(p.path.segments[0].ident.to_string())
+                }
+                _ => None,
+            }
+        }
+        struct Scan<'a> {
+            names: &'a HashSet<String>,
+            skip_next_path: Option<String>,
+            value_use: bool,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Scan<'_> {
+            fn visit_expr(&mut self, e: &'ast syn::Expr) {
+                match e {
+                    syn::Expr::MethodCall(mc) => {
+                        if let Some(n) = ident_of(&mc.receiver) {
+                            self.skip_next_path = Some(n);
+                        }
+                    }
+                    syn::Expr::Field(f) => {
+                        if let Some(n) = ident_of(&f.base) {
+                            self.skip_next_path = Some(n);
+                        }
+                    }
+                    syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                        if let Some(n) = ident_of(&u.expr) {
+                            self.skip_next_path = Some(n);
+                        }
+                    }
+                    syn::Expr::Reference(r) => {
+                        if let Some(n) = ident_of(&r.expr) {
+                            self.skip_next_path = Some(n);
+                        }
+                    }
+                    syn::Expr::Path(_) => {
+                        if let Some(n) = ident_of(e)
+                            && self.names.contains(&n)
+                        {
+                            if self.skip_next_path.as_deref() == Some(n.as_str()) {
+                                self.skip_next_path = None;
+                            } else {
+                                self.value_use = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                syn::visit::visit_expr(self, e);
+            }
+        }
+        let mut scan = Scan {
+            names: &whole_names,
+            skip_next_path: None,
+            value_use: false,
+        };
+        syn::visit::Visit::visit_expr(&mut scan, body);
+        scan.value_use
     }
 
     fn runtime_match_scrutinee_borrows_payload(&self, expr: &syn::Expr) -> bool {

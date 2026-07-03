@@ -1136,7 +1136,7 @@ impl CodeGen {
                     out.push_str("} ");
                 }
                 syn::Pat::Or(_) => {
-                    if self.or_arm_binds_whole_borrowed_scrutinee(&arm.pat, &match_expr.expr) {
+                    if self.or_arm_binds_whole_borrowed_scrutinee(&arm.pat, &match_expr.expr, &arm.body) {
                         return None;
                     }
                     // The collector handles or-cases WITH bindings too
