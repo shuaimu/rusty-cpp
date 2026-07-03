@@ -32552,6 +32552,118 @@ impl CodeGen {
         }
     }
 
+    /// See the `auto::` interception in
+    /// `emit_call_func_with_owner_template_recovery`.
+    fn recover_auto_owner_from_arg_signature(
+        &self,
+        call: &syn::ExprCall,
+        path: &syn::Path,
+    ) -> Option<String> {
+        let owner_name = path
+            .segments
+            .iter()
+            .nth_back(1)?
+            .ident
+            .to_string();
+        let method_name = path.segments.last()?.ident.to_string();
+        let arg = call.args.first()?;
+        let declared_param = self.lookup_owner_method_arg_expected_type(
+            &owner_name,
+            &method_name,
+            0,
+            Some(arg),
+        )?;
+        let arg_ty = self.infer_simple_expr_type(arg).or_else(|| {
+            let syn::Expr::Path(p) = self.peel_paren_group_expr(arg) else {
+                return None;
+            };
+            if p.path.segments.len() != 1 {
+                return None;
+            }
+            self.lookup_local_binding_type(&p.path.segments[0].ident.to_string())
+        })?;
+        let params = self.declared_type_params.get(&owner_name)?.clone();
+        fn unify(
+            declared: &syn::Type,
+            concrete: &syn::Type,
+            params: &[String],
+            subs: &mut HashMap<String, syn::Type>,
+        ) {
+            match (declared, concrete) {
+                (syn::Type::Path(dp), _)
+                    if dp.qself.is_none()
+                        && dp.path.segments.len() == 1
+                        && matches!(
+                            dp.path.segments[0].arguments,
+                            syn::PathArguments::None
+                        )
+                        && params.contains(&dp.path.segments[0].ident.to_string()) =>
+                {
+                    subs.entry(dp.path.segments[0].ident.to_string())
+                        .or_insert_with(|| concrete.clone());
+                }
+                (syn::Type::Path(dp), syn::Type::Path(cp)) => {
+                    let (Some(d_seg), Some(c_seg)) =
+                        (dp.path.segments.last(), cp.path.segments.last())
+                    else {
+                        return;
+                    };
+                    if d_seg.ident != c_seg.ident {
+                        return;
+                    }
+                    if let (
+                        syn::PathArguments::AngleBracketed(da),
+                        syn::PathArguments::AngleBracketed(ca),
+                    ) = (&d_seg.arguments, &c_seg.arguments)
+                    {
+                        for (d, c) in da.args.iter().zip(ca.args.iter()) {
+                            if let (
+                                syn::GenericArgument::Type(dt),
+                                syn::GenericArgument::Type(ct),
+                            ) = (d, c)
+                            {
+                                unify(dt, ct, params, subs);
+                            }
+                        }
+                    }
+                }
+                (syn::Type::Reference(dr), syn::Type::Reference(cr)) => {
+                    unify(&dr.elem, &cr.elem, params, subs);
+                }
+                (syn::Type::Reference(dr), c) => {
+                    unify(&dr.elem, c, params, subs);
+                }
+                _ => {}
+            }
+        }
+        let mut subs = HashMap::new();
+        let concrete = self.peel_reference_paren_group_type(&arg_ty).clone();
+        unify(
+            self.peel_reference_paren_group_type(&declared_param),
+            &concrete,
+            &params,
+            &mut subs,
+        );
+        // Spell the leading resolved params; trailing defaults cover the rest.
+        let mut arg_strs = Vec::new();
+        for param in &params {
+            let Some(ty) = subs.get(param) else { break };
+            let cpp = self.map_type(ty);
+            if cpp.is_empty() || cpp == "auto" || type_string_has_auto_placeholder(&cpp) {
+                break;
+            }
+            arg_strs.push(cpp);
+        }
+        if arg_strs.is_empty() {
+            return None;
+        }
+        let owner_base = Self::path_without_last_segment(path)
+            .map(|owner_path| self.emit_path_to_string(&owner_path))
+            .filter(|s| !s.is_empty() && s != "auto")
+            .unwrap_or(owner_name);
+        Some(format!("{}<{}>", owner_base, arg_strs.join(", ")))
+    }
+
     fn emit_call_func_with_owner_template_recovery(
         &self,
         call: &syn::ExprCall,
@@ -32595,6 +32707,18 @@ impl CodeGen {
                     base_func = format!("::{}", escape_cpp_keyword(&method_tail));
                 }
             }
+        }
+        // `Owned::assume_init(owned)` inside a hint-cleared closure: the
+        // owner spelled `auto`. Unify the first argument's known type
+        // against the method's DECLARED parameter to recover the owner's
+        // template args (declared `Owned<MaybeUninit<T>, T>` vs arg
+        // `Owned<MaybeUninit<E>, E>` ⇒ T = E ⇒ owner `Owned<E>`).
+        if let Some(method_cpp) = base_func.strip_prefix("auto::")
+            && path.segments.len() >= 2
+            && !call.args.is_empty()
+            && let Some(owner_cpp) = self.recover_auto_owner_from_arg_signature(call, path)
+        {
+            return format!("{}::{}", owner_cpp, method_cpp);
         }
         // §13.14 backward turbofish (engine): emit `f<T>(args)` for a free
         // function whose type parameter is return-only and thus undeducible by
@@ -33983,6 +34107,17 @@ impl CodeGen {
         call: &syn::ExprCall,
         func: String,
     ) -> String {
+        // Late `auto::` interception: an owner whose template args never
+        // resolved (hint-cleared closures) — recover them by unifying the
+        // first argument's known type against the method's declared param.
+        if let Some(method_cpp) = func.strip_prefix("auto::")
+            && let syn::Expr::Path(pe) = call.func.as_ref()
+            && pe.path.segments.len() >= 2
+            && !call.args.is_empty()
+            && let Some(owner_cpp) = self.recover_auto_owner_from_arg_signature(call, &pe.path)
+        {
+            return format!("{}::{}", owner_cpp, method_cpp);
+        }
         let syn::Expr::Path(path_expr) = call.func.as_ref() else {
             return func;
         };
