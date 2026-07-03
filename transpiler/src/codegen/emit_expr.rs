@@ -11764,17 +11764,45 @@ impl CodeGen {
                 let right_ty = self
                     .infer_simple_expr_type(&bin.right)
                     .or_else(|| self.infer_owner_type_from_constructor_expr(&bin.right));
-                let left = self.autoderef_binary_value_operand_if_needed(
-                    &bin.left,
-                    &bin.op,
-                    self.emit_binary_operand_expr_with_expected(&bin.left, right_ty.as_ref()),
-                );
+                // Threading each side's type as the OTHER's expected type
+                // string-coerces a LOCAL type compared against a str const
+                // (`tag == Tag::BOOL` became to_string_view(tag) == ...),
+                // bypassing the type's own PartialEq<str> operator. A local
+                // non-string operand facing a string-like one keeps its own
+                // spelling — the emitted operator==(string_view) handles it.
+                let stringish = |ty: &Option<syn::Type>| -> bool {
+                    ty.as_ref().is_some_and(|t| self.type_is_string_view_like(t))
+                };
+                let left_plain = stringish(&right_ty) && !stringish(&left_ty);
+                let right_plain = stringish(&left_ty) && !stringish(&right_ty);
+                let left_expected = if left_plain { None } else { right_ty.as_ref() };
+                let right_expected = if right_plain { None } else { left_ty.as_ref() };
+                // The plain side also skips the autoderef wrap: a Deref-to-
+                // slice type (Tag → [u8]) would otherwise decay to a span and
+                // lose its own operator==(string_view).
+                let left_emitted =
+                    self.emit_binary_operand_expr_with_expected(&bin.left, left_expected);
+                let left = if left_plain {
+                    left_emitted
+                } else {
+                    self.autoderef_binary_value_operand_if_needed(
+                        &bin.left,
+                        &bin.op,
+                        left_emitted,
+                    )
+                };
                 let op = self.emit_binop(&bin.op);
-                let right = self.autoderef_binary_value_operand_if_needed(
-                    &bin.right,
-                    &bin.op,
-                    self.emit_binary_operand_expr_with_expected(&bin.right, left_ty.as_ref()),
-                );
+                let right_emitted =
+                    self.emit_binary_operand_expr_with_expected(&bin.right, right_expected);
+                let right = if right_plain {
+                    right_emitted
+                } else {
+                    self.autoderef_binary_value_operand_if_needed(
+                        &bin.right,
+                        &bin.op,
+                        right_emitted,
+                    )
+                };
                 format!("{} {} {}", left, op, right)
             }
             _ => {
