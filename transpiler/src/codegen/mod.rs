@@ -1053,6 +1053,9 @@ pub struct CodeGen {
     /// Named struct fields that are Rust references (`&T` / `&mut T`), keyed by
     /// struct name (scoped + unscoped). Used for reference-aware unary-deref lowering.
     pub(crate) struct_reference_fields: HashMap<String, HashSet<String>>,
+    /// Fields declared WITHOUT any `pub` (fully module-private). Used to
+    /// approximate Rust field visibility for Deref-vs-direct resolution.
+    pub(crate) struct_nonpub_fields: HashMap<String, HashSet<String>>,
     /// Tuple-struct arity metadata keyed by local type name (scoped and unscoped).
     /// Used for constructor-callable lowering (for example `opt.map(TupleStruct)`).
     pub(crate) tuple_struct_arities: HashMap<String, usize>,
@@ -1799,6 +1802,7 @@ impl CodeGen {
             struct_field_order: std::rc::Rc::new(HashMap::new()),
             struct_field_cpp_names: std::rc::Rc::new(HashMap::new()),
             struct_reference_fields: HashMap::new(),
+            struct_nonpub_fields: HashMap::new(),
             tuple_struct_arities: HashMap::new(),
             function_arg_pass_styles: std::rc::Rc::new(HashMap::new()),
             function_arg_expected_types: std::rc::Rc::new(HashMap::new()),
@@ -27926,8 +27930,25 @@ impl CodeGen {
                 base = base_for_field
             ));
         }
-        // Only coerce when the field is NOT on the base's own struct.
-        if self.lookup_struct_field_type(&base_struct, field_name).is_some() {
+        // Only coerce when the field is NOT on the base's own struct — EXCEPT
+        // when the access site is OUTSIDE the struct's declaring module and
+        // the Deref target also has the field: Rust field visibility makes a
+        // private direct field unnameable there and resolves through Deref
+        // (libyaml's `owned.ptr` is Owned's private NonNull field inside
+        // util, but InitPtr's public `ptr` everywhere else — the whole point
+        // of the c2rust Owned pattern is that the deref route strips the
+        // MaybeUninit staging type).
+        let direct_field_exists = self
+            .lookup_struct_field_type(&base_struct, field_name)
+            .is_some();
+        let direct_field_is_private = self
+            .struct_nonpub_fields
+            .get(&base_struct)
+            .is_some_and(|fields| fields.contains(field_name));
+        if direct_field_exists
+            && (!direct_field_is_private
+                || self.current_module_declares_type_name_exact(&base_struct))
+        {
             return None;
         }
         let scoped = self.scoped_type_key(&base_struct);

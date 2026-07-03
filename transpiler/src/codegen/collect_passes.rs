@@ -4461,6 +4461,25 @@ impl CodeGen {
                                 }
                             })
                             .collect();
+                        let nonpub_fields: HashSet<String> = fields
+                            .named
+                            .iter()
+                            .filter_map(|field| {
+                                let ident = field.ident.as_ref()?;
+                                matches!(field.vis, syn::Visibility::Inherited)
+                                    .then(|| ident.to_string())
+                            })
+                            .collect();
+                        if !nonpub_fields.is_empty() {
+                            self.struct_nonpub_fields
+                                .insert(struct_name.clone(), nonpub_fields.clone());
+                            if !module_path.is_empty() {
+                                self.struct_nonpub_fields.insert(
+                                    format!("{}::{}", module_path.join("::"), struct_name),
+                                    nonpub_fields,
+                                );
+                            }
+                        }
                         if !named_field_types.is_empty() {
                             std::rc::Rc::make_mut(&mut self.struct_field_types)
                                 .insert(struct_name.clone(), named_field_types.clone());
