@@ -32093,6 +32093,13 @@ impl CodeGen {
         if owner_args_omitted
             && owner_name == "Deserializer"
             && matches!(method_name.as_str(), "from_str" | "from_slice")
+            // serde_json's Deserializer<R> takes a reader type; a crate whose
+            // Deserializer has no TYPE params (serde_yaml's is lifetime-only)
+            // must not get the fabricated read_mod::StrRead argument.
+            && self
+                .declared_type_params
+                .get("Deserializer")
+                .is_some_and(|params| !params.is_empty())
         {
             let owner_prefix = path
                 .segments
