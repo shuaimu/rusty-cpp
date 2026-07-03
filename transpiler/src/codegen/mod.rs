@@ -13706,6 +13706,88 @@ impl CodeGen {
         tp.path.segments.last().map(|seg| seg.ident.to_string())
     }
 
+    /// Fn-local hoist-candidate types whose name collides with a
+    /// module-level name — another item, or a data-enum variant whose
+    /// generated ctor free fn shares the namespace (`enum Void {}` inside
+    /// `invalid_type` vs Event's `Void()` ctor, where the non-type
+    /// declaration hides the hoisted enum). Returns the block with the
+    /// colliding local types renamed (`Void` → `VoidLocal`) everywhere a
+    /// path's LEADING segment names them (`Event::Void` is untouched), or
+    /// `None` when nothing collides.
+    fn rename_colliding_local_hoist_types_in_fn_block(
+        &self,
+        block: &syn::Block,
+    ) -> Option<syn::Block> {
+        let candidates = Self::local_trait_impl_hoist_relevant_type_names(block);
+        if candidates.is_empty() {
+            return None;
+        }
+        // Only names this block DECLARES are renameable; referenced-only
+        // names (Formatter, Result, …) belong to the module or runtime.
+        let declared: HashSet<String> = block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Item(syn::Item::Enum(e)) => Some(e.ident.to_string()),
+                syn::Stmt::Item(syn::Item::Struct(s)) => Some(s.ident.to_string()),
+                syn::Stmt::Item(syn::Item::Type(t)) => Some(t.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let collides = |name: &str| {
+            self.declared_item_names.contains(name)
+                || self.data_enum_variant_names.contains(name)
+        };
+        let mut renames: HashMap<String, String> = HashMap::new();
+        for name in candidates {
+            if !declared.contains(&name) || !collides(&name) {
+                continue;
+            }
+            let mut new_name = format!("{}Local", name);
+            while collides(&new_name) || declared.contains(&new_name) {
+                new_name.push('_');
+            }
+            renames.insert(name, new_name);
+        }
+        if renames.is_empty() {
+            return None;
+        }
+        struct Renamer<'a> {
+            map: &'a HashMap<String, String>,
+        }
+        impl syn::visit_mut::VisitMut for Renamer<'_> {
+            fn visit_path_mut(&mut self, path: &mut syn::Path) {
+                if let Some(first) = path.segments.first_mut()
+                    && let Some(new_name) = self.map.get(&first.ident.to_string())
+                {
+                    first.ident = syn::Ident::new(new_name, first.ident.span());
+                }
+                syn::visit_mut::visit_path_mut(self, path);
+            }
+            fn visit_item_enum_mut(&mut self, item: &mut syn::ItemEnum) {
+                if let Some(new_name) = self.map.get(&item.ident.to_string()) {
+                    item.ident = syn::Ident::new(new_name, item.ident.span());
+                }
+                syn::visit_mut::visit_item_enum_mut(self, item);
+            }
+            fn visit_item_struct_mut(&mut self, item: &mut syn::ItemStruct) {
+                if let Some(new_name) = self.map.get(&item.ident.to_string()) {
+                    item.ident = syn::Ident::new(new_name, item.ident.span());
+                }
+                syn::visit_mut::visit_item_struct_mut(self, item);
+            }
+            fn visit_item_type_mut(&mut self, item: &mut syn::ItemType) {
+                if let Some(new_name) = self.map.get(&item.ident.to_string()) {
+                    item.ident = syn::Ident::new(new_name, item.ident.span());
+                }
+                syn::visit_mut::visit_item_type_mut(self, item);
+            }
+        }
+        let mut renamed = block.clone();
+        syn::visit_mut::visit_block_mut(&mut Renamer { map: &renames }, &mut renamed);
+        Some(renamed)
+    }
+
     fn strip_hoisted_local_generic_struct_items_from_block(
         &self,
         block: &syn::Block,

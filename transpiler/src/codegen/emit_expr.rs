@@ -13545,6 +13545,27 @@ impl CodeGen {
                 }
                 return format!("{}({})", func, arg);
             }
+            if call.args.len() == 2
+                && matches!(
+                    joined.as_str(),
+                    "fmt::write" | "std::fmt::write" | "core::fmt::write"
+                )
+            {
+                // Rust `fmt::write(&mut w, format_args!(…))` drives `w`'s
+                // fmt::Write impl. The module-level `write_fmt` helper is
+                // that dispatch (member write_str/write_fmt, formatter
+                // fields, or a trait free fn) — route there instead of a
+                // nonexistent `rusty::fmt::write_` runtime symbol.
+                let mut writer = match self.peel_paren_group_expr(&call.args[0]) {
+                    syn::Expr::Reference(reference) => self.emit_expr_to_string(&reference.expr),
+                    _ => self.emit_expr_to_string(&call.args[0]),
+                };
+                if let Some(stripped) = writer.strip_prefix('&') {
+                    writer = stripped.trim_start().to_string();
+                }
+                let fmt_arg = self.emit_expr_to_string(&call.args[1]);
+                return format!("write_fmt({}, {})", writer, fmt_arg);
+            }
             if call.args.len() == 3
                 && matches!(
                     joined.as_str(),

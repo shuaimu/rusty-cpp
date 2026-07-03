@@ -3651,10 +3651,18 @@ impl CodeGen {
                         | "VariantAccess"
                 )
             );
+            // fmt-family impls absorb as members too: the runtime's
+            // write_fmt/format dispatch duck-probes `writer.write_str(…)` /
+            // `v.fmt(…)`, so a member on the (wrapper-enum or struct) host
+            // is exactly what makes a fn-local `impl fmt::Write for T`
+            // callable after T hoists to namespace scope.
+            let is_local_fmt_trait_impl =
+                matches!(trait_name.as_deref(), Some("Write" | "Display" | "Debug"));
             let allow_non_inherent_trait_impl = is_drop_trait
                 || is_default_trait
                 || impl_is_automatically_derived
-                || is_local_serde_trait_impl;
+                || is_local_serde_trait_impl
+                || is_local_fmt_trait_impl;
             if !is_inherent_impl && !allow_non_inherent_trait_impl {
                 continue;
             }
@@ -5096,7 +5104,7 @@ impl CodeGen {
         &self,
         block: &syn::Block,
     ) -> Vec<syn::ItemStruct> {
-        let local_impl_template_targets: HashSet<String> = block
+        let mut local_impl_template_targets: HashSet<String> = block
             .stmts
             .iter()
             .filter_map(|stmt| match stmt {
@@ -5108,6 +5116,8 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
+        local_impl_template_targets
+            .extend(Self::local_trait_impl_hoist_relevant_type_names(block));
         block
             .stmts
             .iter()
@@ -5126,6 +5136,76 @@ impl CodeGen {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Type names a fn-local TRAIT impl forces to namespace scope: the impl's
+    /// self type plus every locally-relevant type its items name (associated
+    /// `type Value = Void;` aliases, method signatures). The trait-impl
+    /// machinery (UFCS free fns, traits-map adapters) only exists at
+    /// namespace scope, and it spells these types module-qualified — a
+    /// type left fn-local would be unnameable there.
+    pub(super) fn local_trait_impl_hoist_relevant_type_names(
+        block: &syn::Block,
+    ) -> HashSet<String> {
+        use syn::visit::Visit;
+        struct TypeIdentCollector<'a> {
+            out: &'a mut HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for TypeIdentCollector<'_> {
+            fn visit_type_path(&mut self, tp: &'ast syn::TypePath) {
+                if tp.qself.is_none()
+                    && let Some(seg) = tp.path.segments.last()
+                {
+                    self.out.insert(seg.ident.to_string());
+                }
+                syn::visit::visit_type_path(self, tp);
+            }
+        }
+        let mut names = HashSet::new();
+        for stmt in &block.stmts {
+            let syn::Stmt::Item(syn::Item::Impl(impl_block)) = stmt else {
+                continue;
+            };
+            // Only traits whose machinery LIVES at namespace scope force a
+            // hoist: serde adapters (`using Value = …` in the traits map)
+            // and fmt dispatch (out-of-line members on the wrapper enum).
+            // Drop/Default/Clone/… impls are handled fine at block scope —
+            // and hoisting their host away from fn-local statics they
+            // reference would break those references.
+            let needs_namespace_scope = impl_block
+                .trait_
+                .as_ref()
+                .and_then(|(_, path, _)| path.segments.last())
+                .is_some_and(|seg| {
+                    matches!(
+                        seg.ident.to_string().as_str(),
+                        "Visitor"
+                            | "DeserializeSeed"
+                            | "SeqAccess"
+                            | "MapAccess"
+                            | "EnumAccess"
+                            | "VariantAccess"
+                            | "Write"
+                            | "Display"
+                            | "Debug"
+                    )
+                });
+            if !needs_namespace_scope {
+                continue;
+            }
+            if let Some(target) = Self::local_impl_target_type_name(impl_block) {
+                names.insert(target);
+            }
+            let mut collector = TypeIdentCollector { out: &mut names };
+            for item in &impl_block.items {
+                match item {
+                    syn::ImplItem::Type(assoc) => collector.visit_type(&assoc.ty),
+                    syn::ImplItem::Fn(f) => collector.visit_signature(&f.sig),
+                    _ => {}
+                }
+            }
+        }
+        names
     }
 
     /// Local GENERIC `type X<T> = …` aliases in a function body. C++ forbids
@@ -5155,7 +5235,7 @@ impl CodeGen {
     }
 
     pub(super) fn collect_hoistable_local_enums_in_block(&self, block: &syn::Block) -> Vec<syn::ItemEnum> {
-        let local_impl_template_targets: HashSet<String> = block
+        let mut local_impl_template_targets: HashSet<String> = block
             .stmts
             .iter()
             .filter_map(|stmt| match stmt {
@@ -5167,6 +5247,8 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
+        local_impl_template_targets
+            .extend(Self::local_trait_impl_hoist_relevant_type_names(block));
         block
             .stmts
             .iter()
