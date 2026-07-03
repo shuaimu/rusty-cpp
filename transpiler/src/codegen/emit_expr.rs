@@ -8344,7 +8344,16 @@ impl CodeGen {
             };
             return format!("rusty::ptr::{}({})", method_name, receiver);
         }
-        if method_name == "cast" && args.is_empty() && self.is_expr_raw_pointer_like(&mc.receiver) {
+        if method_name == "cast" && args.is_empty() {
+            // Rust's zero-arg `.cast()` exists ONLY on raw pointers and
+            // NonNull, and receiver inference can disagree with the actual
+            // lowering (the Deref-routed `owned.ptr` infers Owned's private
+            // NonNull field while the emission yields InitPtr's raw
+            // pointer). Route ALL of them here: the reinterpret path when
+            // the target is known and the receiver is positively raw, the
+            // `rusty::ptr::cast` proxy otherwise (overloaded for raw
+            // pointers AND NonNull; converts to U*, NonNull<U>, and chains
+            // .as_non_null_ptr()).
             // Target type: explicit turbofish `ptr.cast::<U>()` first; otherwise
             // try the expected_ty (Rust `let x: *mut U = ptr.cast()` and similar
             // arg-position calls). When neither tells us U, the cast can't be

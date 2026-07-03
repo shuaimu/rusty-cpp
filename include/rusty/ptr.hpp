@@ -330,11 +330,29 @@ struct RawCastProxy {
     constexpr operator U*() const noexcept {
         return reinterpret_cast<U*>(ptr_);
     }
+    // `NonNull::from(x).cast()` flowing into a NonNull<U> parameter
+    // (cstr::from_ptr) — the targetless proxy adapts to NonNull too.
+    template<typename U>
+    constexpr operator NonNull<U>() const noexcept {
+        return NonNull<U>(reinterpret_cast<U*>(const_cast<std::remove_const_t<T>*>(ptr_)));
+    }
+    // Chain parity with NonNull's own CastProxy (`nn.cast().as_non_null_ptr()`)
+    // — without a deducible target, falls back to the source pointee.
+    constexpr NonNull<std::remove_const_t<T>> as_non_null_ptr() const noexcept {
+        return NonNull<std::remove_const_t<T>>(const_cast<std::remove_const_t<T>*>(ptr_));
+    }
 };
 
 template<typename T>
 inline constexpr RawCastProxy<T> cast(T* ptr) noexcept {
     return RawCastProxy<T>{ptr};
+}
+
+// NonNull receiver through the same targetless-cast seam (an
+// unresolvable receiver type may turn out to be NonNull at C++ time).
+template<typename T>
+inline constexpr RawCastProxy<T> cast(const NonNull<T>& ptr) noexcept {
+    return RawCastProxy<T>{ptr.get()};
 }
 
 // `<*const T>::align_offset(align)` — the number of ELEMENTS of T that must be
