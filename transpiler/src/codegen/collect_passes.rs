@@ -9499,6 +9499,7 @@ impl CodeGen {
             }
             syn::Pat::Or(or_pat) => {
                 let mut conditions = Vec::new();
+                let mut case_data: Vec<(Vec<String>, HashMap<String, String>)> = Vec::new();
                 for case in &or_pat.cases {
                     let mut case_bindings = Vec::new();
                     let mut case_binding_map = HashMap::new();
@@ -9510,21 +9511,80 @@ impl CodeGen {
                             &mut case_binding_map,
                             variant_ctx,
                         )?;
-                    if !case_bindings.is_empty() || !case_binding_map.is_empty() {
+                    let Some(cond) = case_condition else {
+                        if case_bindings.is_empty() && case_binding_map.is_empty() {
+                            // Irrefutable case: the whole or-pattern matches.
+                            return Some(None);
+                        }
                         return None;
-                    }
-                    if case_condition.is_none() {
-                        return Some(None);
-                    }
-                    conditions.push(case_condition.unwrap_or_default());
+                    };
+                    conditions.push(cond);
+                    case_data.push((case_bindings, case_binding_map));
                 }
-                if conditions.is_empty() {
-                    Some(None)
-                } else if conditions.len() == 1 {
-                    Some(Some(conditions.remove(0)))
-                } else {
-                    Some(Some(format!("({})", conditions.join(" || "))))
+                let all_binding_less = case_data
+                    .iter()
+                    .all(|(stmts, map)| stmts.is_empty() && map.is_empty());
+                if all_binding_less {
+                    return if conditions.is_empty() {
+                        Some(None)
+                    } else if conditions.len() == 1 {
+                        Some(Some(conditions.remove(0)))
+                    } else {
+                        Some(Some(format!("({})", conditions.join(" || "))))
+                    };
                 }
+                // Or-cases WITH bindings (error.rs mark():
+                // `Message(_, Some(Pos { mark, .. })) | UnknownAnchor(mark)
+                // => Some(*mark)`): every case must bind the SAME Rust
+                // names. Bind each name once via a condition-selected
+                // ternary chain — the per-case payload expressions are all
+                // the same type (Rust requires or-case bindings to agree).
+                let first_map = &case_data[0].1;
+                let mut rust_names: Vec<String> = first_map.keys().cloned().collect();
+                rust_names.sort();
+                if case_data.iter().any(|(_, map)| {
+                    map.len() != first_map.len()
+                        || !rust_names.iter().all(|name| map.contains_key(name))
+                }) {
+                    return None;
+                }
+                fn binding_stmt_expr(stmts: &[String], cpp_name: &str) -> Option<String> {
+                    for stmt in stmts {
+                        if let Some(eq) = stmt.find(" = ")
+                            && stmt.ends_with(';')
+                        {
+                            let lhs = stmt[..eq].trim_end();
+                            if lhs.ends_with(cpp_name)
+                                && lhs.len() > cpp_name.len()
+                                && lhs[..lhs.len() - cpp_name.len()]
+                                    .ends_with([' ', '&', '*'])
+                            {
+                                return Some(stmt[eq + 3..stmt.len() - 1].to_string());
+                            }
+                        }
+                    }
+                    None
+                }
+                for rust_name in &rust_names {
+                    let mut case_exprs = Vec::new();
+                    for (stmts, map) in &case_data {
+                        let cpp = map.get(rust_name)?;
+                        case_exprs.push(binding_stmt_expr(stmts, cpp)?);
+                    }
+                    // c0 ? e0 : (c1 ? e1 : e_last)
+                    let mut selected = case_exprs.pop()?;
+                    for (cond, expr) in conditions
+                        .iter()
+                        .zip(case_exprs.iter())
+                        .rev()
+                    {
+                        selected = format!("({} ? ({}) : ({}))", cond, expr, selected);
+                    }
+                    let cpp_name = first_map.get(rust_name)?.clone();
+                    out.push(format!("auto&& {} = {};", cpp_name, selected));
+                    rust_to_cpp.insert(rust_name.clone(), cpp_name);
+                }
+                Some(Some(format!("({})", conditions.join(" || "))))
             }
             syn::Pat::Type(pt) => self
                 .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(

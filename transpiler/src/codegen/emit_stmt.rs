@@ -516,6 +516,28 @@ impl CodeGen {
         // bindings, so arm-body uses may std::move them. Only a borrowing
         // scrutinee keeps the bindings references.
         let match_bindings_are_refs = scrutinee_borrows_payload;
+        // A tuple arm carrying a bare `None` slot needs the lambda RETURN
+        // ANNOTATED to type that slot (`(s, None)` alongside
+        // `(variant, Some(value))` — un-annotated, the deduction locks
+        // onto None_t from whichever arm lowers first). Fall back to the
+        // expression lowerings that carry expected types.
+        if runtime_match_return_annotation.is_empty()
+            && match_expr.arms.iter().any(|arm| {
+                let value = self
+                    .extract_match_arm_value_expr(&arm.body)
+                    .unwrap_or(&arm.body);
+                if let syn::Expr::Tuple(tuple) = self.peel_paren_group_expr(value) {
+                    tuple
+                        .elems
+                        .iter()
+                        .any(|elem| expr_is_option_none_constructor(elem))
+                } else {
+                    false
+                }
+            })
+        {
+            return None;
+        }
         let arm_expected_ty = runtime_match_expected;
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
         let mut out = format!(
@@ -991,43 +1013,33 @@ impl CodeGen {
                     }
                     out.push_str("} ");
                 }
-                syn::Pat::Or(or_pat) => {
-                    let mut conditions = Vec::new();
-                    for case in &or_pat.cases {
-                        let mut case_bindings = Vec::new();
-                        let mut case_binding_map = HashMap::new();
-                        let case_condition = self
-                            .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
-                                case,
-                                "_m",
-                                &mut case_bindings,
-                                &mut case_binding_map,
-                                variant_ctx,
-                            )?;
-                        // Runtime expression lowering only supports OR arms without
-                        // branch-local bindings today; binding OR patterns require
-                        // branch-scoped synthesis to keep names coherent.
-                        if !case_bindings.is_empty() || !case_binding_map.is_empty() {
-                            return None;
-                        }
-                        if let Some(case_condition) = case_condition {
-                            conditions.push(case_condition);
-                        } else {
-                            conditions.clear();
-                            conditions.push("true".to_string());
-                            break;
-                        }
+                syn::Pat::Or(_) => {
+                    // The collector handles or-cases WITH bindings too
+                    // (identical binding sets select their payload through a
+                    // condition-guarded ternary chain — error.rs mark()).
+                    let mut binding_stmts = Vec::new();
+                    let mut binding_map = HashMap::new();
+                    let wrapper_value_bindings =
+                        self.arm_pointer_wrapper_value_bindings(&arm.pat, &arm.body);
+                    if !wrapper_value_bindings.is_empty() {
+                        self.pointer_unwrap_suppressed_bindings
+                            .borrow_mut()
+                            .extend(wrapper_value_bindings.iter().cloned());
                     }
-                    if conditions.is_empty() {
-                        return None;
+                    let collected = self
+                        .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                            &arm.pat,
+                            "_m",
+                            &mut binding_stmts,
+                            &mut binding_map,
+                            variant_ctx,
+                        );
+                    if !wrapper_value_bindings.is_empty() {
+                        self.pointer_unwrap_suppressed_bindings.borrow_mut().clear();
                     }
+                    let cond = collected?;
                     saw_runtime_pattern = true;
-                    let cond_expr = if conditions.len() == 1 {
-                        conditions.remove(0)
-                    } else {
-                        format!("({})", conditions.join(" || "))
-                    };
-                    let binding_map = HashMap::new();
+                    let cond_expr = cond.unwrap_or_else(|| "true".to_string());
                     let body = {
                         let emitted = self.emit_expr_with_try_style_binding_scope_with_ref_mode(
                             &arm.body,
@@ -1051,6 +1063,10 @@ impl CodeGen {
                         "return "
                     };
                     out.push_str(&format!("if ({}) {{ ", cond_expr));
+                    for stmt in binding_stmts {
+                        out.push_str(&stmt);
+                        out.push(' ');
+                    }
                     if let Some((_, guard)) = &arm.guard {
                         let guard_str =
                             self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
