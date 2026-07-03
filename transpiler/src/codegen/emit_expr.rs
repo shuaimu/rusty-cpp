@@ -5080,7 +5080,7 @@ impl CodeGen {
                 helper = Some((m.module.clone(), module_path.clone(), trait_name.clone()));
             }
         }
-        let (dep, module_path, trait_name) = helper?;
+        helper.as_ref()?;
         let owner_cpp = {
             let owner_path: Vec<String> = func_path
                 .path
@@ -5093,9 +5093,49 @@ impl CodeGen {
             let ty: syn::Type = syn::parse_str(&joined).ok()?;
             self.map_type(&ty)
         };
-        if owner_cpp.contains("auto") || type_string_has_auto_placeholder(&owner_cpp) {
+        let args: Vec<String> = call
+            .args
+            .iter()
+            .map(|arg| self.emit_expr_maybe_move(arg))
+            .collect();
+        let args = args.join(", ");
+        self.dep_trait_static_dispatch_call(&owner_cpp, &method, &args)
+    }
+
+    /// Wrap a static trait-method call on `owner_cpp` in the
+    /// member-vs-RuntimeHelper SFINAE dispatch, when exactly one
+    /// dependency trait manifest declares `method` (with a module path
+    /// for its exported RuntimeHelper). The concrete owner may
+    /// implement/override the method (the requires-branch picks the
+    /// member) or rely on the trait's provided default (routed to the
+    /// dep's helper). Returns None when no dep declares the method, on
+    /// cross-dep ambiguity, or when the owner spelling still contains
+    /// an unresolved `auto` placeholder.
+    pub(super) fn dep_trait_static_dispatch_call(
+        &self,
+        owner_cpp: &str,
+        method: &str,
+        args: &str,
+    ) -> Option<String> {
+        if owner_cpp.contains("auto") || type_string_has_auto_placeholder(owner_cpp) {
             return None;
         }
+        let mut helper: Option<(String, String, String)> = None;
+        for m in &self.dependency_ufcs_trait_manifests {
+            for (trait_name, methods) in &m.declared_trait_methods {
+                if !methods.iter().any(|mm| mm == method) {
+                    continue;
+                }
+                let Some(module_path) = m.declared_trait_modules.get(trait_name) else {
+                    continue;
+                };
+                if helper.is_some() {
+                    return None; // ambiguous across deps/traits — stay safe
+                }
+                helper = Some((m.module.clone(), module_path.clone(), trait_name.clone()));
+            }
+        }
+        let (dep, module_path, trait_name) = helper?;
         let helper_path = if module_path.is_empty() {
             format!("::{}::{}RuntimeHelper", dep, escape_cpp_keyword(&trait_name))
         } else {
@@ -5106,13 +5146,7 @@ impl CodeGen {
                 escape_cpp_keyword(&trait_name)
             )
         };
-        let args: Vec<String> = call
-            .args
-            .iter()
-            .map(|arg| self.emit_expr_maybe_move(arg))
-            .collect();
-        let args = args.join(", ");
-        let escaped_method = escape_cpp_keyword(&method);
+        let escaped_method = escape_cpp_keyword(method);
         Some(format!(
             "[&]<typename __Owner = {owner}>() -> decltype(auto) {{ if constexpr (requires {{ __Owner::{m}({args}); }}) {{ return __Owner::{m}({args}); }} else {{ return {helper}::template {m}<__Owner>({args}); }} }}()",
             owner = owner_cpp,
@@ -13204,6 +13238,16 @@ impl CodeGen {
                 let owner = self.serde_error_trait_static_call_owner_cpp(expected_ty);
                 let unexp = self.emit_serde_unexpected_static_call_arg(&call.args[0]);
                 let exp = self.emit_expr_maybe_move(&call.args[1]);
+                // The concrete owner only has an `invalid_type` member when
+                // its impl overrides the trait's provided default; route
+                // non-overriding owners to the dep's RuntimeHelper.
+                if let Some(dispatch) = self.dep_trait_static_dispatch_call(
+                    &owner,
+                    "invalid_type",
+                    &format!("{}, {}", unexp, exp),
+                ) {
+                    return dispatch;
+                }
                 return format!("{}::invalid_type({}, {})", owner, unexp, exp);
             }
             if call.args.len() == 2
