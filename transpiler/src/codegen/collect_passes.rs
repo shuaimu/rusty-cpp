@@ -8751,7 +8751,10 @@ impl CodeGen {
                 } else if let Some(cond_method) =
                     self.runtime_ident_match_condition_method(pi, variant_ctx)
                 {
-                    Some(Some(format!("{}.{}()", source_expr, cond_method)))
+                    Some(Some(format!(
+                        "rusty::detail::deref_if_pointer({}).{}()",
+                        source_expr, cond_method
+                    )))
                 } else if pi.by_ref.is_none() && pi.mutability.is_none() && pi.subpat.is_none() {
                     let ident_name = pi.ident.to_string();
                     if self.pattern_ident_is_const_value(&ident_name) {
@@ -9002,7 +9005,10 @@ impl CodeGen {
                     self.runtime_path_match_condition_method(&path_pat.path, variant_ctx)
                 {
                     let source_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
-                    Some(Some(format!("{}.{}()", source_expr, cond_method)))
+                    Some(Some(format!(
+                        "rusty::detail::deref_if_pointer({}).{}()",
+                        source_expr, cond_method
+                    )))
                 } else if self.path_is_known_data_enum_variant_with_ctx(&path_pat.path, variant_ctx)
                 {
                     let scrutinee_base =
@@ -9161,7 +9167,10 @@ impl CodeGen {
                 } else if let Some(cond_method) =
                     self.runtime_ident_match_condition_method(pi, variant_ctx)
                 {
-                    Some(Some(format!("{}.{}()", source_expr, cond_method)))
+                    Some(Some(format!(
+                        "rusty::detail::deref_if_pointer({}).{}()",
+                        source_expr, cond_method
+                    )))
                 } else if pi.by_ref.is_none() && pi.mutability.is_none() && pi.subpat.is_none() {
                     let ident_name = pi.ident.to_string();
                     if self.pattern_ident_is_const_value(&ident_name) {
@@ -9434,7 +9443,10 @@ impl CodeGen {
                     self.runtime_path_match_condition_method(&path_pat.path, variant_ctx)
                 {
                     let source_expr = format!("rusty::detail::deref_if_pointer({})", source_expr);
-                    Some(Some(format!("{}.{}()", source_expr, cond_method)))
+                    Some(Some(format!(
+                        "rusty::detail::deref_if_pointer({}).{}()",
+                        source_expr, cond_method
+                    )))
                 } else if self.path_is_known_data_enum_variant_with_ctx(&path_pat.path, variant_ctx)
                 {
                     let scrutinee_base =

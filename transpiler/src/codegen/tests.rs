@@ -2480,19 +2480,19 @@ fn test_leaf4153_runtime_result_match_direct_binding_passthrough_uses_unwrap_cal
         "#,
     );
     assert!(
-        out.contains("if (_m.is_ok()) { return _m.unwrap(); }")
-            || out.contains("if (_m.is_ok()) { return std::as_const(_m).unwrap(); }")
+        out.contains("if (rusty::detail::deref_if_pointer(_m).is_ok()) { return rusty::detail::deref_if_pointer(_m).unwrap(); }")
+            || out.contains("if (rusty::detail::deref_if_pointer(_m).is_ok()) { return std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap(); }")
     );
     assert!(
-        out.contains("if (_m.is_err()) { return _m.unwrap_err(); }")
-            || out.contains("if (_m.is_err()) { return std::as_const(_m).unwrap_err(); }")
+        out.contains("if (rusty::detail::deref_if_pointer(_m).is_err()) { return rusty::detail::deref_if_pointer(_m).unwrap_err(); }")
+            || out.contains("if (rusty::detail::deref_if_pointer(_m).is_err()) { return std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap_err(); }")
     );
 }
 
 /// Regression for the destructive-match-arm-unwrap bug found in
 /// linked_list_port. When the scrutinee is a field of `self`, the
 /// match arm binding must be extracted non-destructively via
-/// `std::as_const(_m).unwrap()` — Rust forbids moving out of a
+/// `std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap()` — Rust forbids moving out of a
 /// borrowed self, so the scrutinee type is provably Copy and
 /// the match-bind has copy semantics, not move. Hand-written
 /// `Option<T>::unwrap()` (non-const lvalue) destructively sets
@@ -3817,8 +3817,8 @@ fn test_leaf4123_result_match_on_call_uses_runtime_conditionals() {
         out.contains("auto&& _m = mk();") || out.contains("auto&& _m = ::mk();"),
         "{out}"
     );
-    assert!(out.contains("if (_m.is_ok()) {"));
-    assert!(out.contains("if (_m.is_err()) {"));
+    assert!(out.contains("if (rusty::detail::deref_if_pointer(_m).is_ok()) {"));
+    assert!(out.contains("if (rusty::detail::deref_if_pointer(_m).is_err()) {"));
     assert!(!out.contains("std::visit(overloaded {"));
     assert!(!out.contains("const Ok&"));
     assert!(!out.contains("const Err&"));
@@ -4461,7 +4461,7 @@ fn test_leaf10510_runtime_option_payload_path_pattern_uses_runtime_match_not_vis
         "#,
     );
     assert!(
-        out.contains("if (_m.is_some())"),
+        out.contains("if (rusty::detail::deref_if_pointer(_m).is_some())"),
         "Option payload path-pattern match should use runtime is_some dispatch, got:\n{}",
         out
     );
@@ -4490,7 +4490,7 @@ fn test_leaf10510_runtime_result_payload_literal_pattern_uses_runtime_match_not_
         "#,
     );
     assert!(
-        out.contains("if (_m.is_err())"),
+        out.contains("if (rusty::detail::deref_if_pointer(_m).is_err())"),
         "Result payload literal-pattern match should use runtime is_err dispatch, got:\n{}",
         out
     );
@@ -4523,7 +4523,7 @@ fn test_leaf519_runtime_result_payload_data_enum_unit_variant_uses_variant_holds
         "#,
     );
     assert!(
-        out.contains("if (_m.is_err())"),
+        out.contains("if (rusty::detail::deref_if_pointer(_m).is_err())"),
         "Result payload data-enum path pattern should use runtime is_err dispatch, got:\n{}",
         out
     );
@@ -4606,7 +4606,7 @@ fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_expr_match_uses
         "#,
     );
     assert!(
-        out.contains("if (_m.is_err())"),
+        out.contains("if (rusty::detail::deref_if_pointer(_m).is_err())"),
         "Result payload struct-pattern expression match should use runtime is_err dispatch, got:\n{}",
         out
     );
@@ -4656,7 +4656,7 @@ fn test_leaf5171_runtime_result_expr_diverging_err_arm_keeps_typed_return() {
         "#,
     );
     assert!(
-        out.contains("if (_m.is_err())"),
+        out.contains("if (rusty::detail::deref_if_pointer(_m).is_err())"),
         "runtime Result expression match should use is_err dispatch, got:\n{}",
         out
     );
@@ -4915,7 +4915,7 @@ fn test_leaf10516_runtime_option_payload_range_pattern_uses_runtime_match_not_vi
         "#,
     );
     assert!(
-        out.contains("if (_m.is_some())"),
+        out.contains("if (rusty::detail::deref_if_pointer(_m).is_some())"),
         "Option range-pattern match should use runtime is_some dispatch, got:\n{}",
         out
     );
@@ -8809,8 +8809,8 @@ fn test_leaf523_runtime_match_payload_value_is_materialized_before_condition() {
     // The payload binding may be declared as `auto` or `auto&&` depending
     // on whether the match guard is in stmt-expr accumulator form.
     let decl_idx = out
-        .find("auto _mv0 = std::as_const(_m).unwrap();")
-        .or_else(|| out.find("auto&& _mv0 = std::as_const(_m).unwrap();"))
+        .find("auto _mv0 = std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap();")
+        .or_else(|| out.find("auto&& _mv0 = std::as_const(rusty::detail::deref_if_pointer(_m)).unwrap();"))
         .expect("expected runtime payload materialization");
     let cond = "if ((_mv0 >= static_cast<uint8_t>(48) && _mv0 <= static_cast<uint8_t>(57)))";
     let cond_idx = out
@@ -22087,8 +22087,8 @@ fn test_leaf416_result_match_expression_uses_runtime_conditionals() {
         }
     "#,
     );
-    assert!(out.contains("if (_m.is_err()) {"));
-    assert!(out.contains("if (_m.is_ok()) {"));
+    assert!(out.contains("if (rusty::detail::deref_if_pointer(_m).is_err()) {"));
+    assert!(out.contains("if (rusty::detail::deref_if_pointer(_m).is_ok()) {"));
     assert!(!out.contains("Result_Err"));
     assert!(!out.contains("Result_Ok"));
     assert!(!out.contains("std::visit(overloaded {"));
@@ -25431,7 +25431,7 @@ fn test_leaf41543333333151_result_match_expr_with_nested_struct_pattern_uses_run
         }
     "#,
     );
-    assert!(out.contains("_m.is_err()"));
+    assert!(out.contains("deref_if_pointer(_m).is_err()"));
     assert!(out.contains("return true;"));
     assert!(!out.contains("std::visit(overloaded {"));
 }
@@ -25454,7 +25454,7 @@ fn test_leaf41543333333151_result_match_expr_with_struct_field_binding_extracts_
             || out.contains("auto&& element = rusty::detail::deref_if_pointer(_mv0.element)"),
         "{out}"
     );
-    assert!(out.contains("if (_m.is_err()) {"), "{out}");
+    assert!(out.contains("if (rusty::detail::deref_if_pointer(_m).is_err()) {"), "{out}");
     assert!(!out.contains("std::visit(overloaded {"), "{out}");
 }
 
@@ -31858,7 +31858,8 @@ fn test_leaf10541_option_or_pattern_match_prefers_runtime_checks_over_visit() {
         "#,
     );
     assert!(
-        out.contains("_m.is_none()") && out.contains("_m.is_some()"),
+        out.contains("deref_if_pointer(_m).is_none()")
+            && out.contains("deref_if_pointer(_m).is_some()"),
         "{out}"
     );
     assert!(

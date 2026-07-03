@@ -651,10 +651,13 @@ impl CodeGen {
         };
         let scrutinee_borrows_payload =
             self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
+        // deref_if_pointer is identity on non-pointers; an address-of
+        // scrutinee (`match &self.document.error`) makes `_m` a pointer
+        // whose Option methods need the pointee.
         let payload_source = if scrutinee_borrows_payload {
-            "std::as_const(_m)"
+            "std::as_const(rusty::detail::deref_if_pointer(_m))"
         } else {
-            "_m"
+            "rusty::detail::deref_if_pointer(_m)"
         };
         // Owned scrutinee: Rust MOVES by-value pattern payloads into their
         // bindings, so arm-body uses may std::move them. Only a borrowing
@@ -690,12 +693,15 @@ impl CodeGen {
                         saw_runtime_pattern = true;
                         if direct_binding_passthrough {
                             out.push_str(&format!(
-                                "if (_m.{}()) {{ return {}.{}(); }} ",
+                                "if (rusty::detail::deref_if_pointer(_m).{}()) {{ return {}.{}(); }} ",
                                 cond_method, payload_source, unwrap_method
                             ));
                             continue;
                         }
-                        out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
+                        out.push_str(&format!(
+                            "if (rusty::detail::deref_if_pointer(_m).{}()) {{ ",
+                            cond_method
+                        ));
                         let matched_value = format!("_mv{}", idx);
                         let mut binding_stmts = Vec::new();
                         let payload_variant_ctx =
@@ -715,11 +721,12 @@ impl CodeGen {
                         if needs_payload_materialization {
                             let payload_value_source =
                                 if payload_match_condition.is_some() || arm.guard.is_some() {
-                                    "std::as_const(_m)"
+                                    "std::as_const(rusty::detail::deref_if_pointer(_m))"
                                 } else {
                                     payload_source
                                 };
-                            payload_bindings_are_refs = payload_value_source != "_m";
+                            payload_bindings_are_refs =
+                                payload_value_source != "rusty::detail::deref_if_pointer(_m)";
                             out.push_str(&format!(
                                 "auto&& {} = {}.{}(); ",
                                 matched_value, payload_value_source, unwrap_method
@@ -971,7 +978,10 @@ impl CodeGen {
                         self.runtime_ident_match_condition_method(pi, variant_ctx)
                     {
                         saw_runtime_pattern = true;
-                        out.push_str(&format!("if (_m.{}()) {{ ", cond_method));
+                        out.push_str(&format!(
+                            "if (rusty::detail::deref_if_pointer(_m).{}()) {{ ",
+                            cond_method
+                        ));
                     } else if pi.by_ref.is_none()
                         && pi.mutability.is_none()
                         && self.pattern_ident_is_const_value(&pi.ident.to_string())
