@@ -19846,6 +19846,20 @@ impl CodeGen {
         // the diverging body still deduces `void`. (It stays valid on real
         // function declarations, which go through a different emit path.)
         let lambda_return_annotation = lambda_return_annotation.replace("[[noreturn]] ", "");
+        // `.map(|(event, _mark)| event)` in a fn returning Result<&Event>:
+        // an un-annotated lambda's auto deduction DECAYS the reference slot
+        // (deleted Event copy; the map deduces Result<Event> where
+        // Result<const Event&> is required). When the body is a bare
+        // destructured-binding path and the enclosing return hint is
+        // Result<R, _>/Option<R> with a clean R, annotate ` -> R`.
+        let lambda_return_annotation = if lambda_return_annotation.is_empty()
+            && !closure_param_prelude.is_empty()
+        {
+            self.destructure_identity_closure_ok_annotation(closure)
+                .unwrap_or(lambda_return_annotation)
+        } else {
+            lambda_return_annotation
+        };
         let push_outer_expected_hint = matches!(&resolved_closure_output, syn::ReturnType::Default)
             || matches!(
                 &resolved_closure_output,
@@ -20036,6 +20050,75 @@ impl CodeGen {
         } else {
             emitted
         }
+    }
+
+    /// See the call site in the closure emitter: identity destructure
+    /// closures returning a tuple-slot binding get the enclosing
+    /// Result/Option Ok type as their return annotation, so a reference
+    /// slot survives deduction.
+    fn destructure_identity_closure_ok_annotation(
+        &self,
+        closure: &syn::ExprClosure,
+    ) -> Option<String> {
+        let body_val = match closure.body.as_ref() {
+            syn::Expr::Block(block_expr) => {
+                self.extract_tail_expr_from_block(&block_expr.block)?
+            }
+            other => other,
+        };
+        let syn::Expr::Path(path) = self.peel_paren_group_expr(body_val) else {
+            return None;
+        };
+        if path.qself.is_some() || path.path.segments.len() != 1 {
+            return None;
+        }
+        let name = path.path.segments[0].ident.to_string();
+        let bound_by_destructure = closure.inputs.iter().any(|input| {
+            if !Self::closure_param_needs_body_destructure(input) {
+                return false;
+            }
+            let mut names = HashSet::new();
+            self.collect_pattern_value_binding_names(input, &mut names);
+            names.contains(&name)
+        });
+        if !bound_by_destructure {
+            return None;
+        }
+        let ret = self.current_return_type_hint()?;
+        let peeled = self.peel_reference_paren_group_type(ret);
+        let ok_ty_owned;
+        let ok_ty = if let Some((owner, args)) = self.option_or_result_type_args(peeled) {
+            if !matches!(owner.as_str(), "Result" | "Option") {
+                return None;
+            }
+            ok_ty_owned = args.first()?.clone();
+            &ok_ty_owned
+        } else {
+            // `type Result<T> = result::Result<T, Error>;`-style aliases:
+            // a single-arg generic whose tail resolves to Result/Option
+            // carries the Ok type as its sole argument.
+            let syn::Type::Path(tp) = peeled else {
+                return None;
+            };
+            let seg = tp.path.segments.last()?;
+            let seg_name = seg.ident.to_string();
+            let resolved = self.resolve_type_alias_tail(&seg_name);
+            if !matches!(resolved, "Result" | "Option") {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
+                return None;
+            };
+            let mut type_args = ab.args.iter().filter_map(|arg| match arg {
+                syn::GenericArgument::Type(ty) => Some(ty),
+                _ => None,
+            });
+            ok_ty_owned = type_args.next()?.clone();
+            &ok_ty_owned
+        };
+        let cpp = self.map_type(ok_ty);
+        (!cpp.is_empty() && cpp != "auto" && !type_string_has_auto_placeholder(&cpp))
+            .then(|| format!(" -> {}", cpp))
     }
 
     pub(super) fn emit_closure_destructure_pat_to_string(&self, pat: &syn::Pat) -> String {
