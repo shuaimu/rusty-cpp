@@ -34926,3 +34926,34 @@ fn test_if_let_expression_variant_test_uses_variant_holds_not_is_some() {
     assert!(!out.contains("_iflet_scrutinee.is_some()"), "{out}");
     assert!(!out.contains("_iflet.is_some()"), "{out}");
 }
+
+#[test]
+fn test_loop_rebind_match_arm_lowers_as_statement() {
+    // serde_yaml value/index.rs index_or_insert: a unit-typed tail match in
+    // a `loop` whose arms mix early `return`s with a REBIND arm
+    // (`Value::Tagged(tagged) => v = &mut tagged.value`). The rebind arm is
+    // an assignment (always unit in Rust) — the match must lower as a
+    // STATEMENT so the rebind falls through to the next loop iteration,
+    // NOT as a value-IIFE whose `return v = &x;` mis-types (Value* vs
+    // Value&) and exits the loop early.
+    let out = transpile_str(
+        r#"
+        enum Value {
+            Leaf(i32),
+            Nest(Box<Value>),
+        }
+        fn index_or_insert(mut v: &mut Value) -> &mut Value {
+            loop {
+                match v {
+                    Value::Leaf(_) => return v,
+                    Value::Nest(inner) => v = inner,
+                }
+            }
+        }
+        "#,
+    );
+    // The rebind arm must be a plain assignment statement, never returned.
+    assert!(!out.contains("return v_shadow1 ="), "{out}");
+    assert!(!out.contains("return v ="), "{out}");
+    assert!(out.contains("while (true)"), "{out}");
+}

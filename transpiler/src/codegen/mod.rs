@@ -21256,6 +21256,15 @@ impl CodeGen {
                 .iter()
                 .any(|arm| self.expr_can_fallthrough_without_value(&arm.body)),
             syn::Expr::Loop(_) | syn::Expr::While(_) | syn::Expr::ForLoop(_) => true,
+            // (Compound-)assignments are always unit-typed in Rust: a match
+            // arm like `Value::Tagged(tagged) => v = &mut tagged.value` (a
+            // loop-rebind arm) completes without producing a value. Without
+            // this, a match whose other arms all return counts as
+            // value-like and takes the return-IIFE lowering, turning the
+            // rebind arm into `return v = &x;` — wrong type AND wrong
+            // control flow (the loop must continue, not return).
+            syn::Expr::Assign(_) => true,
+            syn::Expr::Binary(bin) if Self::is_compound_assign_binop(&bin.op) => true,
             _ => false,
         }
     }
@@ -21290,6 +21299,13 @@ impl CodeGen {
         // Decide strategy: switch-compatible value patterns vs std::visit variant dispatch.
         if self.all_arms_are_switch_compatible(&match_expr.arms, variant_ctx.as_ref()) {
             self.emit_match_as_switch(&scrutinee, &match_expr.arms, variant_ctx.as_ref());
+        } else if self.try_emit_variant_match_stmt_if_chain(
+            &scrutinee,
+            match_expr,
+            variant_ctx.as_ref(),
+        ) {
+            // Arms with function-level `return`/`?` cannot live inside the
+            // std::visit lambdas — lowered as an if/else-if chain instead.
         } else {
             let visit_scrutinee =
                 self.emit_match_visit_scrutinee(&match_expr.expr, variant_ctx.as_ref());
@@ -21301,6 +21317,107 @@ impl CodeGen {
                 visit_mutably,
             );
         }
+    }
+
+    /// Statement-position variant match whose arm bodies contain
+    /// FUNCTION-LEVEL control flow (`return` / `?`). Those bodies cannot
+    /// live inside `std::visit(overloaded {...})` lambdas: a `return`
+    /// binds to the visit lambda instead of the enclosing function, and
+    /// mixed void/value arm lambdas fail std::visit's same-return-type
+    /// requirement (serde_yaml's `index_or_insert` loop-rebind match).
+    /// Lower as an exclusive `if / else if / else` chain over the variant
+    /// conditions with payload bindings, keeping arm statements at
+    /// function scope (a rebind arm falls through to the enclosing loop's
+    /// next iteration).
+    fn try_emit_variant_match_stmt_if_chain(
+        &mut self,
+        scrutinee: &str,
+        match_expr: &syn::ExprMatch,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> bool {
+        if match_expr.arms.is_empty() {
+            return false;
+        }
+        let has_fn_level_control_flow = match_expr
+            .arms
+            .iter()
+            .any(|arm| self.expr_contains_early_return_or_try(&arm.body));
+        if !has_fn_level_control_flow {
+            return false;
+        }
+        // Plan every arm up front — all-or-nothing so unsupported patterns
+        // keep their historical visit routing.
+        let mut plans: Vec<(Option<String>, Vec<String>, HashMap<String, String>)> =
+            Vec::with_capacity(match_expr.arms.len());
+        for arm in &match_expr.arms {
+            if arm.guard.is_some() {
+                return false;
+            }
+            if matches!(&arm.pat, syn::Pat::Wild(_)) {
+                plans.push((None, Vec::new(), HashMap::new()));
+                continue;
+            }
+            let mut binding_stmts = Vec::new();
+            let mut binding_map = HashMap::new();
+            let Some(cond) = self.collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                &arm.pat,
+                "_m",
+                &mut binding_stmts,
+                &mut binding_map,
+                variant_ctx,
+            ) else {
+                return false;
+            };
+            plans.push((cond, binding_stmts, binding_map));
+        }
+        self.writeln("{");
+        self.indent += 1;
+        self.writeln(&format!("auto&& _m = {};", scrutinee));
+        let mut opened_else = false;
+        for (arm, (cond, binding_stmts, binding_map)) in match_expr.arms.iter().zip(&plans) {
+            match cond {
+                Some(cond) => {
+                    if opened_else {
+                        self.writeln(&format!("else if ({}) {{", cond));
+                    } else {
+                        self.writeln(&format!("if ({}) {{", cond));
+                        opened_else = true;
+                    }
+                }
+                None => {
+                    if opened_else {
+                        self.writeln("else {");
+                    } else {
+                        self.writeln("{");
+                    }
+                }
+            }
+            self.indent += 1;
+            for stmt in binding_stmts {
+                self.writeln(stmt);
+            }
+            let pushed = self.push_local_cpp_binding_scope(binding_map);
+            self.push_pattern_ref_binding_scope(&arm.pat);
+            match arm.body.as_ref() {
+                syn::Expr::Block(block) => self.emit_block(&block.block),
+                body => {
+                    let stmt = syn::Stmt::Expr(body.clone(), Some(Default::default()));
+                    self.emit_stmt(&stmt, false);
+                }
+            }
+            self.pop_pattern_ref_binding_scope();
+            self.pop_local_cpp_binding_scope(pushed);
+            self.indent -= 1;
+            self.writeln("}");
+            if cond.is_none() {
+                // Irrefutable arm: later arms are unreachable (Rust tests
+                // arms in order).
+                break;
+            }
+        }
+        self.indent -= 1;
+        self.writeln("}");
+        true
     }
 
     fn match_visit_requires_mutable_binding(&self, expr: &syn::Expr) -> bool {
