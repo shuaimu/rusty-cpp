@@ -863,7 +863,11 @@ decltype(auto) as_ref_ptr(const T& value) {
         if constexpr (std::is_pointer_v<std::remove_reference_t<RawPtr>>) {
             using Pointee =
                 std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<RawPtr>>>;
-            if constexpr (!std::is_same_v<Pointee, char>) {
+            // String-likes (char data, or u8 data with a c_str() — String/str
+            // as_ptr() is *const u8 for Rust parity) keep object identity.
+            constexpr bool string_like_data = std::is_same_v<Pointee, char>
+                || (std::is_same_v<Pointee, uint8_t> && requires { value.c_str(); });
+            if constexpr (!string_like_data) {
                 return detail::adapt_as_ptr_result(value, value.as_ptr());
             } else {
                 return &value;
@@ -879,7 +883,9 @@ decltype(auto) as_ref_ptr(const T& value) {
                           std::remove_pointer_t<std::remove_reference_t<RawPtr>>>) {
             using Pointee =
                 std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<RawPtr>>>;
-            if constexpr (!std::is_same_v<Pointee, char>) {
+            constexpr bool string_like_data2 = std::is_same_v<Pointee, char>
+                || (std::is_same_v<Pointee, uint8_t> && requires { value.c_str(); });
+            if constexpr (!string_like_data2) {
                 return detail::adapt_as_ptr_result(
                     value,
                     const_cast<std::remove_cvref_t<T>&>(value).as_ptr());

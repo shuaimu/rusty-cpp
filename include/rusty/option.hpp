@@ -767,21 +767,30 @@ public:
     }
 
     // Rust Option::map_or_else on a reference payload: eagerly picks the
-    // mapped value or the default-fn result.
+    // mapped value or the default-fn result. Deduced (`decltype(auto)`)
+    // returns on purpose: a trailing `decltype(f(std::declval<T&>()))`
+    // would make overload resolution instantiate the generic lambda's
+    // body for BOTH const-nesses (hard error when the body mutates and
+    // the const candidate substitutes `const T&`); deduction defers body
+    // instantiation until after the overload is selected. The default-fn
+    // branch static_casts so a nullptr_t default unifies with a pointer
+    // mapped value.
     template<typename D, typename F>
-    auto map_or_else(D&& default_fn, F&& f) -> decltype(f(std::declval<T&>())) {
+    decltype(auto) map_or_else(D&& default_fn, F&& f) {
+        using R = decltype(f(*ptr));
         if (ptr) {
-            return f(*ptr);
+            return static_cast<R>(f(*ptr));
         }
-        return default_fn();
+        return static_cast<R>(default_fn());
     }
 
     template<typename D, typename F>
-    auto map_or_else(D&& default_fn, F&& f) const -> decltype(f(std::declval<const T&>())) {
+    decltype(auto) map_or_else(D&& default_fn, F&& f) const {
+        using R = decltype(f(*static_cast<const T*>(ptr)));
         if (ptr) {
-            return f(*ptr);
+            return static_cast<R>(f(*static_cast<const T*>(ptr)));
         }
-        return default_fn();
+        return static_cast<R>(default_fn());
     }
 
     // Map function over const reference
@@ -1035,13 +1044,15 @@ public:
         return Option<U>(None);
     }
 
-    // Rust Option::map_or_else on a const-reference payload.
+    // Rust Option::map_or_else on a const-reference payload (deduced
+    // return; see the Option<T&> overloads for why).
     template<typename D, typename F>
-    auto map_or_else(D&& default_fn, F&& f) const -> decltype(f(std::declval<const T&>())) {
+    decltype(auto) map_or_else(D&& default_fn, F&& f) const {
+        using R = decltype(f(*ptr));
         if (ptr) {
-            return f(*ptr);
+            return static_cast<R>(f(*ptr));
         }
-        return default_fn();
+        return static_cast<R>(default_fn());
     }
 
     // Rust parity: Option<&T>::copied() -> Option<T>

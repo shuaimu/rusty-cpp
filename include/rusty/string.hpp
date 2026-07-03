@@ -446,15 +446,16 @@ public:
         ensure_null_terminated();
     }
     
-    // Get C string (null-terminated)
+    // Rust parity: String::as_ptr() is *const u8. c_str() below keeps the
+    // char* spelling for C-string interop.
     // @lifetime: (&'a) -> &'a
-    const char* as_ptr() const {
-        return data_ ? data_ : "";
+    const uint8_t* as_ptr() const {
+        return reinterpret_cast<const uint8_t*>(data_ ? data_ : "");
     }
     
     // @lifetime: (&'a) -> &'a
     const char* c_str() const {
-        return as_ptr();
+        return data_ ? data_ : "";
     }
     
     // Get as string_view
@@ -946,16 +947,19 @@ public:
     str() : data_(nullptr), len_(0) {}
     str(const char* s) : data_(s), len_(s ? std::strlen(s) : 0) {}
     str(const char* s, size_t len) : data_(s), len_(len) {}
-    str(const String& s) : data_(s.as_ptr()), len_(s.len()) {}
+    str(const String& s)
+        : data_(reinterpret_cast<const char*>(s.as_ptr())), len_(s.len()) {}
     str(std::string_view sv) : data_(sv.data()), len_(sv.length()) {}
     
     // Length and emptiness
     size_t len() const { return len_; }
     bool is_empty() const { return len_ == 0; }
     
-    // Get as C string (may not be null-terminated!)
+    // Rust parity: str::as_ptr() is *const u8 (may not be null-terminated!)
     // @lifetime: (&'a) -> &'a
-    const char* as_ptr() const { return data_; }
+    const uint8_t* as_ptr() const {
+        return reinterpret_cast<const uint8_t*>(data_);
+    }
     
     // Get as string_view
     // @lifetime: (&'a) -> &'a
