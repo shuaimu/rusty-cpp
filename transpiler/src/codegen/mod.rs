@@ -21364,6 +21364,34 @@ impl CodeGen {
         match_expr: &syn::ExprMatch,
         variant_ctx: Option<&VariantTypeContext>,
     ) -> bool {
+        self.try_emit_variant_match_stmt_if_chain_with_assign(
+            scrutinee, match_expr, variant_ctx, None,
+        )
+    }
+
+    /// Like the statement if-chain, but non-diverging arms ASSIGN their value
+    /// into `assign_target` instead of executing for effect — the lowering
+    /// for `let x = match { ... return-arms ... }` (loader.rs's Cow-valued
+    /// Progress match with a fn-level Err return: no expression-position
+    /// wrapper can host those returns).
+    fn try_emit_variant_match_stmt_if_chain_with_assign(
+        &mut self,
+        scrutinee: &str,
+        match_expr: &syn::ExprMatch,
+        variant_ctx: Option<&VariantTypeContext>,
+        assign_target: Option<&str>,
+    ) -> bool {
+        self.variant_match_if_chain_impl(scrutinee, match_expr, variant_ctx, assign_target, None)
+    }
+
+    fn variant_match_if_chain_impl(
+        &mut self,
+        scrutinee: &str,
+        match_expr: &syn::ExprMatch,
+        variant_ctx: Option<&VariantTypeContext>,
+        assign_target: Option<&str>,
+        assign_decl: Option<&str>,
+    ) -> bool {
         if match_expr.arms.is_empty() {
             return false;
         }
@@ -21386,6 +21414,36 @@ impl CodeGen {
                 plans.push((None, Vec::new(), HashMap::new()));
                 continue;
             }
+            // Or-pattern arm of BINDING-LESS cases (`Iterable(_) | Document(_)`):
+            // the condition is the OR of per-case variant conditions.
+            if let syn::Pat::Or(or_pat) = &arm.pat {
+                let mut case_conds = Vec::new();
+                let mut supported = true;
+                for case in &or_pat.cases {
+                    let mut case_stmts = Vec::new();
+                    let mut case_map = HashMap::new();
+                    match self.collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+                        case,
+                        "_m",
+                        &mut case_stmts,
+                        &mut case_map,
+                        variant_ctx,
+                    ) {
+                        Some(Some(cond)) if case_stmts.is_empty() && case_map.is_empty() => {
+                            case_conds.push(cond);
+                        }
+                        _ => {
+                            supported = false;
+                            break;
+                        }
+                    }
+                }
+                if !supported || case_conds.is_empty() {
+                    return false;
+                }
+                plans.push((Some(format!("({})", case_conds.join(" || "))), Vec::new(), HashMap::new()));
+                continue;
+            }
             let mut binding_stmts = Vec::new();
             let mut binding_map = HashMap::new();
             let Some(cond) = self.collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
@@ -21398,6 +21456,9 @@ impl CodeGen {
                 return false;
             };
             plans.push((cond, binding_stmts, binding_map));
+        }
+        if let Some(decl) = assign_decl {
+            self.writeln(decl);
         }
         self.writeln("{");
         self.indent += 1;
@@ -21427,9 +21488,47 @@ impl CodeGen {
             }
             let pushed = self.push_local_cpp_binding_scope(binding_map);
             self.push_pattern_ref_binding_scope(&arm.pat);
-            match arm.body.as_ref() {
-                syn::Expr::Block(block) => self.emit_block(&block.block),
-                body => {
+            match (assign_target, arm.body.as_ref()) {
+                (Some(target), body) if !self.is_expr_diverging(body) => {
+                    // Value arm: rewrite the arm so its TAIL becomes an
+                    // assignment into the target, then emit through
+                    // emit_block — the full block machinery (placeholder
+                    // hint collection for `let mut buffer = Vec::new()`
+                    // prefixes included) runs as it would for any block.
+                    let target_expr: syn::Expr =
+                        syn::parse_str(target).unwrap_or_else(|_| parse_quote!(__chain_target));
+                    let assign = |value: syn::Expr| -> syn::Expr {
+                        syn::Expr::Assign(syn::ExprAssign {
+                            attrs: Vec::new(),
+                            left: Box::new(target_expr.clone()),
+                            eq_token: Default::default(),
+                            right: Box::new(value),
+                        })
+                    };
+                    match body {
+                        syn::Expr::Block(block) => {
+                            let mut rewritten = block.block.clone();
+                            if let Some(syn::Stmt::Expr(tail, semi @ None)) =
+                                rewritten.stmts.last_mut()
+                            {
+                                *tail = assign(tail.clone());
+                                *semi = Some(Default::default());
+                                self.emit_block(&rewritten);
+                            } else {
+                                self.emit_block(&block.block);
+                            }
+                        }
+                        _ => {
+                            let stmt = syn::Stmt::Expr(
+                                assign(body.clone()),
+                                Some(Default::default()),
+                            );
+                            self.emit_stmt(&stmt, false);
+                        }
+                    }
+                }
+                (_, syn::Expr::Block(block)) => self.emit_block(&block.block),
+                (_, body) => {
                     let stmt = syn::Stmt::Expr(body.clone(), Some(Default::default()));
                     self.emit_stmt(&stmt, false);
                 }

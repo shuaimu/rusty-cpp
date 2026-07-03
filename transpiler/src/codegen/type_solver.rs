@@ -1281,6 +1281,13 @@ impl<'ctx, 'r> ConstraintCollector<'ctx, 'r> {
                     self.collect_expr_constraints(a, resolver);
                 }
             }
+            syn::Expr::Assign(a) => {
+                // An assignment's RHS is a consumer position like any other
+                // (`input = Cow::Owned(buffer)` pins `buffer` exactly as the
+                // bare tail `Cow::Owned(buffer)` does).
+                self.collect_expr_constraints(&a.left, resolver);
+                self.collect_expr_constraints(&a.right, resolver);
+            }
             syn::Expr::Paren(e) => self.collect_expr_constraints(&e.expr, resolver),
             syn::Expr::Group(e) => self.collect_expr_constraints(&e.expr, resolver),
             syn::Expr::Reference(e) => self.collect_expr_constraints(&e.expr, resolver),

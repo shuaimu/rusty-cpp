@@ -2412,7 +2412,6 @@ impl CodeGen {
             return None;
         }
         if expected_ty.is_none() {
-            if std::env::var_os("RUSTY_CPP_DBG_MSE").is_some() { eprintln!("[mse] bail: expected none"); }
             return None;
         }
         let match_contains_early_return_or_try =
@@ -2603,7 +2602,6 @@ impl CodeGen {
                         &mut binding_stmts,
                         variant_ctx,
                     ) else {
-                        if std::env::var_os("RUSTY_CPP_DBG_MSE").is_some() { eprintln!("[mse] bail: tuplestruct helper none"); }
                         return None;
                     };
                     let bindings = if binding_stmts.is_empty() {
@@ -2667,6 +2665,23 @@ impl CodeGen {
                                 conds.clear();
                                 conds.push("true".to_string());
                                 break;
+                            }
+                            // `Progress::Iterable(_) | Progress::Document(_)`:
+                            // an all-wildcard TupleStruct or-case is just the
+                            // variant condition.
+                            syn::Pat::TupleStruct(ts)
+                                if ts.elems.iter().all(|elem| {
+                                    matches!(
+                                        self.peel_pat_type_ref_paren(elem),
+                                        syn::Pat::Wild(_)
+                                    )
+                                }) =>
+                            {
+                                conds.push(self.runtime_variant_match_condition_for_path(
+                                    &ts.path,
+                                    variant_ctx,
+                                    "_m",
+                                ));
                             }
                             _ => return None,
                         }
@@ -18968,6 +18983,44 @@ impl CodeGen {
             }
             if let Some(lowered) = self.emit_try_style_either_match_expr(match_expr, expected_ty) {
                 return lowered;
+            }
+            // A fn-level `return` inside a VALUE match whose type differs
+            // from the enclosing fn's return cannot live in the IIFE lambda
+            // (loader.rs: `return Err(io)` inside a Cow-valued Progress
+            // match binds to the Cow lambda). Take the statement-expression
+            // lowering with variant arms enabled — `return` stays a real
+            // function return there.
+            let delegation_expected: Option<syn::Type> = expected_ty.cloned().or_else(|| {
+                // The 4-arm inference cap above doesn't apply here: any
+                // common non-diverging arm type suffices to detect the
+                // fn-return mismatch (loader's 6-arm Progress match).
+                self.infer_match_arms_common_type(&match_expr.arms)
+                    .or_else(|| self.infer_match_arms_common_type_with_scrutinee(match_expr))
+            });
+            if let (Some(fn_ret), Some(expected)) = (
+                self.current_return_type_hint().cloned(),
+                delegation_expected.as_ref(),
+            ) {
+                let fn_ret_cpp = self.map_type(&fn_ret);
+                let expected_cpp = self.map_type(expected);
+                if !fn_ret_cpp.is_empty()
+                    && !expected_cpp.is_empty()
+                    && fn_ret_cpp != "auto"
+                    && expected_cpp != "auto"
+                    && fn_ret_cpp != expected_cpp
+                {
+                    let variant_ctx =
+                        self.infer_variant_type_context_from_expr(&match_expr.expr);
+                    let lowered = self.emit_match_expr_switch_statement_expr_with_arm_mode(
+                        match_expr,
+                        Some(expected),
+                        variant_ctx.as_ref(),
+                        true,
+                    );
+                    if let Some(lowered) = lowered {
+                        return lowered;
+                    }
+                }
             }
         }
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);

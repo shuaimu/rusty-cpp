@@ -159,6 +159,60 @@ impl CodeGen {
             if self.try_emit_let_match_return_statement_level(local) {
                 return;
             }
+            // `let x = match { ... fn-level-return arms ... }` whose value
+            // type differs from the fn's return: no expression-position
+            // lowering can host the returns. Declare the local, then run
+            // the statement if-chain with `x = <arm value>` assignments.
+            // Option/Result scrutinees stay on the established try-style
+            // lowering (shadow renaming, emplace machinery); this path is
+            // for custom data enums it declines (e.g. loader's Progress).
+            if let syn::Pat::Ident(pat_ident) = &local.pat
+                && pat_ident.subpat.is_none()
+                && let Some(init) = &local.init
+                && init.diverge.is_none()
+                && let syn::Expr::Match(match_expr) = self.peel_paren_group_expr(&init.expr)
+                && self.match_expr_has_explicit_return_arm(match_expr)
+                && match_expr.arms.iter().all(|arm| arm.guard.is_none())
+                && !self.match_arms_reference_option_result_variants(&match_expr.arms)
+            {
+                let arm_ty = self
+                    .infer_match_arms_common_type(&match_expr.arms)
+                    .or_else(|| self.infer_match_arms_common_type_with_scrutinee(match_expr));
+                let fn_ret_cpp = self
+                    .current_return_type_hint()
+                    .map(|t| self.map_type(t))
+                    .unwrap_or_default();
+                if let Some(arm_ty) = arm_ty {
+                    let arm_cpp = self.map_type(&arm_ty);
+                    if !arm_cpp.is_empty()
+                        && arm_cpp != "auto"
+                        && !type_string_has_auto_placeholder(&arm_cpp)
+                        && !fn_ret_cpp.is_empty()
+                        && fn_ret_cpp != "auto"
+                        && arm_cpp != fn_ret_cpp
+                    {
+                        let rust_name = pat_ident.ident.to_string();
+                        let cpp_name = escape_cpp_keyword(&rust_name);
+                        let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+                        let variant_ctx =
+                            self.infer_variant_type_context_from_expr(&match_expr.expr);
+                        let decl = format!("{} {};", arm_cpp, cpp_name);
+                        self.register_local_binding(rust_name.clone(), Some(arm_ty.clone()));
+                        if self.variant_match_if_chain_impl(
+                            &scrutinee,
+                            match_expr,
+                            variant_ctx.as_ref(),
+                            Some(&rust_name),
+                            Some(&decl),
+                        ) {
+                            return;
+                        }
+                        // Chain declined: fall through to the normal let
+                        // emission (the bare decl line above is harmless —
+                        // it will be shadowed).
+                    }
+                }
+            }
         }
         // Deferred-init `let x;` whose declaration was suppressed by
         // `emit_local` (because no type could be inferred — `auto X;`
@@ -321,6 +375,31 @@ impl CodeGen {
             syn::Stmt::Expr(expr, None) => ident_of(expr),
             _ => None,
         }
+    }
+
+    /// Any arm pattern (including or-pattern cases) naming an
+    /// Option/Result variant (`Some`/`None`/`Ok`/`Err`).
+    fn match_arms_reference_option_result_variants(&self, arms: &[syn::Arm]) -> bool {
+        fn pat_names_std_variant(pat: &syn::Pat) -> bool {
+            let path = match pat {
+                syn::Pat::TupleStruct(ts) => &ts.path,
+                syn::Pat::Path(p) => &p.path,
+                syn::Pat::Struct(ps) => &ps.path,
+                syn::Pat::Or(or) => return or.cases.iter().any(pat_names_std_variant),
+                syn::Pat::Reference(r) => return pat_names_std_variant(&r.pat),
+                syn::Pat::Paren(p) => return pat_names_std_variant(&p.pat),
+                _ => return false,
+            };
+            path.segments
+                .last()
+                .is_some_and(|seg| {
+                    matches!(
+                        seg.ident.to_string().as_str(),
+                        "Some" | "None" | "Ok" | "Err"
+                    )
+                })
+        }
+        arms.iter().any(|arm| pat_names_std_variant(&arm.pat))
     }
 
     pub(super) fn emit_control_flow_with_return_scope<F>(&mut self, preserve_tail_returns: bool, emit: F)
@@ -2667,7 +2746,9 @@ impl CodeGen {
                                 {
                                     self.emit_repeat_expr_with_element_hint(repeat, elem_hint)
                                 } else if let Some(ty) = inferred_binding_ty.as_ref() {
-                                    self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
+                                    {
+                                        self.emit_expr_to_string_with_expected(&init.expr, Some(ty))
+                                    }
                                 } else {
                                     self.emit_expr_maybe_move(&init.expr)
                                 }

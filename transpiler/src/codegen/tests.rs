@@ -3196,10 +3196,22 @@ fn test_unguarded_return_arm_match_with_differing_types_lowers_to_statement_expr
         }
     "#,
     );
+    // Batch 78: this shape now lowers via the statement if-chain (decl +
+    // per-arm assignment; fn-level returns stay native) instead of a GCC
+    // statement expression.
     assert!(
-        out.contains("const auto reason = ({"),
-        "no-guard return-arm match with differing types must lower to a statement expression:\n{out}"
+        out.contains("std::string_view reason;"),
+        "no-guard return-arm match must declare the local before the if-chain:\n{out}"
     );
+    assert!(
+        out.contains("reason = std::string_view(\" because capacity exceeded the maximum\");"),
+        "value arms must assign into the declared local:\n{out}"
+    );
+    assert!(
+        out.contains("deref_if_pointer(_m).index() == 2"),
+        "Pat::Struct arm condition must go through deref_if_pointer:\n{out}"
+    );
+    assert!(!out.contains("const auto reason = ({"));
 }
 
 #[test]
@@ -4602,7 +4614,8 @@ fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_expr_match_uses
     // or index-based `_mv1.index() == 1`.
     assert!(
         out.contains("rusty::detail::variant_holds<CollectionAllocErr_AllocErr>(_mv1)")
-            || out.contains("_mv1.index() == 1)"),
+            || out.contains("_mv1.index() == 1)")
+            || out.contains("rusty::detail::deref_if_pointer(_mv1).index() == 1)"),
         "Result payload struct-pattern expression match should guard on active variant, got:\n{}",
         out
     );
@@ -4612,6 +4625,8 @@ fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_expr_match_uses
             "auto&& layout = rusty::detail::variant_get<CollectionAllocErr_AllocErr>(_mv1).layout;"
         ) || out.contains(
             "auto&& layout = rusty::detail::deref_if_pointer(std::get<1>(_mv1).layout);"
+        ) || out.contains(
+            "auto&& layout = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1)).layout);"
         ) || out.contains("auto&& layout = std::get<1>(_mv1).layout;"),
         "Result payload struct-pattern expression match should bind fields via variant_get on variant payload, got:\n{}",
         out
@@ -19012,7 +19027,8 @@ fn test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas() {
     );
     assert!(
         out.contains("[&](const ParseKind_InvalidNamedFlag& _v) {")
-            || out.contains("_m.index() == 1"),
+            || out.contains("_m.index() == 1")
+            || out.contains("rusty::detail::deref_if_pointer(_m).index() == 1"),
         "{out}"
     );
     // Field binding may come from `_v.got` (typed lambda) or
@@ -19021,7 +19037,10 @@ fn test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas() {
     assert!(
         out.contains("__self_0 = _v.got;")
             || out.contains("__self_0 = std::get<1>(_m).got")
-            || out.contains("auto&& __self_0 = rusty::detail::deref_if_pointer(std::get<1>(_m).got)"),
+            || out.contains("auto&& __self_0 = rusty::detail::deref_if_pointer(std::get<1>(_m).got)")
+            || out.contains(
+                "__self_0 = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_m)).got)"
+            ),
         "{out}"
     );
     assert!(
@@ -19034,7 +19053,8 @@ fn test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas() {
     );
     assert!(
         out.contains("[&](const ParseKind_InvalidHexFlag& _v) {")
-            || out.contains("_m.index() == 2"),
+            || out.contains("_m.index() == 2")
+            || out.contains("rusty::detail::deref_if_pointer(_m).index() == 2"),
         "{out}"
     );
     assert!(
@@ -25158,6 +25178,9 @@ fn test_leaf5128_match_struct_binding_mut_scrutinee_uses_mut_visit_param() {
     let index_form = out.contains("auto&& _m = e;")
         && out.contains(".index() == 0)")
         && (out.contains("auto&& len = rusty::detail::deref_if_pointer(std::get<0>(_m).len)")
+            || out.contains(
+                "auto&& len = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).len)"
+            )
             || out.contains("auto&& len = std::get<0>(_m).len"));
     assert!(visit_form || index_form, "{out}");
     assert!(!out.contains("[&](const E_A& _v)"), "{out}");

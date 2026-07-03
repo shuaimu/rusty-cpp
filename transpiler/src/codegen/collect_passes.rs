@@ -8159,6 +8159,34 @@ impl CodeGen {
             hints.insert(name, expected_ty);
         }
 
+        // Phase 1b: `&mut candidate` against a known std trait signature.
+        // io::Read's read_to_end/read_to_string are declared by no crate, so
+        // the declared tables can't type `rdr.read_to_end(&mut buffer)`'s
+        // buffer — without this, loader-style `let mut buffer = Vec::new()`
+        // leaks `rusty::Vec<auto>`.
+        for (idx, arg) in method_call.args.iter().enumerate() {
+            let syn::Expr::Reference(r) = arg else {
+                continue;
+            };
+            let Some(name) = extract_simple_local_ident(&r.expr) else {
+                continue;
+            };
+            if !candidates.contains(&name) || hints.contains_key(&name) {
+                continue;
+            }
+            let Some(expected) = builtin_std_method_arg_expected_type(&method_name, idx)
+            else {
+                continue;
+            };
+            let peeled = match &expected {
+                syn::Type::Reference(tr) => (*tr.elem).clone(),
+                other => other.clone(),
+            };
+            if self.type_is_concrete_hint_candidate(&peeled) {
+                hints.insert(name, peeled);
+            }
+        }
+
         // Phase 2: check if the receiver is a candidate and infer owner type
         // from the method call.  For example, `cell.set(42)` where `cell` is
         // a candidate initialized with `OnceCell::new()` → infer `OnceCell<i32>`.
@@ -8909,11 +8937,12 @@ impl CodeGen {
             syn::Pat::Struct(struct_pat) => {
                 let is_data_enum_variant =
                     self.path_is_known_data_enum_variant_with_ctx(&struct_pat.path, variant_ctx);
+                let scrutinee_base = format!("rusty::detail::deref_if_pointer({})", source_expr);
                 let field_base_expr = if is_data_enum_variant {
                     self.runtime_variant_payload_expr_for_path(
                         &struct_pat.path,
                         variant_ctx,
-                        source_expr,
+                        &scrutinee_base,
                     )
                 } else {
                     source_expr.to_string()
@@ -8923,7 +8952,7 @@ impl CodeGen {
                     conditions.push(self.runtime_variant_match_condition_for_path(
                         &struct_pat.path,
                         variant_ctx,
-                        source_expr,
+                        &scrutinee_base,
                     ));
                 }
                 for field_pat in &struct_pat.fields {
@@ -9340,11 +9369,12 @@ impl CodeGen {
             syn::Pat::Struct(struct_pat) => {
                 let is_data_enum_variant =
                     self.path_is_known_data_enum_variant_with_ctx(&struct_pat.path, variant_ctx);
+                let scrutinee_base = format!("rusty::detail::deref_if_pointer({})", source_expr);
                 let field_base_expr = if is_data_enum_variant {
                     self.runtime_variant_payload_expr_for_path(
                         &struct_pat.path,
                         variant_ctx,
-                        source_expr,
+                        &scrutinee_base,
                     )
                 } else {
                     source_expr.to_string()
@@ -9354,7 +9384,7 @@ impl CodeGen {
                     conditions.push(self.runtime_variant_match_condition_for_path(
                         &struct_pat.path,
                         variant_ctx,
-                        source_expr,
+                        &scrutinee_base,
                     ));
                 }
                 for field_pat in &struct_pat.fields {
@@ -11257,5 +11287,16 @@ impl CodeGen {
             };
             out.push((callable_name.to_string(), arg_tys, return_ty));
         }
+    }
+}
+
+/// Known std trait method signatures whose argument types pin an
+/// otherwise-uninferable local. These traits (io::Read) are declared by
+/// no transpiled crate, so the declared-method tables never learn them.
+fn builtin_std_method_arg_expected_type(method_name: &str, arg_idx: usize) -> Option<syn::Type> {
+    match (method_name, arg_idx) {
+        ("read_to_end", 0) => Some(syn::parse_quote!(&mut Vec<u8>)),
+        ("read_to_string", 0) => Some(syn::parse_quote!(&mut String)),
+        _ => None,
     }
 }
