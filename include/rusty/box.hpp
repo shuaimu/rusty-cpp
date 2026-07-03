@@ -273,6 +273,26 @@ public:
         return *ptr;
     }
 
+    // Rust deref coercion for boxed slices: `Box<[T]>` coerces to `&[T]`
+    // wherever a slice is expected (function args, returns, comparisons).
+    // The C++ model is Box<std::span<T>>, so mirror the coercion as
+    // implicit conversions viewing the owned span. Gated on T being a
+    // std::span so plain Box<T> is unaffected.
+    // @lifetime: (&'a) -> &'a
+    template<typename U = T>
+        requires rusty::detail::is_std_span_v<U>
+    operator std::span<typename rusty::detail::span_element<U>::type>() {
+        return *ptr;
+    }
+
+    // @lifetime: (&'a) -> &'a
+    template<typename U = T>
+        requires rusty::detail::is_std_span_v<U>
+            && (!std::is_const_v<typename rusty::detail::span_element<U>::type>)
+    operator std::span<const typename rusty::detail::span_element<U>::type>() const {
+        return *ptr;
+    }
+
     // Arrow operator - access members
     // @lifetime: (&'a) -> &'a
     T* operator->() {
