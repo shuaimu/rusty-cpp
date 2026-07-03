@@ -13153,6 +13153,29 @@ impl CodeGen {
         if let Some(emitted) = self.try_emit_associated_bytes_constructor_call(call, expected_ty) {
             return emitted;
         }
+        // `Box::new(w)` where the EXPECTED type erases the Box entirely
+        // (`Box<dyn io::Write + 'a>` → rusty::io::DynWrite): construct the
+        // type-erased wrapper directly — a `Box<void*>` can neither own nor
+        // dispatch the writer (serde_yaml Emitter::into_inner's sink).
+        if let syn::Expr::Path(p) = call.func.as_ref()
+            && p.path
+                .segments
+                .iter()
+                .nth_back(1)
+                .is_some_and(|s| s.ident == "Box")
+            && p.path
+                .segments
+                .last()
+                .is_some_and(|s| matches!(s.ident.to_string().as_str(), "new" | "new_"))
+            && call.args.len() == 1
+            && let Some(expected) = expected_ty
+            && self.map_type(expected) == "rusty::io::DynWrite"
+        {
+            return format!(
+                "rusty::io::DynWrite({})",
+                self.emit_expr_maybe_move(&call.args[0])
+            );
+        }
         if let syn::Expr::Path(path_expr) = call.func.as_ref()
             && call.args.len() == 1
             && path_expr
@@ -14360,6 +14383,25 @@ impl CodeGen {
         let mut func = self.emit_call_func_with_owner_template_recovery(call, expected_ty);
         func = self.rewrite_seed_ctor_path_string(&func);
         func = self.maybe_defer_static_owner_lookup_for_path_call(call, func);
+        // Boxing INTO `void*` can never own or dispatch the value — the
+        // dyn-erased hint (`Box<dyn io::Write>` → element void*) leaked into
+        // the owner recovery. Fall back to the argument's own type; the
+        // resulting Box converts to the erased target (rusty::io::DynWrite's
+        // universal ctor) at the use site.
+        if func.contains("Box<void*>")
+            && call.args.len() == 1
+            && matches!(
+                call.func.as_ref(),
+                syn::Expr::Path(p) if p.path.segments.last()
+                    .is_some_and(|s| matches!(s.ident.to_string().as_str(), "new" | "new_"))
+            )
+        {
+            let arg_cpp = self.emit_expr_to_string(&call.args[0]);
+            func = format!(
+                "rusty::Box<std::remove_cvref_t<decltype(({}))>>::new_",
+                arg_cpp
+            );
+        }
         if matches!(func.as_str(), "new" | "new_")
             && let syn::Expr::Path(path_expr) = call.func.as_ref()
             && path_expr.path.segments.len() >= 2
