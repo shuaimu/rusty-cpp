@@ -766,6 +766,24 @@ public:
         return Option<U>(None);
     }
 
+    // Rust Option::map_or_else on a reference payload: eagerly picks the
+    // mapped value or the default-fn result.
+    template<typename D, typename F>
+    auto map_or_else(D&& default_fn, F&& f) -> decltype(f(std::declval<T&>())) {
+        if (ptr) {
+            return f(*ptr);
+        }
+        return default_fn();
+    }
+
+    template<typename D, typename F>
+    auto map_or_else(D&& default_fn, F&& f) const -> decltype(f(std::declval<const T&>())) {
+        if (ptr) {
+            return f(*ptr);
+        }
+        return default_fn();
+    }
+
     // Map function over const reference
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
@@ -1015,6 +1033,15 @@ public:
             return Option<U>(f(*ptr));
         }
         return Option<U>(None);
+    }
+
+    // Rust Option::map_or_else on a const-reference payload.
+    template<typename D, typename F>
+    auto map_or_else(D&& default_fn, F&& f) const -> decltype(f(std::declval<const T&>())) {
+        if (ptr) {
+            return f(*ptr);
+        }
+        return default_fn();
     }
 
     // Rust parity: Option<&T>::copied() -> Option<T>

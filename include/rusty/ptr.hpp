@@ -87,6 +87,18 @@ public:
         return NonNull<T>(ptr);
     }
 
+    // Deref access. Rust's NonNull needs unsafe as_ref()/as_mut(), but the
+    // transpiler's universal pointer-unwrapping (`deref_if_pointer_like`,
+    // `deref_call`) dispatches through `operator*`/`.get()` like Box/Rc —
+    // without these, field access through a NonNull-typed place
+    // (`(*owned.ptr).sys`) can't lower.
+    // @unsafe
+    constexpr T& operator*() const noexcept { return *ptr_; }
+    // @unsafe
+    constexpr T* operator->() const noexcept { return ptr_; }
+    // @unsafe
+    constexpr T* get() const noexcept { return ptr_; }
+
     // Rust's `NonNull::from(&mut T)` / `NonNull::from(&T)` converts a
     // borrow into a non-null raw-pointer wrapper. In transpiled C++ the
     // `&mut T` argument arrives as a `T*` (e.g. the return of

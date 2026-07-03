@@ -12191,6 +12191,26 @@ impl CodeGen {
             if let Some(lambda) = self.try_emit_tuple_struct_constructor_callable(&path_expr.path) {
                 return lambda;
             }
+            // `ptr::null` / `ptr::null_mut` passed as a callable value
+            // (Option::map_or_else's default fn): the C++ name refers to a
+            // template + non-template overload set, which cannot deduce a
+            // `D&&` parameter. Wrap in a lambda calling the non-template
+            // (nullptr_t) overload — the result converts to any pointer.
+            if path_expr.qself.is_none() && path_expr.path.segments.len() >= 2 {
+                let joined = path_expr
+                    .path
+                    .segments
+                    .iter()
+                    .map(|seg| seg.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                let tail = joined
+                    .trim_start_matches("core::")
+                    .trim_start_matches("std::");
+                if matches!(tail, "ptr::null" | "ptr::null_mut") {
+                    return "[]() { return nullptr; }".to_string();
+                }
+            }
             if path_expr.path.segments.len() == 1 {
                 if let Some(lambda) = self.emit_callable_path_item_expr(arg) {
                     return lambda;
