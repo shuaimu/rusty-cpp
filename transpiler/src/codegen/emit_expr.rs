@@ -2530,6 +2530,12 @@ impl CodeGen {
                 Some(format!("std::remove_cvref_t<decltype(({}))>", body_expr))
             });
         }
+        // Deduction from a single arm locks a bare-None tuple slot onto
+        // None_t; the cross-arm tuple annotation types it properly.
+        let value_cpp = value_cpp.or_else(|| {
+            self.infer_runtime_match_tuple_annotation(match_expr)
+                .map(|annotation| annotation.trim_start_matches(" -> ").to_string())
+        });
         let value_cpp = value_cpp?;
         let storage_cpp = if value_cpp.contains('&') {
             format!("std::remove_cvref_t<{}>", value_cpp)

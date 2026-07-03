@@ -21499,6 +21499,9 @@ impl CodeGen {
             if arm.guard.is_some() {
                 return false;
             }
+            if self.or_arm_binds_whole_borrowed_scrutinee(&arm.pat, &match_expr.expr) {
+                return false;
+            }
             if matches!(&arm.pat, syn::Pat::Wild(_)) {
                 plans.push((None, Vec::new(), HashMap::new()));
                 continue;
@@ -23667,7 +23670,13 @@ impl CodeGen {
         // (the recorder early-returns on empty params), so the oracle is:
         // declared item AND absent from the type-param map.
         let declared_and_param_free = |name: &str| {
-            self.declared_item_names.contains(name)
+            // Cross-crate: a dependency's declared types land in
+            // local_type_module_path (all) and declared_type_params
+            // (arity > 0 only) via the manifest — so dep-declared,
+            // absent-from-params means a param-free enum (serde_core's
+            // Content matched from serde).
+            (self.declared_item_names.contains(name)
+                || self.local_type_module_path.contains_key(name))
                 && !self.declared_type_params.contains_key(name)
         };
         if let Some(ctx) = variant_ctx {
@@ -23692,6 +23701,26 @@ impl CodeGen {
             .map(|seg| seg.ident.to_string())
             .unwrap_or_default();
         declared_and_param_free(&owner)
+    }
+
+    /// `s @ Content::String(_)`-style or-cases bind the WHOLE scrutinee;
+    /// on a BORROWED place the binding is a reference the downstream
+    /// tuple slots must preserve — a shape the or-ternary lowering
+    /// doesn't model. Owned scrutinees move the binding instead (fine).
+    fn or_arm_binds_whole_borrowed_scrutinee(
+        &self,
+        pat: &syn::Pat,
+        scrutinee: &syn::Expr,
+    ) -> bool {
+        let syn::Pat::Or(or_pat) = self.peel_pat_type_ref_paren(pat) else {
+            return false;
+        };
+        or_pat.cases.iter().any(|case| {
+            matches!(
+                self.peel_pat_type_ref_paren(case),
+                syn::Pat::Ident(pi) if pi.subpat.is_some()
+            )
+        }) && self.runtime_match_scrutinee_borrows_payload(scrutinee)
     }
 
     fn runtime_match_scrutinee_borrows_payload(&self, expr: &syn::Expr) -> bool {
@@ -23727,7 +23756,12 @@ impl CodeGen {
                 && path.path.segments.len() == 1
                 && path.path.segments[0].ident == "self"
             {
-                return true;
+                // A by-VALUE receiver owns its fields — `match self.content`
+                // in `fn deserialize_enum(self, …)` moves the payload out
+                // (serde's ContentDeserializer; copying non-copyable
+                // Content is the alternative). Only borrowed receivers pin
+                // the payload.
+                return self.current_self_receiver_is_reference();
             }
             if self.is_expr_reference_like(base) {
                 return true;
@@ -27309,6 +27343,27 @@ impl CodeGen {
                 if pi.ident != "_" {
                     env.insert(pi.ident.to_string(), ty.clone());
                 }
+                // `s @ Content::String(_)`: the subpattern's bindings see
+                // the same scrutinee type.
+                if let Some((_, subpat)) = &pi.subpat {
+                    self.bind_pattern_types_into_env(subpat, ty, env);
+                }
+            }
+            syn::Pat::Or(or_pat) => {
+                // Rust requires or-case bindings to agree in name and
+                // type — binding every case is idempotent.
+                for case in &or_pat.cases {
+                    self.bind_pattern_types_into_env(case, ty, env);
+                }
+            }
+            syn::Pat::Reference(r) => {
+                self.bind_pattern_types_into_env(&r.pat, ty, env);
+            }
+            syn::Pat::Paren(paren) => {
+                self.bind_pattern_types_into_env(&paren.pat, ty, env);
+            }
+            syn::Pat::Type(pt) => {
+                self.bind_pattern_types_into_env(&pt.pat, ty, env);
             }
             syn::Pat::Tuple(tuple_pat) => {
                 let tuple_ty = self.peel_reference_paren_group_type(&peeled_ty);

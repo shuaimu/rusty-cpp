@@ -389,13 +389,35 @@ impl CodeGen {
     /// an expression the simple inferencer understands. Bare `None`
     /// slots contribute nothing — they are exactly what the annotation
     /// exists to type.
-    fn infer_runtime_match_tuple_annotation(
+    pub(super) fn infer_runtime_match_tuple_annotation(
         &self,
         match_expr: &syn::ExprMatch,
     ) -> Option<String> {
         let scrutinee_ty = self
             .infer_simple_expr_type(&match_expr.expr)
-            .or_else(|| self.infer_local_binding_type_from_initializer(&match_expr.expr))?;
+            .or_else(|| self.infer_local_binding_type_from_initializer(&match_expr.expr))
+            .or_else(|| {
+                // `match *self.content` — infer the deref base and peel one
+                // pointer-like (Box/Rc/Arc) or reference layer.
+                let syn::Expr::Unary(unary) = self.peel_paren_group_expr(&match_expr.expr)
+                else {
+                    return None;
+                };
+                if !matches!(unary.op, syn::UnOp::Deref(_)) {
+                    return None;
+                }
+                let base = self.infer_simple_expr_type(&unary.expr)?;
+                let peeled = self.peel_reference_paren_group_type(&base).clone();
+                if let syn::Type::Path(tp) = &peeled
+                    && let Some(seg) = tp.path.segments.last()
+                    && matches!(seg.ident.to_string().as_str(), "Box" | "Rc" | "Arc")
+                    && let syn::PathArguments::AngleBracketed(ab) = &seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner)) = ab.args.first()
+                {
+                    return Some(inner.clone());
+                }
+                Some(peeled)
+            })?;
         let mut arity: Option<usize> = None;
         let mut arm_data: Vec<(HashMap<String, syn::Type>, syn::ExprTuple)> = Vec::new();
         for arm in &match_expr.arms {
@@ -415,6 +437,12 @@ impl CodeGen {
             }
             let mut env = HashMap::new();
             self.bind_pattern_types_into_env(&arm.pat, &scrutinee_ty, &mut env);
+            // An arm body that RE-BINDS a pattern name (`let (variant, value)
+            // = match iter.next() { … }` shadowing `Map(value)`) makes the
+            // pattern env wrong for that name — drop shadowed names.
+            let mut shadowed = HashSet::new();
+            self.collect_arm_body_let_binding_names(&arm.body, &mut shadowed);
+            env.retain(|name, _| !shadowed.contains(name));
             arm_data.push((env, tuple.clone()));
         }
         let arity = arity?;
@@ -466,6 +494,26 @@ impl CodeGen {
         }
         let slots: Option<Vec<String>> = slot_cpp.into_iter().collect();
         Some(format!(" -> std::tuple<{}>", slots?.join(", ")))
+    }
+
+    /// Names bound by `let` statements anywhere inside an arm body —
+    /// shadow detection for the tuple-annotation env.
+    fn collect_arm_body_let_binding_names(
+        &self,
+        body: &syn::Expr,
+        out: &mut HashSet<String>,
+    ) {
+        struct Scan<'a, 'b> {
+            cg: &'a CodeGen,
+            out: &'b mut HashSet<String>,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Scan<'_, '_> {
+            fn visit_local(&mut self, local: &'ast syn::Local) {
+                self.cg.collect_pattern_binding_names(&local.pat, self.out);
+                syn::visit::visit_local(self, local);
+            }
+        }
+        syn::visit::Visit::visit_expr(&mut Scan { cg: self, out }, body);
     }
 
     /// Any arm pattern (including or-pattern cases) naming an
@@ -612,28 +660,6 @@ impl CodeGen {
         // bindings, so arm-body uses may std::move them. Only a borrowing
         // scrutinee keeps the bindings references.
         let match_bindings_are_refs = scrutinee_borrows_payload;
-        // A tuple arm carrying a bare `None` slot needs the lambda RETURN
-        // ANNOTATED to type that slot (`(s, None)` alongside
-        // `(variant, Some(value))` — un-annotated, the deduction locks
-        // onto None_t from whichever arm lowers first). Fall back to the
-        // expression lowerings that carry expected types.
-        if runtime_match_return_annotation.is_empty()
-            && match_expr.arms.iter().any(|arm| {
-                let value = self
-                    .extract_match_arm_value_expr(&arm.body)
-                    .unwrap_or(&arm.body);
-                if let syn::Expr::Tuple(tuple) = self.peel_paren_group_expr(value) {
-                    tuple
-                        .elems
-                        .iter()
-                        .any(|elem| expr_is_option_none_constructor(elem))
-                } else {
-                    false
-                }
-            })
-        {
-            return None;
-        }
         let arm_expected_ty = runtime_match_expected;
         let scrutinee = self.emit_expr_to_string(&match_expr.expr);
         let mut out = format!(
@@ -1110,6 +1136,9 @@ impl CodeGen {
                     out.push_str("} ");
                 }
                 syn::Pat::Or(_) => {
+                    if self.or_arm_binds_whole_borrowed_scrutinee(&arm.pat, &match_expr.expr) {
+                        return None;
+                    }
                     // The collector handles or-cases WITH bindings too
                     // (identical binding sets select their payload through a
                     // condition-guarded ternary chain — error.rs mark()).
