@@ -639,14 +639,25 @@ impl CodeGen {
                     } else {
                         let mut binding_stmts = Vec::new();
                         let mut binding_map = HashMap::new();
-                        let cond = self
+                        let wrapper_value_bindings =
+                            self.arm_pointer_wrapper_value_bindings(&arm.pat, &arm.body);
+                        if !wrapper_value_bindings.is_empty() {
+                            self.pointer_unwrap_suppressed_bindings
+                                .borrow_mut()
+                                .extend(wrapper_value_bindings.iter().cloned());
+                        }
+                        let collected = self
                             .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                                 &arm.pat,
                                 "_m",
                                 &mut binding_stmts,
                                 &mut binding_map,
                                 variant_ctx,
-                            )?;
+                            );
+                        if !wrapper_value_bindings.is_empty() {
+                            self.pointer_unwrap_suppressed_bindings.borrow_mut().clear();
+                        }
+                        let cond = collected?;
                         saw_runtime_pattern = true;
                         let cond_expr = cond.unwrap_or_else(|| "true".to_string());
                         let body = {
@@ -696,14 +707,25 @@ impl CodeGen {
                 syn::Pat::Path(_) => {
                     let mut binding_stmts = Vec::new();
                     let mut binding_map = HashMap::new();
-                    let cond = self
+                    let wrapper_value_bindings =
+                        self.arm_pointer_wrapper_value_bindings(&arm.pat, &arm.body);
+                    if !wrapper_value_bindings.is_empty() {
+                        self.pointer_unwrap_suppressed_bindings
+                            .borrow_mut()
+                            .extend(wrapper_value_bindings.iter().cloned());
+                    }
+                    let collected = self
                         .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                             &arm.pat,
                             "_m",
                             &mut binding_stmts,
                             &mut binding_map,
                             variant_ctx,
-                        )?;
+                        );
+                    if !wrapper_value_bindings.is_empty() {
+                        self.pointer_unwrap_suppressed_bindings.borrow_mut().clear();
+                    }
+                    let cond = collected?;
                     saw_runtime_pattern = true;
                     let cond_expr = cond.unwrap_or_else(|| "true".to_string());
                     let body = {
@@ -909,14 +931,25 @@ impl CodeGen {
                 | syn::Pat::Paren(_) => {
                     let mut binding_stmts = Vec::new();
                     let mut binding_map = HashMap::new();
-                    let cond = self
+                    let wrapper_value_bindings =
+                        self.arm_pointer_wrapper_value_bindings(&arm.pat, &arm.body);
+                    if !wrapper_value_bindings.is_empty() {
+                        self.pointer_unwrap_suppressed_bindings
+                            .borrow_mut()
+                            .extend(wrapper_value_bindings.iter().cloned());
+                    }
+                    let collected = self
                         .collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                             &arm.pat,
                             "_m",
                             &mut binding_stmts,
                             &mut binding_map,
                             variant_ctx,
-                        )?;
+                        );
+                    if !wrapper_value_bindings.is_empty() {
+                        self.pointer_unwrap_suppressed_bindings.borrow_mut().clear();
+                    }
+                    let cond = collected?;
                     saw_runtime_pattern = true;
                     let cond_expr = cond.unwrap_or_else(|| "true".to_string());
                     let body = {

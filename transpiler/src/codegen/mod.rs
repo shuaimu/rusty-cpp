@@ -21535,13 +21535,24 @@ impl CodeGen {
             }
             let mut binding_stmts = Vec::new();
             let mut binding_map = HashMap::new();
-            let Some(cond) = self.collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
+            let wrapper_value_bindings =
+                self.arm_pointer_wrapper_value_bindings(&arm.pat, &arm.body);
+            if !wrapper_value_bindings.is_empty() {
+                self.pointer_unwrap_suppressed_bindings
+                    .borrow_mut()
+                    .extend(wrapper_value_bindings.iter().cloned());
+            }
+            let collected = self.collect_runtime_match_binding_stmts_and_condition_with_cpp_name_map(
                 &arm.pat,
                 "_m",
                 &mut binding_stmts,
                 &mut binding_map,
                 variant_ctx,
-            ) else {
+            );
+            if !wrapper_value_bindings.is_empty() {
+                self.pointer_unwrap_suppressed_bindings.borrow_mut().clear();
+            }
+            let Some(cond) = collected else {
                 return false;
             };
             plans.push((cond, binding_stmts, binding_map));
@@ -22433,6 +22444,84 @@ impl CodeGen {
         } else {
             field_expr
         }
+    }
+
+    /// By-value pattern bindings whose ARM-BODY uses all want the source
+    /// wrapper (Arc/Box) itself — identity returns, call arguments,
+    /// `.clone()` (Rust's `Arc::clone`) — with no use that forces the
+    /// up-front pointer unwrap (field access, non-clone method call,
+    /// explicit deref). `Progress::Fail(err) => return Err(shared(err))`
+    /// must keep the Arc; unwrapping strands the pointee where the
+    /// wrapper is expected.
+    fn arm_pointer_wrapper_value_bindings(
+        &self,
+        pat: &syn::Pat,
+        body: &syn::Expr,
+    ) -> HashSet<String> {
+        let mut bound = HashSet::new();
+        self.collect_pattern_value_binding_names(pat, &mut bound);
+        if bound.is_empty() {
+            return bound;
+        }
+        fn ident_of(x: &syn::Expr) -> Option<String> {
+            match x {
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                    Some(p.path.segments[0].ident.to_string())
+                }
+                _ => None,
+            }
+        }
+        struct Scan<'a> {
+            names: &'a HashSet<String>,
+            forced: HashSet<String>,
+            seen: HashSet<String>,
+        }
+        impl<'ast> syn::visit::Visit<'ast> for Scan<'_> {
+            fn visit_expr(&mut self, e: &'ast syn::Expr) {
+                match e {
+                    syn::Expr::Field(f) => {
+                        if let Some(n) = ident_of(&f.base)
+                            && self.names.contains(&n)
+                        {
+                            self.forced.insert(n);
+                        }
+                    }
+                    syn::Expr::MethodCall(mc) => {
+                        if let Some(n) = ident_of(&mc.receiver)
+                            && self.names.contains(&n)
+                            && mc.method != "clone"
+                        {
+                            self.forced.insert(n);
+                        }
+                    }
+                    syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
+                        if let Some(n) = ident_of(&u.expr)
+                            && self.names.contains(&n)
+                        {
+                            self.forced.insert(n);
+                        }
+                    }
+                    syn::Expr::Path(_) => {
+                        if let Some(n) = ident_of(e)
+                            && self.names.contains(&n)
+                        {
+                            self.seen.insert(n);
+                        }
+                    }
+                    _ => {}
+                }
+                syn::visit::visit_expr(self, e);
+            }
+        }
+        let mut scan = Scan {
+            names: &bound,
+            forced: HashSet::new(),
+            seen: HashSet::new(),
+        };
+        syn::visit::visit_expr(&mut scan, body);
+        let Scan { forced, mut seen, .. } = scan;
+        seen.retain(|n| !forced.contains(n));
+        seen
     }
 
     fn peel_pat_type_ref_paren<'a>(&self, mut pat: &'a syn::Pat) -> &'a syn::Pat {
