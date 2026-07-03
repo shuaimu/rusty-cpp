@@ -4287,8 +4287,8 @@ fn test_leaf2114_str_bytes_all_lowers_to_runtime_iter_helper() {
         out
     );
     assert!(
-        out.contains("rusty::str_runtime::bytes("),
-        "str bytes() receiver should lower via rusty::str_runtime::bytes(...), got:\n{}",
+        out.contains("rusty::as_bytes(rusty::to_string_view("),
+        "str bytes() receiver should lower via rusty::as_bytes(to_string_view(...)), got:\n{}",
         out
     );
     assert!(
@@ -4355,7 +4355,7 @@ fn test_str_split_loop_item_bytes_stays_string_bytes_not_io_bytes() {
         "#,
     );
     assert!(
-        out.contains("rusty::str_runtime::bytes(segment)"),
+        out.contains("rusty::as_bytes(rusty::to_string_view(segment))"),
         "split loop item .bytes() should lower as string bytes, got:\n{}",
         out
     );

@@ -5998,9 +5998,24 @@ impl CodeGen {
                     .infer_simple_expr_type(&mc.receiver)
                     .as_ref()
                     .is_some_and(|ty| self.type_is_string_view_like(ty))
-                || self.expected_type_is_string_view(expected_ty);
+                || self.expected_type_is_string_view(expected_ty)
+                // `scalar[1..].bytes()` — an index/slice whose BASE is
+                // string-like yields a string view.
+                || matches!(
+                    self.peel_paren_group_expr(&mc.receiver),
+                    syn::Expr::Index(idx)
+                        if self
+                            .infer_simple_expr_type(&idx.expr)
+                            .as_ref()
+                            .is_some_and(|ty| self.type_is_string_view_like(ty))
+                );
             if receiver_is_string_like {
-                return format!("rusty::str_runtime::bytes({})", receiver);
+                // Rust str::bytes() iterates u8 — a byte span over the view
+                // is range-compatible with every iterator consumer.
+                return format!(
+                    "rusty::as_bytes(rusty::to_string_view({}))",
+                    receiver
+                );
             }
             return format!("rusty::io::bytes({})", receiver);
         }
@@ -9484,6 +9499,25 @@ impl CodeGen {
             return None;
         }
         let escaped_method = escape_cpp_keyword(&method);
+        // A receiver-less associated fn (`Location::from_mark(mark)`) is a
+        // STATIC taking the mapped value as its argument — a member call on
+        // the value would look the method up on the wrong type.
+        if self
+            .lookup_owner_method_has_receiver(&owner, &method)
+            .is_some_and(|has_receiver| !has_receiver)
+            // A GENERIC owner can't be spelled bare (`Slice::method` needs
+            // template args) — only non-generic statics take this form.
+            && self
+                .declared_type_params
+                .get(&owner)
+                .is_none_or(|params| params.is_empty())
+        {
+            let owner_cpp = self.emit_path_to_string(&syn::parse_str::<syn::Path>(&owner).ok()?);
+            return Some(format!(
+                "[](auto&& _v) -> decltype(auto) {{ return {}::{}(std::forward<decltype(_v)>(_v)); }}",
+                owner_cpp, escaped_method
+            ));
+        }
         Some(format!(
             "[](auto&& _v) -> decltype(auto) {{ return std::forward<decltype(_v)>(_v).{}(); }}",
             escaped_method
