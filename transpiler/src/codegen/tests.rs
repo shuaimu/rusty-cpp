@@ -23443,7 +23443,7 @@ fn test_leaf4154333333332761_function_item_binding_lowers_to_callable_wrapper() 
     "#,
     );
     assert!(
-        out.contains("const auto s = [&](auto&&... _args) -> decltype(auto)"),
+        out.contains("const auto s = [](auto&&... _args) -> decltype(auto)"),
         "expected callable wrapper for function-item binding, output:\n{}",
         out
     );
@@ -30172,7 +30172,7 @@ fn test_leaf5116_imported_drop_path_callable_arg_avoids_move_of_function_item() 
     );
 
     assert!(
-        out.contains("this->for_each([&](auto&&... _args) -> decltype(auto)"),
+        out.contains("this->for_each([](auto&&... _args) -> decltype(auto)"),
         "function-item callable args should lower to forwarding callable wrapper, got:\n{}",
         out
     );

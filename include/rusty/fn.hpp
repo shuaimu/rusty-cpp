@@ -191,6 +191,15 @@ public:
     /// @safe - Construct from SafeFn (safe functions can be stored as unsafe)
     constexpr UnsafeFn(SafeFn<Ret(Args...)> safe_fn) noexcept : ptr_(safe_fn.get()) {}
 
+    /// @safe - Construct from anything convertible to the function pointer
+    /// (a captureless — possibly generic — lambda wrapping a fn item; the
+    /// implicit route would need two user conversions, which C++ forbids).
+    template<typename F>
+        requires (!std::is_same_v<std::remove_cvref_t<F>, UnsafeFn>
+                  && !std::is_same_v<std::remove_cvref_t<F>, SafeFn<Ret(Args...)>>
+                  && std::is_convertible_v<F&&, pointer>)
+    constexpr UnsafeFn(F&& fn) noexcept : ptr_(static_cast<pointer>(std::forward<F>(fn))) {}
+
     /// @safe - Copy constructor
     constexpr UnsafeFn(const UnsafeFn&) noexcept = default;
 

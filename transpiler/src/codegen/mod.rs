@@ -34073,8 +34073,27 @@ impl CodeGen {
             return None;
         }
         let target = self.emit_expr_path_to_string(path);
+        // A NON-generic local fn item is a unique C++ free function: the
+        // bare name decays to a function pointer (the shape a C callback
+        // parameter like yaml_emitter_set_output's UnsafeFn needs — a
+        // lambda would require two user conversions) and is equally
+        // callable. Mapped/runtime paths keep the wrapper (their C++
+        // targets can be overload sets or templates).
+        if path.segments.len() == 1
+            && (self.is_local_function_name_in_scope(&last)
+                || self.module_qualified_functions.contains_key(&last))
+            && self
+                .function_type_param_names
+                .get(&last)
+                .is_none_or(|params| params.is_empty())
+        {
+            return Some(target);
+        }
+        // Captureless on purpose: the body references only a free function,
+        // and a captureless lambda converts to a C function pointer where
+        // the target instantiates.
         Some(format!(
-            "[&](auto&&... _args) -> decltype(auto) {{ return {}(std::forward<decltype(_args)>(_args)...); }}",
+            "[](auto&&... _args) -> decltype(auto) {{ return {}(std::forward<decltype(_args)>(_args)...); }}",
             target
         ))
     }
