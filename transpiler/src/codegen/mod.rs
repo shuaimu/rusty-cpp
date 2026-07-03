@@ -22518,7 +22518,10 @@ impl CodeGen {
             forced: HashSet::new(),
             seen: HashSet::new(),
         };
-        syn::visit::visit_expr(&mut scan, body);
+        // Call the TRAIT method so the body node itself is classified —
+        // the free-fn walker only visits children (`err.get()` as the
+        // whole arm body would never hit the MethodCall arm).
+        syn::visit::Visit::visit_expr(&mut scan, body);
         let Scan { forced, mut seen, .. } = scan;
         seen.retain(|n| !forced.contains(n));
         seen
