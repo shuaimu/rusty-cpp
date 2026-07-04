@@ -2122,12 +2122,20 @@ impl CodeGen {
                         self.indent += 1;
                         let variant_name = vname.to_string();
                         let mut named_field_cpp_names: HashMap<String, String> = HashMap::new();
+                        let mut named_reference_fields: HashSet<String> = HashSet::new();
                         for field in &fields.named {
                             let fname = field.ident.as_ref().unwrap();
                             let rust_field_name = fname.to_string();
                             let cpp_field_name = escape_cpp_keyword(&rust_field_name);
                             named_field_cpp_names
                                 .insert(rust_field_name.clone(), cpp_field_name.clone());
+                            // A `&T` variant field is emitted as a C++ reference
+                            // member — record it so struct-literal inits bind the
+                            // lvalue instead of passing a pointer (`&self.path`).
+                            if matches!(self.peel_paren_group_type(&field.ty), syn::Type::Reference(_))
+                            {
+                                named_reference_fields.insert(rust_field_name.clone());
+                            }
                             let field_key = Self::format_by_value_field_name(
                                 Some(variant_name.as_str()),
                                 &rust_field_name,
@@ -2142,6 +2150,10 @@ impl CodeGen {
                         let variant_struct_name = format!("{}_{}", name, vname);
                         std::rc::Rc::make_mut(&mut self.struct_field_cpp_names)
                             .insert(variant_struct_name.clone(), named_field_cpp_names.clone());
+                        if !named_reference_fields.is_empty() {
+                            self.struct_reference_fields
+                                .insert(variant_struct_name.clone(), named_reference_fields.clone());
+                        }
                         if !self.module_stack.is_empty() {
                             std::rc::Rc::make_mut(&mut self.struct_field_cpp_names).insert(
                                 format!(
@@ -2151,6 +2163,16 @@ impl CodeGen {
                                 ),
                                 named_field_cpp_names,
                             );
+                            if !named_reference_fields.is_empty() {
+                                self.struct_reference_fields.insert(
+                                    format!(
+                                        "{}::{}",
+                                        self.module_stack.join("::"),
+                                        variant_struct_name
+                                    ),
+                                    named_reference_fields,
+                                );
+                            }
                         }
                         self.indent -= 1;
                         self.writeln("};");
@@ -7005,10 +7027,33 @@ impl CodeGen {
                         && !self.type_contains_unresolved_placeholder_like(ty)
                         && !self.type_contains_unbound_single_letter_generic(ty)
                 });
-                let val = self.emit_expr_to_string_with_expected_and_move_if_needed(
-                    &f.expr,
-                    field_ty.as_ref(),
-                );
+                // A reference-typed field (Rust `parent: &'a Path`) is emitted
+                // as a C++ reference member (`const Path& parent`). An `&expr`
+                // initializer (`Path::Alias { parent: &self.path }`) would emit
+                // `&this->path` — a pointer, which can't bind to a reference
+                // member ("reference to const Path could not bind to rvalue
+                // path::Path *"). Strip the address-of so the reference binds
+                // to the lvalue directly.
+                // Variant-struct field types aren't in struct_field_types
+                // (keyed by `Enum_Variant`), so also consult
+                // struct_reference_fields — registered for both regular and
+                // variant structs.
+                let field_is_reference = field_ty
+                    .as_ref()
+                    .is_some_and(|ty| matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_)))
+                    || resolved_struct_name
+                        .as_ref()
+                        .is_some_and(|n| self.struct_field_is_reference(n, &rust_member_name));
+                let val = if field_is_reference
+                    && let syn::Expr::Reference(ref_expr) = self.peel_paren_group_expr(&f.expr)
+                {
+                    self.emit_expr_to_string(&ref_expr.expr)
+                } else {
+                    self.emit_expr_to_string_with_expected_and_move_if_needed(
+                        &f.expr,
+                        field_ty.as_ref(),
+                    )
+                };
                 let val = self.rewrite_iterator_wrapper_field_initializer(
                     &f.expr,
                     field_ty.as_ref(),
