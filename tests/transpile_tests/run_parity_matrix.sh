@@ -29,6 +29,12 @@ declare -a MATRIX_CRATES=(
     "serde_core"
     "serde"
     "pollster"
+    # indexmap + hashbrown: serde_yaml's transitive deps, added as standalone
+    # matrix crates so their codegen is exercised in isolation (fast, focused
+    # feedback vs. only surfacing buried in the serde_yaml build). Versions
+    # match what serde_yaml resolves so fixes transfer. KNOWN_FAIL until clear.
+    "hashbrown"
+    "indexmap"
     "serde_yaml"
 )
 
@@ -41,6 +47,8 @@ declare -a MATRIX_CRATES=(
 declare -a KNOWN_FAIL_CRATES=(
     "itertools"
     "serde_yaml"
+    "hashbrown"
+    "indexmap"
 )
 
 is_known_fail() {
@@ -71,6 +79,8 @@ declare -A CRATE_REPO=(
     ["serde"]="https://github.com/serde-rs/serde.git"
     ["pollster"]="https://github.com/zesterer/pollster.git"
     ["serde_yaml"]="https://github.com/dtolnay/serde-yaml.git"
+    ["hashbrown"]="https://github.com/rust-lang/hashbrown.git"
+    ["indexmap"]="https://github.com/indexmap-rs/indexmap.git"
 )
 
 declare -A CRATE_REF=(
@@ -90,6 +100,10 @@ declare -A CRATE_REF=(
     ["serde"]="v1.0.228"
     ["pollster"]="master"
     ["serde_yaml"]="0.9.34"
+    # Match the versions serde_yaml resolves (indexmap 2.14.0 -> hashbrown
+    # 0.17.1 + equivalent 1.0.2) so standalone fixes transfer to serde_yaml.
+    ["hashbrown"]="v0.17.1"
+    ["indexmap"]="2.14.0"
 )
 
 declare -A CRATE_MANIFEST_REL=(
@@ -333,6 +347,17 @@ ensure_crate_checkout() {
     if ! git clone --depth 1 --branch "${ref}" "${repo}" "${crate_dir}"; then
         print_failure_diagnostics "${crate}" "${work_dir}" ""
         return 1
+    fi
+
+    # Per-crate post-clone prep. Kept OUTSIDE the crate dir (the clone above
+    # wipes it) under crate_preps/<crate>.sh, invoked with the crate dir. Used
+    # to trim untranspilable test targets — e.g. indexmap/hashbrown drop their
+    # quickcheck/rand tests, whose getrandom -> libc (raw C FFI) dependency
+    # chain cannot be transpiled.
+    local prep_script="${SCRIPT_DIR}/crate_preps/${crate}.sh"
+    if [[ -f "${prep_script}" ]]; then
+        echo "  Applying ${crate} prep..."
+        bash "${prep_script}" "${crate_dir}"
     fi
 }
 
