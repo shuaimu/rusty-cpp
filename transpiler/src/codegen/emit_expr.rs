@@ -14888,6 +14888,45 @@ impl CodeGen {
                 );
             }
         }
+        // `Sequence::deserialize(de)` where `Sequence` is a concrete local
+        // type/alias (`Sequence = Vec<Value>`) is `<Sequence as
+        // Deserialize>::deserialize` — route to the UFCS free-fn form. A member
+        // call `Sequence::deserialize` fails: `Vec` (and other blanket-impl
+        // types) has no deserialize member. The owner type IS the deserialize
+        // target, so PhantomData<Sequence> drives dispatch.
+        if func_method_tail == "deserialize"
+            && !func_is_deserialize_trait_call
+            && call.args.len() == 1
+            && func_owner_tail
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+            && !func_owner_tail.is_empty()
+            && (self.local_declared_types.contains(&func_owner_tail)
+                || self.is_local_type_name_in_scope(&func_owner_tail)
+                || self.type_alias_targets.contains_key(&func_owner_tail))
+        {
+            if let syn::Expr::Path(func_path) = call.func.as_ref()
+                && let Some(owner_path) = Self::path_without_last_segment(&func_path.path)
+            {
+                let owner_ty = syn::Type::Path(syn::TypePath {
+                    qself: None,
+                    path: owner_path,
+                });
+                let owner_cpp = self.map_type(&owner_ty);
+                if !owner_cpp.is_empty()
+                    && owner_cpp != "auto"
+                    && !owner_cpp.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&owner_cpp)
+                {
+                    let deserializer = self.emit_deserializer_call_arg(&call.args[0]);
+                    return format!(
+                        "::de::rusty_ext::deserialize(rusty::PhantomData<{}>{{}}, {})",
+                        owner_cpp, deserializer
+                    );
+                }
+            }
+        }
         if func_method_tail == "deserialize"
             && !func_is_deserialize_trait_call
             && call.args.len() == 1
