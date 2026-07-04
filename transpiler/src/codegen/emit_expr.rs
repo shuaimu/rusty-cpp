@@ -6833,6 +6833,31 @@ impl CodeGen {
         }
 
         let method_name = mc.method.to_string();
+        // Record a `.map(closure)` receiver's Ok/Some type so the closure's
+        // destructured param types its bindings (see
+        // pending_map_closure_input_type). Only for a closure arg — path
+        // callables (Some/From) take a different route and would otherwise
+        // leave a stale hint.
+        if method_name == "map"
+            && mc.args.len() == 1
+            && matches!(self.peel_paren_group_expr(&mc.args[0]), syn::Expr::Closure(_))
+        {
+            let input_ty = self.infer_simple_expr_type(&mc.receiver).and_then(|recv_ty| {
+                // The receiver is Result/Option, possibly via a crate alias
+                // (`Result<T>` / `R<T>`); the closure input is the Ok/Some type
+                // = the first generic arg. expected_result/option_type_arg miss
+                // aliases, so fall back to the first type arg.
+                self.expected_result_type_arg(Some(&recv_ty), 0)
+                    .or_else(|| self.expected_option_type_arg(Some(&recv_ty)))
+                    .cloned()
+                    .or_else(|| Self::first_generic_type_arg(&recv_ty).cloned())
+                    .filter(|ty| {
+                        !self.type_contains_infer(ty)
+                            && !self.type_contains_unresolved_placeholder_like(ty)
+                    })
+            });
+            *self.pending_map_closure_input_type.borrow_mut() = input_ty;
+        }
         if matches!(method_name.as_str(), "eq" | "ne")
             && mc.args.len() == 1
             && (self.expr_lowers_to_slice_or_span_view(&mc.receiver)
@@ -9396,6 +9421,22 @@ impl CodeGen {
         ))
     }
 
+    /// The first `<T, ...>` type argument of a path type's tail segment
+    /// (`Result<T, E>` / `Option<T>` / a `Result<T>`-style alias → `T`).
+    fn first_generic_type_arg(ty: &syn::Type) -> Option<&syn::Type> {
+        let syn::Type::Path(tp) = ty else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        args.args.iter().find_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        })
+    }
+
     pub(super) fn try_emit_map_callable_arg_with_expected(
         &self,
         arg: &syn::Expr,
@@ -10736,6 +10777,42 @@ impl CodeGen {
                         return format!("{}{{{}}}", expected_tuple_cpp, elems.join(", "));
                     }
                     return format!("std::make_tuple({})", elems.join(", "));
+                }
+                // `std::make_tuple` DECAYS references to values, copying the
+                // referent — fatal for a tuple element that is a reference to a
+                // non-copyable type (`(event, mark)` where `event: &Event`, and
+                // Event has a deleted copy ctor). When every element type is
+                // inferable and at least one is such a reference, build an
+                // explicit `std::tuple<T0, T1>{...}` that preserves the
+                // reference element.
+                let elem_types: Option<Vec<syn::Type>> = tup
+                    .elems
+                    .iter()
+                    .map(|e| self.infer_simple_expr_type(e))
+                    .collect();
+                if let Some(elem_types) = elem_types.filter(|tys| {
+                    tys.iter().any(|ty| self.type_is_non_copyable_referent(ty))
+                }) {
+                    let elem_cpps: Vec<String> =
+                        elem_types.iter().map(|t| self.map_type(t)).collect();
+                    if elem_cpps.iter().all(|c| {
+                        !c.is_empty()
+                            && c != "auto"
+                            && !c.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(c)
+                    }) {
+                        let elems: Vec<String> = tup
+                            .elems
+                            .iter()
+                            .zip(elem_types.iter())
+                            .map(|(e, ty)| self.emit_tuple_element_with_expected_type(e, Some(ty)))
+                            .collect();
+                        return format!(
+                            "std::tuple<{}>{{{}}}",
+                            elem_cpps.join(", "),
+                            elems.join(", ")
+                        );
+                    }
                 }
                 let elems: Vec<String> = tup
                     .elems
@@ -19868,6 +19945,10 @@ impl CodeGen {
         let params_str = params.join(", ");
 
         let mut inner = self.new_inner_for_block();
+        // The `.map(closure)` input type was recorded on `self`; hand it to the
+        // sub-codegen so it types the closure's destructured params.
+        *inner.pending_map_closure_input_type.borrow_mut() =
+            self.pending_map_closure_input_type.borrow_mut().take();
         inner.bind_closure_params_for_emission(closure);
         if !untyped_param_scope.is_empty() {
             inner.push_untyped_closure_param_scope(untyped_param_scope);

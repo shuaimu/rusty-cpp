@@ -133,6 +133,27 @@ impl CodeGen {
     /// `type Guarded<T> = Mutex<T>`) won't be caught, but those would also
     /// fail to copy at the C++ level so the user would notice. Cheaper than
     /// `is_copy_constructible_v`-style probing at codegen time.
+    /// A reference type `&T` whose referent `T` is non-copyable — a known
+    /// move-only wrapper, or a user data enum (emitted as a `std::variant`
+    /// that is non-copyable when a payload is move-only, e.g. serde_yaml's
+    /// `Event`). Used to decide whether a tuple element must preserve its
+    /// reference instead of decaying to a (deleted) copy via `make_tuple`.
+    pub(super) fn type_is_non_copyable_referent(&self, ty: &syn::Type) -> bool {
+        let syn::Type::Reference(r) = ty else {
+            return false;
+        };
+        let referent = self.peel_reference_paren_group_type(&r.elem);
+        if self.type_contains_known_non_copyable(referent) {
+            return true;
+        }
+        if let syn::Type::Path(tp) = referent
+            && let Some(last) = tp.path.segments.last()
+        {
+            return self.data_enum_name_matches(&last.ident.to_string());
+        }
+        false
+    }
+
     pub(super) fn type_name_is_known_non_copyable(name: &str) -> bool {
         matches!(
             name,

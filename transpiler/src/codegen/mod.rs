@@ -1150,6 +1150,12 @@ pub struct CodeGen {
     /// can't bind to the `size_t&` field. Maps the local name → the field's
     /// integer element type.
     pub(crate) int_literal_usage_type_hints: Vec<HashMap<String, syn::Type>>,
+    /// The input type of the closure currently being emitted as a `.map()` /
+    /// `.and_then()` argument (the receiver's `Result`/`Option` Ok/Some type).
+    /// Lets a destructured closure param (`|(event, mark)|` on
+    /// `Result<(&Event, Mark)>`) type its bindings (`event: &Event`), so tuple
+    /// returns preserve references instead of decaying via `make_tuple`.
+    pub(crate) pending_map_closure_input_type: std::cell::RefCell<Option<syn::Type>>,
     /// Scoped raw-C++ element overrides for empty collection locals whose element
     /// type is NOT nameable as a `syn::Type` — because it is the item type of an
     /// `auto`-typed iterator chain (e.g. `let v = Vec::new(); v.extend(it.take(n))`
@@ -1844,6 +1850,7 @@ impl CodeGen {
             repeat_elem_type_hints: HashMap::new(),
             local_placeholder_type_hints: Vec::new(),
             int_literal_usage_type_hints: Vec::new(),
+            pending_map_closure_input_type: std::cell::RefCell::new(None),
             collection_decltype_element_overrides: Vec::new(),
             assert_equal_sibling_item: std::cell::RefCell::new(None),
             as_ptr_expected_element: std::cell::RefCell::new(None),
@@ -38545,8 +38552,19 @@ impl CodeGen {
 
 
     fn bind_closure_params_for_emission(&mut self, closure: &syn::ExprClosure) {
-        for input in &closure.inputs {
-            self.bind_closure_param_for_emission(input);
+        // A `.map()`/`.and_then()` closure gets its single param's type from the
+        // receiver's Ok/Some type (recorded on entry). Distribute it so a
+        // destructured tuple param types its bindings (`|(event, mark)|` on
+        // `Result<(&Event, Mark)>` → `event: &Event`).
+        let map_input_ty = if closure.inputs.len() == 1 {
+            self.pending_map_closure_input_type.borrow_mut().take()
+        } else {
+            *self.pending_map_closure_input_type.borrow_mut() = None;
+            None
+        };
+        for (idx, input) in closure.inputs.iter().enumerate() {
+            let ty = if idx == 0 { map_input_ty.as_ref() } else { None };
+            self.bind_closure_param_for_emission_with_type(input, ty);
         }
     }
 
@@ -38555,9 +38573,28 @@ impl CodeGen {
 
 
     fn bind_closure_param_for_emission(&mut self, pat: &syn::Pat) {
+        self.bind_closure_param_for_emission_with_type(pat, None);
+    }
+
+    fn bind_closure_param_for_emission_with_type(
+        &mut self,
+        pat: &syn::Pat,
+        ty: Option<&syn::Type>,
+    ) {
+        // A tuple pattern with a matching tuple type distributes element types.
+        if let syn::Pat::Tuple(tuple_pat) = pat
+            && let Some(ty) = ty
+            && let syn::Type::Tuple(tuple_ty) = self.peel_reference_paren_group_type(ty)
+            && tuple_ty.elems.len() == tuple_pat.elems.len()
+        {
+            for (elem_pat, elem_ty) in tuple_pat.elems.iter().zip(tuple_ty.elems.iter()) {
+                self.bind_closure_param_for_emission_with_type(elem_pat, Some(elem_ty));
+            }
+            return;
+        }
         match pat {
             syn::Pat::Ident(pi) => {
-                self.bind_closure_param_name(&pi.ident.to_string(), None);
+                self.bind_closure_param_name(&pi.ident.to_string(), ty.cloned());
             }
             syn::Pat::Type(pt) => {
                 if let syn::Pat::Ident(pi) = pt.pat.as_ref() {
