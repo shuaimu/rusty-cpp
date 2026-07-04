@@ -26512,16 +26512,20 @@ impl CodeGen {
             .rev()
             .skip(1)
             .find_map(|scope| scope.get(rust_name).cloned());
+        // A local must not reuse the C++ name of ANY enclosing parameter, not
+        // just the innermost frame's — a nested fn's params (e.g. iter_cmp_by's
+        // `this`) can sit below an inner frame, so `let mut this =
+        // this.into_iter()` would otherwise emit `auto this_ = this_...`
+        // (self-referential redefinition of the param `this_`).
         let param_cpp_names: HashSet<String> = self
             .param_bindings
-            .last()
-            .map(|params| {
+            .iter()
+            .flat_map(|params| {
                 params
                     .keys()
                     .map(|name| escape_cpp_keyword(name.as_str()))
-                    .collect()
             })
-            .unwrap_or_default();
+            .collect();
         let Some(scope_snapshot) = self.local_cpp_bindings.last() else {
             return escape_cpp_keyword(rust_name);
         };
