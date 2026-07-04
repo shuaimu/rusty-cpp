@@ -2245,6 +2245,23 @@ impl CodeGen {
                     .init
                     .as_ref()
                     .and_then(|init| self.infer_local_binding_type_from_initializer(&init.expr));
+                // An untyped integer-literal local later used as `&mut x` in an
+                // integer-reference struct field (`DeserializerFromEvents { pos:
+                // &mut pos }`, field `&mut usize`) must take that field's int
+                // type, not the C++ `int` the literal deduces to.
+                if let Some(usage_ty) = self
+                    .int_literal_usage_type_hints
+                    .last()
+                    .and_then(|hints| hints.get(&name_str))
+                    .cloned()
+                {
+                    let should_override = inferred_binding_ty
+                        .as_ref()
+                        .is_none_or(|ty| self.is_known_integer_like_type(ty));
+                    if should_override {
+                        inferred_binding_ty = Some(usage_ty);
+                    }
+                }
                 if inferred_binding_ty.is_none()
                     && let Some(init) = local.init.as_ref()
                     && matches!(

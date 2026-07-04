@@ -1143,6 +1143,13 @@ pub struct CodeGen {
     /// (for example `let mut v = ArrayVec::<_, 3>::new(); v.push(x);`).
     /// Used to recover `_` generic arguments in constructor call sites.
     pub(crate) local_placeholder_type_hints: Vec<HashMap<String, syn::Type>>,
+    /// Scoped hints for untyped integer-literal locals (`let mut pos = 0;`)
+    /// whose `&mut pos` / `&pos` is later used as an integer-reference struct
+    /// field (`DeserializerFromEvents { pos: &mut pos }` where the field is
+    /// `&mut usize`). Without this the literal deduces to C++ `int`, which
+    /// can't bind to the `size_t&` field. Maps the local name → the field's
+    /// integer element type.
+    pub(crate) int_literal_usage_type_hints: Vec<HashMap<String, syn::Type>>,
     /// Scoped raw-C++ element overrides for empty collection locals whose element
     /// type is NOT nameable as a `syn::Type` — because it is the item type of an
     /// `auto`-typed iterator chain (e.g. `let v = Vec::new(); v.extend(it.take(n))`
@@ -1836,6 +1843,7 @@ impl CodeGen {
             mutable_pointer_aliased_vars: std::collections::HashSet::new(),
             repeat_elem_type_hints: HashMap::new(),
             local_placeholder_type_hints: Vec::new(),
+            int_literal_usage_type_hints: Vec::new(),
             collection_decltype_element_overrides: Vec::new(),
             assert_equal_sibling_item: std::cell::RefCell::new(None),
             as_ptr_expected_element: std::cell::RefCell::new(None),
@@ -26512,6 +26520,93 @@ impl CodeGen {
         };
         self.function_return_types.contains_key(&scoped)
             || self.emitted_top_level_functions.contains(&scoped)
+    }
+
+    /// Collect integer element types for untyped integer-literal locals whose
+    /// `&x` / `&mut x` is used as an integer-reference struct field. See
+    /// `int_literal_usage_type_hints`.
+    fn collect_int_literal_usage_type_hints(
+        &self,
+        stmts: &[syn::Stmt],
+    ) -> HashMap<String, syn::Type> {
+        // Untyped `let [mut] x = <int literal>;` candidates.
+        let mut candidates: HashSet<String> = HashSet::new();
+        for stmt in stmts {
+            let syn::Stmt::Local(local) = stmt else { continue };
+            let syn::Pat::Ident(pi) = &local.pat else { continue };
+            if pi.subpat.is_some() {
+                continue;
+            }
+            let Some(init) = &local.init else { continue };
+            if init.diverge.is_some() {
+                continue;
+            }
+            if matches!(
+                self.peel_paren_group_expr(&init.expr),
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(_),
+                    ..
+                })
+            ) {
+                candidates.insert(pi.ident.to_string());
+            }
+        }
+        if candidates.is_empty() {
+            return HashMap::new();
+        }
+        // Find struct-literal field inits `field: &[mut] candidate` whose field
+        // type is an integer reference; record candidate -> element int type.
+        struct Scan<'a> {
+            cg: &'a CodeGen,
+            candidates: &'a HashSet<String>,
+            out: HashMap<String, syn::Type>,
+        }
+        impl<'a> syn::visit::Visit<'a> for Scan<'a> {
+            fn visit_expr_struct(&mut self, node: &'a syn::ExprStruct) {
+                for field in &node.fields {
+                    let syn::Member::Named(fname) = &field.member else {
+                        continue;
+                    };
+                    let syn::Expr::Reference(r) = &field.expr else {
+                        continue;
+                    };
+                    let syn::Expr::Path(p) = self.cg.peel_paren_group_expr(&r.expr) else {
+                        continue;
+                    };
+                    if p.path.segments.len() != 1 {
+                        continue;
+                    }
+                    let local_name = p.path.segments[0].ident.to_string();
+                    if !self.candidates.contains(&local_name)
+                        || self.out.contains_key(&local_name)
+                    {
+                        continue;
+                    }
+                    let Some(field_ty) = self.cg.lookup_struct_literal_field_type(
+                        node,
+                        &fname.to_string(),
+                        None,
+                    ) else {
+                        continue;
+                    };
+                    if let syn::Type::Reference(field_ref) = &field_ty {
+                        if self.cg.is_known_integer_like_type(&field_ref.elem) {
+                            self.out.insert(local_name, (*field_ref.elem).clone());
+                        }
+                    }
+                }
+                syn::visit::visit_expr_struct(self, node);
+            }
+        }
+        let mut scan = Scan {
+            cg: self,
+            candidates: &candidates,
+            out: HashMap::new(),
+        };
+        for stmt in stmts {
+            syn::visit::Visit::visit_stmt(&mut scan, stmt);
+        }
+        scan.out
     }
 
     fn allocate_local_cpp_name(&mut self, rust_name: &str) -> String {
