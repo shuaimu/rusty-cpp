@@ -14406,7 +14406,7 @@ impl CodeGen {
         // Primitive scalar conversion constructors (e.g. `u32::from(x)`) lower to casts.
         if let syn::Expr::Path(func_path) = call.func.as_ref() {
             if func_path.qself.is_none()
-                && (call.args.len() == 1 || call.args.len() == 2)
+                && call.args.len() <= 2
                 && func_path.path.segments.len() >= 2
             {
                 let method_name = func_path
@@ -14499,6 +14499,22 @@ impl CodeGen {
                         "rusty::from_str_radix<{}>({}, {})",
                         target_cpp, input, radix
                     );
+                }
+                // Deprecated `i64::max_value()` / `u64::min_value()` — the
+                // zero-arg method forms of the `MAX`/`MIN` associated consts
+                // (still used by serde_yaml's integer parsing). For integer
+                // primitives, `numeric_limits::min()` equals Rust's `MIN`.
+                if matches!(method_name.as_deref(), Some("max_value" | "min_value"))
+                    && call.args.is_empty()
+                    && let Some(owner_name) = owner_name.as_deref()
+                    && let Some(target_cpp) = rust_primitive_cast_target_cpp_type(owner_name)
+                {
+                    let limit = if method_name.as_deref() == Some("min_value") {
+                        "min"
+                    } else {
+                        "max"
+                    };
+                    return format!("std::numeric_limits<{}>::{}()", target_cpp, limit);
                 }
             }
         }
