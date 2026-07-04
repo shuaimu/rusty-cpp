@@ -11667,7 +11667,12 @@ impl CodeGen {
             return Some(format!("{}()", owner_cpp));
         }
         if owner_cpp.starts_with("rusty::Vec<") && method == "from_iter" && args.len() == 1 {
-            return Some(format!("rusty::collect_range({})", args[0]));
+            // `Vec::from_iter(X)` is a Vec in Rust, but `collect_range` yields a
+            // bare std::vector (losing rusty::Vec methods like sort_by). Re-wrap
+            // it into a rusty::Vec; CTAD deduces the element from the collected
+            // std::vector<E>. `Vec::from_iter` can't take the std::vector
+            // directly (SpecFromIter drives it through `.next()`).
+            return Some(format!("rusty::Vec(rusty::collect_range({}))", args[0]));
         }
         // A static/associated call's owner must be the BARE class type. An unsized
         // owner (e.g. indexmap's `Slice<T>`, only ever held by reference) maps to
@@ -15659,7 +15664,11 @@ impl CodeGen {
                         && func.ends_with(">::from_iter"));
             if is_vec_from_iter_call {
                 let arg = self.emit_expr_maybe_move(&call.args[0]);
-                return format!("rusty::collect_range({})", arg);
+                // `Vec::from_iter(X)` is a Vec in Rust; `collect_range` yields a
+                // bare std::vector (losing rusty::Vec methods like sort_by), so
+                // re-wrap into a rusty::Vec (CTAD deduces the element from the
+                // collected std::vector<E>).
+                return format!("rusty::Vec(rusty::collect_range({}))", arg);
             }
         }
         if matches!(

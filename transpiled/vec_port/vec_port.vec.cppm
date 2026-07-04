@@ -4626,6 +4626,18 @@ struct Vec {
             this->push(std::move(const_cast<T&>(item)));
         }
     }
+    // Wrap a std::vector<T> into a rusty::Vec (moving elements). Used by the
+    // transpiler's `Vec::from_iter` lowering, which collects into a std::vector
+    // via `rusty::collect_range` and then re-wraps so rusty::Vec methods
+    // (sort_by, partial_cmp, ...) remain available. The implicit deduction
+    // guide handles `rusty::Vec(std::vector<E>{...})` -> Vec<E, Global>.
+    // Codify in post_transpile_patch.py before re-transpiling vec_port.
+    Vec(std::vector<T> init) requires std::is_default_constructible_v<A>
+        : buf(RawVec<T, A>::with_capacity_in(init.size(), A{})), len_field(0) {
+        for (auto& item : init) {
+            this->push(std::move(item));
+        }
+    }
     static Vec<T, A> make() requires std::is_default_constructible_v<A> {
         return Vec<T, A>();
     }
