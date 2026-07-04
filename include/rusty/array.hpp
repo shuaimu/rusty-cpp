@@ -800,10 +800,17 @@ auto collect_range(Range&& range_like) {
         return out;
     } else if constexpr (requires(Range&& r) { std::forward<Range>(r).into_iter(); }) {
         return collect_range(std::forward<Range>(range_like).into_iter());
+    } else if constexpr (requires(Range&& r) { r.iter(); }) {
+        // Const-only-iterable containers expose a borrowing `.iter()` but no
+        // const-callable `.into_iter()` (e.g. a `const Mapping&`, whose by-value
+        // IntoIterator impl lowers to a non-const `into_iter()`). Rust's
+        // `Vec::from_iter(&container)` selects the by-ref IntoIterator impl in
+        // exactly this case; mirror that by collecting through `.iter()`.
+        return collect_range(range_like.iter());
     } else {
         static_assert(
             detail::collect_range_dependent_false_v<Range>,
-            "rusty::collect_range requires a range, into_iter(), or Option-like next()");
+            "rusty::collect_range requires a range, into_iter(), iter(), or Option-like next()");
     }
 }
 
