@@ -239,7 +239,13 @@ impl CodeGen {
                         // the OUTER `event`, and the new binding needs a
                         // shadow name (`event_shadow1`) — a bare re-decl of
                         // the same name is a C++ redefinition error.
-                        let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+                        // Reference-Ok `?` scrutinees (`match self.peek_event()?`
+                        // → Result<&Event>) route through the pointer-valued
+                        // try expansion so the reference doesn't decay to a
+                        // copied Event.
+                        let scrutinee = self
+                            .maybe_emit_scrutinee_reference_pointer(&match_expr.expr)
+                            .unwrap_or_else(|| self.emit_expr_to_string(&match_expr.expr));
                         let cpp_name = self.allocate_local_cpp_name(&rust_name);
                         let variant_ctx =
                             self.infer_variant_type_context_from_expr(&match_expr.expr);

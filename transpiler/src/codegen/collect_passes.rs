@@ -9659,22 +9659,36 @@ impl CodeGen {
                         rust_to_cpp.insert(rust_name.clone(), resolved.clone());
                         resolved
                     };
+                    let by_value_mut = pi.by_ref.is_none() && pi.mutability.is_some();
                     let binding_prefix = if pi.by_ref.is_some() && pi.mutability.is_some() {
                         "auto&"
                     } else if pi.by_ref.is_some() {
                         "const auto&"
+                    } else if by_value_mut {
+                        // A `mut` by-value binding is an INDEPENDENT mutable
+                        // place — Rust moves (non-Copy) or copies (Copy) the
+                        // payload into it. `auto&&` would inherit the payload's
+                        // const category (a borrowed scrutinee yields `const
+                        // T&`), so `&mut name` / a `T&`-parameter call fails
+                        // ("drops const"). A bare `auto` with a moved source
+                        // makes a fresh mutable object: move-ctor for owned
+                        // move-only payloads (btree_port `Occupied(mut entry)`),
+                        // copy-ctor for const Copy scalars (de.rs
+                        // `Event::Alias(mut pos)` → `jump(&mut pos)`).
+                        "auto"
                     } else {
-                        // By-value pattern bindings (both `x` and `mut x`):
-                        // use `auto&&` to preserve reference payloads (e.g.,
-                        // `R = T&`) without forcing `const`, AND to avoid the
-                        // hidden copy when the value is move-only. See the
-                        // sibling site at the earlier emit path for the full
-                        // explanation (btree_port B4 / `Occupied(mut entry)`
-                        // match-arm copy).
+                        // Plain by-value binding (`x`): `auto&&` preserves
+                        // reference payloads (`R = T&`) without forcing const,
+                        // and avoids a hidden copy of move-only values.
                         "auto&&"
                     };
                     let binding_source = if pi.by_ref.is_none() {
-                        format!("rusty::detail::deref_if_pointer({})", source_expr)
+                        let derefed = format!("rusty::detail::deref_if_pointer({})", source_expr);
+                        if by_value_mut {
+                            format!("std::move({})", derefed)
+                        } else {
+                            derefed
+                        }
                     } else {
                         source_expr.to_string()
                     };

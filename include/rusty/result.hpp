@@ -870,6 +870,22 @@ struct err_contextual_value {
     operator Result<T, E>() const& {
         return Result<T, E>::Err(error);
     }
+
+    // `Err(e).map_err(f)` keeps the Ok type deferred while transforming the
+    // error, so the whole chain still converts to any `Result<T, E2>`. This
+    // arises when a value-producing `break Err(...)` is lowered to a tail
+    // `return Err(...).map_err(...)` (loop-with-break method chains).
+    template<typename F>
+    auto map_err(F&& f) && {
+        using mapped_t = std::decay_t<decltype(f(std::move(error)))>;
+        return err_contextual_value<mapped_t>{std::forward<F>(f)(std::move(error))};
+    }
+
+    template<typename F>
+    auto map_err(F&& f) const& {
+        using mapped_t = std::decay_t<decltype(f(error))>;
+        return err_contextual_value<mapped_t>{std::forward<F>(f)(error)};
+    }
 };
 
 template<typename U>

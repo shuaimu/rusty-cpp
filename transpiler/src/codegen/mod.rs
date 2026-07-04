@@ -21409,19 +21409,7 @@ impl CodeGen {
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
         let scrutinee = self
             .try_emit_runtime_entry_probe_for_match_arms(&match_expr.arms, &match_expr.expr)
-            .or_else(|| {
-                // Reference-Ok `?` scrutinee: the try macro's statement-expr
-                // value decays the reference (deleted Event copy) — take the
-                // pointer-valued expansion; deref_if_pointer absorbs it.
-                let syn::Expr::Try(try_expr) = self.peel_paren_group_expr(&match_expr.expr)
-                else {
-                    return None;
-                };
-                if !self.try_operand_ok_type_is_reference(&try_expr.expr) {
-                    return None;
-                }
-                self.emit_try_expr_reference_pointer(&match_expr.expr)
-            })
+            .or_else(|| self.maybe_emit_scrutinee_reference_pointer(&match_expr.expr))
             .unwrap_or_else(|| self.emit_expr_to_string(&match_expr.expr));
         if self.try_emit_runtime_match_stmt(match_expr, variant_ctx.as_ref()) {
             return;
@@ -39022,6 +39010,25 @@ impl CodeGen {
     /// to a deleted copy, so such scrutinees route through the
     /// pointer-valued expansion instead (every runtime-match consumer
     /// already sees scrutinees through deref_if_pointer).
+    /// A match/let scrutinee `expr?` whose `?` operand yields `Result<&T, _>`
+    /// decays the reference through the try macro's statement-expression value
+    /// (a copy of a move-only `T` — deleted). Emit the pointer-valued try
+    /// expansion instead; `deref_if_pointer` absorbs the pointer downstream.
+    /// Returns None (caller falls back to plain emission) for non-reference-Ok
+    /// or non-try scrutinees.
+    pub(super) fn maybe_emit_scrutinee_reference_pointer(
+        &self,
+        expr: &syn::Expr,
+    ) -> Option<String> {
+        let syn::Expr::Try(try_expr) = self.peel_paren_group_expr(expr) else {
+            return None;
+        };
+        if !self.try_operand_ok_type_is_reference(&try_expr.expr) {
+            return None;
+        }
+        self.emit_try_expr_reference_pointer(expr)
+    }
+
     fn try_operand_ok_type_is_reference(&self, operand: &syn::Expr) -> bool {
         let inferred = self.infer_simple_expr_type(operand).or_else(|| {
             let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(operand) else {
