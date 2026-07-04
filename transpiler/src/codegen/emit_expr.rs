@@ -16796,14 +16796,20 @@ impl CodeGen {
             return None;
         }
 
-        let inner = self.emit_expr_to_string(arg);
+        // For a `?`-operand, take the *pointer* form (`&(...unwrap())` inside the
+        // statement expression) rather than the value form. A GCC statement
+        // expression `({...; unwrap(); })` decays its trailing `const T&` result
+        // to a prvalue `T`, which copies the (often move-only) referent before we
+        // can deref it. The pointer form keeps a `const T*` result, no copy.
+        let inner = self
+            .emit_try_expr_reference_pointer(arg)
+            .unwrap_or_else(|| self.emit_expr_to_string(arg));
         // Normalize through `deref_if_pointer_like` so the `*` reliably invokes
         // the referent's user `operator*` (Deref) rather than a raw pointer
-        // dereference: a `&T` argument may lower to either `const T*` (pointer)
-        // or `const T&` (value/ref) depending on the surrounding expression
-        // (e.g. `?`-unwrap yields a pointer). Without this, `*ptr` yields `T`
-        // instead of `T::Target`, so `span v = *ptr` tries to copy the (often
-        // move-only) `T` and fails.
+        // dereference: the coerced `&T` may lower to either `const T*` (pointer)
+        // or `const T&` (value/ref) depending on the surrounding expression.
+        // Without this, `*ptr` yields `T` instead of `T::Target`, so `span v =
+        // *ptr` tries to copy the (often move-only) `T` and fails.
         Some(format!(
             "*rusty::detail::deref_if_pointer_like({})",
             inner
