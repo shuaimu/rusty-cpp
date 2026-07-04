@@ -4656,6 +4656,11 @@ struct Vec {
     void sort() {
         std::sort(this->begin(), this->end());
     }
+    // `Vec::reverse` (in Rust a slice method reached via DerefMut); reverse the
+    // elements in place. Codify in post_transpile_patch.py before re-transpiling.
+    void reverse() {
+        std::reverse(this->begin(), this->end());
+    }
     template<typename Cmp>
     void sort_by(Cmp&& cmp) {
         std::sort(this->begin(), this->end(),

@@ -34,3 +34,9 @@ compile_test*
 !cpp_std_complex/src/
 !cpp_std_complex/src/lib.rs
 !cpp_std_complex/cpp_module_index.toml
+
+# Track the committed local `vec` parity-test crate (hand-written, not cloned)
+!vec/
+!vec/Cargo.toml
+!vec/src/
+!vec/src/lib.rs

@@ -19,6 +19,10 @@ declare -a MATRIX_CRATES=(
     "semver"
     "bitflags"
     "smallvec"
+    # vec: a committed local (non-cloned) crate — hand-written focused Vec
+    # parity tests. Its source lives in tests/transpile_tests/vec/ (tracked via
+    # .gitignore exceptions), so ensure_crate_checkout skips the clone.
+    "vec"
     # itertools: temporarily disabled — iterator-item engine + FoldWhile_Ok done
     # (quick leak-free), remaining = tree_reduce alias-hoist (UFCS path, collision-
     # safe) + projected-push transpile leaks. Re-enable when those land.
