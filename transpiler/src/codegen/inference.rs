@@ -3396,12 +3396,81 @@ impl CodeGen {
         )
     }
 
+    /// If `path` names an enum VARIANT (`Nest::Sequence` where `Nest` is a
+    /// known c-like/data enum), return the enum type (`Nest`) — otherwise None.
+    fn enum_variant_path_owner_type(&self, path: &syn::Path) -> Option<syn::Type> {
+        if path.segments.len() < 2 {
+            return None;
+        }
+        let owner = path.segments.iter().nth_back(1)?.ident.to_string();
+        let is_enum_owner = self.c_like_enum_types.contains(&owner)
+            || self.c_like_enum_types.contains(&self.scoped_type_key(&owner))
+            || self.path_is_known_data_enum_variant(path);
+        if !is_enum_owner {
+            return None;
+        }
+        let n = path.segments.len();
+        let mut enum_path = path.clone();
+        enum_path.segments = path.segments.iter().take(n - 1).cloned().collect();
+        Some(syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: enum_path,
+        }))
+    }
+
+    /// Recursively rewrite enum-variant value paths inside a placeholder hint
+    /// to the enum type: `stack.push(Nest::Sequence)` infers the Vec element as
+    /// the variant `Nest::Sequence`, but that isn't a C++ type (`Sequence` is
+    /// an enumerator, not a type) — the element is the enum `Nest`.
+    fn canonicalize_enum_variant_types_in_hint(&self, ty: &syn::Type) -> syn::Type {
+        match ty {
+            syn::Type::Path(tp) if tp.qself.is_none() => {
+                if matches!(
+                    tp.path.segments.last().map(|s| &s.arguments),
+                    Some(syn::PathArguments::None)
+                ) {
+                    if let Some(enum_ty) = self.enum_variant_path_owner_type(&tp.path) {
+                        return enum_ty;
+                    }
+                }
+                let mut out = tp.clone();
+                for seg in &mut out.path.segments {
+                    if let syn::PathArguments::AngleBracketed(args) = &mut seg.arguments {
+                        for arg in &mut args.args {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                *inner = self.canonicalize_enum_variant_types_in_hint(inner);
+                            }
+                        }
+                    }
+                }
+                syn::Type::Path(out)
+            }
+            syn::Type::Reference(r) => {
+                let mut out = r.clone();
+                *out.elem = self.canonicalize_enum_variant_types_in_hint(&r.elem);
+                syn::Type::Reference(out)
+            }
+            syn::Type::Tuple(t) => {
+                let mut out = t.clone();
+                out.elems = t
+                    .elems
+                    .iter()
+                    .map(|e| self.canonicalize_enum_variant_types_in_hint(e))
+                    .collect();
+                syn::Type::Tuple(out)
+            }
+            _ => ty.clone(),
+        }
+    }
+
     pub(super) fn infer_local_type_from_placeholder_hint(
         &self,
         local: &syn::Local,
         binding_name: &str,
     ) -> Option<syn::Type> {
-        let hint = self.lookup_local_placeholder_type_hint(binding_name)?;
+        let hint_ref = self.lookup_local_placeholder_type_hint(binding_name)?;
+        let hint_canonical = self.canonicalize_enum_variant_types_in_hint(hint_ref);
+        let hint: &syn::Type = &hint_canonical;
         let init = local.init.as_ref()?;
 
         let init_expr = self.peel_paren_group_expr(&init.expr);
@@ -3834,11 +3903,14 @@ impl CodeGen {
         if inferred_last.ident != hint_last.ident {
             return false;
         }
-        // Restrict to TWO-PARAMETER owners only — see the doc
-        // comment above for why single-param Cell-style owners
-        // must be left to the existing machinery.
+        // Two-parameter owners, plus `Vec`: a bare `Vec` inferred from
+        // `Vec::new()` carries no element, so a specialized `Vec<T>` hint (the
+        // forward-scan push-arg answer) is strictly better — and the raw-hint
+        // machinery otherwise fills the element un-canonicalized (an enum
+        // variant `Nest::Sequence` instead of the enum `Nest`). Single-param
+        // Cell-style owners stay excluded per the doc comment above.
         let ident_str = inferred_last.ident.to_string();
-        if !matches!(ident_str.as_str(), "HashMap" | "BTreeMap") {
+        if !matches!(ident_str.as_str(), "HashMap" | "BTreeMap" | "Vec") {
             return false;
         }
         if !matches!(inferred_last.arguments, syn::PathArguments::None) {
