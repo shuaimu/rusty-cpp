@@ -13115,6 +13115,49 @@ impl CodeGen {
         Some(format!("{}({})", seed, args.join(", ")))
     }
 
+    /// A self-recursive nested fn's name used as a VALUE (not the head of a
+    /// call) — `iter_cmp_by(a, b, total_cmp)`. The Y-combinator lambda takes
+    /// `__self` as its first parameter, so the bare name can't be passed
+    /// directly (and `const auto total_cmp = [...total_cmp...]` self-references
+    /// its own initializer). Emit a self-bound wrapper lambda that forwards to
+    /// `__self(__self, ...)` (inside the body) or `NAME(NAME, ...)` (outer
+    /// scope), presenting the ordinary N-argument signature callers expect.
+    pub(super) fn try_emit_recursive_nested_fn_value_reference(
+        &self,
+        path: &syn::Path,
+    ) -> Option<String> {
+        if path.leading_colon.is_some() || path.segments.len() != 1 {
+            return None;
+        }
+        let seg = path.segments.first()?;
+        if !matches!(seg.arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let ident = seg.ident.to_string();
+        let inside_own_body = self
+            .recursive_nested_fn_self_emit_stack
+            .last()
+            .is_some_and(|top| top == &ident);
+        let in_outer_scope = !inside_own_body
+            && self
+                .recursive_nested_fns_in_scope
+                .iter()
+                .rev()
+                .any(|scope| scope.contains(&ident));
+        if !inside_own_body && !in_outer_scope {
+            return None;
+        }
+        let seed = if inside_own_body {
+            "__self".to_string()
+        } else {
+            escape_cpp_keyword(&ident)
+        };
+        Some(format!(
+            "[&](auto&&... __rec_args) -> decltype(auto) {{ return {}({}, std::forward<decltype(__rec_args)>(__rec_args)...); }}",
+            seed, seed
+        ))
+    }
+
     /// `slice::from_raw_parts[_mut](ptr, len)` → `rusty::from_raw_parts[_mut](ptr, len)`
     /// (a `std::span<T>`). The slice element `T` lives only in the RESULT type
     /// (`&[T]` / `&mut [T]`), so without it the `.cast()` on the pointer argument
@@ -17655,6 +17698,10 @@ impl CodeGen {
                     && owner.ident.to_string().starts_with("__private")
                 {
                     return "rusty::None".to_string();
+                }
+                if let Some(lambda) = self.try_emit_recursive_nested_fn_value_reference(&path.path)
+                {
+                    return lambda;
                 }
                 if let Some(lambda) = self.try_emit_method_reference_lambda(&path.path) {
                     return lambda;

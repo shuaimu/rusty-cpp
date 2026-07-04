@@ -34678,6 +34678,12 @@ impl CodeGen {
             return None;
         };
         let path = &path_expr.path;
+        // A self-recursive nested fn passed as a callable value (`iter_cmp_by(a,
+        // b, total_cmp)`) is a Y-combinator lambda taking `__self` first — the
+        // bare name isn't the right callable. Wrap it as a self-bound lambda.
+        if let Some(rec) = self.try_emit_recursive_nested_fn_value_reference(path) {
+            return Some(rec);
+        }
         let joined = path
             .segments
             .iter()
