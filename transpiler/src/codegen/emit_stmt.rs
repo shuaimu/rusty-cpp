@@ -159,6 +159,48 @@ impl CodeGen {
             if self.try_emit_let_match_return_statement_level(local) {
                 return;
             }
+            // `let x = { …; tail }` whose block contains `?`/`return`: an
+            // IIFE lowering binds those to the lambda (wrong fn exit, and
+            // return-type deduction clashes with the tail). Declare the
+            // local, inline the block, assign the tail.
+            if let syn::Pat::Ident(pat_ident) = &local.pat
+                && pat_ident.subpat.is_none()
+                && let Some(init) = &local.init
+                && init.diverge.is_none()
+                && let syn::Expr::Block(block_expr) = self.peel_paren_group_expr(&init.expr)
+                && self.expr_contains_early_return_or_try(&init.expr)
+                && block_expr.block.stmts.len() > 1
+                && let Some(syn::Stmt::Expr(tail, None)) = block_expr.block.stmts.last()
+                && !self.is_expr_diverging(tail)
+                && let Some(tail_ty) = self.infer_let_block_tail_type(&block_expr.block, tail)
+            {
+                let tail_cpp = self.map_type(&tail_ty);
+                if !tail_cpp.is_empty()
+                    && tail_cpp != "auto"
+                    && !type_string_has_auto_placeholder(&tail_cpp)
+                {
+                    let rust_name = pat_ident.ident.to_string();
+                    let cpp_name = self.allocate_local_cpp_name(&rust_name);
+                    self.writeln(&format!("{} {};", tail_cpp, cpp_name));
+                    self.register_local_binding(rust_name.clone(), Some(tail_ty));
+                    let mut rewritten = block_expr.block.clone();
+                    if let Some(syn::Stmt::Expr(tail_expr, semi @ None)) =
+                        rewritten.stmts.last_mut()
+                    {
+                        let target: syn::Expr = syn::parse_str(&rust_name)
+                            .unwrap_or_else(|_| parse_quote!(__let_block_target));
+                        *tail_expr = syn::Expr::Assign(syn::ExprAssign {
+                            attrs: Vec::new(),
+                            left: Box::new(target),
+                            eq_token: Default::default(),
+                            right: Box::new(tail_expr.clone()),
+                        });
+                        *semi = Some(Default::default());
+                    }
+                    self.emit_block(&rewritten);
+                    return;
+                }
+            }
             // `let x = match { ... fn-level-return arms ... }` whose value
             // type differs from the fn's return: no expression-position
             // lowering can host the returns. Declare the local, then run
@@ -494,6 +536,63 @@ impl CodeGen {
         }
         let slots: Option<Vec<String>> = slot_cpp.into_iter().collect();
         Some(format!(" -> std::tuple<{}>", slots?.join(", ")))
+    }
+
+    /// The type of a let-block's tail using only the BLOCK's own lets:
+    /// `let total = { let mut seq = SeqAccess(…); …?; seq.len }` — outer
+    /// inference can't see `seq`, but the block's own `let` initializer
+    /// types it and the struct-field table gives `.len`.
+    fn infer_let_block_tail_type(
+        &self,
+        block: &syn::Block,
+        tail: &syn::Expr,
+    ) -> Option<syn::Type> {
+        if let Some(ty) = self
+            .infer_simple_expr_type(tail)
+            .or_else(|| self.infer_local_binding_type_from_initializer(tail))
+        {
+            return Some(ty);
+        }
+        let mut env: HashMap<String, syn::Type> = HashMap::new();
+        for stmt in &block.stmts {
+            let syn::Stmt::Local(local) = stmt else { continue };
+            let syn::Pat::Ident(pi) = &local.pat else { continue };
+            let Some(init) = &local.init else { continue };
+            if let Some(ty) = self
+                .infer_simple_expr_type(&init.expr)
+                .or_else(|| self.infer_local_binding_type_from_initializer(&init.expr))
+            {
+                env.insert(pi.ident.to_string(), ty);
+            }
+        }
+        match self.peel_paren_group_expr(tail) {
+            syn::Expr::Path(p) if p.path.segments.len() == 1 => {
+                env.get(&p.path.segments[0].ident.to_string()).cloned()
+            }
+            syn::Expr::Field(f) => {
+                let syn::Expr::Path(base) = self.peel_paren_group_expr(&f.base) else {
+                    return None;
+                };
+                if base.path.segments.len() != 1 {
+                    return None;
+                }
+                let base_ty = env.get(&base.path.segments[0].ident.to_string())?;
+                let peeled = self.peel_reference_paren_group_type(base_ty);
+                let syn::Type::Path(tp) = peeled else { return None };
+                let owner = tp.path.segments.last()?.ident.to_string();
+                let syn::Member::Named(field) = &f.member else { return None };
+                let fields = self.struct_field_types.get(&owner).or_else(|| {
+                    // Module-scoped keys (`de::SeqAccess`).
+                    let suffix = format!("::{}", owner);
+                    self.struct_field_types
+                        .iter()
+                        .find(|(key, _)| key.ends_with(&suffix))
+                        .map(|(_, fields)| fields)
+                })?;
+                fields.get(&field.to_string()).cloned()
+            }
+            _ => None,
+        }
     }
 
     /// Names bound by `let` statements anywhere inside an arm body —

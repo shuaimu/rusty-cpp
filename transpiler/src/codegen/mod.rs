@@ -35398,6 +35398,20 @@ impl CodeGen {
                 self.expr_tree_has_return_or_try(&a.left)
                     || self.expr_tree_has_return_or_try(&a.right)
             }
+            syn::Expr::While(w) => {
+                self.expr_tree_has_return_or_try(&w.cond)
+                    || self.block_contains_early_return_or_try(&w.body)
+            }
+            syn::Expr::ForLoop(f) => {
+                self.expr_tree_has_return_or_try(&f.expr)
+                    || self.block_contains_early_return_or_try(&f.body)
+            }
+            syn::Expr::Loop(l) => self.block_contains_early_return_or_try(&l.body),
+            syn::Expr::Let(l) => self.expr_tree_has_return_or_try(&l.expr),
+            syn::Expr::Unary(u) => self.expr_tree_has_return_or_try(&u.expr),
+            syn::Expr::Reference(r) => self.expr_tree_has_return_or_try(&r.expr),
+            syn::Expr::Paren(p) => self.expr_tree_has_return_or_try(&p.expr),
+            syn::Expr::Field(f) => self.expr_tree_has_return_or_try(&f.base),
             syn::Expr::Macro(m) => {
                 // Check if macro is a try! or ? equivalent
                 m.mac
