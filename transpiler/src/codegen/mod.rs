@@ -24796,6 +24796,19 @@ impl CodeGen {
         path: &syn::Path,
         variant_ctx: Option<&VariantTypeContext>,
     ) -> Option<usize> {
+        // When the Entry enum is a KNOWN data enum (transpiled locally or as a
+        // dep with recorded variant indices), defer to the general resolver so
+        // the ACTUAL declared order is used. The hardcode below matches std
+        // BTreeMap's `{ Vacant, Occupied }`, but indexmap and HashMap declare
+        // `{ Occupied, Vacant }` (Occupied = 0) — using the hardcode there
+        // swaps the arms (serde_yaml Mapping's `entry()` match).
+        if self.path_is_known_data_enum_variant_with_ctx(path, variant_ctx)
+            && self
+                .data_enum_variant_index_for_path(path, variant_ctx)
+                .is_some()
+        {
+            return None;
+        }
         let variant_name = self
             .canonical_variant_name(&path.segments.last()?.ident.to_string())
             .to_string();
