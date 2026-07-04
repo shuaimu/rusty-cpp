@@ -5902,7 +5902,52 @@ impl CodeGen {
         {
             let can_keep_explicit_current_struct_assoc_return =
                 self.return_type_current_struct_assoc_aliases_emitted(&method.sig.output);
-            if !can_keep_explicit_current_struct_assoc_return {
+            // Projections rooted at the METHOD's own template params
+            // (`-> Result<V::Value>`) are always spellable: a member
+            // template's return type only instantiates when a call supplies
+            // a concrete `V`. Keeping the spelling matters for bodies that
+            // RECURSE (a deduced `auto` can't be used before it's pinned —
+            // de.rs's Alias-arm `jump(pos)?.deserialize_bool(visitor)`) and
+            // for typed Ok/Err ctor back-propagation at return sites.
+            // `method.sig.generics` may carry INJECTED impl/struct params
+            // (Either's L, R) alongside the method's own — only params
+            // invisible in OUTER scope frames are genuinely method-level
+            // (the innermost frame is the method's own push above).
+            let outer_scope_params: HashSet<&String> = self
+                .type_param_scopes
+                .iter()
+                .rev()
+                .skip(1)
+                .flatten()
+                .collect();
+            let method_param_names: HashSet<String> = method
+                .sig
+                .generics
+                .params
+                .iter()
+                .filter_map(|param| match param {
+                    syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                    _ => None,
+                })
+                .filter(|name| !outer_scope_params.contains(name))
+                .collect();
+            let spellable_method_param_projection = !method_param_names.is_empty()
+                && return_type != "auto"
+                && !return_type.contains("/* TODO")
+                && !type_string_has_auto_placeholder(&return_type)
+                // The assoc-name mapper can glue a CURRENT-STRUCT alias's args
+                // onto a param projection tail when the names collide
+                // (indexmap's `I::IntoIter` vs `IndexMap::IntoIter` →
+                // `typename I::template IntoIter<K, V>`). A plain assoc-TYPE
+                // projection never needs the `template` keyword — its
+                // presence means the mapper treated the assoc as a template
+                // and the spelling can't be trusted; keep those on `auto`.
+                && !return_type.contains("::template ")
+                && !self.return_type_references_current_struct_assoc(&method.sig.output)
+                && matches!(&method.sig.output, syn::ReturnType::Type(_, ty)
+                    if self.type_dependent_assoc_roots_are_method_params(ty, &method_param_names));
+            if !can_keep_explicit_current_struct_assoc_return && !spellable_method_param_projection
+            {
                 return_type = "auto".to_string();
                 softened_dependent_assoc_return = true;
             }

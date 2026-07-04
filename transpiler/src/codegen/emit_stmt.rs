@@ -328,6 +328,9 @@ impl CodeGen {
                 {
                     return;
                 }
+                if should_emit_tail_return && self.try_emit_tail_loop_method_chain(expr) {
+                    return;
+                }
                 let mut expr_str = if is_tail && semi.is_none() {
                     self.emit_expr_to_string_with_expected_and_move_if_needed(
                         expr,
@@ -403,6 +406,57 @@ impl CodeGen {
                 self.emit_macro_stmt(&stmt_macro.mac);
             }
         }
+    }
+
+    /// Tail-position `loop { … break e; … }.method(args)` (de.rs's
+    /// `loop { match next { … } }.map_err(|err| fix_mark(…))` family): a
+    /// Loop receiver has no expression-position lowering (the catch-all
+    /// emits `unreachable()` and the body vanishes), and an IIFE wrapper
+    /// would rebind `?`/`return` inside the body to the lambda. Rewrite
+    /// every `break e` that binds to this loop into `return (e).method(args)`
+    /// — substituting the break value for the chain's base receiver — and
+    /// emit the loop as a plain statement. `?` inside keeps its
+    /// function-level meaning, and each returned chain gets the enclosing
+    /// fn's expected-type treatment (typed Ok/Err ctors).
+    fn try_emit_tail_loop_method_chain(&mut self, expr: &syn::Expr) -> bool {
+        let chain = self.peel_paren_group_expr(expr);
+        if !matches!(chain, syn::Expr::MethodCall(_)) {
+            return false;
+        }
+        let mut base = chain;
+        while let syn::Expr::MethodCall(mc) = base {
+            base = self.peel_paren_group_expr(&mc.receiver);
+        }
+        let syn::Expr::Loop(loop_expr) = base else {
+            return false;
+        };
+        let label = loop_expr.label.as_ref().map(|l| l.name.ident.to_string());
+        // The transform applies only if every break binding to this loop
+        // carries a value: a valueless break would mean a `()`-typed loop
+        // (not a method receiver) or a shape we don't understand.
+        let mut scan = LoopBreakChainRewrite {
+            label: label.as_deref(),
+            in_nested: false,
+            value_breaks: 0,
+            plain_breaks: 0,
+            chain: None,
+        };
+        let mut scan_body = loop_expr.body.clone();
+        syn::visit_mut::VisitMut::visit_block_mut(&mut scan, &mut scan_body);
+        if scan.value_breaks == 0 || scan.plain_breaks > 0 {
+            return false;
+        }
+        let mut rewritten = loop_expr.clone();
+        let mut rw = LoopBreakChainRewrite {
+            label: label.as_deref(),
+            in_nested: false,
+            value_breaks: 0,
+            plain_breaks: 0,
+            chain: Some(chain),
+        };
+        syn::visit_mut::VisitMut::visit_block_mut(&mut rw, &mut rewritten.body);
+        self.emit_control_flow_with_return_scope(false, |this| this.emit_loop(&rewritten));
+        true
     }
 
     /// `{ return <ident>; }` or `{ <ident> }` (a single identity
@@ -5074,4 +5128,106 @@ impl CodeGen {
         }
         self.emit_expr_to_string_with_expected(value_expr, expected_ty)
     }
+}
+
+/// Clone a method-call `chain`, replacing its base receiver (the innermost
+/// non-method-call expression, peeling parens/groups) with `new_base`.
+fn replace_method_chain_base(chain: &syn::Expr, new_base: &syn::Expr) -> syn::Expr {
+    match chain {
+        syn::Expr::MethodCall(mc) => {
+            let mut mc2 = mc.clone();
+            *mc2.receiver = replace_method_chain_base(&mc.receiver, new_base);
+            syn::Expr::MethodCall(mc2)
+        }
+        syn::Expr::Paren(p) => replace_method_chain_base(&p.expr, new_base),
+        syn::Expr::Group(g) => replace_method_chain_base(&g.expr, new_base),
+        _ => new_base.clone(),
+    }
+}
+
+/// Walks a loop body finding `break`s that bind to THAT loop: unlabeled
+/// breaks stop at nested loops (they bind the inner one), labeled breaks
+/// match the loop's label honoring label shadowing, and closures/nested
+/// items are opaque (a `break` can't cross either boundary). With
+/// `chain: Some(_)`, each matching break-with-value `break e` is replaced
+/// by `return <chain with base := e>`; with `None` it only counts.
+struct LoopBreakChainRewrite<'a> {
+    label: Option<&'a str>,
+    in_nested: bool,
+    value_breaks: usize,
+    plain_breaks: usize,
+    chain: Option<&'a syn::Expr>,
+}
+
+impl LoopBreakChainRewrite<'_> {
+    fn label_shadowed_by(&self, inner: Option<&syn::Label>) -> bool {
+        matches!(
+            (inner, self.label),
+            (Some(inner), Some(ours)) if inner.name.ident == ours
+        )
+    }
+}
+
+impl syn::visit_mut::VisitMut for LoopBreakChainRewrite<'_> {
+    fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+        match node {
+            syn::Expr::Break(b) => {
+                let binds_here = match (&b.label, self.label) {
+                    (Some(bl), Some(ll)) => bl.ident == ll,
+                    (Some(_), None) => false,
+                    (None, _) => !self.in_nested,
+                };
+                if binds_here {
+                    if let Some(val) = b.expr.as_deref() {
+                        self.value_breaks += 1;
+                        if let Some(chain) = self.chain {
+                            let substituted = replace_method_chain_base(chain, val);
+                            *node = syn::Expr::Return(syn::ExprReturn {
+                                attrs: Vec::new(),
+                                return_token: Default::default(),
+                                expr: Some(Box::new(substituted)),
+                            });
+                            return;
+                        }
+                    } else {
+                        self.plain_breaks += 1;
+                    }
+                }
+                syn::visit_mut::visit_expr_mut(self, node);
+            }
+            syn::Expr::Loop(l) => {
+                if self.label_shadowed_by(l.label.as_ref()) {
+                    return;
+                }
+                let prev = std::mem::replace(&mut self.in_nested, true);
+                syn::visit_mut::visit_expr_mut(self, node);
+                self.in_nested = prev;
+            }
+            syn::Expr::While(w) => {
+                if self.label_shadowed_by(w.label.as_ref()) {
+                    return;
+                }
+                let prev = std::mem::replace(&mut self.in_nested, true);
+                syn::visit_mut::visit_expr_mut(self, node);
+                self.in_nested = prev;
+            }
+            syn::Expr::ForLoop(f) => {
+                if self.label_shadowed_by(f.label.as_ref()) {
+                    return;
+                }
+                // The iterable is evaluated before loop entry — a break
+                // there binds outward, not to this for-loop.
+                self.visit_expr_mut(&mut f.expr);
+                let prev = std::mem::replace(&mut self.in_nested, true);
+                for stmt in &mut f.body.stmts {
+                    self.visit_stmt_mut(stmt);
+                }
+                self.in_nested = prev;
+            }
+            syn::Expr::Closure(_) => {}
+            _ => syn::visit_mut::visit_expr_mut(self, node),
+        }
+    }
+
+    fn visit_item_mut(&mut self, _node: &mut syn::Item) {}
 }

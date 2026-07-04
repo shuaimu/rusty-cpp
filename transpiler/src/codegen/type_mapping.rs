@@ -3207,6 +3207,115 @@ impl CodeGen {
         }
     }
 
+    /// True when every dependent-assoc projection in `ty` is rooted at one
+    /// of `method_params` (the method's OWN template params). Those
+    /// projections (`V::Value`) are always spellable in C++: a member
+    /// template's return type only instantiates when a call supplies a
+    /// concrete `V` — unlike struct-param projections, which hard-fail the
+    /// moment the owner is instantiated with a concrete type (the
+    /// `Either<int,int>` case the dependent-assoc softening exists for).
+    pub(super) fn type_dependent_assoc_roots_are_method_params(
+        &self,
+        ty: &syn::Type,
+        method_params: &HashSet<String>,
+    ) -> bool {
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none() && tp.path.segments.len() >= 2 {
+                    if let Some(first) = tp.path.segments.first().map(|s| s.ident.to_string()) {
+                        if first == "Self" {
+                            return false;
+                        }
+                        if self.is_type_param_in_scope(&first) {
+                            if !method_params.contains(&first) {
+                                return false;
+                            }
+                            // A param-rooted projection whose tail segment
+                            // carries generic args (`I::IntoIter<..>`, GATs)
+                            // would need C++'s `template` keyword — not
+                            // spellable by plain mapping.
+                            if tp.path.segments.iter().skip(1).any(|seg| {
+                                !matches!(seg.arguments, syn::PathArguments::None)
+                            }) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                if let Some(qself) = &tp.qself {
+                    // `<Base as Trait>::Assoc` — the projection root is Base.
+                    let base = self.peel_reference_paren_group_type(&qself.ty);
+                    match base {
+                        syn::Type::Path(btp)
+                            if btp.qself.is_none() && btp.path.segments.len() == 1 =>
+                        {
+                            let name = btp.path.segments[0].ident.to_string();
+                            if name == "Self" {
+                                return false;
+                            }
+                            if self.is_type_param_in_scope(&name) {
+                                if !method_params.contains(&name) {
+                                    return false;
+                                }
+                                if tp.path.segments.iter().skip(qself.position).any(|seg| {
+                                    !matches!(seg.arguments, syn::PathArguments::None)
+                                }) {
+                                    return false;
+                                }
+                            }
+                        }
+                        _ => {
+                            if self.type_mentions_in_scope_type_param(&qself.ty)
+                                || self.type_contains_dependent_assoc(&qself.ty)
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                tp.path.segments.iter().all(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().all(|arg| {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                self.type_dependent_assoc_roots_are_method_params(
+                                    inner,
+                                    method_params,
+                                )
+                            } else {
+                                true
+                            }
+                        })
+                    } else {
+                        true
+                    }
+                })
+            }
+            syn::Type::Reference(r) => {
+                self.type_dependent_assoc_roots_are_method_params(&r.elem, method_params)
+            }
+            syn::Type::Ptr(p) => {
+                self.type_dependent_assoc_roots_are_method_params(&p.elem, method_params)
+            }
+            syn::Type::Slice(s) => {
+                self.type_dependent_assoc_roots_are_method_params(&s.elem, method_params)
+            }
+            syn::Type::Array(a) => {
+                self.type_dependent_assoc_roots_are_method_params(&a.elem, method_params)
+            }
+            syn::Type::Paren(p) => {
+                self.type_dependent_assoc_roots_are_method_params(&p.elem, method_params)
+            }
+            syn::Type::Group(g) => {
+                self.type_dependent_assoc_roots_are_method_params(&g.elem, method_params)
+            }
+            syn::Type::Tuple(tup) => tup
+                .elems
+                .iter()
+                .all(|elem| self.type_dependent_assoc_roots_are_method_params(elem, method_params)),
+            _ => true,
+        }
+    }
+
     pub(super) fn type_references_current_struct_assoc(&self, ty: &syn::Type) -> bool {
         match ty {
             syn::Type::Path(tp) => {

@@ -21509,14 +21509,27 @@ impl CodeGen {
         let mut plans: Vec<(Option<String>, Vec<String>, HashMap<String, String>)> =
             Vec::with_capacity(match_expr.arms.len());
         for arm in &match_expr.arms {
-            if arm.guard.is_some() {
-                return false;
+            // A guard folds into the arm CONDITION (`cond && guard`),
+            // preserving Rust's fall-through-to-next-arm semantics exactly;
+            // when the guard needs the arm's payload bindings they're
+            // re-derived inside a bool lambda. A guard with fn-level
+            // control flow can't live inside a condition — bail to visit.
+            if let Some((_, guard)) = &arm.guard {
+                if self.expr_contains_early_return_or_try(guard) {
+                    return false;
+                }
             }
             if self.or_arm_binds_whole_borrowed_scrutinee(&arm.pat, &match_expr.expr, &arm.body) {
                 return false;
             }
             if matches!(&arm.pat, syn::Pat::Wild(_)) {
-                plans.push((None, Vec::new(), HashMap::new()));
+                let cond = arm.guard.as_ref().map(|(_, guard)| {
+                    format!(
+                        "({})",
+                        self.emit_expr_with_try_style_binding_scope(guard, None, &HashMap::new())
+                    )
+                });
+                plans.push((cond, Vec::new(), HashMap::new()));
                 continue;
             }
             // Or-pattern arm of BINDING-LESS cases (`Iterable(_) | Document(_)`):
@@ -21546,7 +21559,13 @@ impl CodeGen {
                 if !supported || case_conds.is_empty() {
                     return false;
                 }
-                plans.push((Some(format!("({})", case_conds.join(" || "))), Vec::new(), HashMap::new()));
+                let mut cond = format!("({})", case_conds.join(" || "));
+                if let Some((_, guard)) = &arm.guard {
+                    let guard_str =
+                        self.emit_expr_with_try_style_binding_scope(guard, None, &HashMap::new());
+                    cond = format!("{} && ({})", cond, guard_str);
+                }
+                plans.push((Some(cond), Vec::new(), HashMap::new()));
                 continue;
             }
             let mut binding_stmts = Vec::new();
@@ -21570,6 +21589,30 @@ impl CodeGen {
             }
             let Some(cond) = collected else {
                 return false;
+            };
+            let cond = if let Some((_, guard)) = &arm.guard {
+                let guard_str =
+                    self.emit_expr_with_try_style_binding_scope(guard, None, &binding_map);
+                // Bindings the guard may reference are re-derived inside a
+                // bool lambda (the accessor statements are pure reads); the
+                // body's own copies are emitted separately inside the arm.
+                let guard_cond = if binding_stmts.is_empty() {
+                    format!("({})", guard_str)
+                } else {
+                    format!(
+                        "[&]() -> bool {{ {} return static_cast<bool>({}); }}()",
+                        binding_stmts.join(" "),
+                        guard_str
+                    )
+                };
+                match cond {
+                    Some(c) => Some(format!("{} && {}", c, guard_cond)),
+                    // Irrefutable pattern with a guard (`x if g =>`): the
+                    // guard alone is the condition.
+                    None => Some(guard_cond),
+                }
+            } else {
+                cond
             };
             plans.push((cond, binding_stmts, binding_map));
         }
@@ -34884,6 +34927,20 @@ impl CodeGen {
             self.lookup_owner_method_has_receiver(&trait_segment, &method_name),
             Some(false)
         ) {
+            return None;
+        }
+        // A trait STATIC method (no self receiver) is an associated call, not
+        // UFCS instance dispatch — `Deserialize::deserialize(&mut self)` passes
+        // an ordinary argument that merely references self; rewriting it to
+        // `self.deserialize()` swallows the argument and calls a nonexistent
+        // member. The owner-method table above only covers concrete owners;
+        // consult the trait-method receiver shapes too.
+        let segments: Vec<String> = func_path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        if self.trait_static_call_has_receiver_for_segments(&segments) == Some(false) {
             return None;
         }
 
