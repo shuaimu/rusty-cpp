@@ -17544,6 +17544,57 @@ fn test_leaf10521_if_let_else_return_local_uses_statement_lowering_without_todo(
 }
 
 #[test]
+fn test_assign_place_if_let_with_try_branch_uses_statement_lowering_without_todo() {
+    // `place = if let P = scrut { stmt?; a } else { b };` — a branch of the
+    // RHS if-expression contains `?`, which must escape to the enclosing
+    // function. The default expression path can only wrap it in an IIFE (which
+    // would trap the `?`), so it degraded to a `/* TODO: if-expression */`
+    // placeholder. The assignment must instead be pushed into each branch.
+    let out = transpile_str(
+        r#"
+        enum State { Start(i32), Checked, Duplicated }
+        struct S { state: State }
+        impl S {
+            fn go(&mut self, one: bool) -> Result<(), i32> {
+                self.state = if let State::Start(_) = self.state {
+                    self.prep()?;
+                    State::Duplicated
+                } else {
+                    State::Checked
+                };
+                Ok(())
+            }
+            fn prep(&mut self) -> Result<(), i32> { Ok(()) }
+        }
+        "#,
+    );
+    assert!(
+        !out.contains("/* TODO: if-expression */"),
+        "assign-place if-let with a try branch must lower via statement form, got:\n{}",
+        out
+    );
+    // The assignment is pushed into each branch tail rather than an IIFE.
+    assert!(
+        out.contains("this->state =") || out.contains("_assign_if_lhs ="),
+        "assignment should be pushed into each if branch, got:\n{}",
+        out
+    );
+    // The variant is gated by `variant_holds<...>` and the wildcard payload
+    // (`State::Start(_)`) must NOT emit a spurious `.unwrap()` — a data-enum
+    // std::variant has no such member.
+    assert!(
+        out.contains("variant_holds<State_Start>"),
+        "if-let should gate on the data-enum variant, got:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("_iflet_s.unwrap()"),
+        "wildcard payload must not extract via .unwrap() on a data-enum variant, got:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_leaf4154411_impl_trait_arg_position_uses_auto_not_void_ptr() {
     let out = transpile_str_module(
         r#"

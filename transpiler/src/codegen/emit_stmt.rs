@@ -293,6 +293,13 @@ impl CodeGen {
             if self.try_emit_assign_match_return_statement_level(&assign.left, &assign.right) {
                 return;
             }
+            // Sibling of the match case: `place = if cond { ...?...; a } else { b };`
+            // where a branch has escaping control flow. Push the assignment into
+            // each branch so the `?`/`return` lowers at function level instead of
+            // degrading to a `/* TODO: if-expression */` placeholder.
+            if self.try_emit_assign_if_return_statement_level(&assign.left, &assign.right) {
+                return;
+            }
         }
         match stmt {
             syn::Stmt::Local(local) => self.emit_local(local),
@@ -2496,6 +2503,15 @@ impl CodeGen {
                             .as_ref()
                             .expect("checked Some in condition"),
                     )
+                } else if local.init.is_none()
+                    && let Some(ty) = uninitialized_inferred_ty.as_ref()
+                {
+                    // A deferred-init `let x;` whose inferred type does NOT use
+                    // optional storage — emit a plain default-constructed
+                    // declaration (`rusty::String tag;`) instead of the invalid
+                    // `auto tag;`. The assignments (`tag = …`) stay plain since
+                    // the local wasn't marked delayed-init.
+                    self.map_type(ty)
                 } else if local
                     .init
                     .as_ref()
@@ -4607,6 +4623,17 @@ impl CodeGen {
         let Some(binding_pat) = binding_pat else {
             return;
         };
+
+        // A wildcard payload (`Variant(_)` / `Some(_)`) binds nothing, and the
+        // enclosing variant/`is_some` condition already gated the branch. There
+        // is no payload to extract — and for a data-enum `std::variant`
+        // scrutinee the fallback `.unwrap()` accessor doesn't even exist, so
+        // emitting it produces `no member named 'unwrap'`. Skip extraction.
+        if matches!(binding_pat, syn::Pat::Wild(_))
+            || matches!(binding_pat, syn::Pat::Ident(pi) if pi.ident == "_" && pi.subpat.is_none())
+        {
+            return;
+        }
 
         let simple_ident = match binding_pat {
             syn::Pat::Ident(pi) if pi.ident != "_" && pi.subpat.is_none() => {

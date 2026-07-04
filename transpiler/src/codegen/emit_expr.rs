@@ -4832,6 +4832,47 @@ impl CodeGen {
         true
     }
 
+    /// Statement-level lowering for `place = if cond { ...?...; val_a } else { val_b };`.
+    ///
+    /// When a branch of the RHS if-expression contains `?` or an early
+    /// `return`, the default expression path can only wrap it in an IIFE — but
+    /// that traps the control flow inside the lambda instead of escaping to the
+    /// enclosing function, so the emitter degrades to a `/* TODO: if-expression
+    /// */` placeholder. Instead, alias the LHS place and push the assignment
+    /// into each branch tail (reusing `emit_if_assign_as_statement_block`), so
+    /// the if-expression becomes an if-*statement* and the `?`/`return` lower to
+    /// ordinary function-level control flow.
+    pub(super) fn try_emit_assign_if_return_statement_level(
+        &mut self,
+        lhs_expr: &syn::Expr,
+        rhs_expr: &syn::Expr,
+    ) -> bool {
+        let rhs_peeled = self.peel_paren_group_expr(rhs_expr);
+        let syn::Expr::If(if_expr) = rhs_peeled else {
+            return false;
+        };
+        // Assignment needs a value in every path, so an else branch is required.
+        let Some((_, else_branch)) = &if_expr.else_branch else {
+            return false;
+        };
+        // Only intercept when a branch has escaping control flow (`?`/`return`);
+        // the plain ternary/IIFE path handles the value-only case correctly.
+        let needs_stmt_lowering = self.block_contains_early_return_or_try(&if_expr.then_branch)
+            || self.expr_contains_early_return_or_try(else_branch);
+        if !needs_stmt_lowering {
+            return false;
+        }
+        // Pre-emit alias `auto& <synth> = <lhs>;` so inner-pattern bindings that
+        // happen to share a name with the LHS path don't shadow it (mirrors the
+        // match-assign handler).
+        let lhs_cpp = self.emit_expr_to_string(lhs_expr);
+        let synth_name = self.reserve_synthetic_cpp_name("_assign_if_lhs");
+        self.writeln(&format!("auto& {} = {};", synth_name, lhs_cpp));
+        let expected_ty = self.infer_simple_expr_type(lhs_expr);
+        self.emit_if_assign_as_statement_block(&synth_name, if_expr, expected_ty.as_ref());
+        true
+    }
+
     pub(super) fn try_emit_tuple_local_match_initializer(
         &mut self,
         tuple: &syn::PatTuple,
