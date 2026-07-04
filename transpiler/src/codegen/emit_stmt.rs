@@ -664,7 +664,18 @@ impl CodeGen {
         // scrutinee keeps the bindings references.
         let match_bindings_are_refs = scrutinee_borrows_payload;
         let arm_expected_ty = runtime_match_expected;
-        let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+        let scrutinee = if let syn::Expr::Try(try_expr) =
+            self.peel_paren_group_expr(&match_expr.expr)
+            && self.try_operand_ok_type_is_reference(&try_expr.expr)
+        {
+            // Reference-Ok `?` scrutinee: the try macro's statement-expr
+            // value decays the reference (deleted Event copy) — take the
+            // pointer-valued expansion; deref_if_pointer absorbs it.
+            self.emit_try_expr_reference_pointer(&match_expr.expr)
+                .unwrap_or_else(|| self.emit_expr_to_string(&match_expr.expr))
+        } else {
+            self.emit_expr_to_string(&match_expr.expr)
+        };
         let mut out = format!(
             "[&](){} {{ auto&& _m = {}; ",
             runtime_match_return_annotation, scrutinee

@@ -21409,6 +21409,19 @@ impl CodeGen {
         let variant_ctx = self.infer_variant_type_context_from_expr(&match_expr.expr);
         let scrutinee = self
             .try_emit_runtime_entry_probe_for_match_arms(&match_expr.arms, &match_expr.expr)
+            .or_else(|| {
+                // Reference-Ok `?` scrutinee: the try macro's statement-expr
+                // value decays the reference (deleted Event copy) — take the
+                // pointer-valued expansion; deref_if_pointer absorbs it.
+                let syn::Expr::Try(try_expr) = self.peel_paren_group_expr(&match_expr.expr)
+                else {
+                    return None;
+                };
+                if !self.try_operand_ok_type_is_reference(&try_expr.expr) {
+                    return None;
+                }
+                self.emit_try_expr_reference_pointer(&match_expr.expr)
+            })
             .unwrap_or_else(|| self.emit_expr_to_string(&match_expr.expr));
         if self.try_emit_runtime_match_stmt(match_expr, variant_ctx.as_ref()) {
             return;
@@ -38933,6 +38946,64 @@ impl CodeGen {
     /// For pointer-rebound reference locals initialized from `expr?`, emit a
     /// pointer-valued try expression directly to avoid taking the address of a
     /// statement-expression result (invalid in GCC C++).
+    /// The `?` operand's Ok slot is a REFERENCE (`fn next_event(&self)
+    /// -> Result<&Event>`): the statement-expression try macros DECAY it
+    /// to a deleted copy, so such scrutinees route through the
+    /// pointer-valued expansion instead (every runtime-match consumer
+    /// already sees scrutinees through deref_if_pointer).
+    fn try_operand_ok_type_is_reference(&self, operand: &syn::Expr) -> bool {
+        let inferred = self.infer_simple_expr_type(operand).or_else(|| {
+            let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(operand) else {
+                return None;
+            };
+            self.lookup_unique_method_return_type_by_name(&mc.method.to_string())
+        });
+        let Some(ty) = inferred else {
+            return false;
+        };
+        let peeled = self.peel_reference_paren_group_type(&ty);
+        if let Some((owner, args)) = self.option_or_result_type_args(peeled) {
+            return matches!(owner.as_str(), "Result" | "Option")
+                && matches!(
+                    args.first().map(|a| self.peel_paren_group_type(a)),
+                    Some(syn::Type::Reference(_))
+                );
+        }
+        // Crate `Result<T>` aliases: the alias RHS names Result/Option and
+        // the use-site's sole argument is the Ok slot.
+        let syn::Type::Path(tp) = peeled else {
+            return false;
+        };
+        let Some(seg) = tp.path.segments.last() else {
+            return false;
+        };
+        let Some(target) = self.type_alias_targets.get(&seg.ident.to_string()) else {
+            return false;
+        };
+        let target_peeled = self.peel_reference_paren_group_type(target);
+        let syn::Type::Path(target_path) = target_peeled else {
+            return false;
+        };
+        if !target_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| matches!(s.ident.to_string().as_str(), "Result" | "Option"))
+        {
+            return false;
+        }
+        let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else {
+            return false;
+        };
+        matches!(
+            ab.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(self.peel_paren_group_type(t)),
+                _ => None,
+            }),
+            Some(syn::Type::Reference(_))
+        )
+    }
+
     fn emit_try_expr_reference_pointer(&self, expr: &syn::Expr) -> Option<String> {
         let try_expr = match self.peel_paren_group_expr(expr) {
             syn::Expr::Try(try_expr) => try_expr,

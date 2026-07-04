@@ -1003,6 +1003,15 @@ impl CodeGen {
                 return self.emit_expr_to_string_with_variant_ctx(&reference.expr, variant_ctx);
             }
         }
+        // Reference-Ok `?` scrutinee: the try macro's statement-expr value
+        // decays the reference (deleted Event copy) — take the
+        // pointer-valued expansion; deref_if_pointer absorbs it.
+        if let syn::Expr::Try(try_expr) = expr
+            && self.try_operand_ok_type_is_reference(&try_expr.expr)
+            && let Some(ptr_form) = self.emit_try_expr_reference_pointer(expr)
+        {
+            return ptr_form;
+        }
         self.emit_expr_to_string_with_variant_ctx(expr, variant_ctx)
     }
 
@@ -1336,7 +1345,18 @@ impl CodeGen {
             ));
         }
 
-        let scrutinee = self.emit_expr_to_string(&match_expr.expr);
+        // Reference-Ok `?` scrutinee: the try macro's statement-expr value
+        // decays the reference (deleted Event copy) — take the
+        // pointer-valued expansion; deref_if_pointer absorbs it.
+        let scrutinee = if let syn::Expr::Try(try_expr) =
+            self.peel_paren_group_expr(&match_expr.expr)
+            && self.try_operand_ok_type_is_reference(&try_expr.expr)
+            && let Some(ptr_form) = self.emit_try_expr_reference_pointer(&match_expr.expr)
+        {
+            ptr_form
+        } else {
+            self.emit_expr_to_string(&match_expr.expr)
+        };
         self.writeln("{");
         self.indent += 1;
         self.writeln(&format!("auto&& _m = {};", scrutinee));
@@ -1895,7 +1915,7 @@ impl CodeGen {
         }
 
         self.indent -= 1;
-        self.writeln("}, _m);");
+        self.writeln("}, rusty::detail::deref_if_pointer(_m));");
         self.indent -= 1;
         self.writeln("}");
     }
@@ -19183,9 +19203,9 @@ impl CodeGen {
             let visit_borrows_payload =
                 self.runtime_match_scrutinee_borrows_payload(&match_expr.expr);
             let visit_payload = if visit_borrows_payload {
-                "_m"
+                "rusty::detail::deref_if_pointer(_m)"
             } else {
-                "std::move(_m)"
+                "std::move(rusty::detail::deref_if_pointer(_m))"
             };
             // Variant match → IIFE with std::visit
             if self.should_force_size_t_visit_return_for_bound_match(match_expr, expected_ty) {
