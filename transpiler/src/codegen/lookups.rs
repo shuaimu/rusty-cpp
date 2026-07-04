@@ -2559,6 +2559,20 @@ impl CodeGen {
         };
         let last = tp.path.segments.last()?;
         let owner = last.ident.to_string();
+        // User-defined `impl Deref for T { type Target = U }` (e.g. a newtype
+        // `Tag(Box<[u8]>): Deref<Target=[u8]>`). Consult the recorded targets so
+        // Deref coercions through user smart-pointers/newtypes resolve like the
+        // builtin `Box`/`Rc`/guard cases below, with receiver-arg substitution
+        // for generic wrappers.
+        let scoped = self.scoped_type_key(&owner);
+        if let Some(raw_target) = self
+            .user_deref_targets
+            .get(&owner)
+            .or_else(|| self.user_deref_targets.get(&scoped))
+        {
+            let raw_target = raw_target.clone();
+            return Some(self.instantiate_deref_target_with_receiver_args(tp, &raw_target));
+        }
         if !matches!(
             owner.as_str(),
             "Box"

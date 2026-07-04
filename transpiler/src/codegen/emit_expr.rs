@@ -16797,12 +16797,17 @@ impl CodeGen {
         }
 
         let inner = self.emit_expr_to_string(arg);
-        let deref_expr = if self.method_receiver_needs_parentheses(arg) {
-            format!("*({})", inner)
-        } else {
-            format!("*{}", inner)
-        };
-        Some(deref_expr)
+        // Normalize through `deref_if_pointer_like` so the `*` reliably invokes
+        // the referent's user `operator*` (Deref) rather than a raw pointer
+        // dereference: a `&T` argument may lower to either `const T*` (pointer)
+        // or `const T&` (value/ref) depending on the surrounding expression
+        // (e.g. `?`-unwrap yields a pointer). Without this, `*ptr` yields `T`
+        // instead of `T::Target`, so `span v = *ptr` tries to copy the (often
+        // move-only) `T` and fails.
+        Some(format!(
+            "*rusty::detail::deref_if_pointer_like({})",
+            inner
+        ))
     }
 
     pub(super) fn try_emit_variant_constructor_callable(&self, path: &syn::Path) -> Option<String> {

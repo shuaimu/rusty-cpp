@@ -17595,6 +17595,52 @@ fn test_assign_place_if_let_with_try_branch_uses_statement_lowering_without_todo
 }
 
 #[test]
+fn test_reassigned_slice_ref_local_is_span_value_with_user_deref_coercion() {
+    // `let mut bytes: &[u8] = t.as_ref()?;` where `t: &Option<Tag>` and
+    // `Tag(Box<[u8]>): Deref<Target=[u8]>`. Two things must happen:
+    //  (A) a reassigned `&[u8]` local lowers to a `std::span` VALUE (not a
+    //      pointer-to-span), so `bytes = rest` rebinds it directly; and
+    //  (B) the `&Tag` initializer is Deref-coerced to the slice view via the
+    //      user `operator*`, normalized through `deref_if_pointer_like` so it
+    //      works whether the `?`-unwrap yields a pointer or a reference.
+    let out = transpile_str(
+        r#"
+        use std::ops::Deref;
+        struct Tag(Box<[u8]>);
+        impl Deref for Tag {
+            type Target = [u8];
+            fn deref(&self) -> &[u8] { &self.0 }
+        }
+        fn parse_tag(t: &Option<Tag>) -> Option<u8> {
+            let mut bytes: &[u8] = t.as_ref()?;
+            let (first, rest) = bytes.split_first()?;
+            if !rest.is_empty() {
+                bytes = rest;
+            }
+            Some(bytes.len() as u8 + *first)
+        }
+        "#,
+    );
+    // (A) span VALUE, not `span<...>* bytes`.
+    assert!(
+        out.contains("std::span<const uint8_t> bytes ="),
+        "reassigned &[u8] local should be a span value, got:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("std::span<const uint8_t>* bytes"),
+        "reassigned &[u8] local must not use the pointer-to-span rebind model, got:\n{}",
+        out
+    );
+    // (B) Deref coercion applied via deref_if_pointer_like + `*`.
+    assert!(
+        out.contains("*rusty::detail::deref_if_pointer_like("),
+        "the &Tag initializer should be Deref-coerced to the slice view, got:\n{}",
+        out
+    );
+}
+
+#[test]
 fn test_leaf4154411_impl_trait_arg_position_uses_auto_not_void_ptr() {
     let out = transpile_str_module(
         r#"

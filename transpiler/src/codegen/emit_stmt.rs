@@ -2981,8 +2981,20 @@ impl CodeGen {
                         self.type_is_reference_like(ty)
                             && !self.reference_type_lowers_to_value_cpp(ty)
                     });
-                let needs_rebind_pointer_local =
-                    is_mut && self.reassigned_vars.contains(&name_str) && local_decl_is_reference;
+                // A reassigned reference local whose declared type lowers to a
+                // self-contained C++ view value (`&[u8]` -> `std::span`, `&str`
+                // -> `std::string_view`) is already a fat-pointer value: `x =
+                // rest` rebinds it directly, so it does not need the `span*`
+                // pointer-rebind model (which also breaks Deref coercions at the
+                // initializer, e.g. `&Tag` with `Tag: Deref<Target=[u8]>`).
+                let decl_ref_lowers_to_value = get_local_type(local)
+                    .cloned()
+                    .or_else(|| inferred_binding_ty.clone())
+                    .is_some_and(|ty| self.reference_type_lowers_to_value_cpp(&ty));
+                let needs_rebind_pointer_local = is_mut
+                    && self.reassigned_vars.contains(&name_str)
+                    && local_decl_is_reference
+                    && !decl_ref_lowers_to_value;
                 let rebind_pointer_decl_type = if needs_rebind_pointer_local {
                     get_local_type(local)
                         .and_then(|ty| self.map_reference_type_to_pointer_cpp_type(ty))
@@ -3853,9 +3865,18 @@ impl CodeGen {
                             self.peel_paren_group_type(&resolved_ty),
                             syn::Type::Reference(_)
                         );
+                    // A reassigned reference local whose declared type lowers to a
+                    // self-contained C++ view value (`&[u8]` -> `std::span`, `&str`
+                    // -> `std::string_view`) is already a fat-pointer value: `x =
+                    // rest` rebinds it directly, so it does not need the `span*`
+                    // pointer-rebind model (which also breaks Deref coercions at
+                    // the initializer, e.g. `&Tag` with `Tag: Deref<Target=[u8]>`).
+                    let decl_ref_lowers_to_value =
+                        self.reference_type_lowers_to_value_cpp(&resolved_ty);
                     let needs_rebind_pointer_local = is_mut
                         && self.reassigned_vars.contains(&name_str)
-                        && local_decl_is_reference;
+                        && local_decl_is_reference
+                        && !decl_ref_lowers_to_value;
                     let rebind_pointer_decl_type = if needs_rebind_pointer_local {
                         self.map_reference_type_to_pointer_cpp_type(&resolved_ty)
                             .or(Some("auto*".to_string()))
@@ -3907,7 +3928,25 @@ impl CodeGen {
                                 decl_type, cpp_name, backing_name
                             ));
                         } else {
-                            let expr_str = if let Some(callable_item_expr) =
+                            // Deref coercion at a slice-view initializer: when the
+                            // local is `&[u8]`/`&str` (lowered to a `std::span` /
+                            // `std::string_view` value) but the initializer yields
+                            // `&T` with `T: Deref<Target=[u8]>` (e.g. `let bytes:
+                            // &[u8] = tag_ref` where `Tag(Box<[u8]>): Deref`), emit
+                            // the `*` deref so the view is constructed from the
+                            // target slice rather than copy-constructing the
+                            // (often move-only) wrapper.
+                            let deref_coerced = if decl_ref_lowers_to_value {
+                                self.try_emit_reference_coercion_for_expected_option_inner(
+                                    &init.expr,
+                                    &resolved_ty,
+                                )
+                            } else {
+                                None
+                            };
+                            let expr_str = if let Some(coerced) = deref_coerced {
+                                coerced
+                            } else if let Some(callable_item_expr) =
                                 self.emit_callable_path_item_expr(&init.expr)
                             {
                                 callable_item_expr
