@@ -1,5 +1,31 @@
 use super::*;
 
+/// Replaces every bare `Type::Path` whose single-segment identifier equals
+/// `from` with the type `to` (used to substitute an assoc-bound impl generic
+/// `A` with `<SelfParam as Iterator>::Item`).
+struct TypeIdentReplacer {
+    from: String,
+    to: syn::Type,
+}
+
+impl syn::visit_mut::VisitMut for TypeIdentReplacer {
+    fn visit_type_mut(&mut self, ty: &mut syn::Type) {
+        if let syn::Type::Path(tp) = ty
+            && tp.qself.is_none()
+            && tp
+                .path
+                .get_ident()
+                .map(|i| i.to_string())
+                .as_deref()
+                == Some(self.from.as_str())
+        {
+            *ty = self.to.clone();
+            return;
+        }
+        syn::visit_mut::visit_type_mut(self, ty);
+    }
+}
+
 impl CodeGen {
     pub(super) fn collect_struct_enum_items_recursive<'a>(
         items: &'a [syn::Item],
@@ -2455,10 +2481,140 @@ impl CodeGen {
         }
     }
 
+    /// An impl generic that is NOT a parameter of the self type but is fixed by
+    /// a `where SelfParam: Iterator<Item = A>` bound is `SelfParam::Item`, not a
+    /// free parameter. Left alone, the transpiler promotes `A` as a spurious
+    /// `template<typename A>` onto every method (breaking trait-override shapes)
+    /// and leaves `using Item = (A, A)` referencing an undeclared `A`. Rewrite
+    /// the impl so `A` is replaced by `<SelfParam as Iterator>::Item` (which maps
+    /// to `associated_item_t<SelfParam>`) in the assoc types, method signatures,
+    /// and where-clause, and drop `A` from the impl generics. Method BODIES are
+    /// deliberately left untouched so a body-local `type X<A> = ..` that reuses
+    /// the name `A` keeps its own (shadowing) generic parameter.
+    pub(super) fn normalize_impl_assoc_bound_generics(
+        &self,
+        imp: &syn::ItemImpl,
+    ) -> Option<syn::ItemImpl> {
+        let impl_type_params: std::collections::HashSet<String> = imp
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        if impl_type_params.is_empty() {
+            return None;
+        }
+        let mut self_idents = std::collections::HashSet::new();
+        Self::collect_type_referenced_idents(&imp.self_ty, &mut self_idents);
+        let wc = imp.generics.where_clause.as_ref()?;
+        let mut subs: Vec<(String, syn::Type)> = Vec::new();
+        for pred in &wc.predicates {
+            let syn::WherePredicate::Type(pt) = pred else {
+                continue;
+            };
+            let syn::Type::Path(bounded) = &pt.bounded_ty else {
+                continue;
+            };
+            let Some(x_name) = bounded.path.get_ident().map(|i| i.to_string()) else {
+                continue;
+            };
+            if !self_idents.contains(&x_name) {
+                continue;
+            }
+            for bound in &pt.bounds {
+                let syn::TypeParamBound::Trait(tb) = bound else {
+                    continue;
+                };
+                let Some(last) = tb.path.segments.last() else {
+                    continue;
+                };
+                if last.ident != "Iterator" {
+                    continue;
+                }
+                let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                    continue;
+                };
+                for a in &args.args {
+                    let syn::GenericArgument::AssocType(at) = a else {
+                        continue;
+                    };
+                    if at.ident != "Item" {
+                        continue;
+                    }
+                    let syn::Type::Path(item_tp) = &at.ty else {
+                        continue;
+                    };
+                    let Some(p_name) = item_tp.path.get_ident().map(|i| i.to_string()) else {
+                        continue;
+                    };
+                    if impl_type_params.contains(&p_name)
+                        && !self_idents.contains(&p_name)
+                        && !subs.iter().any(|(n, _)| n == &p_name)
+                        && let Ok(proj) = syn::parse_str::<syn::Type>(&format!(
+                            "<{} as Iterator>::Item",
+                            x_name
+                        ))
+                    {
+                        subs.push((p_name, proj));
+                    }
+                }
+            }
+        }
+        if subs.is_empty() {
+            return None;
+        }
+        let sub_names: std::collections::HashSet<String> =
+            subs.iter().map(|(n, _)| n.clone()).collect();
+        let mut rewritten = imp.clone();
+        for (from, to) in &subs {
+            let mut rep = TypeIdentReplacer {
+                from: from.clone(),
+                to: to.clone(),
+            };
+            for it in &mut rewritten.items {
+                match it {
+                    syn::ImplItem::Type(t) => rep.visit_type_mut(&mut t.ty),
+                    syn::ImplItem::Fn(f) => {
+                        for input in &mut f.sig.inputs {
+                            if let syn::FnArg::Typed(pt) = input {
+                                rep.visit_type_mut(&mut pt.ty);
+                            }
+                        }
+                        if let syn::ReturnType::Type(_, ty) = &mut f.sig.output {
+                            rep.visit_type_mut(ty);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(wc) = &mut rewritten.generics.where_clause {
+                for pred in &mut wc.predicates {
+                    rep.visit_where_predicate_mut(pred);
+                }
+            }
+        }
+        rewritten.generics.params = rewritten
+            .generics
+            .params
+            .into_iter()
+            .filter(|p| match p {
+                syn::GenericParam::Type(tp) => !sub_names.contains(&tp.ident.to_string()),
+                _ => true,
+            })
+            .collect();
+        Some(rewritten)
+    }
+
     pub(super) fn collect_impl_blocks(&mut self, items: &[syn::Item], module_path: &[String]) {
         for item in items {
             match item {
                 syn::Item::Impl(impl_block) => {
+                    let normalized_impl = self.normalize_impl_assoc_bound_generics(impl_block);
+                    let impl_block: &syn::ItemImpl =
+                        normalized_impl.as_ref().unwrap_or(impl_block);
                     if Self::impl_self_type_path(impl_block.self_ty.as_ref()).is_none() {
                         // Self type isn't a path (e.g. `impl Trait for [T; N]`).
                         // We can't key these in `impl_blocks` (which is keyed by
