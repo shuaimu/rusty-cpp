@@ -11203,6 +11203,93 @@ impl CodeGen {
         }
         let variant_name = path.segments.last()?.ident.to_string();
 
+        // RUNTIME Either (a std::variant alias — no static Left/Right):
+        // `Either::Left(x)` with a resolvable expected `Either<A, B>`
+        // constructs through the runtime factory, both sides explicit
+        // (`Either_Left<A, B>` carries both params, so a single payload
+        // can't deduce the other side). at_most_one's
+        // `ExactlyOneError::new_(Some(Either::Left([first, second])), ..)`
+        // — the call-arg sibling of the match-level recovery in
+        // emit_runtime_match_expr.
+        if matches!(variant_name.as_str(), "Left" | "Right")
+            && call.args.len() == 1
+            && (path.segments.len() == 1
+                || path
+                    .segments
+                    .iter()
+                    .nth_back(1)
+                    .is_some_and(|seg| seg.ident == "Either"))
+            // Only for the RUNTIME Either (a dep/preamble alias). A crate that
+            // DECLARES its own Either data enum (the either crate itself) must
+            // keep the local data-enum construction path — the runtime factory
+            // returns rusty::Either_Left, which doesn't convert to a local
+            // struct-wrapper Either.
+            && !self
+                .local_declared_types
+                .iter()
+                .any(|decl| decl == "Either" || decl.ends_with("::Either"))
+        {
+            let expected_peeled = self.peel_reference_paren_group_type(expected_ty);
+            if let syn::Type::Path(tp) = expected_peeled
+                && tp.path.segments.last().is_some_and(|seg| seg.ident == "Either")
+                && let Some(syn::PathArguments::AngleBracketed(ab)) =
+                    tp.path.segments.last().map(|seg| &seg.arguments)
+            {
+                let arg_tys: Vec<&syn::Type> = ab
+                    .args
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        syn::GenericArgument::Type(ty) => Some(ty),
+                        _ => None,
+                    })
+                    .collect();
+                if arg_tys.len() == 2 {
+                    let a0 = self.map_type(arg_tys[0]);
+                    let a1 = self.map_type(arg_tys[1]);
+                    let viable = |t: &str| {
+                        t != "auto"
+                            && !t.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(t)
+                    };
+                    if viable(&a0) && viable(&a1) {
+                        let payload_expected = if variant_name == "Left" {
+                            arg_tys[0]
+                        } else {
+                            arg_tys[1]
+                        };
+                        let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                            call.args.first()?,
+                            Some(payload_expected),
+                        );
+                        return Some(format!(
+                            "rusty::either::{}<{}, {}>({})",
+                            variant_name, a0, a1, arg
+                        ));
+                    }
+                }
+            }
+            // Expected doesn't resolve both Either sides (or isn't an Either
+            // at all — a mis-threaded hint like the match scrutinee's
+            // `Option<Self::Item>`): construct through the DEFERRED one-sided
+            // factory. `rusty::either::Left(x)` carries the payload and
+            // converts to Either<L, R2> at the point where C++ knows the
+            // destination — always correct, unlike the member-style
+            // `rusty::Either::Left(x)` fallthrough (no static Left on a
+            // std::variant alias).
+            let owner_is_either = path
+                .segments
+                .iter()
+                .nth_back(1)
+                .is_some_and(|seg| seg.ident == "Either");
+            if owner_is_either {
+                let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    call.args.first()?,
+                    None,
+                );
+                return Some(format!("rusty::either::{}({})", variant_name, arg));
+            }
+        }
+
         if let Some(expected_enum) = self.expected_data_enum_name(expected_ty) {
             if !self.enum_has_variant_name(&expected_enum, &variant_name) {
                 return None;

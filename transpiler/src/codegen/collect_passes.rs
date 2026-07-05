@@ -3,9 +3,9 @@ use super::*;
 /// Replaces every bare `Type::Path` whose single-segment identifier equals
 /// `from` with the type `to` (used to substitute an assoc-bound impl generic
 /// `A` with `<SelfParam as Iterator>::Item`).
-struct TypeIdentReplacer {
-    from: String,
-    to: syn::Type,
+pub(super) struct TypeIdentReplacer {
+    pub(super) from: String,
+    pub(super) to: syn::Type,
 }
 
 impl syn::visit_mut::VisitMut for TypeIdentReplacer {

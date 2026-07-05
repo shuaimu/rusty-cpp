@@ -456,7 +456,31 @@ impl CodeGen {
         let mapped = if Self::is_plain_self_type(ty) {
             self_cpp_ty.to_string()
         } else {
-            self.map_type(ty)
+            // A NESTED `Self` — adaptor-returning Itertools signatures like
+            // `fn permutations(self, k) -> Permutations<Self>` — maps to an
+            // `auto` placeholder through the generic path, which made the
+            // UFCS emitter skip 57 of itertools' 136 extension methods
+            // ("unresolved signature placeholder"). Substitute the concrete
+            // self spelling into the syn type first whenever it parses as a
+            // type (always true for the default-method `Self_` template
+            // param, and for concrete impl types like `rusty::Vec<T>`).
+            let self_substituted = if self_cpp_ty.is_empty() {
+                None
+            } else {
+                syn::parse_str::<syn::Type>(self_cpp_ty).ok().map(|self_syn| {
+                    let mut cloned = ty.clone();
+                    let mut replacer = super::collect_passes::TypeIdentReplacer {
+                        from: "Self".to_string(),
+                        to: self_syn,
+                    };
+                    syn::visit_mut::VisitMut::visit_type_mut(&mut replacer, &mut cloned);
+                    cloned
+                })
+            };
+            match &self_substituted {
+                Some(substituted) => self.map_type(substituted),
+                None => self.map_type(ty),
+            }
         };
         let rewritten = self.rewrite_extension_self_assoc_cpp_type(
             mapped,

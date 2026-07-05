@@ -1011,13 +1011,23 @@ impl CodeGen {
             );
         }
         let mut expected = expected?;
+        let mut owner_substitutions_applied = false;
         if let Some(substitutions) =
             self.owner_segment_type_arg_substitutions(&path_expr.path, owner_seg_idx)
         {
+            owner_substitutions_applied = !substitutions.is_empty();
             expected = self.substitute_type_params_in_type(&expected, &substitutions);
         }
+        // A SUBSTITUTED expected that mentions in-scope params is the POINT
+        // of the substitution (`ExactlyOneError<Self_>::new_`'s param becomes
+        // `Option<Either<[Self_::Item; 2], Self_>>`) — recovering over it
+        // replaces the authoritative signature type with a heuristic guess
+        // (exactly_one's ctor arg got the match scrutinee's
+        // `Option<Self::Item>` instead). Only UNSUBSTITUTED expecteds recover
+        // on the in-scope-param signal.
         let expected_needs_owner_recovery = self.type_contains_infer(&expected)
-            || self.type_contains_in_scope_type_param(&expected)
+            || (!owner_substitutions_applied
+                && self.type_contains_in_scope_type_param(&expected))
             || self.type_contains_unbound_single_letter_generic(&expected)
             || matches!(
                 self.peel_reference_paren_group_type(&expected),

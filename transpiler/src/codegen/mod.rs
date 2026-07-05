@@ -10405,8 +10405,35 @@ impl CodeGen {
             }
             match self.local_type_module_path.get(type_name) {
                 Some(existing) if existing != &escaped_path => {
-                    self.local_type_module_path
-                        .insert(type_name.to_string(), String::new());
+                    // Prefer-ancestor: `duplicates_impl` declares
+                    // `pub type DuplicatesBy = private::DuplicatesBy<..>`
+                    // wrapping the struct in its own private child — one path
+                    // being a strict prefix of the other isn't genuine
+                    // ambiguity. The ancestor's name is the visible/canonical
+                    // spelling (the child is implementation detail), so keep
+                    // it; only UNRELATED modules blank the entry.
+                    fn is_strict_child(child: &str, ancestor: &str) -> bool {
+                        child.len() > ancestor.len() + 2
+                            && child.starts_with(ancestor)
+                            && child.as_bytes()[ancestor.len()] == b':'
+                            && child.as_bytes()[ancestor.len() + 1] == b':'
+                    }
+                    let existing = existing.clone();
+                    if !existing.is_empty()
+                        && !escaped_path.is_empty()
+                        && is_strict_child(&escaped_path, &existing)
+                    {
+                        // existing is the ancestor — keep it.
+                    } else if !existing.is_empty()
+                        && !escaped_path.is_empty()
+                        && is_strict_child(&existing, &escaped_path)
+                    {
+                        self.local_type_module_path
+                            .insert(type_name.to_string(), escaped_path);
+                    } else {
+                        self.local_type_module_path
+                            .insert(type_name.to_string(), String::new());
+                    }
                 }
                 Some(_) => {}
                 None => {
@@ -16860,6 +16887,22 @@ impl CodeGen {
         self.pop_type_param_scope();
         self.in_forward_decl_signature = prev_forward_decl_signature;
         if signature_has_unresolved_placeholder {
+            if std::env::var_os("RUSTY_CPP_DBG_UFCS_SKIP").is_some() {
+                let offending: Vec<String> = params
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(return_type.clone()))
+                    .filter(|ty| {
+                        ty.contains("/* TODO")
+                            || type_string_has_auto_placeholder(ty)
+                            || self.mapped_assoc_type_contains_unbound_placeholder(ty)
+                    })
+                    .collect();
+                eprintln!(
+                    "[ufcs-skip] {} offending={:?}",
+                    method_name, offending
+                );
+            }
             self.writeln(&format!(
                 "// Rust-only extension method skipped (unresolved signature placeholder): {}",
                 method_name
@@ -16953,7 +16996,41 @@ impl CodeGen {
         // exactly as it bridges to a concrete self type otherwise.
         self.writeln("using Self = std::remove_reference_t<decltype(self_)>;");
         self.push_return_value_scope(&return_type);
-        self.push_return_type_hint(&method.sig.output);
+        // Push the hint in the free fn's own type language: `Self` IS the
+        // `Self_` template param here. Substituting before the push lets
+        // downstream expected-type threading (nested-match lambda
+        // annotations, ctor-arg expected lookups) SPELL the type —
+        // `Result<Self_::Item, ExactlyOneError<Self_>>` — instead of bailing
+        // on an unresolvable `Self::Item` projection and falling back to
+        // arm-type inference (which invented `ExactlyOneError<rusty::None>`
+        // for exactly_one).
+        let hint_output = if method_spec.self_is_template_param {
+            // Rename Self AS A PATH SEGMENT too (`Self::Item` → `Self_::Item`)
+            // — TypeIdentReplacer only matches whole single-ident paths, and a
+            // leftover `Self` token makes the downstream annotation mapping
+            // bail (mapped_assoc_type_contains_unbound_placeholder flags the
+            // literal token), handing nested matches to arm-type inference.
+            struct SelfSegmentRenamer;
+            impl syn::visit_mut::VisitMut for SelfSegmentRenamer {
+                fn visit_type_path_mut(&mut self, tp: &mut syn::TypePath) {
+                    if tp.qself.is_none()
+                        && let Some(first) = tp.path.segments.first_mut()
+                        && first.ident == "Self"
+                    {
+                        first.ident = syn::Ident::new("Self_", first.ident.span());
+                    }
+                    syn::visit_mut::visit_type_path_mut(self, tp);
+                }
+            }
+            let mut out = method.sig.output.clone();
+            if let syn::ReturnType::Type(_, ty) = &mut out {
+                syn::visit_mut::VisitMut::visit_type_mut(&mut SelfSegmentRenamer, ty);
+            }
+            out
+        } else {
+            method.sig.output.clone()
+        };
+        self.push_return_type_hint(&hint_output);
         self.push_param_bindings(&method.sig.inputs);
         self.override_current_param_self_binding_with_type(&method_spec.self_ty, receiver);
         self.push_callable_param_bound_scope(method_spec.callable_param_metadata.clone());
@@ -43352,6 +43429,27 @@ template<typename L, typename R>\n\
 Either_Left<L, R> Left(L _0) { return Either_Left<L, R>{std::forward<L>(_0)}; }\n\
 template<typename L, typename R>\n\
 Either_Right<L, R> Right(R _0) { return Either_Right<L, R>{std::forward<R>(_0)}; }\n\
+// Deferred one-sided constructions: Rust infers the OTHER Either side from\n\
+// the use site, so a bare `Either::Left(x)` can't spell R at construction.\n\
+// These carry the payload and convert to any Either<L, R2> at the point\n\
+// where C++ knows the destination (function argument, return, Option\n\
+// converting constructor, ...).\n\
+template<typename L>\n\
+struct left_value {\n\
+    L __v;\n\
+    template<typename R2>\n\
+    operator Either<L, R2>() && { return Either_Left<L, R2>{std::move(__v)}; }\n\
+};\n\
+template<typename R>\n\
+struct right_value {\n\
+    R __v;\n\
+    template<typename L2>\n\
+    operator Either<L2, R>() && { return Either_Right<L2, R>{std::move(__v)}; }\n\
+};\n\
+template<typename L>\n\
+left_value<L> Left(L _0) { return {std::forward<L>(_0)}; }\n\
+template<typename R>\n\
+right_value<R> Right(R _0) { return {std::forward<R>(_0)}; }\n\
 }\n\
 // Display-oriented conversion helper used by format_args lowering.\n\
 template<typename T>\n\

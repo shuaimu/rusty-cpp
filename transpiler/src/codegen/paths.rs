@@ -871,6 +871,23 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
         result_segments.join("::")
     }
 
+    /// escape_and_rename_qualified_name for SYMBOL paths (types, fns, enum
+    /// variants): module renames apply to every segment EXCEPT the last — a
+    /// symbol path never ENDS at a module, so renaming the tail corrupts a
+    /// fn that shares its module's name (itertools `adaptors::coalesce(it, f)`
+    /// — fn `coalesce` glob-re-exported from module `coalesce`, which is
+    /// renamed to `coalesce_tests`; the CALL must keep the fn segment).
+    pub(super) fn escape_and_rename_qualified_symbol_path(&self, path: &str) -> String {
+        let segments: Vec<&str> = path.split("::").collect();
+        if segments.len() <= 1 {
+            return self.escape_and_rename_qualified_name(path);
+        }
+        let (last, prefix_segments) = segments.split_last().unwrap();
+        let prefix = prefix_segments.join("::");
+        let renamed_prefix = self.escape_and_rename_qualified_name(&prefix);
+        format!("{}::{}", renamed_prefix, escape_cpp_keyword(last))
+    }
+
     pub(super) fn normalize_impl_method_receiver_for_reference_self(
         method: &mut syn::ImplItemFn,
         impl_self_ty: &syn::Type,
@@ -2742,7 +2759,9 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             force_leading_colon = true;
         }
         if segments.len() > 1 {
-            let mut emitted = self.escape_and_rename_qualified_name(&joined);
+            // Symbol paths (this is expr/type position — a Rust path here
+            // never ENDS at a module): don't module-rename the tail segment.
+            let mut emitted = self.escape_and_rename_qualified_symbol_path(&joined);
             if force_leading_colon && !emitted.is_empty() && !emitted.starts_with("::") {
                 emitted = format!("::{}", emitted);
             }
