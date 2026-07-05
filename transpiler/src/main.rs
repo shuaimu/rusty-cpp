@@ -4297,6 +4297,19 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
                 && transpile_options.cross_file_type_aliases.is_empty(),
             "parity transpile assumes empty cross_file_* (syn) fields"
         );
+        // The crate's own LIB is a dependency of its test/bench targets — its
+        // UFCS trait manifest (e.g. the Itertools extension methods) must be
+        // consumable by them, or the tests' method calls never classify as
+        // trait calls and emit as members of runtime iterator types
+        // ("no member named 'tuple_windows' in 'rusty::slice_iter::Iter'").
+        // The lib transpiles earlier in this same loop (targets order puts
+        // Lib first; default sequential), so its manifest is on disk by the
+        // time the test targets transpile.
+        let root_lib_manifest_path: Option<std::path::PathBuf> = targets
+            .iter()
+            .find(|t| matches!(t.kind, metadata::TargetKind::Lib))
+            .and_then(|lib| target_dirs.get(&lib.module_name))
+            .map(|dir| dir.join("ufcs-traits.json"));
         let transpile_one = |target: &metadata::CrateTarget,
                              source: &str|
          -> Result<(Option<GeneratedCppmArtifact>, String), String> {
@@ -4362,12 +4375,20 @@ fn run_parity_test(args: &ParityTestArgs) -> Result<(), String> {
             // (book § 3.2.7): the target consumes every dependency's trait
             // manifest so calls to a dependency's trait methods classify +
             // module-qualify (`<dep>::<Tr>_::m`).
+            let mut dependency_ufcs_trait_manifests = ufcs_dep_manifest_paths.clone();
+            if !matches!(target.kind, metadata::TargetKind::Lib)
+                && let Some(lib_manifest) = root_lib_manifest_path.as_ref()
+                && lib_manifest.exists()
+                && !dependency_ufcs_trait_manifests.contains(lib_manifest)
+            {
+                dependency_ufcs_trait_manifests.push(lib_manifest.clone());
+            }
             let target_options = transpile::TranspileOptions {
                 by_value_cycle_breaking_prototype: opt_by_value,
                 cpp_module_symbol_index: opt_cpp_index.clone(),
                 cpp_module_symbol_index_sources: opt_cpp_index_sources.clone(),
                 external_crate_module_aliases: flattened_dependency_aliases.clone(),
-                dependency_ufcs_trait_manifests: ufcs_dep_manifest_paths.clone(),
+                dependency_ufcs_trait_manifests,
                 emit_ufcs_trait_manifest_path: Some(target_dir.join("ufcs-traits.json")),
                 use_import_std_in_modules: opt_import_std,
                 prefer_rusty_unit_alias: opt_prefer_unit,
