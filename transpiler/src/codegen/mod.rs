@@ -40946,9 +40946,16 @@ impl CodeGen {
         inputs: &syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
         output: &syn::ReturnType,
     ) -> Vec<String> {
-        let syn::ReturnType::Type(_, ret_ty) = output else {
-            return Vec::new();
-        };
+        // C++ deduces fn-level type params only from the INPUTS. A param
+        // absent from every input is undeducible at any call site — whether
+        // it appears in the return type (classic return-position inference)
+        // or only in bounds/body (`fn no_collect_test<A, T>(to_adaptor: T)
+        // where T: FnOnce(..) -> A` — Rust infers A from T's return; clang:
+        // "couldn't infer template argument 'A'"). The sole consumer
+        // (deduced_callable_return_type_aliases_for_function) still only
+        // materializes an alias when a callable bound actually RETURNS the
+        // param, so broadening the candidate set here is contained.
+        let _ = output;
         generics
             .params
             .iter()
@@ -40958,9 +40965,7 @@ impl CodeGen {
                     if self.is_type_param_in_scope(&name) {
                         return None;
                     }
-                    if self.type_mentions_named_type_param(ret_ty, &name)
-                        && !self.function_inputs_reference_named_type_param(inputs, &name)
-                    {
+                    if !self.function_inputs_reference_named_type_param(inputs, &name) {
                         Some(name)
                     } else {
                         None

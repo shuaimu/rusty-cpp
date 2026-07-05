@@ -102,6 +102,42 @@ impl CodeGen {
                 })
                 .collect();
         }
+        // Keep the forward decl's template head in lockstep with the
+        // definition: params replaced by deduced callable-return aliases in
+        // the def (see emit_function) must be dropped here too, or the
+        // decl/def pair diverges and calls go ambiguous/unmatched.
+        {
+            let deduced_alias_names: HashSet<String> = self
+                .deduced_callable_return_type_aliases_for_function(
+                    &f.sig.generics,
+                    &f.sig.inputs,
+                    &f.sig.output,
+                )
+                .into_iter()
+                .filter(|(alias_name, alias_expr)| {
+                    !Self::cpp_type_expr_mentions_identifier(alias_expr, alias_name)
+                })
+                .filter(|(alias_name, _)| match &f.sig.output {
+                    syn::ReturnType::Type(_, ret_ty) => {
+                        !self.type_mentions_named_type_param(ret_ty, alias_name)
+                    }
+                    syn::ReturnType::Default => true,
+                })
+                .map(|(name, _)| name)
+                .collect();
+            if !deduced_alias_names.is_empty() {
+                emitted_generics.params = emitted_generics
+                    .params
+                    .into_iter()
+                    .filter(|param| match param {
+                        syn::GenericParam::Type(tp) => {
+                            !deduced_alias_names.contains(&tp.ident.to_string())
+                        }
+                        _ => true,
+                    })
+                    .collect();
+            }
+        }
 
         self.push_type_param_scope(&f.sig.generics);
         let prev_forward_decl_signature = self.in_forward_decl_signature;
@@ -291,6 +327,45 @@ impl CodeGen {
                 .into_iter()
                 .filter(|param| match param {
                     syn::GenericParam::Type(tp) => tp.ident != param_name,
+                    _ => true,
+                })
+                .collect();
+        }
+        // Undeducible params derivable from a callable bound's return
+        // (`fn no_collect_test<A, T: FnOnce(..) -> A>(to_adaptor: T)`) —
+        // mirror the member emitter: drop them from the template head and
+        // define them as `using A = std::invoke_result_t<…>;` in the body.
+        // ONLY bound-only params: one mentioned in the fn's RETURN TYPE must
+        // stay in the head (the signature spells it; a body-local using can't
+        // reach it — dropping `K` from into_group_map_by's head left its
+        // `HashMap<K, Vec<V>>` return undeclared).
+        let deduced_return_aliases = self
+            .deduced_callable_return_type_aliases_for_function(
+                &f.sig.generics,
+                &f.sig.inputs,
+                &f.sig.output,
+            )
+            .into_iter()
+            .filter(|(alias_name, alias_expr)| {
+                !Self::cpp_type_expr_mentions_identifier(alias_expr, alias_name)
+            })
+            .filter(|(alias_name, _)| match &f.sig.output {
+                syn::ReturnType::Type(_, ret_ty) => {
+                    !self.type_mentions_named_type_param(ret_ty, alias_name)
+                }
+                syn::ReturnType::Default => true,
+            })
+            .collect::<Vec<_>>();
+        if !deduced_return_aliases.is_empty() {
+            let alias_names: HashSet<String> = deduced_return_aliases
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            emitted_generics.params = emitted_generics
+                .params
+                .into_iter()
+                .filter(|param| match param {
+                    syn::GenericParam::Type(tp) => !alias_names.contains(&tp.ident.to_string()),
                     _ => true,
                 })
                 .collect();
@@ -507,6 +582,10 @@ impl CodeGen {
         );
         self.push_type_param_scope(&f.sig.generics);
         self.indent += 1;
+        for (alias_name, alias_ty) in &deduced_return_aliases {
+            let alias_ty = Self::rewrite_private_keyword_namespace_in_type_path(alias_ty);
+            self.writeln(&format!("using {} = {};", alias_name, alias_ty));
+        }
 
         if stub_expanded_async_test_body {
             self.writeln(
