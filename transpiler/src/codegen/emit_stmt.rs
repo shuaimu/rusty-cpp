@@ -720,6 +720,151 @@ impl CodeGen {
         self.return_value_scopes.pop();
     }
 
+    /// partition_result-style recovery: `match r { Ok(v) => Either::Left(v),
+    /// Err(v) => Either::Right(v) }` where the expected `Either<L, R>`
+    /// carries the CALLEE's generics (partition_map's `F: FnMut(..) ->
+    /// Either<L, R>`), unbound at this site — Rust unifies them from the arm
+    /// payloads. Mirror that unification in C++: each Either side is the
+    /// scrutinee payload's decltype (`unwrap()` for the Ok arm, `unwrap_err()`
+    /// for Err), placed at the slot of the variant the arm constructs
+    /// (Left = 0, Right = 1, definitional for the runtime Either). Returns
+    /// (arg0, arg1, per-arm (variant, binding) factory overrides).
+    #[allow(clippy::type_complexity)]
+    fn runtime_match_unbound_either_recovery(
+        &self,
+        match_expr: &syn::ExprMatch,
+        runtime_match_expected: Option<&syn::Type>,
+        scrutinee: &str,
+    ) -> Option<(String, String, HashMap<usize, (String, String)>)> {
+        macro_rules! reject {
+            ($tag:expr) => {{
+                if std::env::var_os("RUSTY_CPP_DBG_EITHER").is_some() {
+                    use quote::ToTokens;
+                    eprintln!(
+                        "[either-rec] reject={} expected={:?}",
+                        $tag,
+                        runtime_match_expected.map(|t| t.to_token_stream().to_string())
+                    );
+                }
+                return None;
+            }};
+        }
+        let Some(expected) = runtime_match_expected else {
+            reject!("no-expected")
+        };
+        let expected_peeled = self.peel_reference_paren_group_type(expected);
+        let syn::Type::Path(tp) = expected_peeled else {
+            reject!("not-path")
+        };
+        let last = tp.path.segments.last()?;
+        if last.ident != "Either" {
+            return None;
+        }
+        // Accept a 2-arg or ARGLESS `Either` expected type (an upstream pass
+        // can strip unresolved args to a bare `Either`). Arg boundness is
+        // irrelevant: whenever the arm shape below matches, the decltype
+        // slots equal the Rust-unified sides, so the factory construction is
+        // correct for bound args too (and the pre-recovery emission —
+        // `rusty::Either<..>::Left(..)` on the variant alias — never was).
+        let arg_count = match &last.arguments {
+            syn::PathArguments::None => 0usize,
+            syn::PathArguments::AngleBracketed(ab) => ab
+                .args
+                .iter()
+                .filter(|arg| matches!(arg, syn::GenericArgument::Type(_)))
+                .count(),
+            syn::PathArguments::Parenthesized(_) => reject!("paren-args"),
+        };
+        if arg_count != 0 && arg_count != 2 {
+            reject!("arg-count")
+        }
+        if match_expr.arms.len() != 2 {
+            reject!("arm-count")
+        }
+        let mut arm_factory: HashMap<usize, (String, String)> = HashMap::new();
+        let mut slots: [Option<String>; 2] = [None, None];
+        for (idx, arm) in match_expr.arms.iter().enumerate() {
+            if arm.guard.is_some() {
+                reject!("arm-guard")
+            }
+            let syn::Pat::TupleStruct(ts) = &arm.pat else {
+                reject!("pat-not-tuplestruct")
+            };
+            if ts.elems.len() != 1 {
+                reject!("pat-elems")
+            }
+            let syn::Pat::Ident(binding) = &ts.elems[0] else {
+                reject!("pat-binding")
+            };
+            if binding.by_ref.is_some() || binding.subpat.is_some() {
+                reject!("pat-binding-mods")
+            }
+            let unwrap_method = match ts
+                .path
+                .segments
+                .last()?
+                .ident
+                .to_string()
+                .as_str()
+            {
+                "Ok" => "unwrap",
+                "Err" => "unwrap_err",
+                _ => reject!("pat-variant"),
+            };
+            let Some(body_expr) = self.extract_value_expr(&arm.body) else {
+                reject!("body-extract")
+            };
+            let syn::Expr::Call(call) = self.peel_paren_group_expr(body_expr) else {
+                reject!("body-not-call")
+            };
+            let syn::Expr::Path(func_path) = call.func.as_ref() else {
+                reject!("body-func")
+            };
+            let ctor_variant = func_path.path.segments.last()?.ident.to_string();
+            let slot = match ctor_variant.as_str() {
+                "Left" => 0usize,
+                "Right" => 1usize,
+                _ => reject!("body-variant"),
+            };
+            if func_path.path.segments.len() >= 2
+                && func_path
+                    .path
+                    .segments
+                    .iter()
+                    .nth_back(1)
+                    .is_some_and(|seg| seg.ident != "Either")
+            {
+                reject!("body-owner")
+            }
+            if call.args.len() != 1 {
+                reject!("body-args")
+            }
+            let syn::Expr::Path(arg_path) = self.peel_paren_group_expr(call.args.first()?) else {
+                reject!("body-arg-not-binding")
+            };
+            if arg_path.path.segments.len() != 1
+                || arg_path.path.segments[0].ident != binding.ident
+            {
+                reject!("body-arg-mismatch")
+            }
+            if slots[slot].is_some() {
+                reject!("slot-dup")
+            }
+            slots[slot] = Some(format!(
+                "std::remove_cvref_t<decltype(std::as_const(rusty::detail::deref_if_pointer({})).{}())>",
+                scrutinee, unwrap_method
+            ));
+            arm_factory.insert(
+                idx,
+                (ctor_variant, binding.ident.to_string()),
+            );
+        }
+        let (Some(arg0), Some(arg1)) = (slots[0].take(), slots[1].take()) else {
+            reject!("slot-missing")
+        };
+        Some((arg0, arg1, arm_factory))
+    }
+
     pub(super) fn emit_runtime_match_expr(
         &self,
         match_expr: &syn::ExprMatch,
@@ -842,6 +987,22 @@ impl CodeGen {
         } else {
             self.emit_expr_to_string(&match_expr.expr)
         };
+        // Unbound-Either recovery: resolve `Either<L, R>` (callee generics)
+        // from the scrutinee payload decltypes; overrides the annotation and
+        // the matched arms' constructions below.
+        let either_recovery = self.runtime_match_unbound_either_recovery(
+            match_expr,
+            runtime_match_expected,
+            &scrutinee,
+        );
+        let either_resolved_ty = either_recovery
+            .as_ref()
+            .map(|(arg0, arg1, _)| format!("rusty::Either<{}, {}>", arg0, arg1));
+        let runtime_match_return_annotation = if let Some(resolved) = &either_resolved_ty {
+            format!(" -> {}", resolved)
+        } else {
+            runtime_match_return_annotation
+        };
         let mut out = format!(
             "[&](){} {{ auto&& _m = {}; ",
             runtime_match_return_annotation, scrutinee
@@ -916,7 +1077,23 @@ impl CodeGen {
                             out.push_str(&stmt);
                             out.push(' ');
                         }
-                        let body = {
+                        let body = if let Some((arg0, arg1, arm_factory)) = &either_recovery
+                            && let Some((ctor_variant, binding_ident)) = arm_factory.get(&idx)
+                        {
+                            // Resolved-Either arm: construct through the
+                            // runtime factory with both sides explicit
+                            // (`Either_Left<A,B>` carries both params, so a
+                            // single payload can't deduce them); the value
+                            // converts into the lambda's variant return type.
+                            let binding_cpp = binding_map
+                                .get(binding_ident)
+                                .cloned()
+                                .unwrap_or_else(|| escape_cpp_keyword(binding_ident));
+                            format!(
+                                "rusty::either::{}<{}, {}>(std::move({}))",
+                                ctor_variant, arg0, arg1, binding_cpp
+                            )
+                        } else {
                             let emitted = self
                                 .emit_expr_with_try_style_binding_scope_with_ref_mode(
                                     &arm.body,
@@ -1413,7 +1590,14 @@ impl CodeGen {
             return None;
         }
 
-        if let Some(expected) = runtime_match_expected {
+        if let Some(resolved) = &either_resolved_ty {
+            // The generic fallback maps the (unresolved) expected type — use
+            // the recovery's resolved spelling instead.
+            out.push_str(&format!(
+                "return [&]() -> {} {{ rusty::intrinsics::unreachable(); }}(); }}()",
+                resolved
+            ));
+        } else if let Some(expected) = runtime_match_expected {
             if runtime_match_return_annotation.is_empty() {
                 out.push_str("rusty::intrinsics::unreachable(); }()");
             } else {
