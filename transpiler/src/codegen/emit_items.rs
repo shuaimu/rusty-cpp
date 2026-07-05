@@ -354,6 +354,12 @@ impl CodeGen {
         let renamed_local_types_block =
             self.rename_colliding_local_hoist_types_in_fn_block(&f.block);
         let fn_block: &syn::Block = renamed_local_types_block.as_ref().unwrap_or(&f.block);
+        // Fn-local `use` aliases referenced from items that may be HOISTED to
+        // namespace scope (a hoisted Drop impl's `Ordering::Relaxed`) die with
+        // the fn scope — inline them into local item stmts as full Rust paths
+        // before hoist processing so the normal mapping qualifies them.
+        let alias_inlined_block = self.inline_local_use_aliases_into_block_items(fn_block);
+        let fn_block: &syn::Block = alias_inlined_block.as_ref().unwrap_or(fn_block);
         let hoisted_local_enums = self.collect_hoistable_local_enums_in_block(fn_block);
         let outer_function_params = Self::generic_type_or_const_param_names(&f.sig.generics);
         let mut hoisted_local_generic_structs =
@@ -384,15 +390,41 @@ impl CodeGen {
             .collect();
         hoisted_local_type_names.extend(hoisted_local_enums.iter().map(|e| e.ident.to_string()));
         hoisted_local_type_names.extend(hoisted_local_aliases.iter().map(|t| t.ident.to_string()));
+        // A hoisted type's impls may reference fn-local statics (TrackedDrop's
+        // Drop counts into `static DROPPED`) — a C++ fn-local static isn't
+        // visible at namespace scope, so hoist the static alongside the type
+        // (emitted BEFORE the type: its definition appears in inline method
+        // bodies). Name collisions at namespace scope are skipped (left
+        // fn-local as before).
+        let hoisted_local_statics: Vec<syn::ItemStatic> = if hoisted_local_type_names.is_empty() {
+            Vec::new()
+        } else {
+            Self::collect_hoistable_local_statics_for_hoisted_types(
+                fn_block,
+                &hoisted_local_type_names,
+            )
+            .into_iter()
+            .filter(|s| !self.declared_item_names.contains(&s.ident.to_string()))
+            .collect()
+        };
+        let hoisted_local_static_names: HashSet<String> = hoisted_local_statics
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
         if !hoisted_local_type_names.is_empty() {
             // Hoisted types genuinely live at namespace scope from here on —
             // register them as declared items so an accompanying trait impl
             // routes through the local-host path instead of the orphan stub.
             self.declared_item_names
                 .extend(hoisted_local_type_names.iter().cloned());
+            self.declared_item_names
+                .extend(hoisted_local_static_names.iter().cloned());
             self.push_type_param_scope(&f.sig.generics);
             self.hoisted_local_type_name_scopes
                 .push(hoisted_local_type_names.clone());
+            for hoisted_static in &hoisted_local_statics {
+                self.emit_static(hoisted_static);
+            }
             self.emit_hoisted_local_generic_type_aliases(&hoisted_local_aliases);
             self.emit_hoisted_local_enums_for_block(fn_block, &hoisted_local_enums);
             self.emit_hoisted_local_generic_structs_for_block(
@@ -405,10 +437,23 @@ impl CodeGen {
         let filtered_function_block = if hoisted_local_type_names.is_empty() {
             None
         } else {
-            Some(self.strip_hoisted_local_generic_struct_items_from_block(
+            let mut filtered = self.strip_hoisted_local_generic_struct_items_from_block(
                 fn_block,
                 &hoisted_local_type_names,
-            ))
+            );
+            // The hoisted statics now live at namespace scope; drop their
+            // fn-local definitions so the body references the hoisted object
+            // (a shadowing local would silently split the state in two).
+            if !hoisted_local_static_names.is_empty() {
+                filtered.stmts.retain(|stmt| {
+                    !matches!(
+                        stmt,
+                        syn::Stmt::Item(syn::Item::Static(s))
+                            if hoisted_local_static_names.contains(&s.ident.to_string())
+                    )
+                });
+            }
+            Some(filtered)
         };
         let block_for_emission = filtered_function_block.as_ref().unwrap_or(fn_block);
 

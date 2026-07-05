@@ -5364,6 +5364,154 @@ impl CodeGen {
         names
     }
 
+    /// Inline fn-local `use` aliases into the block's ITEM stmts as full Rust
+    /// paths. A hoisted local item (struct/impl/static) is emitted at
+    /// namespace scope, where the fn-local `using` lines don't reach — a
+    /// hoisted Drop impl's `Ordering::Relaxed` (via `use std::sync::atomic::
+    /// Ordering;`) would be undeclared there. Rewriting to the full Rust path
+    /// (`std::sync::atomic::Ordering::Relaxed`) lets the normal path mapping
+    /// produce the qualified C++ spelling. Only multi-segment paths are
+    /// rewritten (single idents resolve through the type mapper already), and
+    /// only inside item stmts — plain statements keep using the local
+    /// `using`s. Returns None when the block has no local use-aliases.
+    pub(super) fn inline_local_use_aliases_into_block_items(
+        &self,
+        block: &syn::Block,
+    ) -> Option<syn::Block> {
+        fn collect_use_aliases(
+            tree: &syn::UseTree,
+            prefix: &mut Vec<syn::Ident>,
+            out: &mut HashMap<String, Vec<syn::Ident>>,
+        ) {
+            match tree {
+                syn::UseTree::Path(p) => {
+                    prefix.push(p.ident.clone());
+                    collect_use_aliases(&p.tree, prefix, out);
+                    prefix.pop();
+                }
+                syn::UseTree::Name(n) => {
+                    let mut full = prefix.clone();
+                    full.push(n.ident.clone());
+                    out.insert(n.ident.to_string(), full);
+                }
+                syn::UseTree::Rename(r) => {
+                    let mut full = prefix.clone();
+                    full.push(r.ident.clone());
+                    out.insert(r.rename.to_string(), full);
+                }
+                syn::UseTree::Group(g) => {
+                    for item in &g.items {
+                        collect_use_aliases(item, prefix, out);
+                    }
+                }
+                syn::UseTree::Glob(_) => {}
+            }
+        }
+        let mut aliases: HashMap<String, Vec<syn::Ident>> = HashMap::new();
+        for stmt in &block.stmts {
+            if let syn::Stmt::Item(syn::Item::Use(use_item)) = stmt {
+                let mut prefix = Vec::new();
+                collect_use_aliases(&use_item.tree, &mut prefix, &mut aliases);
+            }
+        }
+        // Self-referential aliases (`use foo::Bar;` giving Bar -> foo::Bar with
+        // a 1-segment target) are fine; drop entries whose target IS the bare
+        // alias (`use Bar;` — nothing to qualify).
+        aliases.retain(|alias, full| full.len() > 1 || full[0] != *alias);
+        if aliases.is_empty() {
+            return None;
+        }
+        struct AliasInliner<'a> {
+            aliases: &'a HashMap<String, Vec<syn::Ident>>,
+        }
+        impl syn::visit_mut::VisitMut for AliasInliner<'_> {
+            fn visit_path_mut(&mut self, path: &mut syn::Path) {
+                if path.leading_colon.is_none() && path.segments.len() >= 2 {
+                    let first = &path.segments[0];
+                    if first.arguments.is_none()
+                        && let Some(full) = self.aliases.get(&first.ident.to_string())
+                    {
+                        let tail: Vec<syn::PathSegment> =
+                            path.segments.iter().skip(1).cloned().collect();
+                        let mut segments = syn::punctuated::Punctuated::new();
+                        for ident in full {
+                            segments.push(syn::PathSegment::from(ident.clone()));
+                        }
+                        for seg in tail {
+                            segments.push(seg);
+                        }
+                        path.segments = segments;
+                    }
+                }
+                syn::visit_mut::visit_path_mut(self, path);
+            }
+        }
+        let mut rewritten = block.clone();
+        let mut inliner = AliasInliner { aliases: &aliases };
+        for stmt in &mut rewritten.stmts {
+            if let syn::Stmt::Item(item) = stmt
+                && !matches!(item, syn::Item::Use(_))
+            {
+                syn::visit_mut::VisitMut::visit_item_mut(&mut inliner, item);
+            }
+        }
+        Some(rewritten)
+    }
+
+    /// Fn-local `static`s referenced by the hoisted local types' definitions
+    /// or impls (`TrackedDrop`'s Drop counting into `static DROPPED`). A C++
+    /// fn-local static isn't visible at namespace scope, so the hoisted item
+    /// would reference an undeclared name — such statics must hoist too.
+    pub(super) fn collect_hoistable_local_statics_for_hoisted_types(
+        block: &syn::Block,
+        hoisted_type_names: &HashSet<String>,
+    ) -> Vec<syn::ItemStatic> {
+        use syn::visit::Visit;
+        struct PathIdentCollector<'a> {
+            out: &'a mut HashSet<String>,
+        }
+        impl<'ast> Visit<'ast> for PathIdentCollector<'_> {
+            fn visit_path(&mut self, path: &'ast syn::Path) {
+                for seg in &path.segments {
+                    self.out.insert(seg.ident.to_string());
+                }
+                syn::visit::visit_path(self, path);
+            }
+        }
+        let mut referenced: HashSet<String> = HashSet::new();
+        for stmt in &block.stmts {
+            let syn::Stmt::Item(item) = stmt else {
+                continue;
+            };
+            let is_hoisted_item = match item {
+                syn::Item::Struct(s) => hoisted_type_names.contains(&s.ident.to_string()),
+                syn::Item::Enum(e) => hoisted_type_names.contains(&e.ident.to_string()),
+                syn::Item::Type(t) => hoisted_type_names.contains(&t.ident.to_string()),
+                syn::Item::Impl(impl_block) => Self::local_impl_target_type_name(impl_block)
+                    .is_some_and(|name| hoisted_type_names.contains(&name)),
+                _ => false,
+            };
+            if is_hoisted_item {
+                let mut collector = PathIdentCollector {
+                    out: &mut referenced,
+                };
+                collector.visit_item(item);
+            }
+        }
+        block
+            .stmts
+            .iter()
+            .filter_map(|stmt| match stmt {
+                syn::Stmt::Item(syn::Item::Static(s))
+                    if referenced.contains(&s.ident.to_string()) =>
+                {
+                    Some(s.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Local GENERIC `type X<T> = …` aliases in a function body. C++ forbids
     /// in-function templates, so these must be hoisted to namespace scope (where
     /// `template<typename T> using X = …` is legal). Non-generic local aliases are
