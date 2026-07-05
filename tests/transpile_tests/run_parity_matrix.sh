@@ -329,14 +329,18 @@ fi
 ensure_crate_checkout() {
     local crate="$1"
     local crate_dir="${SCRIPT_DIR}/${crate}"
-    local repo="${CRATE_REPO[${crate}]}"
-    local ref="${CRATE_REF[${crate}]}"
     local work_dir="${WORK_ROOT}/${crate}"
 
     local manifest_rel="${CRATE_MANIFEST_REL[${crate}]:-Cargo.toml}"
     if [[ -f "${crate_dir}/${manifest_rel}" ]]; then
         return 0
     fi
+
+    # Only registry crates need a repo/ref (local crates returned above).
+    # Access these AFTER the early return so `set -u` doesn't trip on a
+    # local-only crate (e.g. `vec`) that has no CRATE_REPO entry.
+    local repo="${CRATE_REPO[${crate}]}"
+    local ref="${CRATE_REF[${crate}]}"
 
     if [[ "${DRY_RUN}" -eq 1 ]]; then
         echo "  [dry-run] git clone --depth 1 --branch ${ref} ${repo} ${crate_dir}"
