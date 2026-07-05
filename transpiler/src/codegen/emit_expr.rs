@@ -5665,6 +5665,59 @@ impl CodeGen {
                                 callee = format!("{}<{}>", callee, access_cpp);
                             }
                         }
+                        // A method TURBOFISH supplies generics C++ can't deduce
+                        // (`.sum1::<i32>()` — S only in the return type). The
+                        // free fn declares Self_ FIRST, and explicit template
+                        // args fill left-to-right, so Self_ must be spelled
+                        // too — from the receiver's own type. Dropping the
+                        // turbofish left the requires-probes SFINAE-false and
+                        // the dispatch fell through to the (hard-error) member
+                        // branch.
+                        if let Some(turbofish) = &mc.turbofish
+                            && !callee.contains('<')
+                        {
+                            let mapped: Vec<String> = turbofish
+                                .args
+                                .iter()
+                                .filter_map(|arg| match arg {
+                                    syn::GenericArgument::Type(ty) => {
+                                        Some(self.map_type(ty))
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            let all_viable = !mapped.is_empty()
+                                && mapped.iter().all(|t| {
+                                    t != "auto"
+                                        && !t.contains("/* TODO")
+                                        && !type_string_has_auto_placeholder(t)
+                                        // Crate-path-qualified args can be
+                                        // mis-qualified at this position
+                                        // (serde's `::<IgnoredAny>` mapped to
+                                        // `serde::de::IgnoredAny`, unnameable
+                                        // inside the crate) — thread only
+                                        // primitives/std/rusty spellings and
+                                        // leave the rest to the member path
+                                        // as before.
+                                        && t.split('<')
+                                            .flat_map(|part| part.split(", "))
+                                            .all(|part| {
+                                                !part.contains("::")
+                                                    || part.trim_start_matches("typename ")
+                                                        .starts_with("std::")
+                                                    || part.trim_start_matches("typename ")
+                                                        .starts_with("rusty::")
+                                            })
+                                });
+                            if all_viable {
+                                callee = format!(
+                                    "{}<std::remove_cvref_t<decltype({})>, {}>",
+                                    callee,
+                                    receiver,
+                                    mapped.join(", ")
+                                );
+                            }
+                        }
                         return self.emit_extension_call_with_receiver_autoderef_fallback(
                             &callee, &receiver, &args,
                         );
