@@ -2269,6 +2269,52 @@ impl CodeGen {
                         inferred_binding_ty = Some(usage_ty);
                     }
                 }
+                // `let mut m = HashMap::new()`: back-propagate m's concrete
+                // Coll<K,V,..> from its later insert/push uses in this block so
+                // the initializer emits `HashMap<K,V>::new()` instead of leaking
+                // `HashMap<auto,auto>::new()`. Only when nothing else pinned it.
+                if let Some(coll_ty) = self
+                    .collection_ctor_usage_type_hints
+                    .last()
+                    .and_then(|hints| hints.get(&name_str))
+                    .cloned()
+                {
+                    // Override when the initializer pinned nothing OR only an
+                    // incomplete type — a bare `IndexMap::new()` infers to
+                    // `IndexMap<auto,..>`, which would leak. The usage-derived
+                    // `Coll<K,V,..>` is complete. A binding whose initializer
+                    // already resolved fully is left untouched.
+                    let initializer_incomplete = inferred_binding_ty.as_ref().is_none_or(|ty| {
+                        if type_string_has_auto_placeholder(&self.map_type(ty)) {
+                            return true;
+                        }
+                        // A BARE polymorphic collection type (`Vec`, `HashMap`
+                        // with no/empty args) is incomplete: emission fills the
+                        // missing element types with `auto` (`Vec::new()` infers
+                        // to a bare `Vec`, which lowers to `rusty::Vec<auto>`).
+                        // The usage-derived `Coll<K,V,..>` is complete.
+                        if let syn::Type::Path(tp) = ty
+                            && let Some(last) = tp.path.segments.last()
+                        {
+                            let is_bare = match &last.arguments {
+                                syn::PathArguments::None => true,
+                                syn::PathArguments::AngleBracketed(a) => a.args.is_empty(),
+                                _ => false,
+                            };
+                            if is_bare
+                                && CodeGen::is_polymorphic_collection_name(
+                                    &last.ident.to_string(),
+                                )
+                            {
+                                return true;
+                            }
+                        }
+                        false
+                    });
+                    if initializer_incomplete {
+                        inferred_binding_ty = Some(coll_ty);
+                    }
+                }
                 if inferred_binding_ty.is_none()
                     && let Some(init) = local.init.as_ref()
                     && matches!(

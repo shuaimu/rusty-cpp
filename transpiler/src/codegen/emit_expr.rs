@@ -643,6 +643,8 @@ impl CodeGen {
         self.local_placeholder_type_hints.push(placeholder_hints);
         self.int_literal_usage_type_hints
             .push(self.collect_int_literal_usage_type_hints(&block.stmts));
+        self.collection_ctor_usage_type_hints
+            .push(self.collect_collection_ctor_usage_type_hints(&block.stmts));
         self.collection_decltype_element_overrides
             .push(decltype_element_overrides);
         self.local_bindings.push(HashMap::new());
@@ -906,6 +908,7 @@ impl CodeGen {
         self.recursive_nested_fns_in_scope.pop();
         self.local_placeholder_type_hints.pop();
         self.int_literal_usage_type_hints.pop();
+        self.collection_ctor_usage_type_hints.pop();
         self.collection_decltype_element_overrides.pop();
         self.reassigned_vars = prev;
         self.deref_assigned_vars = prev_deref_assigned;

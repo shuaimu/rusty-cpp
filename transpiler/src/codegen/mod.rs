@@ -1150,6 +1150,13 @@ pub struct CodeGen {
     /// can't bind to the `size_t&` field. Maps the local name → the field's
     /// integer element type.
     pub(crate) int_literal_usage_type_hints: Vec<HashMap<String, syn::Type>>,
+    /// `let mut m = HashMap::new()` — a bare polymorphic collection constructor
+    /// with no turbofish/annotation leaves K,V,Elem unpinned, which C++ can't
+    /// emit (`HashMap<auto,auto>::new()`). Rust pins them by unifying the
+    /// binding's later `m.insert(k, v)` / `m.push(x)` uses; mirror a bounded
+    /// slice of that: back-propagate the concrete `Coll<..>` from those uses in
+    /// the same block. Maps the local name → the inferred collection type.
+    pub(crate) collection_ctor_usage_type_hints: Vec<HashMap<String, syn::Type>>,
     /// The input type of the closure currently being emitted as a `.map()` /
     /// `.and_then()` argument (the receiver's `Result`/`Option` Ok/Some type).
     /// Lets a destructured closure param (`|(event, mark)|` on
@@ -1850,6 +1857,7 @@ impl CodeGen {
             repeat_elem_type_hints: HashMap::new(),
             local_placeholder_type_hints: Vec::new(),
             int_literal_usage_type_hints: Vec::new(),
+            collection_ctor_usage_type_hints: Vec::new(),
             pending_map_closure_input_type: std::cell::RefCell::new(None),
             collection_decltype_element_overrides: Vec::new(),
             assert_equal_sibling_item: std::cell::RefCell::new(None),
@@ -26609,6 +26617,480 @@ impl CodeGen {
             cg: self,
             candidates: &candidates,
             out: HashMap::new(),
+        };
+        for stmt in stmts {
+            syn::visit::Visit::visit_stmt(&mut scan, stmt);
+        }
+        scan.out
+    }
+
+    /// Standard/ecosystem generic collections whose bare constructors leave the
+    /// element/key/value type params to be unified from later usage.
+    fn is_polymorphic_collection_name(name: &str) -> bool {
+        matches!(
+            name,
+            "HashMap"
+                | "HashSet"
+                | "BTreeMap"
+                | "BTreeSet"
+                | "IndexMap"
+                | "IndexSet"
+                | "Vec"
+                | "VecDeque"
+                | "LinkedList"
+                | "BinaryHeap"
+        )
+    }
+
+    /// See `collection_ctor_usage_type_hints`. Scan `stmts` for
+    /// `let [mut] m = Coll::new()` bindings (no turbofish/annotation) and
+    /// back-propagate `m`'s concrete type from its later
+    /// `m.insert(k, v)` / `m.insert(k)` / `m.push(x)` uses in the same block.
+    fn collect_collection_ctor_usage_type_hints(
+        &self,
+        stmts: &[syn::Stmt],
+    ) -> HashMap<String, syn::Type> {
+        // Both the `let [mut] x = Coll::new()` candidates AND their
+        // `x.insert(..)` / `x.push(..)` uses are collected in one RECURSIVE
+        // pass. The binding is frequently nested inside a block-expression
+        // initializer that gets inlined
+        // (`let outer = { let mut map = IndexMap::new(); ...; map }`), so a
+        // top-level-only candidate scan would miss it. A `let x: T =`
+        // annotation makes `local.pat` a `Pat::Type` (not `Pat::Ident`), so
+        // annotated bindings are naturally skipped — their type is pinned.
+        struct Scan<'a> {
+            cg: &'a CodeGen,
+            candidates: HashMap<String, syn::Path>,
+            out: HashMap<String, syn::Type>,
+            // Types of in-scope bindings the scan has itself resolved (array/
+            // slice locals, for-loop pattern bindings). Needed because the
+            // emit-time local environment isn't populated during this pre-pass,
+            // so `infer_simple_expr_type` can't see `let insert = [..]` yet.
+            binding_types: HashMap<String, syn::Type>,
+        }
+        impl<'a> Scan<'a> {
+            /// `Coll::new()` / `Coll::with_capacity(..)` → the collection owner
+            /// path (constructor segment removed), or None when the initializer
+            /// isn't a bare, turbofish-free polymorphic collection constructor.
+            fn coll_owner_path(cg: &CodeGen, init: &syn::Expr) -> Option<syn::Path> {
+                let syn::Expr::Call(call) = cg.peel_paren_group_expr(init) else {
+                    return None;
+                };
+                let syn::Expr::Path(func_path) = cg.peel_paren_group_expr(&call.func) else {
+                    return None;
+                };
+                let segs = &func_path.path.segments;
+                if segs.len() < 2 {
+                    return None;
+                }
+                let ctor = segs.last().unwrap();
+                let is_ctor = matches!(
+                    ctor.ident.to_string().as_str(),
+                    "new" | "new_in"
+                        | "with_capacity"
+                        | "with_capacity_in"
+                        | "with_hasher"
+                        | "with_capacity_and_hasher"
+                );
+                // A turbofish on the constructor or collection segment already
+                // pins the element types; leave those to the normal path.
+                if !is_ctor || !ctor.arguments.is_none() {
+                    return None;
+                }
+                let coll_seg = &segs[segs.len() - 2];
+                if !coll_seg.arguments.is_none()
+                    || !CodeGen::is_polymorphic_collection_name(&coll_seg.ident.to_string())
+                {
+                    return None;
+                }
+                let mut owner = syn::Path {
+                    leading_colon: func_path.path.leading_colon,
+                    segments: syn::punctuated::Punctuated::new(),
+                };
+                for s in segs.iter().take(segs.len() - 1) {
+                    owner.segments.push(s.clone());
+                }
+                Some(owner)
+            }
+            /// Reconstruct `Owner<arg0, arg1, ..>`.
+            fn build(owner: &syn::Path, args: Vec<syn::Type>) -> syn::Type {
+                let mut path = owner.clone();
+                if let Some(last) = path.segments.last_mut() {
+                    let mut generic = syn::punctuated::Punctuated::new();
+                    for a in args {
+                        generic.push(syn::GenericArgument::Type(a));
+                    }
+                    last.arguments =
+                        syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                            colon2_token: None,
+                            lt_token: Default::default(),
+                            args: generic,
+                            gt_token: Default::default(),
+                        });
+                }
+                syn::Type::Path(syn::TypePath { qself: None, path })
+            }
+            /// Fallback container type for a binding initializer that
+            /// `infer_simple_expr_type` can't type directly: find the first
+            /// nested array literal (the `[9, 2, 7]` inside an expanded
+            /// `vec![9, 2, 7]` — `box_assume_init_into_vec_unsafe(..[9,2,7]..)`)
+            /// and spell it `[Elem; N]`. Element extraction over `[Elem; N]`
+            /// matches the real `Vec<Elem>`, which is all the iterator-item
+            /// resolution needs.
+            fn nested_array_container_type(cg: &CodeGen, e: &syn::Expr) -> Option<syn::Type> {
+                fn find_array(e: &syn::Expr) -> Option<&syn::ExprArray> {
+                    match e {
+                        syn::Expr::Array(a) => Some(a),
+                        syn::Expr::Call(c) => c
+                            .args
+                            .iter()
+                            .find_map(find_array)
+                            .or_else(|| find_array(&c.func)),
+                        syn::Expr::MethodCall(m) => find_array(&m.receiver)
+                            .or_else(|| m.args.iter().find_map(find_array)),
+                        syn::Expr::Reference(r) => find_array(&r.expr),
+                        syn::Expr::Group(g) => find_array(&g.expr),
+                        syn::Expr::Paren(p) => find_array(&p.expr),
+                        _ => None,
+                    }
+                }
+                let arr = find_array(e)?;
+                cg.infer_simple_expr_type(&syn::Expr::Array(arr.clone()))
+            }
+            /// `Owner::from_iter(iter)` / `Owner::from([..])` (turbofish-free,
+            /// polymorphic owner) → the concrete `Owner<Item..>` inferred from
+            /// the argument's element type. Map owners take `(K, V)` pairs, so
+            /// the item tuple splits.
+            fn from_iter_hint(cg: &CodeGen, init: &syn::Expr) -> Option<syn::Type> {
+                let syn::Expr::Call(call) = cg.peel_paren_group_expr(init) else {
+                    return None;
+                };
+                let syn::Expr::Path(fp) = cg.peel_paren_group_expr(&call.func) else {
+                    return None;
+                };
+                let segs = &fp.path.segments;
+                if segs.len() < 2 || call.args.len() != 1 {
+                    return None;
+                }
+                let ctor = segs.last().unwrap();
+                if !matches!(ctor.ident.to_string().as_str(), "from_iter" | "from")
+                    || !ctor.arguments.is_none()
+                {
+                    return None;
+                }
+                let coll_seg = &segs[segs.len() - 2];
+                if !coll_seg.arguments.is_none()
+                    || !CodeGen::is_polymorphic_collection_name(&coll_seg.ident.to_string())
+                {
+                    return None;
+                }
+                let mut owner = syn::Path {
+                    leading_colon: fp.path.leading_colon,
+                    segments: syn::punctuated::Punctuated::new(),
+                };
+                for s in segs.iter().take(segs.len() - 1) {
+                    owner.segments.push(s.clone());
+                }
+                // `from_iter` takes an iterator; `from` an array/collection
+                // literal. Try iterator-item inference, then element extraction
+                // off a directly-inferable (or nested-array `vec!`) container.
+                let item = cg.infer_iter_item_type_from_expr(&call.args[0]).or_else(|| {
+                    cg.infer_simple_expr_type(&call.args[0])
+                        .or_else(|| Scan::nested_array_container_type(cg, &call.args[0]))
+                        .and_then(|t| cg.extract_iter_item_type_from_type(&t))
+                })?;
+                let owner_is_map = matches!(
+                    coll_seg.ident.to_string().as_str(),
+                    "HashMap" | "BTreeMap" | "IndexMap"
+                );
+                let args = match &item {
+                    syn::Type::Tuple(t) if owner_is_map && t.elems.len() == 2 => {
+                        t.elems.iter().cloned().collect()
+                    }
+                    _ => vec![item],
+                };
+                Some(Scan::build(&owner, args))
+            }
+            /// Value type of an expression, consulting the scan's own
+            /// `binding_types` first (single-segment idents) before falling
+            /// back to the CodeGen inferencer. Compound expressions built from
+            /// scan-tracked bindings (`elt * 2`, `elt.clone()`, `&elt`, `elt as
+            /// usize`) are resolved through `binding_types` too — the CodeGen
+            /// inferencer only sees the emit-time environment, which is empty
+            /// during this pre-pass.
+            fn expr_type(&self, e: &syn::Expr) -> Option<syn::Type> {
+                let e = self.cg.peel_paren_group_expr(e);
+                if let syn::Expr::Path(p) = e
+                    && p.qself.is_none()
+                    && p.path.segments.len() == 1
+                    && let Some(t) = self
+                        .binding_types
+                        .get(&p.path.segments[0].ident.to_string())
+                {
+                    return Some(t.clone());
+                }
+                if let Some(t) = self.cg.infer_simple_expr_type(e) {
+                    return Some(t);
+                }
+                // Fallbacks that thread scan-tracked binding types through
+                // simple compound expressions the CodeGen inferencer misses.
+                match e {
+                    syn::Expr::Binary(b) => {
+                        self.expr_type(&b.left).or_else(|| self.expr_type(&b.right))
+                    }
+                    syn::Expr::Reference(r) => self.expr_type(&r.expr),
+                    syn::Expr::Unary(u) => self.expr_type(&u.expr),
+                    syn::Expr::Cast(c) => Some((*c.ty).clone()),
+                    syn::Expr::MethodCall(m)
+                        if matches!(
+                            m.method.to_string().as_str(),
+                            "clone" | "to_owned" | "to_string"
+                        ) =>
+                    {
+                        if m.method == "to_string" {
+                            Some(syn::parse_quote!(String))
+                        } else {
+                            self.expr_type(&m.receiver)
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            /// Item (element) type yielded by a for-loop iterator expression,
+            /// as a ref-stripped value type. `enumerate()` produces a
+            /// `(usize, INNER)` tuple so tuple patterns bind correctly.
+            fn iter_item_type(&self, iter: &syn::Expr) -> Option<syn::Type> {
+                let tuple2 = |a: syn::Type, b: syn::Type| -> syn::Type {
+                    let mut elems = syn::punctuated::Punctuated::new();
+                    elems.push(a);
+                    elems.push(b);
+                    syn::Type::Tuple(syn::TypeTuple {
+                        paren_token: Default::default(),
+                        elems,
+                    })
+                };
+                let usize_ty: syn::Type = syn::parse_quote!(usize);
+                let iter = self.cg.peel_paren_group_expr(iter);
+                match iter {
+                    syn::Expr::MethodCall(mc) if mc.args.is_empty() => {
+                        match mc.method.to_string().as_str() {
+                            "enumerate" => {
+                                let inner = self.iter_item_type(&mc.receiver)?;
+                                Some(tuple2(usize_ty, inner))
+                            }
+                            "iter" | "iter_mut" | "into_iter" | "drain" | "keys" | "values"
+                            | "values_mut" => {
+                                let recv = self.expr_type(&mc.receiver)?;
+                                self.cg.extract_iter_item_type_from_type(&recv)
+                            }
+                            "rev" | "cloned" | "copied" | "by_ref" | "peekable" | "fuse" => {
+                                self.iter_item_type(&mc.receiver)
+                            }
+                            _ => {
+                                let ty = self.expr_type(iter)?;
+                                self.cg.extract_iter_item_type_from_type(&ty)
+                            }
+                        }
+                    }
+                    syn::Expr::Reference(r) => {
+                        let ty = self.expr_type(&r.expr)?;
+                        self.cg.extract_iter_item_type_from_type(&ty)
+                    }
+                    // `0..16` / `0..=15` iterate their (integer) bound type.
+                    syn::Expr::Range(range) => range
+                        .start
+                        .as_ref()
+                        .or(range.end.as_ref())
+                        .and_then(|b| self.expr_type(b)),
+                    syn::Expr::Call(call) => {
+                        if let syn::Expr::Path(p) =
+                            self.cg.peel_paren_group_expr(&call.func)
+                            && call.args.len() == 1
+                        {
+                            match p.path.segments.last().map(|s| s.ident.to_string()).as_deref() {
+                                Some("enumerate") => {
+                                    let inner = self.iter_item_type(&call.args[0])?;
+                                    return Some(tuple2(usize_ty, inner));
+                                }
+                                Some("iter") | Some("iter_mut") | Some("into_iter")
+                                | Some("rev") => {
+                                    let recv = self.expr_type(&call.args[0])?;
+                                    return self.cg.extract_iter_item_type_from_type(&recv);
+                                }
+                                _ => {}
+                            }
+                        }
+                        let ty = self
+                            .expr_type(iter)
+                            .or_else(|| Scan::nested_array_container_type(self.cg, iter))?;
+                        self.cg.extract_iter_item_type_from_type(&ty)
+                    }
+                    _ => {
+                        let ty = self
+                            .expr_type(iter)
+                            .or_else(|| Scan::nested_array_container_type(self.cg, iter))?;
+                        self.cg.extract_iter_item_type_from_type(&ty)
+                    }
+                }
+            }
+            /// Bind a for-loop pattern's identifiers to their value types,
+            /// destructuring tuple patterns and stripping `&`/`ref` binding
+            /// modes (item types are already ref-stripped values).
+            fn bind_pat(&mut self, pat: &syn::Pat, ty: &syn::Type) {
+                match pat {
+                    syn::Pat::Ident(pi) if pi.subpat.is_none() => {
+                        self.binding_types.insert(pi.ident.to_string(), ty.clone());
+                    }
+                    syn::Pat::Reference(pr) => {
+                        let inner = match ty {
+                            syn::Type::Reference(r) => (*r.elem).clone(),
+                            _ => ty.clone(),
+                        };
+                        self.bind_pat(&pr.pat, &inner);
+                    }
+                    syn::Pat::Tuple(pt) => {
+                        if let syn::Type::Tuple(tt) = ty {
+                            for (p, t) in pt.elems.iter().zip(tt.elems.iter()) {
+                                self.bind_pat(p, t);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        impl<'a> syn::visit::Visit<'a> for Scan<'a> {
+            fn visit_local(&mut self, local: &'a syn::Local) {
+                if let syn::Pat::Ident(pi) = &local.pat
+                    && pi.subpat.is_none()
+                    && let Some(init) = &local.init
+                    && init.diverge.is_none()
+                    && let Some(owner) = Scan::coll_owner_path(self.cg, &init.expr)
+                {
+                    self.candidates.insert(pi.ident.to_string(), owner);
+                }
+                // `let x = Coll::from_iter(iter)`: the element types come from
+                // the iterator's item type (no later `insert` needed).
+                if let syn::Pat::Ident(pi) = &local.pat
+                    && pi.subpat.is_none()
+                    && !self.out.contains_key(&pi.ident.to_string())
+                    && let Some(init) = &local.init
+                    && let Some(hint) = Scan::from_iter_hint(self.cg, &init.expr)
+                {
+                    self.binding_types.insert(pi.ident.to_string(), hint.clone());
+                    self.out.insert(pi.ident.to_string(), hint);
+                }
+                // Record the binding's value type so later for-loop iterators
+                // over it (`for x in insert.iter()`) can be resolved. Handles
+                // ident, tuple (`let (k1, k2) = ..`), and reference patterns via
+                // `bind_pat`.
+                match &local.pat {
+                    syn::Pat::Type(pt) => self.bind_pat(&pt.pat, &pt.ty),
+                    pat => {
+                        if let Some(init) = &local.init
+                            && let Some(t) =
+                                self.cg.infer_simple_expr_type(&init.expr).or_else(|| {
+                                    Scan::nested_array_container_type(self.cg, &init.expr)
+                                })
+                        {
+                            self.bind_pat(pat, &t);
+                        }
+                    }
+                }
+                syn::visit::visit_local(self, local);
+            }
+            fn visit_expr_for_loop(&mut self, node: &'a syn::ExprForLoop) {
+                if let Some(item_ty) = self.iter_item_type(&node.expr) {
+                    self.bind_pat(&node.pat, &item_ty);
+                }
+                syn::visit::visit_expr_for_loop(self, node);
+            }
+            fn visit_expr_method_call(&mut self, node: &'a syn::ExprMethodCall) {
+                let recv_name = match self.cg.peel_paren_group_expr(&node.receiver) {
+                    syn::Expr::Path(p) if p.path.segments.len() == 1 => {
+                        Some(p.path.segments[0].ident.to_string())
+                    }
+                    _ => None,
+                };
+                if let Some(name) = recv_name
+                    && self.candidates.contains_key(&name)
+                    && !self.out.contains_key(&name)
+                {
+                    let method = node.method.to_string();
+                    let owner = self.candidates.get(&name).cloned();
+                    let owner_is_map = owner
+                        .as_ref()
+                        .and_then(|o| o.segments.last())
+                        .map(|s| s.ident.to_string())
+                        .is_some_and(|n| {
+                            matches!(n.as_str(), "HashMap" | "BTreeMap" | "IndexMap")
+                        });
+                    let arg_ty = |i: usize| {
+                        node.args.iter().nth(i).and_then(|a| self.expr_type(a))
+                    };
+                    let args = match (method.as_str(), node.args.len()) {
+                        // Map<K,V> inserts taking (key, value). Guarded on the
+                        // owner: `Vec::insert(index, value)` is ALSO 2-arg but
+                        // its element is only the value (arg1), not (index,value).
+                        ("insert" | "insert_full" | "insert_sorted", 2) if owner_is_map => {
+                            match (arg_ty(0), arg_ty(1)) {
+                                (Some(k), Some(v)) => Some(vec![k, v]),
+                                _ => None,
+                            }
+                        }
+                        // Positional map inserts taking (index, key, value).
+                        ("insert_before" | "shift_insert", 3) if owner_is_map => {
+                            match (arg_ty(1), arg_ty(2)) {
+                                (Some(k), Some(v)) => Some(vec![k, v]),
+                                _ => None,
+                            }
+                        }
+                        // Vec/VecDeque::insert(index, value): element is the value.
+                        ("insert", 2) => arg_ty(1).map(|e| vec![e]),
+                        // Set positional inserts taking (index, value).
+                        ("shift_insert" | "insert_before", 2) => arg_ty(1).map(|e| vec![e]),
+                        // Set/sequence inserts taking a single element.
+                        ("insert" | "insert_full" | "insert_sorted" | "replace"
+                        | "replace_full" | "get_or_insert" | "push" | "push_back"
+                        | "push_front", 1) => arg_ty(0).map(|e| vec![e]),
+                        // `coll.extend(iter)`: element(s) come from the iterator's
+                        // item type. Map owners iterate `(K, V)` pairs.
+                        ("extend", 1) => self.iter_item_type(&node.args[0]).map(|elem| {
+                            match &elem {
+                                // `map.extend([(&k, &v), ..])` uses the
+                                // `Extend<(&K, &V)>` impl, so the map is
+                                // `<K, V>` — strip the borrows off the pair.
+                                syn::Type::Tuple(t) if owner_is_map && t.elems.len() == 2 => t
+                                    .elems
+                                    .iter()
+                                    .map(|e| match e {
+                                        syn::Type::Reference(r) => (*r.elem).clone(),
+                                        _ => e.clone(),
+                                    })
+                                    .collect(),
+                                _ => vec![elem],
+                            }
+                        }),
+                        _ => None,
+                    };
+                    if let Some(args) = args
+                        && let Some(owner) = owner
+                    {
+                        let built = Scan::build(&owner, args);
+                        // Mirror into `binding_types` so a later `for x in &coll`
+                        // over this binding can resolve its element type.
+                        self.binding_types.insert(name.clone(), built.clone());
+                        self.out.insert(name, built);
+                    }
+                }
+                syn::visit::visit_expr_method_call(self, node);
+            }
+        }
+        let mut scan = Scan {
+            cg: self,
+            candidates: HashMap::new(),
+            out: HashMap::new(),
+            binding_types: HashMap::new(),
         };
         for stmt in stmts {
             syn::visit::Visit::visit_stmt(&mut scan, stmt);
