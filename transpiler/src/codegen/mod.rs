@@ -27152,6 +27152,65 @@ impl CodeGen {
                         self.out.insert(name, built);
                     }
                 }
+                // Iterator-callback rule: the callback's parameter IS the
+                // receiver's iterator Item — `self_.all(|elt| used.insert(elt))`
+                // (all_unique) fills `used` with Self_'s items; without this
+                // the insert arg has no resolvable type and the candidate
+                // stays `HashSet<auto>` / `Vec<auto>`. Seed the param into
+                // `binding_types` BEFORE recursing so the closure-body visits
+                // above resolve it (including through `.clone()`).
+                const ITEM_CALLBACK_METHODS: &[&str] = &[
+                    "all",
+                    "any",
+                    "for_each",
+                    "inspect",
+                    "filter",
+                    "find",
+                    "position",
+                    "map",
+                    "filter_map",
+                    "flat_map",
+                    "take_while",
+                    "skip_while",
+                ];
+                if node.args.len() == 1
+                    && ITEM_CALLBACK_METHODS.contains(&node.method.to_string().as_str())
+                    && let syn::Expr::Closure(closure) =
+                        self.cg.peel_paren_group_expr(&node.args[0])
+                    && closure.inputs.len() == 1
+                {
+                    // Peel `|&x|` / `|x: T|` down to the bare ident.
+                    let mut param_pat: &syn::Pat = &closure.inputs[0];
+                    loop {
+                        match param_pat {
+                            syn::Pat::Type(pt) => param_pat = &pt.pat,
+                            syn::Pat::Reference(pr) => param_pat = &pr.pat,
+                            _ => break,
+                        }
+                    }
+                    if let syn::Pat::Ident(pi) = param_pat
+                        && !self.binding_types.contains_key(&pi.ident.to_string())
+                    {
+                        let item_ty = self.iter_item_type(&node.receiver).or_else(|| {
+                            // Generic receiver (`self_: Self_`, a test fn's
+                            // `i: I`): the item is the associated projection
+                            // `<T as Iterator>::Item`, which the type mapper
+                            // spells as associated_item_t.
+                            use quote::ToTokens;
+                            let recv_ty = self.expr_type(&node.receiver)?;
+                            let recv_peeled =
+                                self.cg.peel_reference_paren_group_type(&recv_ty);
+                            syn::parse_str::<syn::Type>(&format!(
+                                "<{} as Iterator>::Item",
+                                recv_peeled.to_token_stream()
+                            ))
+                            .ok()
+                        });
+                        if let Some(item_ty) = item_ty {
+                            self.binding_types.insert(pi.ident.to_string(), item_ty);
+                        }
+                    }
+                }
                 syn::visit::visit_expr_method_call(self, node);
             }
         }
