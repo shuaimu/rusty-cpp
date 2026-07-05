@@ -16866,6 +16866,33 @@ impl CodeGen {
             ));
             return;
         }
+        // A local generic `type X<T> = …` alias (e.g. itertools `tree_reduce`'s
+        // `State<T> = Result<T, Option<T>>`) is illegal as a block-scope
+        // `template<…> using` in C++. Hoist such aliases to namespace scope,
+        // just before this UFCS free function, exactly as the member emitter
+        // (`emit_method`) and the regular-fn emitter already do — the plain
+        // `emit_block` call below would otherwise emit them at block scope.
+        // Only aliases NOT referencing an outer (free-fn) generic param are
+        // hoistable; the rest would go out of scope at namespace level.
+        let outer_free_generic_params = Self::generic_type_or_const_param_names(&free_generics);
+        let mut hoisted_body_aliases =
+            self.collect_hoistable_local_generic_type_aliases_in_block(&method.block);
+        hoisted_body_aliases.retain(|t| {
+            !Self::local_type_items_reference_names(
+                &method.block,
+                &t.ident.to_string(),
+                &outer_free_generic_params,
+            )
+        });
+        let hoisted_body_alias_names: HashSet<String> = hoisted_body_aliases
+            .iter()
+            .map(|t| t.ident.to_string())
+            .collect();
+        if !hoisted_body_aliases.is_empty() {
+            self.push_type_param_scope(&free_generics);
+            self.emit_hoisted_local_generic_type_aliases(&hoisted_body_aliases);
+            self.pop_type_param_scope();
+        }
         let export_prefix = if self.module_name.is_some() {
             "export "
         } else {
@@ -17173,7 +17200,18 @@ impl CodeGen {
             }
         }
         if !emitted_default_body_override {
-            self.emit_block(&method.block);
+            if hoisted_body_alias_names.is_empty() {
+                self.emit_block(&method.block);
+            } else {
+                // The hoisted local generic aliases were emitted at namespace
+                // scope above; drop their block-scope definitions so the body
+                // references the hoisted ones instead of redeclaring them.
+                let stripped = self.strip_hoisted_local_generic_struct_items_from_block(
+                    &method.block,
+                    &hoisted_body_alias_names,
+                );
+                self.emit_block(&stripped);
+            }
         }
         self.pop_transient_statement_scope();
         self.pop_self_path_override();
