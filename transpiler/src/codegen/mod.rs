@@ -31555,12 +31555,36 @@ impl CodeGen {
             && tp.path.segments.len() == 1
         {
             let ident = tp.path.segments[0].ident.to_string();
-            if self.is_type_param_in_scope(&ident) {
+            if self.is_type_param_in_scope(&ident)
+                || self.type_looks_like_unresolved_generic(expected_ty, &ident)
+            {
                 return None;
             }
         }
 
         Some(expected_ty.clone())
+    }
+
+    /// A closure's expected TYPE that is a bare single-segment nominal which
+    /// doesn't resolve to any concrete C++ type is almost certainly a generic
+    /// Fn-bound parameter of a callee (e.g. `min_set_impl`'s
+    /// `Compare: FnMut(..) -> Ordering`), NOT the closure's return type — so it
+    /// must not be emitted as a `-> Compare` trailing return annotation.
+    /// `type_is_bare_generic_param_like` only catches ALL-UPPERCASE names
+    /// (`F`/`FI`); this also catches mixed-case ones (`Compare`/`Pred`).
+    /// Signal: uppercase-initial, not a known local/declared type, and
+    /// `map_type` leaves the ident unchanged (i.e. it resolves to nothing).
+    fn type_looks_like_unresolved_generic(&self, ty: &syn::Type, ident: &str) -> bool {
+        if !ident.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            return false;
+        }
+        if self.is_local_type_name_in_scope(ident)
+            || self.local_declared_types.contains(ident)
+            || self.declared_item_names.contains(ident)
+        {
+            return false;
+        }
+        self.map_type(ty) == ident
     }
 
     fn peel_paren_group_type<'a>(&self, ty: &'a syn::Type) -> &'a syn::Type {
