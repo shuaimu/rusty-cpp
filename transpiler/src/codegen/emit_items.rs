@@ -4587,6 +4587,35 @@ impl CodeGen {
         path.to_string()
     }
 
+    /// `use Enum::Variant` where `Enum` is a GENERIC data enum: its C++ variants
+    /// are generic sibling structs (`Enum_Variant<T>`) constructed qualified, and
+    /// `Enum` itself is a class template — so `using ::path::Enum::Variant;` is
+    /// ill-formed ("class template requires template arguments") and unused.
+    /// Owner lookups are TAIL-matched because submodule enums are keyed by their
+    /// scoped name (`minmax::MinMaxResult`), not the bare tail.
+    pub(super) fn import_path_is_generic_data_enum_variant(&self, path: &str) -> bool {
+        let trimmed = path.trim_start_matches("::");
+        if trimmed.contains(" = ") {
+            return false;
+        }
+        let segs: Vec<&str> = trimmed.split("::").collect();
+        if segs.len() < 2 {
+            return false;
+        }
+        let variant = segs[segs.len() - 1];
+        let owner = segs[segs.len() - 2];
+        let owner_suffix = format!("::{owner}");
+        let owner_has_variant = self.data_enum_variants_by_enum.iter().any(|(k, vs)| {
+            (k == owner || k.ends_with(&owner_suffix)) && vs.contains(variant)
+        });
+        if !owner_has_variant {
+            return false;
+        }
+        self.declared_type_params.iter().any(|(key, params)| {
+            !params.is_empty() && (key == owner || key.ends_with(&owner_suffix))
+        })
+    }
+
     pub(super) fn emit_use(&mut self, u: &syn::ItemUse) {
         let is_pub = matches!(u.vis, syn::Visibility::Public(_));
 
@@ -4707,6 +4736,13 @@ impl CodeGen {
             if self.is_variant_constructor_alias_import(&resolved_path) {
                 self.writeln(&format!(
                     "// Rust-only constructor alias import: using {};",
+                    resolved_path
+                ));
+                continue;
+            }
+            if self.import_path_is_generic_data_enum_variant(&resolved_path) {
+                self.writeln(&format!(
+                    "// Rust-only generic-enum variant import: using {};",
                     resolved_path
                 ));
                 continue;
