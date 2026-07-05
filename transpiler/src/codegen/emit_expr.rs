@@ -11441,6 +11441,96 @@ impl CodeGen {
         }
     }
 
+    /// Forward element inference for a bare polymorphic-collection constructor.
+    /// The consuming context type `forward_ty` (an explicit expected type, or a
+    /// fn return-type hint) is a container/iterator `Other<E..>` that shares its
+    /// element with the ctor's collection but has a DIFFERENT owner (so the
+    /// ordinary expected-type path bailed) — e.g. `VecDeque::new()` in a fn that
+    /// returns `VecDequeIntoIter<E>`. Extract `E..` and synthesize `Coll<E..>`,
+    /// then reuse the proven expected-type emission so the ctor gets its args.
+    pub(super) fn try_emit_collection_ctor_with_forward_element(
+        &self,
+        call: &syn::ExprCall,
+        forward_ty: &syn::Type,
+    ) -> Option<String> {
+        let syn::Expr::Path(func_path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        let func_path = &func_path_expr.path;
+        let segs = &func_path.segments;
+        if segs.len() < 2 {
+            return None;
+        }
+        let ctor = segs.last()?;
+        if !matches!(
+            ctor.ident.to_string().as_str(),
+            "new" | "new_" | "new_in" | "with_capacity" | "with_capacity_in" | "from"
+                | "from_iter"
+        ) || !matches!(ctor.arguments, syn::PathArguments::None)
+        {
+            return None;
+        }
+        let coll_seg = &segs[segs.len() - 2];
+        let coll_name = coll_seg.ident.to_string();
+        if !matches!(coll_seg.arguments, syn::PathArguments::None)
+            || !Self::is_polymorphic_collection_name(&coll_name)
+        {
+            return None;
+        }
+        let fwd = self.peel_reference_paren_group_type(forward_ty);
+        let syn::Type::Path(fwd_tp) = fwd else {
+            return None;
+        };
+        let fwd_last = fwd_tp.path.segments.last()?;
+        // Same owner → the ordinary expected-type path already handles it.
+        if fwd_last.ident == coll_name {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(fwd_args) = &fwd_last.arguments else {
+            return None;
+        };
+        let fwd_type_args: Vec<syn::Type> = fwd_args
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                syn::GenericArgument::Type(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        let is_map = matches!(coll_name.as_str(), "HashMap" | "BTreeMap" | "IndexMap");
+        let needed = if is_map { 2 } else { 1 };
+        if fwd_type_args.len() < needed {
+            return None;
+        }
+        let elems: Vec<syn::Type> = fwd_type_args.into_iter().take(needed).collect();
+        // Synthesize `Coll<elems..>`, preserving the ctor's own owner path.
+        let mut owner_path = func_path.clone();
+        owner_path.segments = func_path
+            .segments
+            .iter()
+            .take(segs.len() - 1)
+            .cloned()
+            .collect();
+        if let Some(last) = owner_path.segments.last_mut() {
+            let mut generic = syn::punctuated::Punctuated::new();
+            for e in elems {
+                generic.push(syn::GenericArgument::Type(e));
+            }
+            last.arguments =
+                syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                    colon2_token: None,
+                    lt_token: Default::default(),
+                    args: generic,
+                    gt_token: Default::default(),
+                });
+        }
+        let coll_expected = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: owner_path,
+        });
+        self.try_emit_associated_call_with_expected_type(call, &coll_expected)
+    }
+
     pub(super) fn try_emit_associated_call_with_expected_type(
         &self,
         call: &syn::ExprCall,
@@ -13842,6 +13932,19 @@ impl CodeGen {
             if let Some(emitted) = self.try_emit_associated_call_with_expected_type(call, ty) {
                 return emitted;
             }
+        }
+        // Forward element inference for a bare collection constructor whose
+        // element type wasn't pinned above: the consuming context (an explicit
+        // expected type, or — for a `return`/tail expr — the fn's return type)
+        // is a container/iterator `Other<E..>` that SHARES the element with the
+        // ctor's collection (`VecDeque::new()` returning `VecDequeIntoIter<E>`).
+        // Synthesize the matching `Coll<E..>` and reuse the proven expected-type
+        // path so `VecDeque::new_()` emits `VecDeque<E>::new_()`.
+        if let Some(forward_ty) = expected_ty.or_else(|| self.current_return_type_hint())
+            && let Some(emitted) =
+                self.try_emit_collection_ctor_with_forward_element(call, forward_ty)
+        {
+            return emitted;
         }
         // For Ok/Err calls inside closures, the closure's return type hint may be more
         // relevant than any outer expected type (closure return type overrides).
