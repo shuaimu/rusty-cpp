@@ -8914,10 +8914,10 @@ impl CodeGen {
                 } else if pi.by_ref.is_none() && pi.mutability.is_none() && pi.subpat.is_none() {
                     let ident_name = pi.ident.to_string();
                     if self.pattern_ident_is_const_value(&ident_name) {
-                        Some(Some(format!(
-                            "{} == {}",
+                        Some(Some(self.const_value_ident_pattern_condition(
+                            &pi.ident,
                             source_expr,
-                            escape_cpp_keyword(&ident_name)
+                            variant_ctx,
                         )))
                     } else if self.collect_pattern_binding_stmts(pat, source_expr, out) {
                         Some(None)
@@ -9330,15 +9330,11 @@ impl CodeGen {
                 } else if pi.by_ref.is_none() && pi.mutability.is_none() && pi.subpat.is_none() {
                     let ident_name = pi.ident.to_string();
                     if self.pattern_ident_is_const_value(&ident_name) {
-                        // Qualify with enum owner when the bare ident is a
-                        // C-like enum variant brought in via `use Enum::*;`
-                        // — C++20 `enum class` does not flatten into the
-                        // surrounding scope the way Rust's glob does.
-                        let qualified = self
-                            .unique_c_like_enum_owner_for_variant_name(&ident_name)
-                            .map(|owner| format!("{}::{}", owner, escape_cpp_keyword(&ident_name)))
-                            .unwrap_or_else(|| escape_cpp_keyword(&ident_name));
-                        Some(Some(format!("{} == {}", source_expr, qualified)))
+                        Some(Some(self.const_value_ident_pattern_condition(
+                            &pi.ident,
+                            source_expr,
+                            variant_ctx,
+                        )))
                     } else if self.collect_pattern_binding_stmts_with_cpp_name_map(
                         pat,
                         source_expr,

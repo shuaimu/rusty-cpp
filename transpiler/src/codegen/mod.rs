@@ -24157,10 +24157,8 @@ impl CodeGen {
                 {
                     Some(Some(format!("{}.{}()", value_expr, cond_method)))
                 } else if self.pattern_ident_is_const_value(&pi.ident.to_string()) {
-                    Some(Some(format!(
-                        "{} == {}",
-                        value_expr,
-                        escape_cpp_keyword(&pi.ident.to_string())
+                    Some(Some(self.const_value_ident_pattern_condition(
+                        &pi.ident, value_expr, None,
                     )))
                 } else {
                     Some(None)
@@ -24947,7 +24945,40 @@ impl CodeGen {
             })
     }
 
-    fn runtime_variant_match_condition_for_path(
+    /// Condition for a bare const-value ident PATTERN (`NoElements =>`,
+    /// `SOME_CONST =>`). A C-like enum variant (from `use Enum::*;`) qualifies
+    /// to `Owner::Variant` equality; a DATA-enum unit variant can't lower to
+    /// `==` at all — its bare name resolves to the variant's ctor free fn, not
+    /// a comparable constant — so mirror the sibling payload arms' lowering
+    /// (`deref(_m).index() == N`) via the same variant-condition machinery.
+    pub(super) fn const_value_ident_pattern_condition(
+        &self,
+        ident: &syn::Ident,
+        source_expr: &str,
+        variant_ctx: Option<&VariantTypeContext>,
+    ) -> String {
+        let ident_name = ident.to_string();
+        if let Some(owner) = self.unique_c_like_enum_owner_for_variant_name(&ident_name) {
+            return format!(
+                "{} == {}::{}",
+                source_expr,
+                owner,
+                escape_cpp_keyword(&ident_name)
+            );
+        }
+        let ident_path = syn::Path::from(ident.clone());
+        if self.path_is_known_data_enum_variant_with_ctx(&ident_path, variant_ctx) {
+            let matched_base = format!("rusty::detail::deref_if_pointer({})", source_expr);
+            return self.runtime_variant_match_condition_for_path(
+                &ident_path,
+                variant_ctx,
+                &matched_base,
+            );
+        }
+        format!("{} == {}", source_expr, escape_cpp_keyword(&ident_name))
+    }
+
+    pub(super) fn runtime_variant_match_condition_for_path(
         &self,
         path: &syn::Path,
         variant_ctx: Option<&VariantTypeContext>,
@@ -25337,7 +25368,7 @@ impl CodeGen {
                 .contains(&canonical_variant_name)
     }
 
-    fn path_is_known_data_enum_variant_with_ctx(
+    pub(super) fn path_is_known_data_enum_variant_with_ctx(
         &self,
         path: &syn::Path,
         variant_ctx: Option<&VariantTypeContext>,

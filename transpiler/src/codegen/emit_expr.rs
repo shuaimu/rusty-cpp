@@ -11084,11 +11084,30 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> Option<String> {
         let expected_ty = expected_ty?;
-        if path.segments.len() < 2 {
-            return None;
-        }
         let variant_name = path.segments.last()?.ident.to_string();
-        let enum_name = path.segments.iter().nth_back(1)?.ident.to_string();
+        let enum_name = if path.segments.len() >= 2 {
+            path.segments.iter().nth_back(1)?.ident.to_string()
+        } else {
+            // A BARE unit-variant reference (`return NoElements;` after its
+            // `use MinMaxResult::{..}` import was dropped — ill-formed as a
+            // C++ using-decl). Resolve the owner from the EXPECTED type: this
+            // only fires when the expected enum actually declares a variant
+            // with this name, so ordinary identifiers can't be hijacked.
+            let expected_path = self.expected_type_path(expected_ty)?;
+            let expected_last = expected_path.segments.last()?.ident.to_string();
+            let owner_suffix = format!("::{}", expected_last);
+            let expected_enum_declares_variant = self
+                .data_enum_variants_by_enum
+                .iter()
+                .any(|(known_enum, variants)| {
+                    (known_enum == &expected_last || known_enum.ends_with(&owner_suffix))
+                        && variants.contains(&variant_name)
+                });
+            if !expected_enum_declares_variant {
+                return None;
+            }
+            expected_last
+        };
         let variant_key = format!("{}_{}", enum_name, variant_name);
         let is_known_data_enum_unit_variant = self.data_enum_unit_variants.contains(&variant_key);
 

@@ -1213,7 +1213,21 @@ impl CodeGen {
                         } else if let Some(qualified) = c_like_qualified {
                             out.push_str(&format!("if (_m == {}) {{ ", qualified));
                         } else {
-                            out.push_str(&format!("if (_m == {}) {{ ", ident));
+                            // No variant_ctx and no unique C-like owner. A bare
+                            // data-enum unit variant (`NoElements =>` via
+                            // `use MinMaxResult::{..}`) still can't lower to
+                            // `==` — resolve it through the shared helper,
+                            // which emits the same `deref(_m).index() == N`
+                            // form the sibling payload arms use (and falls
+                            // back to the bare equality otherwise).
+                            out.push_str(&format!(
+                                "if ({}) {{ ",
+                                self.const_value_ident_pattern_condition(
+                                    &pi.ident,
+                                    "_m",
+                                    variant_ctx
+                                )
+                            ));
                         }
                     } else {
                         let cpp_name = escape_cpp_keyword(&pi.ident.to_string());
