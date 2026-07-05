@@ -5583,6 +5583,16 @@ impl CodeGen {
         // by `ufcs_traits` (default off).
         {
             let method_name = mc.method.to_string();
+            if std::env::var_os("RUSTY_CPP_DBG_UFCS_GATE").is_some()
+                && matches!(method_name.as_str(), "exactly_one" | "sum1" | "next_array")
+            {
+                eprintln!(
+                    "[ufcs-gate] {} class={:?} owners={:?}",
+                    method_name,
+                    self.ufcs_method_classes.get(&method_name),
+                    self.ufcs_method_trait_owners.get(&method_name)
+                );
+            }
             if matches!(
                 self.ufcs_method_classes.get(&method_name),
                 Some(crate::transpile::MethodNameClass::TraitOnly)
