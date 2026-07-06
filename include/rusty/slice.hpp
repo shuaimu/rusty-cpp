@@ -160,6 +160,28 @@ private:
 } // namespace slice_iter
 
 namespace detail {
+
+// Rebind a template's arguments onto another template: for a Rust
+// `impl<K, V> From<Src<K, V>> for Owner<K, V>`, the emitted
+// `Owner::from(arg)` can name its owner as
+// `rebind_from<Owner, remove_cvref_t<decltype(arg)>>::type` when the
+// owner's template args are not recoverable at transpile time — the C++
+// compiler extracts them from the argument's concrete type (indexmap's
+// `Entry::Occupied(e) => IndexedEntry::from(e)`). The transpiler only
+// emits this when the impl's parameter shares the owner's params in the
+// same order.
+template<template<class...> class Owner, class Src>
+struct rebind_from;
+
+template<template<class...> class Owner, template<class...> class Src, class... As>
+struct rebind_from<Owner, Src<As...>> {
+    using type = Owner<As...>;
+};
+
+template<template<class...> class Owner, class Arg>
+using rebind_from_t =
+    typename rebind_from<Owner, std::remove_cvref_t<Arg>>::type;
+
 template<typename T>
 inline constexpr bool dependent_false_v = false;
 

@@ -11734,7 +11734,20 @@ impl CodeGen {
             return None;
         }
         if owner_cpp.contains("<auto") {
-            return None;
+            // #79: an expected `Self` that resolved through the impl's self
+            // type carries the impl's UNBOUND params (`IndexedEntry<auto,
+            // auto>` for indexmap's `Entry::Occupied(e) =>
+            // IndexedEntry::from(e)`). The From-conversion's declared
+            // parameter shares those params — unify it against the
+            // argument's type to recover them; bail only if that fails.
+            if !call.args.is_empty()
+                && let Some(recovered) =
+                    self.recover_auto_owner_from_arg_signature(call, func_path)
+            {
+                owner_cpp = recovered;
+            } else {
+                return None;
+            }
         }
         let rust_method_name = func_path.segments.last()?.ident.to_string();
         // The expected type describes the call's RESULT; spelling it as the

@@ -33447,11 +33447,75 @@ impl CodeGen {
 
     /// See the `auto::` interception in
     /// `emit_call_func_with_owner_template_recovery`.
-    fn recover_auto_owner_from_arg_signature(
+
+    /// For a single-argument conversion (`Owner::from(arg)` /
+    /// `Owner::try_from(arg)`) whose declared parameter's template args are
+    /// EXACTLY the owner's own params in declaration order
+    /// (`impl<K, V> From<Src<K, V>> for Owner<K, V>`), the C++ side can
+    /// rebind the owner's args from the argument's concrete type. Returns
+    /// true when that order-exact sharing holds.
+    fn from_conversion_param_shares_owner_params(
+        &self,
+        owner_name: &str,
+        method_name: &str,
+    ) -> bool {
+        let Some(declared_param) = self.lookup_owner_method_arg_expected_type(
+            owner_name,
+            method_name,
+            0,
+            None,
+        ) else {
+            return false;
+        };
+        let Some(params) = self
+            .declared_type_params
+            .get(owner_name)
+            .or_else(|| {
+                self.declared_type_params
+                    .get(&self.scoped_type_key(owner_name))
+            })
+            .or_else(|| {
+                self.lookup_declared_type_key_for_base(owner_name, owner_name)
+                    .and_then(|key| self.declared_type_params.get(&key))
+            })
+        else {
+            return false;
+        };
+        if params.is_empty() {
+            return false;
+        }
+        let peeled = self.peel_reference_paren_group_type(&declared_param);
+        let syn::Type::Path(tp) = peeled else {
+            return false;
+        };
+        let Some(last) = tp.path.segments.last() else {
+            return false;
+        };
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return false;
+        };
+        let arg_idents: Vec<String> = args
+            .args
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::GenericArgument::Type(syn::Type::Path(p))
+                    if p.qself.is_none() && p.path.segments.len() == 1 =>
+                {
+                    Some(p.path.segments[0].ident.to_string())
+                }
+                syn::GenericArgument::Lifetime(_) => None,
+                _ => Some(String::new()),
+            })
+            .collect();
+        arg_idents.len() == params.len()
+            && arg_idents.iter().zip(params.iter()).all(|(a, p)| a == p)
+    }
+
+    fn recover_auto_owner_args_from_arg_signature(
         &self,
         call: &syn::ExprCall,
         path: &syn::Path,
-    ) -> Option<String> {
+    ) -> Option<(String, Vec<String>)> {
         let owner_name = path
             .segments
             .iter()
@@ -33460,13 +33524,20 @@ impl CodeGen {
             .to_string();
         let method_name = path.segments.last()?.ident.to_string();
         let arg = call.args.first()?;
-        let declared_param = self.lookup_owner_method_arg_expected_type(
+        let dbg = std::env::var_os("RUSTY_CPP_DBG_OWNER_RECOVERY").is_some();
+        let declared_param = match self.lookup_owner_method_arg_expected_type(
             &owner_name,
             &method_name,
             0,
             Some(arg),
-        )?;
-        let arg_ty = self.infer_simple_expr_type(arg).or_else(|| {
+        ) {
+            Some(p) => p,
+            None => {
+                if dbg { eprintln!("[owner-recovery] no declared param for {}::{}", owner_name, method_name); }
+                return None;
+            }
+        };
+        let arg_ty = match self.infer_simple_expr_type(arg).or_else(|| {
             let syn::Expr::Path(p) = self.peel_paren_group_expr(arg) else {
                 return None;
             };
@@ -33474,8 +33545,30 @@ impl CodeGen {
                 return None;
             }
             self.lookup_local_binding_type(&p.path.segments[0].ident.to_string())
-        })?;
-        let params = self.declared_type_params.get(&owner_name)?.clone();
+        }) {
+            Some(t) => t,
+            None => {
+                if dbg { eprintln!("[owner-recovery] arg type unknown for {}::{}", owner_name, method_name); }
+                return None;
+            }
+        };
+        let params = match self
+            .declared_type_params
+            .get(&owner_name)
+            .or_else(|| {
+                self.declared_type_params
+                    .get(&self.scoped_type_key(&owner_name))
+            })
+            .or_else(|| {
+                self.lookup_declared_type_key_for_base(&owner_name, &owner_name)
+                    .and_then(|key| self.declared_type_params.get(&key))
+            }) {
+            Some(p) => p.clone(),
+            None => {
+                if dbg { eprintln!("[owner-recovery] no declared params for {}", owner_name); }
+                return None;
+            }
+        };
         fn unify(
             declared: &syn::Type,
             concrete: &syn::Type,
@@ -33548,12 +33641,23 @@ impl CodeGen {
             arg_strs.push(cpp);
         }
         if arg_strs.is_empty() {
+            if dbg { eprintln!("[owner-recovery] unification empty for {}::{} (param {:?} vs arg {:?})", owner_name, method_name, quote::quote!(#declared_param).to_string(), quote::quote!(#arg_ty).to_string()); }
             return None;
         }
         let owner_base = Self::path_without_last_segment(path)
             .map(|owner_path| self.emit_path_to_string(&owner_path))
             .filter(|s| !s.is_empty() && s != "auto")
             .unwrap_or(owner_name);
+        Some((owner_base, arg_strs))
+    }
+
+    /// Formatting wrapper over [`Self::recover_auto_owner_args_from_arg_signature`].
+    fn recover_auto_owner_from_arg_signature(
+        &self,
+        call: &syn::ExprCall,
+        path: &syn::Path,
+    ) -> Option<String> {
+        let (owner_base, arg_strs) = self.recover_auto_owner_args_from_arg_signature(call, path)?;
         Some(format!("{}<{}>", owner_base, arg_strs.join(", ")))
     }
 
@@ -33612,6 +33716,27 @@ impl CodeGen {
             && let Some(owner_cpp) = self.recover_auto_owner_from_arg_signature(call, path)
         {
             return format!("{}::{}", owner_cpp, method_cpp);
+        }
+        // Same recovery when the owner resolved structurally but its template
+        // args stayed unresolved placeholders — `IndexedEntry<auto, auto>::
+        // from(e)` in a match arm whose expected type never reached the call
+        // (indexmap's `Entry::Occupied(e) => IndexedEntry::from(e)`). The
+        // From-conversion's declared parameter shares the owner's params, so
+        // unifying it against the argument's type recovers them (#79).
+        if let Some((owner_part, method_cpp)) = base_func.rsplit_once("::")
+            && (owner_part.contains("<auto") || type_string_has_auto_placeholder(owner_part))
+            && path.segments.len() >= 2
+            && !call.args.is_empty()
+        {
+            if std::env::var_os("RUSTY_CPP_DBG_OWNER_RECOVERY").is_some() {
+                eprintln!("[owner-recovery] trying base_func={}", base_func);
+            }
+            if let Some(owner_cpp) = self.recover_auto_owner_from_arg_signature(call, path) {
+                return format!("{}::{}", owner_cpp, method_cpp);
+            }
+            if std::env::var_os("RUSTY_CPP_DBG_OWNER_RECOVERY").is_some() {
+                eprintln!("[owner-recovery] FAILED for {}", base_func);
+            }
         }
         // §13.14 backward turbofish (engine): emit `f<T>(args)` for a free
         // function whose type parameter is return-only and thus undeducible by
@@ -34049,7 +34174,27 @@ impl CodeGen {
                 )
                 && !owner_args.is_empty()
             {
-                return format!("{}<{}>::{}", owner_part, owner_args.join(", "), method_part);
+                // The engine can hand back UNSOLVED placeholders when the
+                // expected type resolved through the impl's self type with
+                // unbound params (`Self` for indexmap's `Entry::Occupied(e)
+                // => IndexedEntry::from(e)` ⇒ ["auto", "auto"]). Emitting
+                // them is the strict-auto leak; recover via the
+                // From-conversion argument-unification instead (#79), and if
+                // that also fails keep the bare emission rather than leak.
+                if owner_args
+                    .iter()
+                    .any(|a| a == "auto" || type_string_has_auto_placeholder(a))
+                {
+                    if !call.args.is_empty()
+                        && let syn::Expr::Path(pe) = call.func.as_ref()
+                        && let Some(owner_cpp) =
+                            self.recover_auto_owner_from_arg_signature(call, &pe.path)
+                    {
+                        return format!("{}::{}", owner_cpp, method_part);
+                    }
+                } else {
+                    return format!("{}<{}>::{}", owner_part, owner_args.join(", "), method_part);
+                }
             }
             return base_func;
         }
@@ -34437,7 +34582,15 @@ impl CodeGen {
                                     None
                                 };
                             let owner_arg_is_usable = |arg: &str| {
-                                !self.owner_template_arg_is_value_identifier(arg)
+                                // A literal `auto` (or a type still carrying an
+                                // `auto` placeholder) is never a usable owner
+                                // arg — emitting it is exactly the strict-auto
+                                // leak. Rejecting it here lets the position
+                                // fall through to the other sources / the
+                                // From-conversion unification below.
+                                arg != "auto"
+                                    && !type_string_has_auto_placeholder(arg)
+                                    && !self.owner_template_arg_is_value_identifier(arg)
                                     && !self.owner_template_arg_looks_like_namespace_path(arg)
                             };
                             let prefer_inferred_owner_args = owner_args_omitted
@@ -34718,6 +34871,31 @@ impl CodeGen {
                                                 }
                                             }
                                         }
+                                        // #79: From-conversion owner recovery — the method's
+                                        // declared parameter (`From<Occ<K, V>> for Idx<K, V>` ⇒
+                                        // param `Occ<K, V>`) shares the owner's params; unify it
+                                        // against the argument's type to fill the remaining
+                                        // placeholder positions (indexmap's
+                                        // `Entry::Occupied(e) => IndexedEntry::from(e)`).
+                                        if recovered_args.iter().any(|a| a == "auto")
+                                            && !call.args.is_empty()
+                                            && let syn::Expr::Path(pe) = call.func.as_ref()
+                                            && let Some((_, unified)) = self
+                                                .recover_auto_owner_args_from_arg_signature(
+                                                    call, &pe.path,
+                                                )
+                                        {
+                                            for (idx, arg) in
+                                                unified.into_iter().enumerate().take(owner_arity)
+                                            {
+                                                if recovered_args
+                                                    .get(idx)
+                                                    .is_some_and(|a| a == "auto")
+                                                {
+                                                    recovered_args[idx] = arg;
+                                                }
+                                            }
+                                        }
                                         // Single-template-arg-owner factories (`Box::new_in(arg,
                                         // alloc)`, `Box::try_new(arg)`, etc.) elide the Box
                                         // generic — at the Rust call site it's inferred from
@@ -34743,6 +34921,30 @@ impl CodeGen {
                                         {
                                             recovered_args[0] = inferred;
                                         }
+                                        // #79 (C++-level closer): when the args are STILL
+                                        // placeholders and the call is a From-conversion whose
+                                        // declared parameter shares the owner's params in order
+                                        // (`impl<K, V> From<Src<K, V>> for Owner<K, V>`), let the
+                                        // C++ compiler rebind the owner's args from the
+                                        // argument's concrete type. Emits
+                                        // `rusty::detail::rebind_from_t<Owner, decltype(arg)>` as
+                                        // the owner segment (indexmap's
+                                        // `Entry::Occupied(e) => IndexedEntry::from(e)`).
+                                        if recovered_args.iter().any(|a| a == "auto")
+                                            && call.args.len() == 1
+                                            && matches!(method_name.as_str(), "from" | "try_from")
+                                            && self.from_conversion_param_shares_owner_params(
+                                                &owner_name,
+                                                &method_name,
+                                            )
+                                        {
+                                            let arg_cpp =
+                                                self.emit_expr_to_string(&call.args[0]);
+                                            seg_text = format!(
+                                                "rusty::detail::rebind_from_t<{}, decltype({})>",
+                                                seg_text, arg_cpp
+                                            );
+                                        } else {
                                         // Detect the "first arg is `&self`" shape:
                                         // `Rc::strong_count(&one)` where `one: Rc<int>`.
                                         // Wrapping the recovered arg as
@@ -34794,6 +34996,7 @@ impl CodeGen {
                                                 seg_text,
                                                 recovered_args.join(", ")
                                             );
+                                        }
                                         }
                                     }
                                 }
