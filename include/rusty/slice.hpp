@@ -2133,6 +2133,36 @@ inline std::pair<std::size_t, std::size_t> range(R r, Bounds bounds) noexcept {
 
 } // namespace slice_ext
 
+// Rust-protocol sides for `rusty::zip`: a zipped side exposing option-like
+// `next()` but no begin()/end() (indexmap's Keys/Values/Iter) is adapted
+// through `detail::make_next_iter_range` and re-dispatched. After
+// normalization neither side satisfies the constraint, so resolution falls
+// to the zip_view overload (array.hpp) — no recursion. Sides that already
+// have begin()/end() pass through untouched.
+namespace detail {
+template<typename T>
+inline constexpr bool zip_needs_next_adapter_v =
+    has_option_like_next_v<std::remove_reference_t<T>>
+    && !requires(T& t) { std::begin(t); std::end(t); };
+
+template<typename T>
+decltype(auto) zip_normalize_side(T&& side) {
+    if constexpr (zip_needs_next_adapter_v<T>) {
+        return make_next_iter_range(std::forward<T>(side));
+    } else {
+        return std::forward<T>(side);
+    }
+}
+} // namespace detail
+
+template<typename A, typename B>
+requires (detail::zip_needs_next_adapter_v<A> || detail::zip_needs_next_adapter_v<B>)
+auto zip(A&& a, B&& b) {
+    return zip(
+        detail::zip_normalize_side(std::forward<A>(a)),
+        detail::zip_normalize_side(std::forward<B>(b)));
+}
+
 // ---- rusty::iter_ext namespace — `iter_ext::zip(a, b)` helper.
 // Cannot live in `rusty::iter` because that's already a free function;
 // patcher maps `iter::zip` → `rusty::iter_ext::zip` to disambiguate. ----
