@@ -23,6 +23,9 @@ declare -a MATRIX_CRATES=(
     # parity tests. Its source lives in tests/transpile_tests/vec/ (tracked via
     # .gitignore exceptions), so ensure_crate_checkout skips the clone.
     "vec"
+    # btree: committed local crate like `vec` — focused BTreeMap/BTreeSet
+    # parity tests (ordered iteration, ranges, entry API, set algebra).
+    "btree"
     # itertools: temporarily disabled — iterator-item engine + FoldWhile_Ok done
     # (quick leak-free), remaining = tree_reduce alias-hoist (UFCS path, collision-
     # safe) + projected-push transpile leaks. Re-enable when those land.
@@ -57,6 +60,11 @@ declare -a KNOWN_FAIL_CRATES=(
     "serde_yaml"
     "hashbrown"
     "indexmap"
+    # btree: new coverage crate, being driven to green. Initial landscape
+    # (19 errors): cross-module Iterator adapter dispatch on btree_port
+    # iterator types (.copied()/.cloned() on Iter/Keys/Values/Union/...),
+    # Option<(&K,&V)> tuple-ref equality, entry().or_insert() deref-assign.
+    "btree"
 )
 
 is_known_fail() {

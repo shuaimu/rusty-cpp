@@ -40,3 +40,8 @@ compile_test*
 !vec/Cargo.toml
 !vec/src/
 !vec/src/lib.rs
+# Track the committed local `btree` parity-test crate (hand-written, not cloned)
+!btree/
+!btree/Cargo.toml
+!btree/src/
+!btree/src/lib.rs
