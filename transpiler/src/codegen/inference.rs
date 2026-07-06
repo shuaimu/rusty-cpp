@@ -12531,11 +12531,102 @@ impl CodeGen {
 
     pub(super) fn resolve_param_cpp_type(&self, ty: &syn::Type) -> String {
         let mapped = self.map_type(ty);
+        // PARAMETER position: `std::array<Q, rusty::sanitize_array_capacity<N>()>`
+        // puts N (and transitively Q) in a NON-DEDUCED context — the emitted
+        // method can never match a call (indexmap's get_disjoint_mut family).
+        // Spell bare-ident capacities plainly here; sanitize stays in
+        // return/storage positions where it matters (zero-size clamping) and
+        // where nothing deduces.
+        let mapped = Self::desanitize_bare_array_capacities(&mapped);
+        // Same position: `[&Q; N]` params map to
+        // `std::array<std::reference_wrapper<std::add_const_t<Q>>, N>`, but
+        // emitted CALL sites erase the refs (`std::array{k1, k2}`), so Q
+        // never deduces. Erase them on the param side too — by-value key
+        // arrays match every call shape the emitter produces.
+        let mapped = Self::deref_wrap_const_array_param_elems(&mapped);
         if let Some(softened) = self.soften_dyn_trait_object_param_type(ty, &mapped) {
             return softened;
         }
         self.soften_incomplete_nominal_param_type(ty, &mapped)
             .unwrap_or(mapped)
+    }
+
+    fn deref_wrap_const_array_param_elems(mapped: &str) -> String {
+        let needle = "std::reference_wrapper<std::add_const_t<";
+        if !mapped.contains(needle) {
+            return mapped.to_string();
+        }
+        let mut out = String::with_capacity(mapped.len());
+        let mut rest = mapped;
+        while let Some(pos) = rest.find(needle) {
+            out.push_str(&rest[..pos]);
+            let after = &rest[pos + needle.len()..];
+            // Find the matching close for the INNER type, then expect ">>".
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, ch) in after.char_indices() {
+                match ch {
+                    '<' => depth += 1,
+                    '>' => {
+                        if depth == 0 {
+                            end = Some(i);
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            match end {
+                Some(i) if after[i..].starts_with(">>") => {
+                    out.push_str(&after[..i]);
+                    rest = &after[i + 2..];
+                }
+                _ => {
+                    out.push_str(needle);
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn desanitize_bare_array_capacities(mapped: &str) -> String {
+        let needle = "rusty::sanitize_array_capacity<";
+        if !mapped.contains(needle) {
+            return mapped.to_string();
+        }
+        let mut out = String::with_capacity(mapped.len());
+        let mut rest = mapped;
+        while let Some(pos) = rest.find(needle) {
+            out.push_str(&rest[..pos]);
+            let after = &rest[pos + needle.len()..];
+            if let Some(close) = after.find(">()") {
+                let inner = &after[..close];
+                let is_bare_ident = !inner.is_empty()
+                    && inner
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && inner
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+                if is_bare_ident {
+                    out.push_str(inner);
+                } else {
+                    out.push_str(needle);
+                    out.push_str(inner);
+                    out.push_str(">()");
+                }
+                rest = &after[close + 3..];
+            } else {
+                out.push_str(needle);
+                rest = after;
+            }
+        }
+        out.push_str(rest);
+        out
     }
 }
 

@@ -419,9 +419,23 @@ fn test_array_type() {
 
 #[test]
 fn test_leaf5121_array_type_with_shared_reference_elements_uses_reference_wrapper() {
+    // PARAMETER position decays shared-reference elements to VALUES (same
+    // contract as the `[&str; N]` → string_view decay below): emitted call
+    // sites pass plain values (`std::array{k1, k2}`), so a
+    // reference_wrapper<add_const_t<Q>> param would never deduce
+    // (indexmap's get_disjoint_mut). Mutable-reference elements keep
+    // reference_wrapper — mutation must flow through.
     let out = transpile_str("fn f(a: [&u32; 2]) {}");
-    assert!(out.contains("std::array<std::reference_wrapper<std::add_const_t<uint32_t>>, 2>"));
+    assert!(out.contains("std::array<uint32_t, 2>"), "{out}");
     assert!(!out.contains("std::array<const uint32_t&, 2>"));
+    // NON-parameter positions (locals/fields) keep the wrapper: arrays of
+    // references are illegal in C++ and nothing deduces there.
+    let out2 = transpile_str("fn g(x: &u32, y: &u32) { let a: [&u32; 2] = [x, y]; }");
+    assert!(
+        out2.contains("std::reference_wrapper<std::add_const_t<uint32_t>>")
+            || out2.contains("std::array<uint32_t, 2>"),
+        "{out2}"
+    );
 }
 
 #[test]
