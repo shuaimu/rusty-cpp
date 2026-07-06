@@ -3828,6 +3828,18 @@ impl CodeGen {
     /// with methods merged into their struct definitions.
     /// If `module_name` is set, emits C++20 module declarations.
     pub fn emit_file(&mut self, file: &syn::File, module_name: Option<&str>) {
+        // Whole-impl normalization BEFORE any collection pass: rename bare
+        // positional self-type generics to the host struct's own param names
+        // (see normalize_bare_self_param_impls). Lazy clone — most files
+        // change nothing.
+        let normalized_file;
+        let file = match Self::normalize_bare_self_param_impls(file) {
+            Some(f) => {
+                normalized_file = f;
+                &normalized_file
+            }
+            None => file,
+        };
         let profile_emit = std::env::var_os("RUSTY_CPP_PROFILE_EMIT").is_some();
         let profile_this_file = profile_emit;
         let emit_start = std::time::Instant::now();
@@ -42172,6 +42184,21 @@ fn sniff_leading_type_ident(args: &str) -> Option<String> {
 ///
 /// Match is leaf-name only — `Immut`, `::marker::Immut`, and
 /// `marker::Immut` all resolve to the same substitution entry.
+/// Blanket ident renamer scoped to one impl block (see
+/// normalize_bare_self_param_impls). Renames EVERY ident occurrence,
+/// covering the generic-param declaration, `R::Out` assoc-type paths,
+/// where-clauses, method signatures and bodies.
+struct BareSelfParamRenamer<'a> {
+    renames: &'a HashMap<String, String>,
+}
+impl syn::visit_mut::VisitMut for BareSelfParamRenamer<'_> {
+    fn visit_ident_mut(&mut self, i: &mut syn::Ident) {
+        if let Some(to) = self.renames.get(&i.to_string()) {
+            *i = syn::Ident::new(to, i.span());
+        }
+    }
+}
+
 struct ParallelImplRewriter<'a> {
     subs: &'a [(String, String)],
 }
@@ -42757,6 +42784,218 @@ fn replace_whole_word(haystack: &str, needle: &str, replacement: &str) -> String
 /// params onto the method (they'd be undeducible at call sites like
 /// `leaf_kv.left_edge()` where the call provides no type info to bind
 /// them to).
+/// Whole-impl normalization: `impl<I, R> Tr for Type<I, R>` whose SELF-type
+/// args are BARE impl generics positionally naming the host struct's
+/// declared params under DIFFERENT names (itertools' `MapSpecialCase<I, F>`
+/// impl'd via `R`, indexmap's `IndexSet<T, S>` impl'd via `S1`) renames the
+/// impl generic to the host's name across the ENTIRE impl — generics,
+/// self-ty, trait path, assoc types (`type Item = R::Out`), method
+/// signatures and bodies. Absorbed members then reference host params
+/// directly instead of carrying an undeducible `template<typename R>`
+/// (indexmap set operators; the assoc-type spelling would otherwise keep
+/// the old name even if only the METHOD were rewritten).
+impl CodeGen {
+    fn normalize_bare_self_param_impls(file: &syn::File) -> Option<syn::File> {
+        fn type_param_names(g: &syn::Generics) -> Vec<String> {
+            g.params
+                .iter()
+                .filter_map(|p| match p {
+                    syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                    _ => None,
+                })
+                .collect()
+        }
+        // Same-named types in DIFFERENT modules (map::OccupiedEntry<K, V> vs
+        // table::OccupiedEntry<T>) must not conflate: key by module-qualified
+        // path, with a bare-name entry only while it stays unique.
+        fn collect_host_params(
+            items: &[syn::Item],
+            prefix: &mut Vec<String>,
+            qualified: &mut HashMap<String, Vec<String>>,
+            bare: &mut HashMap<String, Option<Vec<String>>>,
+        ) {
+            let mut record = |name: String,
+                              params: Vec<String>,
+                              prefix: &[String],
+                              qualified: &mut HashMap<String, Vec<String>>,
+                              bare: &mut HashMap<String, Option<Vec<String>>>| {
+                let key = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}::{}", prefix.join("::"), name)
+                };
+                qualified.insert(key, params.clone());
+                match bare.entry(name) {
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(Some(params));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut o) => {
+                        if o.get().as_ref() != Some(&params) {
+                            o.insert(None);
+                        }
+                    }
+                }
+            };
+            for it in items {
+                match it {
+                    syn::Item::Struct(st) => record(
+                        st.ident.to_string(),
+                        type_param_names(&st.generics),
+                        prefix,
+                        qualified,
+                        bare,
+                    ),
+                    syn::Item::Enum(en) => record(
+                        en.ident.to_string(),
+                        type_param_names(&en.generics),
+                        prefix,
+                        qualified,
+                        bare,
+                    ),
+                    syn::Item::Mod(m) => {
+                        if let Some((_, nested)) = &m.content {
+                            prefix.push(m.ident.to_string());
+                            collect_host_params(nested, prefix, qualified, bare);
+                            prefix.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        fn compute_renames(
+            imp: &syn::ItemImpl,
+            prefix: &[String],
+            qualified: &HashMap<String, Vec<String>>,
+            bare: &HashMap<String, Option<Vec<String>>>,
+        ) -> HashMap<String, String> {
+            let mut self_ty: &syn::Type = imp.self_ty.as_ref();
+            loop {
+                match self_ty {
+                    syn::Type::Reference(r) => self_ty = &r.elem,
+                    syn::Type::Paren(p) => self_ty = &p.elem,
+                    syn::Type::Group(g) => self_ty = &g.elem,
+                    _ => break,
+                }
+            }
+            let syn::Type::Path(sp) = self_ty else {
+                return HashMap::new();
+            };
+            let Some(seg) = sp.path.segments.last() else {
+                return HashMap::new();
+            };
+            // Only same-scope single-segment self paths resolve by module;
+            // otherwise fall back to the bare name IF it is globally unique.
+            let seg_name = seg.ident.to_string();
+            let module_key = if prefix.is_empty() {
+                seg_name.clone()
+            } else {
+                format!("{}::{}", prefix.join("::"), seg_name)
+            };
+            let resolved = if sp.path.segments.len() == 1 {
+                qualified
+                    .get(&module_key)
+                    .or_else(|| bare.get(&seg_name).and_then(|o| o.as_ref()))
+            } else {
+                bare.get(&seg_name).and_then(|o| o.as_ref())
+            };
+            let Some(host_params) = resolved else {
+                return HashMap::new();
+            };
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                return HashMap::new();
+            };
+            let impl_generics: HashSet<String> = imp
+                .generics
+                .params
+                .iter()
+                .filter_map(|p| match p {
+                    syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                    _ => None,
+                })
+                .collect();
+            let mut renames: HashMap<String, String> = HashMap::new();
+            let mut sources_seen: HashSet<String> = HashSet::new();
+            let mut ambiguous: HashSet<String> = HashSet::new();
+            let type_args: Vec<&syn::GenericArgument> = args
+                .args
+                .iter()
+                .filter(|a| matches!(a, syn::GenericArgument::Type(_)))
+                .collect();
+            for (pos, host) in host_params.iter().enumerate() {
+                let Some(syn::GenericArgument::Type(syn::Type::Path(ap))) =
+                    type_args.get(pos).copied()
+                else {
+                    continue;
+                };
+                if ap.qself.is_some() || ap.path.segments.len() != 1 {
+                    continue;
+                }
+                let src = ap.path.segments[0].ident.to_string();
+                if !impl_generics.contains(&src)
+                    || &src == host
+                    // Renaming to a name the impl ALSO declares would merge
+                    // two distinct params — skip.
+                    || impl_generics.contains(host)
+                {
+                    continue;
+                }
+                if !sources_seen.insert(src.clone()) {
+                    // Same impl generic at two host positions (Type<R, R>):
+                    // ambiguous, drop it.
+                    ambiguous.insert(src.clone());
+                    continue;
+                }
+                renames.insert(src, host.clone());
+            }
+            for a in ambiguous {
+                renames.remove(&a);
+            }
+            renames
+        }
+        fn rename_in_items(
+            items: &mut [syn::Item],
+            prefix: &mut Vec<String>,
+            qualified: &HashMap<String, Vec<String>>,
+            bare: &HashMap<String, Option<Vec<String>>>,
+            changed: &mut bool,
+        ) {
+            for it in items.iter_mut() {
+                match it {
+                    syn::Item::Impl(imp) => {
+                        let renames = compute_renames(imp, prefix, qualified, bare);
+                        if !renames.is_empty() {
+                            let mut rw = BareSelfParamRenamer { renames: &renames };
+                            syn::visit_mut::VisitMut::visit_item_impl_mut(&mut rw, imp);
+                            *changed = true;
+                        }
+                    }
+                    syn::Item::Mod(m) => {
+                        if let Some((_, nested)) = &mut m.content {
+                            prefix.push(m.ident.to_string());
+                            rename_in_items(nested, prefix, qualified, bare, changed);
+                            prefix.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut qualified: HashMap<String, Vec<String>> = HashMap::new();
+        let mut bare: HashMap<String, Option<Vec<String>>> = HashMap::new();
+        let mut prefix: Vec<String> = Vec::new();
+        collect_host_params(&file.items, &mut prefix, &mut qualified, &mut bare);
+        if qualified.is_empty() {
+            return None;
+        }
+        let mut cloned = file.clone();
+        let mut changed = false;
+        rename_in_items(&mut cloned.items, &mut prefix, &qualified, &bare, &mut changed);
+        changed.then_some(cloned)
+    }
+}
+
 fn detect_impl_structural_decomposition(
     impl_block: &syn::ItemImpl,
     host_class_params: &[String],
