@@ -3,13 +3,26 @@
 [![CI](https://github.com/shuaimu/rusty-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/shuaimu/rusty-cpp/actions/workflows/ci.yml)
 [![Documentation](https://img.shields.io/badge/documentation-online-blue)](http://mpaxos.com/software/rusty-cpp.html)
 
-Bringing Rust's safety to C++ through:
+Bringing Rust's safety to C++ — in both directions. You can have your existing C++ *checked* like Rust, or you can *write* Rust and ship C++:
 
-**1. Static Borrow Checker** - Compile-time ownership and lifetime analysis via `rusty-cpp-checker`.
+**1. Static Borrow Checker** - Compile-time ownership and lifetime analysis for C++ via `rusty-cpp-checker`.
 <br>
-**2. Safe Types** - `Box<T>`, `RefCell<T>`, `Vec<T>`, `HashMap<K,V>`, etc.
+**2. Rust-to-C++ Translation** - `rusty-cpp-transpiler` translates Rust crates into readable C++20 modules; validated by running real crates' own test suites (serde, semver, smallvec, ...) through the pipeline.
 <br>
-**3. Rust Idioms** - `Send`/`Sync` traits, RAII guards, type-state patterns, `Result<T,E>`/`Option<T>`, etc.
+**3. Rust as an Embedded DSL** - Write individual functions in Rust *inside* your `.cpp` files; the tool keeps a generated C++ fallback in-place, so your build stays a plain C++ build.
+<br>
+**4. Safe Types** - `Box<T>`, `RefCell<T>`, `Vec<T>`, `HashMap<K,V>`, etc. — the same `rusty::` runtime the transpiler emits code against.
+<br>
+**5. Rust Idioms** - `Send`/`Sync` traits, RAII guards, type-state patterns, `Result<T,E>`/`Option<T>`, etc.
+
+Which tool do I want?
+
+| You have | You want | Use |
+|---|---|---|
+| Existing C++ | Memory-safety checking without changing the code | `rusty-cpp-checker` (§1) |
+| A Rust crate (or the wish to write one) | C++20 modules that drop into a C++ build | `rusty-cpp-transpiler` (§2) |
+| A C++ codebase you're migrating piecemeal | Rust for new/rewritten functions, C++ everywhere else | inline Rust DSL (§3) |
+| Hand-written C++ | Rust-shaped types and idioms | `rusty::` headers (§4, §5) |
 
 ---
 
@@ -477,7 +490,117 @@ See [Complete Annotations Guide](docs/annotations.md) for comprehensive document
 
 ---
 
-## 2. Safe Type Alternatives
+## 2. Rust-to-C++ Translation
+
+### 🎯 Vision
+
+The borrow checker above retrofits Rust's rules onto C++. The transpiler takes the opposite (and stronger) route: **write actual Rust, let `rustc` be the safety authority, and translate the result into C++20 modules** that drop into an ordinary C++ build. Rust becomes a front-end language for C++ projects — you get real borrow checking, real pattern matching, and real trait-based generics, while your build system, linker, and the rest of your codebase stay C++.
+
+The core contract is a **forward correctness guarantee**: if the Rust source compiles under `rustc`, the generated C++ compiles and produces the same results. Rust is the source of truth; the C++ output is a faithful, readable rendering — not the other way around. (C++ being more permissive than Rust, the reverse direction is explicitly not claimed.) See [docs/rusty-cpp-transpiler.md](docs/rusty-cpp-transpiler.md) for the full construct-by-construct mapping.
+
+### Example
+
+```rust
+// point.rs
+pub struct Point { pub x: i32, pub y: i32 }
+
+impl Point {
+    pub fn flip(self) -> Point {
+        Point { x: self.y, y: self.x }
+    }
+    pub fn norm2(&self) -> i32 {
+        self.x * self.x + self.y * self.y
+    }
+}
+
+pub fn farthest(points: &[Point]) -> Option<&Point> {
+    let mut best: Option<&Point> = None;
+    for p in points {
+        match best {
+            Some(b) if b.norm2() >= p.norm2() => {}
+            _ => best = Some(p),
+        }
+    }
+    best
+}
+```
+
+```bash
+rusty-cpp-transpiler point.rs -o point.cppm -m point
+```
+
+produces a C++20 module exporting `Point`, `flip`, `norm2`, and `farthest` against the `rusty::` runtime (`rusty::Option`, `std::span` for the slice, pattern-match lowering for the `match`), importable from any C++ translation unit with `import point;`.
+
+### Usage
+
+```bash
+# Build the transpiler (pure Rust — no LLVM/Z3 needed, unlike the checker)
+cargo build --release -p rusty-cpp-transpiler
+
+# Single file -> single C++20 module
+rusty-cpp-transpiler input.rs -o output.cppm -m my_module
+
+# Whole crate -> one module per Rust module, with cross-module imports
+rusty-cpp-transpiler --crate path/to/Cargo.toml --output-dir cpp_out
+
+# Generate a CMakeLists.txt for the emitted modules from Cargo.toml
+rusty-cpp-transpiler --crate path/to/Cargo.toml --cmake path/to/Cargo.toml
+
+# Crates using macros: expand first (requires cargo-expand)
+rusty-cpp-transpiler --crate path/to/Cargo.toml --expand
+
+# Close the loop: run the borrow checker over the transpiled output
+rusty-cpp-transpiler input.rs -o output.cppm --verify
+```
+
+Compiling the output requires a clang toolchain with C++20 modules support (the test matrix builds with `clang++ -std=c++23`); the emitted code `#include`s the header-only `rusty/` runtime from this repository. Generated code can also call *into* existing C++: `use cpp::...` imports resolve against a user-supplied C++ module symbol index (`--cpp-module-index`).
+
+### What's covered
+
+Generics and traits (including associated types and trait objects), data-carrying enums with pattern matching, closures, iterators and adapter chains, the `?` operator, `Box`/`Rc`/`Arc`/`Cell`/`RefCell`, slices and string handling, `Formatter`-based `Debug`/`Display`, multi-module crates with cross-crate dependencies, and — increasingly — `unsafe` raw-pointer code (exercised by porting a C-style YAML parser). Rust's module tree maps onto C++20 modules plus namespaces; traits lower to free-function namespaces resolved via compile-time dispatch, so generic code stays template-friendly with no virtual-dispatch overhead.
+
+### How it's validated: the parity matrix
+
+Every claim above is enforced by CI-style parity testing against **real, unmodified crates from crates.io**: each crate *and its own test suite* are transpiled, compiled with clang, and executed — and the test results must match `cargo test` on the Rust side.
+
+Currently green in the default matrix: `either`, `tap`, `cfg-if`, `take_mut`, `arrayvec`, `semver`, `bitflags`, `smallvec`, `once_cell`, `serde_bytes`, `serde_repr`, `serde_core`, `serde`, `pollster` (plus a focused local `Vec` suite). In progress: `itertools`, `hashbrown`, `indexmap`, `serde_yaml`.
+
+```bash
+# Run one crate through the parity pipeline
+bash tests/transpile_tests/run_parity_matrix.sh --crate semver
+```
+
+---
+
+## 3. Rust as an Embedded DSL in C++
+
+For codebases that can't (or shouldn't) move whole crates at once, the transpiler supports **inline Rust blocks inside `.cpp` files**. You write a function in Rust where it lives today; the tool generates and maintains the equivalent C++ right below it. Normal builds compile the generated C++ (`RUSTYCPP_RUST=0`) — consumers of your project never need a Rust toolchain.
+
+```cpp
+#if RUSTYCPP_RUST
+fn clamp_add(a: i32, b: i32, lo: i32, hi: i32) -> i32 {
+    let s = a + b;
+    if s < lo { lo } else if s > hi { hi } else { s }
+}
+#endif
+/*RUSTYCPP:GEN-BEGIN id=clamp_add version=1 rust_sha256=<hex>*/
+// generated C++ (read-only; regenerated from the Rust above)
+/*RUSTYCPP:GEN-END id=clamp_add*/
+```
+
+```bash
+# Validate marker structure and Rust-payload hashes (CI-friendly)
+rusty-cpp-transpiler inline-rust --check --files src/*.cpp
+
+# Regenerate the C++ fallback regions in place
+rusty-cpp-transpiler inline-rust --rewrite --files src/*.cpp
+```
+
+The generator is deterministic, touches only the `GEN` regions, and records a `rust_sha256` of the Rust payload so CI can reject stale fallbacks. V1 deliberately accepts a conservative Rust subset (free functions, structs with named fields, inherent impls, `Option`/`Result`/`Vec`/`String`, standard control flow) and keeps each block local to its translation unit — no cross-TU declaration magic. See §12 of [docs/rusty-cpp-transpiler.md](docs/rusty-cpp-transpiler.md) for the normative grammar and subset.
+
+---
+
+## 4. Safe Type Alternatives
 
 RustyCpp provides drop-in replacements for C++ standard library types with built-in safety guarantees:
 
@@ -529,11 +652,11 @@ Include the headers:
 #include <rusty/hashmap.hpp>
 ```
 
-These types are designed to work seamlessly with the borrow checker and enforce Rust's safety guarantees at runtime.
+These types are designed to work seamlessly with the borrow checker and enforce Rust's safety guarantees at runtime. They are also the runtime the transpiler (§2) emits code against — hand-written `rusty::` C++ and transpiled Rust share one type system, so the two styles mix freely in a codebase.
 
 ---
 
-## 3. Rust Design Idioms
+## 5. Rust Design Idioms
 
 RustyCpp implements key Rust design patterns for safer concurrent programming:
 
@@ -775,10 +898,9 @@ Try to use [POD](https://en.cppreference.com/w/cpp/named_req/PODType) types if p
 ### Incrementally Migrate to Rust (C++/Rust Interop)
 Some languages (like D, Zig, and Swift) offer seamless integration with C++. This makes it easier to adopt these languages in existing C++ projects, as you can simply write new code in the chosen language and interact with existing C++ code without friction.
 
-Unfortunately, Rust does not support this level of integration (perhaps intentionally to avoid becoming a secondary option in the C++ ecosystem), as discussed [here](https://internals.rust-lang.org/t/true-c-interop-built-into-the-language/19175/5).
-Currently, the best approach for C++/Rust interoperability is through the cxx/autocxx crates.
-This interoperability is implemented as a semi-automated process based on C FFIs (Foreign Function Interfaces) that both C++ and Rust support.
-However, if your C++ code follows the guidelines in this document, particularly if all types are POD, the interoperability experience can approach the seamless integration offered by other languages (though this remains to be verified).
+Rust does not support this level of integration natively (perhaps intentionally, to avoid becoming a secondary option in the C++ ecosystem), as discussed [here](https://internals.rust-lang.org/t/true-c-interop-built-into-the-language/19175/5). The conventional route is FFI-based bindings through the cxx/autocxx crates.
+
+This project takes a different route around the problem: instead of linking Rust and C++ object code across an FFI boundary, **translate the Rust into C++** (§2, §3). New code is written and checked as Rust, but what enters the build is ordinary C++20 — it interoperates with the rest of the codebase the way any C++ does, with no binding layer, no dual toolchain for consumers, and no ABI seam. Whole crates can come over via `rusty-cpp-transpiler --crate`, and single functions can migrate in place via the inline Rust DSL.
 
 ### Closely related projects to watch
 
