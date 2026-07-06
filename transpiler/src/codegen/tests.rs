@@ -18700,7 +18700,10 @@ fn test_leaf4154333333332_collect_with_expected_type_lowers_to_from_iter() {
         }
         "#,
     );
-    assert!(out.contains("return Wrap::from_iter(rusty::iter((*this)).cloned());"));
+    // cloned() routes through the rusty free-function adapter (which prefers
+    // a member spelling when the receiver has one) so transpiled iterator
+    // types without member adapters work too — see try_emit_iter_copied_cloned_call.
+    assert!(out.contains("return Wrap::from_iter(rusty::cloned(rusty::iter((*this))));"));
 }
 
 #[test]

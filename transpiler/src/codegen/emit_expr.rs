@@ -6752,6 +6752,9 @@ impl CodeGen {
         if let Some(rev_call) = self.try_emit_iter_rev_call(mc) {
             return rev_call;
         }
+        if let Some(copied_call) = self.try_emit_iter_copied_cloned_call(mc) {
+            return copied_call;
+        }
         // Note: is_some()/is_none() are kept as-is for rusty::Option (which has
         // these methods). The has_value() rewrite was only needed for std::optional
         // but incorrectly matched rusty::Option from iterator .next() calls.
@@ -19129,6 +19132,29 @@ impl CodeGen {
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
         Some(format!("rusty::rev({})", receiver))
+    }
+
+    /// `it.copied()` / `it.cloned()` route through the rusty free-function
+    /// adapters. Runtime iterator types have member adapters (the free fn
+    /// prefers the member spelling, so their exact adapter types are kept),
+    /// but TRANSPILED iterator types — btree_port's set::Iter, map::Keys,
+    /// set::Union/... — only expose option-like `next()`: their Rust
+    /// `copied`/`cloned` are Iterator DEFAULT methods, not inherent ones, so
+    /// a member call has nothing to resolve against cross-module.
+    pub(super) fn try_emit_iter_copied_cloned_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+    ) -> Option<String> {
+        if (mc.method != "copied" && mc.method != "cloned") || !mc.args.is_empty() {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+        {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        Some(format!("rusty::{}({})", mc.method, receiver))
     }
 
     pub(super) fn try_emit_iter_fold_call(

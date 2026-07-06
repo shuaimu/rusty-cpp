@@ -4261,8 +4261,13 @@ return std::move(k);
     }
     rusty::Option<T> next() {
         auto& pred = this->pred;
-        auto mapped_pred = [&](const T& k, btree_internal::SetValZST& _v) { return pred(k); };
-        return this->inner.next(&mapped_pred, rusty::clone(this->alloc)).map([&](auto&& _destruct_param0) {
+        // Hand-port: the inner map path invokes the predicate with a moved
+        // rvalue SetValZST; Rust inferred this closure param — auto&& matches
+        // both value categories.
+        auto mapped_pred = [&](const T& k, auto&& _v) { return pred(k); };
+        // Hand-port: Rust `&mut mapped_pred` is a borrow — the emitted address-of
+        // produced a pointer rvalue that `next(F&)` cannot bind.
+        return this->inner.next(mapped_pred, rusty::clone(this->alloc)).map([&](auto&& _destruct_param0) {
 auto&& k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_destruct_param0)));
 return std::move(k);
 });
@@ -4878,7 +4883,9 @@ return std::move(k);
     }
     template<typename F>
     void retain(F f) {
-        this->extract_if(rusty::range_full(), [&](auto&& v) { return !f(std::move(v)); }).for_each([&](auto&&... _args) -> decltype(auto) { return rusty::mem::drop(std::forward<decltype(_args)>(_args)...); });
+        // Hand-port: for_each is an Iterator DEFAULT method — no member on the
+        // transpiled ExtractIf; route through the rusty free-function adapter.
+        rusty::for_each(this->extract_if(rusty::range_full(), [&](auto&& v) { return !f(std::move(v)); }), [&](auto&&... _args) -> decltype(auto) { return rusty::mem::drop(std::forward<decltype(_args)>(_args)...); });
     }
     void append(BTreeSet<T, A>& other) {
         this->map.append(other.map);

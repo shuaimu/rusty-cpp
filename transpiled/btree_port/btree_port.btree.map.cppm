@@ -4503,13 +4503,13 @@ struct ExtractIfInner {
                 std::visit(overloaded {
                     [&](const std::variant_alternative_t<1, rusty::detail::variant_underlying_type_t<decltype(rusty::detail::deref_if_pointer(_m))>>& _v) {
                         const auto& end = _v._0;
-                        if (((rusty::detail::deref_if_pointer_like(k))).le(std::move(end))) {
+                        if (rusty::detail::deref_if_pointer_like(k) <= end) {
                             std::make_tuple();
                         }
                     },
                     [&](const std::variant_alternative_t<2, rusty::detail::variant_underlying_type_t<decltype(rusty::detail::deref_if_pointer(_m))>>& _v) {
                         const auto& end = _v._0;
-                        if (((rusty::detail::deref_if_pointer_like(k))).lt(std::move(end))) {
+                        if (rusty::detail::deref_if_pointer_like(k) < end) {
                             std::make_tuple();
                         }
                     },
@@ -4524,9 +4524,11 @@ struct ExtractIfInner {
             if (pred(std::move(k), std::move(v))) {
                 this->length -= 1;
                 auto [kv_shadow1, pos] = rusty::detail::deref_if_pointer_like(kv.remove_kv_tracking([&]() {
-const auto root = this->dormant_root.take().unwrap().awaken();
+// Hand-port: Rust `let mut root` — const blocked pop_internal_level (non-
+// const) and poisoned the DormantMutRef with a const NodeRef.
+auto root = this->dormant_root.take().unwrap().awaken();
 root.pop_internal_level(rusty::clone(alloc));
-this->dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(__btree_port_make_dormant(std::move(root))));
+this->dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>(([](auto&& __t) -> decltype(auto) { if constexpr (requires { __t._1; }) return (std::forward<decltype(__t)>(__t)._1); else return std::get<1>(std::forward<decltype(__t)>(__t)); })(__btree_port_make_dormant(root)));
 }, rusty::clone(alloc)));
                 this->cur_leaf_edge = rusty::Option<btree_internal::Handle<btree_internal::NodeRef<marker::Mut, K, V, marker::Leaf>, marker::Edge>>(std::move(pos));
                 return rusty::Option<std::tuple<K, V>>(std::move(kv_shadow1));
@@ -5707,7 +5709,9 @@ return std::move(v);
     }
     template<typename F>
     void retain(F f) {
-        this->extract_if(rusty::range_full(), [&](auto&& k, auto&& v) { return !f(std::move(k), std::move(v)); }).for_each([&](auto&&... _args) -> decltype(auto) { return rusty::mem::drop(std::forward<decltype(_args)>(_args)...); });
+        // Hand-port: for_each is an Iterator DEFAULT method — no member on the
+        // transpiled ExtractIf; route through the rusty free-function adapter.
+        rusty::for_each(this->extract_if(rusty::range_full(), [&](auto&& k, auto&& v) { return !f(std::move(k), std::move(v)); }), [&](auto&&... _args) -> decltype(auto) { return rusty::mem::drop(std::forward<decltype(_args)>(_args)...); });
     }
     void append(BTreeMap<K, V, A>& other) {
         if (rusty::is_empty(other)) {
@@ -5919,7 +5923,10 @@ return std::move(v);
     std::tuple<ExtractIfInner<K, V, R>, A> extract_if_inner(R range) {
         if (auto&& _iflet_scrutinee = this->root.as_mut(); _iflet_scrutinee.is_some()) {
             auto& root = rusty::detail::deref_if_pointer_like(_iflet_scrutinee.unwrap());
-            auto [root_shadow1, dormant_root] = rusty::detail::deref_if_pointer_like(__btree_port_make_dormant(std::move(root)));
+            // Hand-port: __btree_port_make_dormant takes an lvalue reference
+            // (Rust DormantMutRef::new borrows &mut root); the emitted
+            // std::move made the argument an unbindable rvalue.
+            auto [root_shadow1, dormant_root] = rusty::detail::deref_if_pointer_like(__btree_port_make_dormant(root));
             auto first = root_shadow1.borrow_mut().lower_bound(btree_internal::SearchBound<K>::from_range(rusty::deref_call(range, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).start_bound()) { return std::forward<decltype(__recv)>(__recv).start_bound(); })));
             return std::make_tuple(ExtractIfInner<K, V, R>{.length = this->length, .dormant_root = rusty::Option<btree_internal::DormantMutRef<btree_internal::Root<K, V>>>(std::move(dormant_root)), .cur_leaf_edge = rusty::Option<btree_internal::Handle<btree_internal::NodeRef<marker::Mut, K, V, marker::Leaf>, marker::Edge>>(std::move(first)), .range = std::move(range)}, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
         } else {

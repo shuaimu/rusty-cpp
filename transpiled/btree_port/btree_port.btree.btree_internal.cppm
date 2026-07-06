@@ -4124,18 +4124,29 @@ struct SearchBound : std::variant<SearchBound_Included<T>, SearchBound_Excluded<
     static SearchBound<T> AllExcluded() { return SearchBound<T>{SearchBound_AllExcluded<T>{}}; }
 
 
-    static SearchBound<T> from_range(rusty::Bound<T> range_bound) {
+    template<typename U>
+    static SearchBound<T> from_range(rusty::Bound<U> range_bound) {
         // Range-path fix: the transpiled body returned bare `AllIncluded`
         // (the function template), not a SearchBound value. Hand-port
-        // the match on rusty::Bound<T> = variant<Unbounded, Included, Excluded>
+        // the match on rusty::Bound<U> = variant<Unbounded, Included, Excluded>
         // and emit explicit SearchBound<T> constructions for each arm.
-        if (range_bound.index() == 1) {
-            auto&& t = std::get<1>(range_bound)._0;
-            return SearchBound<T>{SearchBound_Included<T>{std::move(t)}};
-        }
-        if (range_bound.index() == 2) {
-            auto&& t = std::get<2>(range_bound)._0;
-            return SearchBound<T>{SearchBound_Excluded<T>{std::move(t)}};
+        //
+        // Hand-port 2: accept Bound<U>, not just Bound<T>. Rust's Bound is
+        // polymorphic; the C++ range_full() has no key type to name and
+        // defaults its Bound to size_t — its only variant is Unbounded, so
+        // the payload arms are compile-guarded on T-from-U constructibility
+        // and asserted unreachable otherwise (retain() on any key type).
+        if constexpr (std::is_constructible_v<T, U&&>) {
+            if (range_bound.index() == 1) {
+                auto&& t = std::get<1>(range_bound)._0;
+                return SearchBound<T>{SearchBound_Included<T>{T(std::move(t))}};
+            }
+            if (range_bound.index() == 2) {
+                auto&& t = std::get<2>(range_bound)._0;
+                return SearchBound<T>{SearchBound_Excluded<T>{T(std::move(t))}};
+            }
+        } else {
+            assert(range_bound.index() == 0 && "payload-carrying Bound<U> with U not convertible to the key type");
         }
         // Bound_Unbounded → SearchBound_AllIncluded
         return SearchBound<T>{SearchBound_AllIncluded<T>{}};
@@ -4372,9 +4383,13 @@ struct NodeRef {
         return const_cast<std::add_pointer_t<LeafNode<K, V>>>(reinterpret_cast<std::add_pointer_t<std::add_const_t<LeafNode<K, V>>>>(rusty::as_ptr(this_.node)));
     }
     rusty::Result<Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>, NodeRef<BorrowType, K, V, Type>> ascend() {
+        // Hand-port: Rust's `*parent` inside the map closure derefs the
+        // `&NonNull` BORROW (copying the NonNull out) — the emitter read it
+        // as a pointer deref and passed the pointee InternalNode by value.
+        // from_internal takes the NonNull itself.
         // const-block elided (Rust 2024 compile-time fence)
         const auto* leaf_ptr = as_leaf_ptr((*this));
-        return (*leaf_ptr).parent.as_ref().map([&](auto&& parent) -> Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge> { return Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>(NodeRef<BorrowType, K, V, marker::Internal>::from_internal(std::move(rusty::deref_mut(parent)), rusty::detail::deref_if_pointer_like(this->height_field) + static_cast<size_t>(1)), static_cast<size_t>((*leaf_ptr).parent_idx.assume_init()), rusty::PhantomData<marker::Edge>{}); }).ok_or(NodeRef<BorrowType, K, V, Type>(std::move((*this))));
+        return (*leaf_ptr).parent.as_ref().map([&](auto&& parent) -> Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge> { return Handle<NodeRef<BorrowType, K, V, marker::Internal>, marker::Edge>(NodeRef<BorrowType, K, V, marker::Internal>::from_internal(parent, rusty::detail::deref_if_pointer_like(this->height_field) + static_cast<size_t>(1)), static_cast<size_t>((*leaf_ptr).parent_idx.assume_init()), rusty::PhantomData<marker::Edge>{}); }).ok_or(NodeRef<BorrowType, K, V, Type>(std::move((*this))));
     }
     Handle<NodeRef<BorrowType, K, V, Type>, marker::Edge> first_edge() const {
         // @unsafe

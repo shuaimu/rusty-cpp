@@ -60,11 +60,6 @@ declare -a KNOWN_FAIL_CRATES=(
     "serde_yaml"
     "hashbrown"
     "indexmap"
-    # btree: new coverage crate, being driven to green. Initial landscape
-    # (19 errors): cross-module Iterator adapter dispatch on btree_port
-    # iterator types (.copied()/.cloned() on Iter/Keys/Values/Union/...),
-    # Option<(&K,&V)> tuple-ref equality, entry().or_insert() deref-assign.
-    "btree"
 )
 
 is_known_fail() {

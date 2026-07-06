@@ -215,8 +215,14 @@ bool option_like_has_value(const Opt& opt) {
 }
 
 template<typename Opt>
-auto option_like_take_value(Opt& opt) {
+decltype(auto) option_like_take_value(Opt& opt) {
     if constexpr (slice_has_unwrap<Opt>::value) {
+        // decltype(auto): a reference-payload Option (Option<const T&>,
+        // btree_port's map::Values items) yields the reference itself —
+        // the payload may be move-only (rusty::String), so materializing
+        // a value here would be a deleted copy. Callers that need a value
+        // (copied()/cloned()) construct one explicitly. Value-payload
+        // Options deduce T by value exactly as before.
         return opt.unwrap();
     } else if constexpr (slice_has_has_value<Opt>::value && slice_has_reset<Opt>::value) {
         auto value = std::move(*opt);
@@ -530,6 +536,94 @@ public:
 private:
     Iter iter_;
 };
+
+// Rust `Iterator::copied()` / `::cloned()` over ANY option-like-next
+// iterator whose items are references — materializes each item by value.
+// Runtime iterator types (slice_iter::Iter etc.) carry their own member
+// adapters; these wrappers give the same surface to TRANSPILED iterator
+// types (btree_port's set::Iter / map::Keys / set::Union, ...), which have
+// `next()` but no adapter members (their Rust adapters are Iterator
+// default methods, not inherent ones).
+template<typename Iter>
+class copied_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::copied requires next() to return an Option/optional-like value"
+    );
+
+    explicit copied_next_iter(Iter iter) : iter_(std::move(iter)) {}
+
+    copied_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        using item_type = next_item_t<Iter>;
+        using next_result = rusty::Option<item_type>;
+
+        auto item = iter_.next();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(item));
+    }
+
+private:
+    Iter iter_;
+};
+
+template<typename Iter>
+auto make_copied_next_iter(Iter&& iter) {
+    return copied_next_iter<std::remove_reference_t<Iter>>(
+        std::forward<Iter>(iter));
+}
+
+template<typename Iter>
+class cloned_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::cloned requires next() to return an Option/optional-like value"
+    );
+
+    explicit cloned_next_iter(Iter iter) : iter_(std::move(iter)) {}
+
+    cloned_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        using item_type = next_item_t<Iter>;
+        using next_result = rusty::Option<item_type>;
+
+        auto item = iter_.next();
+        if (!option_like_has_value(item)) {
+            return next_result(rusty::None);
+        }
+        // Mirror slice_iter::Iter::cloned(): honor a user clone() when the
+        // item type has one, fall back to copy construction otherwise.
+        decltype(auto) value = option_like_take_value(item);
+        if constexpr (requires { value.clone(); }) {
+            return next_result(value.clone());
+        } else {
+            static_assert(
+                std::is_copy_constructible_v<item_type>,
+                "rusty::cloned requires copy-constructible or clone() items"
+            );
+            return next_result(item_type(value));
+        }
+    }
+
+private:
+    Iter iter_;
+};
+
+template<typename Iter>
+auto make_cloned_next_iter(Iter&& iter) {
+    return cloned_next_iter<std::remove_reference_t<Iter>>(
+        std::forward<Iter>(iter));
+}
 
 template<typename Iter>
 class take_next_iter;
@@ -1581,6 +1675,46 @@ decltype(auto) rev(Range&& range) {
         return rev(std::forward<Range>(range).into_iter());
     } else {
         return rev(iter(std::forward<Range>(range)));
+    }
+}
+
+// Rust `Iterator::copied()` / `::cloned()`. The member spelling wins when
+// the receiver already provides one (runtime iterator types like
+// slice_iter::Iter keep their exact adapter types); the generic wrapper
+// serves transpiled iterator types that only expose option-like next().
+template<typename Range>
+decltype(auto) copied(Range&& range) {
+    if constexpr (requires { std::forward<Range>(range).copied(); }) {
+        return std::forward<Range>(range).copied();
+    } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_copied_next_iter(std::forward<Range>(range));
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::copied requires next() to return an Option/optional-like value"
+        );
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return copied(std::forward<Range>(range).into_iter());
+    } else {
+        return copied(iter(std::forward<Range>(range)));
+    }
+}
+
+template<typename Range>
+decltype(auto) cloned(Range&& range) {
+    if constexpr (requires { std::forward<Range>(range).cloned(); }) {
+        return std::forward<Range>(range).cloned();
+    } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_cloned_next_iter(std::forward<Range>(range));
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::cloned requires next() to return an Option/optional-like value"
+        );
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return cloned(std::forward<Range>(range).into_iter());
+    } else {
+        return cloned(iter(std::forward<Range>(range)));
     }
 }
 

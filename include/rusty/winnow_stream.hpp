@@ -448,7 +448,18 @@ auto as_bytes(const T& value) {
 
 template<typename Haystack, typename Needle>
 bool contains(const Haystack& haystack, const Needle& needle) {
-    if constexpr (requires { haystack.contains(needle); }) {
+    using needle_t = std::remove_reference_t<Needle>;
+    if constexpr (std::is_pointer_v<needle_t>
+                  && !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<needle_t>>, char>
+                  && requires { haystack.contains(*needle); }) {
+        // Rust `set.contains(&x)` borrows x; the generated address-of
+        // temporary must not become a Q-templated member's needle type —
+        // btree's search then compares an int* against stored int keys
+        // through the cmp fallbacks and returns garbage. Forward the
+        // pointee. `char*` needles keep the pointer form: for string
+        // haystacks that is the C-string SUBSTRING pattern.
+        return haystack.contains(*needle);
+    } else if constexpr (requires { haystack.contains(needle); }) {
         return haystack.contains(needle);
     } else if constexpr (
         std::is_convertible_v<Haystack, std::string_view>

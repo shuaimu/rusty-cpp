@@ -2267,6 +2267,22 @@ impl CodeGen {
             return false;
         }
 
+        // This fallback serves receivers whose type is genuinely UNKNOWN —
+        // it guesses "slice-like" from the ARGUMENT's shape. When the
+        // local's type resolves, indexability is the typed predicate's
+        // decision (should_lower_index_method_call_to_index_op, consulted
+        // first at every call site). Without this guard, a resolvable map
+        // local hits the scalar-argument arm: btree_tests'
+        // `m.get(&2)` on BTreeMap<i32, i32> lowered to `rusty::get(m, 2)`
+        // — but Rust map get is an Option-returning LOOKUP, not indexing.
+        if self
+            .infer_simple_expr_type(receiver)
+            .or_else(|| self.infer_local_binding_type_from_initializer(receiver))
+            .is_some()
+        {
+            return false;
+        }
+
         let arg = self.peel_paren_group_expr(arg);
         if self.is_slice_range_index_expr(arg) {
             return true;
@@ -2885,6 +2901,19 @@ impl CodeGen {
                         | "skip"
                         | "scan"
                         | "split"
+                        // Map/set iterator views (BTreeMap/HashMap keys(),
+                        // values(), range(); BTreeSet/HashSet algebra) —
+                        // Rust returns lazy iterators from all of these.
+                        | "keys"
+                        | "values"
+                        | "values_mut"
+                        | "into_keys"
+                        | "into_values"
+                        | "range"
+                        | "union"
+                        | "intersection"
+                        | "difference"
+                        | "symmetric_difference"
                 ) || self.is_probably_iterator_receiver_expr(&mc.receiver)
             }
             syn::Expr::Call(call) => {
