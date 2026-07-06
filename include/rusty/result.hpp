@@ -87,11 +87,15 @@ private:
     // Construct storage without materializing either payload variant.
     explicit Result(UninitTag) noexcept : is_ok_value(false) {}
     
+    // @lifetime: (&'a) -> &'a mut
     OkStored& ok_stored_ref() { return *reinterpret_cast<OkStored*>(&storage.ok_storage); }
+    // @lifetime: (&'a) -> &'a
     const OkStored& ok_stored_ref() const {
         return *reinterpret_cast<const OkStored*>(&storage.ok_storage);
     }
+    // @lifetime: (&'a) -> &'a mut
     ErrStored& err_stored_ref() { return *reinterpret_cast<ErrStored*>(&storage.err_storage); }
+    // @lifetime: (&'a) -> &'a
     const ErrStored& err_stored_ref() const {
         return *reinterpret_cast<const ErrStored*>(&storage.err_storage);
     }
@@ -314,6 +318,7 @@ public:
     }
     
     // Copy assignment
+    // @lifetime: (&'a mut) -> &'a mut self
     Result& operator=(const Result& other) {
         if (this != &other) {
             destroy();
@@ -328,6 +333,7 @@ public:
     }
     
     // Move assignment
+    // @lifetime: (&'a mut) -> &'a mut self
     Result& operator=(Result&& other) noexcept {
         if (this != &other) {
             destroy();
@@ -596,7 +602,9 @@ private:
     
     bool is_ok_value;
     
+    // @lifetime: (&'a) -> &'a mut E
     E& err_ref() { return *reinterpret_cast<E*>(&storage.err_storage); }
+    // @lifetime: (&'a) -> &'a E
     const E& err_ref() const { return *reinterpret_cast<const E*>(&storage.err_storage); }
     
     void destroy() {

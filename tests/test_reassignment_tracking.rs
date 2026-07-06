@@ -9,10 +9,18 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
     } else {
         "/usr/include/z3.h"
     };
+    let include_dir = format!("{}/include", get_project_root());
 
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "--quiet", "--", cpp_file.to_str().unwrap()])
-        .env("Z3_SYS_Z3_HEADER", z3_header);
+    cmd.args(&[
+        "run",
+        "--quiet",
+        "--",
+        cpp_file.to_str().unwrap(),
+        "-I",
+        &include_dir,
+    ])
+    .env("Z3_SYS_Z3_HEADER", z3_header);
 
     if cfg!(target_os = "macos") {
         cmd.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");
@@ -53,7 +61,12 @@ fn compile_and_check(source: &str) -> (bool, String) {
     let has_violations = output.contains("Found") && output.contains("violation");
     let no_violations = output.contains("no violations found");
 
-    (!has_violations || no_violations, output)
+    let analyzer_succeeded = success || has_violations;
+
+    (
+        analyzer_succeeded && (!has_violations || no_violations),
+        output,
+    )
 }
 
 #[test]

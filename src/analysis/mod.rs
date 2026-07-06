@@ -220,8 +220,6 @@ pub fn check_borrows_with_safety_context(
     // only allows pointer operations (address-of, dereference), not borrow rule violations.
     // This matches Rust's behavior where unsafe blocks don't bypass the borrow checker.
     for function in &program.functions {
-        debug_println!("DEBUG: Checking function '{}'", function.name);
-
         // Skip borrow checking for system header functions
         // They are tracked for safety status but not analyzed internally
         if is_system_header(&function.source_file) {
@@ -232,7 +230,6 @@ pub fn check_borrows_with_safety_context(
             );
             continue;
         }
-
         // Only check @safe functions - skip @unsafe and unannotated code
         if !safety_context.should_check_function(&function.name) {
             debug_println!(
@@ -261,6 +258,12 @@ pub fn check_borrows_with_safety_context(
         }
 
         if safety_context.should_check_function(&function.name) {
+            // Inference runs unconditionally on every @safe function that
+            // reaches the IR: an annotation must never exempt a body from
+            // implementation-level checking, or a wrong @lifetime could hide
+            // a dangling reference. Library-tier code (system headers,
+            // include/rusty/) never reaches this loop — the TU scoping in
+            // main.rs keeps it out of the IR passes entirely.
             let inference_errors = lifetime_inference::infer_and_validate_lifetimes(function)?;
             errors.extend(inference_errors);
 
@@ -349,9 +352,29 @@ fn check_lifetime_annotation_requirements(
 
 /// Check if a function returns a reference by analyzing its return type
 fn check_if_function_returns_reference(function: &IrFunction) -> bool {
-    // Check if the return type is a reference
-    // References have & in the type (e.g., "const int&", "int&", "Type&")
-    function.return_type.contains('&') && !function.return_type.contains("&&")
+    contains_top_level_lvalue_reference(&function.return_type)
+}
+
+fn contains_top_level_lvalue_reference(type_name: &str) -> bool {
+    let mut depth = 0usize;
+    let chars: Vec<char> = type_name.chars().collect();
+
+    for (idx, ch) in chars.iter().enumerate() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            '&' if depth == 0 => {
+                let prev_is_amp = idx > 0 && chars[idx - 1] == '&';
+                let next_is_amp = chars.get(idx + 1) == Some(&'&');
+                if !prev_is_amp && !next_is_amp {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 #[allow(dead_code)]
@@ -384,7 +407,10 @@ pub fn check_borrows_with_annotations(
         }
     }
 
-    // Run lifetime inference and validation
+    // Run lifetime inference and validation. Unconditional: an annotation
+    // must never exempt a body from implementation-level checking (a wrong
+    // @lifetime could hide a dangling reference). Library-tier bodies never
+    // reach the IR passes — main.rs scopes them out per TU.
     for function in &program.functions {
         let inference_errors = lifetime_inference::infer_and_validate_lifetimes(function)?;
         errors.extend(inference_errors);

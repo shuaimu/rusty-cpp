@@ -539,6 +539,7 @@ mod tests {
             name: name.to_string(),
             type_name: type_name.to_string(),
             is_reference: false,
+            is_rvalue_reference: false,
             is_pointer: false,
             is_const: false,
             is_unique_ptr: false,
@@ -592,11 +593,7 @@ mod tests {
             Statement::Return(Some(crate::parser::Expression::Variable("x".to_string()))),
         ];
         let errors = check_initialization_safety(&safe_fn("f", body), SafetyMode::Safe);
-        assert!(
-            errors.is_empty(),
-            "expected no errors, got: {:?}",
-            errors
-        );
+        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
     }
 
     #[test]

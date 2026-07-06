@@ -21,10 +21,19 @@ fn run_analyzer(cpp_file: &Path) -> (bool, String) {
     } else {
         "/usr/include/z3.h"
     };
+    let project_root = get_project_root();
+    let include_path = format!("{}/include", project_root);
 
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "--quiet", "--", cpp_file.to_str().unwrap()])
-        .env("Z3_SYS_Z3_HEADER", z3_header);
+    cmd.args(&[
+        "run",
+        "--quiet",
+        "--",
+        "-I",
+        &include_path,
+        cpp_file.to_str().unwrap(),
+    ])
+    .env("Z3_SYS_Z3_HEADER", z3_header);
 
     if cfg!(target_os = "macos") {
         cmd.env("DYLD_LIBRARY_PATH", "/opt/homebrew/Cellar/llvm/19.1.7/lib");

@@ -3,8 +3,25 @@ use std::collections::{HashMap, HashSet};
 
 /// Check if a return type string represents a reference
 fn returns_reference(return_type: &str) -> bool {
-    // Check for reference types: &, const &, const Type&, Type&, etc.
-    return_type.contains('&') && !return_type.contains("&&") // Exclude rvalue references
+    let mut depth = 0usize;
+    let chars: Vec<char> = return_type.chars().collect();
+
+    for (idx, ch) in chars.iter().enumerate() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            '&' if depth == 0 => {
+                let prev_is_amp = idx > 0 && chars[idx - 1] == '&';
+                let next_is_amp = chars.get(idx + 1) == Some(&'&');
+                if !prev_is_amp && !next_is_amp {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /// Represents an inferred lifetime for a variable

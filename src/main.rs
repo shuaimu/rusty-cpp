@@ -189,7 +189,7 @@ fn analyze_file(
     }
 
     // Parse the C++ file with include paths and defines
-    let ast = parser::parse_cpp_file_with_includes_defines_and_args(
+    let mut ast = parser::parse_cpp_file_with_includes_defines_and_args(
         path,
         &all_include_paths,
         defines,
@@ -239,11 +239,24 @@ fn analyze_file(
         }
 
         // Also skip the project's include/ directory (third-party headers like rusty::Box)
-        if file_path.contains("/include/rusty/") || file_path.contains("/include/unified_") {
+        if file_path.contains("/include/rusty/")
+            || file_path.starts_with("include/rusty/")
+            || file_path.contains("/include/unified_")
+            || file_path.starts_with("include/unified_")
+        {
             return true;
         }
 
         false
+    }
+
+    fn is_header_file(file_path: &str) -> bool {
+        matches!(
+            Path::new(file_path)
+                .extension()
+                .and_then(|ext| ext.to_str()),
+            Some("h" | "hh" | "hpp" | "hxx")
+        )
     }
 
     // Check for unsafe pointer operations and unsafe propagation in safe functions
@@ -268,28 +281,8 @@ fn analyze_file(
             );
             continue;
         }
-
-        // Only analyze bodies whose source file matches the TU being checked.
-        // Functions from imported modules / other files have their own check
-        // pass; analyzing them here just produces duplicate findings.
         let fn_file = std::fs::canonicalize(&function.location.file)
             .unwrap_or_else(|_| PathBuf::from(&function.location.file));
-        if fn_file != main_file_canonical {
-            debug_println!(
-                "DEBUG: Skipping cross-file function '{}' from {} (current TU is {})",
-                function.name,
-                function.location.file,
-                main_file_canonical.display()
-            );
-            continue;
-        }
-
-        debug_println!(
-            "DEBUG: Processing function '{}' from '{}' with {} statements",
-            function.name,
-            function.location.file,
-            function.body.len()
-        );
 
         // TEMPORARY WORKAROUND: Treat all operator overloads as unsafe
         // This bypasses annotation matching issues with template operators
@@ -306,6 +299,31 @@ fn analyze_file(
                 function.name
             );
         }
+
+        // Only analyze bodies whose source file matches the TU being checked,
+        // except for safe inline/header functions. Header bodies are part of
+        // the included API contract and must be validated when a TU includes
+        // them. Non-header cross-file bodies (modules/other .cpp files) have
+        // their own check pass; analyzing them here creates duplicate findings.
+        let is_current_tu = fn_file == main_file_canonical;
+        let should_check_header_body = is_header_file(&function.location.file)
+            && function_safety == parser::safety_annotations::SafetyMode::Safe;
+        if !is_current_tu && !should_check_header_body {
+            debug_println!(
+                "DEBUG: Skipping cross-file function '{}' from {} (current TU is {})",
+                function.name,
+                function.location.file,
+                main_file_canonical.display()
+            );
+            continue;
+        }
+
+        debug_println!(
+            "DEBUG: Processing function '{}' from '{}' with {} statements",
+            function.name,
+            function.location.file,
+            function.body.len()
+        );
 
         if safety_context.should_check_function(&function.name) && !is_operator {
             debug_println!(
@@ -392,6 +410,29 @@ fn analyze_file(
     let const_propagation_violations =
         analysis::const_propagation::check_const_propagation(&ast.functions, &ast.classes);
     violations.extend(const_propagation_violations);
+
+    // Scope the IR passes (borrow checking, lifetime inference, RAII
+    // tracking) to the code this TU is responsible for:
+    //  - the TU's own functions;
+    //  - USER-header bodies it includes. Header implementations are part of
+    //    the included API contract, and per-TU checking is the only chance
+    //    to borrow/lifetime-check them (headers are never a TU themselves) —
+    //    a use-after-move in a user's inline header function must be caught.
+    // System and rusty-library headers stay out: they are the trusted
+    // library tier (the same rule the safety loop above applies via
+    // is_system_header_or_std). Bodies from other .cpp files / imported
+    // modules stay out too — they are analyzed when their own file is the
+    // check target; re-analyzing them from every consumer only duplicates
+    // findings.
+    ast.functions.retain(|function| {
+        let function_file = std::fs::canonicalize(&function.location.file)
+            .unwrap_or_else(|_| PathBuf::from(&function.location.file));
+        if function_file == main_file_canonical {
+            return true;
+        }
+        is_header_file(&function.location.file)
+            && !is_system_header_or_std(&function.location.file, &function.name)
+    });
 
     // Build intermediate representation with safety context
     let mut ir = ir::build_ir_with_safety_context(ast, safety_context.clone())?;
