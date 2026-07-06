@@ -125,6 +125,13 @@ impl CodeGen {
                 .contains(&(self.scoped_type_key(type_name), method_name))
     }
 
+    pub(super) fn type_has_user_clone_impl(&self, type_name: &str) -> bool {
+        self.types_with_user_clone.contains(type_name)
+            || self
+                .types_with_user_clone
+                .contains(&self.scoped_type_key(type_name))
+    }
+
     /// Returns true if `name` is a well-known move-only wrapper type whose
     /// presence as a field disqualifies the enclosing struct from a
     /// `= default` copy ctor / copy-assign. Used to decide whether to emit
@@ -3357,6 +3364,155 @@ impl CodeGen {
                 .elems
                 .iter()
                 .all(|elem| self.type_dependent_assoc_roots_are_method_params(elem, method_params)),
+            _ => true,
+        }
+    }
+
+    /// A method-param-rooted projection (`I::Output`) is only C++-spellable
+    /// as `typename I::Output` when the projected assoc is declared by a
+    /// trait this emission knows how to spell (crate-declared / manifest
+    /// traits in `trait_associated_type_names`) among that param's OWN
+    /// bounds. A std/external bound (smallvec's `I: SliceIndex<[T]>` with
+    /// `Output = I::Output`) yields a member the concrete type never has —
+    /// `usize::Output` SFINAE-kills the member template for every integral
+    /// index — so those must soften to a deduced return instead.
+    pub(super) fn method_param_projections_have_declared_assocs(
+        &self,
+        ty: &syn::Type,
+        method_params: &HashSet<String>,
+        generics: &syn::Generics,
+    ) -> bool {
+        let param_bound_declares_assoc = |param: &str, assoc: &str| -> bool {
+            let mut bound_traits: Vec<String> = Vec::new();
+            for gp in &generics.params {
+                if let syn::GenericParam::Type(tp) = gp {
+                    if tp.ident == param {
+                        for bound in &tp.bounds {
+                            if let syn::TypeParamBound::Trait(tb) = bound {
+                                if let Some(seg) = tb.path.segments.last() {
+                                    bound_traits.push(seg.ident.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(where_clause) = &generics.where_clause {
+                for pred in &where_clause.predicates {
+                    if let syn::WherePredicate::Type(pt) = pred {
+                        if let syn::Type::Path(btp) = &pt.bounded_ty {
+                            if btp.qself.is_none()
+                                && btp.path.segments.len() == 1
+                                && btp.path.segments[0].ident == param
+                            {
+                                for bound in &pt.bounds {
+                                    if let syn::TypeParamBound::Trait(tb) = bound {
+                                        if let Some(seg) = tb.path.segments.last() {
+                                            bound_traits.push(seg.ident.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            bound_traits.iter().any(|tr| {
+                self.trait_associated_type_names
+                    .get(tr)
+                    .is_some_and(|names| names.iter().any(|n| n == assoc))
+            })
+        };
+        match ty {
+            syn::Type::Path(tp) => {
+                if tp.qself.is_none() && tp.path.segments.len() >= 2 {
+                    if let Some(first) = tp.path.segments.first().map(|s| s.ident.to_string()) {
+                        if method_params.contains(&first) {
+                            let assoc = tp.path.segments[1].ident.to_string();
+                            if !param_bound_declares_assoc(&first, &assoc) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                if let Some(qself) = &tp.qself {
+                    // `<I as Trait>::Assoc` — the bound trait is explicit in
+                    // the qualified path; check it directly.
+                    let base = self.peel_reference_paren_group_type(&qself.ty);
+                    if let syn::Type::Path(btp) = base {
+                        if btp.qself.is_none()
+                            && btp.path.segments.len() == 1
+                            && method_params.contains(&btp.path.segments[0].ident.to_string())
+                            && qself.position >= 1
+                        {
+                            let trait_name =
+                                tp.path.segments[qself.position - 1].ident.to_string();
+                            let spellable = tp.path.segments.iter().skip(qself.position).all(
+                                |seg| {
+                                    self.trait_associated_type_names
+                                        .get(&trait_name)
+                                        .is_some_and(|names| {
+                                            names.iter().any(|n| seg.ident == n.as_str())
+                                        })
+                                },
+                            );
+                            if !spellable {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                tp.path.segments.iter().all(|seg| {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        args.args.iter().all(|arg| {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                self.method_param_projections_have_declared_assocs(
+                                    inner,
+                                    method_params,
+                                    generics,
+                                )
+                            } else {
+                                true
+                            }
+                        })
+                    } else {
+                        true
+                    }
+                })
+            }
+            syn::Type::Reference(r) => self.method_param_projections_have_declared_assocs(
+                &r.elem,
+                method_params,
+                generics,
+            ),
+            syn::Type::Ptr(p) => self.method_param_projections_have_declared_assocs(
+                &p.elem,
+                method_params,
+                generics,
+            ),
+            syn::Type::Slice(s) => self.method_param_projections_have_declared_assocs(
+                &s.elem,
+                method_params,
+                generics,
+            ),
+            syn::Type::Array(a) => self.method_param_projections_have_declared_assocs(
+                &a.elem,
+                method_params,
+                generics,
+            ),
+            syn::Type::Paren(p) => self.method_param_projections_have_declared_assocs(
+                &p.elem,
+                method_params,
+                generics,
+            ),
+            syn::Type::Group(g) => self.method_param_projections_have_declared_assocs(
+                &g.elem,
+                method_params,
+                generics,
+            ),
+            syn::Type::Tuple(tup) => tup.elems.iter().all(|elem| {
+                self.method_param_projections_have_declared_assocs(elem, method_params, generics)
+            }),
             _ => true,
         }
     }

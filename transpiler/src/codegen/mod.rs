@@ -738,6 +738,13 @@ pub struct CodeGen {
     /// Marks impl methods that come from `Drop` trait impls.
     /// These are emitted as C++ destructors (`~Type()`).
     pub(crate) drop_trait_methods: HashSet<(String, String)>,
+    /// Types with a user `Clone` impl (incl. expanded `#[derive(Clone)]`).
+    /// A Drop-bearing struct is never `Copy` in Rust — its only duplication
+    /// path is `Clone::clone`. When such a struct's fields are all trivially
+    /// copyable (e.g. an owning `NonNull` — semver's `Identifier`), a
+    /// `= default` copy ctor would SHALLOW-copy the owning pointer and
+    /// double-free at scope exit; emit a clone-delegating copy ctor instead.
+    pub(crate) types_with_user_clone: HashSet<String>,
     /// Current struct name when emitting methods inside a struct.
     /// Used to resolve `Self` type references.
     pub(crate) current_struct: Option<String>,
@@ -1761,6 +1768,7 @@ impl CodeGen {
             inherent_impl_method_names: HashMap::new(),
             operator_renames: HashMap::new(),
             drop_trait_methods: HashSet::new(),
+            types_with_user_clone: HashSet::new(),
             current_struct: None,
             type_param_scopes: Vec::new(),
             type_param_scope_order: Vec::new(),
@@ -3845,6 +3853,7 @@ impl CodeGen {
         self.inherent_impl_method_names.clear();
         self.operator_renames.clear();
         self.drop_trait_methods.clear();
+        self.types_with_user_clone.clear();
         self.skipped_module_traits.clear();
         self.expanded_test_markers.clear();
         self.expanded_test_marker_should_panic.clear();

@@ -74,6 +74,15 @@ private:
     };
 
 public:
+    // Rust compares NonNull by ADDRESS (PartialEq/Hash on the pointer value,
+    // never through the pointee). The universal unwrap helper
+    // (`rusty::detail::deref_if_pointer_like`) must therefore pass NonNull
+    // through unchanged: dereferencing it to compare would value-compare the
+    // pointees — and for tagged-pointer smallstring reprs (semver's
+    // Identifier packs string bytes INTO the pointer value) the "address"
+    // isn't dereferenceable at all.
+    using rusty_pointer_identity_semantics = void;
+
     constexpr explicit NonNull(T* ptr) noexcept : ptr_(ptr) {}
 
     static Option<NonNull<T>> new_(T* ptr) noexcept {

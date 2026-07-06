@@ -3464,6 +3464,22 @@ impl CodeGen {
             | syn::Expr::If(_)
             | syn::Expr::Match(_)
             | syn::Expr::Closure(_) => true,
+            // `expr?` lowers to RUSTY_TRY_INTO(...), which materializes the
+            // unwrapped Ok payload as a fresh temporary — the same owning-
+            // rvalue case as calls. Misclassifying it bound semver's
+            // `let (pre, rest) = prerelease_identifier(text)?;` with a
+            // dangling `auto&&`: the payload tuple died at end of statement,
+            // its heap-owning Identifier ran Drop, and the moved-out binding
+            // resurrected the freed pointer (garbage reads + double free).
+            // `.await`, casts, and value-producing loop/range/repeat forms
+            // materialize fresh temporaries the same way.
+            syn::Expr::Try(_)
+            | syn::Expr::TryBlock(_)
+            | syn::Expr::Await(_)
+            | syn::Expr::Cast(_)
+            | syn::Expr::Loop(_)
+            | syn::Expr::Repeat(_)
+            | syn::Expr::Range(_) => true,
             _ => false,
         }
     }

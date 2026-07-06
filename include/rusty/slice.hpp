@@ -273,6 +273,16 @@ constexpr decltype(auto) deref_if_pointer_like(T&& value) {
     using value_type = std::remove_reference_t<T>;
     if constexpr (std::is_pointer_v<value_type>) {
         return *std::forward<T>(value);
+    } else if constexpr (requires {
+                             typename std::remove_cv_t<
+                                 value_type>::rusty_pointer_identity_semantics;
+                         }) {
+        // Types marked with `rusty_pointer_identity_semantics` (rusty::ptr::
+        // NonNull) compare/hash by pointer VALUE in Rust — never through the
+        // pointee. Unboxing them here would read the pointee, which is wrong
+        // for value comparison and UB for tagged-pointer reprs (semver's
+        // Identifier stores inline string bytes in the pointer itself).
+        return std::forward<T>(value);
     } else if constexpr (requires(value_type& v) {
                              v.get();
                              *v;

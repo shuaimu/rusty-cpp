@@ -2664,6 +2664,26 @@ impl CodeGen {
                         .map(|seg| seg.ident.to_string());
                     let is_inherent_impl = trait_name.is_none();
 
+                    // Record user `Clone` impls (incl. expanded derives). Used
+                    // by Drop-struct emission: a Drop type's only Rust
+                    // duplication path is `Clone::clone`, so its C++ copy ctor
+                    // must delegate to the emitted `clone()` member instead of
+                    // `= default` (a shallow default copy of an owning field —
+                    // semver Identifier's NonNull — double-frees at scope
+                    // exit).
+                    if matches!(trait_name.as_deref(), Some("Clone")) {
+                        let simple = tp
+                            .path
+                            .segments
+                            .last()
+                            .map(|s| s.ident.to_string())
+                            .unwrap_or_else(|| raw_type_name.clone());
+                        let scoped = self.scoped_type_key(&simple);
+                        self.types_with_user_clone.insert(simple);
+                        self.types_with_user_clone.insert(type_name.clone());
+                        self.types_with_user_clone.insert(scoped);
+                    }
+
                     // Record `impl Deref for T { type Target = U }` so field /
                     // method access through Deref coercion can emit an explicit
                     // `(*x)` when the member lives on `U`, not `T` (C++ has no

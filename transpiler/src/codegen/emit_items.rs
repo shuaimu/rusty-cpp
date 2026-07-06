@@ -1122,6 +1122,31 @@ impl CodeGen {
             } else {
                 "default"
             };
+            // A Drop struct is never `Copy` in Rust; its only duplication path
+            // is `Clone::clone`. When a user Clone impl exists, a `= default`
+            // copy would SHALLOW-copy owning fields (semver Identifier's
+            // tagged NonNull) — both copies then run Drop and double-free.
+            // Delegate the C++ copy ctor to the emitted `clone()` member so a
+            // plumbing copy is a Rust clone. Without a Clone impl there is no
+            // sanctioned duplication; keep the previous disposition unchanged.
+            let clone_backed_copy =
+                copy_disposition == "default" && self.type_has_user_clone_impl(&name_str);
+            let copy_ctor_line = if clone_backed_copy {
+                format!("{n}(const {n}& other) : {n}(other.clone()) {{}}", n = name)
+            } else {
+                format!("{}(const {}&) = {};", name, name, copy_disposition)
+            };
+            let copy_assign_line = if clone_backed_copy {
+                format!(
+                    "{n}& operator=(const {n}& other) {{ if (this != &other) {{ this->~{n}(); new (this) {n}(other.clone()); }} return *this; }}",
+                    n = name
+                )
+            } else {
+                format!(
+                    "{}& operator=(const {}&) = {};",
+                    name, name, copy_disposition
+                )
+            };
             match &s.fields {
                 syn::Fields::Named(fields) => {
                     let first_field_has_drop_impl = fields
@@ -1171,10 +1196,7 @@ impl CodeGen {
                         ctor_params.join(", "),
                         ctor_inits.join(", ")
                     ));
-                    self.writeln(&format!(
-                        "{}(const {}&) = {};",
-                        name, name, copy_disposition
-                    ));
+                    self.writeln(&copy_ctor_line);
 
                     let move_inits: Vec<String> = fields
                         .named
@@ -1217,10 +1239,7 @@ impl CodeGen {
                     // Rule of Five: when copy ctor and move ctor are declared,
                     // also declare assignment operators to prevent them from
                     // being implicitly deleted.
-                    self.writeln(&format!(
-                        "{}& operator=(const {}&) = {};",
-                        name, name, copy_disposition
-                    ));
+                    self.writeln(&copy_assign_line);
                     self.writeln(&format!(
                         "{}& operator=({}&& other) noexcept {{",
                         name, name
@@ -1277,10 +1296,7 @@ impl CodeGen {
                         ctor_params.join(", "),
                         ctor_inits.join(", ")
                     ));
-                    self.writeln(&format!(
-                        "{}(const {}&) = {};",
-                        name, name, copy_disposition
-                    ));
+                    self.writeln(&copy_ctor_line);
 
                     let move_inits: Vec<String> = fields
                         .unnamed
@@ -1311,10 +1327,7 @@ impl CodeGen {
                     let _ = first_field_has_drop_impl;
                     self.indent -= 1;
                     self.writeln("}");
-                    self.writeln(&format!(
-                        "{}& operator=(const {}&) = {};",
-                        name, name, copy_disposition
-                    ));
+                    self.writeln(&copy_assign_line);
                     self.writeln(&format!(
                         "{}& operator=({}&& other) noexcept {{",
                         name, name
@@ -1333,10 +1346,7 @@ impl CodeGen {
                 }
                 syn::Fields::Unit => {
                     self.writeln(&format!("{}() = default;", name));
-                    self.writeln(&format!(
-                        "{}(const {}&) = {};",
-                        name, name, copy_disposition
-                    ));
+                    self.writeln(&copy_ctor_line);
                     self.writeln(&format!("{}({}&& other) noexcept {{", name, name));
                     self.indent += 1;
                     // Strict null-state: propagate other's forgotten flag.
@@ -1344,10 +1354,7 @@ impl CodeGen {
                     self.writeln("other._rusty_forgotten = true;");
                     self.indent -= 1;
                     self.writeln("}");
-                    self.writeln(&format!(
-                        "{}& operator=(const {}&) = {};",
-                        name, name, copy_disposition
-                    ));
+                    self.writeln(&copy_assign_line);
                     self.writeln(&format!(
                         "{}& operator=({}&& other) noexcept {{",
                         name, name
@@ -6139,7 +6146,15 @@ impl CodeGen {
                 && !return_type.contains("::template ")
                 && !self.return_type_references_current_struct_assoc(&method.sig.output)
                 && matches!(&method.sig.output, syn::ReturnType::Type(_, ty)
-                    if self.type_dependent_assoc_roots_are_method_params(ty, &method_param_names));
+                    if self.type_dependent_assoc_roots_are_method_params(ty, &method_param_names))
+                // The projection is only spellable when the assoc is declared
+                // by a KNOWN trait among the param's own bounds. smallvec's
+                // `I: SliceIndex<[T]>` + `-> &I::Output` would otherwise emit
+                // `typename I::Output`, which SFINAE-kills the member template
+                // for every integral index type (`usize` has no `::Output`).
+                && matches!(&method.sig.output, syn::ReturnType::Type(_, ty)
+                    if self.method_param_projections_have_declared_assocs(
+                        ty, &method_param_names, &method.sig.generics));
             if !can_keep_explicit_current_struct_assoc_return && !spellable_method_param_projection
             {
                 return_type = "auto".to_string();
