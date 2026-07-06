@@ -291,9 +291,18 @@ public:
     // Unsafe Rust parity helper. Runtime checks remain for now.
     T unwrap_unchecked() { return unwrap(); }
 
-    // Unsafe Rust parity helper for borrowed access.
+    // Unsafe Rust parity helper for borrowed access. Returns the stored
+    // value directly rather than routing through `unwrap()`: the overload
+    // set for that name mixes an `owned`-returning signature with the
+    // borrowed one, and the checker's name-keyed signature lookup resolves
+    // the call to the owning overload and flags a reference-to-temporary.
     // @lifetime: (&'a) -> &'a T
-    const T& unwrap_unchecked() const { return unwrap(); }
+    const T& unwrap_unchecked() const {
+        if (!has_value) {
+            throw std::runtime_error("Called unwrap on None");
+        }
+        return value;
+    }
 
     // Expect with custom message - Rust style
     // @lifetime: owned
@@ -694,9 +703,17 @@ public:
         return *ptr;
     }
 
-    // Unsafe Rust parity helper. Runtime checks remain for now.
+    // Unsafe Rust parity helper. Runtime checks remain for now. Direct
+    // member access (not `unwrap()`) so the checker's name-keyed signature
+    // lookup cannot resolve the call to an owning overload — see the
+    // borrowed-access helper in the value specialization.
     // @lifetime: (&'a) -> &'a T
-    T& unwrap_unchecked() { return unwrap(); }
+    T& unwrap_unchecked() {
+        if (!ptr) {
+            throw std::runtime_error("Called unwrap on None");
+        }
+        return *ptr;
+    }
 
     // Unsafe Rust parity helper for const receivers.
     // @lifetime: (&'a) -> &'a T
@@ -1013,9 +1030,17 @@ public:
         return *ptr;
     }
 
-    // Unsafe Rust parity helper. Runtime checks remain for now.
+    // Unsafe Rust parity helper. Runtime checks remain for now. Direct
+    // member access (not `unwrap()`) so the checker's name-keyed signature
+    // lookup cannot resolve the call to an owning overload — see the
+    // borrowed-access helper in the value specialization.
     // @lifetime: (&'a) -> &'a const T
-    const T& unwrap_unchecked() const { return unwrap(); }
+    const T& unwrap_unchecked() const {
+        if (!ptr) {
+            throw std::runtime_error("Called unwrap on None");
+        }
+        return *ptr;
+    }
 
     // Expect with custom message
     // @lifetime: (&'a) -> &'a const T

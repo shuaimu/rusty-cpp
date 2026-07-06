@@ -411,12 +411,27 @@ fn analyze_file(
         analysis::const_propagation::check_const_propagation(&ast.functions, &ast.classes);
     violations.extend(const_propagation_violations);
 
-    // Header declarations remain available through HeaderCache, but their
-    // implementations should not be analyzed as part of this translation unit.
+    // Scope the IR passes (borrow checking, lifetime inference, RAII
+    // tracking) to the code this TU is responsible for:
+    //  - the TU's own functions;
+    //  - USER-header bodies it includes. Header implementations are part of
+    //    the included API contract, and per-TU checking is the only chance
+    //    to borrow/lifetime-check them (headers are never a TU themselves) —
+    //    a use-after-move in a user's inline header function must be caught.
+    // System and rusty-library headers stay out: they are the trusted
+    // library tier (the same rule the safety loop above applies via
+    // is_system_header_or_std). Bodies from other .cpp files / imported
+    // modules stay out too — they are analyzed when their own file is the
+    // check target; re-analyzing them from every consumer only duplicates
+    // findings.
     ast.functions.retain(|function| {
         let function_file = std::fs::canonicalize(&function.location.file)
             .unwrap_or_else(|_| PathBuf::from(&function.location.file));
-        function_file == main_file_canonical
+        if function_file == main_file_canonical {
+            return true;
+        }
+        is_header_file(&function.location.file)
+            && !is_system_header_or_std(&function.location.file, &function.name)
     });
 
     // Build intermediate representation with safety context

@@ -41,10 +41,6 @@ fn is_system_header(file_path: &str) -> bool {
     false
 }
 
-fn is_rusty_library_header(file_path: &str) -> bool {
-    file_path.contains("/include/rusty/") || file_path.starts_with("include/rusty/")
-}
-
 /// Check if a type name represents a primitive type that can't contain references
 fn is_primitive_type(type_name: &str) -> bool {
     // Strip template parameters and qualifiers
@@ -262,14 +258,14 @@ pub fn check_borrows_with_safety_context(
         }
 
         if safety_context.should_check_function(&function.name) {
-            let has_return_lifetime = header_cache
-                .get_signature(&function.name)
-                .is_some_and(|sig| sig.return_lifetime.is_some());
-
-            if !(has_return_lifetime && is_rusty_library_header(&function.source_file)) {
-                let inference_errors = lifetime_inference::infer_and_validate_lifetimes(function)?;
-                errors.extend(inference_errors);
-            }
+            // Inference runs unconditionally on every @safe function that
+            // reaches the IR: an annotation must never exempt a body from
+            // implementation-level checking, or a wrong @lifetime could hide
+            // a dangling reference. Library-tier code (system headers,
+            // include/rusty/) never reaches this loop — the TU scoping in
+            // main.rs keeps it out of the IR passes entirely.
+            let inference_errors = lifetime_inference::infer_and_validate_lifetimes(function)?;
+            errors.extend(inference_errors);
 
             // Phase 1-7: Run RAII tracking checks
             let raii_errors = raii_tracking::check_raii_issues(function, &header_cache)?;
@@ -411,16 +407,13 @@ pub fn check_borrows_with_annotations(
         }
     }
 
-    // Run lifetime inference and validation
+    // Run lifetime inference and validation. Unconditional: an annotation
+    // must never exempt a body from implementation-level checking (a wrong
+    // @lifetime could hide a dangling reference). Library-tier bodies never
+    // reach the IR passes — main.rs scopes them out per TU.
     for function in &program.functions {
-        let has_return_lifetime = header_cache
-            .get_signature(&function.name)
-            .is_some_and(|sig| sig.return_lifetime.is_some());
-
-        if !(has_return_lifetime && is_rusty_library_header(&function.source_file)) {
-            let inference_errors = lifetime_inference::infer_and_validate_lifetimes(function)?;
-            errors.extend(inference_errors);
-        }
+        let inference_errors = lifetime_inference::infer_and_validate_lifetimes(function)?;
+        errors.extend(inference_errors);
     }
 
     // If we have header annotations, also check lifetime constraints

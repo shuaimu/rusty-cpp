@@ -94,6 +94,15 @@ public:
 
     // Consume the cell and return the inner value by move.
     // Mirrors Rust's UnsafeCell::into_inner(self) -> T.
+    //
+    // Rust's into_inner is safe because it consumes the cell by value; the
+    // C++ shim cannot be `&&`-qualified yet — transpiled code spells
+    // consuming-self calls on lvalue member places (once_cell's
+    // `this->value.into_inner()`), so the qualifier would reject those call
+    // sites until the transpiler wraps them in std::move. Until then the
+    // lvalue form leaves a moved-from cell observable, so the shim is
+    // @unsafe: the caller asserts the cell is dead after the call.
+    // @unsafe
     T into_inner() {
         return std::move(value);
     }
