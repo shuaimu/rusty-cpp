@@ -215,8 +215,14 @@ impl CodeGen {
         } else {
             ""
         };
-        let export_prefix = if self.should_export_item(&f.vis, &f.sig.ident.to_string())
-            || self.should_force_export_private_root_module_function(f)
+        // An internal-linkage fn can never be exported (C++20 hard error).
+        // The force-export set is keyed by BARE NAME, so a private test-module
+        // fn that happens to share a re-export target's name (semver's test
+        // util `version` vs the crate's re-exported `version`) would otherwise
+        // emit the ill-formed `export static`.
+        let export_prefix = if !self.should_emit_internal_linkage_function(f)
+            && (self.should_export_item(&f.vis, &f.sig.ident.to_string())
+                || self.should_force_export_private_root_module_function(f))
         {
             "export "
         } else {
@@ -547,8 +553,14 @@ impl CodeGen {
             ""
         };
 
-        let export_prefix = if self.should_export_item(&f.vis, &f.sig.ident.to_string())
-            || self.should_force_export_private_root_module_function(f)
+        // An internal-linkage fn can never be exported (C++20 hard error).
+        // The force-export set is keyed by BARE NAME, so a private test-module
+        // fn that happens to share a re-export target's name (semver's test
+        // util `version` vs the crate's re-exported `version`) would otherwise
+        // emit the ill-formed `export static`.
+        let export_prefix = if !self.should_emit_internal_linkage_function(f)
+            && (self.should_export_item(&f.vis, &f.sig.ident.to_string())
+                || self.should_force_export_private_root_module_function(f))
         {
             "export "
         } else {
