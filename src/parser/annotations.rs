@@ -48,7 +48,6 @@ pub struct LifetimeBound {
 
 pub fn extract_annotations(entity: &Entity) -> Option<FunctionSignature> {
     let name = entity.get_name()?;
-
     // Try getting comment from LibClang first (doc comments like /// or /** */)
     if let Some(comment) = entity.get_comment() {
         if let Some(sig) = parse_lifetime_annotations(&comment, name.clone()) {
@@ -56,7 +55,6 @@ pub fn extract_annotations(entity: &Entity) -> Option<FunctionSignature> {
         }
         // Comment exists but no lifetime annotation found, fall through to source reading
     }
-
     // If no doc comment, read source file for // @lifetime: annotations
     // (similar to how we detect // @unsafe blocks)
     if let Some(sig) = read_lifetime_from_source(entity, &name) {
@@ -76,7 +74,6 @@ fn read_lifetime_from_source(entity: &Entity, name: &str) -> Option<FunctionSign
     let file = file_location.file?;
     let file_path = file.get_path();
     let entity_line = file_location.line as usize;
-
     // Read the source file
     let file_handle = File::open(&file_path).ok()?;
     let reader = BufReader::new(file_handle);
@@ -118,7 +115,10 @@ fn read_lifetime_from_source(entity: &Entity, name: &str) -> Option<FunctionSign
 // @lifetime: 'a -> &'a T
 // @lifetime: ('a, 'b) -> &'a T where 'a: 'b
 // @lifetime: owned
-fn parse_lifetime_annotations(comment: &str, func_name: String) -> Option<FunctionSignature> {
+pub(crate) fn parse_lifetime_annotations(
+    comment: &str,
+    func_name: String,
+) -> Option<FunctionSignature> {
     // Look for @safe / @unsafe / @bridge annotation first
     let safe_re = Regex::new(r"@safe\b").ok()?;
     let unsafe_re = Regex::new(r"@unsafe\b").ok()?;

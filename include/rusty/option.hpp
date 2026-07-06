@@ -260,7 +260,9 @@ public:
 
     // Compatibility shims for transpiled `*option_expr` / `option_expr->...`
     // shapes that should preserve Option semantics rather than payload access.
+    // @lifetime: (&'a) -> &'a self
     Option& operator*() & { return *this; }
+    // @lifetime: (&'a) -> &'a self
     const Option& operator*() const & { return *this; }
     Option&& operator*() && { return std::move(*this); }
     Option* operator->() { return this; }
@@ -290,6 +292,7 @@ public:
     T unwrap_unchecked() { return unwrap(); }
 
     // Unsafe Rust parity helper for borrowed access.
+    // @lifetime: (&'a) -> &'a T
     const T& unwrap_unchecked() const { return unwrap(); }
 
     // Expect with custom message - Rust style
@@ -391,6 +394,7 @@ public:
     }
 
     // Rust parity: Option::get_or_insert(self, value) -> &mut T
+    // @lifetime: (&'a mut) -> &'a mut T
     T& get_or_insert(T default_value) {
         if (!has_value) {
             new (&value) T(std::move(default_value));
@@ -404,6 +408,7 @@ public:
     // value if any, and return a mutable reference to the new one.
     // Unlike `get_or_insert`, this OVERWRITES — so it always returns a
     // ref to the just-inserted value.
+    // @lifetime: (&'a mut) -> &'a mut T
     T& insert(T new_value) {
         if (has_value) {
             value.~T();
@@ -415,6 +420,7 @@ public:
 
     // Rust parity: Option::get_or_insert_with(self, f) -> &mut T
     template<typename F>
+    // @lifetime: (&'a mut) -> &'a mut T
     T& get_or_insert_with(F&& f) {
         if (!has_value) {
             new (&value) T(std::forward<F>(f)());
@@ -663,7 +669,9 @@ public:
     explicit operator bool() const { return ptr != nullptr; }
 
     // Compatibility shims for transpiled `*option_expr` / `option_expr->...`
+    // @lifetime: (&'a) -> &'a self
     Option& operator*() & { return *this; }
+    // @lifetime: (&'a) -> &'a self
     const Option& operator*() const & { return *this; }
     Option&& operator*() && { return std::move(*this); }
     Option* operator->() { return this; }
@@ -687,9 +695,11 @@ public:
     }
 
     // Unsafe Rust parity helper. Runtime checks remain for now.
+    // @lifetime: (&'a) -> &'a T
     T& unwrap_unchecked() { return unwrap(); }
 
     // Unsafe Rust parity helper for const receivers.
+    // @lifetime: (&'a) -> &'a T
     T& unwrap_unchecked() const {
         if (!ptr) {
             throw std::runtime_error("Called unwrap on None");
@@ -730,6 +740,7 @@ public:
     }
 
     template<typename F>
+    // @lifetime: (&'a) -> &'a T
     T& unwrap_or_else(F&& f) {
         if (ptr) {
             return *ptr;
@@ -743,6 +754,7 @@ public:
     }
 
     template<typename F>
+    // @lifetime: (&'a) -> &'a T
     T& unwrap_or_else(F&& f) const {
         if (ptr) {
             return *ptr;
@@ -984,7 +996,9 @@ public:
     explicit operator bool() const { return ptr != nullptr; }
 
     // Compatibility shims for transpiled `*option_expr` / `option_expr->...`
+    // @lifetime: (&'a) -> &'a self
     Option& operator*() & { return *this; }
+    // @lifetime: (&'a) -> &'a self
     const Option& operator*() const & { return *this; }
     Option&& operator*() && { return std::move(*this); }
     Option* operator->() { return this; }
@@ -1000,6 +1014,7 @@ public:
     }
 
     // Unsafe Rust parity helper. Runtime checks remain for now.
+    // @lifetime: (&'a) -> &'a const T
     const T& unwrap_unchecked() const { return unwrap(); }
 
     // Expect with custom message
@@ -1021,6 +1036,7 @@ public:
     }
 
     template<typename F>
+    // @lifetime: (&'a) -> &'a const T
     const T& unwrap_or_else(F&& f) const {
         if (ptr) {
             return *ptr;

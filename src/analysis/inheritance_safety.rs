@@ -819,6 +819,7 @@ mod tests {
                 name: "data".to_string(),
                 type_name: "int".to_string(),
                 is_reference: false,
+                is_rvalue_reference: false,
                 is_pointer: false,
                 is_const: false,
                 is_unique_ptr: false,

@@ -25,3 +25,4 @@ tests/transpile_tests/serde_core/
 tests/transpile_tests/serde_yaml/
 tests/transpile_tests/toml/
 Testing/
+.DS_Store
