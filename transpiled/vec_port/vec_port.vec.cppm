@@ -5389,10 +5389,12 @@ return dst.write(rusty::clone(src));
         rusty::hash::hash(rusty::detail::deref_if_pointer_like((*this)), state);
     }
     template<typename I>
+    requires std::integral<std::remove_cvref_t<I>>
     decltype(auto) operator[](I index) const {
         return rusty::as_slice(*this)[static_cast<size_t>(index)];
     }
     template<typename I>
+    requires std::integral<std::remove_cvref_t<I>>
     decltype(auto) index_mut(I index) {
         return this->as_mut_slice()[static_cast<size_t>(index)];
     }

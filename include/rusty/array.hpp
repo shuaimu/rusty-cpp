@@ -24,7 +24,7 @@
 
 namespace rusty {
 template<typename Container>
-auto as_slice(Container&& container);
+decltype(auto) as_slice(Container&& container);
 }
 
 // GCC/libstdc++ C++23 does not provide span equality operators.
@@ -1331,7 +1331,430 @@ struct owned_container_slice {
     }
 };
 
+// Range-subscript routing (prefer a receiver's own emitted Index<Range…>
+// subscript in the slice helpers). Default OFF: emitted deduced-I subscripts
+// (`template<I> operator[](I)` from generic SliceIndex impls, e.g. smallvec)
+// hard-error inside their bodies when probed with range types — a marker
+// typedef emitted next to concrete range subscripts is needed before this
+// can be on by default (see indexmap unlock notes).
+#ifndef RUSTY_RANGE_SUBSCRIPT_ROUTING
+#define RUSTY_RANGE_SUBSCRIPT_ROUTING 0
+#endif
+
+// A receiver whose storage is directly pointer-addressable (std containers,
+// rusty::Vec/SmallVec ports). For these the span path is authoritative and
+// range-subscript probing is SKIPPED: their emitted `operator[](I)`/
+// `index_mut(I)` templates deduce I and hard-error on range args inside the
+// body (outside the requires' immediate context).
+template<typename C>
+inline constexpr bool raw_span_source_v =
+    requires(C& c) { c.data(); } || requires(C& c) { c.as_ptr(); }
+    // A member as_slice()/as_mut_slice() yielding a pointer-addressable view
+    // (SmallVec → std::span). Crate types whose as_slice returns their OWN
+    // slice type (indexmap's &Slice, no .data()) stay probeable.
+    || requires(C& c) { c.as_slice().data(); }
+    || requires(C& c) { c.as_mut_slice().data(); };
+
 } // namespace detail
+
+// Bound + range types — defined ahead of the slice helpers, which
+// reference them in requires-clauses to prefer a receiver's own
+// `Index<Range…>` subscript over span construction.
+/// Iterable range [start, end) — equivalent to Rust's `start..end`.
+template<typename T>
+struct Bound_Unbounded {};
+
+template<typename T>
+struct Bound_Included {
+    T _0;
+};
+
+template<typename T>
+struct Bound_Excluded {
+    T _0;
+};
+
+template<typename T>
+using Bound = std::variant<Bound_Unbounded<T>, Bound_Included<T>, Bound_Excluded<T>>;
+
+// Value-position factories for Rust's `Bound::…` variant constructors —
+// `Bound` is an alias template over std::variant, so `Bound::Excluded(x)`
+// cannot be spelled directly. `bound_unbounded` is a tag VALUE convertible
+// to any Bound<T>, letting the consumer (tuple-bounds subscripts) pick T.
+template<typename T>
+Bound<std::decay_t<T>> bound_excluded(T&& value) {
+    return Bound<std::decay_t<T>>(Bound_Excluded<std::decay_t<T>>{std::forward<T>(value)});
+}
+template<typename T>
+Bound<std::decay_t<T>> bound_included(T&& value) {
+    return Bound<std::decay_t<T>>(Bound_Included<std::decay_t<T>>{std::forward<T>(value)});
+}
+struct bound_unbounded_t {
+    template<typename T>
+    operator Bound<T>() const { return Bound<T>(Bound_Unbounded<T>{}); }
+};
+inline constexpr bound_unbounded_t bound_unbounded{};
+
+template<typename T>
+class range {
+public:
+    template<typename>
+    friend class range;
+
+    T start;
+
+    constexpr range(T start_value, T end_value)
+        : start(std::move(start_value)), end_(std::move(end_value)) {}
+
+    template<typename U>
+    constexpr range(const range<U>& other)
+    requires std::is_convertible_v<U, T>
+        : start(static_cast<T>(other.start)), end_(static_cast<T>(other.end_)) {}
+
+    range into_iter() {
+        return std::move(*this);
+    }
+
+    struct iterator {
+        T current;
+        T end;
+        bool done;
+        T operator*() const { return current; }
+        iterator& operator++() {
+            if (!done) {
+                ++current;
+                done = (current == end);
+            }
+            return *this;
+        }
+        bool operator!=(const iterator& other) const {
+            (void)other;
+            return !done;
+        }
+    };
+
+    iterator begin() const { return {start, end_, start >= end_}; }
+    iterator end() const { return {end_, end_, true}; }
+    T& end_value() { return end_; }
+    const T& end_value() const { return end_; }
+
+    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end_}); }
+
+    bool contains(const T& value) const {
+        return value >= start && value < end_;
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
+    rusty::Option<T> next() {
+        if (start >= end_) {
+            return rusty::None;
+        }
+        T current = start;
+        ++start;
+        return rusty::Option<T>(current);
+    }
+
+    rusty::Option<T> next_back() {
+        if (start >= end_) {
+            return rusty::None;
+        }
+        --end_;
+        return rusty::Option<T>(end_);
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
+    size_t count() const {
+        if (start >= end_) {
+            return 0;
+        }
+        T current = start;
+        size_t n = 0;
+        while (current != end_) {
+            ++current;
+            ++n;
+        }
+        return n;
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        const size_t remaining = count();
+        return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
+    }
+
+    /// Rust-style `Range::step_by(n)` — yields start, start+n, start+2n, …
+    /// strictly less than end. Iterable via range-for (begin/end) and the
+    /// `.next()` protocol.
+    struct StepBy {
+        T current;
+        T end_;
+        T step;
+        bool done;
+        struct iterator {
+            T current;
+            T end;
+            T step;
+            bool done;
+            T operator*() const { return current; }
+            iterator& operator++() {
+                T next = static_cast<T>(current + step);
+                if (next >= end || next < current) {  // reached end (or wrapped)
+                    done = true;
+                }
+                current = next;
+                return *this;
+            }
+            bool operator!=(const iterator& other) const {
+                (void)other;
+                return !done;
+            }
+        };
+        iterator begin() const { return {current, end_, step, current >= end_}; }
+        iterator end() const { return {end_, end_, step, true}; }
+        rusty::Option<T> next() {
+            if (done || current >= end_) {
+                done = true;
+                return rusty::None;
+            }
+            T value = current;
+            T n = static_cast<T>(current + step);
+            if (n >= end_ || n < current) {
+                done = true;
+            }
+            current = n;
+            return rusty::Option<T>(value);
+        }
+    };
+    StepBy step_by(T step) const { return StepBy{start, end_, step, start >= end_}; }
+
+private:
+    T end_;
+};
+
+template<typename A, typename B>
+range(A, B) -> range<std::common_type_t<A, B>>;
+
+/// Inclusive range [start, end] — equivalent to Rust's `start..=end`.
+template<typename T>
+class range_inclusive {
+public:
+    template<typename>
+    friend class range_inclusive;
+
+    T start;
+
+    constexpr range_inclusive(T start_value, T end_value)
+        : start(std::move(start_value)), end_(std::move(end_value)) {}
+
+    template<typename U>
+    constexpr range_inclusive(const range_inclusive<U>& other)
+    requires std::is_convertible_v<U, T>
+        : start(static_cast<T>(other.start)),
+          end_(static_cast<T>(other.end_)),
+          done_(other.done_) {}
+
+    range_inclusive into_iter() {
+        return std::move(*this);
+    }
+
+    struct iterator {
+        T current;
+        T end;
+        bool done;
+        T operator*() const { return current; }
+        iterator& operator++() { if (current == end) done = true; else ++current; return *this; }
+        bool operator!=(const iterator& other) const {
+            (void)other;
+            return !done;
+        }
+    };
+
+    iterator begin() const { return {start, end_, start > end_}; }
+    iterator end() const { return {end_, end_, true}; }
+    T& end_value() { return end_; }
+    const T& end_value() const { return end_; }
+
+    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end_}); }
+
+    bool contains(const T& value) const {
+        return value >= start && value <= end_;
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
+    rusty::Option<T> next() {
+        if (done_ || start > end_) {
+            return rusty::None;
+        }
+        T current = start;
+        if (start == end_) {
+            done_ = true;
+        } else {
+            ++start;
+        }
+        return rusty::Option<T>(current);
+    }
+
+    rusty::Option<T> next_back() {
+        if (done_ || start > end_) {
+            return rusty::None;
+        }
+        T current = end_;
+        if (start == end_) {
+            done_ = true;
+        } else {
+            --end_;
+        }
+        return rusty::Option<T>(current);
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
+    size_t count() const {
+        if (done_ || start > end_) {
+            return 0;
+        }
+        T current = start;
+        size_t n = 0;
+        while (true) {
+            ++n;
+            if (current == end_) {
+                break;
+            }
+            ++current;
+        }
+        return n;
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        const size_t remaining = count();
+        return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
+    }
+
+private:
+    T end_;
+    bool done_ = false;
+};
+
+template<typename A, typename B>
+range_inclusive(A, B) -> range_inclusive<std::common_type_t<A, B>>;
+
+template<typename T>
+auto get(std::string_view container, const range<T>& idx) {
+    const size_t start_index = detail::checked_index(idx.start);
+    const size_t end_index = detail::checked_index(idx.end_value());
+    using Opt = Option<std::string_view>;
+    if (start_index > end_index || end_index > container.size()) {
+        return Opt(None);
+    }
+    return Opt(container.substr(start_index, end_index - start_index));
+}
+
+template<typename T>
+auto get(std::string_view container, const range_inclusive<T>& idx) {
+    const size_t start_index = detail::checked_index(idx.start);
+    const size_t end_index = detail::checked_index(idx.end_value());
+    using Opt = Option<std::string_view>;
+    if (start_index > end_index || end_index >= container.size()) {
+        return Opt(None);
+    }
+    return Opt(container.substr(start_index, end_index - start_index + 1));
+}
+
+/// Open range from start — equivalent to Rust's `start..`.
+template<typename T>
+struct range_from {
+    T start;
+
+    range_from into_iter() {
+        return std::move(*this);
+    }
+
+    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+
+    bool contains(const T& value) const {
+        return value >= start;
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
+    rusty::Option<T> next() {
+        T current = start;
+        ++start;
+        return rusty::Option<T>(current);
+    }
+
+    /// C++ iteration surface: an unbounded counting iterator. Consumers
+    /// (rusty::zip, range-for) terminate via the OTHER zipped side or an
+    /// explicit break — matching Rust's lazy `start..` semantics.
+    struct unbounded_iterator {
+        T cur;
+        T operator*() const { return cur; }
+        unbounded_iterator& operator++() {
+            ++cur;
+            return *this;
+        }
+        bool operator==(std::unreachable_sentinel_t) const { return false; }
+        bool operator!=(std::unreachable_sentinel_t) const { return true; }
+    };
+    unbounded_iterator begin() const { return unbounded_iterator{start}; }
+    std::unreachable_sentinel_t end() const { return {}; }
+
+    /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
+    /// `start..` is unbounded, so this mirrors an effectively-infinite count.
+    size_t count() const {
+        return std::numeric_limits<size_t>::max();
+    }
+
+    /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
+    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
+        return std::make_tuple(
+            std::numeric_limits<size_t>::max(),
+            rusty::Option<size_t>(rusty::None)
+        );
+    }
+};
+
+/// Range to end — equivalent to Rust's `..end`.
+template<typename T>
+struct range_to {
+    T end;
+
+    Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end}); }
+
+    bool contains(const T& value) const {
+        return value < end;
+    }
+};
+
+/// Full range — equivalent to Rust's `..`.
+struct range_full {
+    template<typename T = size_t>
+    Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+    template<typename T = size_t>
+    Bound<T> end_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+
+    template<typename T>
+    bool contains(const T&) const {
+        return true;
+    }
+};
+
+/// Range to inclusive — equivalent to Rust's `..=end`.
+template<typename T>
+struct range_to_inclusive {
+    T end;
+
+    Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
+    Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end}); }
+
+    bool contains(const T& value) const {
+        return value <= end;
+    }
+};
+
 
 template<typename T, std::size_t N>
 auto slice_full(std::array<T, N>&& container) {
@@ -1348,8 +1771,23 @@ auto slice_full(Container&& container) {
 }
 
 template<typename Container>
-auto slice_full(Container& container) {
+decltype(auto) slice_full(Container& container) {
     using Base = std::remove_cv_t<std::remove_reference_t<Container>>;
+    // A receiver with its own full-range subscript (a transpiled
+    // `Index<RangeFull>`/`IndexMut<RangeFull>` impl, e.g. indexmap) defines
+    // Rust's `&c[..]` — route through it so reference identity is preserved.
+    // Transpiled `IndexMut` lowers to an `index_mut` METHOD (operator[]
+    // cannot overload on receiver constness alone), so mutable receivers
+    // try that first.
+#if RUSTY_RANGE_SUBSCRIPT_ROUTING
+    if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container.index_mut(range_full{}); }) {
+        return container.index_mut(range_full{});
+    } else if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container[range_full{}]; }) {
+        return container[range_full{}];
+    } else
+#endif
     if constexpr (requires { container.as_mut_slice(); }) {
         using Slice = std::remove_cv_t<std::remove_reference_t<decltype(container.as_mut_slice())>>;
         if constexpr (std::is_same_v<Slice, Base>) {
@@ -1381,8 +1819,14 @@ auto slice_full(Container& container) {
 }
 
 template<typename Container>
-auto slice_full(const Container& container) {
+decltype(auto) slice_full(const Container& container) {
     using Base = std::remove_cv_t<std::remove_reference_t<Container>>;
+#if RUSTY_RANGE_SUBSCRIPT_ROUTING
+    if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container[range_full{}]; }) {
+        return container[range_full{}];
+    } else
+#endif
     if constexpr (requires { container.as_slice(); }) {
         using Slice = std::remove_cv_t<std::remove_reference_t<decltype(container.as_slice())>>;
         if constexpr (std::is_same_v<Slice, Base>) {
@@ -1406,12 +1850,12 @@ auto slice_full(const Container& container) {
 }
 
 template<typename T>
-auto slice_full(rusty::Box<T>& container) {
+decltype(auto) slice_full(rusty::Box<T>& container) {
     return slice_full(*container);
 }
 
 template<typename T>
-auto slice_full(const rusty::Box<T>& container) {
+decltype(auto) slice_full(const rusty::Box<T>& container) {
     return slice_full(*container);
 }
 
@@ -1419,7 +1863,7 @@ auto slice_full(const rusty::Box<T>& container) {
 // Keeps const-view semantics even for mutable lvalue receivers and supports
 // temporary receivers through forwarding-reference binding.
 template<typename Container>
-auto as_slice(Container&& container) {
+decltype(auto) as_slice(Container&& container) {
     if constexpr (std::is_rvalue_reference_v<Container&&>) {
         return slice_full(std::forward<Container>(container));
     } else {
@@ -1432,7 +1876,7 @@ auto as_slice(Container&& container) {
 // Preserves mutable-view behavior for containers exposing mutable slices and
 // falls back to mutable span construction where applicable.
 template<typename Container>
-auto as_mut_slice(Container&& container) {
+decltype(auto) as_mut_slice(Container&& container) {
     return slice_full(std::forward<Container>(container));
 }
 
@@ -1853,17 +2297,42 @@ void clone_from_slice(std::span<DstElem, DstExtent> dst, std::span<SrcElem, SrcE
 }
 
 template<typename Container, typename End>
-auto slice_to(Container& container, End end) {
-    auto span = slice_full(container);
+decltype(auto) slice_to(Container& container, End end) {
     const size_t end_index = detail::checked_index(end);
-    detail::validate_slice_bounds(span, 0, end_index);
-    return span.first(end_index);
+    // A container with its own range-subscript (a transpiled `Index<RangeTo>`
+    // impl, e.g. indexmap's Slice) defines Rust's `&c[..end]` — use it.
+    // `index_mut` first: transpiled IndexMut lowers to that method.
+#if RUSTY_RANGE_SUBSCRIPT_ROUTING
+    if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container.index_mut(range_to<size_t>{size_t{}}); }) {
+        return container.index_mut(range_to<size_t>{end_index});
+    } else if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container[range_to<size_t>{size_t{}}]; }) {
+        return container[range_to<size_t>{end_index}];
+    } else
+#endif
+    {
+        auto span = slice_full(container);
+        detail::validate_slice_bounds(span, 0, end_index);
+        return span.first(end_index);
+    }
 }
 
 template<typename Container, typename End>
-auto slice_to_inclusive(Container& container, End end) {
+decltype(auto) slice_to_inclusive(Container& container, End end) {
     const size_t end_index = detail::checked_index(end);
-    return slice_to(container, end_index + 1);
+#if RUSTY_RANGE_SUBSCRIPT_ROUTING
+    if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container.index_mut(range_to_inclusive<size_t>{size_t{}}); }) {
+        return container.index_mut(range_to_inclusive<size_t>{end_index});
+    } else if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container[range_to_inclusive<size_t>{size_t{}}]; }) {
+        return container[range_to_inclusive<size_t>{end_index}];
+    } else
+#endif
+    {
+        return slice_to(container, end_index + 1);
+    }
 }
 
 template<typename Start>
@@ -1875,23 +2344,45 @@ auto slice_from(std::string_view container, Start start) {
 
 template<typename Container, typename Start>
 requires (!std::is_same_v<std::remove_cvref_t<Container>, std::string_view>)
-auto slice_from(Container& container, Start start) {
-    auto span = slice_full(container);
+decltype(auto) slice_from(Container& container, Start start) {
     const size_t start_index = detail::checked_index(start);
-    detail::validate_slice_bounds(span, start_index, span.size());
-    return span.subspan(start_index);
+#if RUSTY_RANGE_SUBSCRIPT_ROUTING
+    if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container.index_mut(range_from<size_t>{size_t{}}); }) {
+        return container.index_mut(range_from<size_t>{start_index});
+    } else if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container[range_from<size_t>{size_t{}}]; }) {
+        return container[range_from<size_t>{start_index}];
+    } else
+#endif
+    {
+        auto span = slice_full(container);
+        detail::validate_slice_bounds(span, start_index, span.size());
+        return span.subspan(start_index);
+    }
 }
 
 template<typename Container, typename Start, typename End>
-auto slice(Container& container, Start start, End end) {
-    auto span = slice_full(container);
+decltype(auto) slice(Container& container, Start start, End end) {
     const size_t start_index = detail::checked_index(start);
     const size_t end_index = detail::checked_index(end);
-    detail::validate_slice_bounds(span, start_index, end_index);
-    if constexpr (std::is_same_v<std::remove_cvref_t<Container>, std::string_view>) {
-        return container.substr(start_index, end_index - start_index);
-    } else {
-        return span.subspan(start_index, end_index - start_index);
+#if RUSTY_RANGE_SUBSCRIPT_ROUTING
+    if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container.index_mut(range<size_t>(size_t{}, size_t{})); }) {
+        return container.index_mut(range<size_t>(start_index, end_index));
+    } else if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container[range<size_t>(size_t{}, size_t{})]; }) {
+        return container[range<size_t>(start_index, end_index)];
+    } else
+#endif
+    {
+        auto span = slice_full(container);
+        detail::validate_slice_bounds(span, start_index, end_index);
+        if constexpr (std::is_same_v<std::remove_cvref_t<Container>, std::string_view>) {
+            return container.substr(start_index, end_index - start_index);
+        } else {
+            return span.subspan(start_index, end_index - start_index);
+        }
     }
 }
 
@@ -1904,7 +2395,57 @@ auto slice(std::string_view container, Start start, End end) {
 }
 
 template<typename Container, typename Start, typename End>
-auto slice_inclusive(Container& container, Start start, End end) {
+decltype(auto) slice_inclusive(Container& container, Start start, End end) {
+    const size_t start_index = detail::checked_index(start);
+    const size_t end_index = detail::checked_index(end);
+#if RUSTY_RANGE_SUBSCRIPT_ROUTING
+    if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container.index_mut(range_inclusive<size_t>(size_t{}, size_t{})); }) {
+        return container.index_mut(range_inclusive<size_t>(start_index, end_index));
+    } else if constexpr (!detail::raw_span_source_v<Container>
+        && requires { container[range_inclusive<size_t>(size_t{}, size_t{})]; }) {
+        return container[range_inclusive<size_t>(start_index, end_index)];
+    } else
+#endif
+    {
+        return slice(container, start_index, end_index + 1);
+    }
+}
+
+// std::span is a borrowed VIEW — slicing an rvalue span is safe and common in
+// emitted code (`self.as_entries()[range]` materializes a prvalue span). The
+// generic overloads take `Container&`, which rejects rvalues; these by-value
+// span overloads are more specialized, so lvalue spans also prefer them.
+template<typename T, std::size_t E, typename End>
+auto slice_to(std::span<T, E> container, End end) {
+    const size_t end_index = detail::checked_index(end);
+    detail::validate_slice_bounds(container, 0, end_index);
+    return container.first(end_index);
+}
+
+template<typename T, std::size_t E, typename End>
+auto slice_to_inclusive(std::span<T, E> container, End end) {
+    const size_t end_index = detail::checked_index(end);
+    return slice_to(container, end_index + 1);
+}
+
+template<typename T, std::size_t E, typename Start>
+auto slice_from(std::span<T, E> container, Start start) {
+    const size_t start_index = detail::checked_index(start);
+    detail::validate_slice_bounds(container, start_index, container.size());
+    return container.subspan(start_index);
+}
+
+template<typename T, std::size_t E, typename Start, typename End>
+auto slice(std::span<T, E> container, Start start, End end) {
+    const size_t start_index = detail::checked_index(start);
+    const size_t end_index = detail::checked_index(end);
+    detail::validate_slice_bounds(container, start_index, end_index);
+    return container.subspan(start_index, end_index - start_index);
+}
+
+template<typename T, std::size_t E, typename Start, typename End>
+auto slice_inclusive(std::span<T, E> container, Start start, End end) {
     const size_t end_index = detail::checked_index(end);
     return slice(container, start, end_index + 1);
 }
@@ -1930,383 +2471,6 @@ decltype(auto) field_start(T&& value) {
         return std::forward<T>(value).start();
     }
 }
-
-/// Iterable range [start, end) — equivalent to Rust's `start..end`.
-template<typename T>
-struct Bound_Unbounded {};
-
-template<typename T>
-struct Bound_Included {
-    T _0;
-};
-
-template<typename T>
-struct Bound_Excluded {
-    T _0;
-};
-
-template<typename T>
-using Bound = std::variant<Bound_Unbounded<T>, Bound_Included<T>, Bound_Excluded<T>>;
-
-template<typename T>
-class range {
-public:
-    template<typename>
-    friend class range;
-
-    T start;
-
-    constexpr range(T start_value, T end_value)
-        : start(std::move(start_value)), end_(std::move(end_value)) {}
-
-    template<typename U>
-    constexpr range(const range<U>& other)
-    requires std::is_convertible_v<U, T>
-        : start(static_cast<T>(other.start)), end_(static_cast<T>(other.end_)) {}
-
-    range into_iter() {
-        return std::move(*this);
-    }
-
-    struct iterator {
-        T current;
-        T end;
-        bool done;
-        T operator*() const { return current; }
-        iterator& operator++() {
-            if (!done) {
-                ++current;
-                done = (current == end);
-            }
-            return *this;
-        }
-        bool operator!=(const iterator& other) const {
-            (void)other;
-            return !done;
-        }
-    };
-
-    iterator begin() const { return {start, end_, start >= end_}; }
-    iterator end() const { return {end_, end_, true}; }
-    T& end_value() { return end_; }
-    const T& end_value() const { return end_; }
-
-    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
-    Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end_}); }
-
-    bool contains(const T& value) const {
-        return value >= start && value < end_;
-    }
-
-    /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
-    rusty::Option<T> next() {
-        if (start >= end_) {
-            return rusty::None;
-        }
-        T current = start;
-        ++start;
-        return rusty::Option<T>(current);
-    }
-
-    rusty::Option<T> next_back() {
-        if (start >= end_) {
-            return rusty::None;
-        }
-        --end_;
-        return rusty::Option<T>(end_);
-    }
-
-    /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
-    size_t count() const {
-        if (start >= end_) {
-            return 0;
-        }
-        T current = start;
-        size_t n = 0;
-        while (current != end_) {
-            ++current;
-            ++n;
-        }
-        return n;
-    }
-
-    /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        const size_t remaining = count();
-        return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
-    }
-
-    /// Rust-style `Range::step_by(n)` — yields start, start+n, start+2n, …
-    /// strictly less than end. Iterable via range-for (begin/end) and the
-    /// `.next()` protocol.
-    struct StepBy {
-        T current;
-        T end_;
-        T step;
-        bool done;
-        struct iterator {
-            T current;
-            T end;
-            T step;
-            bool done;
-            T operator*() const { return current; }
-            iterator& operator++() {
-                T next = static_cast<T>(current + step);
-                if (next >= end || next < current) {  // reached end (or wrapped)
-                    done = true;
-                }
-                current = next;
-                return *this;
-            }
-            bool operator!=(const iterator& other) const {
-                (void)other;
-                return !done;
-            }
-        };
-        iterator begin() const { return {current, end_, step, current >= end_}; }
-        iterator end() const { return {end_, end_, step, true}; }
-        rusty::Option<T> next() {
-            if (done || current >= end_) {
-                done = true;
-                return rusty::None;
-            }
-            T value = current;
-            T n = static_cast<T>(current + step);
-            if (n >= end_ || n < current) {
-                done = true;
-            }
-            current = n;
-            return rusty::Option<T>(value);
-        }
-    };
-    StepBy step_by(T step) const { return StepBy{start, end_, step, start >= end_}; }
-
-private:
-    T end_;
-};
-
-template<typename A, typename B>
-range(A, B) -> range<std::common_type_t<A, B>>;
-
-/// Inclusive range [start, end] — equivalent to Rust's `start..=end`.
-template<typename T>
-class range_inclusive {
-public:
-    template<typename>
-    friend class range_inclusive;
-
-    T start;
-
-    constexpr range_inclusive(T start_value, T end_value)
-        : start(std::move(start_value)), end_(std::move(end_value)) {}
-
-    template<typename U>
-    constexpr range_inclusive(const range_inclusive<U>& other)
-    requires std::is_convertible_v<U, T>
-        : start(static_cast<T>(other.start)),
-          end_(static_cast<T>(other.end_)),
-          done_(other.done_) {}
-
-    range_inclusive into_iter() {
-        return std::move(*this);
-    }
-
-    struct iterator {
-        T current;
-        T end;
-        bool done;
-        T operator*() const { return current; }
-        iterator& operator++() { if (current == end) done = true; else ++current; return *this; }
-        bool operator!=(const iterator& other) const {
-            (void)other;
-            return !done;
-        }
-    };
-
-    iterator begin() const { return {start, end_, start > end_}; }
-    iterator end() const { return {end_, end_, true}; }
-    T& end_value() { return end_; }
-    const T& end_value() const { return end_; }
-
-    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
-    Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end_}); }
-
-    bool contains(const T& value) const {
-        return value >= start && value <= end_;
-    }
-
-    /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
-    rusty::Option<T> next() {
-        if (done_ || start > end_) {
-            return rusty::None;
-        }
-        T current = start;
-        if (start == end_) {
-            done_ = true;
-        } else {
-            ++start;
-        }
-        return rusty::Option<T>(current);
-    }
-
-    rusty::Option<T> next_back() {
-        if (done_ || start > end_) {
-            return rusty::None;
-        }
-        T current = end_;
-        if (start == end_) {
-            done_ = true;
-        } else {
-            --end_;
-        }
-        return rusty::Option<T>(current);
-    }
-
-    /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
-    size_t count() const {
-        if (done_ || start > end_) {
-            return 0;
-        }
-        T current = start;
-        size_t n = 0;
-        while (true) {
-            ++n;
-            if (current == end_) {
-                break;
-            }
-            ++current;
-        }
-        return n;
-    }
-
-    /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        const size_t remaining = count();
-        return std::make_tuple(remaining, rusty::Option<size_t>(remaining));
-    }
-
-private:
-    T end_;
-    bool done_ = false;
-};
-
-template<typename A, typename B>
-range_inclusive(A, B) -> range_inclusive<std::common_type_t<A, B>>;
-
-template<typename T>
-auto get(std::string_view container, const range<T>& idx) {
-    const size_t start_index = detail::checked_index(idx.start);
-    const size_t end_index = detail::checked_index(idx.end_value());
-    using Opt = Option<std::string_view>;
-    if (start_index > end_index || end_index > container.size()) {
-        return Opt(None);
-    }
-    return Opt(container.substr(start_index, end_index - start_index));
-}
-
-template<typename T>
-auto get(std::string_view container, const range_inclusive<T>& idx) {
-    const size_t start_index = detail::checked_index(idx.start);
-    const size_t end_index = detail::checked_index(idx.end_value());
-    using Opt = Option<std::string_view>;
-    if (start_index > end_index || end_index >= container.size()) {
-        return Opt(None);
-    }
-    return Opt(container.substr(start_index, end_index - start_index + 1));
-}
-
-/// Open range from start — equivalent to Rust's `start..`.
-template<typename T>
-struct range_from {
-    T start;
-
-    range_from into_iter() {
-        return std::move(*this);
-    }
-
-    Bound<T> start_bound() const { return Bound<T>(Bound_Included<T>{start}); }
-    Bound<T> end_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
-
-    bool contains(const T& value) const {
-        return value >= start;
-    }
-
-    /// Rust-style iterator protocol helper used by transpiled `.next()` calls.
-    rusty::Option<T> next() {
-        T current = start;
-        ++start;
-        return rusty::Option<T>(current);
-    }
-
-    /// C++ iteration surface: an unbounded counting iterator. Consumers
-    /// (rusty::zip, range-for) terminate via the OTHER zipped side or an
-    /// explicit break — matching Rust's lazy `start..` semantics.
-    struct unbounded_iterator {
-        T cur;
-        T operator*() const { return cur; }
-        unbounded_iterator& operator++() {
-            ++cur;
-            return *this;
-        }
-        bool operator==(std::unreachable_sentinel_t) const { return false; }
-        bool operator!=(std::unreachable_sentinel_t) const { return true; }
-    };
-    unbounded_iterator begin() const { return unbounded_iterator{start}; }
-    std::unreachable_sentinel_t end() const { return {}; }
-
-    /// Rust-style iterator protocol helper used by transpiled `.count()` calls.
-    /// `start..` is unbounded, so this mirrors an effectively-infinite count.
-    size_t count() const {
-        return std::numeric_limits<size_t>::max();
-    }
-
-    /// Rust-style iterator protocol helper used by transpiled `.size_hint()` calls.
-    std::tuple<size_t, rusty::Option<size_t>> size_hint() const {
-        return std::make_tuple(
-            std::numeric_limits<size_t>::max(),
-            rusty::Option<size_t>(rusty::None)
-        );
-    }
-};
-
-/// Range to end — equivalent to Rust's `..end`.
-template<typename T>
-struct range_to {
-    T end;
-
-    Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
-    Bound<T> end_bound() const { return Bound<T>(Bound_Excluded<T>{end}); }
-
-    bool contains(const T& value) const {
-        return value < end;
-    }
-};
-
-/// Full range — equivalent to Rust's `..`.
-struct range_full {
-    template<typename T = size_t>
-    Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
-    template<typename T = size_t>
-    Bound<T> end_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
-
-    template<typename T>
-    bool contains(const T&) const {
-        return true;
-    }
-};
-
-/// Range to inclusive — equivalent to Rust's `..=end`.
-template<typename T>
-struct range_to_inclusive {
-    T end;
-
-    Bound<T> start_bound() const { return Bound<T>(Bound_Unbounded<T>{}); }
-    Bound<T> end_bound() const { return Bound<T>(Bound_Included<T>{end}); }
-
-    bool contains(const T& value) const {
-        return value <= end;
-    }
-};
 
 // Runtime helper used by transpiled dynamic range indexing (`base[idx]` where
 // `idx` is a range-shaped value). This mirrors Rust indexing semantics while

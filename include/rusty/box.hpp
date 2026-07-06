@@ -42,7 +42,7 @@ struct span_element<std::span<E, N>> {
 } // namespace detail
 
 template<typename Container>
-auto as_slice(Container&& container);
+decltype(auto) as_slice(Container&& container);
 
 template<typename T, typename A = rusty::alloc::Global>
 class Box {

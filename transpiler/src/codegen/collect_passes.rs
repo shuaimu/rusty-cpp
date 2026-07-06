@@ -3969,6 +3969,15 @@ impl CodeGen {
         for item in items {
             match item {
                 syn::Item::Const(c) => {
+                    // A `#[rustc_test_marker]` const is test-harness machinery
+                    // named after its test FN (`#[test] fn entry()` expands to
+                    // `pub const entry: test::TestDescAndFn`). Recording it
+                    // would make same-named PATTERN BINDINGS elsewhere in the
+                    // crate lower as const-value equality tests (indexmap's
+                    // `Entry::Occupied(entry)` arms vs its `entry` test).
+                    if Self::has_rustc_test_marker_attr(&c.attrs) {
+                        continue;
+                    }
                     let name = c.ident.to_string();
                     let ty = (*c.ty).clone();
                     self.item_const_types

@@ -1523,6 +1523,13 @@ pub struct CodeGen {
     /// Each stack frame corresponds to the current item-emission scope (crate root
     /// or inline module body), so deferred definitions are emitted in the same scope.
     pub(crate) deferred_method_definitions_stack: Vec<Vec<String>>,
+    // Whole harness-test modules diverted to the end of the TU (after the
+    // deferred method-definition flush). See emit_mod.
+    pub(crate) deferred_harness_test_module_blocks: Vec<String>,
+    pub(crate) capturing_harness_test_module: bool,
+    // Per-module (aligned with emit_mod bodies): names of this module's
+    // direct #[rustc_test_marker] consts == its test-fn names.
+    pub(crate) harness_test_marker_fn_names_stack: Vec<HashSet<String>>,
     /// Per-type non-method member names already emitted in the current type body.
     /// Used to deduplicate merged associated const/type aliases and avoid collisions
     /// with data fields.
@@ -1953,6 +1960,9 @@ impl CodeGen {
             module_namespace_renames: HashMap::new(),
             emitted_method_conflict_keys: Vec::new(),
             deferred_method_definitions_stack: Vec::new(),
+            deferred_harness_test_module_blocks: Vec::new(),
+            capturing_harness_test_module: false,
+            harness_test_marker_fn_names_stack: Vec::new(),
             emitted_non_method_member_names: Vec::new(),
             current_struct_assoc_cpp_types: Vec::new(),
             current_struct_method_output_types: Vec::new(),
@@ -3877,6 +3887,9 @@ impl CodeGen {
         self.emitted_scoped_type_aliases.clear();
         self.emitted_method_conflict_keys.clear();
         self.deferred_method_definitions_stack.clear();
+        self.deferred_harness_test_module_blocks.clear();
+        self.capturing_harness_test_module = false;
+        self.harness_test_marker_fn_names_stack.clear();
         self.emitted_non_method_member_names.clear();
         self.current_struct_assoc_cpp_types.clear();
         self.current_struct_method_output_types.clear();
@@ -4492,6 +4505,20 @@ impl CodeGen {
             self.newline();
         }
         log_emit("emit_extension_trait_free_functions_for_scope");
+
+        // Harness-test modules diverted by emit_mod: their bodies use
+        // decltype(auto) members whose definitions land in the deferred
+        // flush above, so they must come after it.
+        if !self.deferred_harness_test_module_blocks.is_empty() {
+            for block in std::mem::take(&mut self.deferred_harness_test_module_blocks) {
+                self.newline();
+                self.output.push_str(&block);
+                if !block.ends_with('\n') {
+                    self.newline();
+                }
+            }
+        }
+        log_emit("flush_deferred_harness_test_module_blocks");
 
         self.flush_deferred_crate_root_trait_reexports();
         log_emit("flush_deferred_crate_root_trait_reexports");
@@ -5530,8 +5557,124 @@ impl CodeGen {
         // its namespace after the later one for the items that need it.
         self.split_mutual_strict_cycle_modules(&mut final_ordered);
         log_order("split_mutual_strict_cycle_modules");
+        Self::defer_harness_test_submodules(&mut final_ordered);
+        log_order("defer_harness_test_submodules");
         log_order("done");
         final_ordered
+    }
+
+    /// True when this module DIRECTLY holds a `#[rustc_test_marker]` const —
+    /// i.e. it IS a harness test module (`#[cfg(test)] mod tests`), rather
+    /// than a module merely containing one deeper down.
+    fn module_directly_holds_test_markers(items: &[syn::Item]) -> bool {
+        items.iter().any(|it| {
+            matches!(it, syn::Item::Const(c) if Self::has_rustc_test_marker_attr(&c.attrs))
+        })
+    }
+
+    /// True for a module that is PURE harness-test content: only `use`
+    /// items, fns, consts (at least one being a `#[rustc_test_marker]`),
+    /// and nested modules that are themselves pure test content — i.e. a
+    /// `#[cfg(test)] mod tests` or the reopened-namespace wrappers built by
+    /// `defer_harness_test_submodules`. A production module that merely
+    /// CONTAINS a stray `#[test] fn` next to structs/impls (indexmap's
+    /// `map`/`inner` assert_send_sync) is NOT a container — those test items
+    /// are diverted individually at emission instead.
+    fn module_is_harness_test_container(items: &[syn::Item]) -> bool {
+        let mut saw_marker = false;
+        for it in items {
+            match it {
+                syn::Item::Use(_) | syn::Item::Fn(_) => {}
+                syn::Item::Const(c) => {
+                    if Self::has_rustc_test_marker_attr(&c.attrs) {
+                        saw_marker = true;
+                    }
+                }
+                syn::Item::Mod(sub) => match &sub.content {
+                    Some((_, nested)) if Self::module_is_harness_test_container(nested) => {
+                        saw_marker = true;
+                    }
+                    _ => return false,
+                },
+                _ => return false,
+            }
+        }
+        saw_marker
+    }
+
+    /// Harness test modules are LEAVES — `#[cfg(test)]` code cannot be
+    /// referenced by non-test code — but their bodies concretely instantiate
+    /// sibling-module types through method RETURN types the strict-dependency
+    /// scan cannot see (map::slice::tests uses map::iter::Keys<i32,i32> from
+    /// `map_slice.keys()`), fabricating soft cycles and leaving those
+    /// definitions after their use sites. Emit them last: move test modules
+    /// at this level to the end, and for each child module holding a DIRECT
+    /// test submodule, prune the tests out and reopen the child's namespace
+    /// at the end (`mod slice { mod tests }` — C++ namespaces reopen).
+    /// Opt-in switch for the harness-test deferral (ordering pass + emission
+    /// diversion). Default OFF: deferring makes inline `#[cfg(test)]` code
+    /// compile that was previously buried behind ordering errors, and crates
+    /// like smallvec/indexmap have inline tests hitting still-open lowering
+    /// gaps. Enable with RUSTY_CPP_DEFER_HARNESS_TESTS=1 (indexmap work).
+    pub(super) fn harness_test_deferral_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("RUSTY_CPP_DEFER_HARNESS_TESTS")
+                .is_ok_and(|v| !matches!(v.as_str(), "0" | "off" | "false" | "no"))
+        })
+    }
+
+    fn defer_harness_test_submodules<'a>(items: &mut Vec<&'a syn::Item>) {
+        if !Self::harness_test_deferral_enabled() {
+            return;
+        }
+        let is_test_mod = |it: &syn::Item| -> bool {
+            matches!(it, syn::Item::Mod(sub)
+                if sub.content.as_ref().is_some_and(|(_, si)| Self::module_is_harness_test_container(si)))
+        };
+        let mut kept: Vec<&'a syn::Item> = Vec::with_capacity(items.len());
+        let mut deferred: Vec<&'a syn::Item> = Vec::new();
+        for &item in items.iter() {
+            let syn::Item::Mod(m) = item else {
+                kept.push(item);
+                continue;
+            };
+            let Some((_, nested)) = &m.content else {
+                kept.push(item);
+                continue;
+            };
+            if Self::module_is_harness_test_container(nested) {
+                deferred.push(item);
+                continue;
+            }
+            if !nested.iter().any(|it| is_test_mod(it)) {
+                kept.push(item);
+                continue;
+            }
+            let mut pruned = m.clone();
+            let mut wrapper = m.clone();
+            if let (Some((_, pn)), Some((_, wn))) = (&mut pruned.content, &mut wrapper.content) {
+                let source = std::mem::take(pn);
+                wn.clear();
+                for it in source {
+                    if is_test_mod(&it) {
+                        wn.push(it);
+                    } else {
+                        if matches!(it, syn::Item::Use(_)) {
+                            wn.push(it.clone());
+                        }
+                        pn.push(it);
+                    }
+                }
+            }
+            kept.push(&*Box::leak(Box::new(syn::Item::Mod(pruned))));
+            deferred.push(&*Box::leak(Box::new(syn::Item::Mod(wrapper))));
+        }
+        if deferred.is_empty() {
+            return;
+        }
+        kept.extend(deferred);
+        *items = kept;
     }
 
     /// Detect top-level module pairs whose STRICT (by-value completeness)
@@ -10005,6 +10148,39 @@ impl CodeGen {
 
 
     fn emit_item(&mut self, item: &syn::Item) {
+        // A `#[test] fn` declared directly inside a PRODUCTION module (and
+        // its `#[rustc_test_marker]` const) is diverted to the trailing
+        // harness-test block: its body uses decltype(auto) members whose
+        // out-of-line definitions only flush at the end of the TU. The
+        // namespace path is preserved by reopening.
+        if !self.capturing_harness_test_module
+            && Self::harness_test_deferral_enabled()
+            && let Some(markers) = self.harness_test_marker_fn_names_stack.last()
+            && !markers.is_empty()
+        {
+            let divert = match item {
+                syn::Item::Const(c) => Self::has_rustc_test_marker_attr(&c.attrs),
+                syn::Item::Fn(f) => markers.contains(&f.sig.ident.to_string()),
+                _ => false,
+            };
+            if divert {
+                self.capturing_harness_test_module = true;
+                let saved_output = std::mem::take(&mut self.output);
+                let saved_indent = self.indent;
+                self.indent = 0;
+                self.emit_item(item);
+                let mut captured = std::mem::replace(&mut self.output, saved_output);
+                self.indent = saved_indent;
+                self.capturing_harness_test_module = false;
+                if !self.module_stack.is_empty() {
+                    let module_scope =
+                        self.escape_and_rename_qualified_name(&self.module_stack.join("::"));
+                    captured = format!("namespace {} {{\n{}\n}}\n", module_scope, captured);
+                }
+                self.deferred_harness_test_module_blocks.push(captured);
+                return;
+            }
+        }
         let profile_item = std::env::var_os("RUSTY_CPP_PROFILE_ITEMS").is_some();
         let item_label = if profile_item {
             Some(match item {
@@ -26822,6 +26998,9 @@ impl CodeGen {
             // emit-time local environment isn't populated during this pre-pass,
             // so `infer_simple_expr_type` can't see `let insert = [..]` yet.
             binding_types: HashMap<String, syn::Type>,
+            // `let s = String::from;` — locals aliasing an associated fn, so
+            // `s("a")` in insert args can be typed via the ctor convention.
+            fn_aliases: HashMap<String, syn::Path>,
         }
         impl<'a> Scan<'a> {
             /// `Coll::new()` / `Coll::with_capacity(..)` → the collection owner
@@ -27008,8 +27187,92 @@ impl CodeGen {
                             self.expr_type(&m.receiver)
                         }
                     }
+                    // `map.insert((s("a"), s("b")), 1)` (indexmap's
+                    // equivalent_trait test): the key is a TUPLE of local
+                    // free-fn calls — type each element.
+                    syn::Expr::Tuple(t) => {
+                        let elems: Option<Vec<syn::Type>> =
+                            t.elems.iter().map(|e| self.expr_type(e)).collect();
+                        elems.map(|elems| {
+                            syn::Type::Tuple(syn::TypeTuple {
+                                paren_token: Default::default(),
+                                elems: elems.into_iter().collect(),
+                            })
+                        })
+                    }
+                    // A call to a declared free function: use its declared
+                    // return type (concrete returns only — a generic return
+                    // would need substitution). The hint inferencer first —
+                    // it knows expanded-macro shapes like `vec![42]`
+                    // (`box_assume_init_into_vec_unsafe(..)` → `Vec<i32>`).
+                    syn::Expr::Call(call) => self
+                        .cg
+                        .infer_hint_type_from_expr(e)
+                        .or_else(|| self.call_return_type(call)),
                     _ => None,
                 }
+            }
+            /// Return type of a free/associated call in an insert-arg
+            /// position. Declared functions use their recorded signature;
+            /// otherwise `Type::from(..)` / `Type::new(..)`-style associated
+            /// constructors return Self (`String::from("a")` → `String`),
+            /// resolving `let s = String::from;` aliases first.
+            fn call_return_type(&self, call: &syn::ExprCall) -> Option<syn::Type> {
+                if let Some(ty) = self
+                    .cg
+                    .lookup_function_return_type(&call.func)
+                    .filter(|ty| !self.cg.type_mentions_in_scope_type_param(ty))
+                {
+                    return Some(ty.clone());
+                }
+                let mut path = match self.cg.peel_paren_group_expr(&call.func) {
+                    syn::Expr::Path(p) if p.qself.is_none() => p.path.clone(),
+                    _ => return None,
+                };
+                if path.segments.len() == 1
+                    && let Some(aliased) =
+                        self.fn_aliases.get(&path.segments[0].ident.to_string())
+                {
+                    path = aliased.clone();
+                }
+                if path.segments.len() < 2 {
+                    return None;
+                }
+                if !matches!(
+                    path.segments.last().unwrap().ident.to_string().as_str(),
+                    "from" | "new" | "default" | "with_capacity" | "from_iter"
+                ) {
+                    return None;
+                }
+                let owner = &path.segments[path.segments.len() - 2];
+                let owner_name = owner.ident.to_string();
+                if !owner_name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
+                {
+                    return None;
+                }
+                // A bare polymorphic collection owner (`IndexMap::from(..)`)
+                // gives an unparameterized — useless — hint; skip it.
+                if owner.arguments.is_none()
+                    && CodeGen::is_polymorphic_collection_name(&owner_name)
+                {
+                    return None;
+                }
+                let owner_path = syn::Path {
+                    leading_colon: path.leading_colon,
+                    segments: path
+                        .segments
+                        .iter()
+                        .take(path.segments.len() - 1)
+                        .cloned()
+                        .collect(),
+                };
+                Some(syn::Type::Path(syn::TypePath {
+                    qself: None,
+                    path: owner_path,
+                }))
             }
             /// Item (element) type yielded by a for-loop iterator expression,
             /// as a ref-stripped value type. `enumerate()` produces a
@@ -27116,6 +27379,17 @@ impl CodeGen {
         }
         impl<'a> syn::visit::Visit<'a> for Scan<'a> {
             fn visit_local(&mut self, local: &'a syn::Local) {
+                if let syn::Pat::Ident(pi) = &local.pat
+                    && pi.subpat.is_none()
+                    && let Some(init) = &local.init
+                    && init.diverge.is_none()
+                    && let syn::Expr::Path(p) = self.cg.peel_paren_group_expr(&init.expr)
+                    && p.qself.is_none()
+                    && p.path.segments.len() >= 2
+                {
+                    self.fn_aliases
+                        .insert(pi.ident.to_string(), p.path.clone());
+                }
                 if let syn::Pat::Ident(pi) = &local.pat
                     && pi.subpat.is_none()
                     && let Some(init) = &local.init
@@ -27305,6 +27579,7 @@ impl CodeGen {
             candidates: HashMap::new(),
             out: HashMap::new(),
             binding_types: HashMap::new(),
+            fn_aliases: HashMap::new(),
         };
         for stmt in stmts {
             syn::visit::Visit::visit_stmt(&mut scan, stmt);

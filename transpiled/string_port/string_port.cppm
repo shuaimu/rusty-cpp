@@ -4175,8 +4175,10 @@ export struct String {
     String operator+(std::string_view other) const;
     void operator+=(std::string_view other);
     template<typename I>
+    requires requires(I i, std::string_view s) { i.index(s); }
     decltype(auto) operator[](I index) const;
     template<typename I>
+    requires requires(I i, std::string_view s) { i.index(s); }
     decltype(auto) index_mut(I index);
     std::string_view operator*() const;
     std::string_view operator*();
@@ -5482,6 +5484,7 @@ void String::operator+=(std::string_view other) {
 }
 
 template<typename I>
+requires requires(I i, std::string_view s) { i.index(s); }
 decltype(auto) String::operator[](I index) const {
     using Err = typename String::Err;
     using Error = typename String::Error;
@@ -5491,6 +5494,7 @@ decltype(auto) String::operator[](I index) const {
 }
 
 template<typename I>
+requires requires(I i, std::string_view s) { i.index(s); }
 decltype(auto) String::index_mut(I index) {
     using Err = typename String::Err;
     using Error = typename String::Error;

@@ -2471,10 +2471,17 @@ impl CodeGen {
                 // Coll<K,V,..> from its later insert/push uses in this block so
                 // the initializer emits `HashMap<K,V>::new()` instead of leaking
                 // `HashMap<auto,auto>::new()`. Only when nothing else pinned it.
+                // Walk hint frames innermost-first: a `let x = { let mut map
+                // = Coll::with_capacity(n); map.insert(..); map };` initializer
+                // block is lowered through a wrapper frame whose own scan does
+                // not re-see the binding, but the ENCLOSING frame's recursive
+                // scan recorded it (indexmap's remove_to_empty). Innermost
+                // frames still win for genuinely shadowed same-name bindings.
                 if let Some(coll_ty) = self
                     .collection_ctor_usage_type_hints
-                    .last()
-                    .and_then(|hints| hints.get(&name_str))
+                    .iter()
+                    .rev()
+                    .find_map(|hints| hints.get(&name_str))
                     .cloned()
                 {
                     // Override when the initializer pinned nothing OR only an

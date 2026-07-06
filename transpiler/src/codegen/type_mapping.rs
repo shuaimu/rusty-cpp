@@ -78,6 +78,20 @@ impl CodeGen {
     }
 
     pub(super) fn type_key_is_declared_alias(&self, type_key: &str) -> bool {
+        // A NOMINAL type of this name wins over any same-named alias: Rust
+        // rejects inherent impls on aliases outright, so an inherent impl's
+        // self-type naming a declared struct is the struct. Without this
+        // veto, an unrelated private alias in a sibling module hijacks the
+        // struct's methods into the alias-helper route (indexmap:
+        // `map::core::Bucket` struct vs set.rs's `type Bucket<T> =
+        // Bucket<T, ()>` — emitted calls to a never-defined
+        // `set::__rusty_alias_Bucket_refs`).
+        if self.struct_field_types.contains_key(type_key)
+            || self.unit_struct_types.contains(type_key)
+            || self.tuple_struct_arities.contains_key(type_key)
+        {
+            return false;
+        }
         if self.type_alias_targets.contains_key(type_key) {
             return true;
         }

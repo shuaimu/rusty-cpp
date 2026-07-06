@@ -4446,6 +4446,39 @@ impl CodeGen {
             return;
         }
 
+        // Harness-test modules are LEAVES (nothing outside `cfg(test)` can
+        // reference them) but their bodies concretely use decltype(auto)
+        // members whose out-of-line DEFINITIONS flush at the very end of the
+        // TU (deferred method definitions). Divert the whole test module to a
+        // trailing block emitted after that flush, reopening its namespace
+        // path (indexmap: map::slice::tests uses IndexMap::operator[](range)
+        // defined only in the end-of-file dump).
+        if !self.capturing_harness_test_module
+            && Self::harness_test_deferral_enabled()
+            && m.content
+                .as_ref()
+                .is_some_and(|(_, items)| Self::module_is_harness_test_container(items))
+        {
+            self.capturing_harness_test_module = true;
+            let saved_output = std::mem::take(&mut self.output);
+            let saved_indent = self.indent;
+            self.indent = 0;
+            self.emit_mod(m);
+            let mut captured = std::mem::replace(&mut self.output, saved_output);
+            self.indent = saved_indent;
+            self.capturing_harness_test_module = false;
+            if !self.module_stack.is_empty() {
+                let module_scope =
+                    self.escape_and_rename_qualified_name(&self.module_stack.join("::"));
+                captured = format!("namespace {} {{
+{}
+}}
+", module_scope, captured);
+            }
+            self.deferred_harness_test_module_blocks.push(captured);
+            return;
+        }
+
         let mod_name = &m.ident;
         let mod_name_str = mod_name.to_string();
         // Check if this module was renamed due to function name collision
@@ -4539,6 +4572,19 @@ impl CodeGen {
                 ));
                 self.indent += 1;
                 self.module_stack.push(mod_name.to_string());
+                self.harness_test_marker_fn_names_stack.push(
+                    items
+                        .iter()
+                        .filter_map(|it| match it {
+                            syn::Item::Const(c)
+                                if Self::has_rustc_test_marker_attr(&c.attrs) =>
+                            {
+                                Some(c.ident.to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                );
                 let mut nested_mod_names: Vec<String> = items
                     .iter()
                     .filter_map(|item| match item {
@@ -4584,6 +4630,7 @@ impl CodeGen {
                     self.newline();
                 }
                 self.module_stack.pop();
+                self.harness_test_marker_fn_names_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
             } else {
@@ -4608,6 +4655,19 @@ impl CodeGen {
                 ));
                 self.indent += 1;
                 self.module_stack.push(mod_name.to_string());
+                self.harness_test_marker_fn_names_stack.push(
+                    items
+                        .iter()
+                        .filter_map(|it| match it {
+                            syn::Item::Const(c)
+                                if Self::has_rustc_test_marker_attr(&c.attrs) =>
+                            {
+                                Some(c.ident.to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                );
                 let mut nested_mod_names: Vec<String> = items
                     .iter()
                     .filter_map(|item| match item {
@@ -4681,6 +4741,7 @@ impl CodeGen {
                     self.newline();
                 }
                 self.module_stack.pop();
+                self.harness_test_marker_fn_names_stack.pop();
                 self.indent -= 1;
                 self.writeln("}");
 

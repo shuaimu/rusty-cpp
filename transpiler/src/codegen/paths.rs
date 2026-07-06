@@ -2443,6 +2443,24 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             "std::cmp::Ordering::Greater" => return "rusty::cmp::Ordering::Greater".to_string(),
             _ => {}
         }
+        // Rust's `Bound::…` variant constructors (core::ops::Bound) in VALUE
+        // position lower to rusty factories: `Bound` maps to an alias template
+        // over std::variant, so `Bound::Excluded(x)` cannot be spelled
+        // verbatim. A crate-declared `Bound` type keeps its own path.
+        if !self.is_local_type_name_in_scope("Bound")
+            && !self.local_declared_types.contains("Bound")
+            && !self.data_enum_name_matches("Bound")
+        {
+            match joined.as_str() {
+                "Bound::Excluded" | "ops::Bound::Excluded" | "core::ops::Bound::Excluded"
+                | "std::ops::Bound::Excluded" => return "rusty::bound_excluded".to_string(),
+                "Bound::Included" | "ops::Bound::Included" | "core::ops::Bound::Included"
+                | "std::ops::Bound::Included" => return "rusty::bound_included".to_string(),
+                "Bound::Unbounded" | "ops::Bound::Unbounded" | "core::ops::Bound::Unbounded"
+                | "std::ops::Bound::Unbounded" => return "rusty::bound_unbounded".to_string(),
+                _ => {}
+            }
+        }
         match joined.as_str() {
             "Cow::Borrowed"
             | "rusty::Cow::Borrowed"
