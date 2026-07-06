@@ -905,6 +905,7 @@ impl CodeGen {
             export_prefix,
             &format!("struct {}{} {{", name, base_clause),
         );
+        let struct_body_scan_start = self.output.len();
         self.push_type_param_scope(&s.generics);
         self.indent += 1;
 
@@ -2011,6 +2012,18 @@ impl CodeGen {
             }
         }
 
+        // Range-subscript marker: concrete `Index<Range…>`/`IndexMut<Range…>`
+        // impls emitted range-typed subscripts above; the rusty slice helpers
+        // (array.hpp) route through them ONLY when this typedef is present —
+        // a member-type check never instantiates deduced-return bodies,
+        // unlike probing `container[range…]` against generic SliceIndex
+        // `operator[](I)` templates (smallvec), which hard-errors.
+        if self.output[struct_body_scan_start..].contains("operator[](rusty::range")
+            || self.output[struct_body_scan_start..].contains("index_mut(rusty::range")
+            || self.output[struct_body_scan_start..].contains("operator[](std::tuple<rusty::Bound")
+        {
+            self.writeln("using __rusty_has_range_index = void;");
+        }
         self.indent -= 1;
         self.writeln("};");
 

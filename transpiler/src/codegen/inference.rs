@@ -8266,14 +8266,30 @@ impl CodeGen {
                         if let Some(ret) = self.infer_hint_type_from_expr(&closure.body) {
                             return Some(ret);
                         }
-                        if let Some(source_item_ty) = source_item_ty.as_ref()
-                            && let Some(ret) = self
+                        if let Some(source_item_ty) = source_item_ty.as_ref() {
+                            if let Some(ret) = self
                                 .infer_map_closure_item_type_from_source(closure, source_item_ty)
-                        {
-                            return Some(ret);
+                            {
+                                return Some(ret);
+                            }
+                            if let Some(ret) = self
+                                .infer_tuple_map_closure_item_type(closure, source_item_ty)
+                            {
+                                return Some(ret);
+                            }
                         }
                     }
                     return source_item_ty;
+                }
+                // `.enumerate()` yields `(usize, Inner)`. An unknown inner
+                // comes back as `_` so a PARTIAL tuple still lets positional
+                // collection-annotation filling use the usize half
+                // (`IndexMap<_, i32> = [].into_iter().enumerate().map(..)`).
+                if method == "enumerate" && mc.args.is_empty() {
+                    let inner = self
+                        .infer_iter_item_type_from_expr(&mc.receiver)
+                        .unwrap_or_else(|| parse_quote!(_));
+                    return Some(parse_quote!((usize, #inner)));
                 }
                 if method == "filter_map" && mc.args.len() == 1 {
                     if let syn::Expr::Closure(closure) = self.peel_paren_group_expr(&mc.args[0]) {
@@ -8453,6 +8469,82 @@ impl CodeGen {
             inferred = self.infer_deref_result_type_from_type(&inferred)?;
         }
         Some(inferred)
+    }
+
+    /// Tuple-pattern map closure over a tuple item
+    /// (`.enumerate().map(|(i, x)| (i + 100, x))`): bind the pattern's names
+    /// to the source tuple's element types and type a TUPLE body
+    /// elementwise. Unknown elements come back as `_`, so a partial result
+    /// still fills the known slots of a collection annotation.
+    fn infer_tuple_map_closure_item_type(
+        &self,
+        closure: &syn::ExprClosure,
+        source_item_ty: &syn::Type,
+    ) -> Option<syn::Type> {
+        if closure.inputs.len() != 1 {
+            return None;
+        }
+        let syn::Pat::Tuple(pat) = closure.inputs.first()? else {
+            return None;
+        };
+        let syn::Type::Tuple(src) = self.peel_reference_paren_group_type(source_item_ty) else {
+            return None;
+        };
+        if pat.elems.len() != src.elems.len() {
+            return None;
+        }
+        let mut bound: HashMap<String, syn::Type> = HashMap::new();
+        for (p, t) in pat.elems.iter().zip(src.elems.iter()) {
+            if let syn::Pat::Ident(pi) = p {
+                bound.insert(pi.ident.to_string(), t.clone());
+            }
+        }
+        let syn::Expr::Tuple(out) = self.peel_paren_group_expr(&closure.body) else {
+            return None;
+        };
+        let elems: Vec<syn::Type> = out
+            .elems
+            .iter()
+            .map(|e| self.type_closure_tuple_elem_via_bound(e, &bound))
+            .collect();
+        if elems.iter().all(|t| matches!(t, syn::Type::Infer(_))) {
+            return None;
+        }
+        Some(syn::Type::Tuple(syn::TypeTuple {
+            paren_token: Default::default(),
+            elems: elems.into_iter().collect(),
+        }))
+    }
+
+    fn type_closure_tuple_elem_via_bound(
+        &self,
+        e: &syn::Expr,
+        bound: &HashMap<String, syn::Type>,
+    ) -> syn::Type {
+        let infer: syn::Type = parse_quote!(_);
+        match self.peel_paren_group_expr(e) {
+            syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => bound
+                .get(&p.path.segments[0].ident.to_string())
+                .cloned()
+                .or_else(|| self.infer_hint_type_from_expr(e))
+                .unwrap_or(infer),
+            // Arithmetic on a bound ident keeps its type (`i + 100` → usize);
+            // prefer the BOUND side over literal-typed operands.
+            syn::Expr::Binary(b) => {
+                let l = self.type_closure_tuple_elem_via_bound(&b.left, bound);
+                if !matches!(l, syn::Type::Infer(_)) {
+                    l
+                } else {
+                    self.type_closure_tuple_elem_via_bound(&b.right, bound)
+                }
+            }
+            syn::Expr::MethodCall(m)
+                if matches!(m.method.to_string().as_str(), "clone" | "to_owned") =>
+            {
+                self.type_closure_tuple_elem_via_bound(&m.receiver, bound)
+            }
+            _ => self.infer_hint_type_from_expr(e).unwrap_or(infer),
+        }
     }
 
     pub(super) fn infer_deref_result_type_from_type(&self, ty: &syn::Type) -> Option<syn::Type> {
@@ -10032,11 +10124,19 @@ impl CodeGen {
             return expected_ty.clone();
         }
         if let Some(item_ty) = self.infer_iter_item_type_from_expr(iter_expr) {
-            return self.substitute_owner_infer_with_hint(
+            let filled = self.substitute_owner_infer_with_hint(
                 expected_ty,
                 &["ArrayVec", "Vec"],
                 &item_ty,
             );
+            if !self.type_contains_infer(&filled) {
+                return filled;
+            }
+            // Any other polymorphic collection: map-shaped owners fill
+            // positionally from the item tuple (`IndexMap<_, i32>` +
+            // `(usize, i32)` → `IndexMap<usize, i32>`), set-shaped take the
+            // item whole.
+            return self.substitute_collection_infer_args_with_item(&filled, &item_ty);
         }
         expected_ty.clone()
     }

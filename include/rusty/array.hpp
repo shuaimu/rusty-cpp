@@ -1338,7 +1338,7 @@ struct owned_container_slice {
 // typedef emitted next to concrete range subscripts is needed before this
 // can be on by default (see indexmap unlock notes).
 #ifndef RUSTY_RANGE_SUBSCRIPT_ROUTING
-#define RUSTY_RANGE_SUBSCRIPT_ROUTING 0
+#define RUSTY_RANGE_SUBSCRIPT_ROUTING 1
 #endif
 
 // A receiver whose storage is directly pointer-addressable (std containers,
@@ -1346,6 +1346,35 @@ struct owned_container_slice {
 // range-subscript probing is SKIPPED: their emitted `operator[](I)`/
 // `index_mut(I)` templates deduce I and hard-error on range args inside the
 // body (outside the requires' immediate context).
+// Emitted by the transpiler on structs whose Rust Index/IndexMut impls
+// produced CONCRETE range-typed subscripts (`operator[](rusty::range…)`,
+// `index_mut(rusty::range…)`). The helpers below probe range subscripts only
+// behind this marker: a member-type check never instantiates method bodies,
+// while probing `c[range…]` against a generic SliceIndex `operator[](I)`
+// (deduced return) hard-errors inside the body — outside the requires'
+// immediate context.
+template<typename C>
+inline constexpr bool has_range_index_marker_v =
+    requires { typename std::remove_cvref_t<C>::__rusty_has_range_index; };
+
+// Lazy probes: `if constexpr (marker && requires { c[r]; })` does NOT
+// protect — clang computes the requires-expression's satisfaction while
+// analyzing the whole condition, even when the left operand is false,
+// instantiating deduced-return `operator[](I)` bodies (smallvec) and
+// hard-erroring. A constrained partial specialization only evaluates its
+// requires when the marker matched.
+template<typename C, typename R, typename = void>
+struct range_subscript_probe : std::false_type {};
+template<typename C, typename R>
+struct range_subscript_probe<C, R, std::enable_if_t<has_range_index_marker_v<C>>>
+    : std::bool_constant<requires(C& c, R r) { c[r]; }> {};
+
+template<typename C, typename R, typename = void>
+struct range_index_mut_probe : std::false_type {};
+template<typename C, typename R>
+struct range_index_mut_probe<C, R, std::enable_if_t<has_range_index_marker_v<C>>>
+    : std::bool_constant<requires(C& c, R r) { c.index_mut(r); }> {};
+
 template<typename C>
 inline constexpr bool raw_span_source_v =
     requires(C& c) { c.data(); } || requires(C& c) { c.as_ptr(); }
@@ -1780,11 +1809,9 @@ decltype(auto) slice_full(Container& container) {
     // cannot overload on receiver constness alone), so mutable receivers
     // try that first.
 #if RUSTY_RANGE_SUBSCRIPT_ROUTING
-    if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container.index_mut(range_full{}); }) {
+    if constexpr (detail::range_index_mut_probe<Container, range_full>::value) {
         return container.index_mut(range_full{});
-    } else if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container[range_full{}]; }) {
+    } else if constexpr (detail::range_subscript_probe<Container, range_full>::value) {
         return container[range_full{}];
     } else
 #endif
@@ -1822,8 +1849,7 @@ template<typename Container>
 decltype(auto) slice_full(const Container& container) {
     using Base = std::remove_cv_t<std::remove_reference_t<Container>>;
 #if RUSTY_RANGE_SUBSCRIPT_ROUTING
-    if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container[range_full{}]; }) {
+    if constexpr (detail::range_subscript_probe<const Base, range_full>::value) {
         return container[range_full{}];
     } else
 #endif
@@ -2303,11 +2329,9 @@ decltype(auto) slice_to(Container& container, End end) {
     // impl, e.g. indexmap's Slice) defines Rust's `&c[..end]` — use it.
     // `index_mut` first: transpiled IndexMut lowers to that method.
 #if RUSTY_RANGE_SUBSCRIPT_ROUTING
-    if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container.index_mut(range_to<size_t>{size_t{}}); }) {
+    if constexpr (detail::range_index_mut_probe<Container, range_to<size_t>>::value) {
         return container.index_mut(range_to<size_t>{end_index});
-    } else if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container[range_to<size_t>{size_t{}}]; }) {
+    } else if constexpr (detail::range_subscript_probe<Container, range_to<size_t>>::value) {
         return container[range_to<size_t>{end_index}];
     } else
 #endif
@@ -2322,11 +2346,9 @@ template<typename Container, typename End>
 decltype(auto) slice_to_inclusive(Container& container, End end) {
     const size_t end_index = detail::checked_index(end);
 #if RUSTY_RANGE_SUBSCRIPT_ROUTING
-    if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container.index_mut(range_to_inclusive<size_t>{size_t{}}); }) {
+    if constexpr (detail::range_index_mut_probe<Container, range_to_inclusive<size_t>>::value) {
         return container.index_mut(range_to_inclusive<size_t>{end_index});
-    } else if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container[range_to_inclusive<size_t>{size_t{}}]; }) {
+    } else if constexpr (detail::range_subscript_probe<Container, range_to_inclusive<size_t>>::value) {
         return container[range_to_inclusive<size_t>{end_index}];
     } else
 #endif
@@ -2347,11 +2369,9 @@ requires (!std::is_same_v<std::remove_cvref_t<Container>, std::string_view>)
 decltype(auto) slice_from(Container& container, Start start) {
     const size_t start_index = detail::checked_index(start);
 #if RUSTY_RANGE_SUBSCRIPT_ROUTING
-    if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container.index_mut(range_from<size_t>{size_t{}}); }) {
+    if constexpr (detail::range_index_mut_probe<Container, range_from<size_t>>::value) {
         return container.index_mut(range_from<size_t>{start_index});
-    } else if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container[range_from<size_t>{size_t{}}]; }) {
+    } else if constexpr (detail::range_subscript_probe<Container, range_from<size_t>>::value) {
         return container[range_from<size_t>{start_index}];
     } else
 #endif
@@ -2367,11 +2387,9 @@ decltype(auto) slice(Container& container, Start start, End end) {
     const size_t start_index = detail::checked_index(start);
     const size_t end_index = detail::checked_index(end);
 #if RUSTY_RANGE_SUBSCRIPT_ROUTING
-    if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container.index_mut(range<size_t>(size_t{}, size_t{})); }) {
+    if constexpr (detail::range_index_mut_probe<Container, range<size_t>>::value) {
         return container.index_mut(range<size_t>(start_index, end_index));
-    } else if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container[range<size_t>(size_t{}, size_t{})]; }) {
+    } else if constexpr (detail::range_subscript_probe<Container, range<size_t>>::value) {
         return container[range<size_t>(start_index, end_index)];
     } else
 #endif
@@ -2399,11 +2417,9 @@ decltype(auto) slice_inclusive(Container& container, Start start, End end) {
     const size_t start_index = detail::checked_index(start);
     const size_t end_index = detail::checked_index(end);
 #if RUSTY_RANGE_SUBSCRIPT_ROUTING
-    if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container.index_mut(range_inclusive<size_t>(size_t{}, size_t{})); }) {
+    if constexpr (detail::range_index_mut_probe<Container, range_inclusive<size_t>>::value) {
         return container.index_mut(range_inclusive<size_t>(start_index, end_index));
-    } else if constexpr (!detail::raw_span_source_v<Container>
-        && requires { container[range_inclusive<size_t>(size_t{}, size_t{})]; }) {
+    } else if constexpr (detail::range_subscript_probe<Container, range_inclusive<size_t>>::value) {
         return container[range_inclusive<size_t>(start_index, end_index)];
     } else
 #endif

@@ -27884,6 +27884,71 @@ impl CodeGen {
 
 
 
+    /// Fill `_` placeholders in a COLLECTION annotation from a collect
+    /// source's item type: `IndexMap<_, i32>` + item `(usize, i32)` fills
+    /// map-shaped collections' first two type args positionally from the
+    /// item tuple; single-element collections (sets/vecs) take the item
+    /// whole (`Vec<_>` + `(A, B)` → `Vec<(A, B)>`).
+    fn substitute_collection_infer_args_with_item(
+        &self,
+        ty: &syn::Type,
+        item: &syn::Type,
+    ) -> syn::Type {
+        fn recurse(ty: &mut syn::Type, item: &syn::Type) {
+            match ty {
+                syn::Type::Path(tp) => {
+                    for seg in tp.path.segments.iter_mut() {
+                        let seg_name = seg.ident.to_string();
+                        let is_map_shaped = matches!(
+                            seg_name.as_str(),
+                            "HashMap" | "BTreeMap" | "IndexMap"
+                        );
+                        let is_coll = CodeGen::is_polymorphic_collection_name(&seg_name);
+                        if let syn::PathArguments::AngleBracketed(args) = &mut seg.arguments {
+                            let pair: Option<Vec<syn::Type>> = match item {
+                                syn::Type::Tuple(t)
+                                    if is_map_shaped && t.elems.len() == 2 =>
+                                {
+                                    Some(t.elems.iter().cloned().collect())
+                                }
+                                _ => None,
+                            };
+                            let mut type_arg_idx = 0usize;
+                            for arg in args.args.iter_mut() {
+                                if let syn::GenericArgument::Type(inner) = arg {
+                                    if is_coll && matches!(inner, syn::Type::Infer(_)) {
+                                        if let Some(pair) = &pair {
+                                            if type_arg_idx < pair.len() {
+                                                *inner = pair[type_arg_idx].clone();
+                                            }
+                                        } else if !is_map_shaped {
+                                            *inner = item.clone();
+                                        }
+                                    } else {
+                                        recurse(inner, item);
+                                    }
+                                    type_arg_idx += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                syn::Type::Reference(r) => recurse(&mut r.elem, item),
+                syn::Type::Paren(p) => recurse(&mut p.elem, item),
+                syn::Type::Group(g) => recurse(&mut g.elem, item),
+                syn::Type::Tuple(t) => {
+                    for elem in t.elems.iter_mut() {
+                        recurse(elem, item);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = ty.clone();
+        recurse(&mut out, item);
+        out
+    }
+
     fn substitute_owner_infer_with_hint(
         &self,
         ty: &syn::Type,
