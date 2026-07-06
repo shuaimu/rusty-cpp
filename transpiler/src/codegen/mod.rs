@@ -28874,6 +28874,16 @@ impl CodeGen {
 
     fn method_call_is_reference_like_by_shape(&self, mc: &syn::ExprMethodCall) -> bool {
         let method = mc.method.to_string();
+        // Entry-API sinks return `&mut V` in Rust std (BTreeMap/HashMap
+        // entry chains): binding them by value would copy — a deleted copy
+        // for move-only V (String) — and mutations through the binding
+        // would not reach the map.
+        if matches!(
+            method.as_str(),
+            "or_insert" | "or_insert_with" | "or_insert_with_key" | "or_default"
+        ) {
+            return true;
+        }
         if matches!(
             method.as_str(),
             "as_ref" | "as_mut" | "deref" | "deref_mut" | "borrow" | "borrow_mut"

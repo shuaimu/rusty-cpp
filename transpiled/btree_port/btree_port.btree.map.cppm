@@ -5721,10 +5721,14 @@ return std::move(v);
             rusty::mem::swap((*this), other);
             return;
         }
-        const auto self_iter = rusty::mem::replace((*this), BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
-        const auto other_iter = rusty::mem::replace(other, BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
+        // Hand-port: the iterators are consumed by append_from_sorted_iters
+        // (moved by-value params) — const blocked the moves; and Rust's
+        // `&mut self.length` borrow must arrive as the lvalue the size_t&
+        // param binds, not an address-of pointer.
+        auto self_iter = rusty::mem::replace((*this), BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
+        auto other_iter = rusty::mem::replace(other, BTreeMap<K, V, A>::new_in(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))))).into_iter();
         auto& root = this->root.get_or_insert_with([&]() { return btree_internal::Root<K, V>::new_(rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc))))); });
-        root.append_from_sorted_iters(std::move(self_iter), std::move(other_iter), &this->length, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
+        root.append_from_sorted_iters(std::move(self_iter), std::move(other_iter), this->length, rusty::clone(((rusty::detail::deref_if_pointer_like(this->alloc)))));
     }
     void merge(BTreeMap<K, V, A> other, const auto& conflict) {
         if (rusty::is_empty(other)) {

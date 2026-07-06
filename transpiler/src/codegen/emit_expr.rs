@@ -7031,6 +7031,13 @@ impl CodeGen {
             let style = self
                 .lookup_method_arg_pass_style(&method_name, idx)
                 .or_else(|| {
+                    // Rust `a.append(&mut b)`: collection append takes the
+                    // other container by `&mut`; the C++ runtime/port methods
+                    // take an lvalue reference (`Coll& other`), so an emitted
+                    // address-of would pass an unbindable pointer.
+                    if method_name == "append" && idx == 0 && mc.args.len() == 1 {
+                        return Some(ArgPassStyle::Reference);
+                    }
                     if method_name == "clone_from" && idx == 0 {
                         Some(ArgPassStyle::Reference)
                     } else {
@@ -7239,7 +7246,9 @@ impl CodeGen {
                 args.push(format!("rusty::addr_of_temp({})", inner));
                 continue;
             }
-            if method_name == "clone_from" && idx == 0 {
+            if (method_name == "clone_from" || (method_name == "append" && mc.args.len() == 1))
+                && idx == 0
+            {
                 let clone_arg = match self.peel_paren_group_expr(arg) {
                     syn::Expr::Reference(reference) => self.emit_expr_to_string(&reference.expr),
                     expr => self.emit_expr_to_string_with_expected(expr, arg_expected),

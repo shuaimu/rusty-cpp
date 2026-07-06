@@ -215,3 +215,138 @@ fn set_retain() {
     let kept: Vec<i32> = s.iter().copied().collect();
     assert_eq!(kept, vec![0, 3, 6, 9]);
 }
+
+// ──────────────────── extended coverage (round 2) ────────────────────
+
+#[test]
+fn map_entry_and_modify_or_default() {
+    let mut m: BTreeMap<i32, i32> = BTreeMap::new();
+    m.entry(1).and_modify(|v| *v += 10).or_insert(100);
+    assert_eq!(m.get(&1), Some(&100));
+    m.entry(1).and_modify(|v| *v += 10).or_insert(100);
+    assert_eq!(m.get(&1), Some(&110));
+    let d: &mut i32 = m.entry(2).or_default();
+    *d += 7;
+    assert_eq!(m.get(&2), Some(&7));
+}
+
+#[test]
+fn map_entry_or_insert_with() {
+    let mut m: BTreeMap<i32, String> = BTreeMap::new();
+    let v = m.entry(5).or_insert_with(|| String::from("five"));
+    v.push('!');
+    assert_eq!(m.get(&5).map(|s| s.as_str()), Some("five!"));
+}
+
+#[test]
+fn map_append() {
+    let mut a: BTreeMap<i32, i32> = BTreeMap::new();
+    let mut b: BTreeMap<i32, i32> = BTreeMap::new();
+    a.insert(1, 10);
+    a.insert(3, 30);
+    b.insert(2, 20);
+    b.insert(3, 33);
+    a.append(&mut b);
+    assert!(b.is_empty());
+    assert_eq!(a.len(), 3);
+    assert_eq!(a.get(&3), Some(&33));
+    let keys: Vec<i32> = a.keys().copied().collect();
+    assert_eq!(keys, vec![1, 2, 3]);
+}
+
+#[test]
+fn map_split_off() {
+    let mut m: BTreeMap<i32, i32> = BTreeMap::new();
+    for k in 0..8 {
+        m.insert(k, k * 10);
+    }
+    let high = m.split_off(&4);
+    let low_keys: Vec<i32> = m.keys().copied().collect();
+    let high_keys: Vec<i32> = high.keys().copied().collect();
+    assert_eq!(low_keys, vec![0, 1, 2, 3]);
+    assert_eq!(high_keys, vec![4, 5, 6, 7]);
+}
+
+#[test]
+fn map_pop_first_last() {
+    let mut m: BTreeMap<i32, i32> = BTreeMap::new();
+    for k in [5, 1, 9, 3] {
+        m.insert(k, k * 2);
+    }
+    assert_eq!(m.pop_first(), Some((1, 2)));
+    assert_eq!(m.pop_last(), Some((9, 18)));
+    assert_eq!(m.len(), 2);
+    let keys: Vec<i32> = m.keys().copied().collect();
+    assert_eq!(keys, vec![3, 5]);
+}
+
+#[test]
+fn map_string_keys_ordered() {
+    let mut m: BTreeMap<String, i32> = BTreeMap::new();
+    m.insert(String::from("pear"), 3);
+    m.insert(String::from("apple"), 1);
+    m.insert(String::from("mango"), 2);
+    assert_eq!(m.get("apple"), Some(&1));
+    assert!(m.contains_key("mango"));
+    assert!(!m.contains_key("kiwi"));
+    let keys: Vec<String> = m.keys().cloned().collect();
+    assert_eq!(keys.len(), 3);
+    assert_eq!(keys[0], "apple");
+    assert_eq!(keys[1], "mango");
+    assert_eq!(keys[2], "pear");
+}
+
+#[test]
+fn map_get_key_value_remove_entry() {
+    let mut m: BTreeMap<i32, i32> = BTreeMap::new();
+    m.insert(7, 70);
+    assert_eq!(m.get_key_value(&7), Some((&7, &70)));
+    assert_eq!(m.remove_entry(&7), Some((7, 70)));
+    assert_eq!(m.remove_entry(&7), None);
+    assert!(m.is_empty());
+}
+
+#[test]
+fn set_append_split_off() {
+    let mut a: BTreeSet<i32> = BTreeSet::new();
+    let mut b: BTreeSet<i32> = BTreeSet::new();
+    for x in [1, 5] {
+        a.insert(x);
+    }
+    for x in [3, 7] {
+        b.insert(x);
+    }
+    a.append(&mut b);
+    assert!(b.is_empty());
+    let all: Vec<i32> = a.iter().copied().collect();
+    assert_eq!(all, vec![1, 3, 5, 7]);
+    let high = a.split_off(&5);
+    let low: Vec<i32> = a.iter().copied().collect();
+    let hi: Vec<i32> = high.iter().copied().collect();
+    assert_eq!(low, vec![1, 3]);
+    assert_eq!(hi, vec![5, 7]);
+}
+
+#[test]
+fn set_pop_first_last() {
+    let mut s: BTreeSet<i32> = BTreeSet::new();
+    for x in [4, 8, 2, 6] {
+        s.insert(x);
+    }
+    assert_eq!(s.pop_first(), Some(2));
+    assert_eq!(s.pop_last(), Some(8));
+    let rest: Vec<i32> = s.iter().copied().collect();
+    assert_eq!(rest, vec![4, 6]);
+}
+
+#[test]
+fn set_string_elements() {
+    let mut s: BTreeSet<String> = BTreeSet::new();
+    s.insert(String::from("beta"));
+    s.insert(String::from("alpha"));
+    assert!(s.contains("alpha"));
+    assert!(!s.contains("gamma"));
+    let sorted: Vec<String> = s.iter().cloned().collect();
+    assert_eq!(sorted[0], "alpha");
+    assert_eq!(sorted[1], "beta");
+}

@@ -3971,8 +3971,11 @@ struct MergeIterInner {
     }
     template<typename Cmp>
     auto nexts(Cmp cmp) {
-        rusty::Option<std::tuple<rusty::Option<rusty::detail::associated_item_t<I>>, rusty::Option<rusty::detail::associated_item_t<I>>>> a_next = rusty::Option<std::tuple<rusty::Option<rusty::detail::associated_item_t<I>>, rusty::Option<rusty::detail::associated_item_t<I>>>>{rusty::None};
-        rusty::Option<std::tuple<rusty::Option<rusty::detail::associated_item_t<I>>, rusty::Option<rusty::detail::associated_item_t<I>>>> b_next = rusty::Option<std::tuple<rusty::Option<rusty::detail::associated_item_t<I>>, rusty::Option<rusty::detail::associated_item_t<I>>>>{rusty::None};
+        // Hand-port: Rust declares `let mut a_next;` untyped (inferred as
+        // Option<I::Item>); the emitter filled the bindings with the
+        // function's RETURN tuple type instead.
+        rusty::Option<rusty::detail::associated_item_t<I>> a_next = rusty::Option<rusty::detail::associated_item_t<I>>{rusty::None};
+        rusty::Option<rusty::detail::associated_item_t<I>> b_next = rusty::Option<rusty::detail::associated_item_t<I>>{rusty::None};
         {
             auto&& _m = this->peeked.take();
             bool _m_matched = false;
@@ -3981,7 +3984,7 @@ struct MergeIterInner {
                     auto&& _mv0 = std::as_const(_m).unwrap();
                     if (rusty::detail::deref_if_pointer(_mv0).index() == 0) {
                         auto&& next = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_mv0))._0);
-                        a_next = rusty::Option<std::tuple<rusty::Option<rusty::detail::associated_item_t<I>>, rusty::Option<rusty::detail::associated_item_t<I>>>>(next);
+                        a_next = rusty::Option<rusty::detail::associated_item_t<I>>(next);
                         b_next = rusty::deref_call(this->b, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).next()) { return std::forward<decltype(__recv)>(__recv).next(); });
                         _m_matched = true;
                     }
@@ -3992,7 +3995,7 @@ struct MergeIterInner {
                     auto&& _mv1 = std::as_const(_m).unwrap();
                     if (rusty::detail::deref_if_pointer(_mv1).index() == 1) {
                         auto&& next = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_mv1))._0);
-                        b_next = rusty::Option<std::tuple<rusty::Option<rusty::detail::associated_item_t<I>>, rusty::Option<rusty::detail::associated_item_t<I>>>>(next);
+                        b_next = rusty::Option<rusty::detail::associated_item_t<I>>(next);
                         a_next = rusty::deref_call(this->a, [&](auto&& __recv) -> decltype(std::forward<decltype(__recv)>(__recv).next()) { return std::forward<decltype(__recv)>(__recv).next(); });
                         _m_matched = true;
                     }
@@ -4178,7 +4181,9 @@ struct MergeIter {
 
     rusty::Option<std::tuple<K, V>> next() {
         auto [a_next, b_next] = rusty::detail::deref_if_pointer_like(this->_0.nexts([&](const std::tuple<K, V>& a, const std::tuple<K, V>& b) -> rusty::cmp::Ordering {
-return K::cmp(&std::get<0>(a), &std::get<0>(b));
+// Hand-port: Rust `K::cmp(&a.0, &b.0)` is Ord::cmp — primitives have no
+// member cmp in C++; route through the generic comparator.
+return rusty::cmp::cmp(std::get<0>(a), std::get<0>(b));
 }));
         return [&]() -> rusty::Option<std::tuple<K, V>> { auto&& _m0 = a_next; auto&& _m1 = b_next; if (rusty::detail::deref_if_pointer(_m0).is_some() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& a_k = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m0).unwrap()))); auto&& b_v = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m1).unwrap()))); return rusty::Option<std::tuple<K, V>>(std::make_tuple(a_k, b_v)); } if (rusty::detail::deref_if_pointer(_m0).is_some() && _m1.is_none()) { auto&& a = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m0).unwrap()); return rusty::Option<std::tuple<K, V>>(a); } if (_m0.is_none() && rusty::detail::deref_if_pointer(_m1).is_some()) { auto&& b = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_m1).unwrap()); return rusty::Option<std::tuple<K, V>>(b); } if (_m0.is_none() && _m1.is_none()) { return rusty::Option<std::tuple<K, V>>{rusty::None}; } return [&]() -> rusty::Option<std::tuple<K, V>> { rusty::intrinsics::unreachable(); }(); }();
     }
@@ -5162,11 +5167,18 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
         }
     }
     void fix_right_border_of_plentiful() {
-        auto* cur_node = &(this->borrow_mut());
+        // Hand-port: Rust `let mut cur_node = self.borrow_mut();` binds the
+        // NodeRef VALUE (thin trivially-copyable handle) and reassigns it
+        // each iteration; the emitted pointer form addressed a temporary.
+        auto cur_node = this->borrow_mut();
         while (true) {
-            auto&& _whilelet = (*cur_node).force();
-            if (!(/* TODO transpiler: unresolved bare-glob variant `Internal` (no enum decl visible in this TU; patch arm manually) */ true)) { break; }
-            auto&& internal = rusty::detail::deref_if_pointer(rusty::detail::deref_if_pointer(_whilelet)._0);
+            auto&& _whilelet = cur_node.force();
+            // Hand-port (transpiler-marked arm): `while let Internal(internal)
+            // = cur_node.force()` — ForceResult is
+            // variant<ForceResult_Leaf, ForceResult_Internal>; Internal is
+            // index 1 and the payload is its _0.
+            if (_whilelet.index() != 1) { break; }
+            auto&& internal = rusty::detail::deref_if_pointer(std::get<1>(rusty::detail::deref_if_pointer(_whilelet))._0);
             auto last_kv = internal.last_kv().consider_for_balancing();
             assert((last_kv.left_child_len() >= (rusty::detail::deref_if_pointer_like(MIN_LEN) * 2)));
             const auto right_child_len = last_kv.right_child_len();
@@ -5256,7 +5268,9 @@ return rusty::Result<rusty::Option<NodeRef<marker::Mut, K, V, marker::Internal>>
     template<typename I, typename A>
         requires (rusty::alloc::Allocator<A> && std::copyable<A>)
     void append_from_sorted_iters(I left, I right, size_t& length, A alloc) {
-        auto iter = MergeIter(MergeIterInner<I>::new_(std::move(left), std::move(right)));
+        // Hand-port: MergeIter<K, V, I> — K and V are not deducible from the
+        // inner (no deduction guide); they come from the enclosing node.
+        auto iter = MergeIter<K, V, I>{MergeIterInner<I>::new_(std::move(left), std::move(right))};
         this->bulk_push(std::move(iter), length, std::move(alloc));
     }
     template<typename I, typename A>
