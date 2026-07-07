@@ -701,6 +701,47 @@ auto make_cycle_next_iter(Iter&& iter) {
         std::forward<Iter>(iter));
 }
 
+// Adapts a member-begin()/end() VIEW (zip_view: non-const begin, sentinel
+// end) to the option-like next() protocol so the adapter/collect pipeline
+// composes over it. The view is heap-pinned: its iterators point INTO the
+// stored view (zip_view holds its sides by value), so moving the adapter
+// must not relocate the view.
+template<typename View>
+class view_next_iter {
+public:
+    explicit view_next_iter(View view)
+        : view_(std::make_shared<View>(std::move(view))),
+          it_(view_->begin()),
+          end_(view_->end()) {}
+
+    view_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        using item_type = std::decay_t<decltype(*it_)>;
+        using next_result = rusty::Option<item_type>;
+
+        if (!(it_ != end_)) {
+            return next_result(rusty::None);
+        }
+        item_type value = *it_;
+        ++it_;
+        return next_result(std::move(value));
+    }
+
+private:
+    std::shared_ptr<View> view_;
+    decltype(std::declval<View&>().begin()) it_;
+    decltype(std::declval<View&>().end()) end_;
+};
+
+template<typename View>
+auto make_view_next_iter(View&& view) {
+    return view_next_iter<std::remove_cvref_t<View>>(
+        std::forward<View>(view));
+}
+
 template<typename Iter>
 class take_next_iter;
 
@@ -1461,6 +1502,21 @@ decltype(auto) iter(Range&& range) {
         return slice_iter::Iter<elem_type>(data, data + view.size());
     } else if constexpr (requires { std::begin(std::forward<Range>(range)); std::end(std::forward<Range>(range)); }) {
         return std::forward<Range>(range);
+    } else if constexpr (requires {
+        std::forward<Range>(range).begin();
+        std::forward<Range>(range).end();
+    }) {
+        // Member-begin/end view whose begin() is NON-const (zip_view), passed
+        // by value or mutable ref — std::begin can't see it. Adapt to the
+        // next() protocol so map/take/from_iter compose over it.
+        return detail::make_view_next_iter(std::forward<Range>(range));
+    } else if constexpr (
+        std::is_copy_constructible_v<std::remove_cvref_t<Range>>
+        && requires(std::remove_cvref_t<Range>& v) { v.begin(); v.end(); }
+    ) {
+        // Same view behind const: iterate a copy (Rust iteration consumes
+        // the iterator by value).
+        return detail::make_view_next_iter(std::remove_cvref_t<Range>(range));
     } else if constexpr (requires { *std::forward<Range>(range); }) {
         return iter(*std::forward<Range>(range));
     } else {
