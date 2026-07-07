@@ -13663,6 +13663,47 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // `<_>::default()` — a qself-INFER associated call takes its owner
+        // from the position's EXPECTED type (indexmap's
+        // `Self::with_capacity_and_hasher(n, <_>::default())`: arg 2's
+        // declared param is the hasher S). Without this, owner recovery
+        // substitutes Self and builds a MAP where a HASHER is expected.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && let Some(q) = &fp.qself
+            && matches!(q.ty.as_ref(), syn::Type::Infer(_))
+            && fp.path.segments.len() == 1
+        {
+            if let Some(expected) = expected_ty
+                && !matches!(expected, syn::Type::Infer(_))
+            {
+                let owner_cpp = self.map_type(self.peel_reference_paren_group_type(expected));
+                if owner_cpp != "auto"
+                    && !type_string_has_auto_placeholder(&owner_cpp)
+                    && !owner_cpp.contains("/* TODO")
+                {
+                    let method = fp.path.segments[0].ident.to_string();
+                    let method_cpp = if method == "default" {
+                        "default_".to_string()
+                    } else {
+                        escape_cpp_keyword(&method)
+                    };
+                    let args: Vec<String> = call
+                        .args
+                        .iter()
+                        .map(|a| self.emit_expr_maybe_move(a))
+                        .collect();
+                    return format!("{}::{}({})", owner_cpp, method_cpp, args.join(", "));
+                }
+            }
+            // No expected type threaded (plain arg position): `<_>::default()`
+            // lowers to `{}` — C++ copy-list-initialization default-constructs
+            // whatever the PARAMETER type is, which is exactly Rust's
+            // context-inferred `<_>::default()` (indexmap's
+            // `Self::with_capacity_and_hasher(n, <_>::default())`).
+            if fp.path.segments[0].ident == "default" && call.args.is_empty() {
+                return "{}".to_string();
+            }
+        }
         // Empty `Vec::new()`/`with_capacity` whose element is the item type of an
         // `auto`-typed iterator chain (recovered from a later `.extend(...)`): emit
         // the element via `decltype` instead of leaking `Vec<auto>`. This is the
