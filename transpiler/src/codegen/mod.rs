@@ -33455,7 +33455,33 @@ impl CodeGen {
                 )
             })
             .collect();
-        let expected_tuple_cpp = self.map_type(&syn::Type::Tuple(expected_tuple_ty.clone()));
+        // A reference-element slot fed a LITERAL cannot brace-init (a
+        // match-pattern `Some((&0, &mut 0))` compares by value against the
+        // scrutinee's `(&K, &mut V)` type): decay those elements' references
+        // in the SPELLED type. Comparisons against the reference-tuple work
+        // element-wise regardless.
+        let mut spelled = expected_tuple_ty.clone();
+        for (slot, elem_expr) in spelled.elems.iter_mut().zip(tuple_expr.elems.iter()) {
+            let mut peeled_elem = self.peel_paren_group_expr(elem_expr);
+            while let syn::Expr::Reference(reference) = peeled_elem {
+                peeled_elem = self.peel_paren_group_expr(&reference.expr);
+            }
+            let elem_is_literal_like = matches!(
+                peeled_elem,
+                syn::Expr::Lit(_)
+                    | syn::Expr::Unary(syn::ExprUnary {
+                        op: syn::UnOp::Neg(_),
+                        ..
+                    })
+                    | syn::Expr::Cast(_)
+            );
+            if elem_is_literal_like
+                && let syn::Type::Reference(reference) = slot
+            {
+                *slot = (*reference.elem).clone();
+            }
+        }
+        let expected_tuple_cpp = self.map_type(&syn::Type::Tuple(spelled));
         Some(format!("{}{{{}}}", expected_tuple_cpp, elems.join(", ")))
     }
 
