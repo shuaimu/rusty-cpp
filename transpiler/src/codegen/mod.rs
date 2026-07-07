@@ -46445,6 +46445,44 @@ auto binary_search_by_key(R&& recv, const B& b, F&& f) {\n\
             [&](const auto& x) { return rusty::cmp::cmp(f(x), rusty::detail::deref_if_pointer_like(b)); });\n\
     }\n\
 }\n\
+// Rust slice is_sorted family: member-preference, else pairwise compare
+// through rusty::cmp over the as_slice view.\n\
+template<typename R>\n\
+bool is_sorted(R&& recv) {\n\
+    if constexpr (requires { std::forward<R>(recv).is_sorted(); }) {\n\
+        return std::forward<R>(recv).is_sorted();\n\
+    } else {\n\
+        auto s = rusty::as_slice(recv);\n\
+        for (size_t i = 1; i < s.size(); ++i) {\n\
+            if (rusty::cmp::cmp(s[i - 1], s[i]) == rusty::cmp::Ordering::Greater) { return false; }\n\
+        }\n\
+        return true;\n\
+    }\n\
+}\n\
+template<typename R, typename F>\n\
+bool is_sorted_by(R&& recv, F&& f) {\n\
+    if constexpr (requires { std::forward<R>(recv).is_sorted_by(std::forward<F>(f)); }) {\n\
+        return std::forward<R>(recv).is_sorted_by(std::forward<F>(f));\n\
+    } else {\n\
+        auto s = rusty::as_slice(recv);\n\
+        for (size_t i = 1; i < s.size(); ++i) {\n\
+            if (!f(s[i - 1], s[i])) { return false; }\n\
+        }\n\
+        return true;\n\
+    }\n\
+}\n\
+template<typename R, typename F>\n\
+bool is_sorted_by_key(R&& recv, F&& f) {\n\
+    if constexpr (requires { std::forward<R>(recv).is_sorted_by_key(std::forward<F>(f)); }) {\n\
+        return std::forward<R>(recv).is_sorted_by_key(std::forward<F>(f));\n\
+    } else {\n\
+        auto s = rusty::as_slice(recv);\n\
+        for (size_t i = 1; i < s.size(); ++i) {\n\
+            if (rusty::cmp::cmp(f(s[i - 1]), f(s[i])) == rusty::cmp::Ordering::Greater) { return false; }\n\
+        }\n\
+        return true;\n\
+    }\n\
+}\n\
 template<typename R, typename P>\n\
 auto partition_point(R&& recv, P&& pred) {\n\
     if constexpr (requires { std::forward<R>(recv).partition_point(std::forward<P>(pred)); }) {\n\

@@ -19330,6 +19330,8 @@ impl CodeGen {
         let arity = match mc.method.to_string().as_str() {
             "binary_search" | "binary_search_by" | "partition_point" => 1,
             "binary_search_by_key" => 2,
+            "is_sorted" => 0,
+            "is_sorted_by" | "is_sorted_by_key" => 1,
             _ => return None,
         };
         if mc.args.len() != arity {
@@ -19341,6 +19343,9 @@ impl CodeGen {
             .iter()
             .map(|a| self.emit_expr_maybe_move(a))
             .collect();
+        if args.is_empty() {
+            return Some(format!("rusty::{}({})", mc.method, receiver));
+        }
         Some(format!(
             "rusty::{}({}, {})",
             mc.method,
