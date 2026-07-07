@@ -6973,6 +6973,9 @@ impl CodeGen {
         if let Some(for_each_call) = self.try_emit_iter_for_each_call(mc) {
             return for_each_call;
         }
+        if let Some(all_any_call) = self.try_emit_iter_all_any_call(mc) {
+            return all_any_call;
+        }
         if let Some(try_for_each_call) = self.try_emit_iter_try_for_each_call(mc) {
             return try_for_each_call;
         }
@@ -19732,6 +19735,30 @@ impl CodeGen {
         let receiver = self.emit_expr_to_string(&mc.receiver);
         let func = self.emit_call_arg_with_pass_style(mc.args.first()?, None, None, false, None);
         Some(format!("rusty::for_each({}, {})", receiver, func))
+    }
+
+    /// `.all(pred)` / `.any(pred)` — Iterator DEFAULT methods; same gating
+    /// as for_each. The rusty:: free fns loop for_in over the receiver.
+    pub(super) fn try_emit_iter_all_any_call(&self, mc: &syn::ExprMethodCall) -> Option<String> {
+        let method = mc.method.to_string();
+        if !matches!(method.as_str(), "all" | "any") || mc.args.len() != 1 {
+            return None;
+        }
+        if self.receiver_has_inherent_method_named(&mc.receiver, &method) {
+            return None;
+        }
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
+            return None;
+        }
+        if !self.is_iterator_like_receiver_expr(&mc.receiver)
+            && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+            && !self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver)
+        {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let pred = self.emit_call_arg_with_pass_style(mc.args.first()?, None, None, false, None);
+        Some(format!("rusty::{}({}, {})", method, receiver, pred))
     }
 
     pub(super) fn try_emit_iter_try_for_each_call(

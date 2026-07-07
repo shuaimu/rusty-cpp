@@ -2119,6 +2119,16 @@ bool all(Range&& range, Pred&& pred) {
     return true;
 }
 
+template<typename Range, typename Pred>
+bool any(Range&& range, Pred&& pred) {
+    for (auto&& item : for_in(std::forward<Range>(range))) {
+        if (std::invoke(pred, std::forward<decltype(item)>(item))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 template<typename Range>
 size_t count(Range&& range) {
     size_t n = 0;
