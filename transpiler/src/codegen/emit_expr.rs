@@ -11252,8 +11252,38 @@ impl CodeGen {
                 // creates its own inner context which clears hints, so we push on the
                 // Create an inner context (for mutability to push hints).
                 let mut inner = self.new_inner_for_block();
+                // A declared impl-Fn expected type carries the closure's PARAM
+                // types (with_entries' FnOnce(&mut [Bucket<K,V>]) bound) —
+                // hand them to the body emission so slice/sort routings gate
+                // correctly on the params. The RETURN hint then comes from the
+                // callable's OUTPUT (often none -> deduced), never from the
+                // callable type itself.
+                let mut expected_is_callable = false;
+                let mut callable_output: Option<syn::Type> = None;
+                if let Some(expected) = expected_ty
+                    && let Some(param_types) = self.extract_callable_param_types_from_type(expected)
+                    && param_types.len() == closure.inputs.len()
+                    && !param_types.is_empty()
+                    // SLICE-carrying signatures only — those are what the
+                    // body can't recover; other shapes already emit
+                    // correctly and their spellings must not churn.
+                    && param_types.iter().any(|ty| {
+                        matches!(
+                            self.peel_reference_paren_group_type(ty),
+                            syn::Type::Slice(_)
+                        )
+                    })
+                {
+                    expected_is_callable = true;
+                    callable_output = self.extract_callable_return_type_from_type(expected);
+                    *inner.pending_closure_param_types.borrow_mut() = Some(param_types);
+                }
                 // Push the expected return type as a syn::ReturnType for the closure body.
-                let expected_body_ty = self.closure_expected_return_type_from_context(expected_ty);
+                let expected_body_ty = if expected_is_callable {
+                    callable_output
+                } else {
+                    self.closure_expected_return_type_from_context(expected_ty)
+                };
                 let expected_rt = expected_body_ty
                     .map(|t| syn::ReturnType::Type(Default::default(), Box::new(t)));
                 inner.emit_closure_to_string_with_param_scopes(
@@ -20684,6 +20714,8 @@ impl CodeGen {
         // sub-codegen so it types the closure's destructured params.
         *inner.pending_map_closure_input_type.borrow_mut() =
             self.pending_map_closure_input_type.borrow_mut().take();
+        *inner.pending_closure_param_types.borrow_mut() =
+            self.pending_closure_param_types.borrow_mut().take();
         inner.bind_closure_params_for_emission(closure);
         if !untyped_param_scope.is_empty() {
             inner.push_untyped_closure_param_scope(untyped_param_scope);

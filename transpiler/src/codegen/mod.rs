@@ -761,6 +761,11 @@ pub struct CodeGen {
     /// Per-scope mapping from callable type-param name (`F`) to callable-bound
     /// return type (`T` in `F: FnOnce() -> T`).
     pub(crate) callable_type_param_return_scopes: Vec<HashMap<String, syn::Type>>,
+    /// Fn-bound ARG types per generics scope (`&mut [Bucket<K, V>]` for
+    /// `F: FnOnce(&mut [Bucket<K, V>])`). Consulted when INVOKING a bare
+    /// fn-generic binding (`f(&mut self.entries)`) so its args get the
+    /// bound's declared param types (slice coercion follows).
+    pub(crate) callable_type_param_arg_scopes: Vec<HashMap<String, Vec<syn::Type>>>,
     /// Trait default static methods (no receiver) keyed by scoped trait path.
     /// Used to inject these methods into implementing types.
     pub(crate) trait_static_default_methods: HashMap<String, Vec<syn::ImplItemFn>>,
@@ -1170,6 +1175,11 @@ pub struct CodeGen {
     /// `Result<(&Event, Mark)>`) type its bindings (`event: &Event`), so tuple
     /// returns preserve references instead of decaying via `make_tuple`.
     pub(crate) pending_map_closure_input_type: std::cell::RefCell<Option<syn::Type>>,
+    /// Param types for the closure ABOUT to emit, extracted from a declared
+    /// impl-Fn expected type (`with_entries<F: FnOnce(&mut [Bucket<K,V>])>`'s
+    /// closure arg) — consumed by bind_closure_params_for_emission so the
+    /// body sees typed bindings (the sort/slice routings gate on them).
+    pub(crate) pending_closure_param_types: std::cell::RefCell<Option<Vec<syn::Type>>>,
     /// Scoped raw-C++ element overrides for empty collection locals whose element
     /// type is NOT nameable as a `syn::Type` — because it is the item type of an
     /// `auto`-typed iterator chain (e.g. `let v = Vec::new(); v.extend(it.take(n))`
@@ -1787,6 +1797,7 @@ impl CodeGen {
             type_param_scope_order: Vec::new(),
             trait_bound_type_param_scopes: Vec::new(),
             callable_type_param_return_scopes: Vec::new(),
+            callable_type_param_arg_scopes: Vec::new(),
             trait_static_default_methods: HashMap::new(),
             trait_default_const_exprs: HashMap::new(),
             ufcs_helper_shadowing_segments: Vec::new(),
@@ -1880,6 +1891,7 @@ impl CodeGen {
             int_literal_usage_type_hints: Vec::new(),
             collection_ctor_usage_type_hints: Vec::new(),
             pending_map_closure_input_type: std::cell::RefCell::new(None),
+            pending_closure_param_types: std::cell::RefCell::new(None),
             collection_decltype_element_overrides: Vec::new(),
             assert_equal_sibling_item: std::cell::RefCell::new(None),
             as_ptr_expected_element: std::cell::RefCell::new(None),
@@ -3993,6 +4005,7 @@ impl CodeGen {
         self.type_param_scope_order.clear();
         self.trait_bound_type_param_scopes.clear();
         self.callable_type_param_return_scopes.clear();
+        self.callable_type_param_arg_scopes.clear();
         self.reassigned_vars.clear();
         self.deref_assigned_vars.clear();
         self.consuming_method_receiver_vars.clear();
@@ -39857,6 +39870,19 @@ impl CodeGen {
 
 
     fn bind_closure_params_for_emission(&mut self, closure: &syn::ExprClosure) {
+        // Declared impl-Fn param types (extracted from the callee's Fn-trait
+        // bound) type EVERY param; they outrank the single-param map-input
+        // hint below.
+        let declared_param_types = self.pending_closure_param_types.borrow_mut().take();
+        if let Some(param_types) = declared_param_types
+            && param_types.len() == closure.inputs.len()
+        {
+            *self.pending_map_closure_input_type.borrow_mut() = None;
+            for (input, ty) in closure.inputs.iter().zip(param_types.iter()) {
+                self.bind_closure_param_for_emission_with_type(input, Some(ty));
+            }
+            return;
+        }
         // A `.map()`/`.and_then()` closure gets its single param's type from the
         // receiver's Ok/Some type (recorded on entry). Distribute it so a
         // destructured tuple param types its bindings (`|(event, mark)|` on
@@ -40688,6 +40714,8 @@ impl CodeGen {
         self.trait_bound_type_param_scopes.push(trait_bound_map);
         self.callable_type_param_return_scopes
             .push(callable_return_map);
+        self.callable_type_param_arg_scopes
+            .push(Self::collect_callable_type_param_arg_map(generics));
     }
 
     fn pop_type_param_scope(&mut self) {
@@ -40695,6 +40723,7 @@ impl CodeGen {
         self.type_param_scope_order.pop();
         self.trait_bound_type_param_scopes.pop();
         self.callable_type_param_return_scopes.pop();
+        self.callable_type_param_arg_scopes.pop();
     }
 
     fn trait_name_from_bound(bound: &syn::TypeParamBound) -> Option<String> {

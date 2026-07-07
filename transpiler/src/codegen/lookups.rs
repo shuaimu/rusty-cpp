@@ -350,13 +350,68 @@ impl CodeGen {
         arg_idx: usize,
         substitutions: Option<&HashMap<String, syn::Type>>,
     ) -> Option<syn::Type> {
-        let expected = self.lookup_function_arg_expected_type(call.func.as_ref(), arg_idx)?;
+        let expected = match self.lookup_function_arg_expected_type(call.func.as_ref(), arg_idx) {
+            Some(expected) => expected.clone(),
+            // Invoking a CALLABLE PARAM (`f(&mut self.entries)` where
+            // `f: F, F: FnOnce(&mut [Bucket<K, V>])`): the arg expected
+            // types are the Fn bound's parenthesized inputs.
+            None => self.callable_param_invocation_arg_expected_type(call, arg_idx)?,
+        };
         match substitutions {
             Some(substitutions) if !substitutions.is_empty() => {
-                Some(self.substitute_type_params_in_type(expected, substitutions))
+                Some(self.substitute_type_params_in_type(&expected, substitutions))
             }
-            _ => Some(expected.clone()),
+            _ => Some(expected),
         }
+    }
+
+    /// Arg-expected type for invoking a local CALLABLE binding: the binding's
+    /// type is impl-Fn (or a bare fn-generic whose bound is recorded in the
+    /// current type-param scopes) — take input `arg_idx` of the parenthesized
+    /// signature.
+    fn callable_param_invocation_arg_expected_type(
+        &self,
+        call: &syn::ExprCall,
+        arg_idx: usize,
+    ) -> Option<syn::Type> {
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        if path_expr.qself.is_some() || path_expr.path.segments.len() != 1 {
+            return None;
+        }
+        let name = path_expr.path.segments[0].ident.to_string();
+        let binding_ty = self.lookup_local_binding_type(&name)?;
+        // SLICE params only: those are what the C++ side can't pass without
+        // the as_slice coercion. Threading other param types changes
+        // pass-styles for args that already emitted correctly (hashbrown's
+        // `hasher(&guard, i)` with a dyn-Fn hasher moved its ScopeGuard).
+        let slice_param = |ty: &syn::Type| {
+            matches!(
+                self.peel_reference_paren_group_type(ty),
+                syn::Type::Slice(_)
+            )
+        };
+        if let Some(param_types) = self.extract_callable_param_types_from_type(&binding_ty) {
+            return param_types.get(arg_idx).filter(|ty| slice_param(ty)).cloned();
+        }
+        // Bare fn-generic binding (`f: F`): consult the recorded Fn-bound
+        // arg types for F in the enclosing generics scopes (slice-carrying
+        // signatures only, by construction of the collector).
+        let peeled = self.peel_reference_paren_group_type(&binding_ty);
+        let syn::Type::Path(tp) = peeled else {
+            return None;
+        };
+        if tp.qself.is_some() || tp.path.segments.len() != 1 {
+            return None;
+        }
+        let param_name = tp.path.segments[0].ident.to_string();
+        for scope in self.callable_type_param_arg_scopes.iter().rev() {
+            if let Some(arg_types) = scope.get(&param_name) {
+                return arg_types.get(arg_idx).filter(|ty| slice_param(ty)).cloned();
+            }
+        }
+        None
     }
 
     pub(super) fn lookup_function_type_param_names<'a>(&'a self, func: &syn::Expr) -> Option<&'a Vec<String>> {
@@ -1593,6 +1648,49 @@ impl CodeGen {
             },
             syn::Type::Paren(paren) => self.extract_callable_return_type_from_type(&paren.elem),
             syn::Type::Group(group) => self.extract_callable_return_type_from_type(&group.elem),
+            _ => None,
+        }
+    }
+
+    /// The PARENTHESIZED input types of a callable type — `impl FnOnce(&mut
+    /// [Bucket<K, V>])`, a dyn Fn object, or a bare fn pointer. Sibling of
+    /// extract_callable_param_count_from_type; used to type closure params
+    /// and callable-param invocation args from declared Fn bounds.
+    pub(super) fn extract_callable_param_types_from_type(
+        &self,
+        ty: &syn::Type,
+    ) -> Option<Vec<syn::Type>> {
+        fn from_bounds(
+            bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::token::Plus>,
+        ) -> Option<Vec<syn::Type>> {
+            bounds.iter().find_map(|bound| {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    return None;
+                };
+                let seg = trait_bound.path.segments.last()?;
+                if !matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce") {
+                    return None;
+                }
+                let syn::PathArguments::Parenthesized(args) = &seg.arguments else {
+                    return None;
+                };
+                Some(args.inputs.iter().cloned().collect())
+            })
+        }
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::ImplTrait(impl_trait) => from_bounds(&impl_trait.bounds),
+            syn::Type::TraitObject(trait_obj) => from_bounds(&trait_obj.bounds),
+            syn::Type::BareFn(bare_fn) => {
+                Some(bare_fn.inputs.iter().map(|arg| arg.ty.clone()).collect())
+            }
+            syn::Type::Path(tp) => {
+                let seg = tp.path.segments.last()?;
+                if let syn::PathArguments::Parenthesized(args) = &seg.arguments {
+                    return Some(args.inputs.iter().cloned().collect());
+                }
+                None
+            }
             _ => None,
         }
     }

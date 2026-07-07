@@ -4845,8 +4845,10 @@ impl CodeGen {
                         let styles =
                             self.collect_arg_pass_styles_from_inputs(&method.sig.inputs, true);
                         self.record_method_arg_pass_styles(&method_name, styles);
-                        let expected_types =
-                            self.collect_arg_expected_types_from_inputs(&method.sig.inputs, true);
+                        let expected_types = self.resolve_fn_bound_arg_expected_types(
+                            self.collect_arg_expected_types_from_inputs(&method.sig.inputs, true),
+                            &method.sig.generics,
+                        );
                         self.record_method_arg_expected_types(&method_name, expected_types.clone());
                         let method_type_params =
                             self.collect_type_param_names_from_generics(&method.sig.generics);
@@ -4937,6 +4939,78 @@ impl CodeGen {
             }
         }
         expected
+    }
+
+    /// A bare generic-param type (`f: F`) records as its Fn-trait bound
+    /// spelled impl-trait (`impl FnOnce(&mut [Bucket<K, V>])`) so call-site
+    /// machinery can type CLOSURE arguments and their params — indexmap's
+    /// `with_entries<F: FnOnce(&mut [Bucket<K,V>])>` closures otherwise
+    /// carry no param types and their bodies emit member calls on unknowns.
+    /// Only PARENTHESIZED Fn/FnMut/FnOnce bounds substitute; ordinary trait
+    /// bounds leave the param untouched.
+    pub(super) fn resolve_fn_bound_arg_expected_types(
+        &self,
+        expected: Vec<Option<syn::Type>>,
+        generics: &syn::Generics,
+    ) -> Vec<Option<syn::Type>> {
+        fn fn_trait_bound(bound: &syn::TypeParamBound) -> Option<&syn::TypeParamBound> {
+            let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                return None;
+            };
+            let seg = trait_bound.path.segments.last()?;
+            if !matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce") {
+                return None;
+            }
+            matches!(seg.arguments, syn::PathArguments::Parenthesized(_)).then_some(bound)
+        }
+        let mut fn_bounds: HashMap<String, syn::TypeParamBound> = HashMap::new();
+        for param in &generics.params {
+            if let syn::GenericParam::Type(tp) = param {
+                for bound in &tp.bounds {
+                    if let Some(bound) = fn_trait_bound(bound) {
+                        fn_bounds.insert(tp.ident.to_string(), bound.clone());
+                    }
+                }
+            }
+        }
+        if let Some(where_clause) = &generics.where_clause {
+            for predicate in &where_clause.predicates {
+                if let syn::WherePredicate::Type(pt) = predicate
+                    && let syn::Type::Path(tp) = &pt.bounded_ty
+                    && tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                {
+                    let name = tp.path.segments[0].ident.to_string();
+                    for bound in &pt.bounds {
+                        if let Some(bound) = fn_trait_bound(bound) {
+                            fn_bounds.insert(name.clone(), bound.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if fn_bounds.is_empty() {
+            return expected;
+        }
+        expected
+            .into_iter()
+            .map(|slot| {
+                let Some(ty) = slot else { return None };
+                if let syn::Type::Path(tp) = &ty
+                    && tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+                    && let Some(bound) = fn_bounds.get(&tp.path.segments[0].ident.to_string())
+                    && Self::fn_bound_inputs_mention_slice(bound)
+                {
+                    return Some(syn::Type::ImplTrait(syn::TypeImplTrait {
+                        impl_token: Default::default(),
+                        bounds: std::iter::once(bound.clone()).collect(),
+                    }));
+                }
+                Some(ty)
+            })
+            .collect()
     }
 
     pub(super) fn collect_type_param_names_from_generics(&self, generics: &syn::Generics) -> Vec<String> {
@@ -11716,6 +11790,91 @@ impl CodeGen {
         raw.into_iter()
             .filter_map(|(trait_name, type_param)| type_param.map(|tp| (trait_name, tp)))
             .collect()
+    }
+
+    /// A Parenthesized Fn bound whose INPUTS mention a slice type. The
+    /// Fn-bound threading (impl-Fn arg-expected substitution, callable-param
+    /// invocation typing, closure-param typing) engages only for these —
+    /// slice params are what the C++ side cannot recover (`entries.sort_by`
+    /// on an unknown), while `&mut Self`-style bounds already emit correctly
+    /// and their spellings must not churn.
+    pub(super) fn fn_bound_inputs_mention_slice(bound: &syn::TypeParamBound) -> bool {
+        fn ty_mentions_slice(ty: &syn::Type) -> bool {
+            match ty {
+                syn::Type::Slice(_) => true,
+                syn::Type::Reference(r) => ty_mentions_slice(&r.elem),
+                syn::Type::Paren(p) => ty_mentions_slice(&p.elem),
+                syn::Type::Group(g) => ty_mentions_slice(&g.elem),
+                _ => false,
+            }
+        }
+        let syn::TypeParamBound::Trait(trait_bound) = bound else {
+            return false;
+        };
+        let Some(seg) = trait_bound.path.segments.last() else {
+            return false;
+        };
+        let syn::PathArguments::Parenthesized(args) = &seg.arguments else {
+            return false;
+        };
+        args.inputs.iter().any(ty_mentions_slice)
+    }
+
+    /// Fn-bound ARG types per fn-generic (`F: FnOnce(&mut [Bucket<K, V>])`
+    /// → F ↦ [&mut [Bucket<K, V>]]) — the invocation-side sibling of the
+    /// return map below. Conflicting bounds drop the entry. SLICE-carrying
+    /// signatures only (see fn_bound_inputs_mention_slice).
+    pub(super) fn collect_callable_type_param_arg_map(
+        generics: &syn::Generics,
+    ) -> HashMap<String, Vec<syn::Type>> {
+        let mut resolved: HashMap<String, Vec<syn::Type>> = HashMap::new();
+        let mut conflicted: HashSet<String> = HashSet::new();
+        let mut record = |type_param: String, arg_tys: Vec<syn::Type>| {
+            if conflicted.contains(&type_param) {
+                return;
+            }
+            if resolved.contains_key(&type_param) {
+                resolved.remove(&type_param);
+                conflicted.insert(type_param);
+                return;
+            }
+            resolved.insert(type_param, arg_tys);
+        };
+        for param in &generics.params {
+            let syn::GenericParam::Type(tp) = param else {
+                continue;
+            };
+            for bound in &tp.bounds {
+                if let Some((arg_tys, _)) =
+                    Self::callable_bound_return_signature_from_type_param_bound(bound)
+                    && Self::fn_bound_inputs_mention_slice(bound)
+                {
+                    record(tp.ident.to_string(), arg_tys);
+                }
+            }
+        }
+        if let Some(where_clause) = &generics.where_clause {
+            for predicate in &where_clause.predicates {
+                let syn::WherePredicate::Type(type_pred) = predicate else {
+                    continue;
+                };
+                let syn::Type::Path(type_path) = &type_pred.bounded_ty else {
+                    continue;
+                };
+                if type_path.qself.is_some() || type_path.path.segments.len() != 1 {
+                    continue;
+                }
+                for bound in &type_pred.bounds {
+                    if let Some((arg_tys, _)) =
+                        Self::callable_bound_return_signature_from_type_param_bound(bound)
+                        && Self::fn_bound_inputs_mention_slice(bound)
+                    {
+                        record(type_path.path.segments[0].ident.to_string(), arg_tys);
+                    }
+                }
+            }
+        }
+        resolved
     }
 
     pub(super) fn collect_callable_type_param_return_map(
