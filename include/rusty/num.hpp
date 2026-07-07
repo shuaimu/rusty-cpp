@@ -435,6 +435,22 @@ inline Option<std::size_t> checked_next_power_of_two_usize(std::size_t value) {
     return checked_next_power_of_two<std::size_t>(value);
 }
 
+// Rust `i*::abs` / `f*::abs`. A member abs() wins (user numeric wrappers);
+// unsigned values pass through; signed/floating flip the sign. Routed for
+// unknown-typed receivers (closure params), so member preference keeps
+// non-primitive receivers on their own method.
+template<typename T>
+constexpr auto abs(T&& value) {
+    using Plain = std::remove_cvref_t<T>;
+    if constexpr (requires { std::forward<T>(value).abs(); }) {
+        return std::forward<T>(value).abs();
+    } else if constexpr (std::is_unsigned_v<Plain>) {
+        return Plain(value);
+    } else {
+        return value < Plain{} ? Plain(-value) : Plain(value);
+    }
+}
+
 template<typename T>
 requires std::is_integral_v<T>
 constexpr std::uint32_t leading_zeros(T value) {

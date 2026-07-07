@@ -44250,6 +44250,16 @@ Ordering cmp(const A& a, const B& b) {\n\
         return Ordering::Equal;\n\
     }\n\
 }\n\
+// One side of an element-wise eq must be iterable in a shape rusty::for_in\n\
+// accepts — mirrors its tiers structurally (for_in itself static_asserts,\n\
+// so it can't be probed directly). Scalars fail this and keep the plain\n\
+// operator== diagnostic.\n\
+template<typename X>\n\
+concept eq_elementwise_side = requires(std::remove_cvref_t<X>& x) { x.next(); }\n\
+    || requires(std::remove_cvref_t<X>& x) { x.iter(); }\n\
+    || requires(const std::remove_cvref_t<X>& x) { x.data(); x.size(); }\n\
+    || requires(const std::remove_cvref_t<X>& x) { std::begin(x); std::end(x); }\n\
+    || requires(std::remove_cvref_t<X>& x) { x.begin(); x.end(); };\n\
 // Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==,\n\
 // else ELEMENT-WISE over both sides (Rust Iterator::eq and cross-container\n\
 // PartialEq like `IndexSet == Vec` / `Keys == slice::Iter` have no C++\n\
@@ -44263,7 +44273,10 @@ bool eq(const A& a, const B& b) {\n\
         { a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;\n\
     }) {\n\
         return a == rusty::detail::deref_if_pointer_like(b);\n\
-    } else {\n\
+    } else if constexpr (\n\
+        eq_elementwise_side<A>\n\
+        && eq_elementwise_side<decltype(rusty::detail::deref_if_pointer_like(b))>\n\
+    ) {\n\
         auto&& ra = rusty::for_in(a);\n\
         auto&& rb = rusty::for_in(rusty::detail::deref_if_pointer_like(b));\n\
         auto ita = ra.begin();\n\
@@ -44276,6 +44289,8 @@ bool eq(const A& a, const B& b) {\n\
             }\n\
         }\n\
         return !(ita != ea) && !(itb != eb);\n\
+    } else {\n\
+        return a == rusty::detail::deref_if_pointer_like(b);\n\
     }\n\
 }\n\
 template<typename A, typename B>\n\

@@ -9092,6 +9092,23 @@ impl CodeGen {
             };
             return format!("rusty::{}({})", method_name, receiver);
         }
+        // `.abs()` — primitive in Rust std; the rusty::abs helper
+        // member-prefers, so unknown-typed receivers (closure params) route
+        // safely too.
+        if method_name == "abs"
+            && args.is_empty()
+            && !self.is_expr_raw_pointer_like(&mc.receiver)
+            && (self.should_lower_integer_intrinsic_method_call(&mc.receiver)
+                || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver))
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::abs({})", receiver);
+        }
         // One-arg integer intrinsics (`usize::div_ceil`): same routing shape.
         if method_name == "div_ceil"
             && args.len() == 1
