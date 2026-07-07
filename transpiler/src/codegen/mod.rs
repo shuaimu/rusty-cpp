@@ -1591,6 +1591,12 @@ pub struct CodeGen {
     /// whose BODIES are currently being emitted (innermost last). Calls to
     /// names in this stack rewrite to `__self(__self, args)`.
     pub(crate) recursive_nested_fn_self_emit_stack: Vec<String>,
+    /// Generic param names of nested fns whose bodies are currently being
+    /// emitted (innermost last). NOT part of the general type-param scope:
+    /// in the auto-param lambda form these have no C++ spelling, so only
+    /// "is this an unknown-shaped generic?" consumers (iterator-default-
+    /// method routing) consult them — annotation machinery must not.
+    pub(crate) nested_fn_type_params_stack: Vec<HashSet<String>>,
     /// Names of recursive nested fns currently in lexical scope at the call
     /// site (declared earlier in the same block, body already emitted).
     /// Calls to these names rewrite to `NAME(NAME, args)` so the seed
@@ -1979,6 +1985,7 @@ impl CodeGen {
             method_emission_skip_conflict_registration: false,
             current_emit_structural_decomp: None,
             recursive_nested_fn_self_emit_stack: Vec::new(),
+            nested_fn_type_params_stack: Vec::new(),
             recursive_nested_fns_in_scope: Vec::new(),
             user_type_map: types::UserTypeMap::default(),
             cyclic_type_names: HashSet::new(),
@@ -13859,6 +13866,13 @@ impl CodeGen {
         self.push_return_type_hint(&f.sig.output);
         self.push_param_bindings(&f.sig.inputs);
         self.push_const_generic_param_bindings(&f.sig.generics);
+        // The nested fn's generics (I1, I2, ...) go into a DEDICATED set, not
+        // the general type-param scope: in the auto-param lambda form they
+        // have no C++ spelling, so annotation machinery must keep treating
+        // them as unspellable — only "is this an unknown-shaped generic?"
+        // consumers (iterator-default-method routing) should see them.
+        self.nested_fn_type_params_stack
+            .push(nested_type_params.clone());
         if is_self_recursive {
             self.recursive_nested_fn_self_emit_stack.push(raw_name.clone());
         }
@@ -13869,6 +13883,7 @@ impl CodeGen {
                 top.insert(raw_name.clone());
             }
         }
+        self.nested_fn_type_params_stack.pop();
         self.pop_const_generic_param_bindings();
         self.pop_param_bindings();
         self.pop_return_type_hint();

@@ -3054,11 +3054,16 @@ impl CodeGen {
             Some(ty) => {
                 let ty = self.peel_reference_paren_group_type(&ty);
                 match ty {
-                    syn::Type::Path(tp) if tp.qself.is_none() => tp
-                        .path
-                        .segments
-                        .first()
-                        .is_some_and(|seg| self.is_type_param_in_scope(&seg.ident.to_string())),
+                    syn::Type::Path(tp) if tp.qself.is_none() => {
+                        tp.path.segments.first().is_some_and(|seg| {
+                            let head = seg.ident.to_string();
+                            self.is_type_param_in_scope(&head)
+                                || self
+                                    .nested_fn_type_params_stack
+                                    .iter()
+                                    .any(|params| params.contains(&head))
+                        })
+                    }
                     _ => false,
                 }
             }
