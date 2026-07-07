@@ -742,6 +742,60 @@ auto make_view_next_iter(View&& view) {
         std::forward<View>(view));
 }
 
+// Reverses a FORWARD-ONLY next() iterator by materializing it. Rust's
+// `.rev()` needs DoubleEndedIterator, and sources like zip-over-views are
+// double-ended in Rust while the C++ adapters are forward-only — replaying
+// a drained buffer backward preserves the observable sequence at a cost
+// bounded by its length.
+template<typename Iter>
+class materialized_rev_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::rev requires next() to return an Option/optional-like value"
+    );
+    static_assert(
+        !std::is_reference_v<next_item_t<Iter>>,
+        "materialized rev supports by-value items only"
+    );
+
+    explicit materialized_rev_next_iter(Iter iter) {
+        auto source = std::move(iter);
+        while (true) {
+            auto item = source.next();
+            if (!option_like_has_value(item)) {
+                break;
+            }
+            items_.push_back(option_like_take_value(item));
+        }
+    }
+
+    materialized_rev_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        using item_type = next_item_t<Iter>;
+        using next_result = rusty::Option<item_type>;
+
+        if (items_.empty()) {
+            return next_result(rusty::None);
+        }
+        item_type value = std::move(items_.back());
+        items_.pop_back();
+        return next_result(std::move(value));
+    }
+
+private:
+    std::vector<next_item_t<Iter>> items_;
+};
+
+template<typename Iter>
+auto make_materialized_rev_next_iter(Iter&& iter) {
+    return materialized_rev_next_iter<std::remove_reference_t<Iter>>(
+        std::forward<Iter>(iter));
+}
+
 template<typename Iter>
 class take_next_iter;
 
@@ -1802,11 +1856,14 @@ template<typename Range>
 decltype(auto) rev(Range&& range) {
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         using iter_type = std::remove_reference_t<Range>;
-        static_assert(
-            requires(iter_type& iter) { iter.next_back(); },
-            "rusty::rev requires next_back() on next-like iterators"
-        );
-        return detail::make_rev_next_iter(std::forward<Range>(range));
+        if constexpr (requires(iter_type& iter) { iter.next_back(); }) {
+            return detail::make_rev_next_iter(std::forward<Range>(range));
+        } else {
+            // Forward-only adapter chain (zip over views): double-ended in
+            // Rust when its sources are, but the C++ adapters aren't —
+            // materialize and replay backward.
+            return detail::make_materialized_rev_next_iter(std::forward<Range>(range));
+        }
     } else if constexpr (requires { std::forward<Range>(range).next(); }) {
         static_assert(
             detail::dependent_false_v<std::remove_reference_t<Range>>,
