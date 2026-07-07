@@ -8504,6 +8504,23 @@ impl CodeGen {
             };
             return format!("rusty::hash::hash({}, {})", receiver, state_arg);
         }
+        if method_name == "borrow"
+            && args.is_empty()
+            // Borrow-TRAIT protocol: the blanket `Borrow<T> for T` is an
+            // identity borrow, which primitives can't spell as a member
+            // (`key.borrow()` with K=int in equivalent's blanket impl). The
+            // helper member-prefers, so String's Borrow<str> port keeps its
+            // member dispatch.
+            && !self.receiver_has_inherent_method_named(&mc.receiver, "borrow")
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::borrow({})", receiver);
+        }
         if method_name == "to_bits" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {

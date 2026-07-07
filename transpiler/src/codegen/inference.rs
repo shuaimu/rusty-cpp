@@ -6382,6 +6382,18 @@ impl CodeGen {
             syn::Expr::Index(index_expr) => {
                 let base_ty = self.infer_simple_expr_type(&index_expr.expr)?;
                 let base_ty = self.peel_reference_paren_group_type(&base_ty);
+                // Resolve one generic-alias layer (indexmap's `Entries<K, V>
+                // = Vec<Bucket<K, V>>`) so `self.entries[i]` yields the
+                // element type — field renames (value -> value_field) need
+                // the owner.
+                let resolved_alias;
+                let base_ty = match self.resolve_type_alias_once(base_ty) {
+                    Some(resolved) => {
+                        resolved_alias = resolved;
+                        self.peel_reference_paren_group_type(&resolved_alias)
+                    }
+                    None => base_ty,
+                };
                 match base_ty {
                     syn::Type::Array(array_ty) => Some((*array_ty.elem).clone()),
                     syn::Type::Slice(slice_ty) => Some((*slice_ty.elem).clone()),

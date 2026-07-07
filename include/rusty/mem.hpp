@@ -363,6 +363,21 @@ inline constexpr bool needs_drop() noexcept {
 }
 
 } // namespace mem
+
+// Rust `Borrow::borrow`. A member borrow() wins (String's Borrow<str>
+// port); otherwise the blanket `impl<T> Borrow<T> for T` is an identity
+// borrow — forward the reference through (primitives can't spell it as a
+// member: `key.borrow()` with K=int in equivalent's blanket Equivalent
+// impl).
+template<typename T>
+decltype(auto) borrow(T&& value) {
+    if constexpr (requires { std::forward<T>(value).borrow(); }) {
+        return std::forward<T>(value).borrow();
+    } else {
+        return std::forward<T>(value);
+    }
+}
+
 } // namespace rusty
 
 #endif // RUSTY_MEM_HPP
