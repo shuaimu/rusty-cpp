@@ -44245,14 +44245,32 @@ Ordering cmp(const A& a, const B& b) {\n\
         return Ordering::Equal;\n\
     }\n\
 }\n\
-// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==.\n\
-// Derefs pointer-like rhs (Rust `&other` becomes addr_of_temp() in C++ emit).\n\
+// Equality dispatch: prefers .eq() if available (PartialEq inherent), else ==,\n\
+// else ELEMENT-WISE over both sides (Rust Iterator::eq and cross-container\n\
+// PartialEq like `IndexSet == Vec` / `Keys == slice::Iter` have no C++\n\
+// operator== between distinct types). Derefs pointer-like rhs (Rust `&other`\n\
+// becomes addr_of_temp() in C++ emit).\n\
 template<typename A, typename B>\n\
 bool eq(const A& a, const B& b) {\n\
     if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {\n\
         return a.eq(rusty::detail::deref_if_pointer_like(b));\n\
-    } else {\n\
+    } else if constexpr (requires {\n\
+        { a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;\n\
+    }) {\n\
         return a == rusty::detail::deref_if_pointer_like(b);\n\
+    } else {\n\
+        auto&& ra = rusty::for_in(a);\n\
+        auto&& rb = rusty::for_in(rusty::detail::deref_if_pointer_like(b));\n\
+        auto ita = ra.begin();\n\
+        auto ea = ra.end();\n\
+        auto itb = rb.begin();\n\
+        auto eb = rb.end();\n\
+        for (; ita != ea && itb != eb; ++ita, ++itb) {\n\
+            if (!rusty::cmp::eq(*ita, *itb)) {\n\
+            return false;\n\
+            }\n\
+        }\n\
+        return !(ita != ea) && !(itb != eb);\n\
     }\n\
 }\n\
 template<typename A, typename B>\n\
