@@ -47266,6 +47266,22 @@ void hash(const T& value, State& state) {\n\
     }\n\
 }\n\
 }\n\
+// Rust BuildHasher::hash_one. Prefers the builder's own member; inert\n\
+// transpiled builders (hashbrown's DefaultHashBuilder — foldhash's\n\
+// methods come from trait defaults that never emit) fall back to rusty's\n\
+// deterministic combine hashing. Hash VALUES never surface in parity\n\
+// assertions (indexmap iterates in insertion order); only internal\n\
+// consistency matters.\n\
+template<typename B, typename T>\n\
+uint64_t hash_one(B&& builder, const T& value) {\n\
+    if constexpr (requires { std::forward<B>(builder).hash_one(value); }) {\n\
+        return std::forward<B>(builder).hash_one(value);\n\
+    } else {\n\
+        std::size_t state = 14695981039346656037ULL;\n\
+        rusty::hash::hash(value, state);\n\
+        return static_cast<uint64_t>(state);\n\
+    }\n\
+}\n\
 template<typename Writer, typename FmtArg>\n\
 rusty::fmt::Result write_fmt(Writer&& writer, FmtArg&& fmt_arg) {\n\
     const auto text = rusty::to_string(std::forward<FmtArg>(fmt_arg));\n\

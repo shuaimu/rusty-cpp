@@ -6758,6 +6758,14 @@ impl CodeGen {
         if let Some(bs_call) = self.try_emit_slice_binary_search_call(mc) {
             return bs_call;
         }
+        // BuildHasher::hash_one routes through the prelude free fn
+        // (member-preference; inert builders use rusty's deterministic
+        // hashing — indexmap never asserts hash VALUES).
+        if mc.method == "hash_one" && mc.args.len() == 1 {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let arg = self.emit_expr_maybe_move(&mc.args[0]);
+            return format!("rusty::hash_one({}, {})", receiver, arg);
+        }
         // Note: is_some()/is_none() are kept as-is for rusty::Option (which has
         // these methods). The has_value() rewrite was only needed for std::optional
         // but incorrectly matched rusty::Option from iterator .next() calls.
