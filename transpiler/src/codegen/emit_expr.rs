@@ -13,9 +13,52 @@ const ARG_ALREADY_SPAN_PREFIXES: &[&str] = &[
     "rusty::slice_to(",
     "rusty::slice_to_inclusive(",
     "rusty::slice_inclusive(",
+    "rusty::index_with_range(",
 ];
 
 impl CodeGen {
+    /// Rust `&[T]` params map to std::span — TEMPLATE DEDUCTION cannot
+    /// convert a Vec argument (indexmap's `get_hash(&self.entries)`), so
+    /// slice-expected args wrap in rusty::as_slice/as_mut_slice; idempotent
+    /// when already a span. A Rust `&slice[range]` arg is the span VALUE
+    /// itself — an address-of over a span-producing call
+    /// (`&rusty::index_with_range(...)`) would pass span*, so the leading
+    /// `&` strips instead.
+    pub(super) fn coerce_slice_expected_arg_cpp(
+        &self,
+        arg_cpp: String,
+        arg_expected_ty: Option<&syn::Type>,
+    ) -> String {
+        // Address-of over an RVALUE span producer is ill-formed C++ no matter
+        // the callee — strip it even when the declared param is unknown
+        // (map::Slice's two-param owner lookup can miss it while set::Slice
+        // resolves).
+        let trimmed = arg_cpp.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('&').map(str::trim_start)
+            && ARG_ALREADY_SPAN_PREFIXES
+                .iter()
+                .any(|prefix| rest.starts_with(prefix))
+        {
+            return rest.to_string();
+        }
+        match arg_expected_ty.map(|t| self.peel_paren_group_type(t)) {
+            Some(syn::Type::Reference(r)) if matches!(r.elem.as_ref(), syn::Type::Slice(_)) => {
+                if ARG_ALREADY_SPAN_PREFIXES
+                    .iter()
+                    .any(|prefix| trimmed.starts_with(prefix))
+                {
+                    return arg_cpp;
+                }
+                if r.mutability.is_some() {
+                    format!("rusty::as_mut_slice({})", arg_cpp)
+                } else {
+                    format!("rusty::as_slice({})", arg_cpp)
+                }
+            }
+            _ => arg_cpp,
+        }
+    }
+
     /// --interface-traits (§ 3.2.9): if the expected parameter type is
     /// `&dyn Trait` / `&mut dyn Trait` (where Trait is a locally declared
     /// trait), and the argument is `&val` / `&mut val`, wrap the value
@@ -12086,13 +12129,14 @@ impl CodeGen {
                     let iter_expected: syn::Type = parse_quote!(impl Iterator<Item = #item_ty>);
                     arg_expected_ty = Some(iter_expected);
                 }
-                self.emit_call_arg_with_pass_style(
+                let arg_cpp = self.emit_call_arg_with_pass_style(
                     arg,
                     style,
                     arg_expected_ty.as_ref(),
                     false,
                     None,
-                )
+                );
+                self.coerce_slice_expected_arg_cpp(arg_cpp, arg_expected_ty.as_ref())
             })
             .collect();
         if owner_cpp.starts_with("SmallVec<")
@@ -17222,29 +17266,10 @@ impl CodeGen {
                 } else {
                     arg_cpp
                 };
-                // Rust `&[T]` params map to std::span — TEMPLATE DEDUCTION
-                // cannot convert a Vec argument (indexmap's
-                // `get_hash(&self.entries)`). Wrap slice-expected args in
-                // rusty::as_slice/as_mut_slice; idempotent when the arg is
-                // already a span.
-                let arg_cpp = match arg_expected_ty
-                    .as_ref()
-                    .map(|t| self.peel_paren_group_type(t))
-                {
-                    Some(syn::Type::Reference(r))
-                        if matches!(r.elem.as_ref(), syn::Type::Slice(_))
-                            && !ARG_ALREADY_SPAN_PREFIXES.iter().any(|prefix| {
-                                arg_cpp.trim_start().starts_with(prefix)
-                            }) =>
-                    {
-                        if r.mutability.is_some() {
-                            format!("rusty::as_mut_slice({})", arg_cpp)
-                        } else {
-                            format!("rusty::as_slice({})", arg_cpp)
-                        }
-                    }
-                    _ => arg_cpp,
-                };
+                // Rust `&[T]` params map to std::span — see
+                // coerce_slice_expected_arg_cpp.
+                let arg_cpp =
+                    self.coerce_slice_expected_arg_cpp(arg_cpp, arg_expected_ty.as_ref());
                 self.wrap_tuple_struct_constructor_arg_for_by_value_cycle_rewrite(call, idx, arg_cpp)
             })
             .collect();
