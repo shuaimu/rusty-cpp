@@ -8482,7 +8482,14 @@ impl CodeGen {
                 return format!("rusty::str_runtime::split({}, {})", receiver, args[0]);
             }
         }
-        if method_name == "hash" && args.len() == 1 {
+        if method_name == "hash"
+            && args.len() == 1
+            // A type with its OWN inherent `hash` method (indexmap's
+            // `IndexMap::hash(&self, key) -> HashValue`) keeps the member
+            // call — only Hash-TRAIT protocol calls route to the
+            // void-returning rusty::hash::hash(value, state).
+            && !self.receiver_has_inherent_method_named(&mc.receiver, "hash")
+        {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
                 format!("({})", raw_receiver)
