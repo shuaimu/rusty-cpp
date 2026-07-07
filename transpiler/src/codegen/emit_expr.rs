@@ -1,5 +1,20 @@
 use super::*;
 
+
+/// Emitted argument prefixes that already denote a span-producing rusty
+/// helper — wrapping them again in as_slice would be redundant noise (and
+/// breaks exact-emission guard tests).
+const ARG_ALREADY_SPAN_PREFIXES: &[&str] = &[
+    "rusty::as_slice(",
+    "rusty::as_mut_slice(",
+    "rusty::slice_full(",
+    "rusty::slice(",
+    "rusty::slice_from(",
+    "rusty::slice_to(",
+    "rusty::slice_to_inclusive(",
+    "rusty::slice_inclusive(",
+];
+
 impl CodeGen {
     /// --interface-traits (§ 3.2.9): if the expected parameter type is
     /// `&dyn Trait` / `&mut dyn Trait` (where Trait is a locally declared
@@ -17076,6 +17091,29 @@ impl CodeGen {
                     format!("std::move({})", arg_cpp)
                 } else {
                     arg_cpp
+                };
+                // Rust `&[T]` params map to std::span — TEMPLATE DEDUCTION
+                // cannot convert a Vec argument (indexmap's
+                // `get_hash(&self.entries)`). Wrap slice-expected args in
+                // rusty::as_slice/as_mut_slice; idempotent when the arg is
+                // already a span.
+                let arg_cpp = match arg_expected_ty
+                    .as_ref()
+                    .map(|t| self.peel_paren_group_type(t))
+                {
+                    Some(syn::Type::Reference(r))
+                        if matches!(r.elem.as_ref(), syn::Type::Slice(_))
+                            && !ARG_ALREADY_SPAN_PREFIXES.iter().any(|prefix| {
+                                arg_cpp.trim_start().starts_with(prefix)
+                            }) =>
+                    {
+                        if r.mutability.is_some() {
+                            format!("rusty::as_mut_slice({})", arg_cpp)
+                        } else {
+                            format!("rusty::as_slice({})", arg_cpp)
+                        }
+                    }
+                    _ => arg_cpp,
                 };
                 self.wrap_tuple_struct_constructor_arg_for_by_value_cycle_rewrite(call, idx, arg_cpp)
             })
