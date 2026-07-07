@@ -1636,7 +1636,42 @@ impl CodeGen {
                         }
                     } else {
                         let tmp_name = format!("_m{}_tmp", idx);
-                        if self.reference_target_requires_owned_materialization_for_address(
+                        // An assert_eq-desugared literal tuple (`&(&0, &0)`)
+                        // materializes BY VALUE: the reference-element tuple
+                        // spelling can't brace-init from literals, and the
+                        // element-wise comparison works on values.
+                        let literal_tuple_elems: Option<Vec<String>> =
+                            if let syn::Expr::Tuple(tuple_lit) = reference_target {
+                                tuple_lit
+                                    .elems
+                                    .iter()
+                                    .map(|e| {
+                                        let mut p = self.peel_paren_group_expr(e);
+                                        while let syn::Expr::Reference(r) = p {
+                                            p = self.peel_paren_group_expr(&r.expr);
+                                        }
+                                        matches!(
+                                            p,
+                                            syn::Expr::Lit(_)
+                                                | syn::Expr::Unary(syn::ExprUnary {
+                                                    op: syn::UnOp::Neg(_),
+                                                    ..
+                                                })
+                                                | syn::Expr::Cast(_)
+                                        )
+                                        .then(|| self.emit_expr_to_string(p))
+                                    })
+                                    .collect()
+                            } else {
+                                None
+                            };
+                        if let Some(elems) = literal_tuple_elems.filter(|e| !e.is_empty()) {
+                            self.writeln(&format!(
+                                "auto {} = std::make_tuple({});",
+                                tmp_name,
+                                elems.join(", ")
+                            ));
+                        } else if self.reference_target_requires_owned_materialization_for_address(
                             reference_target,
                         ) {
                             // `&*<rvalue>` can borrow through a temporary owner (e.g.
@@ -3502,6 +3537,41 @@ impl CodeGen {
                 let reference_target = self.peel_paren_group_expr(&reference_expr.expr);
                 if !self.is_stable_reference_lvalue_expr(reference_target) {
                     let tmp_name = format!("_m{}_tmp", idx);
+                    // An assert_eq-desugared literal tuple (`&(&0, &0)`)
+                    // materializes BY VALUE — the inferred reference-element
+                    // tuple type can't brace-init from literals, and the
+                    // element-wise comparison works on values regardless.
+                    if let syn::Expr::Tuple(tuple_lit) = reference_target {
+                        let peel_lit = |e: &syn::Expr| -> Option<String> {
+                            let mut p = self.peel_paren_group_expr(e);
+                            while let syn::Expr::Reference(r) = p {
+                                p = self.peel_paren_group_expr(&r.expr);
+                            }
+                            matches!(
+                                p,
+                                syn::Expr::Lit(_)
+                                    | syn::Expr::Unary(syn::ExprUnary {
+                                        op: syn::UnOp::Neg(_),
+                                        ..
+                                    })
+                                    | syn::Expr::Cast(_)
+                            )
+                            .then(|| self.emit_expr_to_string(p))
+                        };
+                        let literal_elems: Option<Vec<String>> =
+                            tuple_lit.elems.iter().map(peel_lit).collect();
+                        if let Some(elems) = literal_elems
+                            && !elems.is_empty()
+                        {
+                            out.push_str(&format!(
+                                "auto {} = std::make_tuple({}); ",
+                                tmp_name,
+                                elems.join(", ")
+                            ));
+                            out.push_str(&format!("auto&& _m{} = &{}; ", idx, tmp_name));
+                            continue;
+                        }
+                    }
                     let target_value = self.emit_expr_to_string(reference_target);
                     out.push_str(&format!("auto {} = {}; ", tmp_name, target_value));
                     out.push_str(&format!("auto&& _m{} = &{}; ", idx, tmp_name));
