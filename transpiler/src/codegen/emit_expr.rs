@@ -14068,6 +14068,31 @@ impl CodeGen {
         if let Some(emitted) = self.try_emit_type_param_trait_static_call(call) {
             return emitted;
         }
+        // `<[()]>::len(&[(), (), ...])` — the macro capacity-counting trick.
+        // The length is the array literal's element count; the qself-slice
+        // static form has no C++ spelling (span has no static len) and the
+        // unit-block elements don't materialize.
+        if let syn::Expr::Path(path_expr) = call.func.as_ref()
+            && let Some(qself) = &path_expr.qself
+            && matches!(
+                self.peel_paren_group_type(&qself.ty),
+                syn::Type::Slice(_)
+            )
+            && path_expr
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.ident == "len")
+            && call.args.len() == 1
+        {
+            let mut arg = self.peel_paren_group_expr(&call.args[0]);
+            while let syn::Expr::Reference(reference) = arg {
+                arg = self.peel_paren_group_expr(&reference.expr);
+            }
+            if let syn::Expr::Array(array_lit) = arg {
+                return format!("static_cast<size_t>({})", array_lit.elems.len());
+            }
+        }
         // `<ScalarType>::from(x)` (primitive conversion) → `static_cast<ScalarType>(x)`.
         if let Some(emitted) = self.try_emit_scalar_from_call(call) {
             return emitted;
