@@ -11705,8 +11705,23 @@ impl CodeGen {
         {
             return None;
         }
-        let fwd = self.peel_reference_paren_group_type(forward_ty);
-        let syn::Type::Path(fwd_tp) = fwd else {
+        // Peel generic-ALIAS layers off the forward type before comparing
+        // owners: an alias's own args are its PARAMS, not the collection's
+        // element (indexmap `Entries<K, V> = Vec<Bucket<K, V>>` — taking `K`
+        // positionally would build `Vec<K>`). An alias of this SAME collection
+        // then hits the owner-match bail below and stays with the ordinary
+        // expected-type paths (which resolve the alias with proper arg
+        // substitution); an alias of a DIFFERENT container carries its
+        // target's REAL args forward. Cap the peel so a malformed alias cycle
+        // can't loop.
+        let mut fwd_ty = self.peel_reference_paren_group_type(forward_ty).clone();
+        for _ in 0..4 {
+            let Some(resolved) = self.resolve_type_alias_once(&fwd_ty) else {
+                break;
+            };
+            fwd_ty = self.peel_reference_paren_group_type(&resolved).clone();
+        }
+        let syn::Type::Path(fwd_tp) = &fwd_ty else {
             return None;
         };
         let fwd_last = fwd_tp.path.segments.last()?;
