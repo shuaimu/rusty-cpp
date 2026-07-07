@@ -21322,7 +21322,14 @@ fn test_leaf518_core_mem_align_of_import_remapped() {
         "#,
     );
     assert!(out.contains("using rusty::mem::align_of;"));
-    assert!(out.contains("return align_of<uint32_t>();"));
+    // The call may be bare (resolved via the using-import) or fully
+    // qualified — the Rust-2024-prelude mapping qualifies bare
+    // size_of/align_of paths unconditionally.
+    assert!(
+        out.contains("return align_of<uint32_t>();")
+            || out.contains("return rusty::mem::align_of<uint32_t>();"),
+        "{out}"
+    );
     assert!(!out.contains("\nusing std::mem::align_of;"));
 }
 

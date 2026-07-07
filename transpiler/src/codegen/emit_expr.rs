@@ -19283,6 +19283,34 @@ impl CodeGen {
         Some(format!("rusty::{}({})", mc.method, receiver))
     }
 
+    /// First `return rusty::Option<…>(` constructor TYPE text in an
+    /// assembled match-arms block (balanced angle brackets), or None when
+    /// absent or placeholder-tainted. Used to annotate deduced-return
+    /// match lambdas whose other arms return the bare `rusty::None` tag.
+    pub(super) fn extract_first_option_ctor_type(arms_text: &str) -> Option<String> {
+        let start = arms_text.find("return rusty::Option<")? + "return ".len();
+        let after_lt = start + "rusty::Option<".len();
+        let bytes = arms_text.as_bytes();
+        let mut depth = 1usize;
+        let mut i = after_lt;
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'<' => depth += 1,
+                b'>' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        if depth != 0 {
+            return None;
+        }
+        let ty = &arms_text[start..i];
+        if ty.contains("auto") || ty.contains("/* TODO") {
+            return None;
+        }
+        Some(ty.to_string())
+    }
+
     /// Rust slice binary-search family routes through rusty free functions
     /// with member-preference dispatch in the emitted prelude: std::span
     /// receivers (the `&[Bucket]` internals) have no such members, while
@@ -19829,16 +19857,26 @@ impl CodeGen {
                     self.peel_paren_group_expr(&match_expr.expr),
                     syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1
                 );
+            let arms_text = self.emit_match_expr_switch_with_consumed_scrutinee(
+                &match_expr.arms,
+                expected_ty,
+                variant_ctx.as_ref(),
+                scrutinee_is_consumed_place,
+            );
+            // A DEDUCED-return lambda whose arms mix `rusty::Option<T>(…)`
+            // and the bare `rusty::None` tag is ill-formed (conflicting
+            // deductions) — annotate from the sibling arm's Option ctor
+            // (indexmap's get_disjoint_opt_mut inner mapper).
+            let mut return_clause = return_clause;
+            if return_clause.is_empty()
+                && arms_text.contains("return rusty::None;")
+                && let Some(opt_ty) = Self::extract_first_option_ctor_type(&arms_text)
+            {
+                return_clause = format!(" -> {}", opt_ty);
+            }
             return format!(
                 "[&](){} {{ auto&& _m = {}; {} }}()",
-                return_clause,
-                scrutinee,
-                self.emit_match_expr_switch_with_consumed_scrutinee(
-                    &match_expr.arms,
-                    expected_ty,
-                    variant_ctx.as_ref(),
-                    scrutinee_is_consumed_place,
-                )
+                return_clause, scrutinee, arms_text
             );
         }
         // Item 11: when type inference can't see the scrutinee's tuple shape

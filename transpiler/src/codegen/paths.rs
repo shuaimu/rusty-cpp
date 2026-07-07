@@ -2443,6 +2443,15 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
             "std::cmp::Ordering::Greater" => return "rusty::cmp::Ordering::Greater".to_string(),
             _ => {}
         }
+        // Rust 2024 prelude items: bare `size_of::<T>()` / `align_of::<T>()`
+        // arrive with no `use` item at all (edition prelude), so the
+        // Using-import action never fires. Map the bare names unless the
+        // crate declares its own.
+        if matches!(joined.as_str(), "size_of" | "align_of")
+            && !self.declared_item_names.contains(joined.as_str())
+        {
+            return format!("rusty::mem::{}", joined);
+        }
         // Rust's `Bound::…` variant constructors (core::ops::Bound) in VALUE
         // position lower to rusty factories: `Bound` maps to an alias template
         // over std::variant, so `Bound::Excluded(x)` cannot be spelled

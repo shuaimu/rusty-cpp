@@ -1609,6 +1609,16 @@ impl CodeGen {
         } else {
             out.push_str("rusty::intrinsics::unreachable(); }()");
         }
+        // A DEDUCED-return lambda whose arms mix `rusty::Option<T>(…)` and
+        // the bare `rusty::None` tag is ill-formed (conflicting deductions):
+        // annotate from the sibling arm's Option constructor (indexmap's
+        // get_disjoint_opt_mut inner mapper).
+        if out.starts_with("[&]() {")
+            && out.contains("return rusty::None;")
+            && let Some(opt_ty) = CodeGen::extract_first_option_ctor_type(&out)
+        {
+            out = out.replacen("[&]() {", &format!("[&]() -> {} {{", opt_ty), 1);
+        }
         Some(out)
     }
 
