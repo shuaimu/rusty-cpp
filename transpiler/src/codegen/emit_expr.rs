@@ -6755,6 +6755,9 @@ impl CodeGen {
         if let Some(copied_call) = self.try_emit_iter_copied_cloned_call(mc) {
             return copied_call;
         }
+        if let Some(bs_call) = self.try_emit_slice_binary_search_call(mc) {
+            return bs_call;
+        }
         // Note: is_some()/is_none() are kept as-is for rusty::Option (which has
         // these methods). The has_value() rewrite was only needed for std::optional
         // but incorrectly matched rusty::Option from iterator .next() calls.
@@ -19177,6 +19180,37 @@ impl CodeGen {
         }
         let receiver = self.emit_expr_to_string(&mc.receiver);
         Some(format!("rusty::{}({})", mc.method, receiver))
+    }
+
+    /// Rust slice binary-search family routes through rusty free functions
+    /// with member-preference dispatch in the emitted prelude: std::span
+    /// receivers (the `&[Bucket]` internals) have no such members, while
+    /// transpiled Slice types keep their own delegating methods — the free
+    /// fn picks whichever exists, so routing is unconditional.
+    pub(super) fn try_emit_slice_binary_search_call(
+        &self,
+        mc: &syn::ExprMethodCall,
+    ) -> Option<String> {
+        let arity = match mc.method.to_string().as_str() {
+            "binary_search" | "binary_search_by" | "partition_point" => 1,
+            "binary_search_by_key" => 2,
+            _ => return None,
+        };
+        if mc.args.len() != arity {
+            return None;
+        }
+        let receiver = self.emit_expr_to_string(&mc.receiver);
+        let args: Vec<String> = mc
+            .args
+            .iter()
+            .map(|a| self.emit_expr_maybe_move(a))
+            .collect();
+        Some(format!(
+            "rusty::{}({}, {})",
+            mc.method,
+            receiver,
+            args.join(", ")
+        ))
     }
 
     pub(super) fn try_emit_iter_fold_call(

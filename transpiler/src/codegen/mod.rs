@@ -43738,6 +43738,69 @@ template<typename A, typename B>
 rusty::Option<rusty::cmp::Ordering> partial_cmp(const A& a, const B& b) {
     return rusty::cmp::partial_cmp(a, b);
 }
+// Rust slice binary-search family. Free functions PREFER a member spelling
+// (transpiled Slice types keep their own delegating methods); otherwise any
+// as_slice()-viewable receiver binary-searches with the Ordering-returning
+// comparator, mirroring core::slice semantics (Result<usize, usize>).
+template<typename R, typename F>
+auto binary_search_by(R&& recv, F&& f) {
+    if constexpr (requires { std::forward<R>(recv).binary_search_by(std::forward<F>(f)); }) {
+        return std::forward<R>(recv).binary_search_by(std::forward<F>(f));
+    } else {
+        auto s = rusty::as_slice(recv);
+        size_t lo = 0;
+        size_t hi = s.size();
+        while (lo < hi) {
+            const size_t mid = lo + (hi - lo) / 2;
+            const auto ord = f(s[mid]);
+            if (ord == rusty::cmp::Ordering::Less) {
+                lo = mid + 1;
+            } else if (ord == rusty::cmp::Ordering::Greater) {
+                hi = mid;
+            } else {
+                return rusty::Result<size_t, size_t>::Ok(mid);
+            }
+        }
+        return rusty::Result<size_t, size_t>::Err(lo);
+    }
+}
+template<typename R, typename T>
+auto binary_search(R&& recv, const T& target) {
+    if constexpr (requires { std::forward<R>(recv).binary_search(target); }) {
+        return std::forward<R>(recv).binary_search(target);
+    } else {
+        return rusty::binary_search_by(std::forward<R>(recv),
+            [&](const auto& x) { return rusty::cmp::cmp(x, rusty::detail::deref_if_pointer_like(target)); });
+    }
+}
+template<typename R, typename B, typename F>
+auto binary_search_by_key(R&& recv, const B& b, F&& f) {
+    if constexpr (requires { std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f)); }) {
+        return std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f));
+    } else {
+        return rusty::binary_search_by(std::forward<R>(recv),
+            [&](const auto& x) { return rusty::cmp::cmp(f(x), rusty::detail::deref_if_pointer_like(b)); });
+    }
+}
+template<typename R, typename P>
+auto partition_point(R&& recv, P&& pred) {
+    if constexpr (requires { std::forward<R>(recv).partition_point(std::forward<P>(pred)); }) {
+        return std::forward<R>(recv).partition_point(std::forward<P>(pred));
+    } else {
+        auto s = rusty::as_slice(recv);
+        size_t lo = 0;
+        size_t hi = s.size();
+        while (lo < hi) {
+            const size_t mid = lo + (hi - lo) / 2;
+            if (pred(s[mid])) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+}
 inline std::partial_ordering to_partial_ordering(rusty::cmp::Ordering ordering) {
     switch (ordering) {
         case rusty::cmp::Ordering::Less:
@@ -46331,6 +46394,69 @@ struct DefaultHasher {\n\
     std::size_t finish() const { return state; }\n\
 };\n\
 namespace rusty {\n\
+// Rust slice binary-search family. Free functions PREFER a member spelling\n\
+// (transpiled Slice types keep their own delegating methods); otherwise any\n\
+// as_slice()-viewable receiver binary-searches with the Ordering-returning\n\
+// comparator, mirroring core::slice semantics (Result<usize, usize>).\n\
+template<typename R, typename F>\n\
+auto binary_search_by(R&& recv, F&& f) {\n\
+    if constexpr (requires { std::forward<R>(recv).binary_search_by(std::forward<F>(f)); }) {\n\
+        return std::forward<R>(recv).binary_search_by(std::forward<F>(f));\n\
+    } else {\n\
+        auto s = rusty::as_slice(recv);\n\
+        size_t lo = 0;\n\
+        size_t hi = s.size();\n\
+        while (lo < hi) {\n\
+            const size_t mid = lo + (hi - lo) / 2;\n\
+            const auto ord = f(s[mid]);\n\
+            if (ord == rusty::cmp::Ordering::Less) {\n\
+                lo = mid + 1;\n\
+            } else if (ord == rusty::cmp::Ordering::Greater) {\n\
+                hi = mid;\n\
+            } else {\n\
+                return rusty::Result<size_t, size_t>::Ok(mid);\n\
+            }\n\
+        }\n\
+        return rusty::Result<size_t, size_t>::Err(lo);\n\
+    }\n\
+}\n\
+template<typename R, typename T>\n\
+auto binary_search(R&& recv, const T& target) {\n\
+    if constexpr (requires { std::forward<R>(recv).binary_search(target); }) {\n\
+        return std::forward<R>(recv).binary_search(target);\n\
+    } else {\n\
+        return rusty::binary_search_by(std::forward<R>(recv),\n\
+            [&](const auto& x) { return rusty::cmp::cmp(x, rusty::detail::deref_if_pointer_like(target)); });\n\
+    }\n\
+}\n\
+template<typename R, typename B, typename F>\n\
+auto binary_search_by_key(R&& recv, const B& b, F&& f) {\n\
+    if constexpr (requires { std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f)); }) {\n\
+        return std::forward<R>(recv).binary_search_by_key(b, std::forward<F>(f));\n\
+    } else {\n\
+        return rusty::binary_search_by(std::forward<R>(recv),\n\
+            [&](const auto& x) { return rusty::cmp::cmp(f(x), rusty::detail::deref_if_pointer_like(b)); });\n\
+    }\n\
+}\n\
+template<typename R, typename P>\n\
+auto partition_point(R&& recv, P&& pred) {\n\
+    if constexpr (requires { std::forward<R>(recv).partition_point(std::forward<P>(pred)); }) {\n\
+        return std::forward<R>(recv).partition_point(std::forward<P>(pred));\n\
+    } else {\n\
+        auto s = rusty::as_slice(recv);\n\
+        size_t lo = 0;\n\
+        size_t hi = s.size();\n\
+        while (lo < hi) {\n\
+            const size_t mid = lo + (hi - lo) / 2;\n\
+            if (pred(s[mid])) {\n\
+                lo = mid + 1;\n\
+            } else {\n\
+                hi = mid;\n\
+            }\n\
+        }\n\
+        return lo;\n\
+    }\n\
+}\n\
 // Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator\n\
 inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp::Ordering>& opt) {\n\
     if (opt.is_none()) return std::partial_ordering::unordered;\n\
