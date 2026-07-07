@@ -2102,6 +2102,17 @@ impl CodeGen {
             return false;
         };
         let receiver_ty = self.peel_reference_paren_group_type(&receiver_ty);
+        // Resolve one generic-alias layer (indexmap's `Entries<K, V> =
+        // Vec<Bucket<K, V>>`) so alias-typed receivers gate the same as
+        // their targets.
+        let resolved_alias;
+        let receiver_ty = match self.resolve_type_alias_once(receiver_ty) {
+            Some(resolved) => {
+                resolved_alias = resolved;
+                self.peel_reference_paren_group_type(&resolved_alias)
+            }
+            None => receiver_ty,
+        };
         if self.type_is_slice_or_span_like(receiver_ty) {
             return true;
         }

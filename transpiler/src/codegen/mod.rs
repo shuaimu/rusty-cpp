@@ -46502,6 +46502,47 @@ auto partition_point(R&& recv, P&& pred) {\n\
         return lo;\n\
     }\n\
 }\n\
+// Rust slice sort family (Vec reaches these through Deref). Members win;\n\
+// the port Vec spells only the STABLE sorts, and a stable sort is a valid\n\
+// unstable sort, so sort_unstable_* fall back to the sort_* members before\n\
+// the generic std::sort over as_mut_slice.\n\
+template<typename R, typename F>\n\
+void sort_unstable_by(R&& recv, F&& f) {\n\
+    if constexpr (requires { std::forward<R>(recv).sort_unstable_by(std::forward<F>(f)); }) {\n\
+        std::forward<R>(recv).sort_unstable_by(std::forward<F>(f));\n\
+    } else if constexpr (requires { std::forward<R>(recv).sort_by(std::forward<F>(f)); }) {\n\
+        std::forward<R>(recv).sort_by(std::forward<F>(f));\n\
+    } else {\n\
+        auto s = rusty::as_mut_slice(recv);\n\
+        std::sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {\n\
+            return f(a, b) == rusty::cmp::Ordering::Less;\n\
+        });\n\
+    }\n\
+}\n\
+template<typename R>\n\
+void sort_unstable(R&& recv) {\n\
+    if constexpr (requires { std::forward<R>(recv).sort_unstable(); }) {\n\
+        std::forward<R>(recv).sort_unstable();\n\
+    } else if constexpr (requires { std::forward<R>(recv).sort(); }) {\n\
+        std::forward<R>(recv).sort();\n\
+    } else {\n\
+        auto s = rusty::as_mut_slice(recv);\n\
+        std::sort(s.begin(), s.end());\n\
+    }\n\
+}\n\
+template<typename R, typename K>\n\
+void sort_unstable_by_key(R&& recv, K&& key) {\n\
+    if constexpr (requires { std::forward<R>(recv).sort_unstable_by_key(std::forward<K>(key)); }) {\n\
+        std::forward<R>(recv).sort_unstable_by_key(std::forward<K>(key));\n\
+    } else if constexpr (requires { std::forward<R>(recv).sort_by_key(std::forward<K>(key)); }) {\n\
+        std::forward<R>(recv).sort_by_key(std::forward<K>(key));\n\
+    } else {\n\
+        auto s = rusty::as_mut_slice(recv);\n\
+        std::sort(s.begin(), s.end(), [&](const auto& a, const auto& b) {\n\
+            return key(a) < key(b);\n\
+        });\n\
+    }\n\
+}\n\
 // Convert Option<Ordering> to std::partial_ordering for C++ spaceship operator\n\
 inline std::partial_ordering to_partial_ordering(const rusty::Option<rusty::cmp::Ordering>& opt) {\n\
     if (opt.is_none()) return std::partial_ordering::unordered;\n\

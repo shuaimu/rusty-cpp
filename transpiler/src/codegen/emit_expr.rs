@@ -19356,6 +19356,14 @@ impl CodeGen {
             "binary_search_by_key" => 2,
             "is_sorted" => 0,
             "is_sorted_by" | "is_sorted_by_key" => 1,
+            // sort_unstable* exist INHERENTLY on set/map types (IndexSet::
+            // sort_unstable sorts values, not buckets) — only slice-shaped
+            // receivers route to the rusty:: slice helpers.
+            "sort_unstable" | "sort_unstable_by" | "sort_unstable_by_key"
+                if self.should_lower_slice_deref_method_call(&mc.receiver) =>
+            {
+                if mc.method == "sort_unstable" { 0 } else { 1 }
+            }
             _ => return None,
         };
         if mc.args.len() != arity {
