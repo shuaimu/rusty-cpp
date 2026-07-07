@@ -3041,6 +3041,8 @@ fn test_leaf415432_mem_size_of_alias_turbofish_preserved() {
 
 #[test]
 fn test_leaf415432_nested_local_fn_turbofish_call_drops_template_args() {
+    // T never appears in the body, so the fn stays a plain lambda and the
+    // call drops the turbofish (any instantiation is equivalent).
     let out = transpile_str(
         r#"
         fn outer() {
@@ -3053,6 +3055,29 @@ fn test_leaf415432_nested_local_fn_turbofish_call_drops_template_args() {
     );
     assert!(out.contains("check();"));
     assert!(!out.contains("check<int32_t>()"));
+}
+
+#[test]
+fn test_nested_local_fn_body_used_explicit_type_param_template_operator() {
+    // T appears only in the body (no parameter carries it), so the nested fn
+    // must be a template lambda and the turbofish call routes through
+    // `.template operator()<...>` — the auto-param form has nowhere to
+    // receive T (indexmap's `assert_default::<Iter<K, V>>()`).
+    let out = transpile_str(
+        r#"
+        fn outer() {
+            fn make<T: Default>() -> i32 {
+                let _x = T::default();
+                0
+            }
+            fn run() {
+                make::<i32>();
+            }
+        }
+    "#,
+    );
+    assert!(out.contains("const auto make = []<typename T>()"));
+    assert!(out.contains("make.template operator()<int32_t>();"));
 }
 
 #[test]

@@ -1612,6 +1612,11 @@ pub struct CodeGen {
     /// "is this an unknown-shaped generic?" consumers (iterator-default-
     /// method routing) consult them — annotation machinery must not.
     pub(crate) nested_fn_type_params_stack: Vec<HashSet<String>>,
+    /// Nested fns emitted as C++20 template lambdas whose type params a call
+    /// site may need to supply explicitly (`assert_default::<T>()`). Scoped
+    /// per block alongside `local_function_bindings`; call sites with a
+    /// turbofish rewrite to `name.template operator()<Args>(args)`.
+    pub(crate) template_lambda_nested_fns: Vec<HashSet<String>>,
     /// Names of recursive nested fns currently in lexical scope at the call
     /// site (declared earlier in the same block, body already emitted).
     /// Calls to these names rewrite to `NAME(NAME, args)` so the seed
@@ -2004,6 +2009,7 @@ impl CodeGen {
             current_emit_structural_decomp: None,
             recursive_nested_fn_self_emit_stack: Vec::new(),
             nested_fn_type_params_stack: Vec::new(),
+            template_lambda_nested_fns: Vec::new(),
             recursive_nested_fns_in_scope: Vec::new(),
             user_type_map: types::UserTypeMap::default(),
             cyclic_type_names: HashSet::new(),
@@ -13760,11 +13766,39 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
-        // Only switch a generic local fn to the C++20 template-lambda form when it
-        // has a DERIVED type param (`T = X::Item`) the old `[](auto&…)` form can't
-        // name. Generic fns without one (their type params never appear as a type
-        // in the body) keep the simpler `auto`-param form that already worked.
-        let use_template_lambda = is_generic_nested_fn && !derived_type_param_usings.is_empty();
+        // A type param that appears in NO parameter type can only arrive via
+        // the call's turbofish (`assert_default::<T>()`) — the auto-param form
+        // has nowhere to receive it, so it must be a template-lambda param
+        // (call sites rewrite to `name.template operator()<T>()`). Only when
+        // the body (or return type) actually NAMES the param, though: a
+        // bound-check-only fn (`fn check<T: AsRef<[Item]>, Item>() {}`) works
+        // as a plain lambda with the turbofish dropped, and its Rust-inferred
+        // `_` slots (Item from T's bound) have no C++ deduction source.
+        let body_tokens = f.block.to_token_stream();
+        let has_explicit_only_type_param = nested_type_params.iter().any(|n| {
+            let single: HashSet<String> = std::iter::once(n.clone()).collect();
+            !derived_type_params.contains(n)
+                && !f.sig.inputs.iter().any(|arg| match arg {
+                    syn::FnArg::Typed(pt) => {
+                        self.type_contains_named_type_params(&pt.ty, &single)
+                    }
+                    _ => false,
+                })
+                && (Self::token_stream_mentions_ident(body_tokens.clone(), n)
+                    || match &f.sig.output {
+                        syn::ReturnType::Type(_, ty) => {
+                            self.type_contains_named_type_params(ty, &single)
+                        }
+                        syn::ReturnType::Default => false,
+                    })
+        });
+        // Switch a generic local fn to the C++20 template-lambda form when it
+        // has a DERIVED type param (`T = X::Item`) the old `[](auto&…)` form
+        // can't name, or an explicit-only one. Generic fns with neither (their
+        // type params never appear as a type in the body) keep the simpler
+        // `auto`-param form that already worked.
+        let use_template_lambda = is_generic_nested_fn
+            && (!derived_type_param_usings.is_empty() || has_explicit_only_type_param);
         // Item 8: detect self-recursion in the body so we can lower it as
         // a Y-combinator. Rust's nested `fn` items can name themselves
         // (they resolve like top-level fns), but a C++ `auto`-deduced
@@ -13774,6 +13808,21 @@ impl CodeGen {
         let raw_name = f.sig.ident.to_string();
         let is_self_recursive =
             Self::token_stream_mentions_ident(f.block.to_token_stream(), &raw_name);
+        // Register for the `name.template operator()<Args>(args)` call-site
+        // rewrite only when a turbofish maps positionally onto the template
+        // parameter list: every non-derived type param is a template param
+        // (derived ones are `using`-bound inside the body, not in the list),
+        // and no const-generic value params shift the argument positions.
+        if use_template_lambda
+            && has_explicit_only_type_param
+            && derived_type_param_usings.is_empty()
+            && !is_self_recursive
+            && self.nested_fn_const_generic_params(&f.sig.generics).is_empty()
+        {
+            if let Some(scope) = self.template_lambda_nested_fns.last_mut() {
+                scope.insert(raw_name.clone());
+            }
+        }
         let mut params_vec: Vec<String> = Vec::new();
         let mut param_types: Vec<String> = Vec::new();
         if is_self_recursive {

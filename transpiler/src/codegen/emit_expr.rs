@@ -774,6 +774,7 @@ impl CodeGen {
         ) = self.collect_local_impl_overrides(&block.stmts, &local_types);
         block_profile_mark("collect_local_impl_overrides");
         self.local_function_bindings.push(local_functions);
+        self.template_lambda_nested_fns.push(HashSet::new());
         self.local_type_bindings.push(local_types);
         self.local_manually_drop_bindings.push(HashSet::new());
         self.recursive_nested_fns_in_scope.push(HashSet::new());
@@ -961,6 +962,7 @@ impl CodeGen {
         self.delayed_init_locals.pop();
         self.pending_uninit_let_locals.pop();
         self.local_function_bindings.pop();
+        self.template_lambda_nested_fns.pop();
         self.local_type_bindings.pop();
         self.local_manually_drop_bindings.pop();
         self.recursive_nested_fns_in_scope.pop();
@@ -14009,6 +14011,57 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // A turbofish call to a nested fn emitted as a template lambda
+        // (`assert_default::<Iter<K, V>>()`): a lambda's call operator takes
+        // explicit template args only via `.template operator()<...>`.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && fp.qself.is_none()
+            && fp.path.segments.len() == 1
+            && let syn::PathArguments::AngleBracketed(ab) = &fp.path.segments[0].arguments
+            && self
+                .template_lambda_nested_fns
+                .iter()
+                .rev()
+                .any(|scope| scope.contains(&fp.path.segments[0].ident.to_string()))
+        {
+            let all_type_args: Vec<&syn::Type> = ab
+                .args
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(t),
+                    _ => None,
+                })
+                .collect();
+            // A `_` slot has no C++ spelling and no skip syntax — keep the
+            // concrete prefix and let deduction (or an empty body) cover the
+            // rest, mirroring emit_method_call_template_args' truncation.
+            let type_args: Vec<&syn::Type> = all_type_args
+                .iter()
+                .take_while(|t| !self.type_contains_infer(t))
+                .copied()
+                .collect();
+            if !type_args.is_empty() {
+                let mapped: Vec<String> =
+                    type_args.iter().map(|t| self.map_type(t)).collect();
+                if !mapped.iter().any(|m| {
+                    m == "auto"
+                        || type_string_has_auto_placeholder(m)
+                        || m.contains("/* TODO")
+                }) {
+                    let args: Vec<String> = call
+                        .args
+                        .iter()
+                        .map(|a| self.emit_expr_maybe_move(a))
+                        .collect();
+                    return format!(
+                        "{}.template operator()<{}>({})",
+                        escape_cpp_keyword(&fp.path.segments[0].ident.to_string()),
+                        mapped.join(", "),
+                        args.join(", ")
+                    );
+                }
+            }
+        }
         // `<_>::default()` — a qself-INFER associated call takes its owner
         // from the position's EXPECTED type (indexmap's
         // `Self::with_capacity_and_hasher(n, <_>::default())`: arg 2's
