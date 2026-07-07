@@ -822,6 +822,27 @@ public:
         return static_cast<R>(default_fn());
     }
 
+    // Rust Option::map_or on a reference payload (same deduced-return
+    // rationale as map_or_else above; the default value casts so mixed
+    // literal/mapped types unify).
+    template<typename U, typename F>
+    decltype(auto) map_or(U&& default_value, F&& f) {
+        using R = decltype(f(*ptr));
+        if (ptr) {
+            return static_cast<R>(f(*ptr));
+        }
+        return static_cast<R>(std::forward<U>(default_value));
+    }
+
+    template<typename U, typename F>
+    decltype(auto) map_or(U&& default_value, F&& f) const {
+        using R = decltype(f(*static_cast<const T*>(ptr)));
+        if (ptr) {
+            return static_cast<R>(f(*static_cast<const T*>(ptr)));
+        }
+        return static_cast<R>(std::forward<U>(default_value));
+    }
+
     // Map function over const reference
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
@@ -1094,6 +1115,17 @@ public:
             return static_cast<R>(f(*ptr));
         }
         return static_cast<R>(default_fn());
+    }
+
+    // Rust Option::map_or on a const-reference payload (same deduced-
+    // return rationale).
+    template<typename U, typename F>
+    decltype(auto) map_or(U&& default_value, F&& f) const {
+        using R = decltype(f(*ptr));
+        if (ptr) {
+            return static_cast<R>(f(*ptr));
+        }
+        return static_cast<R>(std::forward<U>(default_value));
     }
 
     // Rust parity: Option<&T>::copied() -> Option<T>
