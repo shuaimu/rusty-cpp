@@ -585,9 +585,13 @@ public:
         return std::move(*this);
     }
 
-    auto next() {
-        using item_type = next_item_t<Iter>;
-        using next_result = rusty::Option<item_type>;
+    // DECLARED return type: option-like-next probes name this signature
+    // without instantiating the body. A deduced return makes every
+    // requires-probe instantiate through the wrapped iterator's next(),
+    // which clang resolves order-sensitively across deferred POIs in
+    // module units (indexmap set-ops from_iter).
+    rusty::Option<next_item_t<Iter>> next() {
+        using next_result = rusty::Option<next_item_t<Iter>>;
 
         auto item = iter_.next();
         if (!option_like_has_value(item)) {
@@ -620,7 +624,9 @@ public:
         return std::move(*this);
     }
 
-    auto next() {
+    // DECLARED return type: option-like-next probes name this signature
+    // without instantiating the body (see copied_next_iter::next).
+    rusty::Option<next_item_t<Iter>> next() {
         using item_type = next_item_t<Iter>;
         using next_result = rusty::Option<item_type>;
 
