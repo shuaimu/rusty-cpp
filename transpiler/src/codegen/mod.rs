@@ -29578,7 +29578,7 @@ impl CodeGen {
             if cross_crate_call || unknown_local {
                 let field_cpp = escape_cpp_keyword(field_name);
                 return Some(format!(
-                    "[&](auto&& __r) -> decltype(auto) {{ if constexpr (requires {{ (__r.{f}); }}) {{ return (__r.{f}); }} else {{ return ((*__r).{f}); }} }}({base})",
+                    "[&](auto&& __r) -> decltype(auto) {{ if constexpr (requires {{ (__r.{f}); }}) {{ return (__r.{f}); }} else if constexpr (requires {{ (__r.{f}_field); }}) {{ return (__r.{f}_field); }} else if constexpr (requires {{ ((*__r).{f}); }}) {{ return ((*__r).{f}); }} else {{ return ((*__r).{f}_field); }} }}({base})",
                     f = field_cpp,
                     base = base_for_field
                 ));
@@ -29605,7 +29605,7 @@ impl CodeGen {
         {
             let field_cpp = escape_cpp_keyword(field_name);
             return Some(format!(
-                "[&](auto&& __r) -> decltype(auto) {{ if constexpr (requires {{ (__r.{f}); }}) {{ return (__r.{f}); }} else {{ return ((*__r).{f}); }} }}({base})",
+                "[&](auto&& __r) -> decltype(auto) {{ if constexpr (requires {{ (__r.{f}); }}) {{ return (__r.{f}); }} else if constexpr (requires {{ (__r.{f}_field); }}) {{ return (__r.{f}_field); }} else if constexpr (requires {{ ((*__r).{f}); }}) {{ return ((*__r).{f}); }} else {{ return ((*__r).{f}_field); }} }}({base})",
                 f = field_cpp,
                 base = base_for_field
             ));
