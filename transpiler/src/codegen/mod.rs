@@ -3222,6 +3222,11 @@ impl CodeGen {
                 .map(|(name, path)| (name.clone(), path.clone()))
                 .collect(),
             declared_trait_methods,
+            trait_method_has_receiver: self
+                .trait_method_has_receiver
+                .iter()
+                .map(|(key, has)| (key.clone(), *has))
+                .collect(),
             method_owners,
             declared_types,
             hygiene_aliases,

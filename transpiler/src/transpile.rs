@@ -35,6 +35,14 @@ pub struct UfcsTraitManifest {
     /// unless the dep's trait actually provides the same method.
     #[serde(default)]
     pub declared_trait_methods: BTreeMap<String, Vec<String>>,
+    /// `Trait::method` → whether the trait item's first param is `self`.
+    /// A consumer lowering the trait-STATIC call form `T::method(a0, ...)`
+    /// on a generic param T may treat `a0` as the receiver ONLY when the
+    /// method takes `self` (Equivalent::equivalent); associated fns without
+    /// a receiver (Deserialize::deserialize_in_place) must stay on the
+    /// trait-static routing paths.
+    #[serde(default)]
+    pub trait_method_has_receiver: BTreeMap<String, bool>,
     /// Method name → owning trait names, restricted to actually-emitted
     /// `<Tr>_::m` free functions.
     #[serde(default)]
@@ -2763,6 +2771,10 @@ mod tests {
             declared_trait_methods: std::collections::BTreeMap::from([(
                 "Greet".to_string(),
                 vec!["hello".to_string()],
+            )]),
+            trait_method_has_receiver: std::collections::BTreeMap::from([(
+                "Greet::hello".to_string(),
+                true,
             )]),
             method_owners: std::collections::BTreeMap::from([(
                 "hello".to_string(),

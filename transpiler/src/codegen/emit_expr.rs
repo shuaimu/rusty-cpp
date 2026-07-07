@@ -10022,6 +10022,74 @@ impl CodeGen {
         matches!(name, "size_hint" | "left" | "right" | "write_hex")
     }
 
+    /// `T::trait_method(a0, rest...)` where `T` is an in-scope GENERIC PARAM
+    /// and the method is a registered extension (UFCS trait) method. A C++
+    /// type param can't host a static trait call — `Q::equivalent(key, ...)`
+    /// with Q=int is ill-formed ("type 'int' cannot be used prior to '::'"),
+    /// and buried inside a lambda body it surfaces as a bare substitution
+    /// failure on the enclosing candidate (indexmap's `equivalent` helper,
+    /// 18 errors). Rust's trait-static form makes the first argument the
+    /// receiver, so lower it exactly like `a0.trait_method(rest...)` through
+    /// the extension dispatcher.
+    pub(super) fn try_emit_type_param_trait_static_call(
+        &self,
+        call: &syn::ExprCall,
+    ) -> Option<String> {
+        let syn::Expr::Path(path_expr) = self.peel_paren_group_expr(call.func.as_ref()) else {
+            return None;
+        };
+        if path_expr.qself.is_some() {
+            return None;
+        }
+        let segs = &path_expr.path.segments;
+        if segs.len() != 2 || call.args.is_empty() {
+            return None;
+        }
+        let owner = segs[0].ident.to_string();
+        if !matches!(segs[0].arguments, syn::PathArguments::None) {
+            return None;
+        }
+        let method_seg = segs.last()?;
+        let method_name = method_seg.ident.to_string();
+        let owner_is_type_param = self.is_type_param_in_scope(&owner)
+            || self
+                .nested_fn_type_params_stack
+                .iter()
+                .any(|params| params.contains(&owner));
+        if !owner_is_type_param {
+            return None;
+        }
+        if owner == "Self" || !self.extension_method_names.contains(&method_name) {
+            return None;
+        }
+        // Only when the method provably takes `self` is the first argument a
+        // receiver. Associated fns without one (Deserialize::
+        // deserialize_in_place, Error::invalid_value) must stay on the
+        // trait-static routing paths.
+        if !self.trait_method_name_always_has_receiver(&method_name) {
+            return None;
+        }
+        let synthetic_mc = syn::ExprMethodCall {
+            attrs: Vec::new(),
+            receiver: Box::new(call.args[0].clone()),
+            dot_token: Default::default(),
+            method: method_seg.ident.clone(),
+            turbofish: match &method_seg.arguments {
+                syn::PathArguments::AngleBracketed(ab) => Some(ab.clone()),
+                _ => None,
+            },
+            paren_token: Default::default(),
+            args: call.args.iter().skip(1).cloned().collect(),
+        };
+        let extra_args: Vec<String> = call
+            .args
+            .iter()
+            .skip(1)
+            .map(|arg| self.emit_expr_maybe_move(arg))
+            .collect();
+        self.try_emit_extension_method_call(&synthetic_mc, &extra_args, None)
+    }
+
     pub(super) fn try_emit_extension_method_call(
         &self,
         mc: &syn::ExprMethodCall,
@@ -13783,6 +13851,12 @@ impl CodeGen {
         // `slice::from_raw_parts[_mut]` — feed the result's element type to the
         // pointer-arg cast so `span<T>` deduces instead of `span<void>`.
         if let Some(emitted) = self.try_emit_slice_from_raw_parts_call(call, expected_ty) {
+            return emitted;
+        }
+        // `T::trait_method(a0, ...)` on a generic param T: lower through the
+        // extension dispatcher (first arg is the Rust receiver) — a C++ type
+        // param can't host a static trait call for primitive substitutions.
+        if let Some(emitted) = self.try_emit_type_param_trait_static_call(call) {
             return emitted;
         }
         // `<ScalarType>::from(x)` (primitive conversion) → `static_cast<ScalarType>(x)`.

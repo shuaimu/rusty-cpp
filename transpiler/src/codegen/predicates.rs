@@ -3022,6 +3022,35 @@ impl CodeGen {
         }
     }
 
+    /// Every KNOWN `Trait::method` entry for this method name — from
+    /// crate-local trait declarations AND dependency UFCS manifests — says
+    /// the method takes `self`. No known entry, or any receiver-less one,
+    /// returns false (the trait-static call form then stays on the existing
+    /// routing paths rather than treating arg0 as a receiver).
+    pub(super) fn trait_method_name_always_has_receiver(&self, method: &str) -> bool {
+        let suffix = format!("::{}", method);
+        let mut any_known = false;
+        for (key, has_receiver) in self.trait_method_has_receiver.iter() {
+            if key.ends_with(&suffix) {
+                if !*has_receiver {
+                    return false;
+                }
+                any_known = true;
+            }
+        }
+        for manifest in &self.dependency_ufcs_trait_manifests {
+            for (key, has_receiver) in &manifest.trait_method_has_receiver {
+                if key.ends_with(&suffix) {
+                    if !*has_receiver {
+                        return false;
+                    }
+                    any_known = true;
+                }
+            }
+        }
+        any_known
+    }
+
     /// A bare value-binding receiver (local or closure param) whose type the
     /// engine cannot pin to anything member-bearing — no recorded type at
     /// all, or a type headed by an in-scope generic param (`I`,
