@@ -4059,6 +4059,26 @@ impl CodeGen {
                         .map(|s| s.ident.to_string())
                         .collect::<Vec<_>>()
                         .join("::");
+                    // `vec![..]` lowers (via cargo expand) to an
+                    // into_vec/box_assume_init chain over an array literal;
+                    // type the binding `Vec<elem>` so iterator chains over it
+                    // resolve their item type.
+                    if matches!(
+                        joined.as_str(),
+                        "rusty::boxed::into_vec"
+                            | "into_vec"
+                            | "alloc::boxed::into_vec"
+                            | "std::boxed::into_vec"
+                            | "rusty::boxed::box_assume_init_into_vec_unsafe"
+                            | "box_assume_init_into_vec_unsafe"
+                            | "alloc::boxed::box_assume_init_into_vec_unsafe"
+                            | "std::boxed::box_assume_init_into_vec_unsafe"
+                    ) && call.args.len() == 1
+                    {
+                        if let Some(inner) = self.infer_boxed_array_element_type(&call.args[0]) {
+                            return Some(parse_quote!(rusty::Vec<#inner>));
+                        }
+                    }
                     if matches!(
                         joined.as_str(),
                         "de::Error::invalid_type"
@@ -10151,6 +10171,24 @@ impl CodeGen {
             return self.substitute_collection_infer_args_with_item(&filled, &item_ty);
         }
         expected_ty.clone()
+    }
+
+    /// Fill a let annotation's `_` slots (`IndexMap<_, _>`) from the item
+    /// type of a `.collect()` initializer's receiver chain. Returns the
+    /// completed type only when no `_` remains.
+    pub(super) fn try_fill_placeholder_annotation_from_collect_init(
+        &self,
+        annotation: &syn::Type,
+        init: &syn::Expr,
+    ) -> Option<syn::Type> {
+        let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(init) else {
+            return None;
+        };
+        if mc.method != "collect" || !mc.args.is_empty() {
+            return None;
+        }
+        let filled = self.resolve_expected_type_with_iter_hint(annotation, &mc.receiver);
+        (!self.type_contains_infer(&filled)).then_some(filled)
     }
 
     pub(super) fn infer_into_iter_receiver_expected_type_from_call_expected(

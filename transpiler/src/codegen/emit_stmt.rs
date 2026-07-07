@@ -4135,6 +4135,25 @@ impl CodeGen {
                         } else {
                             (*pat_type.ty).clone()
                         };
+                    // `let m: IndexMap<_, _> = iter.collect();` — fill the
+                    // annotation's `_` slots from the collect receiver's item
+                    // type so the binding records a full type (and the
+                    // initializer sees a complete expected type) instead of
+                    // collapsing to `auto`.
+                    let resolved_ty = if self.type_contains_infer(&resolved_ty) {
+                        local
+                            .init
+                            .as_ref()
+                            .and_then(|init| {
+                                self.try_fill_placeholder_annotation_from_collect_init(
+                                    &resolved_ty,
+                                    &init.expr,
+                                )
+                            })
+                            .unwrap_or(resolved_ty)
+                    } else {
+                        resolved_ty
+                    };
                     let has_unresolved_infer = self.type_contains_infer(&resolved_ty);
                     if !has_unresolved_infer {
                         self.update_local_binding_type(name_str.clone(), resolved_ty.clone());
