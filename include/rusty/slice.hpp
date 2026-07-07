@@ -185,6 +185,11 @@ using rebind_from_t =
 template<typename T>
 inline constexpr bool dependent_false_v = false;
 
+template<typename T>
+inline constexpr bool is_std_array_v = false;
+template<typename T, std::size_t N>
+inline constexpr bool is_std_array_v<std::array<T, N>> = true;
+
 #ifndef RUSTY_DETAIL_STD_ARRAY_LIKE_TRAIT_DEFINED
 #define RUSTY_DETAIL_STD_ARRAY_LIKE_TRAIT_DEFINED
 template<typename T>
@@ -1726,6 +1731,15 @@ decltype(auto) map(Range&& range, Func&& func) {
         })
     {
         return std::forward<Range>(range).map(std::forward<Func>(func));
+    } else if constexpr (detail::is_std_array_v<std::remove_cvref_t<Range>>) {
+        // Rust ARRAY::map ([T; N] -> [U; N]) is not Iterator::map — produce
+        // a std::array of the mapped elements (moving each source element).
+        using Arr = std::remove_cvref_t<Range>;
+        using Elem = decltype(func(std::declval<typename Arr::value_type>()));
+        return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return std::array<Elem, std::tuple_size_v<Arr>>{
+                func(std::move(std::get<Is>(range)))...};
+        }(std::make_index_sequence<std::tuple_size_v<Arr>>{});
     } else
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         return detail::make_map_next_iter(

@@ -21335,6 +21335,15 @@ impl CodeGen {
         if self.should_move_reference_binding_for_expected_value(expr, expected_ty) {
             return format!("std::move({})", inner);
         }
+        // A REFERENCE-typed expected slot (the payload of `Option<&mut V>`,
+        // a `&T` param) receives the place itself — moving it decays the
+        // reference to a value (`kv.1` mapped into an `Option<V&>`
+        // annotation produced Option<V>).
+        let expected_is_reference = expected_ty
+            .is_some_and(|ty| matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_)));
+        if expected_is_reference {
+            return inner;
+        }
         if self.should_insert_move(expr)
             || self.should_insert_move_for_deref_expected_value(expr, expected_ty)
         {
