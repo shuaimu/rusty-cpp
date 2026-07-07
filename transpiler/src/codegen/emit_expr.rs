@@ -7039,6 +7039,25 @@ impl CodeGen {
                     })
             });
             *self.pending_map_closure_input_type.borrow_mut() = input_ty;
+            // RETURN-side: the map call's own expected Option/Result payload
+            // is the closure's return. Threaded only for REFERENCE payloads
+            // (`Option<&mut V>`) — an unannotated lambda's deduced return
+            // decays V& to V, so the annotation must be forced; value
+            // payloads keep the pre-existing deduction behavior. Tail-return
+            // map calls carry no arg-expected; fall back to the ambient
+            // return-type hint (the enclosing closure's annotation).
+            let return_payload = expected_ty
+                .or_else(|| self.current_return_type_hint())
+                .and_then(|expected| {
+                    self.expected_option_type_arg(Some(expected))
+                        .or_else(|| self.expected_result_type_arg(Some(expected), 0))
+                        .cloned()
+                });
+            *self.pending_map_closure_return_type.borrow_mut() = return_payload.filter(|ty| {
+                matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
+                    && !self.type_contains_infer(ty)
+                    && !self.type_contains_unresolved_placeholder_like(ty)
+            });
         }
         if matches!(method_name.as_str(), "eq" | "ne")
             && mc.args.len() == 1
@@ -20760,6 +20779,17 @@ impl CodeGen {
             self.pending_map_closure_input_type.borrow_mut().take();
         *inner.pending_closure_param_types.borrow_mut() =
             self.pending_closure_param_types.borrow_mut().take();
+        // A REFERENCE map-payload return (Option<&mut V>) forces
+        // `-> decltype(auto)` on the lambda — plain deduction decays the
+        // reference, and the concrete payload type may not be spellable in
+        // this scope (in-scope type params). Only fires when the closure has
+        // no explicit Rust annotation.
+        let force_decltype_auto_return = self
+            .pending_map_closure_return_type
+            .borrow_mut()
+            .take()
+            .is_some()
+            && matches!(closure.output, syn::ReturnType::Default);
         inner.bind_closure_params_for_emission(closure);
         if !untyped_param_scope.is_empty() {
             inner.push_untyped_closure_param_scope(untyped_param_scope);
@@ -20800,7 +20830,9 @@ impl CodeGen {
             }
             syn::ReturnType::Default => None,
         });
-        let lambda_return_annotation = match &resolved_closure_output {
+        let lambda_return_annotation = if force_decltype_auto_return {
+            " -> decltype(auto)".to_string()
+        } else { match &resolved_closure_output {
             syn::ReturnType::Type(_, ty) => {
                 if suppress_explicit_return_annotation {
                     String::new()
@@ -20857,7 +20889,7 @@ impl CodeGen {
                 })
                 .map(|mapped| format!(" -> {}", mapped))
                 .unwrap_or_default(),
-        };
+        } };
         // A `-> !` (never) closure maps to `-> [[noreturn]] void`, but the
         // attribute is ill-formed in a lambda trailing-return-type. Strip it —
         // the diverging body still deduces `void`. (It stays valid on real

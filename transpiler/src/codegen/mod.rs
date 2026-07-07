@@ -1180,6 +1180,11 @@ pub struct CodeGen {
     /// closure arg) — consumed by bind_closure_params_for_emission so the
     /// body sees typed bindings (the sort/slice routings gate on them).
     pub(crate) pending_closure_param_types: std::cell::RefCell<Option<Vec<syn::Type>>>,
+    /// Expected RETURN type for the `.map(closure)` closure about to emit,
+    /// from the map call's own expected Option/Result payload. Only set for
+    /// REFERENCE payloads (`Option<&mut V>`): an unannotated lambda's
+    /// deduced return decays V& to V, so the annotation must be forced.
+    pub(crate) pending_map_closure_return_type: std::cell::RefCell<Option<syn::Type>>,
     /// Scoped raw-C++ element overrides for empty collection locals whose element
     /// type is NOT nameable as a `syn::Type` — because it is the item type of an
     /// `auto`-typed iterator chain (e.g. `let v = Vec::new(); v.extend(it.take(n))`
@@ -1892,6 +1897,7 @@ impl CodeGen {
             collection_ctor_usage_type_hints: Vec::new(),
             pending_map_closure_input_type: std::cell::RefCell::new(None),
             pending_closure_param_types: std::cell::RefCell::new(None),
+            pending_map_closure_return_type: std::cell::RefCell::new(None),
             collection_decltype_element_overrides: Vec::new(),
             assert_equal_sibling_item: std::cell::RefCell::new(None),
             as_ptr_expected_element: std::cell::RefCell::new(None),
