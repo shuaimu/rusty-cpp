@@ -2302,7 +2302,13 @@ inline MemchrIter memchr_iter(uint8_t needle, std::span<const uint8_t> haystack)
 template<typename Container, typename Mid>
 requires (!std::is_same_v<std::remove_cvref_t<Container>, std::string_view>)
 auto split_at(Container& container, Mid mid) {
-    return split_at(slice_full(container), std::forward<Mid>(mid));
+    // A container spelling its own split_at (port map/set Slice types) wins
+    // over the generic span split.
+    if constexpr (requires { container.split_at(static_cast<size_t>(mid)); }) {
+        return container.split_at(static_cast<size_t>(mid));
+    } else {
+        return split_at(slice_full(container), std::forward<Mid>(mid));
+    }
 }
 
 // Clone elements from one slice into another.

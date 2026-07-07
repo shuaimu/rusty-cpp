@@ -8560,14 +8560,22 @@ impl CodeGen {
                 };
                 return format!("rusty::split_at({}, {})", receiver, args[0]);
             }
-            if self.should_lower_slice_deref_method_call(&mc.receiver) {
+            let slice_shaped = self.should_lower_slice_deref_method_call(&mc.receiver);
+            if slice_shaped
+                || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver)
+            {
                 let raw_receiver = self.emit_expr_to_string(&mc.receiver);
                 let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
                     format!("({})", raw_receiver)
                 } else {
                     raw_receiver
                 };
-                let split_receiver = if self.expr_lowers_to_slice_or_span_view(&mc.receiver) {
+                // Known slice-shaped owners view through as_slice; an
+                // unknown receiver passes through raw so the member-prefer
+                // container overload can dispatch an inherent split_at.
+                let split_receiver = if !slice_shaped
+                    || self.expr_lowers_to_slice_or_span_view(&mc.receiver)
+                {
                     receiver
                 } else {
                     format!("rusty::as_slice({})", receiver)
@@ -19653,11 +19661,14 @@ impl CodeGen {
             // (which member-prefer, so a mistyped receiver that owns the
             // member still dispatches to it).
             "sort_unstable" | "sort_unstable_by" | "sort_unstable_by_key" | "sort" | "sort_by"
-            | "sort_by_key"
+            | "sort_by_key" | "sort_by_cached_key" | "reverse"
                 if self.should_lower_slice_deref_method_call(&mc.receiver)
                     || self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver) =>
             {
-                if matches!(mc.method.to_string().as_str(), "sort_unstable" | "sort") {
+                if matches!(
+                    mc.method.to_string().as_str(),
+                    "sort_unstable" | "sort" | "reverse"
+                ) {
                     0
                 } else {
                     1
