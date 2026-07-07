@@ -162,13 +162,57 @@ pub fn check_parsed_function_for_pointers(
             }
         }
 
-        if let Some(error) = check_parsed_statement_for_pointers_with_return_type(
-            stmt,
-            in_unsafe_scope,
-            &safe_pointer_vars,
-            Some(&function.return_type),
-        ) {
-            errors.push(format!("In function '{}': {}", function.name, error));
+        match stmt {
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+                location,
+            } if !in_unsafe_scope => {
+                if let Some(op) = contains_pointer_operation(condition, &safe_pointer_vars) {
+                    errors.push(format!(
+                        "In function '{}': Unsafe pointer {} in condition at line {}: pointer operations require unsafe context",
+                        function.name, op, location.line
+                    ));
+                }
+
+                for error in check_statements_for_pointers_with_unsafe_tracking(
+                    then_branch,
+                    0,
+                    &safe_pointer_vars,
+                ) {
+                    errors.push(format!("In function '{}': {}", function.name, error));
+                }
+
+                if let Some(else_stmts) = else_branch {
+                    for error in check_statements_for_pointers_with_unsafe_tracking(
+                        else_stmts,
+                        0,
+                        &safe_pointer_vars,
+                    ) {
+                        errors.push(format!("In function '{}': {}", function.name, error));
+                    }
+                }
+            }
+            Statement::Block(statements) if !in_unsafe_scope => {
+                for error in check_statements_for_pointers_with_unsafe_tracking(
+                    statements,
+                    0,
+                    &safe_pointer_vars,
+                ) {
+                    errors.push(format!("In function '{}': {}", function.name, error));
+                }
+            }
+            _ => {
+                if let Some(error) = check_parsed_statement_for_pointers_with_return_type(
+                    stmt,
+                    in_unsafe_scope,
+                    &safe_pointer_vars,
+                    Some(&function.return_type),
+                ) {
+                    errors.push(format!("In function '{}': {}", function.name, error));
+                }
+            }
         }
     }
 
@@ -471,10 +515,48 @@ fn check_statements_for_pointers_with_unsafe_tracking(
 
         let in_unsafe_scope = unsafe_depth > 0;
 
-        if let Some(error) =
-            check_parsed_statement_for_pointers(stmt, in_unsafe_scope, safe_pointer_vars)
-        {
-            errors.push(error);
+        match stmt {
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+                location,
+            } if !in_unsafe_scope => {
+                if let Some(op) = contains_pointer_operation(condition, safe_pointer_vars) {
+                    errors.push(format!(
+                        "Unsafe pointer {} in condition at line {}: pointer operations require unsafe context",
+                        op, location.line
+                    ));
+                }
+
+                errors.extend(check_statements_for_pointers_with_unsafe_tracking(
+                    then_branch,
+                    0,
+                    safe_pointer_vars,
+                ));
+
+                if let Some(else_stmts) = else_branch {
+                    errors.extend(check_statements_for_pointers_with_unsafe_tracking(
+                        else_stmts,
+                        0,
+                        safe_pointer_vars,
+                    ));
+                }
+            }
+            Statement::Block(statements) if !in_unsafe_scope => {
+                errors.extend(check_statements_for_pointers_with_unsafe_tracking(
+                    statements,
+                    0,
+                    safe_pointer_vars,
+                ));
+            }
+            _ => {
+                if let Some(error) =
+                    check_parsed_statement_for_pointers(stmt, in_unsafe_scope, safe_pointer_vars)
+                {
+                    errors.push(error);
+                }
+            }
         }
     }
 

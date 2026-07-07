@@ -216,7 +216,7 @@ fn check_for_unsafe_annotation(entity: &Entity) -> bool {
     for line in preceding.iter().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            return false;
+            continue;
         }
         let is_line_comment = trimmed.starts_with("//");
         let is_block_comment_single_line = trimmed.contains("/*") && trimmed.contains("*/");
@@ -2173,14 +2173,35 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 statements.push(Statement::ExitScope);
             }
             EntityKind::ForStmt | EntityKind::WhileStmt | EntityKind::DoStmt => {
-                // Loop detected - add loop markers
                 statements.push(Statement::EnterLoop);
-                // Extract loop body (usually a compound statement)
-                for loop_child in child.get_children() {
-                    if loop_child.get_kind() == EntityKind::CompoundStmt {
-                        statements.extend(extract_compound_statement(&loop_child));
+
+                let loop_children: Vec<Entity> = child.get_children().into_iter().collect();
+
+                // Libclang exposes loop control pieces as siblings of the loop body:
+                //   for:   init, condition, increment, body
+                //   while: condition, body
+                //   do:    body, condition
+                // Only the body should become loop contents; the other children are
+                // control expressions and declarations, not statements executed inside
+                // the loop block.
+                let body = if child.get_kind() == EntityKind::DoStmt {
+                    loop_children.first()
+                } else {
+                    loop_children.last()
+                };
+
+                if let Some(loop_body) = body {
+                    // Braced loop bodies arrive as CompoundStmt. Unbraced loop bodies
+                    // arrive as the concrete single statement cursor, such as
+                    // BinaryOperator for `x = y`, UnaryOperator for `++i`, CallExpr
+                    // for `f()`, or DeclStmt for a declaration.
+                    if loop_body.get_kind() == EntityKind::CompoundStmt {
+                        statements.extend(extract_compound_statement(loop_body));
+                    } else {
+                        statements.extend(extract_single_statement(loop_body));
                     }
                 }
+
                 statements.push(Statement::ExitLoop);
             }
             EntityKind::IfStmt => {
@@ -2191,16 +2212,15 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 let mut else_branch = None;
 
                 // Parse the if statement structure
+                let mut condition_seen = false;
                 let mut i = 0;
                 while i < children.len() {
                     let child_kind = children[i].get_kind();
 
-                    if child_kind == EntityKind::UnexposedExpr
-                        || child_kind == EntityKind::BinaryOperator
-                    {
-                        // This is likely the condition
+                    if !condition_seen && child_kind != EntityKind::CompoundStmt {
                         if let Some(expr) = extract_expression(&children[i]) {
                             condition = expr;
+                            condition_seen = true;
                         }
                     } else if child_kind == EntityKind::CompoundStmt {
                         // This is a branch
@@ -2208,6 +2228,15 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                             then_branch = extract_compound_statement(&children[i]);
                         } else {
                             else_branch = Some(extract_compound_statement(&children[i]));
+                        }
+                    } else {
+                        let branch = extract_single_statement(&children[i]);
+                        if !branch.is_empty() {
+                            if then_branch.is_empty() {
+                                then_branch = branch;
+                            } else {
+                                else_branch = Some(branch);
+                            }
                         }
                     }
                     i += 1;
@@ -2326,6 +2355,96 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
     }
 
     statements
+}
+
+// Extract one statement cursor used where C++ allows an unbraced substatement,
+// such as `if (x) f();` or `while (x) ++i;`. This helper intentionally takes
+// the already-selected branch/body cursor; callers must not pass a whole IfStmt
+// or ForStmt because those cursors also contain condition/control children.
+fn extract_single_statement(entity: &Entity) -> Vec<Statement> {
+    let location = extract_location(entity);
+
+    match entity.get_kind() {
+        EntityKind::CompoundStmt => extract_compound_statement(entity),
+        EntityKind::DeclStmt => {
+            let mut statements = Vec::new();
+
+            for decl_child in entity.get_children() {
+                if decl_child.get_kind() == EntityKind::VarDecl {
+                    let var = extract_variable(&decl_child);
+                    statements.push(Statement::VariableDecl(var.clone()));
+
+                    for init_child in decl_child.get_children() {
+                        if let Some(expr) = extract_expression(&init_child) {
+                            if var.is_reference {
+                                statements.push(Statement::ReferenceBinding {
+                                    name: var.name.clone(),
+                                    target: expr,
+                                    is_mutable: !var.is_const,
+                                    location: extract_location(&decl_child),
+                                });
+                            } else {
+                                statements.push(Statement::Assignment {
+                                    lhs: Expression::Variable(var.name.clone()),
+                                    rhs: expr,
+                                    location: extract_location(&decl_child),
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            statements
+        }
+        EntityKind::BinaryOperator => {
+            let children: Vec<Entity> = entity.get_children().into_iter().collect();
+            if children.len() == 2 {
+                if let (Some(lhs), Some(rhs)) = (
+                    extract_expression(&children[0]),
+                    extract_expression(&children[1]),
+                ) {
+                    return vec![Statement::Assignment { lhs, rhs, location }];
+                }
+            }
+            Vec::new()
+        }
+        EntityKind::CallExpr => {
+            if let Some(expr) = extract_expression(entity) {
+                match expr {
+                    Expression::FunctionCall { name, args } => {
+                        vec![Statement::FunctionCall {
+                            name,
+                            args,
+                            location,
+                        }]
+                    }
+                    _ => vec![Statement::ExpressionStatement { expr, location }],
+                }
+            } else {
+                Vec::new()
+            }
+        }
+        EntityKind::ReturnStmt => {
+            let return_expr = entity
+                .get_children()
+                .into_iter()
+                .find_map(|c| extract_expression(&c));
+            vec![Statement::Return(return_expr)]
+        }
+        EntityKind::UnexposedExpr
+        | EntityKind::UnaryOperator
+        | EntityKind::NewExpr
+        | EntityKind::DeleteExpr => {
+            if let Some(expr) = extract_expression(entity) {
+                vec![Statement::ExpressionStatement { expr, location }]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Extract pack expansion information from a PackExpansionExpr AST node
