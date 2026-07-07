@@ -9971,8 +9971,10 @@ impl CodeGen {
                 owner_cpp, escaped_method
             ));
         }
+        // The mapped payload may arrive as a POINTER (iterator Options carry
+        // `Bucket*` payloads) — probe-deref before the member call.
         Some(format!(
-            "[](auto&& _v) -> decltype(auto) {{ return std::forward<decltype(_v)>(_v).{}(); }}",
+            "[](auto&& _v) -> decltype(auto) {{ return rusty::detail::deref_if_pointer_like(std::forward<decltype(_v)>(_v)).{}(); }}",
             escaped_method
         ))
     }
