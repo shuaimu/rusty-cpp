@@ -13241,9 +13241,18 @@ impl CodeGen {
             }
             None => return None,
         };
-        if self.type_contains_infer(&target_ty) {
-            return None;
-        }
+        let target_ty = if self.type_contains_infer(&target_ty) {
+            // `let set2: IndexSet<_> = [1, 2, 3, 4].into();` — fill the
+            // infer from the receiver's element/item type (set-shaped
+            // targets take the item whole, map-shaped fill positionally).
+            let filled = self.resolve_expected_type_with_iter_hint(&target_ty, &mc.receiver);
+            if self.type_contains_infer(&filled) {
+                return None;
+            }
+            filled
+        } else {
+            target_ty
+        };
         let target_cpp = self.map_type(&target_ty);
         if target_cpp == "auto"
             || target_cpp.contains("/* TODO")
