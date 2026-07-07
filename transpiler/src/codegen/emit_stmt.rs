@@ -2847,6 +2847,39 @@ impl CodeGen {
                         if receiver_is_arc_get_mut {
                             return false;
                         }
+                        // The Arc carve-out, generalized: any `*_mut` method
+                        // whose DECLARED return is Option/Result returns the
+                        // wrapper BY VALUE (Slice::get_index_mut ->
+                        // Option<&mut V>) — reference-binding it can't bind
+                        // the temporary.
+                        let declared_returns_value_wrapper = self
+                            .infer_simple_expr_type(&mc.receiver)
+                            .and_then(|recv_ty| {
+                                let peeled = self.peel_reference_paren_group_type(&recv_ty);
+                                let syn::Type::Path(tp) = peeled else {
+                                    return None;
+                                };
+                                let owner = tp.path.segments.last()?.ident.to_string();
+                                self.lookup_owner_method_return_type_for_template_inference(
+                                    &owner, &method,
+                                )
+                                .cloned()
+                            })
+                            .is_some_and(|ret| {
+                                matches!(
+                                    self.peel_reference_paren_group_type(&ret),
+                                    syn::Type::Path(tp)
+                                        if tp.path.segments.last().is_some_and(|seg| {
+                                            matches!(
+                                                seg.ident.to_string().as_str(),
+                                                "Option" | "Result"
+                                            )
+                                        })
+                                )
+                            });
+                        if declared_returns_value_wrapper {
+                            return false;
+                        }
                         return matches!(
                             method.as_str(),
                             "get_mut"
@@ -2994,10 +3027,40 @@ impl CodeGen {
                                 self.peel_paren_group_expr(&mc.args[0]),
                                 syn::Expr::Range(_)
                             );
+                        // Same generalization as the reference-bind
+                        // classifier: a `*_mut`/`*_ref` method whose DECLARED
+                        // return is Option/Result yields the wrapper BY VALUE
+                        // (Slice::get_index_mut -> Option<&mut V>).
+                        let declared_returns_value_wrapper = self
+                            .infer_simple_expr_type(&mc.receiver)
+                            .and_then(|recv_ty| {
+                                let peeled = self.peel_reference_paren_group_type(&recv_ty);
+                                let syn::Type::Path(tp) = peeled else {
+                                    return None;
+                                };
+                                let owner = tp.path.segments.last()?.ident.to_string();
+                                self.lookup_owner_method_return_type_for_template_inference(
+                                    &owner, &method,
+                                )
+                                .cloned()
+                            })
+                            .is_some_and(|ret| {
+                                matches!(
+                                    self.peel_reference_paren_group_type(&ret),
+                                    syn::Type::Path(tp)
+                                        if tp.path.segments.last().is_some_and(|seg| {
+                                            matches!(
+                                                seg.ident.to_string().as_str(),
+                                                "Option" | "Result"
+                                            )
+                                        })
+                                )
+                            });
                         if !receiver_is_refcell_borrow
                             && !receiver_is_arc_get_mut
                             && !receiver_is_value_returning_once
                             && !receiver_is_range_get_unchecked
+                            && !declared_returns_value_wrapper
                             && (matches!(
                                 method.as_str(),
                                 "get_or_init"
