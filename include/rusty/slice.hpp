@@ -647,6 +647,60 @@ auto make_cloned_next_iter(Iter&& iter) {
         std::forward<Iter>(iter));
 }
 
+// Rust `Iterator::cycle()` over ANY option-like-next iterator: repeats the
+// base sequence by restarting from a saved copy of the start state. An
+// empty base stays exhausted (Rust: cycle() of an empty iterator keeps
+// returning None rather than spinning).
+template<typename Iter>
+class cycle_next_iter {
+public:
+    static_assert(
+        has_option_like_next_v<Iter>,
+        "rusty::cycle requires next() to return an Option/optional-like value"
+    );
+    static_assert(
+        std::is_copy_constructible_v<Iter>,
+        "rusty::cycle requires a copyable base iterator (to restart it)"
+    );
+
+    explicit cycle_next_iter(Iter iter) : start_(iter), iter_(std::move(iter)) {}
+
+    cycle_next_iter into_iter() {
+        return std::move(*this);
+    }
+
+    auto next() {
+        using item_type = next_item_t<Iter>;
+        using next_result = rusty::Option<item_type>;
+
+        if (exhausted_) {
+            return next_result(rusty::None);
+        }
+        auto item = iter_.next();
+        if (option_like_has_value(item)) {
+            return next_result(option_like_take_value(item));
+        }
+        iter_ = start_;
+        auto again = iter_.next();
+        if (!option_like_has_value(again)) {
+            exhausted_ = true;
+            return next_result(rusty::None);
+        }
+        return next_result(option_like_take_value(again));
+    }
+
+private:
+    Iter start_;
+    Iter iter_;
+    bool exhausted_ = false;
+};
+
+template<typename Iter>
+auto make_cycle_next_iter(Iter&& iter) {
+    return cycle_next_iter<std::remove_reference_t<Iter>>(
+        std::forward<Iter>(iter));
+}
+
 template<typename Iter>
 class take_next_iter;
 
@@ -1522,6 +1576,15 @@ template<typename Range>
 decltype(auto) for_in(Range&& range) {
     if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
         return detail::make_next_iter_range(std::forward<Range>(range));
+    } else if constexpr (
+        std::is_const_v<std::remove_reference_t<Range>>
+        && detail::has_option_like_next_v<std::remove_cvref_t<Range>>
+        && std::is_copy_constructible_v<std::remove_cvref_t<Range>>) {
+        // A CONST binding of a next-protocol adapter (emitted
+        // `const auto iter = …` later consumed by iteration): Rust iteration
+        // takes the iterator by value, so iterate a copy — next() can't
+        // advance through const.
+        return detail::make_next_iter_range(std::remove_cvref_t<Range>(range));
     } else if constexpr (requires { std::forward<Range>(range).next(); }) {
         static_assert(
             detail::dependent_false_v<std::remove_reference_t<Range>>,
@@ -1737,6 +1800,27 @@ decltype(auto) cloned(Range&& range) {
         return cloned(std::forward<Range>(range).into_iter());
     } else {
         return cloned(iter(std::forward<Range>(range)));
+    }
+}
+
+// Rust `Iterator::cycle()`. The member spelling wins when the receiver
+// provides one; the generic wrapper serves iterators that only expose
+// option-like next().
+template<typename Range>
+decltype(auto) cycle(Range&& range) {
+    if constexpr (requires { std::forward<Range>(range).cycle(); }) {
+        return std::forward<Range>(range).cycle();
+    } else if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return detail::make_cycle_next_iter(std::forward<Range>(range));
+    } else if constexpr (requires { std::forward<Range>(range).next(); }) {
+        static_assert(
+            detail::dependent_false_v<std::remove_reference_t<Range>>,
+            "rusty::cycle requires next() to return an Option/optional-like value"
+        );
+    } else if constexpr (requires { std::forward<Range>(range).into_iter(); }) {
+        return cycle(std::forward<Range>(range).into_iter());
+    } else {
+        return cycle(iter(std::forward<Range>(range)));
     }
 }
 

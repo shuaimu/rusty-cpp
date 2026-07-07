@@ -19287,17 +19287,26 @@ impl CodeGen {
     /// prefers the member spelling, so their exact adapter types are kept),
     /// but TRANSPILED iterator types — btree_port's set::Iter, map::Keys,
     /// set::Union/... — only expose option-like `next()`: their Rust
-    /// `copied`/`cloned` are Iterator DEFAULT methods, not inherent ones, so
-    /// a member call has nothing to resolve against cross-module.
+    /// `copied`/`cloned`/`cycle` are Iterator DEFAULT methods, not inherent
+    /// ones, so a member call has nothing to resolve against cross-module.
+    /// Unknown-typed receivers (closure params, generic-param locals) route
+    /// too — the rusty:: free fns member-prefer, so a receiver that does own
+    /// the member still dispatches to it.
     pub(super) fn try_emit_iter_copied_cloned_call(
         &self,
         mc: &syn::ExprMethodCall,
     ) -> Option<String> {
-        if (mc.method != "copied" && mc.method != "cloned") || !mc.args.is_empty() {
+        if !matches!(mc.method.to_string().as_str(), "copied" | "cloned" | "cycle")
+            || !mc.args.is_empty()
+        {
+            return None;
+        }
+        if self.receiver_is_option_or_result_like_expr(&mc.receiver) {
             return None;
         }
         if !self.is_iterator_like_receiver_expr(&mc.receiver)
             && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+            && !self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver)
         {
             return None;
         }
@@ -19545,6 +19554,7 @@ impl CodeGen {
         if !receiver_is_self_iterator
             && !self.is_iterator_like_receiver_expr(&mc.receiver)
             && !self.is_probably_iterator_receiver_expr(&mc.receiver)
+            && !self.receiver_type_unresolved_for_iter_default_routing(&mc.receiver)
         {
             return None;
         }

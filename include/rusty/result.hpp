@@ -421,6 +421,15 @@ public:
         return ok_ref();
     }
 
+    // Rust `unwrap_unchecked` (caller guarantees Ok). Checked here anyway:
+    // the check costs nothing next to Rust's UB, and keeps parity honest.
+    T unwrap_unchecked() { return unwrap(); }
+
+    auto unwrap_unchecked() const
+        -> std::conditional_t<std::is_reference_v<T>, T, const std::remove_reference_t<T>&> {
+        return unwrap();
+    }
+
     template<typename Msg>
     T expect(Msg&& msg) {
         if (!is_ok_value) {
@@ -736,6 +745,9 @@ public:
             throw std::runtime_error("Called unwrap on an Err value");
         }
     }
+
+    // Rust `unwrap_unchecked` (caller guarantees Ok); checked anyway.
+    void unwrap_unchecked() const { unwrap(); }
 
     template<typename Msg>
     void expect(Msg&& msg) const {

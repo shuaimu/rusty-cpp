@@ -3011,6 +3011,49 @@ impl CodeGen {
         }
     }
 
+    /// A bare value-binding receiver (local or closure param) whose type the
+    /// engine cannot pin to anything member-bearing — no recorded type at
+    /// all, or a type headed by an in-scope generic param (`I`,
+    /// `I::IntoIter`). Iterator-DEFAULT-method routing (copied/cloned/
+    /// cycle/for_each) accepts these on top of the iterator-shaped
+    /// predicates: the rusty:: free fns prefer a same-named member when the
+    /// receiver turns out to own one, so routing through them can only widen
+    /// dispatch, never change a resolvable member call.
+    pub(super) fn receiver_type_unresolved_for_iter_default_routing(
+        &self,
+        expr: &syn::Expr,
+    ) -> bool {
+        let expr = self.peel_paren_group_expr(expr);
+        let syn::Expr::Path(path) = expr else {
+            return false;
+        };
+        if path.qself.is_some() || path.path.segments.len() != 1 {
+            return false;
+        }
+        let name = path.path.segments[0].ident.to_string();
+        if name == "self"
+            || name == "Self"
+            || self.is_local_type_name_in_scope(&name)
+            || self.is_local_function_name_in_scope(&name)
+        {
+            return false;
+        }
+        match self.infer_simple_expr_type(expr) {
+            None => true,
+            Some(ty) => {
+                let ty = self.peel_reference_paren_group_type(&ty);
+                match ty {
+                    syn::Type::Path(tp) if tp.qself.is_none() => tp
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|seg| self.is_type_param_in_scope(&seg.ident.to_string())),
+                    _ => false,
+                }
+            }
+        }
+    }
+
     pub(super) fn should_bridge_into_iter_receiver_to_iter(&self, receiver: &syn::Expr) -> bool {
         if self.receiver_is_fixed_array_like_expr(receiver) {
             return true;
