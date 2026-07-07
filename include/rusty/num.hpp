@@ -459,6 +459,15 @@ constexpr std::uint32_t trailing_zeros(const num::NonZero<T>& value) {
     return trailing_zeros(value.get());
 }
 
+// Rust's integer `div_ceil` (ceiling division). Overflow-safe form:
+// quotient plus one when a remainder exists.
+template<typename T, typename U>
+requires std::is_integral_v<T>
+constexpr T div_ceil(T value, U rhs) {
+    const T d = static_cast<T>(rhs);
+    return static_cast<T>(value / d + ((value % d) != T{0} ? T{1} : T{0}));
+}
+
 template<typename T>
 requires std::is_integral_v<T>
 constexpr std::uint32_t count_ones(T value) {

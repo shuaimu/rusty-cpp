@@ -9045,6 +9045,20 @@ impl CodeGen {
             };
             return format!("rusty::{}({})", method_name, receiver);
         }
+        // One-arg integer intrinsics (`usize::div_ceil`): same routing shape.
+        if method_name == "div_ceil"
+            && args.len() == 1
+            && !self.is_expr_raw_pointer_like(&mc.receiver)
+            && self.should_lower_integer_intrinsic_method_call(&mc.receiver)
+        {
+            let raw_receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!("rusty::div_ceil({}, {})", receiver, args[0]);
+        }
         if matches!(
             method_name.as_str(),
             "to_le" | "to_be" | "from_le" | "from_be"
