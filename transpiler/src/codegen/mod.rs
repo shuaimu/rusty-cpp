@@ -44274,6 +44274,13 @@ template<typename Iter>\n\
 auto size_hint(const Iter& iter) -> decltype(iter.size_hint()) {\n\
     return iter.size_hint();\n\
 }\n\
+// Rust's Iterator::size_hint DEFAULT ((0, None)) for adapter types that\n\
+// do not override it (rusty map/filter next-iter wrappers).\n\
+template<typename Iter>\n\
+requires (!requires(const Iter& it) { it.size_hint(); })\n\
+std::tuple<size_t, rusty::Option<size_t>> size_hint(const Iter&) {\n\
+    return std::make_tuple(static_cast<size_t>(0), rusty::Option<size_t>(rusty::None));\n\
+}\n\
 template<typename Value>\n\
 decltype(auto) left(Value&& value) {\n\
     return std::forward<Value>(value).left();\n\
