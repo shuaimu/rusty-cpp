@@ -14379,6 +14379,24 @@ fn test_leaf4292_dynamic_range_index_lowers_to_runtime_helper() {
 }
 
 #[test]
+fn test_map_reference_type_args_lower_to_pointers() {
+    // C++ class templates over `int&` can't take prvalue keys; stored-ref
+    // value lowering is pointers already, so map/set instantiation args
+    // spell as pointers.
+    let out = transpile_str(
+        "use std::collections::HashMap;\n\
+         fn f() {\n\
+             let mut m: HashMap<&'static mut i32, &'static str> = HashMap::new();\n\
+             let _ = &m;\n\
+         }",
+    );
+    assert!(
+        out.contains("int32_t*") && !out.contains("int32_t&,"),
+        "{out}"
+    );
+}
+
+#[test]
 fn test_c_like_enum_default_impl_emits_adl_marker() {
     // enum class can't hold a default_() member; the Default impl emits an
     // ADL marker and type-param call sites route through the dispatcher.

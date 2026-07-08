@@ -1631,6 +1631,51 @@ impl CodeGen {
                 });
             return self.map_type(&syn::Type::Path(rewritten));
         }
+        // Map/set instantiations with REFERENCE type args (`IndexMap<&mut i32,
+        // &str>`): C++ class templates over `int&` can't take prvalue keys and
+        // the stored-reference value lowering is pointers already
+        // (addr_of_temp), so spell those args as pointers. Only references
+        // that actually lower to C++ references qualify — `&str`/`&[T]` lower
+        // to value views (string_view/span) and must keep their spelling; and
+        // `Option<&T>` deliberately selects the Option<T&> specialization.
+        if let syn::Type::Path(tp) = ty
+            && tp.qself.is_none()
+            && let Some(last) = tp.path.segments.last()
+            && matches!(
+                last.ident.to_string().as_str(),
+                "HashMap" | "BTreeMap" | "IndexMap" | "HashSet" | "BTreeSet" | "IndexSet"
+            )
+            && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+            && args.args.iter().any(|a| {
+                matches!(a, syn::GenericArgument::Type(t)
+                    if matches!(self.peel_paren_group_type(t), syn::Type::Reference(_))
+                        && self.map_type(t).trim_end().ends_with('&'))
+            })
+        {
+            let mut rewritten = tp.clone();
+            let last_seg = rewritten.path.segments.last_mut().unwrap();
+            if let syn::PathArguments::AngleBracketed(args) = &mut last_seg.arguments {
+                for arg in args.args.iter_mut() {
+                    if let syn::GenericArgument::Type(t) = arg
+                        && matches!(self.peel_paren_group_type(t), syn::Type::Reference(_))
+                        && self.map_type(t).trim_end().ends_with('&')
+                        && let syn::Type::Reference(r) = self.peel_paren_group_type(t).clone()
+                    {
+                        *t = syn::Type::Ptr(syn::TypePtr {
+                            star_token: Default::default(),
+                            const_token: if r.mutability.is_none() {
+                                Some(Default::default())
+                            } else {
+                                None
+                            },
+                            mutability: r.mutability,
+                            elem: r.elem,
+                        });
+                    }
+                }
+            }
+            return self.map_type(&syn::Type::Path(rewritten));
+        }
         match ty {
             syn::Type::Path(tp) => {
                 if tp.qself.is_none()
