@@ -29650,6 +29650,24 @@ impl CodeGen {
                 _ => None,
             })
             .collect();
+        // Target spelled as exactly one wrapper param (`Target = T`): take the
+        // receiver's positional arg wholesale. A single substitution step —
+        // immune to name collisions between the wrapper's params and the
+        // enclosing fn's generics (a ScopeGuard<T, F> receiver spelled
+        // `ScopeGuard<RawTable<T, A>, F>` inside a fn whose own param is also
+        // named T would otherwise trip the self-reference guard below).
+        if let syn::Type::Path(t) = self.peel_reference_paren_group_type(raw_target)
+            && t.qself.is_none()
+            && t.path.segments.len() == 1
+            && t.path.segments[0].arguments.is_none()
+        {
+            let target_name = t.path.segments[0].ident.to_string();
+            if let Some(pos) = param_names.iter().position(|p| *p == target_name)
+                && let Some(actual) = actual_args.get(pos)
+            {
+                return (*actual).clone();
+            }
+        }
         let mut subst: HashMap<String, syn::Type> = HashMap::new();
         for (name, ty) in param_names.iter().zip(actual_args.iter()) {
             // Skip self-referential bindings (`A -> <type mentioning A>`, e.g.

@@ -14377,6 +14377,27 @@ fn test_leaf4292_dynamic_range_index_lowers_to_runtime_helper() {
 }
 
 #[test]
+fn test_deref_guard_field_access_with_colliding_type_param() {
+    // The guard wrapper's own param T collides with the enclosing fn's T in
+    // the inferred receiver spelling (Guard<Table<T>, F>); the bare-param
+    // Target must still instantiate positionally to Table<T> so the field
+    // routes through the deref.
+    let out = transpile_str(
+        "use std::ops::{Deref, DerefMut};\n\
+         struct Guard<T, F: FnMut(&mut T)> { value: T, dropfn: F }\n\
+         impl<T, F: FnMut(&mut T)> Deref for Guard<T, F> { type Target = T; fn deref(&self) -> &T { &self.value } }\n\
+         impl<T, F: FnMut(&mut T)> DerefMut for Guard<T, F> { fn deref_mut(&mut self) -> &mut T { &mut self.value } }\n\
+         fn guard<T, F: FnMut(&mut T)>(value: T, dropfn: F) -> Guard<T, F> { Guard { value, dropfn } }\n\
+         struct Table<T> { rows: usize, item: T }\n\
+         fn use_it<T>(t: Table<T>) -> usize {\n\
+             let g = guard(t, |x| { let _ = x; });\n\
+             g.rows\n\
+         }",
+    );
+    assert!(out.contains("(*g).rows"), "{out}");
+}
+
+#[test]
 fn test_bound_pair_index_lowers_to_runtime_helper() {
     // Rust's bare-RangeBounds tuple subscript, both value and reference
     // positions (`&slice[range]` from Index<(Bound, Bound)> impl bodies).
