@@ -10195,17 +10195,18 @@ impl CodeGen {
         expected_ty.clone()
     }
 
-    /// A map-shaped collection type's owned iteration item: `(K, V)` from
-    /// the first two type args of HashMap/BTreeMap/IndexMap.
+    /// A collection type's owned iteration item: `(K, V)` from the first
+    /// two type args of map-shaped collections, the first type arg of
+    /// set-shaped ones.
     fn map_shaped_collection_kv_pair_item(&self, ty: &syn::Type) -> Option<syn::Type> {
         let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty) else {
             return None;
         };
         let last = tp.path.segments.last()?;
-        if !matches!(
-            last.ident.to_string().as_str(),
-            "HashMap" | "BTreeMap" | "IndexMap"
-        ) {
+        let name = last.ident.to_string();
+        let is_map_shaped = matches!(name.as_str(), "HashMap" | "BTreeMap" | "IndexMap");
+        let is_set_shaped = matches!(name.as_str(), "HashSet" | "BTreeSet" | "IndexSet");
+        if !is_map_shaped && !is_set_shaped {
             return None;
         }
         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
@@ -10215,6 +10216,10 @@ impl CodeGen {
             syn::GenericArgument::Type(t) => Some(t),
             _ => None,
         });
+        if is_set_shaped {
+            let t = type_args.next()?;
+            return Some(t.clone());
+        }
         let k = type_args.next()?;
         let v = type_args.next()?;
         Some(parse_quote!((#k, #v)))
