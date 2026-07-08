@@ -1511,6 +1511,36 @@ impl CodeGen {
         matches!(normalized, [slice, iter] if slice == "slice" && iter == family)
     }
 
+    /// `type_path_matches_slice_iter_family` plus one use-rename layer:
+    /// `use core::slice::Iter as SliceIter;` makes a single-segment path
+    /// whose import binding resolves back into the slice-iter family.
+    pub(super) fn type_path_resolves_to_slice_iter_family(
+        &self,
+        path: &syn::Path,
+        family: &str,
+    ) -> bool {
+        if Self::type_path_matches_slice_iter_family(path, family) {
+            return true;
+        }
+        if path.segments.len() != 1 {
+            return false;
+        }
+        let name = path.segments[0].ident.to_string();
+        let Some(target) = self
+            .resolve_scope_import_binding_target_for_exact_scope(
+                &self.module_stack.join("::"),
+                &name,
+            )
+            .or_else(|| self.resolve_scope_import_binding_target_for_exact_scope("", &name))
+        else {
+            return false;
+        };
+        let Ok(target_path) = syn::parse_str::<syn::Path>(target.trim_start_matches("::")) else {
+            return false;
+        };
+        Self::type_path_matches_slice_iter_family(&target_path, family)
+    }
+
     pub(super) fn type_is_primitive_str_path(ty: &syn::Type) -> bool {
         let syn::Type::Path(tp) = ty else {
             return false;
@@ -2411,7 +2441,7 @@ impl CodeGen {
 
                         // Rust `slice::Iter<'a, T>` yields immutable references (`&'a T`).
                         // Model that as `Iter<const T>` while keeping `IterMut<'a, T>` as `Iter<T>`.
-                        if Self::type_path_matches_slice_iter_family(&tp.path, "Iter")
+                        if self.type_path_resolves_to_slice_iter_family(&tp.path, "Iter")
                             && let Some(elem_ty) = generic_args.first_mut()
                         {
                             let trimmed = elem_ty.trim_start();
@@ -2454,8 +2484,8 @@ impl CodeGen {
                             // Reuse path_str so single-segment remaps (e.g. IterEither →
                             // iterator::IterEither) are preserved for generic type paths.
                             let mut base = path_str.clone();
-                            if Self::type_path_matches_slice_iter_family(&tp.path, "Iter")
-                                || Self::type_path_matches_slice_iter_family(&tp.path, "IterMut")
+                            if self.type_path_resolves_to_slice_iter_family(&tp.path, "Iter")
+                                || self.type_path_resolves_to_slice_iter_family(&tp.path, "IterMut")
                             {
                                 base = "rusty::slice_iter::Iter".to_string();
                             }

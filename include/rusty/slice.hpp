@@ -58,6 +58,19 @@ public:
     explicit Iter(std::span<T, Extent> span)
         : cur_(span.data()), end_(span.data() + span.size()) {}
 
+    // Iterator const-conversion (Iter<T> -> Iter<const T>), the same
+    // qualification conversion std iterators allow: a Default-constructed
+    // wrapper (`Self { iter: [].iter() }`) builds from a mutable-element
+    // source while the field spells the const iterator.
+    template<typename U>
+        requires(!std::is_same_v<U, T>
+                 && std::is_convertible_v<U (*)[], T (*)[]>)
+    Iter(const Iter<U>& other)
+        : cur_(other.raw_cur()), end_(other.raw_end()) {}
+
+    pointer raw_cur() const { return cur_; }
+    pointer raw_end() const { return end_; }
+
     Iter into_iter() const { return *this; }
     Iter& by_ref() { return *this; }
     const Iter& by_ref() const { return *this; }
