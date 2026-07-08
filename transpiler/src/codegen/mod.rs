@@ -52551,6 +52551,23 @@ fn is_consuming_method_name(method: &str) -> bool {
         //     always `self`-consuming.
         || method.starts_with("forget_")
         || matches!(method, "dormant" | "awaken" | "insert_fit" | "split")
+        // The map entry-API idiom: Entry/OccupiedEntry/IndexedEntry methods
+        // take `self` by value (`let e = map.entry(k); e.or_insert(v)` — the
+        // non-mut binding is still consumed). The same names on collections
+        // (`Vec::swap_remove`) take `&mut self`, whose receivers are
+        // necessarily `mut` bindings already — flagging costs nothing.
+        || matches!(
+            method,
+            "or_insert"
+                | "or_insert_with"
+                | "or_insert_with_key"
+                | "or_default"
+                | "and_modify"
+                | "swap_remove"
+                | "shift_remove"
+                | "swap_remove_entry"
+                | "shift_remove_entry"
+        )
 }
 
 /// Recursively collect assignment targets from a statement.
