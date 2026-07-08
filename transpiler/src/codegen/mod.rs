@@ -20041,6 +20041,30 @@ impl CodeGen {
                             | "operator&=" | "operator|=" | "operator^="
                     )
             })
+            && self.current_struct_fields_are_single_primitive()
+    }
+
+    /// Bitflags wrappers hold exactly one primitive field (`_0: uN`).
+    /// Set-like types with genuine bitwise operators (IndexSet's union `|`,
+    /// intersection `&`, …) hold non-trivial fields and must NOT classify —
+    /// the bitflags const-exception would force their consuming-self methods
+    /// const. Unknown fields (cross-crate wrappers) keep the operator-based
+    /// classification.
+    fn current_struct_fields_are_single_primitive(&self) -> bool {
+        let Some(struct_name) = self.current_struct.as_ref() else {
+            return false;
+        };
+        let scoped_name = self.scoped_type_key(struct_name);
+        for key in [struct_name.as_str(), scoped_name.as_str()] {
+            if let Some(fields) = self.struct_field_order.get(key) {
+                return fields.len() == 1
+                    && fields.iter().all(|f| {
+                        self.lookup_struct_field_type(key, f)
+                            .is_some_and(|ty| self.is_known_integer_like_type(&ty))
+                    });
+            }
+        }
+        true
     }
 
     fn method_is_direct_recursive_bits_forwarder(&self, method: &syn::ImplItemFn) -> bool {
@@ -20383,6 +20407,19 @@ impl CodeGen {
                     }
                 }
                 syn::visit::visit_expr_method_call(self, mc);
+            }
+            fn visit_expr_match(&mut self, m: &'ast syn::ExprMatch) {
+                // `match self { ... }` on a by-value receiver moves self
+                // into the match; arm bindings then own the pieces and may
+                // call consuming/mutating methods (Entry::or_insert's
+                // `Occupied(entry) => entry.into_mut()`). The lowering
+                // aliases `(*this)`, so the method must be non-const.
+                if let syn::Expr::Path(p) = &*m.expr {
+                    if p.path.is_ident("self") {
+                        self.has_move = true;
+                    }
+                }
+                syn::visit::visit_expr_match(self, m);
             }
         }
         let mut v = V { has_move: false, in_ref: 0 };
