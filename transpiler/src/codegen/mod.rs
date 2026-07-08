@@ -30804,8 +30804,11 @@ impl CodeGen {
         let Some(base_struct) = tp.path.segments.last().map(|s| s.ident.to_string()) else {
             return false;
         };
-        // Inherent on the wrapper itself → stays `receiver.method()`.
-        if self.type_name_has_inherent_method(&base_struct, method_name) {
+        // Inherent (or trait-provided) on the wrapper itself → stays
+        // `receiver.method()`.
+        if self.type_name_has_inherent_method(&base_struct, method_name)
+            || self.type_name_has_extension_trait_method(&base_struct, method_name)
+        {
             return false;
         }
         let scoped = self.scoped_type_key(&base_struct);
@@ -30837,6 +30840,47 @@ impl CodeGen {
             target_struct
         };
         self.type_name_has_inherent_method(&target_struct, method_name)
+            || self.type_name_has_extension_trait_method(&target_struct, method_name)
+            // Local Deref targets: the extension registry skips impls on
+            // locally-declared types, so per-type indexing isn't available.
+            // A crate-declared trait method (with receiver) on a local
+            // target dispatches through the member form the emitted class
+            // keeps alongside its UFCS free fn (hashbrown's private
+            // RawTableClone::clone_from_spec on ScopeGuard<RawTable>).
+            || (self.method_name_is_declared_trait_method_with_receiver(method_name)
+                && (self.local_declared_types.contains(&target_struct)
+                    || self
+                        .local_declared_types
+                        .contains(&self.scoped_type_key(&target_struct))))
+    }
+
+    /// Name-level: `method_name` is declared by some crate trait and takes a
+    /// receiver.
+    fn method_name_is_declared_trait_method_with_receiver(&self, method_name: &str) -> bool {
+        self.trait_method_has_receiver.iter().any(|(key, has_recv)| {
+            *has_recv
+                && key
+                    .rsplit_once("::")
+                    .is_some_and(|(_, m)| m == method_name)
+        })
+    }
+
+    /// The UFCS extension registry records trait-impl methods per self type
+    /// (`impl RawTableClone for RawTable` records clone_from_spec under the
+    /// trait, with the impl's self_ty). A deref-coerced call is valid when
+    /// the Target carries the method through a trait impl too — the emitted
+    /// class keeps the member form alongside the UFCS free fn.
+    fn type_name_has_extension_trait_method(&self, type_name: &str, method_name: &str) -> bool {
+        self.extension_trait_impl_methods.values().any(|methods| {
+            methods.iter().any(|m| {
+                m.method.sig.ident == method_name
+                    && matches!(
+                        self.peel_reference_paren_group_type(&m.self_ty),
+                        syn::Type::Path(tp)
+                            if tp.path.segments.last().is_some_and(|s| s.ident == type_name)
+                    )
+            })
+        })
     }
 
     fn method_receiver_uses_wrapper_autoderef_member_access(
