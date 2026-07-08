@@ -95,4 +95,20 @@ constexpr decltype(auto) deref_call(R&& r, F&& f) {
     }
 }
 
+/// Rust `V::default()` for a TYPE-PARAM owner V. Struct emissions carry a
+/// `default_()` static member; a C-like enum-class cannot hold members, so
+/// its Default impl emits an ADL marker next to the enum
+/// (`E __rusty_default(std::type_identity<E>)`, carrying the impl's
+/// variant). Tiers: member → ADL marker → value-init.
+template<typename V>
+constexpr V default_like() {
+    if constexpr (requires { V::default_(); }) {
+        return V::default_();
+    } else if constexpr (requires { __rusty_default(std::type_identity<V>{}); }) {
+        return __rusty_default(std::type_identity<V>{});
+    } else {
+        return V{};
+    }
+}
+
 } // namespace rusty

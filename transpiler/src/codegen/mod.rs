@@ -14758,6 +14758,34 @@ impl CodeGen {
 
 
 
+    /// A C-like enum's `impl Default` cannot become a member (`enum class`
+    /// holds no fns). Emit an ADL marker carrying the impl's variant so the
+    /// runtime `rusty::default_like<V>()` dispatcher finds it for type-param
+    /// owners: `inline constexpr E __rusty_default(std::type_identity<E>)`.
+    fn emit_c_like_enum_default_adl_marker(&mut self, enum_name: &str, method: &syn::ImplItemFn) {
+        if method.sig.ident != "default" || !method.sig.inputs.is_empty() {
+            return;
+        }
+        // Function-local enums would need block-scoped markers; skip.
+        if self.block_depth > 0 {
+            return;
+        }
+        // The derive body is a single tail expression (`Self::Variant`).
+        let [syn::Stmt::Expr(tail, None)] = method.block.stmts.as_slice() else {
+            return;
+        };
+        let prev_struct = self.current_struct.clone();
+        self.current_struct = Some(enum_name.to_string());
+        let body = self.emit_expr_to_string(tail);
+        self.current_struct = prev_struct;
+        let enum_cpp = escape_cpp_keyword(enum_name);
+        self.writeln(&format!(
+            "inline constexpr {en} __rusty_default(std::type_identity<{en}>) {{ return {body}; }}",
+            en = enum_cpp,
+            body = body
+        ));
+    }
+
     fn emit_c_like_enum_fmt_helper(&mut self, enum_name: &str, method: &syn::ImplItemFn) {
         if method.sig.ident != "fmt" {
             return;
@@ -14842,6 +14870,7 @@ impl CodeGen {
             return;
         }
         let Some(syn::FnArg::Receiver(recv)) = method.sig.inputs.first() else {
+            self.emit_c_like_enum_default_adl_marker(enum_name, method);
             return;
         };
 

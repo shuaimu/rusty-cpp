@@ -15903,6 +15903,19 @@ impl CodeGen {
                 );
             }
         }
+        // `V::default()` on a TYPE-PARAM owner: a c-like enum-class V has no
+        // member fns, so route through the runtime dispatcher (member → ADL
+        // marker → value-init tiers). Struct owners keep resolving via the
+        // member tier.
+        if matches!(func_method_tail, "default" | "default_")
+            && func_owner_is_type_param
+            && call.args.is_empty()
+        {
+            return format!(
+                "rusty::default_like<{}>()",
+                escape_cpp_keyword(&func_owner_tail)
+            );
+        }
         // `Sequence::deserialize(de)` where `Sequence` is a concrete local
         // type/alias (`Sequence = Vec<Value>`) is `<Sequence as
         // Deserialize>::deserialize` — route to the UFCS free-fn form. A member

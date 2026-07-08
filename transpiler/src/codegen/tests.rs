@@ -5716,8 +5716,10 @@ fn test_default_keyword_escaped_in_impl_and_call() {
 
 #[test]
 fn test_default_keyword_escaped_in_generic_path_call() {
+    // Type-param owners route through the dispatcher: struct T resolves via
+    // its default_() member tier, c-like enum-class T via the ADL marker.
     let out = transpile_str("fn f<T>() -> T { T::default() }");
-    assert!(out.contains("T::default_()"));
+    assert!(out.contains("rusty::default_like<T>()"), "{out}");
 }
 
 #[test]
@@ -14374,6 +14376,22 @@ fn test_leaf4292_dynamic_range_index_lowers_to_runtime_helper() {
         "{out}"
     );
     assert!(!out.contains("input[span]"), "{out}");
+}
+
+#[test]
+fn test_c_like_enum_default_impl_emits_adl_marker() {
+    // enum class can't hold a default_() member; the Default impl emits an
+    // ADL marker and type-param call sites route through the dispatcher.
+    let out = transpile_str(
+        "enum E { A, B }\n\
+         impl Default for E { fn default() -> Self { E::B } }\n\
+         fn f<V: Default>() -> V { V::default() }",
+    );
+    assert!(
+        out.contains("__rusty_default(std::type_identity<E>)"),
+        "{out}"
+    );
+    assert!(out.contains("rusty::default_like<V>()"), "{out}");
 }
 
 #[test]
