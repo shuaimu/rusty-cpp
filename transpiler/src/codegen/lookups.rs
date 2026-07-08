@@ -311,6 +311,19 @@ impl CodeGen {
         let syn::Expr::Path(path_expr) = func else {
             return None;
         };
+        // A nested fn in lexical scope shadows all global registrations —
+        // the innermost block-scoped signature is the one Rust resolves.
+        if path_expr.qself.is_none() && path_expr.path.segments.len() == 1 {
+            let name = path_expr.path.segments[0].ident.to_string();
+            for scope in self.local_function_arg_expected_types.iter().rev() {
+                if let Some(expected) = scope.get(&name) {
+                    if let Some(Some(ty)) = expected.get(arg_idx) {
+                        return Some(ty);
+                    }
+                    break;
+                }
+            }
+        }
         for key in self.call_path_candidates(&path_expr.path) {
             if let Some(expected) = self.function_arg_expected_types.get(&key) {
                 if let Some(Some(ty)) = expected.get(arg_idx) {

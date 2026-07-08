@@ -1617,6 +1617,13 @@ pub struct CodeGen {
     /// per block alongside `local_function_bindings`; call sites with a
     /// turbofish rewrite to `name.template operator()<Args>(args)`.
     pub(crate) template_lambda_nested_fns: Vec<HashSet<String>>,
+    /// Arg expected types of NESTED fns, scoped per block: the global
+    /// `function_arg_expected_types` conflict-merges same-named nested fns
+    /// (three test-local `fn check` with different signatures → all-None
+    /// slots), while lexical scoping makes the innermost registration the
+    /// right one at its call sites.
+    pub(crate) local_function_arg_expected_types:
+        Vec<HashMap<String, Vec<Option<syn::Type>>>>,
     /// Names of recursive nested fns currently in lexical scope at the call
     /// site (declared earlier in the same block, body already emitted).
     /// Calls to these names rewrite to `NAME(NAME, args)` so the seed
@@ -2010,6 +2017,7 @@ impl CodeGen {
             recursive_nested_fn_self_emit_stack: Vec::new(),
             nested_fn_type_params_stack: Vec::new(),
             template_lambda_nested_fns: Vec::new(),
+            local_function_arg_expected_types: Vec::new(),
             recursive_nested_fns_in_scope: Vec::new(),
             user_type_map: types::UserTypeMap::default(),
             cyclic_type_names: HashSet::new(),

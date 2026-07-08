@@ -383,6 +383,13 @@ impl CodeGen {
                     self.record_function_arg_pass_styles(&local_fn_name, local_styles);
                     let local_expected =
                         self.collect_arg_expected_types_from_inputs(&f.sig.inputs, false);
+                    let local_expected =
+                        self.resolve_fn_bound_arg_expected_types(local_expected, &f.sig.generics);
+                    // The block-scoped table wins at call sites: the GLOBAL
+                    // record conflict-merges same-named nested fns to None.
+                    if let Some(scope) = self.local_function_arg_expected_types.last_mut() {
+                        scope.insert(local_fn_name.clone(), local_expected.clone());
+                    }
                     self.record_function_arg_expected_types(&local_fn_name, local_expected);
                     let local_type_params =
                         self.collect_type_param_names_from_generics(&f.sig.generics);

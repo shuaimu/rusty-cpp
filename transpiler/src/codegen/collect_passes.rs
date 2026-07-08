@@ -4775,6 +4775,8 @@ impl CodeGen {
                     self.record_function_arg_pass_styles(&scoped_name, styles);
                     let expected_types =
                         self.collect_arg_expected_types_from_inputs(&f.sig.inputs, false);
+                    let expected_types =
+                        self.resolve_fn_bound_arg_expected_types(expected_types, &f.sig.generics);
                     self.record_function_arg_expected_types(&scoped_name, expected_types);
                     let type_params = self.collect_type_param_names_from_generics(&f.sig.generics);
                     self.record_function_type_param_names(&scoped_name, type_params);
@@ -4963,12 +4965,67 @@ impl CodeGen {
             }
             matches!(seg.arguments, syn::PathArguments::Parenthesized(_)).then_some(bound)
         }
+        // An Iterator-family bound with a CONCRETE `Item = X` binding
+        // (`I2: Iterator<Item = i32>`) also substitutes: the arg expected
+        // becomes `impl Iterator<Item = i32>` so return-only generic args
+        // (`check(.., empty())`) can take their type from the bound.
+        let fn_type_param_names: HashSet<String> = generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let iterator_bound = |bound: &syn::TypeParamBound| -> Option<syn::TypeParamBound> {
+            let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                return None;
+            };
+            let seg = trait_bound.path.segments.last()?;
+            if !matches!(
+                seg.ident.to_string().as_str(),
+                "Iterator" | "IntoIterator" | "DoubleEndedIterator" | "ExactSizeIterator"
+            ) {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                return None;
+            };
+            let item = args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::AssocType(assoc) if assoc.ident == "Item" => {
+                    Some(&assoc.ty)
+                }
+                _ => None,
+            })?;
+            // Concrete plain-path items only (peel references): a generic
+            // Item (T) or a composite one has no context-free spelling.
+            let mut peeled = item;
+            while let syn::Type::Reference(r) = peeled {
+                peeled = &r.elem;
+            }
+            let syn::Type::Path(item_tp) = peeled else {
+                return None;
+            };
+            let last = item_tp.path.segments.last()?;
+            if !matches!(last.arguments, syn::PathArguments::None) {
+                return None;
+            }
+            if item_tp.path.segments.len() == 1
+                && fn_type_param_names.contains(&last.ident.to_string())
+            {
+                return None;
+            }
+            Some(bound.clone())
+        };
         let mut fn_bounds: HashMap<String, syn::TypeParamBound> = HashMap::new();
+        let mut iter_bounds: HashMap<String, syn::TypeParamBound> = HashMap::new();
         for param in &generics.params {
             if let syn::GenericParam::Type(tp) = param {
                 for bound in &tp.bounds {
                     if let Some(bound) = fn_trait_bound(bound) {
                         fn_bounds.insert(tp.ident.to_string(), bound.clone());
+                    } else if let Some(bound) = iterator_bound(bound) {
+                        iter_bounds.insert(tp.ident.to_string(), bound);
                     }
                 }
             }
@@ -4984,12 +5041,14 @@ impl CodeGen {
                     for bound in &pt.bounds {
                         if let Some(bound) = fn_trait_bound(bound) {
                             fn_bounds.insert(name.clone(), bound.clone());
+                        } else if let Some(bound) = iterator_bound(bound) {
+                            iter_bounds.insert(name.clone(), bound);
                         }
                     }
                 }
             }
         }
-        if fn_bounds.is_empty() {
+        if fn_bounds.is_empty() && iter_bounds.is_empty() {
             return expected;
         }
         expected
@@ -5000,13 +5059,22 @@ impl CodeGen {
                     && tp.qself.is_none()
                     && tp.path.segments.len() == 1
                     && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
-                    && let Some(bound) = fn_bounds.get(&tp.path.segments[0].ident.to_string())
-                    && Self::fn_bound_inputs_mention_slice(bound)
                 {
-                    return Some(syn::Type::ImplTrait(syn::TypeImplTrait {
-                        impl_token: Default::default(),
-                        bounds: std::iter::once(bound.clone()).collect(),
-                    }));
+                    let name = tp.path.segments[0].ident.to_string();
+                    if let Some(bound) = fn_bounds.get(&name)
+                        && Self::fn_bound_inputs_mention_slice(bound)
+                    {
+                        return Some(syn::Type::ImplTrait(syn::TypeImplTrait {
+                            impl_token: Default::default(),
+                            bounds: std::iter::once(bound.clone()).collect(),
+                        }));
+                    }
+                    if let Some(bound) = iter_bounds.get(&name) {
+                        return Some(syn::Type::ImplTrait(syn::TypeImplTrait {
+                            impl_token: Default::default(),
+                            bounds: std::iter::once(bound.clone()).collect(),
+                        }));
+                    }
                 }
                 Some(ty)
             })

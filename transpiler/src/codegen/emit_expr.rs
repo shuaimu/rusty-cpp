@@ -775,6 +775,7 @@ impl CodeGen {
         block_profile_mark("collect_local_impl_overrides");
         self.local_function_bindings.push(local_functions);
         self.template_lambda_nested_fns.push(HashSet::new());
+        self.local_function_arg_expected_types.push(HashMap::new());
         self.local_type_bindings.push(local_types);
         self.local_manually_drop_bindings.push(HashSet::new());
         self.recursive_nested_fns_in_scope.push(HashSet::new());
@@ -963,6 +964,7 @@ impl CodeGen {
         self.pending_uninit_let_locals.pop();
         self.local_function_bindings.pop();
         self.template_lambda_nested_fns.pop();
+        self.local_function_arg_expected_types.pop();
         self.local_type_bindings.pop();
         self.local_manually_drop_bindings.pop();
         self.recursive_nested_fns_in_scope.pop();
@@ -14122,6 +14124,39 @@ impl CodeGen {
                         args.join(", ")
                     );
                 }
+            }
+        }
+        // `iter::empty()` in a position whose expected type carries an
+        // iterator Item (`check(.., empty())` against
+        // `impl Iterator<Item = i32>`): the return-only generic takes its
+        // element from the expected — a bare `rusty::empty()` can't deduce.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && fp.qself.is_none()
+            && call.args.is_empty()
+            && fp.path.segments.last().is_some_and(|seg| {
+                seg.ident == "empty" && matches!(seg.arguments, syn::PathArguments::None)
+            })
+            && (fp.path.segments.len() == 1
+                || fp
+                    .path
+                    .segments
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(|seg| seg.ident == "iter"))
+            && !self.is_local_function_name_in_scope("empty")
+            && let Some(expected) = expected_ty
+            && let Some(item) = self.extract_iter_item_type_from_type(
+                self.peel_reference_paren_group_type(expected),
+            )
+        {
+            let item = self.peel_reference_paren_group_type(&item);
+            let item_cpp = self.map_type(item);
+            if item_cpp != "auto"
+                && !type_string_has_auto_placeholder(&item_cpp)
+                && !item_cpp.contains("/* TODO")
+            {
+                return format!("rusty::empty<{}>()", item_cpp);
             }
         }
         // `<_>::default()` — a qself-INFER associated call takes its owner
