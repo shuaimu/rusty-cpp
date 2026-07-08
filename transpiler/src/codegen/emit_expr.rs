@@ -16699,6 +16699,29 @@ impl CodeGen {
         ) && call.args.len() == 1
         {
             let expected_inner_ty = self.expected_option_type_arg(expected_ty);
+            // Some((&"key3", &mut 3)) against Option<(&K, &mut V)>: literal
+            // temporaries can't bind the payload tuple's reference slots.
+            // Decay them in BOTH the Option spelling and the arg expected —
+            // elementwise comparison against the reference-tuple LHS is
+            // unchanged by value slots.
+            if let Some(inner_ty) = expected_inner_ty
+                && let syn::Type::Tuple(tt) = self.peel_paren_group_type(inner_ty)
+                && let syn::Expr::Tuple(te) = self.peel_paren_group_expr(&call.args[0])
+                && let Some(decayed) = self.decay_literal_ref_tuple_slots(tt, te)
+            {
+                let decayed_ty = syn::Type::Tuple(decayed);
+                let inner_cpp = self.map_type(&decayed_ty);
+                if inner_cpp != "auto"
+                    && !inner_cpp.contains("/* TODO")
+                    && !type_string_has_auto_placeholder(&inner_cpp)
+                {
+                    let arg = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                        &call.args[0],
+                        Some(&decayed_ty),
+                    );
+                    return format!("rusty::Option<{}>({})", inner_cpp, arg);
+                }
+            }
             let expected_inner_is_ref = expected_inner_ty.is_some_and(|ty| {
                 matches!(self.peel_paren_group_type(ty), syn::Type::Reference(_))
             });
@@ -16843,6 +16866,33 @@ impl CodeGen {
             // break associated-type call sites (for example `Option<T::Bits>`).
             if expected_inner_ty.is_none() {
                 if let Some(inferred_inner_ty) = self.infer_simple_expr_type(&call.args[0]) {
+                    // Some((&"key3", &mut 3)) with no expected: the payload
+                    // infers to a reference tuple, whose slots can't bind the
+                    // literal temporaries. Decay literal-fed ref slots and
+                    // re-emit the arg against the decayed shape — elementwise
+                    // comparison against a reference-tuple LHS is unchanged.
+                    if let syn::Type::Tuple(tt) =
+                        self.peel_paren_group_type(&inferred_inner_ty)
+                        && let syn::Expr::Tuple(te) = self.peel_paren_group_expr(&call.args[0])
+                        && let Some(decayed) = self.decay_literal_ref_tuple_slots(tt, te)
+                    {
+                        let decayed_ty = syn::Type::Tuple(decayed);
+                        let decayed_cpp = self.map_type(&decayed_ty);
+                        if decayed_cpp != "auto"
+                            && !decayed_cpp.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(&decayed_cpp)
+                        {
+                            let decayed_arg = self
+                                .emit_expr_to_string_with_expected_and_move_if_needed(
+                                    &call.args[0],
+                                    Some(&decayed_ty),
+                                );
+                            return format!(
+                                "rusty::Option<{}>({})",
+                                decayed_cpp, decayed_arg
+                            );
+                        }
+                    }
                     let inferred_unemitted_current_assoc = self
                         .should_soften_dependent_assoc_mode()
                         && self.type_references_current_struct_assoc_projection(&inferred_inner_ty)

@@ -32304,6 +32304,33 @@ impl CodeGen {
             }
             return self.emit_expr_to_string_with_expected(elem, Some(expected_elem_ty));
         }
+        // Value-expected slot fed `&literal`/`&mut literal` (a decayed
+        // reference-tuple slot): peel the reference so the literal fills the
+        // value directly instead of an addr_of_temp pointer.
+        {
+            let mut peeled = self.peel_paren_group_expr(elem);
+            let mut saw_ref = false;
+            while let syn::Expr::Reference(reference) = peeled {
+                saw_ref = true;
+                peeled = self.peel_paren_group_expr(&reference.expr);
+            }
+            if saw_ref
+                && matches!(
+                    peeled,
+                    syn::Expr::Lit(_)
+                        | syn::Expr::Unary(syn::ExprUnary {
+                            op: syn::UnOp::Neg(_),
+                            ..
+                        })
+                        | syn::Expr::Cast(_)
+                )
+            {
+                return self.emit_expr_to_string_with_expected_and_move_if_needed(
+                    peeled,
+                    Some(expected_elem_ty),
+                );
+            }
+        }
         self.emit_expr_to_string_with_expected_and_move_if_needed(elem, Some(expected_elem_ty))
     }
 
@@ -33569,7 +33596,28 @@ impl CodeGen {
         // scrutinee's `(&K, &mut V)` type): decay those elements' references
         // in the SPELLED type. Comparisons against the reference-tuple work
         // element-wise regardless.
+        let spelled = self
+            .decay_literal_ref_tuple_slots(expected_tuple_ty, tuple_expr)
+            .unwrap_or_else(|| expected_tuple_ty.clone());
+        let expected_tuple_cpp = self.map_type(&syn::Type::Tuple(spelled));
+        Some(format!("{}{{{}}}", expected_tuple_cpp, elems.join(", ")))
+    }
+
+    /// Decay reference slots of an expected tuple type whose corresponding
+    /// tuple-expression elements peel (through `&`-layers) to literal-like
+    /// exprs — references can't bind those temporaries, and elementwise
+    /// comparison against the reference-tuple works the same by value.
+    /// Returns None when nothing decays.
+    pub(super) fn decay_literal_ref_tuple_slots(
+        &self,
+        expected_tuple_ty: &syn::TypeTuple,
+        tuple_expr: &syn::ExprTuple,
+    ) -> Option<syn::TypeTuple> {
+        if expected_tuple_ty.elems.len() != tuple_expr.elems.len() {
+            return None;
+        }
         let mut spelled = expected_tuple_ty.clone();
+        let mut changed = false;
         for (slot, elem_expr) in spelled.elems.iter_mut().zip(tuple_expr.elems.iter()) {
             let mut peeled_elem = self.peel_paren_group_expr(elem_expr);
             while let syn::Expr::Reference(reference) = peeled_elem {
@@ -33585,13 +33633,14 @@ impl CodeGen {
                     | syn::Expr::Cast(_)
             );
             if elem_is_literal_like
-                && let syn::Type::Reference(reference) = slot
+                && let syn::Type::Reference(reference) = self.peel_paren_group_type(slot)
             {
-                *slot = (*reference.elem).clone();
+                let decayed_elem = (*reference.elem).clone();
+                *slot = decayed_elem;
+                changed = true;
             }
         }
-        let expected_tuple_cpp = self.map_type(&syn::Type::Tuple(spelled));
-        Some(format!("{}{{{}}}", expected_tuple_cpp, elems.join(", ")))
+        changed.then_some(spelled)
     }
 
 
