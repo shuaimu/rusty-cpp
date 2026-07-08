@@ -2626,6 +2626,46 @@ impl CodeGen {
             }
             syn::Type::Path(tp) => {
                 let last = tp.path.segments.last()?;
+                // Crate-declared `impl Iterator` Item facts outrank the
+                // positional guesses below: map-shaped iterators
+                // (IntoIter<K, V>) yield (K, V), not their first arg.
+                if let Some(entries) = self.iterator_impl_items.get(&last.ident.to_string())
+                    && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                {
+                    let actual: Vec<&syn::Type> = args
+                        .args
+                        .iter()
+                        .filter_map(|a| match a {
+                            syn::GenericArgument::Type(t) => Some(t),
+                            _ => None,
+                        })
+                        .collect();
+                    let mut matching = entries.iter().filter(|(params, self_args, _)| {
+                        self_args.len() == actual.len()
+                            && self_args.iter().all(|sa| {
+                                matches!(sa, syn::Type::Path(p)
+                                    if p.path.get_ident().is_some_and(|i| {
+                                        params.contains(&i.to_string())
+                                    }))
+                            })
+                    });
+                    if let Some((_, self_args, item)) = matching.next()
+                        && matching.next().is_none()
+                    {
+                        let mut subs: HashMap<String, syn::Type> = HashMap::new();
+                        for (sa, act) in self_args.iter().zip(actual.iter()) {
+                            if let syn::Type::Path(p) = sa
+                                && let Some(id) = p.path.get_ident()
+                            {
+                                subs.insert(id.to_string(), (*act).clone());
+                            }
+                        }
+                        let substituted = self.substitute_type_params_in_type(item, &subs);
+                        if !self.type_contains_infer(&substituted) {
+                            return Some(substituted);
+                        }
+                    }
+                }
                 match last.ident.to_string().as_str() {
                     "IntoIter" | "Iter"
                         if matches!(last.arguments, syn::PathArguments::None)

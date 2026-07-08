@@ -1247,6 +1247,13 @@ pub struct CodeGen {
     /// Used to resolve `<NonPathType>::Assoc` projections to a concrete type
     /// at call sites where impl_blocks (Path-only keyed) can't help.
     pub(crate) non_path_impl_assoc_types: HashMap<String, HashMap<String, String>>,
+    /// `impl Iterator for Tail<Args..> { type Item = ..; }` facts, keyed by
+    /// the Self path's tail ident. Each entry: (impl type-param names, the
+    /// Self type's generic args as written, the Item type). Lets item
+    /// inference resolve map-shaped iterators (IntoIter<K, V> -> (K, V))
+    /// instead of guessing the first generic arg.
+    pub(crate) iterator_impl_items:
+        HashMap<String, Vec<(Vec<String>, Vec<syn::Type>, syn::Type)>>,
     /// Scoped Rust-local names emitted as C++ reference bindings.
     /// Used by deref collapsing when local type tracking is inconclusive.
     pub(crate) local_reference_bindings: Vec<HashSet<String>>,
@@ -1923,6 +1930,7 @@ impl CodeGen {
             local_const_bindings: Vec::new(),
             local_item_const_names: Vec::new(),
             non_path_impl_assoc_types: HashMap::new(),
+            iterator_impl_items: HashMap::new(),
             local_reference_bindings: Vec::new(),
             rebind_reference_pointer_bindings: Vec::new(),
             delayed_init_locals: Vec::new(),

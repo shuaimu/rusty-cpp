@@ -2663,6 +2663,43 @@ impl CodeGen {
                         .and_then(|path| path.segments.last())
                         .map(|seg| seg.ident.to_string());
                     let is_inherent_impl = trait_name.is_none();
+                    // Record `impl Iterator for Tail<Args..>` Item facts so
+                    // item inference resolves map-shaped iterators
+                    // (IntoIter<K, V> yields (K, V), not K).
+                    if trait_name.as_deref() == Some("Iterator")
+                        && let Some(item_ty) = impl_block.items.iter().find_map(|it| match it {
+                            syn::ImplItem::Type(t) if t.ident == "Item" => {
+                                Some(t.ty.clone())
+                            }
+                            _ => None,
+                        })
+                        && let Some(self_seg) = tp.path.segments.last()
+                    {
+                        let impl_params: Vec<String> = impl_block
+                            .generics
+                            .params
+                            .iter()
+                            .filter_map(|p| match p {
+                                syn::GenericParam::Type(tp) => Some(tp.ident.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        let self_args: Vec<syn::Type> = match &self_seg.arguments {
+                            syn::PathArguments::AngleBracketed(a) => a
+                                .args
+                                .iter()
+                                .filter_map(|arg| match arg {
+                                    syn::GenericArgument::Type(t) => Some(t.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        self.iterator_impl_items
+                            .entry(self_seg.ident.to_string())
+                            .or_default()
+                            .push((impl_params, self_args, item_ty));
+                    }
 
                     // Record user `Clone` impls (incl. expanded derives). Used
                     // by Drop-struct emission: a Drop type's only Rust
