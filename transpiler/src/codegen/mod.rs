@@ -31738,16 +31738,29 @@ impl CodeGen {
         // lowers through the slice iterator. Make the member tier conditional
         // and bottom out in rusty::iter for that one method.
         if callee_leaf == "into_iter" && extra_args.is_empty() {
+            // Member tiers use the DIRECT receiver: deref_if_pointer_like
+            // unboxes deref-view containers (rusty::Vec -> its span view),
+            // which loses the owning into_iter member. Pointer receivers
+            // still get a deref member tier, moved-direct covers
+            // &&-qualified members on lvalues (Rust's into_iter consumes),
+            // and slice views bottom out in rusty::iter.
+            let direct_member_call =
+                format!("std::forward<decltype(__self)>(__self).into_iter()");
+            let moved_member_call = format!("std::move(__self).into_iter()");
             let iter_fallback = format!("rusty::iter({})", direct_receiver);
             return format!(
-                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
                 arg_param_list,
                 direct_call,
                 direct_call,
                 deref_call,
                 deref_call,
+                direct_member_call,
+                direct_member_call,
                 member_call,
                 member_call,
+                moved_member_call,
+                moved_member_call,
                 iter_fallback,
                 arg_call_list
             );
