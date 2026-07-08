@@ -28078,7 +28078,15 @@ impl CodeGen {
                                 if let syn::GenericArgument::Type(inner) = arg {
                                     if is_coll && matches!(inner, syn::Type::Infer(_)) {
                                         if let Some(pair) = &pair {
-                                            if type_arg_idx < pair.len() {
+                                            // Partial items spell unknown
+                                            // slots `_` — never write those
+                                            // into the annotation.
+                                            if type_arg_idx < pair.len()
+                                                && !matches!(
+                                                    pair[type_arg_idx],
+                                                    syn::Type::Infer(_)
+                                                )
+                                            {
                                                 *inner = pair[type_arg_idx].clone();
                                             }
                                         } else if !is_map_shaped {

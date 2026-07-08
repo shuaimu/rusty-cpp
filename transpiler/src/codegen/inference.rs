@@ -8351,6 +8351,15 @@ impl CodeGen {
                         if let Some(item_ty) = self.extract_iter_item_type_from_type(&receiver_ty) {
                             return Some(item_ty);
                         }
+                        // Map-shaped COLLECTION receiver (the extract above
+                        // only knows iterator types): `map.into_iter()`
+                        // yields the owned (K, V) pair.
+                        if method == "into_iter"
+                            && let Some(pair) =
+                                self.map_shaped_collection_kv_pair_item(&receiver_ty)
+                        {
+                            return Some(pair);
+                        }
                     }
                 }
                 if method == "split" && mc.args.len() == 1 {
@@ -10170,7 +10179,113 @@ impl CodeGen {
             // item whole.
             return self.substitute_collection_infer_args_with_item(&filled, &item_ty);
         }
+        // Whole-item inference failed, but a `.map(|(..)| (a, b))` closure
+        // still yields PARTIAL slot knowledge: tuple slots that are bare
+        // closure-param bindings pass the upstream item's slot through
+        // unchanged. Only the annotation's `_` slots need filling, so a
+        // partial item is enough (`IndexMap<_, String>` collected from
+        // `.map(|(k, v)| (k, v.into()))` needs just K).
+        if let Some(partial_item) = self.infer_partial_tuple_item_through_map_closure(iter_expr) {
+            let filled =
+                self.substitute_collection_infer_args_with_item(expected_ty, &partial_item);
+            if !self.type_contains_infer(&filled) {
+                return filled;
+            }
+        }
         expected_ty.clone()
+    }
+
+    /// A map-shaped collection type's owned iteration item: `(K, V)` from
+    /// the first two type args of HashMap/BTreeMap/IndexMap.
+    fn map_shaped_collection_kv_pair_item(&self, ty: &syn::Type) -> Option<syn::Type> {
+        let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty) else {
+            return None;
+        };
+        let last = tp.path.segments.last()?;
+        if !matches!(
+            last.ident.to_string().as_str(),
+            "HashMap" | "BTreeMap" | "IndexMap"
+        ) {
+            return None;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+            return None;
+        };
+        let mut type_args = args.args.iter().filter_map(|a| match a {
+            syn::GenericArgument::Type(t) => Some(t),
+            _ => None,
+        });
+        let k = type_args.next()?;
+        let v = type_args.next()?;
+        Some(parse_quote!((#k, #v)))
+    }
+
+    /// `.map(|pat| (e0, e1, ...))` receivers: derive a PARTIAL tuple item
+    /// type. Slots whose expr is a bare binding introduced by the closure's
+    /// destructuring tuple pattern take the upstream item's matching slot
+    /// type; all other slots stay `_`. None unless at least one slot
+    /// resolved.
+    fn infer_partial_tuple_item_through_map_closure(
+        &self,
+        iter_expr: &syn::Expr,
+    ) -> Option<syn::Type> {
+        let syn::Expr::MethodCall(mc) = self.peel_paren_group_expr(iter_expr) else {
+            return None;
+        };
+        if mc.method != "map" || mc.args.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Closure(closure) = self.peel_paren_group_expr(&mc.args[0]) else {
+            return None;
+        };
+        if closure.inputs.len() != 1 {
+            return None;
+        }
+        let syn::Expr::Tuple(body_tuple) = self.peel_paren_group_expr(&closure.body) else {
+            return None;
+        };
+        let upstream = self.infer_iter_item_type_from_expr(&mc.receiver)?;
+        let upstream = self.peel_reference_paren_group_type(&upstream);
+        let syn::Type::Tuple(upstream_tuple) = upstream else {
+            return None;
+        };
+        let mut pat = &closure.inputs[0];
+        if let syn::Pat::Type(ptype) = pat {
+            pat = ptype.pat.as_ref();
+        }
+        let syn::Pat::Tuple(pat_tuple) = pat else {
+            return None;
+        };
+        let mut slot_of_binding: HashMap<String, usize> = HashMap::new();
+        for (i, p) in pat_tuple.elems.iter().enumerate() {
+            if let syn::Pat::Ident(pi) = p {
+                slot_of_binding.insert(pi.ident.to_string(), i);
+            }
+        }
+        let mut resolved_any = false;
+        let elems: syn::punctuated::Punctuated<syn::Type, syn::token::Comma> = body_tuple
+            .elems
+            .iter()
+            .map(|e| {
+                if let syn::Expr::Path(p) = self.peel_paren_group_expr(e)
+                    && p.path.segments.len() == 1
+                    && let Some(&slot) =
+                        slot_of_binding.get(&p.path.segments[0].ident.to_string())
+                    && let Some(t) = upstream_tuple.elems.iter().nth(slot)
+                {
+                    resolved_any = true;
+                    t.clone()
+                } else {
+                    syn::parse_quote!(_)
+                }
+            })
+            .collect();
+        resolved_any.then(|| {
+            syn::Type::Tuple(syn::TypeTuple {
+                paren_token: Default::default(),
+                elems,
+            })
+        })
     }
 
     /// Fill a let annotation's `_` slots (`IndexMap<_, _>`) from the item

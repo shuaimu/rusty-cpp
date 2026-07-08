@@ -1945,6 +1945,49 @@ impl CodeGen {
 
     /// Look up the nearest in-scope local binding type for a variable name.
     pub(super) fn lookup_local_binding_type(&self, name: &str) -> Option<syn::Type> {
+        let recorded = self.lookup_local_binding_type_recorded(name);
+        // A ctor-initialized collection binding (`let mut m = IndexMap::new()`)
+        // records no type (or an incomplete one); its concrete Coll<K, V>
+        // lives in the emit-time usage back-prop frames. Surface it here so
+        // downstream inference (clone chains, iter items, collect fills)
+        // sees the same type the binding's declaration emits with.
+        let incomplete = match &recorded {
+            None => true,
+            Some(ty) => self.recorded_binding_type_is_incomplete_collection(ty),
+        };
+        if incomplete
+            && let Some(hint) = self
+                .collection_ctor_usage_type_hints
+                .iter()
+                .rev()
+                .find_map(|hints| hints.get(name))
+        {
+            return Some(hint.clone());
+        }
+        recorded
+    }
+
+    fn recorded_binding_type_is_incomplete_collection(&self, ty: &syn::Type) -> bool {
+        if let syn::Type::Path(tp) = self.peel_reference_paren_group_type(ty)
+            && let Some(last) = tp.path.segments.last()
+            && Self::is_polymorphic_collection_name(&last.ident.to_string())
+        {
+            let bare = match &last.arguments {
+                syn::PathArguments::None => true,
+                syn::PathArguments::AngleBracketed(a) => {
+                    a.args.is_empty()
+                        || a.args.iter().any(|arg| {
+                            matches!(arg, syn::GenericArgument::Type(syn::Type::Infer(_)))
+                        })
+                }
+                _ => false,
+            };
+            return bare;
+        }
+        false
+    }
+
+    fn lookup_local_binding_type_recorded(&self, name: &str) -> Option<syn::Type> {
         let skip_current_scope_binding = self
             .in_progress_local_initializers
             .iter()
