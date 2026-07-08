@@ -52,7 +52,25 @@ impl CodeGen {
                 if r.mutability.is_some() {
                     format!("rusty::as_mut_slice({})", arg_cpp)
                 } else {
-                    format!("rusty::as_slice({})", arg_cpp)
+                    // Exact-spell the immutable expected: an as_slice over a
+                    // MUTABLE span/container yields span<T>, which does not
+                    // DEDUCE against a template callee's span<const Elem<K, V>>
+                    // param (indexmap's insert_bulk_no_grow(indices,
+                    // &entries[..])). Call-argument temporaries live through
+                    // the call, so viewing an owned-slice result is safe here.
+                    let wrapped = format!("rusty::as_slice({})", arg_cpp);
+                    if let syn::Type::Slice(sl) = r.elem.as_ref() {
+                        let elem_cpp = self.map_type(&sl.elem);
+                        if elem_cpp != "auto"
+                            && !elem_cpp.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(&elem_cpp)
+                            && !self.mapped_type_has_out_of_scope_type_params(&elem_cpp)
+                            && !elem_cpp.trim_start().starts_with("const ")
+                        {
+                            return format!("std::span<const {}>({})", elem_cpp, wrapped);
+                        }
+                    }
+                    wrapped
                 }
             }
             _ => arg_cpp,
