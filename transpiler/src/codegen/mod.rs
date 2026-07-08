@@ -29875,8 +29875,26 @@ impl CodeGen {
         let target_ty = self
             .user_deref_targets
             .get(&base_struct)
-            .or_else(|| self.user_deref_targets.get(&scoped))?;
-        let target_ty = self.peel_reference_paren_group_type(target_ty);
+            .or_else(|| self.user_deref_targets.get(&scoped))
+            .cloned()
+            // RUNTIME deref wrappers have no crate Deref impl to record;
+            // ManuallyDrop's Target is its first type arg (hashbrown's
+            // into_inner reads `guard.value` through ManuallyDrop).
+            .or_else(|| {
+                if base_struct != "ManuallyDrop" {
+                    return None;
+                }
+                let syn::PathArguments::AngleBracketed(args) =
+                    &tp.path.segments.last()?.arguments
+                else {
+                    return None;
+                };
+                args.args.iter().find_map(|arg| match arg {
+                    syn::GenericArgument::Type(t) => Some(t.clone()),
+                    _ => None,
+                })
+            })?;
+        let target_ty = self.peel_reference_paren_group_type(&target_ty);
         // The recorded Deref Target is written in terms of the wrapper's generic
         // params (e.g. `ScopeGuard<T,F>: Deref<Target=T>` records `T`).
         // Instantiate it with the receiver's actual type args
