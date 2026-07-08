@@ -341,6 +341,31 @@ impl CodeGen {
         {
             return Some(ty);
         }
+        // Same-named owners across modules (map::Slice::from_slice vs
+        // set::Slice::from_slice): prefer the key scoped under the CURRENT
+        // module chain, walking outward — Self:: calls resolve to the
+        // enclosing impl's owner. SLICE params only: those are what the C++
+        // side can't pass without the expected-typed coercion, and wider
+        // threading surfaces module-private alias spellings (itertools'
+        // `Idx` collect target) at sites that already emitted fine.
+        if fallback_keys.len() > 1 && !self.module_stack.is_empty() {
+            for depth in (1..=self.module_stack.len()).rev() {
+                let prefix = format!("{}::", self.module_stack[..depth].join("::"));
+                let mut scoped = fallback_keys
+                    .iter()
+                    .filter(|key| key.starts_with(&prefix));
+                if let (Some(first), None) = (scoped.next(), scoped.next())
+                    && let Some(expected) = self.function_arg_expected_types.get(*first)
+                    && let Some(Some(ty)) = expected.get(arg_idx)
+                    && matches!(
+                        self.peel_reference_paren_group_type(ty),
+                        syn::Type::Slice(_)
+                    )
+                {
+                    return Some(ty);
+                }
+            }
+        }
         None
     }
 
