@@ -30733,6 +30733,17 @@ impl CodeGen {
         let Some(target_struct) = ttp.path.segments.last().map(|s| s.ident.to_string()) else {
             return false;
         };
+        // A method-return wrapper spelled with `Self` instantiates the
+        // Target to the literal `Self` — resolve it through the enclosing
+        // impl's type (mirrors field_access_through_user_deref).
+        let target_struct = if target_struct == "Self" {
+            match self.current_struct.clone() {
+                Some(current) => current,
+                None => return false,
+            }
+        } else {
+            target_struct
+        };
         self.type_name_has_inherent_method(&target_struct, method_name)
     }
 
