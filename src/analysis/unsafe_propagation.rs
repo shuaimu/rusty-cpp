@@ -207,17 +207,6 @@ fn check_statements_with_unsafe_tracking(
                     ));
                 }
             }
-            Statement::Block(statements) if !in_unsafe_scope => {
-                errors.extend(check_statements_with_unsafe_tracking(
-                    statements,
-                    safety_context,
-                    known_safe_functions,
-                    external_annotations,
-                    template_params,
-                    callable_params,
-                    0,
-                ));
-            }
             _ => {
                 if let Some(error) = check_statement_for_unsafe_calls_with_external(
                     stmt,
@@ -349,6 +338,23 @@ fn check_statement_for_unsafe_calls_with_external(
                 return Some(format!(
                     "Calling unsafe function '{}' in return statement requires unsafe context",
                     unsafe_func
+                ));
+            }
+        }
+        Statement::ExpressionStatement { expr, location } => {
+            // Loop conditions and other standalone expressions can nest
+            // calls (`while (unsafe_get() > 0)`).
+            if let Some(unsafe_func) = find_unsafe_function_call_with_external(
+                expr,
+                safety_context,
+                known_safe_functions,
+                external_annotations,
+                template_params,
+                callable_params,
+            ) {
+                return Some(format!(
+                    "Calling unsafe function '{}' at line {} requires unsafe context",
+                    unsafe_func, location.line
                 ));
             }
         }

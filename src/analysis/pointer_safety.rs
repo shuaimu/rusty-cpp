@@ -194,15 +194,6 @@ pub fn check_parsed_function_for_pointers(
                     }
                 }
             }
-            Statement::Block(statements) if !in_unsafe_scope => {
-                for error in check_statements_for_pointers_with_unsafe_tracking(
-                    statements,
-                    0,
-                    &safe_pointer_vars,
-                ) {
-                    errors.push(format!("In function '{}': {}", function.name, error));
-                }
-            }
             _ => {
                 if let Some(error) = check_parsed_statement_for_pointers_with_return_type(
                     stmt,
@@ -542,13 +533,6 @@ fn check_statements_for_pointers_with_unsafe_tracking(
                         safe_pointer_vars,
                     ));
                 }
-            }
-            Statement::Block(statements) if !in_unsafe_scope => {
-                errors.extend(check_statements_for_pointers_with_unsafe_tracking(
-                    statements,
-                    0,
-                    safe_pointer_vars,
-                ));
             }
             _ => {
                 if let Some(error) =

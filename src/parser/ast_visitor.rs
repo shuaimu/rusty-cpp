@@ -211,11 +211,19 @@ fn check_for_unsafe_annotation(entity: &Entity) -> bool {
         }
     }
 
-    // Walk back through the contiguous comment block that precedes the
-    // brace. Stop at the first blank line OR the first non-comment line.
+    // Walk back through the comment block that precedes the brace,
+    // tolerating at most ONE blank line between the annotation and the
+    // block. Two or more blank lines sever attachment: an `@unsafe`
+    // escape hatch far above a block must not silently disable its
+    // checks, so the search stays local to the brace.
+    let mut blank_lines_skipped = 0usize;
     for line in preceding.iter().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            blank_lines_skipped += 1;
+            if blank_lines_skipped > 1 {
+                return false;
+            }
             continue;
         }
         let is_line_comment = trimmed.starts_with("//");
@@ -1657,8 +1665,10 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                     }
                 }
             }
-            EntityKind::BinaryOperator => {
-                // Handle assignments
+            EntityKind::BinaryOperator | EntityKind::CompoundAssignOperator => {
+                // Handle assignments (incl. compound `+=`/`-=`: both sides
+                // still need pointer/unsafe scanning, and Assignment is the
+                // shape the analyses already understand)
                 let children: Vec<Entity> = child.get_children().into_iter().collect();
                 debug_println!("DEBUG STMT: BinaryOperator has {} children", children.len());
                 if children.len() == 2 {
@@ -2173,81 +2183,10 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
                 statements.push(Statement::ExitScope);
             }
             EntityKind::ForStmt | EntityKind::WhileStmt | EntityKind::DoStmt => {
-                statements.push(Statement::EnterLoop);
-
-                let loop_children: Vec<Entity> = child.get_children().into_iter().collect();
-
-                // Libclang exposes loop control pieces as siblings of the loop body:
-                //   for:   init, condition, increment, body
-                //   while: condition, body
-                //   do:    body, condition
-                // Only the body should become loop contents; the other children are
-                // control expressions and declarations, not statements executed inside
-                // the loop block.
-                let body = if child.get_kind() == EntityKind::DoStmt {
-                    loop_children.first()
-                } else {
-                    loop_children.last()
-                };
-
-                if let Some(loop_body) = body {
-                    // Braced loop bodies arrive as CompoundStmt. Unbraced loop bodies
-                    // arrive as the concrete single statement cursor, such as
-                    // BinaryOperator for `x = y`, UnaryOperator for `++i`, CallExpr
-                    // for `f()`, or DeclStmt for a declaration.
-                    if loop_body.get_kind() == EntityKind::CompoundStmt {
-                        statements.extend(extract_compound_statement(loop_body));
-                    } else {
-                        statements.extend(extract_single_statement(loop_body));
-                    }
-                }
-
-                statements.push(Statement::ExitLoop);
+                statements.extend(extract_loop_statement(&child));
             }
             EntityKind::IfStmt => {
-                // Extract if statement
-                let children: Vec<Entity> = child.get_children().into_iter().collect();
-                let mut condition = Expression::Literal("true".to_string());
-                let mut then_branch = Vec::new();
-                let mut else_branch = None;
-
-                // Parse the if statement structure
-                let mut condition_seen = false;
-                let mut i = 0;
-                while i < children.len() {
-                    let child_kind = children[i].get_kind();
-
-                    if !condition_seen && child_kind != EntityKind::CompoundStmt {
-                        if let Some(expr) = extract_expression(&children[i]) {
-                            condition = expr;
-                            condition_seen = true;
-                        }
-                    } else if child_kind == EntityKind::CompoundStmt {
-                        // This is a branch
-                        if then_branch.is_empty() {
-                            then_branch = extract_compound_statement(&children[i]);
-                        } else {
-                            else_branch = Some(extract_compound_statement(&children[i]));
-                        }
-                    } else {
-                        let branch = extract_single_statement(&children[i]);
-                        if !branch.is_empty() {
-                            if then_branch.is_empty() {
-                                then_branch = branch;
-                            } else {
-                                else_branch = Some(branch);
-                            }
-                        }
-                    }
-                    i += 1;
-                }
-
-                statements.push(Statement::If {
-                    condition,
-                    then_branch,
-                    else_branch,
-                    location: extract_location(&child),
-                });
+                statements.push(extract_if_statement(&child));
             }
             EntityKind::UnaryOperator => {
                 // Handle standalone dereference operations
@@ -2357,15 +2296,153 @@ fn extract_compound_statement(entity: &Entity) -> Vec<Statement> {
     statements
 }
 
+/// Extract an IfStmt cursor into a `Statement::If`. Shared by the braced
+/// path (`extract_compound_statement`) and the unbraced-substatement path
+/// (`extract_single_statement`), which is what makes `else if` chains work:
+/// the else-branch cursor of an IfStmt is itself an IfStmt.
+fn extract_if_statement(entity: &Entity) -> Statement {
+    let children: Vec<Entity> = entity.get_children().into_iter().collect();
+    let mut condition = Expression::Literal("true".to_string());
+    let mut then_branch = Vec::new();
+    let mut else_branch = None;
+
+    let mut condition_seen = false;
+    let mut i = 0;
+    while i < children.len() {
+        let child_kind = children[i].get_kind();
+
+        if !condition_seen && child_kind != EntityKind::CompoundStmt {
+            if let Some(expr) = extract_expression(&children[i]) {
+                condition = expr;
+                condition_seen = true;
+            }
+        } else if child_kind == EntityKind::CompoundStmt {
+            // This is a branch
+            if then_branch.is_empty() {
+                then_branch = extract_compound_statement(&children[i]);
+            } else {
+                else_branch = Some(extract_compound_statement(&children[i]));
+            }
+        } else {
+            let branch = extract_single_statement(&children[i]);
+            if !branch.is_empty() {
+                if then_branch.is_empty() {
+                    then_branch = branch;
+                } else {
+                    else_branch = Some(branch);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    Statement::If {
+        condition,
+        then_branch,
+        else_branch,
+        location: extract_location(entity),
+    }
+}
+
+/// Extract a For/While/Do cursor into `EnterLoop .. ExitLoop` statements.
+/// Shared by the braced and unbraced-substatement paths.
+///
+/// Libclang exposes loop control pieces as siblings of the loop body:
+///   for:   init, condition, increment, body
+///   while: condition, body
+///   do:    body, condition
+/// The body becomes the loop contents; the OTHER children are control
+/// expressions and declarations evaluated as part of each iteration, so
+/// they are emitted inside the loop region too — as declarations for
+/// DeclStmt pieces and plain expression statements otherwise (never as
+/// fabricated assignments: `i < n` is a comparison, not an assignment).
+/// This is what lets `while (unsafe_call())` or `for (...; ...; ++raw_ptr)`
+/// reach the safety analyses.
+fn extract_loop_statement(entity: &Entity) -> Vec<Statement> {
+    let mut statements = Vec::new();
+    statements.push(Statement::EnterLoop);
+
+    let loop_children: Vec<Entity> = entity.get_children().into_iter().collect();
+
+    let body_index = if entity.get_kind() == EntityKind::DoStmt {
+        if loop_children.is_empty() { None } else { Some(0) }
+    } else {
+        loop_children.len().checked_sub(1)
+    };
+
+    let mut emit_control = |control: &Entity, statements: &mut Vec<Statement>| {
+        if control.get_kind() == EntityKind::DeclStmt {
+            statements.extend(extract_single_statement(control));
+        } else if let Some(expr) = extract_expression(control) {
+            let location = extract_location(control);
+            match expr {
+                // A call-shaped condition (`while (f())`) keeps the
+                // FunctionCall statement form the unsafe-propagation
+                // analysis matches on.
+                Expression::FunctionCall { name, args } => {
+                    statements.push(Statement::FunctionCall {
+                        name,
+                        args,
+                        location,
+                    });
+                }
+                expr => {
+                    statements.push(Statement::ExpressionStatement { expr, location });
+                }
+            }
+        }
+    };
+
+    // while/for: control pieces evaluate before the body each iteration.
+    if entity.get_kind() != EntityKind::DoStmt {
+        for (idx, control) in loop_children.iter().enumerate() {
+            if Some(idx) != body_index {
+                emit_control(control, &mut statements);
+            }
+        }
+    }
+
+    if let Some(idx) = body_index {
+        let loop_body = &loop_children[idx];
+        // Braced loop bodies arrive as CompoundStmt. Unbraced loop bodies
+        // arrive as the concrete single statement cursor, such as
+        // BinaryOperator for `x = y`, UnaryOperator for `++i`, CallExpr
+        // for `f()`, or DeclStmt for a declaration.
+        if loop_body.get_kind() == EntityKind::CompoundStmt {
+            statements.extend(extract_compound_statement(loop_body));
+        } else {
+            statements.extend(extract_single_statement(loop_body));
+        }
+    }
+
+    // do-while: the condition evaluates after the body each iteration.
+    if entity.get_kind() == EntityKind::DoStmt {
+        for (idx, control) in loop_children.iter().enumerate() {
+            if Some(idx) != body_index {
+                emit_control(control, &mut statements);
+            }
+        }
+    }
+
+    statements.push(Statement::ExitLoop);
+    statements
+}
+
 // Extract one statement cursor used where C++ allows an unbraced substatement,
 // such as `if (x) f();` or `while (x) ++i;`. This helper intentionally takes
-// the already-selected branch/body cursor; callers must not pass a whole IfStmt
-// or ForStmt because those cursors also contain condition/control children.
+// the already-selected branch/body cursor; callers must not pass raw condition
+// or control cursors — those are the enclosing statement's own children.
 fn extract_single_statement(entity: &Entity) -> Vec<Statement> {
     let location = extract_location(entity);
 
     match entity.get_kind() {
         EntityKind::CompoundStmt => extract_compound_statement(entity),
+        // Nested control flow as an unbraced substatement: `else if (..) ..`
+        // (the else cursor IS an IfStmt), `if (x) while (y) f();`, ...
+        EntityKind::IfStmt => vec![extract_if_statement(entity)],
+        EntityKind::ForStmt | EntityKind::WhileStmt | EntityKind::DoStmt => {
+            extract_loop_statement(entity)
+        }
         EntityKind::DeclStmt => {
             let mut statements = Vec::new();
 
@@ -2398,7 +2475,7 @@ fn extract_single_statement(entity: &Entity) -> Vec<Statement> {
 
             statements
         }
-        EntityKind::BinaryOperator => {
+        EntityKind::BinaryOperator | EntityKind::CompoundAssignOperator => {
             let children: Vec<Entity> = entity.get_children().into_iter().collect();
             if children.len() == 2 {
                 if let (Some(lhs), Some(rhs)) = (
