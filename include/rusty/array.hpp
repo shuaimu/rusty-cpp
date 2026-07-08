@@ -2152,6 +2152,34 @@ auto last_mut(Container& container) {
     return Opt(*(rusty::as_ptr(span) + last_index));
 }
 
+// std::span accessor counterparts — spans are borrowed views, so rvalue
+// spans (`self.as_entries_mut()` materializes a prvalue) are safe to take
+// by value; the generic `Container&` overloads reject rvalues. More
+// specialized, so lvalue spans also prefer them.
+template<typename T, std::size_t E, typename Index>
+auto get_mut(std::span<T, E> container, Index idx) {
+    const size_t index = detail::checked_index(idx);
+    using Opt = Option<T&>;
+    if (index < container.size()) {
+        return Opt(container[index]);
+    }
+    return Opt(None);
+}
+
+template<typename T, std::size_t E>
+auto first_mut(std::span<T, E> container) {
+    return get_mut(container, size_t{0});
+}
+
+template<typename T, std::size_t E>
+auto last_mut(std::span<T, E> container) {
+    using Opt = Option<T&>;
+    if (container.empty()) {
+        return Opt(None);
+    }
+    return Opt(container[container.size() - 1]);
+}
+
 // Collect a slice-like container into std::vector by value-cloning elements.
 // Used by transpiled Rust `.to_vec()` lowering for slice/array/ArrayVec shapes.
 //

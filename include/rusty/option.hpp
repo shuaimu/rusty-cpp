@@ -784,11 +784,15 @@ public:
         }
     }
 
-    // Map function over the reference
+    // Map function over the reference. Deduced return on purpose (same
+    // rationale as map_or_else below): a trailing decltype return would
+    // instantiate a generic lambda's body for BOTH const-nesses during
+    // overload resolution — hard error when the body mutates and the const
+    // candidate substitutes `const T&`.
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
-    auto map(F&& f) -> Option<decltype(f(std::declval<T&>()))> {
-        using U = decltype(f(std::declval<T&>()));
+    auto map(F&& f) {
+        using U = decltype(f(*ptr));
         if (ptr) {
             return Option<U>(f(*ptr));
         }
@@ -843,13 +847,13 @@ public:
         return static_cast<R>(std::forward<U>(default_value));
     }
 
-    // Map function over const reference
+    // Map function over const reference (deduced return — see map above).
     template<typename F>
     // @lifetime: (&'a) -> Option<U>
-    auto map(F&& f) const -> Option<decltype(f(std::declval<const T&>()))> {
-        using U = decltype(f(std::declval<const T&>()));
+    auto map(F&& f) const {
+        using U = decltype(f(*static_cast<const T*>(ptr)));
         if (ptr) {
-            return Option<U>(f(*ptr));
+            return Option<U>(f(*static_cast<const T*>(ptr)));
         }
         return Option<U>(None);
     }
