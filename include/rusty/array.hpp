@@ -1784,6 +1784,57 @@ struct range_to_inclusive {
     }
 };
 
+namespace detail {
+// Rust RangeBounds shapes: the range structs and (Bound, Bound) pairs.
+// Emitted Q-keyed lookup methods (`Q: Equivalent<K>`) constrain with
+// `!range_bounds_like<Q>` so a range subscript never lands on the greedy
+// key template — mirroring Rust, where range tuples don't implement
+// Equivalent and overload selection happens through distinct impls.
+template<typename T>
+struct is_bound_like : std::false_type {};
+template<typename T>
+struct is_bound_like<
+    std::variant<Bound_Unbounded<T>, Bound_Included<T>, Bound_Excluded<T>>>
+    : std::true_type {};
+template<>
+struct is_bound_like<bound_unbounded_t> : std::true_type {};
+template<typename T>
+inline constexpr bool is_bound_like_v = is_bound_like<std::remove_cvref_t<T>>::value;
+
+template<typename T>
+struct is_range_bounds_like : std::false_type {};
+template<typename A, typename B>
+struct is_range_bounds_like<std::tuple<A, B>>
+    : std::bool_constant<is_bound_like_v<A> && is_bound_like_v<B>> {};
+template<typename A, typename B>
+struct is_range_bounds_like<std::pair<A, B>>
+    : std::bool_constant<is_bound_like_v<A> && is_bound_like_v<B>> {};
+template<typename T>
+struct is_range_bounds_like<range<T>> : std::true_type {};
+template<typename T>
+struct is_range_bounds_like<range_inclusive<T>> : std::true_type {};
+template<typename T>
+struct is_range_bounds_like<range_from<T>> : std::true_type {};
+template<typename T>
+struct is_range_bounds_like<range_to<T>> : std::true_type {};
+template<typename T>
+struct is_range_bounds_like<range_to_inclusive<T>> : std::true_type {};
+template<>
+struct is_range_bounds_like<range_full> : std::true_type {};
+template<typename T>
+inline constexpr bool is_range_bounds_like_v =
+    is_range_bounds_like<std::remove_cvref_t<T>>::value;
+
+template<typename T>
+concept range_bounds_like = is_range_bounds_like_v<T>;
+
+// The C++ mirror of Rust's `Q: Equivalent<K>` bound on keyed lookups:
+// range shapes never implement Equivalent, so constraining the greedy
+// Q-key template keeps range subscripts on the dedicated range impls.
+template<typename Q>
+concept equivalence_key_like = !is_range_bounds_like_v<Q>;
+} // namespace detail
+
 
 template<typename T, std::size_t N>
 auto slice_full(std::array<T, N>&& container) {

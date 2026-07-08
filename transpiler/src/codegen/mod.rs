@@ -43707,6 +43707,12 @@ fn well_known_concept_for_trait_path(path: &syn::Path) -> Option<&'static str> {
         | "std::alloc::Allocator"
         | "alloc::alloc::Allocator" => Some("rusty::alloc::Allocator"),
         "Clone" | "core::clone::Clone" | "std::clone::Clone" => Some("std::copyable"),
+        // Rust's Equivalent/Comparable key bounds exclude range shapes;
+        // the concept keeps range subscripts off the greedy Q-key template
+        // (indexmap's Index<(Bound, Bound)> vs Index<&Q> overloads).
+        "Equivalent" | "equivalent::Equivalent" | "Comparable" | "equivalent::Comparable" => {
+            Some("rusty::detail::equivalence_key_like")
+        }
         _ => {
             let _ = last;
             None
