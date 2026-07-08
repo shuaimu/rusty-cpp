@@ -3225,6 +3225,37 @@ impl CodeGen {
         matches!(self.peel_paren_group_expr(index), syn::Expr::Range(_))
     }
 
+    /// The index TYPE is a runtime range shape: a canonical `rusty::range*`
+    /// family type, or a `(Bound, Bound)` pair (Rust's bare RangeBounds tuple
+    /// form). Subscripts with these route through `rusty::index_with_range`
+    /// rather than raw `operator[]` — span/C-string bases have no such
+    /// subscript, and receivers with their own Index impls are preferred
+    /// inside the helper.
+    pub(super) fn mapped_index_type_is_runtime_range_like(&self, index_ty: &syn::Type) -> bool {
+        let index_ty = self.peel_reference_paren_group_type(index_ty);
+        let mapped = self.map_type(index_ty);
+        let canonical = mapped
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect::<String>();
+        canonical.starts_with("rusty::range<")
+            || canonical.starts_with("rusty::range_from<")
+            || canonical.starts_with("rusty::range_inclusive<")
+            || canonical.starts_with("rusty::range_to<")
+            || canonical.starts_with("rusty::range_to_inclusive<")
+            || canonical == "rusty::range_full"
+            || canonical.starts_with("std::tuple<rusty::Bound<")
+            || canonical.starts_with("std::pair<rusty::Bound<")
+    }
+
+    /// `expr`'s inferred type is runtime-range-like (see
+    /// `mapped_index_type_is_runtime_range_like`).
+    pub(super) fn index_expr_is_runtime_range_valued(&self, index: &syn::Expr) -> bool {
+        self.infer_simple_expr_type(index)
+            .as_ref()
+            .is_some_and(|ty| self.mapped_index_type_is_runtime_range_like(ty))
+    }
+
     pub(super) fn is_range_expression(expr: &syn::Expr) -> bool {
         match expr {
             syn::Expr::Range(_) => true,

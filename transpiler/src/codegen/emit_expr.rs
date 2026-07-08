@@ -10663,23 +10663,7 @@ impl CodeGen {
             .is_some_and(|ty| {
                 self.is_known_string_like_type(ty) || self.map_type(ty) == "std::string_view"
             });
-        let is_runtime_range_index = self
-            .infer_simple_expr_type(index_expr)
-            .as_ref()
-            .is_some_and(|index_ty| {
-                let index_ty = self.peel_reference_paren_group_type(index_ty);
-                let mapped = self.map_type(index_ty);
-                let canonical = mapped
-                    .chars()
-                    .filter(|c| !c.is_ascii_whitespace())
-                    .collect::<String>();
-                canonical.starts_with("rusty::range<")
-                    || canonical.starts_with("rusty::range_from<")
-                    || canonical.starts_with("rusty::range_inclusive<")
-                    || canonical.starts_with("rusty::range_to<")
-                    || canonical.starts_with("rusty::range_to_inclusive<")
-                    || canonical == "rusty::range_full"
-            });
+        let is_runtime_range_index = self.index_expr_is_runtime_range_valued(index_expr);
         let is_span_unwrap_range_hint = matches!(
             self.peel_paren_group_expr(index_expr),
             syn::Expr::MethodCall(outer)
@@ -12739,6 +12723,25 @@ impl CodeGen {
         };
         if self.is_stable_reference_lvalue_expr(&reference.expr) {
             return None;
+        }
+
+        // `&base[range]` — a runtime range subscript: route through
+        // index_with_range (a live span view). Static storage would alias a
+        // runtime-dependent value across calls, and std::span has no range
+        // operator[] anyway (Slice::from_slice(&self.as_entries()[range])).
+        if let syn::Expr::Index(idx) = self.peel_paren_group_expr(&reference.expr)
+            && (self.is_slice_range_index_expr(&idx.index)
+                || self.index_expr_is_runtime_range_valued(&idx.index))
+            // Array-literal bases keep the typed static-storage path below
+            // (the literal needs materialized storage the span can outlive).
+            && !matches!(
+                self.peel_paren_group_expr(&idx.expr),
+                syn::Expr::Array(_) | syn::Expr::Repeat(_)
+            )
+        {
+            let base = self.emit_expr_to_string(&idx.expr);
+            let index = self.emit_expr_to_string(&idx.index);
+            return Some(format!("rusty::index_with_range({}, {})", base, index));
         }
 
         let elem_ty = slice_ty.elem.as_ref();
@@ -20292,23 +20295,7 @@ impl CodeGen {
                 .is_some_and(|ty| {
                     self.is_known_string_like_type(ty) || self.map_type(ty) == "std::string_view"
                 });
-        let is_runtime_range_index = self
-            .infer_simple_expr_type(&idx.index)
-            .as_ref()
-            .is_some_and(|index_ty| {
-                let index_ty = self.peel_reference_paren_group_type(index_ty);
-                let mapped = self.map_type(index_ty);
-                let canonical = mapped
-                    .chars()
-                    .filter(|c| !c.is_ascii_whitespace())
-                    .collect::<String>();
-                canonical.starts_with("rusty::range<")
-                    || canonical.starts_with("rusty::range_from<")
-                    || canonical.starts_with("rusty::range_inclusive<")
-                    || canonical.starts_with("rusty::range_to<")
-                    || canonical.starts_with("rusty::range_to_inclusive<")
-                    || canonical == "rusty::range_full"
-            });
+        let is_runtime_range_index = self.index_expr_is_runtime_range_valued(&idx.index);
         let is_span_unwrap_range_hint = matches!(
             self.peel_paren_group_expr(&idx.index),
             syn::Expr::MethodCall(outer)

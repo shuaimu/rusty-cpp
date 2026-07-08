@@ -14377,6 +14377,24 @@ fn test_leaf4292_dynamic_range_index_lowers_to_runtime_helper() {
 }
 
 #[test]
+fn test_bound_pair_index_lowers_to_runtime_helper() {
+    // Rust's bare-RangeBounds tuple subscript, both value and reference
+    // positions (`&slice[range]` from Index<(Bound, Bound)> impl bodies).
+    let out = transpile_str(
+        "use std::ops::Bound;\n\
+         fn f(v: &[u8], range: (Bound<usize>, Bound<usize>)) -> &[u8] { &v[range] }\n\
+         fn g(v: &[u8], range: (Bound<usize>, Bound<usize>)) -> usize { v[range].len() }",
+    );
+    assert_eq!(
+        out.matches("rusty::index_with_range(v, range)").count(),
+        2,
+        "{out}"
+    );
+    assert!(!out.contains("v[range]"), "{out}");
+    assert!(!out.contains("_slice_ref_tmp = v[range]"), "{out}");
+}
+
+#[test]
 fn test_leaf4154332_raw_pointer_add_offset_method_calls_lowered_to_runtime_helpers() {
     let out = transpile_str(
         "fn f(p: *mut i32, q: *const i32, n: usize, d: isize) { let _a = p.add(n); let _b = q.offset(d); }",

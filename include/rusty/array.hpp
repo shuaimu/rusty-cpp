@@ -1828,6 +1828,49 @@ inline constexpr bool is_range_bounds_like_v =
 template<typename T>
 concept range_bounds_like = is_range_bounds_like_v<T>;
 
+// Just the `(Bound, Bound)` pair shapes — the RangeBounds form with no
+// dedicated range struct, so subscripts decode the pair at runtime.
+template<typename T>
+struct is_bound_pair_like : std::false_type {};
+template<typename A, typename B>
+struct is_bound_pair_like<std::tuple<A, B>>
+    : std::bool_constant<is_bound_like_v<A> && is_bound_like_v<B>> {};
+template<typename A, typename B>
+struct is_bound_pair_like<std::pair<A, B>>
+    : std::bool_constant<is_bound_like_v<A> && is_bound_like_v<B>> {};
+template<typename T>
+inline constexpr bool is_bound_pair_like_v =
+    is_bound_pair_like<std::remove_cvref_t<T>>::value;
+
+// Decode one slot of a `(Bound, Bound)` pair to a concrete element index.
+// Start: Unbounded→0, Included(i)→i, Excluded(i)→i+1. A slot is either the
+// Bound<T> variant or the type-erased `bound_unbounded_t` factory tag.
+template<typename Bnd>
+size_t bound_pair_start(const Bnd& b) {
+    if constexpr (std::is_same_v<std::remove_cvref_t<Bnd>, bound_unbounded_t>) {
+        return 0;
+    } else {
+        switch (b.index()) {
+            case 1: return static_cast<size_t>(std::get<1>(b)._0);
+            case 2: return static_cast<size_t>(std::get<2>(b)._0) + 1;
+            default: return 0;
+        }
+    }
+}
+// End, given the container length: Unbounded→len, Included(i)→i+1, Excluded(i)→i.
+template<typename Bnd>
+size_t bound_pair_end(const Bnd& b, size_t len) {
+    if constexpr (std::is_same_v<std::remove_cvref_t<Bnd>, bound_unbounded_t>) {
+        return len;
+    } else {
+        switch (b.index()) {
+            case 1: return static_cast<size_t>(std::get<1>(b)._0) + 1;
+            case 2: return static_cast<size_t>(std::get<2>(b)._0);
+            default: return len;
+        }
+    }
+}
+
 // The C++ mirror of Rust's `Q: Equivalent<K>` bound on keyed lookups:
 // range shapes never implement Equivalent, so constraining the greedy
 // Q-key template keeps range subscripts on the dedicated range impls.
@@ -2606,6 +2649,35 @@ auto index_with_range(Base&& base, const range_full&) {
         return std::string_view(std::forward<Base>(base));
     } else {
         return slice_full(std::forward<Base>(base));
+    }
+}
+
+// Rust's `(Bound, Bound)` subscript — the RangeBounds tuple form. A receiver
+// with its own transpiled `Index<(Bound<usize>, Bound<usize>)>` impl wins,
+// matching Rust's impl selection; otherwise the pair decodes to concrete
+// indices over the span view.
+template<typename Base, typename B>
+    requires detail::is_bound_pair_like_v<B>
+decltype(auto) index_with_range(Base&& base, const B& bounds) {
+#if RUSTY_RANGE_SUBSCRIPT_ROUTING
+    if constexpr (detail::range_index_mut_probe<std::remove_reference_t<Base>, B>::value) {
+        return base.index_mut(bounds);
+    } else if constexpr (detail::range_subscript_probe<std::remove_reference_t<Base>, B>::value) {
+        return base[bounds];
+    } else
+#endif
+    if constexpr (std::is_convertible_v<Base&&, std::string_view>) {
+        auto view = std::string_view(std::forward<Base>(base));
+        const size_t start_index = detail::bound_pair_start(std::get<0>(bounds));
+        const size_t end_index = detail::bound_pair_end(std::get<1>(bounds), view.size());
+        detail::validate_slice_bounds(view, start_index, end_index);
+        return view.substr(start_index, end_index - start_index);
+    } else {
+        std::span view{base};
+        const size_t start_index = detail::bound_pair_start(std::get<0>(bounds));
+        const size_t end_index = detail::bound_pair_end(std::get<1>(bounds), view.size());
+        detail::validate_slice_bounds(view, start_index, end_index);
+        return view.subspan(start_index, end_index - start_index);
     }
 }
 
