@@ -5054,8 +5054,29 @@ impl CodeGen {
             }
             Some(bound.clone())
         };
+        // A `Q: Equivalent<K>` / `Comparable<K>` lookup-key bound: the arg
+        // slot rewrites to K so call-site keys spell as the map's key type
+        // (string literals on IndexMap<&str, _>::get need string_view; the
+        // receiver-substitution layer concretizes an impl-param K).
+        let equivalent_bound = |bound: &syn::TypeParamBound| -> Option<syn::Type> {
+            let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                return None;
+            };
+            let seg = trait_bound.path.segments.last()?;
+            if !matches!(seg.ident.to_string().as_str(), "Equivalent" | "Comparable") {
+                return None;
+            }
+            let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+                return None;
+            };
+            args.args.iter().find_map(|arg| match arg {
+                syn::GenericArgument::Type(t) => Some(t.clone()),
+                _ => None,
+            })
+        };
         let mut fn_bounds: HashMap<String, syn::TypeParamBound> = HashMap::new();
         let mut iter_bounds: HashMap<String, syn::TypeParamBound> = HashMap::new();
+        let mut equiv_bounds: HashMap<String, syn::Type> = HashMap::new();
         for param in &generics.params {
             if let syn::GenericParam::Type(tp) = param {
                 for bound in &tp.bounds {
@@ -5063,6 +5084,8 @@ impl CodeGen {
                         fn_bounds.insert(tp.ident.to_string(), bound.clone());
                     } else if let Some(bound) = iterator_bound(bound) {
                         iter_bounds.insert(tp.ident.to_string(), bound);
+                    } else if let Some(k) = equivalent_bound(bound) {
+                        equiv_bounds.insert(tp.ident.to_string(), k);
                     }
                 }
             }
@@ -5080,18 +5103,40 @@ impl CodeGen {
                             fn_bounds.insert(name.clone(), bound.clone());
                         } else if let Some(bound) = iterator_bound(bound) {
                             iter_bounds.insert(name.clone(), bound);
+                        } else if let Some(k) = equivalent_bound(bound) {
+                            equiv_bounds.insert(name.clone(), k);
                         }
                     }
                 }
             }
         }
-        if fn_bounds.is_empty() && iter_bounds.is_empty() {
+        if fn_bounds.is_empty() && iter_bounds.is_empty() && equiv_bounds.is_empty() {
             return expected;
         }
         expected
             .into_iter()
             .map(|slot| {
                 let Some(ty) = slot else { return None };
+                // Lookup-key params appear as `&Q` — peel one reference and
+                // re-wrap the substituted K.
+                let (peeled, ref_shell) = match &ty {
+                    syn::Type::Reference(r) => (r.elem.as_ref(), Some(r.clone())),
+                    other => (other, None),
+                };
+                if let syn::Type::Path(tp) = peeled
+                    && tp.qself.is_none()
+                    && tp.path.segments.len() == 1
+                    && matches!(tp.path.segments[0].arguments, syn::PathArguments::None)
+                    && let Some(k) = equiv_bounds.get(&tp.path.segments[0].ident.to_string())
+                {
+                    return Some(match ref_shell {
+                        Some(mut shell) => {
+                            shell.elem = Box::new(k.clone());
+                            syn::Type::Reference(shell)
+                        }
+                        None => k.clone(),
+                    });
+                }
                 if let syn::Type::Path(tp) = &ty
                     && tp.qself.is_none()
                     && tp.path.segments.len() == 1
