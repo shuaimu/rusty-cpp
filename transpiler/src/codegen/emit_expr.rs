@@ -6682,7 +6682,40 @@ impl CodeGen {
             return format!("rusty::iter_mut({})", receiver);
         }
         if mc.method == "into_iter" && mc.args.is_empty() {
-            if self.should_bridge_direct_into_iter_receiver_to_iter(&mc.receiver) {
+            // An expected OWNING iterator (`Self { iter: entries.into_iter() }`
+            // against a `vec::IntoIter<Bucket<K, V>>` field) must stay a member
+            // into_iter() — the rusty::iter(...) bridge yields a borrowing
+            // slice iterator that can't initialize the field. Fixed arrays keep
+            // bridging (no into_iter member), and ctor-shaped receivers still
+            // take their element from the expected iterator's item.
+            let expected_wants_owning_into_iter = expected_ty.is_some_and(|ty| {
+                matches!(
+                    self.peel_reference_paren_group_type(ty),
+                    syn::Type::Path(tp)
+                        if tp.path.segments.last().is_some_and(|seg| seg.ident == "IntoIter")
+                )
+            }) && !self.receiver_is_fixed_array_like_expr(&mc.receiver);
+            if expected_wants_owning_into_iter {
+                if let Some(receiver_expected) = self
+                    .infer_into_iter_receiver_expected_type_from_call_expected(
+                        &mc.receiver,
+                        expected_ty,
+                    )
+                {
+                    let raw = self.emit_expr_to_string_with_expected_and_move_if_needed(
+                        &mc.receiver,
+                        Some(&receiver_expected),
+                    );
+                    let recv = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                        format!("({})", raw)
+                    } else {
+                        raw
+                    };
+                    return format!("{}.into_iter()", recv);
+                }
+                // No ctor-shaped receiver to specialize: fall through to the
+                // default member emission (entries.into_iter()).
+            } else if self.should_bridge_direct_into_iter_receiver_to_iter(&mc.receiver) {
                 let receiver_expected = self
                     .infer_into_iter_receiver_expected_type_from_call_expected(
                         &mc.receiver,

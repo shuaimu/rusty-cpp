@@ -23812,8 +23812,13 @@ fn test_leaf5442_into_iter_bridge_specializes_nested_vec_new_from_expected_iter_
         }
     "#,
     );
+    // With an OWNING IntoIter expected, the receiver keeps the specialized
+    // element AND the member into_iter() (the rusty::iter bridge would yield
+    // a borrowing slice iterator that can't be the vec::IntoIter element).
     assert!(
-        out.contains("rusty::iter(rusty::Vec<rusty::detail::associated_item_t<I>>::new_())"),
+        out.contains(
+            "rusty::Vec<rusty::detail::associated_item_t<I>>::new_().into_iter()"
+        ),
         "{out}"
     );
     assert!(!out.contains("Vec<auto>::new_()"), "{out}");
