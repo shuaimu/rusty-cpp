@@ -2888,10 +2888,15 @@ impl CodeGen {
                     // emitted `const auto&` cannot invoke a `mutable` lambda —
                     // "no matching function for call to object of type 'const
                     // (lambda ...)'" from indexmap's find_mut closures).
+                    // Plain `Fn` joins them: transpiled move-closures emit as
+                    // `mutable` lambdas (captures may be moved out), which a
+                    // `const auto&` param cannot invoke even when the Rust
+                    // bound is Fn (indexmap passing a move-closure hasher to
+                    // hashbrown's insert_unique).
                     let has_mutable_trait = it.bounds.iter().any(|b| {
                         if let syn::TypeParamBound::Trait(tb) = b {
                             let last = tb.path.segments.last().map(|s| s.ident.to_string());
-                            matches!(last.as_deref(), Some("Write" | "FnMut" | "FnOnce"))
+                            matches!(last.as_deref(), Some("Write" | "Fn" | "FnMut" | "FnOnce"))
                         } else {
                             false
                         }
