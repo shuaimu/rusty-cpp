@@ -31733,6 +31733,25 @@ impl CodeGen {
         // capturing lambda is illegal at namespace scope, where this shim
         // lands inside `const` static-member initializers (Phase-7 fallout
         // category B, e.g. bitflags `TestFlags::ABC = …`).
+        // `into_iter` on a raw slice view (std::span entries) has neither a
+        // rusty_ext overload nor a member — Rust's IntoIterator for &[T]
+        // lowers through the slice iterator. Make the member tier conditional
+        // and bottom out in rusty::iter for that one method.
+        if callee_leaf == "into_iter" && extra_args.is_empty() {
+            let iter_fallback = format!("rusty::iter({})", direct_receiver);
+            return format!(
+                "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
+                arg_param_list,
+                direct_call,
+                direct_call,
+                deref_call,
+                deref_call,
+                member_call,
+                member_call,
+                iter_fallback,
+                arg_call_list
+            );
+        }
         format!(
             "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
             arg_param_list,
