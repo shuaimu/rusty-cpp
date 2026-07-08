@@ -21013,6 +21013,63 @@ impl CodeGen {
         };
         let lambda_mutability = if is_move_closure { " mutable" } else { "" };
 
+        // A callable-shaped expected type means this closure IS the callable.
+        // Type its params from the signature (so body casts see the real
+        // param types), and for fn-POINTER shapes (bare fn, SafeFn/UnsafeFn)
+        // drop the capture list — Rust only coerces capture-less closures to
+        // fn pointers, and C++ only converts capture-less lambdas.
+        let callable_expected_ty = expected_return_type.and_then(|rt| match rt {
+            syn::ReturnType::Type(_, ty) if self.type_is_callable_shape_for_lambda(ty) => {
+                Some(ty.as_ref())
+            }
+            _ => None,
+        });
+        let callable_is_fn_pointer_shape = callable_expected_ty.is_some_and(|ty| {
+            match self.peel_reference_paren_group_type(ty) {
+                syn::Type::BareFn(_) => true,
+                syn::Type::Path(tp) => tp.path.segments.last().is_some_and(|seg| {
+                    matches!(seg.ident.to_string().as_str(), "SafeFn" | "UnsafeFn")
+                }),
+                _ => false,
+            }
+        });
+        let capture = if callable_is_fn_pointer_shape {
+            String::new()
+        } else {
+            capture
+        };
+        // Seed binding types only for fn-POINTER shapes, where the C++
+        // params are spelled concretely below and agree with the bindings.
+        // For impl-Fn shapes the params stay `auto&&`, and typed bindings
+        // would flip body lowerings (deref helpers) out from under them.
+        if callable_is_fn_pointer_shape
+            && let Some(ty) = callable_expected_ty
+            && self.pending_closure_param_types.borrow().is_none()
+            && let Some(param_types) = self.extract_callable_param_types_from_type(ty)
+            && param_types.len() == closure.inputs.len()
+        {
+            *self.pending_closure_param_types.borrow_mut() = Some(param_types);
+        }
+
+        // Fn-pointer coercion needs CONCRETE param spellings: a generic
+        // lambda's conversion template takes `T&&` params, which never
+        // deduces against a plain-pointer signature like void(*)(uint8_t*).
+        let callable_param_cpp: Option<Vec<String>> = if callable_is_fn_pointer_shape {
+            callable_expected_ty
+                .and_then(|ty| self.extract_callable_param_types_from_type(ty))
+                .filter(|ts| ts.len() == closure.inputs.len())
+                .map(|ts| ts.iter().map(|t| self.map_type(t)).collect::<Vec<_>>())
+                .filter(|mapped| {
+                    mapped.iter().all(|m| {
+                        m != "auto"
+                            && !m.contains("/* TODO")
+                            && !type_string_has_auto_placeholder(m)
+                    })
+                })
+        } else {
+            None
+        };
+
         // Build parameter list.
         let mut closure_param_prelude: Vec<String> = Vec::new();
         let params: Vec<String> = closure
@@ -21021,6 +21078,22 @@ impl CodeGen {
             .enumerate()
             .map(|(idx, p)| {
                 let (decl, prelude_stmt) = self.emit_closure_param_with_prelude(p, idx);
+                // Concrete fn-pointer param spelling: keep the NAME the
+                // normal path allocated (it carries shadow renames like
+                // `ptr_shadow1` that the body references) and swap only the
+                // `auto&&` type for the signature's param type.
+                if let Some(types) = &callable_param_cpp
+                    && prelude_stmt.is_none()
+                    && matches!(p, syn::Pat::Ident(pi) if pi.subpat.is_none())
+                    && let Some(name) = decl.rsplit(' ').next()
+                {
+                    return format!("{} {}", types[idx], name);
+                }
+                if let Some(types) = &callable_param_cpp
+                    && matches!(p, syn::Pat::Wild(_))
+                {
+                    return format!("{} _unused{}", types[idx], idx);
+                }
                 if let Some(stmt) = prelude_stmt {
                     closure_param_prelude.push(stmt);
                 }
@@ -21139,7 +21212,19 @@ impl CodeGen {
                 }
             }
             syn::ReturnType::Default => fallback_expected_return_ty
-                .map(|ty| self.map_type(ty))
+                .and_then(|ty| {
+                    // A callable-shaped expected (bare fn pointer, Fn bound,
+                    // SafeFn/UnsafeFn wrapper) is the CLOSURE'S OWN type, not
+                    // its return — annotate with the callable's output
+                    // (hashbrown's Option<unsafe fn(*mut u8)> drop hook: a
+                    // void body must not get a `-> UnsafeFn<..>` annotation).
+                    if self.type_is_callable_shape_for_lambda(ty) {
+                        self.extract_callable_return_type_from_type(ty)
+                            .map(|out| self.map_type(&out))
+                    } else {
+                        Some(self.map_type(ty))
+                    }
+                })
                 .filter(|mapped| {
                     mapped != "auto"
                         && !mapped.contains("/* TODO")

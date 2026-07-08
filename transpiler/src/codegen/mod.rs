@@ -19850,6 +19850,21 @@ impl CodeGen {
         if reject_tuple_placeholder_marker && self.type_contains_tuple_placeholder_marker(ty) {
             return String::new();
         }
+        // A callable EXPECTED type (bare fn pointer, Fn bound, SafeFn/
+        // UnsafeFn/Function wrapper) describes the closure ITSELF, not its
+        // return: annotate with the callable's OUTPUT. Spelling the wrapper
+        // as the return type makes a void body (`return drop_in_place(..)`,
+        // hashbrown's Option<unsafe fn(*mut u8)> drop hook) fail to convert.
+        if self.type_is_callable_shape_for_lambda(ty) {
+            return match self.extract_callable_return_type_from_type(ty) {
+                Some(output) => self.expected_lambda_return_annotation(
+                    Some(&output),
+                    reject_tuple_placeholder_marker,
+                ),
+                // Default (void) output: leave the body to deduce.
+                None => String::new(),
+            };
+        }
         if self.should_soften_dependent_assoc_mode()
             && self.type_references_current_struct_assoc_projection(ty)
             && !self.type_current_struct_assoc_aliases_emitted(ty)
@@ -19865,6 +19880,35 @@ impl CodeGen {
             return String::new();
         }
         format!(" -> {}", mapped)
+    }
+
+    /// Is this expected type the shape of a CALLABLE the closure coerces to
+    /// (rather than a value type the closure returns)? Bare fn pointers,
+    /// `impl Fn`/`dyn Fn` bounds, and the SafeFn/UnsafeFn/Function wrappers.
+    pub(super) fn type_is_callable_shape_for_lambda(&self, ty: &syn::Type) -> bool {
+        let ty = self.peel_reference_paren_group_type(ty);
+        match ty {
+            syn::Type::BareFn(_) => true,
+            syn::Type::ImplTrait(it) => it.bounds.iter().any(|bound| {
+                matches!(bound, syn::TypeParamBound::Trait(tb)
+                    if tb.path.segments.last().is_some_and(|seg| {
+                        matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce")
+                    }))
+            }),
+            syn::Type::TraitObject(obj) => obj.bounds.iter().any(|bound| {
+                matches!(bound, syn::TypeParamBound::Trait(tb)
+                    if tb.path.segments.last().is_some_and(|seg| {
+                        matches!(seg.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce")
+                    }))
+            }),
+            syn::Type::Path(tp) => tp.path.segments.last().is_some_and(|seg| {
+                matches!(
+                    seg.ident.to_string().as_str(),
+                    "SafeFn" | "UnsafeFn" | "Function" | "Fn" | "FnMut" | "FnOnce"
+                )
+            }),
+            _ => false,
+        }
     }
 
 
