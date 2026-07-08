@@ -52612,6 +52612,43 @@ fn is_consuming_method_name(method: &str) -> bool {
                 | "swap_remove_entry"
                 | "shift_remove_entry"
         )
+        // Iterator adapters and terminal consumers take `self` by value
+        // (`let diff1 = a.difference(b); diff1.chain(diff2)` consumes the
+        // non-mut binding — a const C++ local can't feed the runtime
+        // adapters, whose next() is non-const). Same-named borrowing
+        // methods on other types (slice::last(&self)) merely lose a
+        // C++ const on their binding, which is harmless.
+        || matches!(
+            method,
+            "chain"
+                | "zip"
+                | "rev"
+                | "enumerate"
+                | "take"
+                | "take_while"
+                | "skip"
+                | "skip_while"
+                | "fuse"
+                | "peekable"
+                | "cycle"
+                | "step_by"
+                | "scan"
+                | "flat_map"
+                | "flatten"
+                | "inspect"
+                | "cloned"
+                | "copied"
+                | "collect"
+                | "fold"
+                | "count"
+                | "last"
+                | "nth"
+                | "sum"
+                | "product"
+                | "for_each"
+                | "partition"
+                | "unzip"
+        )
 }
 
 /// Recursively collect assignment targets from a statement.
