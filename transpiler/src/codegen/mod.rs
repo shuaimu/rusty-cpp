@@ -29796,6 +29796,15 @@ impl CodeGen {
             return None;
         };
         let target_struct = ttp.path.segments.last()?.ident.to_string();
+        // A method-return wrapper spelled with `Self`
+        // (`ScopeGuard<Self, impl FnMut(&mut Self)>` from prepare_resize)
+        // instantiates the Target to the literal `Self` — resolve it through
+        // the enclosing impl's type.
+        let target_struct = if target_struct == "Self" {
+            self.current_struct.clone()?
+        } else {
+            target_struct
+        };
         // The Deref target must actually have the field.
         self.lookup_struct_field_type(&target_struct, field_name)?;
         let field_cpp = self
