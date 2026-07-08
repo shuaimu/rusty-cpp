@@ -32697,6 +32697,38 @@ impl CodeGen {
         expected_ty: Option<&syn::Type>,
     ) -> String {
         let elem_expected = self.expected_array_element_type(expected_ty);
+        // An array of literal-backed reference tuples
+        // (Ok([(&1, &mut 10)]) against [(&K, &mut V); 1]): decay the ref
+        // slots uniformly across elements — the references can't bind the
+        // literal temporaries, and elementwise comparison is unchanged.
+        let decayed_elem: Option<syn::Type> = elem_expected.and_then(|elem_ty| {
+            let syn::Type::Tuple(tt) = self.peel_paren_group_type(elem_ty) else {
+                return None;
+            };
+            if array_expr.elems.is_empty() {
+                return None;
+            }
+            let mut decayed_shape: Option<syn::TypeTuple> = None;
+            for elem in &array_expr.elems {
+                let syn::Expr::Tuple(te) = self.peel_paren_group_expr(elem) else {
+                    return None;
+                };
+                let d = self.decay_literal_ref_tuple_slots(tt, te)?;
+                match &decayed_shape {
+                    None => decayed_shape = Some(d),
+                    Some(prev) => {
+                        let prev_s = quote::quote!(#prev).to_string();
+                        let d_s = quote::quote!(#d).to_string();
+                        if prev_s != d_s {
+                            return None;
+                        }
+                    }
+                }
+            }
+            decayed_shape.map(syn::Type::Tuple)
+        });
+        let decayed_elem_ref = decayed_elem.as_ref();
+        let elem_expected = decayed_elem_ref.or(elem_expected);
         if array_expr.elems.is_empty() {
             if let Some(elem_ty) = elem_expected {
                 return format!(
