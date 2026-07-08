@@ -1082,8 +1082,17 @@ public:
     }
 
     auto next() {
-        using left_item = next_item_t<std::remove_reference_t<LeftIter>>;
-        using item_type = std::decay_t<left_item>;
+        // Probe the UNDECAYED payload (next_item_t decays by definition):
+        // lvalue-reference items stay references — Rust's Chain over
+        // ref-yielding iterators yields refs, and rusty::Option<T&> is
+        // pointer-backed so returning it is safe. Decaying them mismatched
+        // emitted adapter wrappers whose declared Item is `const T&`.
+        using left_item_raw = decltype(option_like_take_value(
+            std::declval<next_result_t<std::remove_reference_t<LeftIter>>&>()));
+        using item_type = std::conditional_t<
+            std::is_lvalue_reference_v<left_item_raw>,
+            left_item_raw,
+            std::decay_t<left_item_raw>>;
         using next_result = rusty::Option<item_type>;
 
         if (!left_done_) {
