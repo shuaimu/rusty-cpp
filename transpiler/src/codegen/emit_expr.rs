@@ -6669,14 +6669,16 @@ impl CodeGen {
             && mc.args.is_empty()
             && !self.receiver_type_has_user_iter_method(&mc.receiver, "iter")
         {
-            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver =
+                self.emit_iter_receiver_with_array_elem_from_expected(&mc.receiver, expected_ty);
             return format!("rusty::iter({})", receiver);
         }
         if mc.method == "iter_mut"
             && mc.args.is_empty()
             && !self.receiver_type_has_user_iter_method(&mc.receiver, "iter_mut")
         {
-            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let receiver =
+                self.emit_iter_receiver_with_array_elem_from_expected(&mc.receiver, expected_ty);
             return format!("rusty::iter_mut({})", receiver);
         }
         if mc.method == "into_iter" && mc.args.is_empty() {
@@ -12567,6 +12569,33 @@ impl CodeGen {
         func = self.rewrite_seed_ctor_path_string(&func);
         func = self.maybe_defer_static_owner_lookup_for_path_call(call, func);
         Some(format!("{}({})", func, arg))
+    }
+
+    /// `[].iter()` in a position expecting an iterator over Elem (Default
+    /// impls of iterator wrappers: `Self { iter: [].iter() }` against a
+    /// `slice::Iter<'a, Bucket<K, V>>` field): thread the expected item
+    /// down as the empty array literal's element so it doesn't default to
+    /// `std::array<int, 0>`.
+    fn emit_iter_receiver_with_array_elem_from_expected(
+        &self,
+        receiver: &syn::Expr,
+        expected_ty: Option<&syn::Type>,
+    ) -> String {
+        if let Some(expected) = expected_ty
+            && matches!(
+                self.peel_paren_group_expr(receiver),
+                syn::Expr::Array(arr) if arr.elems.is_empty()
+            )
+            && let Some(item) = self.extract_iter_item_type_from_type(
+                self.peel_reference_paren_group_type(expected),
+            )
+            && !self.type_contains_infer(&item)
+        {
+            let item = self.peel_reference_paren_group_type(&item).clone();
+            let expected_arr: syn::Type = parse_quote!([#item; 0]);
+            return self.emit_expr_to_string_with_expected(receiver, Some(&expected_arr));
+        }
+        self.emit_expr_to_string(receiver)
     }
 
     pub(super) fn try_emit_reference_array_literal_with_expected_span(

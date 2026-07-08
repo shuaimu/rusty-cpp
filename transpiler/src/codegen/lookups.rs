@@ -2616,10 +2616,10 @@ impl CodeGen {
                         })?;
                         Some(parse_quote!(rusty::detail::associated_item_t<#owner_ty>))
                     }
-                    "ArrayVec" | "IntoIter" | "VecIntoIter" | "Iter" | "Vec" | "array" | "span"
-                    | "range" | "range_inclusive" | "range_from" | "range_to"
-                    | "range_to_inclusive" | "Range" | "RangeInclusive" | "RangeFrom" | "RangeTo"
-                    | "RangeToInclusive" => {
+                    "ArrayVec" | "IntoIter" | "VecIntoIter" | "Iter" | "IterMut" | "Vec"
+                    | "array" | "span" | "range" | "range_inclusive" | "range_from"
+                    | "range_to" | "range_to_inclusive" | "Range" | "RangeInclusive"
+                    | "RangeFrom" | "RangeTo" | "RangeToInclusive" => {
                         let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
                             return None;
                         };
@@ -2629,7 +2629,35 @@ impl CodeGen {
                         })
                     }
                     "SplitIter" => Some(parse_quote!(&str)),
-                    _ => None,
+                    other => {
+                        // A use-renamed iterator (`use core::slice::Iter as
+                        // SliceIter;`): resolve the import binding and re-check
+                        // its tail; the type args live on the alias segment.
+                        if tp.path.segments.len() != 1 {
+                            return None;
+                        }
+                        let target = self
+                            .resolve_scope_import_binding_target_for_exact_scope(
+                                &self.module_stack.join("::"),
+                                other,
+                            )
+                            .or_else(|| {
+                                self.resolve_scope_import_binding_target_for_exact_scope(
+                                    "", other,
+                                )
+                            })?;
+                        let target_tail = target.rsplit("::").next().unwrap_or(&target);
+                        if !matches!(target_tail, "Iter" | "IterMut" | "IntoIter") {
+                            return None;
+                        }
+                        let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+                            return None;
+                        };
+                        args.args.iter().find_map(|arg| match arg {
+                            syn::GenericArgument::Type(t) => Some(t.clone()),
+                            _ => None,
+                        })
+                    }
                 }
             }
             _ => None,
