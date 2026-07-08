@@ -19254,12 +19254,19 @@ impl CodeGen {
                                 // cannot have a capture-default" when a
                                 // lambda with a capture-default lives
                                 // inside an unevaluated requires-operand.
+                                // Deref tiers: Rust auto-derefs tuple-field
+                                // access through wrappers (a ScopeGuard over
+                                // a tuple — hashbrown's clone_from guard).
                                 format!(
                                     "([](auto&& __t) -> decltype(auto) {{ \
                                        if constexpr (requires {{ __t._{1}; }}) \
                                          return (std::forward<decltype(__t)>(__t)._{1}); \
-                                       else \
+                                       else if constexpr (requires {{ std::get<{1}>(std::forward<decltype(__t)>(__t)); }}) \
                                          return std::get<{1}>(std::forward<decltype(__t)>(__t)); \
+                                       else if constexpr (requires {{ (*__t)._{1}; }}) \
+                                         return ((*std::forward<decltype(__t)>(__t))._{1}); \
+                                       else \
+                                         return std::get<{1}>(*std::forward<decltype(__t)>(__t)); \
                                      }})({0})",
                                     base_for_field, idx.index
                                 )
