@@ -1984,7 +1984,17 @@ decltype(auto) slice_full(const rusty::Box<T>& container) {
 // temporary receivers through forwarding-reference binding.
 template<typename Container>
 decltype(auto) as_slice(Container&& container) {
-    if constexpr (std::is_rvalue_reference_v<Container&&>) {
+    // Rust's `Iter::as_slice` — the iterator's REMAINING range. slice_iter
+    // iterators expose raw_cur/raw_end exactly for this view; the generic
+    // fallthrough would wrap the iterator object itself.
+    if constexpr (requires {
+                      container.raw_cur();
+                      container.raw_end();
+                  }) {
+        return std::span(
+            container.raw_cur(),
+            static_cast<size_t>(container.raw_end() - container.raw_cur()));
+    } else if constexpr (std::is_rvalue_reference_v<Container&&>) {
         return slice_full(std::forward<Container>(container));
     } else {
         using Base = std::remove_reference_t<Container>;
