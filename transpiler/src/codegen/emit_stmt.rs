@@ -3297,7 +3297,15 @@ impl CodeGen {
                         self.update_local_binding_type(name_str.clone(), promoted_ref_ty);
                     }
                 }
-                let ref_suffix = if emits_ref_binding || init_returns_reference_binding {
+                // A reference initializer that lowers to a self-contained C++
+                // view VALUE (`&[Bucket]` -> std::span) binds by value —
+                // `auto&` cannot bind the prvalue span from as_entries().
+                let init_reference_lowers_to_value = inferred_binding_ty
+                    .as_ref()
+                    .is_some_and(|ty| self.reference_type_lowers_to_value_cpp(ty));
+                let ref_suffix = if emits_ref_binding
+                    || (init_returns_reference_binding && !init_reference_lowers_to_value)
+                {
                     "&"
                 } else {
                     ""
