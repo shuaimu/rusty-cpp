@@ -44303,16 +44303,22 @@ template<typename A, typename B>
 bool eq(const A& a, const B& b) {
     if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {
         return a.eq(rusty::detail::deref_if_pointer_like(b));
-    } else {
+    } else if constexpr (requires { { a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>; }) {
         return a == rusty::detail::deref_if_pointer_like(b);
+    } else {
+        // Both sides pointer-carried references (Q-key equivalence):
+        // compare the pointees.
+        return rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b);
     }
 }
 template<typename A, typename B>
 bool ne(const A& a, const B& b) {
     if constexpr (requires { a.ne(rusty::detail::deref_if_pointer_like(b)); }) {
         return a.ne(rusty::detail::deref_if_pointer_like(b));
-    } else {
+    } else if constexpr (requires { { a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>; }) {
         return !(a == rusty::detail::deref_if_pointer_like(b));
+    } else {
+        return !(rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b));
     }
 }
 template<typename Value>
@@ -44866,6 +44872,11 @@ bool eq(const A& a, const B& b) {\n\
             }\n\
         }\n\
         return !(ita != ea) && !(itb != eb);\n\
+    } else if constexpr (requires {\n\
+        { rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;\n\
+    }) {\n\
+        /* both sides pointer-carried references (Q-key equivalence) */\n\
+        return rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b);\n\
     } else {\n\
         return a == rusty::detail::deref_if_pointer_like(b);\n\
     }\n\
@@ -44874,8 +44885,12 @@ template<typename A, typename B>\n\
 bool ne(const A& a, const B& b) {\n\
     if constexpr (requires { a.ne(rusty::detail::deref_if_pointer_like(b)); }) {\n\
         return a.ne(rusty::detail::deref_if_pointer_like(b));\n\
-    } else {\n\
+    } else if constexpr (requires {\n\
+        { a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;\n\
+    }) {\n\
         return !(a == rusty::detail::deref_if_pointer_like(b));\n\
+    } else {\n\
+        return !(rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b));\n\
     }\n\
 }\n\
 template<typename F>\n\
