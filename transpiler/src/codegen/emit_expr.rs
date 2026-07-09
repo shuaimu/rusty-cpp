@@ -6527,7 +6527,13 @@ impl CodeGen {
                 receiver
             );
         }
-        if mc.method == "into_boxed_slice" && mc.args.is_empty() {
+        if mc.method == "into_boxed_slice"
+            && mc.args.is_empty()
+            // A receiver whose type declares its OWN into_boxed_slice keeps
+            // the member call (indexmap's IndexMap::into_boxed_slice ->
+            // Box<Slice<K, V>>); the runtime helper only knows Vec shapes.
+            && !self.receiver_declares_inherent_method(&mc.receiver, "into_boxed_slice")
+        {
             let receiver = self.emit_expr_maybe_move(&mc.receiver);
             return format!("rusty::into_boxed_slice({})", receiver);
         }
