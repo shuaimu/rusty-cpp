@@ -4937,14 +4937,16 @@ struct Vec {
         }
         // @unsafe
         {
-            int ret = 0;  // stub
+            // Late-init `let ret;` binding: materialize as Option so
+            // non-default-constructible T works, unwrap at the return.
+            rusty::Option<T> ret{rusty::None};
             {
                 const auto ptr_shadow1 = rusty::ptr::add(reinterpret_cast<std::add_pointer_t<T>>(rusty::as_mut_ptr((*this))), std::move(index));
-                ret = rusty::ptr::read(ptr_shadow1);
+                ret = rusty::Option<T>(rusty::ptr::read(ptr_shadow1));
                 rusty::ptr::copy(rusty::ptr::add(ptr_shadow1, 1), ptr_shadow1, (rusty::detail::deref_if_pointer_like(len) - rusty::detail::deref_if_pointer_like(index)) - 1);
             }
             this->set_len(rusty::detail::deref_if_pointer_like(len) - static_cast<size_t>(1));
-            return rusty::Option<T>(std::move(ret));
+            return ret;
         }
     }
     template<typename F>
