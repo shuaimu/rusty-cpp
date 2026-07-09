@@ -14198,6 +14198,38 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // `K::cmp(&a.key, &b.key)` — a comparison-trait assoc call on an
+        // in-scope TYPE PARAM has no static surface in C++ (int::cmp);
+        // route through the generic rusty::cmp free helpers.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && fp.qself.is_none()
+            && fp.path.segments.len() == 2
+            && fp.path.segments.iter().all(|s| s.arguments.is_none())
+            && matches!(
+                fp.path.segments[1].ident.to_string().as_str(),
+                "cmp" | "partial_cmp" | "eq" | "ne"
+            )
+            && call.args.len() == 2
+            && self.is_type_param_in_scope(&fp.path.segments[0].ident.to_string())
+        {
+            // Peel the Rust-level borrow: the helpers take const&, and the
+            // emitted operand may be a prvalue (field-probe IIFE) that `&`
+            // cannot apply to.
+            let peeled_a = match self.peel_paren_group_expr(&call.args[0]) {
+                syn::Expr::Reference(r) => r.expr.as_ref(),
+                other => other,
+            };
+            let peeled_b = match self.peel_paren_group_expr(&call.args[1]) {
+                syn::Expr::Reference(r) => r.expr.as_ref(),
+                other => other,
+            };
+            let a = self.emit_expr_to_string(peeled_a);
+            let b = self.emit_expr_to_string(peeled_b);
+            return format!(
+                "rusty::cmp::{}(rusty::detail::deref_if_pointer_like({}), rusty::detail::deref_if_pointer_like({}))",
+                fp.path.segments[1].ident, a, b
+            );
+        }
         // A turbofish call to a nested fn emitted as a template lambda
         // (`assert_default::<Iter<K, V>>()`): a lambda's call operator takes
         // explicit template args only via `.template operator()<...>`.
