@@ -5848,6 +5848,15 @@ impl CodeGen {
                     .cloned()
             })
             .collect();
+        // A None slot means the registry couldn't type that param — either
+        // an uncollected type or a MERGE CONFLICT between same-named fns
+        // (hashbrown has two `new_uninitialized` signatures). Return-only-ness
+        // is then unverifiable: the param might mention the type param, and
+        // firing would invent a wrong turbofish (A=Fallibility bound the
+        // allocator). Bail to keep this path strictly additive.
+        if params.iter().any(|p| p.is_none()) {
+            return None;
+        }
         // Fire only when EVERY type param is return-only — the pure case C++
         // argument deduction can't touch at all (`invalid_mut<T>`). Mixed
         // forward+return cases (`from_trait<R, T>`, where R deduces from the
