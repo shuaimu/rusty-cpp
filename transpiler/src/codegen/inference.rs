@@ -1064,6 +1064,21 @@ impl CodeGen {
             return None;
         }
 
+        // An ENUM owner means the last arg is a VARIANT literal
+        // (`Fallibility::Infallible` passed by value), not a `T::method`
+        // associated path that pins the type param — firing would invent a
+        // turbofish binding the fn's generic to the enum
+        // (RawTableInner::new_uninitialized<Fallibility> bound A, the
+        // allocator).
+        let scoped_name = self.scoped_type_key(type_name);
+        if self.c_like_enum_types.contains(type_name)
+            || self.c_like_enum_types.contains(&scoped_name)
+            || self.data_enum_types.contains(type_name)
+            || self.data_enum_types.contains(&scoped_name)
+        {
+            return None;
+        }
+
         // For now, return a single type argument (matches the first type parameter)
         // This handles the common case of `fn case<T: Flags>(expected: T::Bits, inherent: impl FnOnce() -> T)`
         Some(vec![type_name.clone()])
