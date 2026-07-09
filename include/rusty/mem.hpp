@@ -322,6 +322,20 @@ inline void swap(T& left, T& right) noexcept(noexcept(std::swap(left, right))) {
     std::swap(left, right);
 }
 
+// Rust deref-coerces `&mut wrapper` args when mem::swap's unification wants
+// the wrapped type (`mem::swap(self, &mut guard)` with guard:
+// ScopeGuard<Self, F> swaps against *guard). Mirror it for mixed-type
+// pairs: deref the side whose operator* yields the other.
+template<typename T, typename U>
+    requires (!std::is_same_v<T, U>)
+inline void swap(T& left, U& right) {
+    if constexpr (requires(T& l, U& r) { swap(l, *r); }) {
+        swap(left, *right);
+    } else {
+        swap(*left, right);
+    }
+}
+
 // Rust std::mem::drop consumes a value and destroys it at the end of this call.
 template<typename T>
 inline void drop(T value) {
