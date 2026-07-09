@@ -523,6 +523,16 @@ constexpr bool is_power_of_two(T value) {
     return std::has_single_bit(static_cast<U>(value));
 }
 
+// Rust `uN::next_power_of_two(self)` — the smallest power of two >= self
+// (1 for 0; overflow panics in debug, wraps to 0 via bit_ceil UB-avoidance
+// here matching release semantics closely enough for transpiled corpora).
+template<typename T>
+requires std::is_integral_v<T>
+constexpr T next_power_of_two(T value) {
+    using U = std::make_unsigned_t<T>;
+    return static_cast<T>(std::bit_ceil(static_cast<U>(value)));
+}
+
 template<typename T>
 requires num::is_nonzero_integral_v<std::remove_cvref_t<T>>
 constexpr std::remove_cvref_t<T> wrapping_neg(T value) {

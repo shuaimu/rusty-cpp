@@ -9299,6 +9299,7 @@ impl CodeGen {
                 | "count_zeros"
                 | "swap_bytes"
                 | "is_power_of_two"
+                | "next_power_of_two"
         ) && args.is_empty()
             && !self.is_expr_raw_pointer_like(&mc.receiver)
             && self.should_lower_integer_intrinsic_method_call(&mc.receiver)
