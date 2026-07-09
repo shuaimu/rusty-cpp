@@ -2103,6 +2103,31 @@ auto get(const Container& container, Index idx) {
     return Opt(None);
 }
 
+// Rust `slice.get(range)` — the subslice when in bounds, None otherwise.
+template<typename Container, typename T>
+auto get(const Container& container, const range<T>& idx) {
+    auto span = slice_full(container);
+    using Sub = decltype(span.subspan(size_t{0}, size_t{0}));
+    using Opt = Option<Sub>;
+    const size_t start = static_cast<size_t>(idx.start);
+    const size_t end = static_cast<size_t>(idx.end_value());
+    if (start > end || end > span.size()) {
+        return Opt(None);
+    }
+    return Opt(span.subspan(start, end - start));
+}
+
+template<typename T, std::size_t E, typename U>
+auto get_mut(std::span<T, E> container, const range<U>& idx) {
+    using Opt = Option<std::span<T>>;
+    const size_t start = static_cast<size_t>(idx.start);
+    const size_t end = static_cast<size_t>(idx.end_value());
+    if (start > end || end > container.size()) {
+        return Opt(None);
+    }
+    return Opt(container.subspan(start, end - start));
+}
+
 // Mutable counterpart for Rust-style `.get_mut(index)` lowering.
 template<typename Container, typename Index>
 auto get_mut(Container& container, Index idx) {
