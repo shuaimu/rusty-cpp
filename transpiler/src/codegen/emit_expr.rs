@@ -10040,24 +10040,42 @@ impl CodeGen {
         // A receiver-less associated fn (`Location::from_mark(mark)`) is a
         // STATIC taking the mapped value as its argument — a member call on
         // the value would look the method up on the wrong type.
+        let owner_in_own_scope = self
+            .current_struct
+            .as_deref()
+            .is_some_and(|cur| cur.rsplit("::").next() == Some(owner.as_str()));
+        // A generic owner outside its own scope is spellable when EVERY one
+        // of its declared params is an in-scope template param of the
+        // enclosing method (IndexMap<K, V, S>::get_range maps
+        // Slice::from_slice — `Slice<K, V>` spells directly).
+        let owner_generic_args_in_scope = self.declared_type_params.get(&owner).and_then(|params| {
+            (!params.is_empty()
+                && params.iter().all(|p| self.is_type_param_in_scope(p)))
+            .then(|| params.join(", "))
+        });
         if self
             .lookup_owner_method_has_receiver(&owner, &method)
             .is_some_and(|has_receiver| !has_receiver)
             // A GENERIC owner can't be spelled bare (`Slice::method` needs
             // template args) — only non-generic statics take this form,
-            // EXCEPT inside the owner's own class scope, where the
-            // injected-class-name refers to the current instantiation
-            // (`Slice::from_slice` within Slice<K, V>::get_range).
+            // EXCEPT inside the owner's own class scope (injected-class-name
+            // refers to the current instantiation) or when its params are
+            // all in scope.
             && (self
                 .declared_type_params
                 .get(&owner)
                 .is_none_or(|params| params.is_empty())
-                || self
-                    .current_struct
-                    .as_deref()
-                    .is_some_and(|cur| cur.rsplit("::").next() == Some(owner.as_str())))
+                || owner_in_own_scope
+                || owner_generic_args_in_scope.is_some())
         {
-            let owner_cpp = self.emit_path_to_string(&syn::parse_str::<syn::Path>(&owner).ok()?);
+            let mut owner_cpp =
+                self.emit_path_to_string(&syn::parse_str::<syn::Path>(&owner).ok()?);
+            if !owner_in_own_scope
+                && let Some(args) = owner_generic_args_in_scope
+                && !owner_cpp.contains('<')
+            {
+                owner_cpp = format!("{}<{}>", owner_cpp, args);
+            }
             return Some(format!(
                 "[](auto&& _v) -> decltype(auto) {{ return {}::{}(std::forward<decltype(_v)>(_v)); }}",
                 owner_cpp, escaped_method
