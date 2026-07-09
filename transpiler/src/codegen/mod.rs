@@ -34532,6 +34532,40 @@ impl CodeGen {
                 }
             }
         }
+        // `Owner::assoc(owner_value, ..)` with OMITTED generic args in Rust:
+        // the scope recovery can only guess (`ScopeGuard::into_inner(self_)`
+        // spelled `ScopeGuard<T, T>` — both params filled from the enclosing
+        // scope). When the fn's first declared param IS the owner type, the
+        // argument itself carries the exact instantiation — decltype it.
+        if path.segments.len() >= 2
+            && path
+                .segments
+                .iter()
+                .all(|s| matches!(s.arguments, syn::PathArguments::None))
+            && !call.args.is_empty()
+            && let Some((owner_part, method_part)) = base_func.rsplit_once("::")
+            && owner_part.contains('<')
+        {
+            let owner_tail_rust = path.segments[path.segments.len() - 2].ident.to_string();
+            let method_rust = path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+            let first_param_is_owner = self
+                .lookup_owner_method_arg_expected_type(&owner_tail_rust, &method_rust, 0, None)
+                .is_some_and(|t| {
+                    matches!(
+                        self.peel_reference_paren_group_type(&t),
+                        syn::Type::Path(tp)
+                            if tp.path.segments.last().is_some_and(|s|
+                                s.ident == owner_tail_rust.as_str() || s.ident == "Self")
+                    )
+                });
+            if first_param_is_owner {
+                let arg0 = self.emit_expr_to_string(&call.args[0]);
+                return format!(
+                    "std::remove_cvref_t<decltype({})>::{}",
+                    arg0, method_part
+                );
+            }
+        }
         // `Owned::assume_init(owned)` inside a hint-cleared closure: the
         // owner spelled `auto`. Unify the first argument's known type
         // against the method's DECLARED parameter to recover the owner's
