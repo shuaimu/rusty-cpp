@@ -8549,20 +8549,34 @@ impl CodeGen {
         if closure.inputs.len() != 1 {
             return None;
         }
-        let syn::Pat::Tuple(pat) = closure.inputs.first()? else {
-            return None;
-        };
-        let syn::Type::Tuple(src) = self.peel_reference_paren_group_type(source_item_ty) else {
-            return None;
-        };
-        if pat.elems.len() != src.elems.len() {
-            return None;
+        let mut param = closure.inputs.first()?;
+        if let syn::Pat::Type(ptype) = param {
+            param = ptype.pat.as_ref();
         }
         let mut bound: HashMap<String, syn::Type> = HashMap::new();
-        for (p, t) in pat.elems.iter().zip(src.elems.iter()) {
-            if let syn::Pat::Ident(pi) = p {
-                bound.insert(pi.ident.to_string(), t.clone());
+        match param {
+            syn::Pat::Tuple(pat) => {
+                let syn::Type::Tuple(src) = self.peel_reference_paren_group_type(source_item_ty)
+                else {
+                    return None;
+                };
+                if pat.elems.len() != src.elems.len() {
+                    return None;
+                }
+                for (p, t) in pat.elems.iter().zip(src.elems.iter()) {
+                    if let syn::Pat::Ident(pi) = p {
+                        bound.insert(pi.ident.to_string(), t.clone());
+                    }
+                }
             }
+            // `|i| (i, i * i)` — the whole source item binds to one name.
+            syn::Pat::Ident(pi) => {
+                bound.insert(
+                    pi.ident.to_string(),
+                    self.peel_reference_paren_group_type(source_item_ty).clone(),
+                );
+            }
+            _ => return None,
         }
         let syn::Expr::Tuple(out) = self.peel_paren_group_expr(&closure.body) else {
             return None;
