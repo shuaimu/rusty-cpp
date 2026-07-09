@@ -44523,6 +44523,10 @@ template<typename T>
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value) {
     return &value;
 }
+template<typename T>
+constexpr std::remove_reference_t<T>* addr_of_temp_mut(T&& value) {
+    return &value;
+}
 }
 namespace ser {
 namespace rusty_ext {
@@ -45100,6 +45104,8 @@ template<typename T>\n\
 constexpr T* addr_of_temp(T& value);\n\
 template<typename T>\n\
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value);\n\
+template<typename T>\n\
+std::remove_reference_t<T>* addr_of_temp_mut(T&& value);\n\
 }\n\
 namespace de {\n\
 namespace impls {\n\
@@ -47885,6 +47891,18 @@ const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value) {\n\
     _addr_of_tmp.reset();\n\
     _addr_of_tmp.emplace(std::forward<T>(value));\n\
     return &*_addr_of_tmp;\n\
+}\n\
+template<typename T>\n\
+std::remove_reference_t<T>* addr_of_temp_mut(T&& value) {\n\
+    if constexpr (std::is_lvalue_reference_v<T&&>) {\n\
+        return &value;\n\
+    } else {\n\
+        using Stored = std::remove_cv_t<std::remove_reference_t<T>>;\n\
+        thread_local std::optional<Stored> _addr_of_tmp_mut;\n\
+        _addr_of_tmp_mut.reset();\n\
+        _addr_of_tmp_mut.emplace(std::forward<T>(value));\n\
+        return &*_addr_of_tmp_mut;\n\
+    }\n\
 }\n\
 struct Cow_Borrowed {\n\
     std::string_view _0;\n\

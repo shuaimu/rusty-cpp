@@ -11281,6 +11281,11 @@ impl CodeGen {
                     }
                     let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
                     if !self.is_stable_reference_lvalue_expr(&r.expr) {
+                        // `&mut TEMP` must carry a mutable pointer (the const
+                        // rvalue overload breaks K/V deduced as `T*`).
+                        if r.mutability.is_some() {
+                            return format!("rusty::addr_of_temp_mut({})", inner);
+                        }
                         return format!("rusty::addr_of_temp({})", inner);
                     }
                     if inner.starts_with('&') {
