@@ -5615,6 +5615,35 @@ impl CodeGen {
         mc: &syn::ExprMethodCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // `.map(third)` / `.map(util::third)` — a GENERIC free fn passed as
+        // the callable: C++ can't bind a raw template name to the adapter's
+        // deduced F. Wrap it in a forwarding lambda (the path emission also
+        // resolves `use`-imported leaves to their qualified spelling).
+        if matches!(mc.method.to_string().as_str(), "map" | "map_err")
+            && mc.args.len() == 1
+            && let syn::Expr::Path(p) = self.peel_paren_group_expr(&mc.args[0])
+            && p.qself.is_none()
+            // Module-fn paths only (every segment lowercase): `Type::assoc`
+            // callables (`E::custom`) keep their dedicated downstream path.
+            && p.path.segments.iter().all(|s| {
+                s.arguments.is_none()
+                    && s.ident
+                        .to_string()
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_lowercase())
+            })
+            && self
+                .lookup_function_type_param_names_with_import_fallback(&mc.args[0])
+                .is_some()
+        {
+            let receiver = self.emit_expr_to_string(&mc.receiver);
+            let callee = self.emit_expr_to_string(&mc.args[0]);
+            return format!(
+                "{}.{}([](auto&& _v) -> decltype(auto) {{ return {}(std::forward<decltype(_v)>(_v)); }})",
+                receiver, mc.method, callee
+            );
+        }
         if let Some(try_into_call) = self.try_emit_try_into_method_call(mc, expected_ty) {
             return try_into_call;
         }
