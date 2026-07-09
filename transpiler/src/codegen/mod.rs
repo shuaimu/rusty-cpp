@@ -32920,6 +32920,52 @@ impl CodeGen {
                 self.emit_expr_to_string_with_expected_and_move_if_needed(elem, elem_expected)
             })
             .collect();
+        // A mixed Option array with no expected (`[Some(&mut x), None]`): a
+        // bare None slot spells None_t and breaks std::array CTAD against the
+        // Some sibling's Option<T&>. Rewrap None slots in the first non-None
+        // sibling's type (decltype is unevaluated, so repeating the sibling
+        // string is side-effect free).
+        let elems: Vec<String> = if elem_expected.is_none() {
+            let is_none_slot: Vec<bool> = array_expr
+                .elems
+                .iter()
+                .map(|e| {
+                    matches!(
+                        self.peel_paren_group_expr(e),
+                        syn::Expr::Path(p)
+                            if p.path.segments.last().is_some_and(|s| s.ident == "None")
+                    )
+                })
+                .collect();
+            if is_none_slot.iter().any(|b| *b) && is_none_slot.iter().any(|b| !*b) {
+                let sibling = elems
+                    .iter()
+                    .zip(&is_none_slot)
+                    .find(|(_, none)| !**none)
+                    .map(|(s, _)| s.clone());
+                match sibling {
+                    Some(sibling) => elems
+                        .into_iter()
+                        .zip(is_none_slot)
+                        .map(|(s, none)| {
+                            if none {
+                                format!(
+                                    "std::remove_cvref_t<decltype({})>(rusty::None)",
+                                    sibling
+                                )
+                            } else {
+                                s
+                            }
+                        })
+                        .collect(),
+                    None => elems,
+                }
+            } else {
+                elems
+            }
+        } else {
+            elems
+        };
         if let Some(elem_ty) = elem_expected {
             let elem_cpp = self.map_array_element_type(elem_ty);
             if !elem_cpp.contains("/* TODO")
