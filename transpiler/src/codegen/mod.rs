@@ -33200,6 +33200,13 @@ impl CodeGen {
         if !self.binary_operator_prefers_value_operands(op) {
             return emitted;
         }
+        // A borrow operand (`&set_a | &(&set_d - &set_b)`): Rust's `&` here
+        // is operator-borrow syntax and C++ overloaded operators take
+        // const& — the reference emission's addr_of_temp pointer wrap does
+        // not convert. Re-emit the referent directly.
+        if let syn::Expr::Reference(r) = self.peel_paren_group_expr(expr) {
+            return self.emit_expr_to_string(&r.expr);
+        }
         if let syn::Expr::Path(path) = self.peel_paren_group_expr(expr)
             && (self.is_associated_const_value_path(&path.path)
                 || self
