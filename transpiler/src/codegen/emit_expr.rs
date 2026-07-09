@@ -10043,11 +10043,18 @@ impl CodeGen {
             .lookup_owner_method_has_receiver(&owner, &method)
             .is_some_and(|has_receiver| !has_receiver)
             // A GENERIC owner can't be spelled bare (`Slice::method` needs
-            // template args) — only non-generic statics take this form.
-            && self
+            // template args) — only non-generic statics take this form,
+            // EXCEPT inside the owner's own class scope, where the
+            // injected-class-name refers to the current instantiation
+            // (`Slice::from_slice` within Slice<K, V>::get_range).
+            && (self
                 .declared_type_params
                 .get(&owner)
                 .is_none_or(|params| params.is_empty())
+                || self
+                    .current_struct
+                    .as_deref()
+                    .is_some_and(|cur| cur.rsplit("::").next() == Some(owner.as_str())))
         {
             let owner_cpp = self.emit_path_to_string(&syn::parse_str::<syn::Path>(&owner).ok()?);
             return Some(format!(
