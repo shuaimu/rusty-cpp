@@ -27,6 +27,7 @@
 /// `(*receiver).method(args)`. The dispatcher is the fallback for the
 /// "don't know" case.
 
+#include <cstdint>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -63,6 +64,21 @@ constexpr decltype(auto) ptr_or_addr(T&& v) {
         return +v;
     } else {
         return std::addressof(v);
+    }
+}
+
+/// @brief `expr as *T` for a source whose C++ carrier shape the transpiler
+/// could not resolve: pointers reinterpret directly, integers round-trip
+/// through uintptr_t (usize-as-pointer), lvalues decay to their address.
+template<typename Target, typename V>
+Target ptr_cast(V&& v) {
+    using Src = std::remove_cvref_t<V>;
+    if constexpr (std::is_pointer_v<Src>) {
+        return reinterpret_cast<Target>(+v);
+    } else if constexpr (std::is_integral_v<Src> || std::is_enum_v<Src>) {
+        return reinterpret_cast<Target>(static_cast<std::uintptr_t>(v));
+    } else {
+        return reinterpret_cast<Target>(std::addressof(v));
     }
 }
 

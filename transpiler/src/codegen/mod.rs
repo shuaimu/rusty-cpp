@@ -37318,10 +37318,11 @@ impl CodeGen {
             format!("reinterpret_cast<{}>(rusty::addr_of_temp({}))", ty, expr)
         } else if target_is_pointer_type && !source_is_raw_pointer_type && !source_is_reference_like
         {
-            format!(
-                "reinterpret_cast<{}>(static_cast<std::uintptr_t>({}))",
-                ty, expr
-            )
+            // The source's C++ carrier shape is unresolved here: an integer
+            // (usize-as-pointer) needs the uintptr_t round-trip, but an
+            // inference-missed pointer (`Box::into_raw(x) as *mut U`) must
+            // reinterpret directly — dispatch on the C++ side.
+            format!("rusty::detail::ptr_cast<{}>({})", ty, expr)
         } else if target_is_numeric_scalar
             && (source_is_raw_pointer_type
                 || source_reference_to_pointer_like

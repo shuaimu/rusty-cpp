@@ -16262,11 +16262,10 @@ fn test_leaf415449_integer_to_pointer_cast_uses_uintptr_bridge() {
         "#,
     );
     // The bitwise-NOT operand may be bare `0` or wrapped in `static_cast<int32_t>(0)`.
+    // ptr_cast dispatches integral sources through the uintptr_t bridge.
     assert!(
-        out.contains("reinterpret_cast<uint8_t*>(static_cast<std::uintptr_t>(~0))")
-            || out.contains(
-                "reinterpret_cast<uint8_t*>(static_cast<std::uintptr_t>(~static_cast<int32_t>(0)))"
-            ),
+        out.contains("rusty::detail::ptr_cast<uint8_t*>(~0)")
+            || out.contains("rusty::detail::ptr_cast<uint8_t*>(~static_cast<int32_t>(0))"),
         "{out}"
     );
     assert!(!out.contains("static_cast<uint8_t*>(!0)"));
