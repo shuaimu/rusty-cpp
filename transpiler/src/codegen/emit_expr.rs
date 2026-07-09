@@ -10077,11 +10077,34 @@ impl CodeGen {
         // of its declared params is an in-scope template param of the
         // enclosing method (IndexMap<K, V, S>::get_range maps
         // Slice::from_slice — `Slice<K, V>` spells directly).
-        let owner_generic_args_in_scope = self.declared_type_params.get(&owner).and_then(|params| {
-            (!params.is_empty()
-                && params.iter().all(|p| self.is_type_param_in_scope(p)))
-            .then(|| params.join(", "))
-        });
+        let owner_generic_args_in_scope = self
+            .declared_type_params
+            .get(&owner)
+            .and_then(|params| {
+                (!params.is_empty() && params.iter().all(|p| self.is_type_param_in_scope(p)))
+                    .then(|| params.join(", "))
+            })
+            .or_else(|| {
+                // Same-named types in sibling modules shadow each other on
+                // the bare key (map::Slice<K, V> vs set::Slice<T>): fall
+                // back to a module-scoped entry whose params ARE all in
+                // scope, when the candidates agree on a single spelling.
+                let suffix = format!("::{}", owner);
+                let mut found: Option<String> = None;
+                for (key, params) in self.declared_type_params.iter() {
+                    if key.ends_with(&suffix)
+                        && !params.is_empty()
+                        && params.iter().all(|p| self.is_type_param_in_scope(p))
+                    {
+                        let joined = params.join(", ");
+                        match &found {
+                            Some(prev) if prev != &joined => return None,
+                            _ => found = Some(joined),
+                        }
+                    }
+                }
+                found
+            });
         if self
             .lookup_owner_method_has_receiver(&owner, &method)
             .is_some_and(|has_receiver| !has_receiver)
