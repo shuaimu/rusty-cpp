@@ -3248,6 +3248,16 @@ inline std::tuple<size_t, rusty::Option<size_t>> IntoIter::size_hint() const {\n
                                 helper_owner = rebound.trim_end_matches("::").to_string();
                             }
                         }
+                        // A crate-local enum's factory lives inside the crate
+                        // namespace wrap; `crate::Enum::Variant` roots the
+                        // owner globally (`::Enum`), but `::Enum_Variant()`
+                        // looks in the TRUE global scope. Unqualified resolves
+                        // through the enclosing crate namespace.
+                        if helper_owner.starts_with("::")
+                            && self.c_like_enum_types.contains(&enum_name)
+                        {
+                            helper_owner = helper_owner.trim_start_matches("::").to_string();
+                        }
                         format!("{}_{}()", helper_owner, helper_name)
                     }
                 };
