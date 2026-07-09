@@ -16006,7 +16006,7 @@ fn test_leaf41543333333111_generic_cast_to_raw_pointer_preserves_address_of_for_
         }
         "#,
     );
-    assert!(out.contains("static_cast<std::add_pointer_t<T>>(&x)"));
+    assert!(out.contains("static_cast<std::add_pointer_t<T>>(rusty::detail::ptr_or_addr(x))"));
     assert!(!out.contains("static_cast<std::add_pointer_t<T>>(x)"));
 }
 
@@ -16019,7 +16019,9 @@ fn test_leaf41543333333111_ptr_read_cast_uses_address_of_for_pointer_alias() {
         }
         "#,
     );
-    assert!(out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(&mut_ref))"));
+    assert!(out.contains(
+        "rusty::ptr::read(static_cast<std::add_pointer_t<T>>(rusty::detail::ptr_or_addr(mut_ref)))"
+    ));
     assert!(!out.contains("rusty::ptr::read(static_cast<std::add_pointer_t<T>>(mut_ref))"));
 }
 
@@ -16129,7 +16131,7 @@ fn test_leaf10512_shadowed_param_pointer_cast_uses_outer_reference_binding_in_in
     );
     assert!(
         out.contains(
-            "rusty::ptr::read(reinterpret_cast<const size_t*>(static_cast<const Identifier*>(&repr)))"
+            "rusty::ptr::read(reinterpret_cast<const size_t*>(static_cast<const Identifier*>(rusty::detail::ptr_or_addr(repr))))"
         ),
         "shadowed param cast-chain should use outer reference address in initializer, got:\n{}",
         out

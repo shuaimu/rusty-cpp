@@ -2412,6 +2412,26 @@ impl CodeGen {
     pub(super) fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
         self.register_local_binding_pattern(pat);
+        // `let (k1, k2) = (&mut 1, other);` — the blanket registration types
+        // tuple-destructured bindings as None. When the initializer is a
+        // matching-arity tuple literal, type each ident binding from its own
+        // initializer element (downstream `k1 as *const i32` needs to know
+        // k1 is reference-like, not an integer).
+        if let syn::Pat::Tuple(pat_tuple) = pat
+            && let Some(init) = &local.init
+            && let syn::Expr::Tuple(init_tuple) = self.peel_paren_group_expr(&init.expr)
+            && pat_tuple.elems.len() == init_tuple.elems.len()
+        {
+            for (elem_pat, elem_init) in pat_tuple.elems.iter().zip(init_tuple.elems.iter()) {
+                if let syn::Pat::Ident(pi) = elem_pat
+                    && let Some(ty) = self
+                        .infer_local_binding_type_from_initializer(elem_init)
+                        .or_else(|| self.infer_simple_expr_type(elem_init))
+                {
+                    self.register_local_binding(pi.ident.to_string(), Some(ty));
+                }
+            }
+        }
 
         match pat {
             syn::Pat::Ident(pat_ident) => {

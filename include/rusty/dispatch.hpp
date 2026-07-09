@@ -27,6 +27,7 @@
 /// `(*receiver).method(args)`. The dispatcher is the fallback for the
 /// "don't know" case.
 
+#include <memory>
 #include <type_traits>
 #include <utility>
 
@@ -50,6 +51,18 @@ consteval bool lambda_reachable_via_deref() {
             decltype(*std::declval<R&&>()), F>();
     } else {
         return false;
+    }
+}
+
+/// @brief A pointer from a Rust-reference-typed binding, whatever its C++
+/// carrier shape: identity (decayed to prvalue) when the binding already
+/// lowered to a raw pointer, address-of when it lowered to an lvalue.
+template<typename T>
+constexpr decltype(auto) ptr_or_addr(T&& v) {
+    if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>) {
+        return +v;
+    } else {
+        return std::addressof(v);
     }
 }
 

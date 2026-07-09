@@ -37299,7 +37299,14 @@ impl CodeGen {
             } else if expr_trimmed.starts_with('&') {
                 format!("static_cast<{}>({})", ty, expr)
             } else {
-                format!("static_cast<{}>(&{})", ty, expr)
+                // The Rust binding is reference-typed, but its C++ carrier
+                // may be a raw pointer (tuple-destructured addr_of_temp) or
+                // an lvalue — ptr_or_addr is identity for the former,
+                // address-of for the latter.
+                format!(
+                    "static_cast<{}>(rusty::detail::ptr_or_addr({}))",
+                    ty, expr
+                )
             }
         } else if target_is_pointer_type
             && source_is_slice_like_value
