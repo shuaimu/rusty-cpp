@@ -31316,6 +31316,20 @@ impl CodeGen {
         } else {
             "."
         };
+        // Rust resolves `box.as_ref()` to the POINTEE's inherent as_ref when
+        // it has one, else to Box's own (`Box<Slice>` → Box::as_ref → &Slice;
+        // Slice has no member). An unconditional arrow loses the wrapper
+        // fallback — probe both.
+        if member_op == "->"
+            && matches!(method_call.as_str(), "as_ref" | "as_mut")
+            && args.is_empty()
+        {
+            return format!(
+                "([&](auto&& __b) -> decltype(auto) {{ if constexpr (requires {{ (*__b).{m}(); }}) {{ return (*__b).{m}(); }} else {{ return __b.{m}(); }} }})({r})",
+                m = method_call,
+                r = receiver
+            );
+        }
         format!(
             "{}{}{}({})",
             receiver,
