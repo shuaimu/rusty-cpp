@@ -15420,7 +15420,11 @@ fn test_leaf41543333333251_non_pointer_write_call_is_not_rewritten() {
         }
         "#,
     );
-    assert!(out.contains("w.write("));
+    // Member `write` decls escape to `write_` (escape_cpp_keyword), so the
+    // call probes the escaped spelling first with a raw-name fallback for
+    // foreign receivers — and never routes non-pointer receivers through
+    // rusty::ptr::write.
+    assert!(out.contains(".write_("), "{out}");
     assert!(!out.contains("rusty::ptr::write(w"));
 }
 

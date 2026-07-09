@@ -8832,6 +8832,19 @@ impl CodeGen {
                 }
                 return format!("rusty::ptr::write({}, {})", receiver, value_arg);
             }
+            // Member `write` decls escape to `write_` (escape_cpp_keyword),
+            // so member calls must follow — probe the escaped spelling first
+            // and keep the raw name for foreign receivers
+            // (hashbrown's Bucket::write, emitted `void write_(T)`).
+            let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
+                format!("({})", raw_receiver)
+            } else {
+                raw_receiver
+            };
+            return format!(
+                "([&](auto&& __w, auto&& __v) -> decltype(auto) {{ if constexpr (requires {{ std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }}) {{ return std::forward<decltype(__w)>(__w).write_(std::forward<decltype(__v)>(__v)); }} else {{ return std::forward<decltype(__w)>(__w).write(std::forward<decltype(__v)>(__v)); }} }})({}, {})",
+                receiver, args[0]
+            );
         }
         if method_name == "read" && args.is_empty() {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
