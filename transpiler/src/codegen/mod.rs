@@ -42852,6 +42852,7 @@ fn map_operator_trait(trait_name: &str) -> Option<&'static str> {
         "ShlAssign" => Some("operator<<="),
         "ShrAssign" => Some("operator>>="),
         "Index" => Some("operator[]"),
+        "IndexMut" => Some("operator[]"),
         "Deref" => Some("operator*"),
         "DerefMut" => Some("operator*"),
         "PartialEq" => Some("operator=="),
