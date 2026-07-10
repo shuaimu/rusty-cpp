@@ -24823,7 +24823,13 @@ impl CodeGen {
             )
         } else if self.path_is_known_data_enum_variant_with_ctx(path, variant_ctx) {
             if let Some(index) = self.data_enum_variant_index_for_path(path, variant_ctx) {
-                format!("{}.index() == {}", value_expr, index)
+                // Read the discriminant through the variant BASE — a Rust
+                // enum method named `index` shadows std::variant::index on
+                // the derived wrapper (indexmap Entry::index self-recursed).
+                format!(
+                    "rusty::detail::variant_index({}) == {}",
+                    value_expr, index
+                )
             } else {
                 let variant_cpp = self.variant_pattern_cpp_type(path, variant_ctx);
                 format!(
@@ -25491,7 +25497,11 @@ impl CodeGen {
         scrutinee_expr: &str,
     ) -> String {
         if let Some(index) = self.runtime_variant_index_for_path(path, variant_ctx) {
-            format!("{}.index() == {}", scrutinee_expr, index)
+            // Through the variant BASE — see path_pattern_value_condition.
+            format!(
+                "rusty::detail::variant_index({}) == {}",
+                scrutinee_expr, index
+            )
         } else {
             let variant_cpp =
                 self.runtime_variant_cpp_type_for_scrutinee(path, variant_ctx, scrutinee_expr);
@@ -26669,11 +26679,23 @@ impl CodeGen {
             }
             iter_source = stable_iter_name;
         }
+        let iter_is_borrowed_mut = matches!(
+            self.peel_paren_group_expr(&for_expr.expr),
+            syn::Expr::Reference(r)
+                if r.mutability.is_some() && !self.is_expr_raw_pointer_like(&r.expr)
+        );
         let iter_expr = if iter_is_borrowed {
             // Borrowed Rust `for x in &expr` iterates by reference, NOT consuming.
             // Use `rusty::iter(expr)` to get a non-consuming iterator, then
             // `rusty::for_in(...)` to adapt it for range-based for.
-            format!("rusty::for_in(rusty::iter({}))", iter_source)
+            // `for x in &mut expr` yields `&mut T` items — `rusty::iter(...)`
+            // would iterate const and lose writes through the binding
+            // (indexmap's reverse() never reversed its index table).
+            if iter_is_borrowed_mut {
+                format!("rusty::for_in(rusty::iter_mut({}))", iter_source)
+            } else {
+                format!("rusty::for_in(rusty::iter({}))", iter_source)
+            }
         } else {
             // Rust `for x in expr` desugars through IntoIterator; `for_in` handles:
             // - types with `.into_iter()`

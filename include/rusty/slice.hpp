@@ -394,6 +394,17 @@ public:
     class iterator {
         using item_type = next_item_t<NextIter>;
         using iter_type = std::remove_reference_t<NextIter>;
+        // A reference-payload item (ValuesMut/IterMut yield `Option<T&>`)
+        // must not decay into the slot: `for v in map.values_mut() { *v *= 2 }`
+        // would mutate a copy. Carry the referent's address instead —
+        // `deref_if_pointer` in operator* restores the lvalue.
+        using taken_type =
+            decltype(option_like_take_value(std::declval<next_result_t<iter_type>&>()));
+        static constexpr bool item_is_lvalue_ref = std::is_lvalue_reference_v<taken_type>;
+        using stored_type = std::conditional_t<
+            item_is_lvalue_ref,
+            std::remove_reference_t<taken_type>*,
+            item_type>;
 
     public:
         iterator() : iter_(nullptr), at_end_(true) {}
@@ -430,12 +441,16 @@ public:
                 at_end_ = true;
                 return;
             }
-            current_.emplace(option_like_take_value(next_item));
+            if constexpr (item_is_lvalue_ref) {
+                current_.emplace(std::addressof(option_like_take_value(next_item)));
+            } else {
+                current_.emplace(option_like_take_value(next_item));
+            }
             at_end_ = false;
         }
 
         iter_type* iter_;
-        std::optional<item_type> current_;
+        std::optional<stored_type> current_;
         bool at_end_;
     };
 
@@ -1685,7 +1700,13 @@ decltype(auto) iter_mut(Range&& range) {
     // data+size, std::begin/end, *r recursion) handle receivers that have
     // no `.iter_mut()` in their chain — those still walk through `*r` for
     // wrapped-container cases. See rusty-std-book §6.11.
-    if constexpr (requires {
+    //
+    // A next-protocol receiver IS the iterator: Rust `for x in &mut it`
+    // consumes `it` by reference (`impl Iterator for &mut I`) — the items
+    // keep their own mutability, there is nothing to "mut". Pass through.
+    if constexpr (detail::has_option_like_next_v<std::remove_reference_t<Range>>) {
+        return std::forward<Range>(range);
+    } else if constexpr (requires {
         rusty::deref_call(std::forward<Range>(range),
             [](auto&& __r) -> decltype(__r.iter_mut()) { return __r.iter_mut(); });
     }) {

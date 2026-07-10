@@ -3247,7 +3247,7 @@ fn test_unguarded_return_arm_match_with_differing_types_lowers_to_statement_expr
         "value arms must assign into the declared local:\n{out}"
     );
     assert!(
-        out.contains("deref_if_pointer(_m).index() == 2"),
+        out.contains("variant_index(rusty::detail::deref_if_pointer(_m)) == 2"),
         "Pat::Struct arm condition must go through deref_if_pointer:\n{out}"
     );
     assert!(!out.contains("const auto reason = ({"));
@@ -4567,10 +4567,10 @@ fn test_leaf519_runtime_result_payload_data_enum_unit_variant_uses_variant_holds
         out
     );
     // Variant discrimination may use `variant_holds<E_A>(...)` or
-    // index-based `_mv0.index() == N` dispatch.
+    // index-based `variant_index(_mv0) == N` dispatch.
     assert!(
         out.contains("rusty::detail::variant_holds<E_A>(_mv0)")
-            || (out.contains("_mv0") && out.contains(".index() == 0)")),
+            || (out.contains("_mv0") && out.contains(") == 0)")),
         "data-enum unit-variant payload pattern should lower via variant_holds, got:\n{}",
         out
     );
@@ -4650,11 +4650,11 @@ fn test_leaf5170_runtime_result_payload_data_enum_struct_pattern_expr_match_uses
         out
     );
     // Guard may use `variant_holds<CollectionAllocErr_AllocErr>(_mv1)`
-    // or index-based `_mv1.index() == 1`.
+    // or index-based `variant_index(_mv1) == 1`.
     assert!(
         out.contains("rusty::detail::variant_holds<CollectionAllocErr_AllocErr>(_mv1)")
-            || out.contains("_mv1.index() == 1)")
-            || out.contains("rusty::detail::deref_if_pointer(_mv1).index() == 1)"),
+            || out.contains("variant_index(_mv1) == 1)")
+            || out.contains("rusty::detail::variant_index(rusty::detail::deref_if_pointer(_mv1)) == 1)"),
         "Result payload struct-pattern expression match should guard on active variant, got:\n{}",
         out
     );
@@ -4700,10 +4700,10 @@ fn test_leaf5171_runtime_result_expr_diverging_err_arm_keeps_typed_return() {
         out
     );
     // The dispatch on Err's variant may use `variant_holds<...>` (legacy)
-    // or index-based `.index() == N` (current).
+    // or index-based `) == N` (current).
     assert!(
         out.contains("if (rusty::detail::variant_holds<CollectionAllocErr_CapacityOverflow>(_mv1)) { return [&]() -> int32_t { rusty::panicking::panic(\"capacity overflow\"); }(); }")
-            || (out.contains(".index() == 0)")
+            || (out.contains(") == 0)")
                 && out.contains("return [&]() -> int32_t { rusty::panicking::panic(\"capacity overflow\"); }();")),
         "diverging err arm should keep a typed return in runtime expression match lowering, got:\n{}",
         out
@@ -5615,8 +5615,8 @@ fn test_leaf5111_bound_match_with_imported_variants_uses_runtime_bound_context()
     // std::visit overloaded form, or index-based dispatch via `_m.index()`.
     assert!(
         out.contains("std::variant_alternative_t<1, std::remove_reference_t<decltype(_m)>>")
-            || out.contains("_m.index() == 1")
-            || out.contains("rusty::detail::deref_if_pointer(_m).index() == 1"),
+            || out.contains("variant_index(_m) == 1")
+            || out.contains("rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1"),
         "{out}"
     );
     assert!(!out.contains("const Included&"));
@@ -5902,7 +5902,7 @@ fn test_leaf5119_unsafe_tail_match_keeps_value_return_path() {
     // accumulator with `_match_value.emplace`).
     assert!(
         out.contains("return [&]() { auto&& _m = d; return std::visit(overloaded {")
-            || (out.contains("auto&& _m = d;") && out.contains(".index() == ")),
+            || (out.contains("auto&& _m = d;") && out.contains(") == ")),
         "{out}"
     );
     assert!(
@@ -6861,12 +6861,12 @@ fn test_match_variant_reference_scrutinee_uses_variant_value_for_visit() {
             || out.contains("auto&& _m = &this->kind;"),
         "{out}"
     );
-    // Dispatch may be std::visit(overloaded{...}) or `_m.index() == N`
+    // Dispatch may be std::visit(overloaded{...}) or `variant_index(_m) == N`
     // (optionally through `rusty::detail::deref_if_pointer`).
     assert!(
         out.contains("std::visit(overloaded {")
-            || out.contains("_m.index() == 0")
-            || out.contains("rusty::detail::deref_if_pointer(_m).index() == 0"),
+            || out.contains("variant_index(_m) == 0")
+            || out.contains("rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0"),
         "{out}"
     );
 }
@@ -10536,10 +10536,10 @@ fn test_leaf1052_try_style_either_shadowed_payload_bindings_scope_arm_bodies() {
     "#,
     );
     // Codegen dispatches arms via either `_m.is_right()` (legacy) or
-    // `_m.index() == 1` (current). Either way the arms must shadow `rhs`
+    // `variant_index(_m) == 1` (current). Either way the arms must shadow `rhs`
     // properly and use `rhs_shadow1` in both the return and tail-value paths.
     let arm_dispatch_present =
-        out.contains("_m.is_right()") || out.contains("_m).index() == 1");
+        out.contains("_m.is_right()") || out.contains("_m)) == 1");
     assert!(arm_dispatch_present, "{out}");
     // Right-arm tail value path: a `rhs_shadow1` binding feeds into
     // `_match_value` (legacy) or directly into the IIFE result (current).
@@ -14232,25 +14232,25 @@ fn test_leaf41543333_bound_match_patterns_lower_to_runtime_bound_variants() {
         "#,
     );
     // Bound match may use variant-typed alternative names or
-    // index-based dispatch (`.index() == 0/1/2`).
+    // index-based dispatch (`) == 0/1/2`).
     assert!(
         out.contains("rusty::Bound_Unbounded<size_t>")
             || out.contains(
                 "std::variant_alternative_t<0, std::remove_reference_t<decltype(_m)>>"
             )
-            || out.contains(".index() == 0)"),
+            || out.contains(") == 0)"),
         "{out}"
     );
     assert!(
         out.contains("rusty::Bound_Included<size_t>")
-            || out.contains(".index() == 1)")
+            || out.contains(") == 1)")
             || out.contains(
                 "std::variant_alternative_t<1, std::remove_reference_t<decltype(_m)>>"
             )
     );
     assert!(
         out.contains("rusty::Bound_Excluded<size_t>")
-            || out.contains(".index() == 2)")
+            || out.contains(") == 2)")
             || out.contains(
                 "std::variant_alternative_t<2, std::remove_reference_t<decltype(_m)>>"
             )
@@ -14275,20 +14275,20 @@ fn test_leaf41543333333327191_bound_match_visit_uses_variant_alternative_type_re
         "#,
     );
     // May use `variant_alternative_t<N, ...>` (legacy) or index-based
-    // dispatch (`.index() == N`).
+    // dispatch (`) == N`).
     assert!(
         out.contains("std::variant_alternative_t<0, std::remove_reference_t<decltype(_m)>>")
-            || out.contains(".index() == 0)"),
+            || out.contains(") == 0)"),
         "{out}"
     );
     assert!(
         out.contains("std::variant_alternative_t<1, std::remove_reference_t<decltype(_m)>>")
-            || out.contains(".index() == 1)"),
+            || out.contains(") == 1)"),
         "{out}"
     );
     assert!(
         out.contains("std::variant_alternative_t<2, std::remove_reference_t<decltype(_m)>>")
-            || out.contains(".index() == 2)"),
+            || out.contains(") == 2)"),
         "{out}"
     );
     assert!(!out.contains("rusty::Bound_Included<size_t>"));
@@ -14314,9 +14314,9 @@ fn test_leaf415433333333311_bound_match_without_expected_type_forces_size_t_visi
     // dispatch where each arm `return`s directly from an IIFE.
     assert!(
         out.contains("std::visit<size_t>(overloaded {")
-            || (out.contains(".index() == ")
+            || (out.contains(") == ")
                 && out.contains("_match_value.emplace("))
-            || (out.contains(".index() == ")
+            || (out.contains(") == ")
                 && out.contains("[&]() -> size_t")
                 && out.contains("return j;")),
         "{out}"
@@ -15480,7 +15480,7 @@ fn test_leaf4154333333352_for_loop_borrowed_iterable_drops_pointer_shaped_ampers
         }
         "#,
     );
-    assert!(out.contains("for (auto&& x : rusty::for_in(rusty::iter(data)))"));
+    assert!(out.contains("for (auto&& x : rusty::for_in(rusty::iter_mut(data)))"));
     assert!(!out.contains("for (auto&& x : &data)"));
 }
 
@@ -19235,19 +19235,19 @@ fn test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas() {
         "#,
     );
     // Struct-variant arms may lower as typed std::visit lambdas or as
-    // index-dispatch (`_m.index() == N`) with method-style calls on `f`.
+    // index-dispatch (`variant_index(_m) == N`) with method-style calls on `f`.
     assert!(
         out.contains("[&](const ParseKind_EmptyFlag&) { return f.write_str(\"EmptyFlag\"); }")
-            || (out.contains("_m.index() == 0")
+            || (out.contains("variant_index(_m) == 0")
                 && out.contains("return f.write_str(\"EmptyFlag\");"))
-            || (out.contains("rusty::detail::deref_if_pointer(_m).index() == 0")
+            || (out.contains("rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0")
                 && out.contains("return f.write_str(\"EmptyFlag\");")),
         "{out}"
     );
     assert!(
         out.contains("[&](const ParseKind_InvalidNamedFlag& _v) {")
-            || out.contains("_m.index() == 1")
-            || out.contains("rusty::detail::deref_if_pointer(_m).index() == 1"),
+            || out.contains("variant_index(_m) == 1")
+            || out.contains("rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1"),
         "{out}"
     );
     // Field binding may come from `_v.got` (typed lambda) or
@@ -19272,8 +19272,8 @@ fn test_leaf10534_match_expr_struct_arms_emit_typed_visit_lambdas() {
     );
     assert!(
         out.contains("[&](const ParseKind_InvalidHexFlag& _v) {")
-            || out.contains("_m.index() == 2")
-            || out.contains("rusty::detail::deref_if_pointer(_m).index() == 2"),
+            || out.contains("variant_index(_m) == 2")
+            || out.contains("rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 2"),
         "{out}"
     );
     assert!(
@@ -19850,7 +19850,7 @@ fn test_cluster_e_nested_variant_pattern_uses_get_with_borrow_scrutinee() {
     //      `_iflet_payload._0`, which is wrong when the payload is a
     //      `std::variant`. The correct shape is
     //      `std::get<N>(_iflet_payload)._0`, gated on a
-    //      `variant_holds`/`.index() == N` check.
+    //      `variant_holds`/`) == N` check.
     // The fix preserves the borrow via `std::as_const(...).unwrap()`
     // and routes the inner pattern through the runtime variant lowering
     // path, which emits both the variant-holds check and the
@@ -19884,9 +19884,9 @@ fn test_cluster_e_nested_variant_pattern_uses_get_with_borrow_scrutinee() {
         out
     );
     // And there must be a variant-holds-style gating check between the
-    // outer is_some() and the binding (.index() == 0 or variant_holds<...>).
+    // outer is_some() and the binding () == 0 or variant_holds<...>).
     assert!(
-        out.contains(".index() == 0") || out.contains("variant_holds<Inner_Root"),
+        out.contains(") == 0") || out.contains("variant_holds<Inner_Root"),
         "Cluster E: expected variant-holds check for inner variant, got:\n{}",
         out
     );
@@ -20446,7 +20446,7 @@ fn test_while_let_custom_variant_lowers_to_runtime_variant_check() {
     assert!(out.contains("while (true) {"), "{out}");
     assert!(out.contains("auto&& _whilelet ="), "{out}");
     assert!(
-        out.contains("_whilelet).index() == 1") || out.contains("variant_holds<"),
+        out.contains("_whilelet)) == 1") || out.contains("variant_holds<"),
         "{out}"
     );
     assert!(out.contains("if (!("), "{out}");
@@ -21871,15 +21871,15 @@ fn test_leaf46_tuple_match_expr_lowers_to_multi_visit_args() {
     "#,
     );
     // Tuple match may lower via `std::visit(overloaded { ... }, a, b);`
-    // (legacy) or index-based dispatch through `_m0/_m1.index() == N`.
+    // (legacy) or index-based dispatch through `_m0/_m1) == N`.
     let visit_form = out.contains("return std::visit(overloaded {")
         && out.contains("}, a, b);")
         && out.contains("auto&& x = _v0._0;")
         && out.contains("auto&& y = _v1._0;");
     let index_form = out.contains("auto&& _m0 = a;")
         && out.contains("auto&& _m1 = b;")
-        && out.contains(".index() == 0 && ")
-        && out.contains(".index() == 0)")
+        && out.contains(") == 0 && ")
+        && out.contains(") == 0)")
         && out.contains("auto&& x =")
         && out.contains("auto&& y =");
     assert!(visit_form || index_form, "{out}");
@@ -21904,13 +21904,13 @@ fn test_leaf46_visit_lambdas_capture_outer_locals() {
     // and the value scrutinee `_m` is captured by reference.
     let arm_a_via_visit = out.contains("[&](const E_A& _v)")
         || out.contains("std::variant_alternative_t<0, ");
-    let arm_a_via_index = out.contains("_m.index() == 0")
-        || out.contains("rusty::detail::deref_if_pointer(_m).index() == 0");
+    let arm_a_via_index = out.contains("variant_index(_m) == 0")
+        || out.contains("rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 0");
     assert!(arm_a_via_visit || arm_a_via_index, "{out}");
     let arm_b_via_visit = out.contains("[&](const E_B& _v)")
         || out.contains("std::variant_alternative_t<1, ");
-    let arm_b_via_index = out.contains("_m.index() == 1")
-        || out.contains("rusty::detail::deref_if_pointer(_m).index() == 1");
+    let arm_b_via_index = out.contains("variant_index(_m) == 1")
+        || out.contains("rusty::detail::variant_index(rusty::detail::deref_if_pointer(_m)) == 1");
     assert!(arm_b_via_visit || arm_b_via_index, "{out}");
     // Negative: outer-locals are captured by ref (no `[]`-empty arm).
     assert!(!out.contains("[](const E_A& _v)"), "{out}");
@@ -21959,7 +21959,7 @@ fn test_leaf48_generic_enum_match_on_self_uses_variant_template_args() {
     );
     // Match arms may lower via std::visit lambdas (with the concrete
     // variant struct or via `std::variant_alternative_t<N, ...>`) or via
-    // `_m.index() == N` index dispatch. In any case the variant's
+    // `variant_index(_m) == N` index dispatch. In any case the variant's
     // template args (L, R) must thread through.
     let templates_present = out.contains("Either<L, R>")
         || out.contains("Either_Left<L, R>")
@@ -21967,10 +21967,10 @@ fn test_leaf48_generic_enum_match_on_self_uses_variant_template_args() {
     assert!(templates_present, "{out}");
     let left_dispatch = out.contains("[&](const Either_Left<L, R>& _v)")
         || out.contains("std::variant_alternative_t<0, ")
-        || out.contains(".index() == 0");
+        || out.contains(") == 0");
     let right_dispatch = out.contains("[&](const Either_Right<L, R>& _v)")
         || out.contains("std::variant_alternative_t<1, ")
-        || out.contains(".index() == 1");
+        || out.contains(") == 1");
     assert!(left_dispatch, "{out}");
     assert!(right_dispatch, "{out}");
     // Negative: the un-templated bare-variant spelling must NOT appear.
@@ -22001,10 +22001,10 @@ fn test_leaf48_typed_param_match_uses_concrete_variant_template_args() {
     );
     let left_dispatch = out.contains("[&](const Either_Left<int32_t, int32_t>& _v)")
         || out.contains("std::variant_alternative_t<0, ")
-        || out.contains(".index() == 0");
+        || out.contains(") == 0");
     let right_dispatch = out.contains("[&](const Either_Right<int32_t, int32_t>& _v)")
         || out.contains("std::variant_alternative_t<1, ")
-        || out.contains(".index() == 1");
+        || out.contains(") == 1");
     assert!(left_dispatch, "{out}");
     assert!(right_dispatch, "{out}");
 }
@@ -22288,10 +22288,10 @@ fn test_leaf416_self_variant_patterns_emit_resolved_enum_variant_types() {
     assert!(templates_present, "{out}");
     let left_dispatch = out.contains("[&](const Either_Left<L, R>& _v)")
         || out.contains("std::variant_alternative_t<0, ")
-        || out.contains(".index() == 0");
+        || out.contains(") == 0");
     let right_dispatch = out.contains("[&](const Either_Right<L, R>& _v)")
         || out.contains("std::variant_alternative_t<1, ")
-        || out.contains(".index() == 1");
+        || out.contains(") == 1");
     assert!(left_dispatch, "{out}");
     assert!(right_dispatch, "{out}");
     assert!(!out.contains("Self_Left"), "{out}");
@@ -25407,7 +25407,7 @@ fn test_leaf5128_match_struct_binding_mut_scrutinee_uses_mut_visit_param() {
     let visit_form = out.contains("[&](E_A& _v)")
         && out.contains("auto&& len = _v.len;");
     let index_form = out.contains("auto&& _m = e;")
-        && out.contains(".index() == 0)")
+        && out.contains(") == 0)")
         && (out.contains("auto&& len = rusty::detail::deref_if_pointer(std::get<0>(_m).len)")
             || out.contains(
                 "auto&& len = rusty::detail::deref_if_pointer(std::get<0>(rusty::detail::deref_if_pointer(_m)).len)"
@@ -35163,7 +35163,7 @@ fn test_if_let_expression_variant_test_uses_variant_holds_not_is_some() {
     // multi-statement form goes through the variant_holds condition.
     assert!(
         out.contains("rusty::detail::variant_holds<State_Found>")
-            || out.contains(".index() == 2"),
+            || out.contains(") == 2"),
         "{out}"
     );
     assert!(

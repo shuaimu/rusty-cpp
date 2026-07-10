@@ -276,6 +276,16 @@ namespace rusty {
             }
         }
 
+        // The active alternative's index, read through the std::variant base.
+        // A Rust enum method named `index` shadows std::variant::index on the
+        // derived wrapper, so a match lowering's bare `.index()` read would
+        // call the Rust method — indexmap's Entry::index() recursed into
+        // itself that way.
+        template<typename VariantLike>
+        constexpr std::size_t variant_index(VariantLike&& value) {
+            return as_variant_ref(std::forward<VariantLike>(value)).index();
+        }
+
         template<typename T, typename Variant, std::size_t Index = 0>
         constexpr bool variant_holds_impl(const Variant& value) {
             if constexpr (Index >= std::variant_size_v<Variant>) {
