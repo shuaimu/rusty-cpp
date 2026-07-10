@@ -29945,7 +29945,7 @@ impl CodeGen {
             .lookup_struct_field_cpp_name(&target_struct, field_name)
             .unwrap_or_else(|| escape_cpp_keyword(field_name));
         Some(format!(
-            "rusty::detail::deref_if_pointer_like((*{})).{}",
+            "rusty::detail::deref_if_pointer((*{})).{}",
             base_for_field, field_cpp
         ))
     }
@@ -31313,7 +31313,7 @@ impl CodeGen {
             // (ScopeGuard holding the guarded place's ADDRESS) and is
             // identity for value slots.
             return format!(
-                "rusty::detail::deref_if_pointer_like((*{})).{}({})",
+                "rusty::detail::deref_if_pointer((*{})).{}({})",
                 receiver,
                 method_call,
                 args.join(", ")
