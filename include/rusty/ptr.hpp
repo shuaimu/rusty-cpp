@@ -179,6 +179,57 @@ public:
     }
 };
 
+// Rust's fat slice pointer `NonNull<[T]>` (Allocator::allocate's return):
+// pointer + length. Mirrors the thin NonNull surface (cast/as_non_null_ptr)
+// while keeping the length reachable (`block.len() != layout.size`).
+template<typename T>
+class NonNullSlice {
+    T* ptr_;
+    std::size_t len_;
+
+public:
+    using rusty_pointer_identity_semantics = void;
+
+    constexpr NonNullSlice(T* ptr, std::size_t len) noexcept : ptr_(ptr), len_(len) {}
+    constexpr explicit NonNullSlice(std::span<T> s) noexcept
+        : ptr_(s.data()), len_(s.size()) {}
+    // Thin-pointer fallback (length unknown -> 0); keeps producers that
+    // only have a data pointer compiling.
+    constexpr explicit NonNullSlice(T* ptr) noexcept : ptr_(ptr), len_(0) {}
+    constexpr explicit NonNullSlice(NonNull<T> ptr) noexcept
+        : ptr_(ptr.as_ptr()), len_(0) {}
+
+    static constexpr NonNullSlice<T> new_unchecked(std::span<T> s) noexcept {
+        return NonNullSlice<T>(s);
+    }
+    static constexpr NonNullSlice<T> new_unchecked(T* ptr) noexcept {
+        return NonNullSlice<T>(ptr);
+    }
+
+    constexpr std::size_t len() const noexcept { return len_; }
+    constexpr std::size_t size() const noexcept { return len_; }
+    constexpr T* as_ptr() const noexcept { return ptr_; }
+    constexpr T* data() const noexcept { return ptr_; }
+    constexpr NonNull<T> as_non_null_ptr() const noexcept { return NonNull<T>(ptr_); }
+    constexpr std::span<T> as_span() const noexcept { return std::span<T>(ptr_, len_); }
+
+    constexpr auto cast() const noexcept { return NonNull<T>(ptr_).cast(); }
+    template<typename U>
+    constexpr NonNull<U> cast() const noexcept {
+        return NonNull<U>(reinterpret_cast<U*>(ptr_));
+    }
+
+    // Thin-context compatibility: existing consumers typed NonNull<T>.
+    constexpr operator NonNull<T>() const noexcept { return NonNull<T>(ptr_); }
+
+    friend constexpr bool operator==(NonNullSlice lhs, NonNullSlice rhs) noexcept {
+        return lhs.ptr_ == rhs.ptr_ && lhs.len_ == rhs.len_;
+    }
+    friend constexpr bool operator!=(NonNullSlice lhs, NonNullSlice rhs) noexcept {
+        return !(lhs == rhs);
+    }
+};
+
 // Null pointer constants for explicit null initialization
 template<typename T>
 constexpr Ptr<T> null_ptr = nullptr;
@@ -249,6 +300,9 @@ namespace ptr {
 
 template<typename T>
 using NonNull = ::rusty::NonNull<T>;
+
+template<typename T>
+using NonNullSlice = ::rusty::NonNullSlice<T>;
 
 inline constexpr std::nullptr_t null_mut() noexcept {
     return nullptr;
@@ -362,6 +416,13 @@ inline constexpr RawCastProxy<T> cast(T* ptr) noexcept {
 template<typename T>
 inline constexpr RawCastProxy<T> cast(const NonNull<T>& ptr) noexcept {
     return RawCastProxy<T>{ptr.get()};
+}
+
+// Fat slice pointer (`block.cast()` on Allocator::allocate's return): the
+// cast drops to the data pointer, same as Rust's NonNull<[T]>::cast.
+template<typename T>
+inline constexpr RawCastProxy<T> cast(const NonNullSlice<T>& ptr) noexcept {
+    return RawCastProxy<T>{ptr.as_ptr()};
 }
 
 // `<*const T>::align_offset(align)` — the number of ELEMENTS of T that must be

@@ -1600,12 +1600,10 @@ impl CodeGen {
 
     pub(super) fn map_type(&self, ty: &syn::Type) -> String {
         // `NonNull<[u8]>` is Rust's fat byte-pointer return from
-        // `Allocator::allocate`. Our `rusty::alloc::Allocator` concept (and
-        // `rusty::ptr::NonNull<T>`) is thin-pointer-only, so map the slice
-        // argument away to keep the call-site types compatible with what the
-        // concept's `allocate` actually returns. This is intentionally lossy
-        // (the slice's length information is discarded), matching how most
-        // call sites use `.cast::<T>()` on the result anyway.
+        // `Allocator::allocate`: pointer + length. Map to the FAT carrier
+        // (rusty::ptr::NonNullSlice<T>) — it mirrors the thin NonNull
+        // surface (cast/as_non_null_ptr, implicit NonNull conversion) while
+        // keeping `block.len() != layout.size` checkable.
         if let syn::Type::Path(tp) = ty
             && tp.qself.is_none()
             && let Some(last) = tp.path.segments.last()
@@ -1619,17 +1617,8 @@ impl CodeGen {
             && let Some(elem_last) = elem_tp.path.segments.last()
             && elem_last.ident == "u8"
         {
-            let mut rewritten = tp.clone();
-            let last_seg = rewritten.path.segments.last_mut().unwrap();
-            let elem_ty = (*slice.elem).clone();
-            last_seg.arguments =
-                syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
-                    colon2_token: None,
-                    lt_token: Default::default(),
-                    args: std::iter::once(syn::GenericArgument::Type(elem_ty)).collect(),
-                    gt_token: Default::default(),
-                });
-            return self.map_type(&syn::Type::Path(rewritten));
+            let elem_cpp = self.map_type(slice.elem.as_ref());
+            return format!("rusty::ptr::NonNullSlice<{}>", elem_cpp);
         }
         // Map/set instantiations with REFERENCE type args (`IndexMap<&mut i32,
         // &str>`): C++ class templates over `int&` can't take prvalue keys and
