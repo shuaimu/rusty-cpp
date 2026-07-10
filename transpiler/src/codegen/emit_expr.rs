@@ -1687,7 +1687,34 @@ impl CodeGen {
                             } else {
                                 None
                             };
-                        if let Some(elems) = literal_tuple_elems.filter(|e| !e.is_empty()) {
+                        // An EMPTY array literal against an ARRAY-typed
+                        // sibling (`assert_eq!(map.get_disjoint_mut([]), [])`):
+                        // a bare `std::array<int, 0>` has no operator==
+                        // against the sibling's element type — adopt the
+                        // sibling's type (empty arrays compare equal
+                        // regardless). Non-array siblings (SmallVec) keep the
+                        // plain emission: they carry their own ==(array)
+                        // overloads and may not be default-constructible.
+                        if idx > 0
+                            && matches!(
+                                self.peel_paren_group_expr(reference_target),
+                                syn::Expr::Array(a) if a.elems.is_empty()
+                            )
+                            && peer_expr.is_some_and(|peer| {
+                                self.infer_simple_expr_type(peer).is_some_and(|ty| {
+                                    matches!(
+                                        self.peel_reference_paren_group_type(&ty),
+                                        syn::Type::Array(_)
+                                    )
+                                })
+                            })
+                        {
+                            self.writeln(&format!(
+                                "auto {} = std::remove_cvref_t<decltype(*_m{})>{{}};",
+                                tmp_name,
+                                idx - 1
+                            ));
+                        } else if let Some(elems) = literal_tuple_elems.filter(|e| !e.is_empty()) {
                             self.writeln(&format!(
                                 "auto {} = std::make_tuple({});",
                                 tmp_name,
