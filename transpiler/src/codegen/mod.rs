@@ -24406,6 +24406,15 @@ impl CodeGen {
                 || self.is_expr_reference_like(base)
                 || self.runtime_match_scrutinee_borrows_payload(base);
         }
+        // `match indices[i] { … }` — Rust forbids moving out of an
+        // indexed place outright (Index::index returns a reference), so
+        // the payload must be Copy and the slot stays live after the
+        // match. The destructive lvalue `unwrap()` would null the slot:
+        // indexmap's get_disjoint_opt_mut bounds loop consumed
+        // `indices[i]`, and the output map then read None.
+        if matches!(expr, syn::Expr::Index(_)) {
+            return true;
+        }
         // `match obj.field { … }` where the base is a borrowed receiver
         // — either `self` (a borrowed `&self`/`&mut self`) or a local
         // whose declared type is a reference. The Rust compiler forbids
@@ -29525,7 +29534,7 @@ impl CodeGen {
                     | "first_mut"
                     | "last"
                     | "last_mut"
-            );
+            ) || mut_ref_yielding_method_shape(&inner_method);
         }
         false
     }
@@ -50409,6 +50418,27 @@ fn collect_reassigned_vars(stmts: &[syn::Stmt]) -> std::collections::HashSet<Str
         collect_assignments_in_stmt(stmt, &mut result);
     }
     result
+}
+
+/// Rust's `*_mut` naming convention: the method yields a single `&mut`
+/// payload (possibly wrapped in Option/Result), so `.unwrap()`/`.expect()`
+/// on it exposes a C++ reference that a binding must preserve. Multi-
+/// reference shapes (tuples/arrays of `&mut`) are excluded — their C++
+/// carriers are by-value and `auto&` cannot bind the temporary.
+fn mut_ref_yielding_method_shape(name: &str) -> bool {
+    name.ends_with("_mut")
+        && !matches!(
+            name,
+            "split_first_mut"
+                | "split_last_mut"
+                | "split_at_mut"
+                | "get_many_mut"
+                | "get_disjoint_mut"
+                | "get_disjoint_opt_mut"
+                | "as_mut_slice_mut"
+                | "each_mut"
+                | "iter_mut"
+        )
 }
 
 /// Locals used as deref-assignment targets (`*x = …`, possibly through

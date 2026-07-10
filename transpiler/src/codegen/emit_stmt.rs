@@ -1770,10 +1770,25 @@ impl CodeGen {
         // `&mut` borrow so we can use `std::as_const(...).unwrap()` /
         // `.as_mut().unwrap()` to keep the payload as a reference into the
         // original storage rather than consuming it.
-        let (scrutinee_expr, scrutinee_borrow_mode) = match let_expr.expr.as_ref() {
+        let (scrutinee_expr, mut scrutinee_borrow_mode) = match let_expr.expr.as_ref() {
             syn::Expr::Reference(r) => (r.expr.as_ref(), Some(r.mutability.is_some())),
             other => (other, None),
         };
+        // `if let Some(idx) = indices[i]` — an indexed place cannot be
+        // moved out of in Rust, so the payload is Copy and the slot must
+        // survive the binding. Route through the borrowing (as_const)
+        // unwrap; the destructive lvalue unwrap() nulls the slot. Skip
+        // `mut` bindings: they need an owned copy the const-ref binding
+        // can't provide.
+        if scrutinee_borrow_mode.is_none()
+            && matches!(
+                self.peel_paren_group_expr(scrutinee_expr),
+                syn::Expr::Index(_)
+            )
+            && !if_let_pat_contains_mut_binding(&let_expr.pat)
+        {
+            scrutinee_borrow_mode = Some(false);
+        }
         let scrutinee = self.emit_expr_to_string(scrutinee_expr);
         let (_, _, option_unwrap_method, _) =
             self.option_like_pattern_surface_for_expr(scrutinee_expr);
@@ -2985,6 +3000,17 @@ impl CodeGen {
                             });
                         if declared_returns_value_wrapper {
                             return false;
+                        }
+                        // `.find_mut(...).expect(...)` — unwrap/expect peels
+                        // the Option/Result wrapper, exposing the `&mut`
+                        // payload of a `*_mut` accessor; the binding must
+                        // stay non-const so writes reach the referent.
+                        if matches!(method.as_str(), "unwrap" | "unwrap_unchecked" | "expect")
+                            && let syn::Expr::MethodCall(inner) =
+                                self.peel_paren_group_expr(&mc.receiver)
+                            && mut_ref_yielding_method_shape(&inner.method.to_string())
+                        {
+                            return true;
                         }
                         return matches!(
                             method.as_str(),
@@ -5673,6 +5699,31 @@ impl CodeGen {
             }
         }
         self.emit_expr_to_string_with_expected(value_expr, expected_ty)
+    }
+}
+
+/// Whether any binding in an if-let pattern is declared `mut`
+/// (`Some(mut x)`, `Ok((a, mut b))`, …).
+fn if_let_pat_contains_mut_binding(pat: &syn::Pat) -> bool {
+    match pat {
+        syn::Pat::Ident(pi) => {
+            pi.mutability.is_some()
+                || pi
+                    .subpat
+                    .as_ref()
+                    .is_some_and(|(_, sub)| if_let_pat_contains_mut_binding(sub))
+        }
+        syn::Pat::TupleStruct(ts) => ts.elems.iter().any(if_let_pat_contains_mut_binding),
+        syn::Pat::Tuple(t) => t.elems.iter().any(if_let_pat_contains_mut_binding),
+        syn::Pat::Struct(s) => s
+            .fields
+            .iter()
+            .any(|f| if_let_pat_contains_mut_binding(&f.pat)),
+        syn::Pat::Reference(r) => if_let_pat_contains_mut_binding(&r.pat),
+        syn::Pat::Or(o) => o.cases.iter().any(if_let_pat_contains_mut_binding),
+        syn::Pat::Paren(p) => if_let_pat_contains_mut_binding(&p.pat),
+        syn::Pat::Slice(s) => s.elems.iter().any(if_let_pat_contains_mut_binding),
+        _ => false,
     }
 }
 

@@ -6258,8 +6258,14 @@ impl CodeGen {
         {
             let receiver = self.emit_expr_to_string(&mc.receiver);
             let needle = self.emit_expr_maybe_move(&mc.args[0]);
+            // The needle's C++ carrier may be a raw pointer (a borrowed
+            // `&Some(idx)` lowers through addr_of_temp). Try the raw
+            // comparison first, then a pointer-peeled needle — without the
+            // peel both `requires` arms fail and the loop constant-folds to
+            // false (indexmap's get_disjoint_opt_mut overlap check never
+            // fired, letting duplicate indices through).
             return format!(
-                "[&]() {{ auto&& _haystack = {}; auto&& _needle = {}; for (const auto& _item : _haystack) {{ if constexpr (requires {{ _item == _needle; }}) {{ if (_item == _needle) return true; }} else if constexpr (requires {{ _needle == _item; }}) {{ if (_needle == _item) return true; }} }} return false; }}()",
+                "[&]() {{ auto&& _haystack = {}; auto&& _needle = {}; for (const auto& _item : _haystack) {{ if constexpr (requires {{ _item == _needle; }}) {{ if (_item == _needle) return true; }} else if constexpr (requires {{ _needle == _item; }}) {{ if (_needle == _item) return true; }} else if constexpr (requires {{ _item == rusty::detail::deref_if_pointer(_needle); }}) {{ if (_item == rusty::detail::deref_if_pointer(_needle)) return true; }} else if constexpr (requires {{ rusty::detail::deref_if_pointer(_needle) == _item; }}) {{ if (rusty::detail::deref_if_pointer(_needle) == _item) return true; }} }} return false; }}()",
                 receiver, needle
             );
         }
