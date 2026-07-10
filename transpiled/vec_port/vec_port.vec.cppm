@@ -3737,8 +3737,19 @@ struct SpecExtend {
 // Patcher rewrites `::slice::SpecCloneIntoVec` / `slice::SpecCloneIntoVec`
 // to bare `SpecCloneIntoVec` for these stubs.
 struct SpecCloneIntoVec {
+    // Rust `slice::clone_into(&self, target: &mut Vec<T>)`: reuse the
+    // target's storage, clone the source elements across. The previous
+    // empty stub made Vec::clone_from a silent no-op — cloned IndexMaps
+    // kept full index tables over EMPTY entry vectors.
     template<typename Src, typename Dst>
-    static void clone_into(Src, Dst&) {}
+    static void clone_into(Src src, Dst& dst) {
+        auto s = rusty::as_slice(src);
+        dst.clear();
+        dst.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i) {
+            dst.push(rusty::clone(s[i]));
+        }
+    }
 };
 
 
