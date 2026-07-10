@@ -14368,6 +14368,73 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // `guard(self, |s| ...)` / `guard(&mut place, ...)`: the ScopeGuard
+        // slot must ALIAS the place — a value slot copies (a Clone-backed
+        // RawTable copy re-enters clone_from_impl's own guard: infinite
+        // recursion) and mutations through the guard must hit the original.
+        // The slot holds the place's ADDRESS; the strict-pointer auto-deref
+        // wrap peels it at `(*g).x` use sites. Owned-value guards
+        // (`guard(new_table, ...)`) keep the by-value slot.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && fp.path.segments.last().is_some_and(|s| s.ident == "guard")
+            && call.args.len() == 2
+        {
+            // `guard((0, &mut *self), |(n, s)| ...)` — a TUPLE place: wrap
+            // only the mutable-reference ELEMENTS as pointers (the counter
+            // stays by value; destructured closure bindings reach members
+            // through the pointer-tolerant dispatch ladders).
+            if let syn::Expr::Tuple(tup) = self.peel_paren_group_expr(&call.args[0])
+                && tup.elems.iter().any(|e| {
+                    matches!(
+                        self.peel_paren_group_expr(e),
+                        syn::Expr::Reference(r) if r.mutability.is_some()
+                    )
+                })
+            {
+                let func = self.emit_expr_to_string(&call.func);
+                let elems: Vec<String> = tup
+                    .elems
+                    .iter()
+                    .map(|e| match self.peel_paren_group_expr(e) {
+                        syn::Expr::Reference(r) if r.mutability.is_some() => format!(
+                            "rusty::detail::ptr_or_addr({})",
+                            self.emit_expr_to_string(&r.expr)
+                        ),
+                        _ => self.emit_expr_maybe_move(e),
+                    })
+                    .collect();
+                let closure = self.emit_expr_to_string(&call.args[1]);
+                return format!(
+                    "{}(std::make_tuple({}), {})",
+                    func,
+                    elems.join(", "),
+                    closure
+                );
+            }
+            let place_expr = match self.peel_paren_group_expr(&call.args[0]) {
+                syn::Expr::Reference(r) if r.mutability.is_some() => Some(r.expr.as_ref()),
+                p @ syn::Expr::Path(pp)
+                    if pp.qself.is_none()
+                        && pp.path.segments.len() == 1
+                        && pp.path.segments[0].ident == "self" =>
+                {
+                    Some(p)
+                }
+                _ => None,
+            };
+            if let Some(place_expr) = place_expr {
+                let func = self.emit_expr_to_string(&call.func);
+                let place = self.emit_expr_to_string(place_expr);
+                let closure = self.emit_expr_to_string(&call.args[1]);
+                // The drop closure's body was emitted for a REFERENCE
+                // receiver — the adaptor peels the pointer slot before
+                // invoking it.
+                return format!(
+                    "{}(rusty::detail::ptr_or_addr({}), [__g_inner = {}](auto&& __g_place) mutable {{ return __g_inner(rusty::detail::deref_if_pointer(std::forward<decltype(__g_place)>(__g_place))); }})",
+                    func, place, closure
+                );
+            }
+        }
         // `NonNull::new_unchecked(slice_from_raw_parts_mut(data, len))` with
         // a FAT owner (`NonNull<[u8]>` -> NonNullSlice): the raw-parts helper
         // returns a raw pointer, so routing through it DROPS the length
@@ -19635,8 +19702,12 @@ impl CodeGen {
                                 // Deref tiers: Rust auto-derefs tuple-field
                                 // access through wrappers (a ScopeGuard over
                                 // a tuple — hashbrown's clone_from guard).
+                                // The final deref_if_pointer peels a
+                                // POINTER-carried tuple element (a guard
+                                // aliasing its place by address) so `.1`
+                                // yields the place, not the pointer.
                                 format!(
-                                    "([](auto&& __t) -> decltype(auto) {{ \
+                                    "rusty::detail::deref_if_pointer(([](auto&& __t) -> decltype(auto) {{ \
                                        if constexpr (requires {{ __t._{1}; }}) \
                                          return (std::forward<decltype(__t)>(__t)._{1}); \
                                        else if constexpr (requires {{ std::get<{1}>(std::forward<decltype(__t)>(__t)); }}) \
@@ -19645,7 +19716,7 @@ impl CodeGen {
                                          return ((*std::forward<decltype(__t)>(__t))._{1}); \
                                        else \
                                          return std::get<{1}>(*std::forward<decltype(__t)>(__t)); \
-                                     }})({0})",
+                                     }})({0}))",
                                     base_for_field, idx.index
                                 )
                             }

@@ -350,7 +350,14 @@ constexpr decltype(auto) deref_if_pointer_like(T&& value) {
         // Deref-like value types (for example ArrayVec/ArrayString) should compare/hash
         // on their target view instead of recursing through self-comparisons.
         if constexpr (!std::is_same_v<deref_type, value_type>) {
-            return *std::forward<T>(value);
+            if constexpr (std::is_pointer_v<deref_type>) {
+                // A wrapper whose Deref target is a raw POINTER (a
+                // ScopeGuard aliasing its place by address): the value is
+                // two hops away.
+                return *(*std::forward<T>(value));
+            } else {
+                return *std::forward<T>(value);
+            }
         } else {
             return std::forward<T>(value);
         }
