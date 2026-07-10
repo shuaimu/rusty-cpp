@@ -1044,6 +1044,36 @@ impl CodeGen {
             syn::Fields::Unit => {}
         }
         self.current_struct = prev_struct_for_fields;
+        // Slice-tail VIEW wrappers get the span surface (size/data/begin/
+        // end/subspan) so the runtime slice helpers (rusty::len/get/
+        // slice_to) accept the view value directly.
+        if let Some(field) = self.slice_tail_view_types.get(&name_str).cloned() {
+            let f = escape_cpp_keyword(&field);
+            self.writeln(&format!(
+                "constexpr std::size_t size() const noexcept {{ return {}.size(); }}",
+                f
+            ));
+            self.writeln(&format!(
+                "constexpr auto data() const noexcept {{ return {}.data(); }}",
+                f
+            ));
+            self.writeln(&format!(
+                "constexpr auto begin() const noexcept {{ return {}.begin(); }}",
+                f
+            ));
+            self.writeln(&format!(
+                "constexpr auto end() const noexcept {{ return {}.end(); }}",
+                f
+            ));
+            self.writeln(&format!(
+                "constexpr auto subspan(std::size_t o) const {{ return {}.subspan(o); }}",
+                f
+            ));
+            self.writeln(&format!(
+                "constexpr auto subspan(std::size_t o, std::size_t n) const {{ return {}.subspan(o, n); }}",
+                f
+            ));
+        }
         if matches!(&s.fields, syn::Fields::Unit) {
             self.unit_struct_types.insert(name_str.clone());
             let scoped_name = self.scoped_type_key(&name_str);

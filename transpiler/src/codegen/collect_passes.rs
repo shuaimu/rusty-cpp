@@ -4118,6 +4118,23 @@ impl CodeGen {
                         &s.generics,
                         true,
                     );
+                    // A slice-tail wrapper (`struct Slice<K, V> { entries:
+                    // [Bucket<K, V>] }`, repr(transparent) DSTs): its C++
+                    // form is a single-span VIEW VALUE — `&Slice`/`&mut
+                    // Slice` lower to values and the from-slice pun
+                    // constructs instead of reinterpreting.
+                    let mut fields = s.fields.iter();
+                    if let (Some(only), None) = (fields.next(), fields.next())
+                        && matches!(&only.ty, syn::Type::Slice(_))
+                    {
+                        let field_name = only
+                            .ident
+                            .as_ref()
+                            .map(|i| i.to_string())
+                            .unwrap_or_else(|| "_0".to_string());
+                        self.slice_tail_view_types
+                            .insert(s.ident.to_string(), field_name);
+                    }
                 }
                 syn::Item::Union(u) => {
                     self.record_local_declared_type(module_path, &u.ident.to_string());

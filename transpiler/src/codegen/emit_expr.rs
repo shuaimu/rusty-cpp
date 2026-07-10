@@ -10986,6 +10986,14 @@ impl CodeGen {
                 self.emit_binary_expr_to_string_with_expected(bin, expected_ty)
             }
             syn::Expr::Unary(un) => {
+                // Slice-tail view pun: `*(entries as *mut [B] as *mut Self)`
+                // — construct the view VALUE from the span (the reinterpret
+                // of a by-value span param dangles).
+                if matches!(un.op, syn::UnOp::Deref(_))
+                    && let Some(view_ctor) = self.try_emit_slice_tail_view_pun(&un.expr)
+                {
+                    return view_ctor;
+                }
                 if matches!(un.op, syn::UnOp::Deref(_)) && !self.is_expr_raw_pointer_like(&un.expr)
                 {
                     let operand = self.peel_paren_group_expr(&un.expr);
@@ -11339,6 +11347,14 @@ impl CodeGen {
                         && !self.is_expr_raw_pointer_like(&r.expr)
                     {
                         return self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
+                    }
+                    // Slice-tail view pun under `&`/`&mut`: the view VALUE
+                    // stands in for the (danging) reference.
+                    if let syn::Expr::Unary(un) = self.peel_paren_group_expr(&r.expr)
+                        && matches!(un.op, syn::UnOp::Deref(_))
+                        && let Some(view_ctor) = self.try_emit_slice_tail_view_pun(&un.expr)
+                    {
+                        return view_ctor;
                     }
                     let inner = self.emit_expr_to_string_with_expected(&r.expr, expected_ty);
                     if !self.is_stable_reference_lvalue_expr(&r.expr) {
@@ -14251,6 +14267,46 @@ impl CodeGen {
             "static_cast<{}>({})",
             owner_bare,
             self.emit_expr_to_string(&call.args[0])
+        ))
+    }
+
+    /// A slice-tail view pun's construction: for a DEREF operand that is a
+    /// cast chain `entries as *mut [B] as *mut Self` targeting a slice-tail
+    /// view type, returns `Slice<K, V>{entries}` — the view VALUE. The
+    /// reinterpret form would return a reference into the by-value span
+    /// param (dangling).
+    fn try_emit_slice_tail_view_pun(&self, deref_operand: &syn::Expr) -> Option<String> {
+        let mut cur = self.peel_paren_group_expr(deref_operand);
+        if !matches!(cur, syn::Expr::Cast(_)) {
+            return None;
+        }
+        let mut view_ty: Option<String> = None;
+        while let syn::Expr::Cast(c) = cur {
+            if view_ty.is_none()
+                && let syn::Type::Ptr(p) = self.peel_paren_group_type(&c.ty)
+                && let syn::Type::Path(tp) = self.peel_paren_group_type(&p.elem)
+                && tp.path.segments.last().is_some_and(|s| {
+                    let n = s.ident.to_string();
+                    self.slice_tail_view_types.contains_key(&n)
+                        || (n == "Self"
+                            && self.current_struct.as_deref().is_some_and(|cur_s| {
+                                self.slice_tail_view_types
+                                    .contains_key(cur_s.rsplit("::").next().unwrap_or(cur_s))
+                            }))
+                })
+            {
+                view_ty = Some(self.map_type(&p.elem));
+            }
+            cur = self.peel_paren_group_expr(&c.expr);
+        }
+        let view = view_ty?;
+        let base = self.emit_expr_to_string(cur);
+        // The shared-view path receives span<const B>; the wrapper's member
+        // is span<B> — despan_const bridges (Rust's &Slice guarantees no
+        // mutation through the shared view).
+        Some(format!(
+            "{}{{rusty::detail::despan_const({})}}",
+            view, base
         ))
     }
 

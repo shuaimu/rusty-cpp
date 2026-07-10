@@ -67,6 +67,19 @@ constexpr decltype(auto) ptr_or_addr(T&& v) {
     }
 }
 
+/// @brief A mutable span from either span flavor: slice-tail view wrappers
+/// hold `std::span<T>`, but the SHARED-view constructor receives
+/// `std::span<const T>` (Rust's `&Slice` guarantees no mutation through it).
+template<typename T>
+constexpr auto despan_const(std::span<T> s) noexcept {
+    if constexpr (std::is_const_v<T>) {
+        using U = std::remove_const_t<T>;
+        return std::span<U>(const_cast<U*>(s.data()), s.size());
+    } else {
+        return s;
+    }
+}
+
 /// @brief Declared return type for a DIVERGING closure (`|_| unreachable!()`,
 /// Rust type `!`): converts to anything so the callable satisfies slots with
 /// concrete return expectations (a hasher returning uint64_t). The body's

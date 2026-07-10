@@ -2697,6 +2697,25 @@ impl CodeGen {
                     }
                     return format!("std::span<const {}>", elem);
                 }
+                // Slice-tail DST wrappers are VIEW VALUES: `&Slice<K, V>`
+                // and `&mut Slice<K, V>` both lower to Slice<K, V> by value
+                // (the span member aliases the underlying buckets; the
+                // reference form would dangle — the from-slice pun has no
+                // stable object to point at). `&mut Self` inside the
+                // wrapper's own impl resolves through current_struct.
+                if let syn::Type::Path(tp) = self.peel_paren_group_type(r.elem.as_ref())
+                    && tp.path.segments.last().is_some_and(|s| {
+                        let n = s.ident.to_string();
+                        self.slice_tail_view_types.contains_key(&n)
+                            || (n == "Self"
+                                && self.current_struct.as_deref().is_some_and(|cur| {
+                                    self.slice_tail_view_types
+                                        .contains_key(cur.rsplit("::").next().unwrap_or(cur))
+                                }))
+                    })
+                {
+                    return self.map_type(r.elem.as_ref());
+                }
                 // Special case: &dyn Trait → pro::proxy_view or std::function for Fn traits
                 // Special case: &dyn Trait → pro::proxy_view or std::function for Fn traits
                 if let syn::Type::TraitObject(to) = r.elem.as_ref() {

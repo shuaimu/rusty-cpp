@@ -975,6 +975,10 @@ pub struct CodeGen {
     /// Enum names that lower to `std::variant` wrappers (enums with data).
     /// Used to decide when match-path patterns require `std::visit` rather than `switch`.
     pub(crate) data_enum_types: HashSet<String>,
+    /// Slice-tail DST wrappers (`struct Slice<K, V> { entries: [Bucket] }`):
+    /// lowered as single-span VIEW VALUES — `&T`/`&mut T` drop the
+    /// reference. Maps type name -> the span field's emitted name.
+    pub(crate) slice_tail_view_types: HashMap<String, String>,
     /// Data enums emitted as struct-wrapper variants (instead of alias-only `using`).
     /// Used for expression lowering where wrapper-only static constructors may be needed.
     pub(crate) data_enum_wrapper_types: HashSet<String>,
@@ -1863,6 +1867,7 @@ impl CodeGen {
             forward_declared_function_paths: HashSet::new(),
             external_extension_method_hints: HashSet::new(),
             data_enum_types: HashSet::new(),
+            slice_tail_view_types: HashMap::new(),
             data_enum_wrapper_types: HashSet::new(),
             data_enum_unit_variants: HashSet::new(),
             data_enum_variants_by_enum: HashMap::new(),
@@ -3996,6 +4001,7 @@ impl CodeGen {
         self.emitted_extension_impl_scopes.clear();
         self.forward_declared_function_paths.clear();
         self.data_enum_types.clear();
+        self.slice_tail_view_types.clear();
         self.data_enum_wrapper_types.clear();
         self.data_enum_unit_variants.clear();
         self.data_enum_variants_by_enum.clear();
