@@ -8942,6 +8942,12 @@ impl CodeGen {
                             | ("get_or_try_init", 0)
                             | ("new", 0)
                             | ("new_", 0)
+                            // Iterator adapters consume their iterator arg
+                            // by value (`diff1.chain(diff2)` — a const diff2
+                            // can't move and its non-const next() is
+                            // unreachable through the const carrier).
+                            | ("chain", 0)
+                            | ("zip", 0)
                     );
                     if (matches!(style, Some(ArgPassStyle::Value))
                         || (matches!(style, None | Some(ArgPassStyle::Mixed)) && heuristic_value))
