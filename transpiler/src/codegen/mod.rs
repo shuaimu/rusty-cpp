@@ -32922,6 +32922,25 @@ impl CodeGen {
                 {
                     return zero_arg_ctor;
                 }
+                // An array of `&str` literals without a CONCRETE expected
+                // element (none, or an out-of-scope generic like `&Q`): raw
+                // char* elements deduce Q = const char* downstream (and
+                // deref to `char`) — spell the string_view convention.
+                let elem_expected_concrete = elem_expected.is_some_and(|ty| {
+                    let mapped = self.map_array_element_type(ty);
+                    !mapped.contains("/* TODO")
+                        && !type_string_has_auto_placeholder(&mapped)
+                        && !self.mapped_type_has_out_of_scope_type_params(&mapped)
+                });
+                if !elem_expected_concrete
+                    && let syn::Expr::Lit(lit) = self.peel_paren_group_expr(elem)
+                    && matches!(lit.lit, syn::Lit::Str(_))
+                {
+                    return format!(
+                        "std::string_view({})",
+                        self.emit_expr_to_string_with_expected_and_move_if_needed(elem, None)
+                    );
+                }
                 self.emit_expr_to_string_with_expected_and_move_if_needed(elem, elem_expected)
             })
             .collect();
