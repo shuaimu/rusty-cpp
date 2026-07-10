@@ -7741,9 +7741,24 @@ impl CodeGen {
                 return format!("rusty::ptr::as_mut({})", receiver);
             }
         }
+        // IndexMap::as_slice returns &Slice<K, V> — its OWN type, not a
+        // span; the generic helper binds garbage to the Slice reference.
+        // The inherent method only wins when the receiver maps to its own
+        // EMITTED type — a Rust-inherent method on a runtime-replaced type
+        // (Iter -> rusty::slice_iter::Iter) has no C++ member.
+        let receiver_keeps_inherent_slice_method = |method: &str| {
+            self.receiver_declares_inherent_method(&mc.receiver, method)
+                && !self
+                    .infer_simple_expr_type(&mc.receiver)
+                    .map(|ty| self.map_type(&ty))
+                    .is_some_and(|cpp| {
+                        cpp.trim_start_matches("const ").trim_start().starts_with("rusty::")
+                    })
+        };
         if method_name == "as_slice"
             && args.is_empty()
             && !self.method_receiver_uses_pointer_member_access(&mc.receiver)
+            && !receiver_keeps_inherent_slice_method("as_slice")
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
@@ -7756,6 +7771,7 @@ impl CodeGen {
         if method_name == "as_mut_slice"
             && args.is_empty()
             && !self.method_receiver_uses_pointer_member_access(&mc.receiver)
+            && !receiver_keeps_inherent_slice_method("as_mut_slice")
         {
             let raw_receiver = self.emit_expr_to_string(&mc.receiver);
             let receiver = if self.method_receiver_needs_parentheses(&mc.receiver) {
