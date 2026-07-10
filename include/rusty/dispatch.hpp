@@ -67,6 +67,18 @@ constexpr decltype(auto) ptr_or_addr(T&& v) {
     }
 }
 
+/// @brief Rust unary `!`: logical for bool, BITWISE for integers. Used when
+/// the transpiler cannot type the operand (C++ `!` on an integer would
+/// collapse it to 0/1 — hashbrown's `BitMask(!mask.0)` became an empty mask).
+template<typename T>
+constexpr auto rust_not(T v) {
+    if constexpr (std::is_same_v<std::remove_cvref_t<T>, bool>) {
+        return !v;
+    } else {
+        return ~v;
+    }
+}
+
 /// @brief A mutable span from either span flavor: slice-tail view wrappers
 /// hold `std::span<T>`, but the SHARED-view constructor receives
 /// `std::span<const T>` (Rust's `&Slice` guarantees no mutation through it).

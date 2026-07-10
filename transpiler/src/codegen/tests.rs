@@ -2927,7 +2927,7 @@ fn test_generic_deref_wrapper_field_access_resolves_through_target() {
     "#,
     );
     assert!(
-        out.contains("(*g).payload"),
+        out.contains("rusty::detail::deref_if_pointer_like((*g)).payload"),
         "field access through a generic Deref wrapper should resolve to \
          (*g).payload:\n{out}"
     );
@@ -2961,11 +2961,11 @@ fn test_generic_deref_wrapper_method_call_resolves_through_target() {
     "#,
     );
     assert!(
-        out.contains("(*g).compute()"),
+        out.contains("rusty::detail::deref_if_pointer_like((*g)).compute()"),
         "method on the Deref target should resolve to (*g).compute():\n{out}"
     );
     assert!(
-        out.contains("g.defuse()") && !out.contains("(*g).defuse()"),
+        out.contains("g.defuse()") && !out.contains("rusty::detail::deref_if_pointer_like((*g)).defuse()"),
         "method inherent on the wrapper must stay g.defuse():\n{out}"
     );
 }
@@ -14430,7 +14430,7 @@ fn test_deref_guard_field_access_with_colliding_type_param() {
              g.rows\n\
          }",
     );
-    assert!(out.contains("(*g).rows"), "{out}");
+    assert!(out.contains("rusty::detail::deref_if_pointer_like((*g)).rows"), "{out}");
 }
 
 #[test]
@@ -20692,7 +20692,7 @@ fn test_user_deref_field_access_on_call_result() {
         "#,
     );
     // Deref-coerced: `(*<call>).fail`, not a bare `<call>.fail` member access.
-    assert!(out.contains("flush()).fail"), "{out}");
+    assert!(out.contains("flush())).fail"), "{out}");
     assert!(out.contains("(*"), "{out}");
 }
 

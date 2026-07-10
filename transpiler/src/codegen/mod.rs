@@ -29844,6 +29844,16 @@ impl CodeGen {
             return None;
         };
         let base_struct = tp.path.segments.last()?.ident.to_string();
+        // A `Self`-typed base (ScopeGuard::into_inner's `guard: Self` param
+        // reading `guard.value`) resolves through the enclosing impl —
+        // otherwise the own-field check misses and the access wrongly
+        // deref-coerces onto the Deref target.
+        let base_struct = if base_struct == "Self" {
+            let cur = self.current_struct.clone()?;
+            cur.rsplit("::").next().unwrap_or(&cur).to_string()
+        } else {
+            base_struct
+        };
         // Cross-crate receiver: the dep's struct fields and Deref impls are
         // invisible in this transpile (serde_yaml can't see that
         // unsafe_libyaml's Success derefs to Failure, which owns `fail`).
@@ -29934,7 +29944,10 @@ impl CodeGen {
         let field_cpp = self
             .lookup_struct_field_cpp_name(&target_struct, field_name)
             .unwrap_or_else(|| escape_cpp_keyword(field_name));
-        Some(format!("(*{}).{}", base_for_field, field_cpp))
+        Some(format!(
+            "rusty::detail::deref_if_pointer_like((*{})).{}",
+            base_for_field, field_cpp
+        ))
     }
 
 
@@ -31296,8 +31309,11 @@ impl CodeGen {
         // `(*g).field`. Uses the existing operator* (no operator-> needed) and
         // keeps the output clean (no `if constexpr` ladder).
         if self.method_call_resolves_through_user_deref_target(receiver_expr, method_name) {
+            // deref_if_pointer_like peels a pointer-carrying Deref slot
+            // (ScopeGuard holding the guarded place's ADDRESS) and is
+            // identity for value slots.
             return format!(
-                "(*{}).{}({})",
+                "rusty::detail::deref_if_pointer_like((*{})).{}({})",
                 receiver,
                 method_call,
                 args.join(", ")
@@ -37084,6 +37100,32 @@ impl CodeGen {
             .unwrap_or_else(|| self.map_type(&cast.ty));
         let ty = self.rewrite_extension_integer_assoc_projection_fallbacks(&ty);
         let target_ty_syn = target_ty_override.unwrap_or(cast.ty.as_ref());
+        // A slice-tail VIEW value cast to a pointer (`map_slice as *const _`
+        // identity asserts): the view's identity is its DATA pointer — the
+        // value's own address is a dangling stack artifact.
+        if matches!(
+            self.peel_paren_group_type(target_ty_syn),
+            syn::Type::Ptr(_) | syn::Type::Infer(_)
+        ) && self
+            .infer_simple_expr_type(&cast.expr)
+            .as_ref()
+            .map(|ty| self.peel_reference_paren_group_type(ty))
+            .is_some_and(|ty| {
+                matches!(
+                    ty,
+                    syn::Type::Path(tp)
+                        if tp.path.segments.last().is_some_and(|s| {
+                            self.slice_tail_view_types
+                                .contains_key(&s.ident.to_string())
+                        })
+                )
+            })
+        {
+            return format!(
+                "{}.data()",
+                self.emit_expr_to_string(&cast.expr)
+            );
+        }
         // `[] as [&u32; 0]` — an EMPTY array literal cast to an array type:
         // static_cast between unrelated array types is ill-formed; construct
         // the target directly.
@@ -44900,7 +44942,38 @@ bool eq(const A& a, const B& b) {\n\
     } else if constexpr (requires {\n\
         { a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;\n\
     }) {\n\
-        return a == rusty::detail::deref_if_pointer_like(b);\n\
+        /* PartialEq-impl wrappers delegate their body back here with the\n\
+           SAME instantiation (Slice::operator==(array) -> cmp::eq(self,\n\
+           other) -> that operator==): a per-instantiation re-entrancy\n\
+           guard breaks the cycle by falling to the elementwise compare,\n\
+           which IS the Rust slice-family semantics of those wrappers. */\n\
+        thread_local int _rusty_eq_depth = 0;\n\
+        if (_rusty_eq_depth == 0) {\n\
+            struct _DepthGuard {\n\
+                int& d;\n\
+                ~_DepthGuard() { --d; }\n\
+            } _g{(++_rusty_eq_depth, _rusty_eq_depth)};\n\
+            return a == rusty::detail::deref_if_pointer_like(b);\n\
+        }\n\
+        if constexpr (\n\
+            eq_elementwise_side<A>\n\
+            && eq_elementwise_side<decltype(rusty::detail::deref_if_pointer_like(b))>\n\
+        ) {\n\
+            auto&& ra = rusty::for_in(a);\n\
+            auto&& rb = rusty::for_in(rusty::detail::deref_if_pointer_like(b));\n\
+            auto ita = ra.begin();\n\
+            auto ea = ra.end();\n\
+            auto itb = rb.begin();\n\
+            auto eb = rb.end();\n\
+            for (; ita != ea && itb != eb; ++ita, ++itb) {\n\
+                if (!rusty::cmp::eq(*ita, *itb)) {\n\
+                return false;\n\
+                }\n\
+            }\n\
+            return !(ita != ea) && !(itb != eb);\n\
+        } else {\n\
+            return a == rusty::detail::deref_if_pointer_like(b);\n\
+        }\n\
     } else if constexpr (\n\
         eq_elementwise_side<A>\n\
         && eq_elementwise_side<decltype(rusty::detail::deref_if_pointer_like(b))>\n\
@@ -44922,6 +44995,22 @@ bool eq(const A& a, const B& b) {\n\
     }) {\n\
         /* both sides pointer-carried references (Q-key equivalence) */\n\
         return rusty::detail::deref_if_pointer_like(a) == rusty::detail::deref_if_pointer_like(b);\n\
+    } else if constexpr (requires {\n\
+        a.key_field;\n\
+        a.value_field;\n\
+        std::get<0>(rusty::detail::deref_if_pointer_like(b));\n\
+        std::get<1>(rusty::detail::deref_if_pointer_like(b));\n\
+    }) {\n\
+        /* map-entry projection: a Bucket{hash, key, value} against a\n\
+           (K, V) tuple compares by key/value (Rust's Slice iter yields\n\
+           entry pairs, not raw buckets). */\n\
+        auto&& bb = rusty::detail::deref_if_pointer_like(b);\n\
+        return rusty::cmp::eq(a.key_field, std::get<0>(bb))\n\
+            && rusty::cmp::eq(a.value_field, std::get<1>(bb));\n\
+    } else if constexpr (requires { a.key_field; }) {\n\
+        /* set-entry projection: Bucket<T, ()> against a bare element\n\
+           compares the key only (set iteration yields keys). */\n\
+        return rusty::cmp::eq(a.key_field, rusty::detail::deref_if_pointer_like(b));\n\
     } else {\n\
         return a == rusty::detail::deref_if_pointer_like(b);\n\
     }\n\
@@ -52780,6 +52869,8 @@ fn is_consuming_method_name(method: &str) -> bool {
         method,
         "unwrap"
             | "unwrap_err"
+            | "unwrap_unchecked"
+            | "unwrap_err_unchecked"
             | "expect"
             | "expect_err"
             | "unwrap_left"

@@ -19239,11 +19239,33 @@ impl CodeGen {
                             self.emit_expr_to_string(&un.expr)
                         };
                         format!("~{}", operand)
-                    } else {
+                    } else if operand_ty.as_ref().is_some_and(|ty| {
+                        matches!(
+                            self.peel_reference_paren_group_type(ty),
+                            syn::Type::Path(tp)
+                                if tp.path.segments.last().is_some_and(|s| s.ident == "bool")
+                        )
+                    })
+                        || matches!(
+                            self.peel_paren_group_expr(&un.expr),
+                            syn::Expr::Binary(b) if matches!(
+                                b.op,
+                                syn::BinOp::Eq(_) | syn::BinOp::Ne(_) | syn::BinOp::Lt(_)
+                                    | syn::BinOp::Le(_) | syn::BinOp::Gt(_) | syn::BinOp::Ge(_)
+                                    | syn::BinOp::And(_) | syn::BinOp::Or(_)
+                            )
+                        )
+                    {
                         let bool_ty: syn::Type = parse_quote!(bool);
                         let operand =
                             self.emit_expr_to_string_with_expected(&un.expr, Some(&bool_ty));
                         format!("!{}", operand)
+                    } else {
+                        // Untyped operand: Rust `!` is BITWISE on integers
+                        // and logical only on bool — dispatch on the C++
+                        // side (`BitMask(!mask.0)` must not collapse to 0/1).
+                        let operand = self.emit_expr_to_string(&un.expr);
+                        format!("rusty::detail::rust_not({})", operand)
                     }
                 }
                 syn::UnOp::Deref(_) => {
