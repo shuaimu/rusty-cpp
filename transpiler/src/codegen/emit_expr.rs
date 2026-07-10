@@ -14238,6 +14238,26 @@ impl CodeGen {
         ))
     }
 
+    /// The LAST `std::function<SIG>` template slot in a mapped type
+    /// spelling, e.g. `ScopeGuard<T, std::function<void (T&)>>` -> the SIG.
+    fn extract_trailing_std_function_signature(mapped: &str) -> Option<String> {
+        let start = mapped.rfind("std::function<")? + "std::function<".len();
+        let mut depth = 1usize;
+        for (i, c) in mapped[start..].char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(mapped[start..start + i].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// The closure body is a single diverging panic-family call
     /// (`unreachable!()` post-expansion: `::core::panicking::panic(..)`),
     /// or the macro itself pre-expansion.
@@ -14276,6 +14296,33 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // `Ok(guard(table, |self_| ...))` against a declared
+        // `ScopeGuard<T, std::function<SIG>>`: the raw lambda instantiates a
+        // DIFFERENT ScopeGuard<T, lambda> with no conversion between the
+        // two. When the expected type's mapped spelling carries a
+        // std::function slot and the call's trailing arg is a closure, wrap
+        // that closure so deduction lands on the declared instantiation.
+        if let Some(expected) = expected_ty
+            && let Some(last_arg) = call.args.last()
+            && matches!(self.peel_paren_group_expr(last_arg), syn::Expr::Closure(_))
+            && let mapped = self.map_type(expected)
+            && let Some(sig) = Self::extract_trailing_std_function_signature(&mapped)
+        {
+            let func = self.emit_expr_to_string(&call.func);
+            let mut args: Vec<String> = Vec::new();
+            for (i, arg) in call.args.iter().enumerate() {
+                if i + 1 == call.args.len() {
+                    args.push(format!(
+                        "std::function<{}>({})",
+                        sig,
+                        self.emit_expr_to_string(arg)
+                    ));
+                } else {
+                    args.push(self.emit_expr_maybe_move(arg));
+                }
+            }
+            return format!("{}({})", func, args.join(", "));
+        }
         // `K::cmp(&a.key, &b.key)` — a comparison-trait assoc call on an
         // in-scope TYPE PARAM has no static surface in C++ (int::cmp);
         // route through the generic rusty::cmp free helpers.
