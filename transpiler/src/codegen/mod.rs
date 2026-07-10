@@ -47269,7 +47269,12 @@ bool is_sorted(R&& recv) {\n\
     } else {\n\
         auto s = rusty::as_slice(recv);\n\
         for (size_t i = 1; i < s.size(); ++i) {\n\
-            if (rusty::cmp::cmp(s[i - 1], s[i]) == rusty::cmp::Ordering::Greater) { return false; }\n\
+            /* PartialOrd semantics: NAN pairs are NOT sorted (native <= says false) */\n\
+            if constexpr (requires { s[i - 1] <= s[i]; }) {\n\
+                if (!(s[i - 1] <= s[i])) { return false; }\n\
+            } else {\n\
+                if (rusty::cmp::cmp(s[i - 1], s[i]) == rusty::cmp::Ordering::Greater) { return false; }\n\
+            }\n\
         }\n\
         return true;\n\
     }\n\
@@ -47293,7 +47298,12 @@ bool is_sorted_by_key(R&& recv, F&& f) {\n\
     } else {\n\
         auto s = rusty::as_slice(recv);\n\
         for (size_t i = 1; i < s.size(); ++i) {\n\
-            if (rusty::cmp::cmp(f(s[i - 1]), f(s[i])) == rusty::cmp::Ordering::Greater) { return false; }\n\
+            /* PartialOrd semantics: NAN keys are NOT sorted (native <= says false) */\n\
+            if constexpr (requires { f(s[i - 1]) <= f(s[i]); }) {\n\
+                if (!(f(s[i - 1]) <= f(s[i]))) { return false; }\n\
+            } else {\n\
+                if (rusty::cmp::cmp(f(s[i - 1]), f(s[i])) == rusty::cmp::Ordering::Greater) { return false; }\n\
+            }\n\
         }\n\
         return true;\n\
     }\n\
