@@ -5671,6 +5671,24 @@ impl CodeGen {
                 receiver, mc.method, callee
             );
         }
+        // rusty::Layout carries `size`/`align` as FIELDS — the Rust method
+        // spelling (`layout.size()`) would call the size_t.
+        if matches!(mc.method.to_string().as_str(), "size" | "align")
+            && mc.args.is_empty()
+            && self.infer_simple_expr_type(&mc.receiver).is_some_and(|ty| {
+                matches!(
+                    self.peel_reference_paren_group_type(&ty),
+                    syn::Type::Path(tp)
+                        if tp.path.segments.last().is_some_and(|s| s.ident == "Layout")
+                )
+            })
+        {
+            return format!(
+                "{}.{}",
+                self.emit_expr_to_string(&mc.receiver),
+                mc.method
+            );
+        }
         if let Some(try_into_call) = self.try_emit_try_into_method_call(mc, expected_ty) {
             return try_into_call;
         }

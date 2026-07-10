@@ -2409,6 +2409,67 @@ impl CodeGen {
         ))
     }
 
+    /// Infer a tuple-destructuring initializer's type, seeing through the
+    /// macro-expansion shape `{ let NAME = INIT; unsafe { NAME.tail() } }` by
+    /// inlining the single-use let for inference purposes.
+    fn infer_tuple_let_initializer_type(&self, init: &syn::Expr) -> Option<syn::Type> {
+        let tail = crate::codegen::peel_to_tail_expr(init).unwrap_or(init);
+        if let Some(ty) = self
+            .infer_simple_expr_type(tail)
+            .or_else(|| self.infer_local_binding_type_from_initializer(tail))
+        {
+            return Some(ty);
+        }
+        // Two-statement block: substitute the let binding into the tail.
+        let block = match tail {
+            syn::Expr::Block(b) => &b.block,
+            syn::Expr::Unsafe(u) => &u.block,
+            _ => return None,
+        };
+        if block.stmts.len() != 2 {
+            return None;
+        }
+        let syn::Stmt::Local(l) = &block.stmts[0] else {
+            return None;
+        };
+        let syn::Pat::Ident(pi) = &l.pat else {
+            return None;
+        };
+        let name = pi.ident.to_string();
+        let let_init = l.init.as_ref()?.expr.as_ref();
+        let syn::Stmt::Expr(tail_expr, _) = &block.stmts[1] else {
+            return None;
+        };
+        struct Sub<'a> {
+            name: &'a str,
+            init: &'a syn::Expr,
+        }
+        impl syn::visit_mut::VisitMut for Sub<'_> {
+            fn visit_expr_mut(&mut self, e: &mut syn::Expr) {
+                if let syn::Expr::Path(p) = e
+                    && p.qself.is_none()
+                    && p.path.segments.len() == 1
+                    && p.path.segments[0].ident == self.name
+                {
+                    *e = self.init.clone();
+                    return;
+                }
+                syn::visit_mut::visit_expr_mut(self, e);
+            }
+        }
+        let mut substituted = tail_expr.clone();
+        syn::visit_mut::VisitMut::visit_expr_mut(
+            &mut Sub {
+                name: &name,
+                init: let_init,
+            },
+            &mut substituted,
+        );
+        let peeled = crate::codegen::peel_to_tail_expr(&substituted).unwrap_or(&substituted);
+        self.infer_simple_expr_type(peeled)
+            .or_else(|| self.infer_local_binding_type_from_initializer(peeled))
+    }
+
     pub(super) fn emit_local(&mut self, local: &syn::Local) {
         let pat = &local.pat;
         self.register_local_binding_pattern(pat);
@@ -2419,16 +2480,34 @@ impl CodeGen {
         // k1 is reference-like, not an integer).
         if let syn::Pat::Tuple(pat_tuple) = pat
             && let Some(init) = &local.init
-            && let syn::Expr::Tuple(init_tuple) = self.peel_paren_group_expr(&init.expr)
-            && pat_tuple.elems.len() == init_tuple.elems.len()
         {
-            for (elem_pat, elem_init) in pat_tuple.elems.iter().zip(init_tuple.elems.iter()) {
-                if let syn::Pat::Ident(pi) = elem_pat
-                    && let Some(ty) = self
-                        .infer_local_binding_type_from_initializer(elem_init)
-                        .or_else(|| self.infer_simple_expr_type(elem_init))
-                {
-                    self.register_local_binding(pi.ident.to_string(), Some(ty));
+            if let syn::Expr::Tuple(init_tuple) = self.peel_paren_group_expr(&init.expr)
+                && pat_tuple.elems.len() == init_tuple.elems.len()
+            {
+                for (elem_pat, elem_init) in pat_tuple.elems.iter().zip(init_tuple.elems.iter()) {
+                    if let syn::Pat::Ident(pi) = elem_pat
+                        && let Some(ty) = self
+                            .infer_local_binding_type_from_initializer(elem_init)
+                            .or_else(|| self.infer_simple_expr_type(elem_init))
+                    {
+                        self.register_local_binding(pi.ident.to_string(), Some(ty));
+                    }
+                }
+            } else if let Some(init_ty) = self
+                .infer_tuple_let_initializer_type(&init.expr)
+                && let syn::Type::Tuple(tt) =
+                    self.peel_reference_paren_group_type(&init_ty)
+                && tt.elems.len() == pat_tuple.elems.len()
+            {
+                // Non-literal initializer whose INFERRED type is a tuple
+                // (`let (layout, offset) = f().unwrap();`).
+                for (elem_pat, elem_ty) in pat_tuple.elems.iter().zip(tt.elems.iter()) {
+                    if let syn::Pat::Ident(pi) = elem_pat {
+                        self.register_local_binding(
+                            pi.ident.to_string(),
+                            Some(elem_ty.clone()),
+                        );
+                    }
                 }
             }
         }
