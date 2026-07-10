@@ -14296,6 +14296,31 @@ impl CodeGen {
         call: &syn::ExprCall,
         expected_ty: Option<&syn::Type>,
     ) -> String {
+        // `NonNull::new_unchecked(slice_from_raw_parts_mut(data, len))` with
+        // a FAT owner (`NonNull<[u8]>` -> NonNullSlice): the raw-parts helper
+        // returns a raw pointer, so routing through it DROPS the length
+        // (len 0 poisons `block.len() != layout.size`). Inline the two args
+        // into the fat carrier's (ptr, len) constructor.
+        if let syn::Expr::Path(fp) = call.func.as_ref()
+            && fp.path.segments.len() >= 2
+            && fp.path.segments.last().is_some_and(|s| s.ident == "new_unchecked")
+            && fp.path.segments.iter().nth_back(1).is_some_and(|s| s.ident == "NonNull")
+            && call.args.len() == 1
+            && let syn::Expr::Call(inner) = self.peel_paren_group_expr(&call.args[0])
+            && let syn::Expr::Path(ip) = inner.func.as_ref()
+            && ip.path.segments.last().is_some_and(|s| {
+                matches!(
+                    s.ident.to_string().as_str(),
+                    "slice_from_raw_parts" | "slice_from_raw_parts_mut"
+                )
+            })
+            && inner.args.len() == 2
+        {
+            // The element type comes from the data pointer via CTAD.
+            let data = self.emit_expr_to_string(&inner.args[0]);
+            let len = self.emit_expr_to_string(&inner.args[1]);
+            return format!("rusty::NonNullSlice({}, {})", data, len);
+        }
         // `Ok(guard(table, |self_| ...))` against a declared
         // `ScopeGuard<T, std::function<SIG>>`: the raw lambda instantiates a
         // DIFFERENT ScopeGuard<T, lambda> with no conversion between the
