@@ -37070,12 +37070,24 @@ impl CodeGen {
         cast: &syn::ExprCast,
         target_ty_override: Option<&syn::Type>,
     ) -> String {
-        let expr = self.emit_expr_to_string(&cast.expr);
         let ty = target_ty_override
             .map(|ty| self.map_type(ty))
             .unwrap_or_else(|| self.map_type(&cast.ty));
         let ty = self.rewrite_extension_integer_assoc_projection_fallbacks(&ty);
         let target_ty_syn = target_ty_override.unwrap_or(cast.ty.as_ref());
+        // `[] as [&u32; 0]` — an EMPTY array literal cast to an array type:
+        // static_cast between unrelated array types is ill-formed; construct
+        // the target directly.
+        if matches!(
+            self.peel_paren_group_expr(&cast.expr),
+            syn::Expr::Array(arr) if arr.elems.is_empty()
+        ) && matches!(
+            self.peel_paren_group_type(target_ty_syn),
+            syn::Type::Array(_)
+        ) {
+            return format!("{}{{}}", ty);
+        }
+        let expr = self.emit_expr_to_string(&cast.expr);
         let target_is_slice_span_value = self.span_element_type(target_ty_syn).is_some()
             || matches!(
                 self.peel_paren_group_type(target_ty_syn),
