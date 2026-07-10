@@ -21204,10 +21204,30 @@ impl CodeGen {
                         .is_some_and(|ty| {
                             matches!(self.peel_paren_group_type(&ty), syn::Type::Reference(_))
                         });
+                    // A reference-typed fn PARAM (`key: &Q` on a helper that
+                    // returns the closure): moving copies the referent (const
+                    // T&& -> deleted copy for move-only payloads), and a
+                    // `&key` capture dangles once the closure outlives the
+                    // frame. Capture the referent's ADDRESS — body sites
+                    // tolerate pointer carriers via the deref dispatch.
+                    let capture_param_ptr = !capture_ref
+                        && self
+                            .lookup_local_binding_type(cpp_name)
+                            .is_some_and(|ty| {
+                                matches!(self.peel_paren_group_type(&ty), syn::Type::Reference(_))
+                                    // Only when the C++ carrier is a true
+                                    // reference — `&[T]`/`&str` params lower
+                                    // to span/string_view VALUES, which
+                                    // value-capture fine.
+                                    && self.map_type(&ty).trim_end().ends_with('&')
+                            });
                     if capture_ref {
                         // Capturing a reference-typed local by move can force a copy of
                         // the referent (`const T&&`), which fails for move-only payloads.
                         capture_parts.push(format!("&{}", cpp_name));
+                    } else if capture_param_ptr {
+                        capture_parts
+                            .push(format!("{0} = rusty::detail::ref_capture({0})", cpp_name));
                     } else {
                         capture_parts.push(format!("{0} = std::move({0})", cpp_name));
                     }

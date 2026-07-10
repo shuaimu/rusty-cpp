@@ -67,6 +67,19 @@ constexpr decltype(auto) ptr_or_addr(T&& v) {
     }
 }
 
+/// @brief Move-capture surrogate for a reference-typed binding in a `move`
+/// closure: copyable payloads capture by value (what `std::move` of a const
+/// ref did anyway), move-only payloads carry the referent's ADDRESS — the
+/// deref-dispatch at use sites tolerates either carrier.
+template<typename T>
+constexpr decltype(auto) ref_capture(const T& v) {
+    if constexpr (std::is_copy_constructible_v<T>) {
+        return T(v);
+    } else {
+        return std::addressof(v);
+    }
+}
+
 /// @brief `expr as *T` for a source whose C++ carrier shape the transpiler
 /// could not resolve: pointers reinterpret directly, integers round-trip
 /// through uintptr_t (usize-as-pointer), lvalues decay to their address.
