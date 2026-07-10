@@ -67,6 +67,17 @@ constexpr decltype(auto) ptr_or_addr(T&& v) {
     }
 }
 
+/// @brief Declared return type for a DIVERGING closure (`|_| unreachable!()`,
+/// Rust type `!`): converts to anything so the callable satisfies slots with
+/// concrete return expectations (a hasher returning uint64_t). The body's
+/// [[noreturn]] panic fires first; the conversion itself is unreachable.
+struct diverging_value {
+    template<typename T>
+    [[noreturn]] operator T() const {
+        std::abort();
+    }
+};
+
 /// @brief Move-capture surrogate for a reference-typed binding in a `move`
 /// closure: copyable payloads capture by value (what `std::move` of a const
 /// ref did anyway), move-only payloads carry the referent's ADDRESS — the

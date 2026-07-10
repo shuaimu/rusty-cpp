@@ -14193,6 +14193,39 @@ impl CodeGen {
         ))
     }
 
+    /// The closure body is a single diverging panic-family call
+    /// (`unreachable!()` post-expansion: `::core::panicking::panic(..)`),
+    /// or the macro itself pre-expansion.
+    pub(super) fn closure_body_is_diverging_panic(body: &syn::Expr) -> bool {
+        let mut expr = body;
+        loop {
+            match expr {
+                syn::Expr::Paren(p) => expr = &p.expr,
+                syn::Expr::Group(g) => expr = &g.expr,
+                syn::Expr::Block(b) if b.block.stmts.len() == 1 => {
+                    match &b.block.stmts[0] {
+                        syn::Stmt::Expr(inner, _) => expr = inner,
+                        _ => return false,
+                    }
+                }
+                _ => break,
+            }
+        }
+        match expr {
+            syn::Expr::Call(call) => matches!(
+                call.func.as_ref(),
+                syn::Expr::Path(p) if p.path.segments.iter().any(|s| s.ident == "panicking")
+            ),
+            syn::Expr::Macro(m) => m.mac.path.segments.last().is_some_and(|s| {
+                matches!(
+                    s.ident.to_string().as_str(),
+                    "panic" | "unreachable" | "todo" | "unimplemented"
+                )
+            }),
+            _ => false,
+        }
+    }
+
     pub(super) fn emit_call_expr_to_string(
         &self,
         call: &syn::ExprCall,
@@ -21439,6 +21472,13 @@ impl CodeGen {
                         format!(" -> {}", mapped)
                     }
                 }
+            }
+            // A DIVERGING body (`|_| unreachable!()`, Rust `!`) deduces void,
+            // which fails slots expecting a concrete return (a hasher slot
+            // wanting uint64_t). Declare the any-convertible marker type —
+            // the [[noreturn]] panic fires before any conversion.
+            syn::ReturnType::Default if Self::closure_body_is_diverging_panic(&closure.body) => {
+                " -> rusty::detail::diverging_value".to_string()
             }
             syn::ReturnType::Default => fallback_expected_return_ty
                 .and_then(|ty| {
