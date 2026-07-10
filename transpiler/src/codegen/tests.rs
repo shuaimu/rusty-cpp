@@ -25710,7 +25710,7 @@ fn test_leaf41543333333161_tuple_match_err_constructor_uses_peer_result_context(
         }
     "#,
     );
-    assert!(out.contains("_ResultCtorCtx::Err("));
+    assert!(out.contains("_ResultCtorCtx::Err_compat("));
     assert!(!out.contains("auto _m1_tmp = Err("));
 }
 
@@ -25735,7 +25735,7 @@ fn test_leaf41543333333161_tuple_match_ok_constructor_uses_peer_result_context()
         }
     "#,
     );
-    assert!(out.contains("_ResultCtorCtx::Ok("));
+    assert!(out.contains("_ResultCtorCtx::Ok_compat("));
     assert!(!out.contains("auto _m1_tmp = Ok("));
 }
 
@@ -25753,12 +25753,12 @@ fn test_leaf5145_tuple_match_ok_constructor_applies_peer_result_payload_type_con
     "#,
     );
     assert!(
-        out.contains("_ResultCtorCtx::Ok(std::array<uint8_t, 2>"),
+        out.contains("_ResultCtorCtx::Ok_compat(std::array<uint8_t, 2>"),
         "peer-context Result::Ok should apply payload expected type to array literals, got:\n{}",
         out
     );
     assert!(
-        !out.contains("_ResultCtorCtx::Ok(std::array{0, 1})"),
+        !out.contains("_ResultCtorCtx::Ok_compat(std::array{0, 1})"),
         "peer-context Result::Ok should not emit untyped int array literal for u8 payload, got:\n{}",
         out
     );
@@ -25791,7 +25791,7 @@ fn test_leaf41543333333171_tuple_match_err_constructor_consumes_nonconst_local_p
     );
     assert!(out.contains("auto u = rusty::clone(p);"));
     assert!(!out.contains("const auto u = rusty::clone(p);"));
-    assert!(out.contains("_ResultCtorCtx::Err(std::move(u))"));
+    assert!(out.contains("_ResultCtorCtx::Err_compat(std::move(u))"));
 }
 
 #[test]
@@ -25821,7 +25821,7 @@ fn test_leaf41543333333171_tuple_match_ok_constructor_consumes_nonconst_local_pa
     );
     assert!(out.contains("auto u = rusty::clone(p);"));
     assert!(!out.contains("const auto u = rusty::clone(p);"));
-    assert!(out.contains("_ResultCtorCtx::Ok(std::move(u))"));
+    assert!(out.contains("_ResultCtorCtx::Ok_compat(std::move(u))"));
 }
 
 #[test]
@@ -25848,9 +25848,9 @@ fn test_leaf41543333333181_result_tuple_match_uses_context_typed_ctor_and_direct
     // The Ok constructor may pass arg bare or wrapped in static_cast,
     // and may be qualified or use the context-derived alias.
     assert!(
-        out.contains("_ResultCtorCtx::Ok(1)")
+        out.contains("_ResultCtorCtx::Ok_compat(1)")
             || out.contains("rusty::Result<int32_t, int32_t>::Ok(1)")
-            || out.contains("_ResultCtorCtx::Ok(static_cast<int32_t>(1))")
+            || out.contains("_ResultCtorCtx::Ok_compat(static_cast<int32_t>(1))")
             || out.contains("rusty::Result<int32_t, int32_t>::Ok(static_cast<int32_t>(1))"),
         "{out}"
     );

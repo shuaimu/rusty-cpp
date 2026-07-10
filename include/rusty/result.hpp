@@ -196,8 +196,10 @@ public:
         Result r(UninitTag{});
         if constexpr (std::is_constructible_v<OkStored, const U&>) {
             new (&r.storage.ok_storage) OkStored(value);
-        } else if constexpr (requires(const U& v) { v.clone(); }
-                             && std::is_constructible_v<OkStored, decltype(value.clone())>) {
+        } else if constexpr (requires(const U& v) {
+                       v.clone();
+                       requires std::is_constructible_v<OkStored, decltype(v.clone())>;
+                   }) {
             new (&r.storage.ok_storage) OkStored(value.clone());
         } else {
             static_assert(
@@ -596,6 +598,80 @@ public:
     bool operator!=(const Result& other) const {
         return !(*this == other);
     }
+
+    // Heterogeneous compare: a reference-payload Result (method return
+    // `Result<[(&K, &mut V); N], E>`) against its literal-built expected
+    // (`Result<[(K, V); N], E>`). Payloads compare structurally — direct
+    // `==` when valid, otherwise elementwise through the tuple protocol
+    // (std::array included).
+    template<typename A, typename B>
+    static constexpr bool hetero_payload_eq(const A& a, const B& b) {
+        if constexpr (requires {
+                          { a == b } -> std::convertible_to<bool>;
+                      }) {
+            return a == b;
+        } else if constexpr (requires {
+                                 requires std::tuple_size<A>::value
+                                     == std::tuple_size<B>::value;
+                             }) {
+            return [&]<std::size_t... I>(std::index_sequence<I...>) {
+                return (hetero_payload_eq(std::get<I>(a), std::get<I>(b)) && ...);
+            }(std::make_index_sequence<std::tuple_size<A>::value>{});
+        } else {
+            static_assert(sizeof(A) == 0,
+                          "Result heterogeneous compare: payloads are neither "
+                          "==-comparable nor tuple-protocol congruent");
+            return false;
+        }
+    }
+
+    template<typename T2, typename E2>
+    bool operator==(const Result<T2, E2>& other) const {
+        if (is_ok_value != other.is_ok()) {
+            return false;
+        }
+        if (is_ok_value) {
+            return hetero_payload_eq(ok_ref(), other.ok_ref());
+        }
+        return hetero_payload_eq(err_ref(), other.err_ref());
+    }
+
+    template<typename T2, typename E2>
+    bool operator!=(const Result<T2, E2>& other) const {
+        return !(*this == other);
+    }
+
+    // Constructor surrogate for context-typed Ok/Err spellings
+    // (`_ResultCtorCtx::Ok_compat(expr)`): when the context's stored type
+    // can't hold the operand (a reference-tuple array vs decayed literals),
+    // build the operand's OWN Result type instead — the heterogeneous
+    // operator== above compares the two shapes.
+    template<typename U>
+    static auto Ok_compat(U&& value) {
+        using Decayed = std::remove_cvref_t<U>;
+        if constexpr (std::is_constructible_v<OkStored, U&&>
+                      || std::is_constructible_v<OkStored, const Decayed&>
+                      || requires(const Decayed& v) {
+                             v.clone();
+                             requires std::is_constructible_v<OkStored,
+                                                              decltype(v.clone())>;
+                         }) {
+            return Ok(std::forward<U>(value));
+        } else {
+            return Result<Decayed, E>::Ok(std::forward<U>(value));
+        }
+    }
+
+    template<typename U>
+    static auto Err_compat(U&& error) {
+        using Decayed = std::remove_cvref_t<U>;
+        if constexpr (std::is_constructible_v<ErrStored, U&&>
+                      || std::is_constructible_v<ErrStored, const Decayed&>) {
+            return Err(std::forward<U>(error));
+        } else {
+            return Result<T, Decayed>::Err(std::forward<U>(error));
+        }
+    }
 };
 
 // Specialization for Result<void, E>
@@ -641,7 +717,19 @@ public:
         r.is_ok_value = true;
         return r;
     }
-    
+
+    // Context-typed spelling surrogates (the `_ResultCtorCtx::{Ok,Err}_compat`
+    // emission): the void specialization ignores a unit-shaped Ok operand.
+    static Result Ok_compat() { return Ok(); }
+    template<typename U>
+    static Result Ok_compat(U&&) {
+        return Ok();
+    }
+    template<typename U>
+    static auto Err_compat(U&& error) {
+        return Err(std::forward<U>(error));
+    }
+
     // Constructor for Err variant
     static Result Err(E error) requires std::is_reference_v<E> {
         Result r;
@@ -665,8 +753,10 @@ public:
         Result r;
         if constexpr (std::is_constructible_v<E, const U&>) {
             new (&r.storage.err_storage) E(error);
-        } else if constexpr (requires(const U& e) { e.clone(); }
-                             && std::is_constructible_v<E, decltype(error.clone())>) {
+        } else if constexpr (requires(const U& e) {
+                       e.clone();
+                       requires std::is_constructible_v<E, decltype(e.clone())>;
+                   }) {
             new (&r.storage.err_storage) E(error.clone());
         } else {
             static_assert(

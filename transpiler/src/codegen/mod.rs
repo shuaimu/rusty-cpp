@@ -22543,8 +22543,11 @@ impl CodeGen {
                 peer, result_arg_alias, ctor_value, ctor_name, ctor_name, arg
             ));
         }
+        // The _compat surrogate falls back to the operand's OWN Result type
+        // when the context's stored payload can't hold it (reference-tuple
+        // array vs decayed literals) — heterogeneous == compares the shapes.
         Some(format!(
-            "[&]() {{ using _ResultCtorCtx = std::remove_cvref_t<decltype(({}))>; return _ResultCtorCtx::{}({}); }}()",
+            "[&]() {{ using _ResultCtorCtx = std::remove_cvref_t<decltype(({}))>; return _ResultCtorCtx::{}_compat({}); }}()",
             peer, ctor_name, arg
         ))
     }
