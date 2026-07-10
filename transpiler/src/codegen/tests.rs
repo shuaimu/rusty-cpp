@@ -9335,10 +9335,8 @@ fn test_leaf423_some_ref_rvalue_no_address_of_rvalue() {
     assert!(!out.contains("std::make_optional(&2)"));
     // RHS may be bare `2` or wrapped in `static_cast<int32_t>(2)`.
     assert!(
-        out.contains("static const auto _some_ref_tmp = 2")
-            || out.contains(
-                "static const auto _some_ref_tmp = static_cast<int32_t>(2);"
-            ),
+        out.contains("auto _some_ref_value = (2);")
+            || out.contains("auto _some_ref_value = (static_cast<int32_t>(2));"),
         "{out}"
     );
 }
@@ -9348,7 +9346,7 @@ fn test_leaf424_some_ref_uses_rusty_someref_shape() {
     let out = transpile_str("fn f() { let x = Some(&2); let y = Some(&mut 2); }");
     assert!(out.contains("rusty::Option<const int32_t&>("), "{out}");
     assert!(out.contains("rusty::Option<int32_t&>("), "{out}");
-    assert!(!out.contains("std::make_optional([&]() { static const auto _some_ref_tmp"));
+    assert!(!out.contains("std::make_optional([&]() { auto _some_ref_value"));
     // `_some_mut_ref_value` RHS may be bare or wrapped in `static_cast<int32_t>(...)`.
     assert!(
         out.contains("auto _some_mut_ref_value = (2);")

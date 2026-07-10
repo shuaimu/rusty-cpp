@@ -36399,9 +36399,12 @@ impl CodeGen {
         }
         if r.mutability.is_none() {
             // `Some(&<rvalue>)` appears in expanded assertions (`&2`, etc.).
-            // Materialize a static object and return a stable const reference.
+            // Re-emplace into thread-local storage per evaluation — a
+            // `static const` slot initializes ONCE, so inside a loop every
+            // later iteration would compare against the first value
+            // (indexmap's insert test compared get(&elt) to Some(&0) forever).
             return Some(format!(
-                "[&]() -> const auto& {{ static const auto _some_ref_tmp = {}; return _some_ref_tmp; }}()",
+                "[&]() -> const auto& {{ auto _some_ref_value = ({}); thread_local std::optional<std::remove_cvref_t<decltype(_some_ref_value)>> _some_ref_tmp; _some_ref_tmp.reset(); _some_ref_tmp.emplace(std::move(_some_ref_value)); return *_some_ref_tmp; }}()",
                 inner
             ));
         }
