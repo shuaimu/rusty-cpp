@@ -29815,7 +29815,12 @@ impl CodeGen {
                             .lookup_local_binding_type(&p.path.segments[0].ident.to_string())
                             .is_none()
             );
-            if cross_crate_call || unknown_local {
+            // A subscripted element (`self.iter.as_slice()[index].key`) whose
+            // element type didn't resolve: the field may be conflict-renamed
+            // (Bucket's `key` -> `key_field`) — same identity-safe dispatch.
+            let unknown_index_elem =
+                matches!(self.peel_paren_group_expr(base_expr), syn::Expr::Index(_));
+            if cross_crate_call || unknown_local || unknown_index_elem {
                 let field_cpp = escape_cpp_keyword(field_name);
                 return Some(format!(
                     "[&](auto&& __r) -> decltype(auto) {{ if constexpr (requires {{ (__r.{f}); }}) {{ return (__r.{f}); }} else if constexpr (requires {{ (__r.{f}_field); }}) {{ return (__r.{f}_field); }} else if constexpr (requires {{ ((*__r).{f}); }}) {{ return ((*__r).{f}); }} else {{ return ((*__r).{f}_field); }} }}({base})",
