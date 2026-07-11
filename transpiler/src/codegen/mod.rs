@@ -48101,22 +48101,19 @@ constexpr T* addr_of_temp(T& value) {\n\
 }\n\
 template<typename T>\n\
 const std::remove_cv_t<std::remove_reference_t<T>>* addr_of_temp(T&& value) {\n\
-    using Stored = std::remove_cv_t<std::remove_reference_t<T>>;\n\
-    thread_local std::optional<Stored> _addr_of_tmp;\n\
-    _addr_of_tmp.reset();\n\
-    _addr_of_tmp.emplace(std::forward<T>(value));\n\
-    return &*_addr_of_tmp;\n\
+    /* The rvalue argument is a caller-side temporary that lives to the end\n\
+       of the FULL EXPRESSION - exactly Rust's `&temp` statement scope. The\n\
+       old per-TYPE thread_local slot aliased simultaneous same-type temps:\n\
+       vec![&1, &2, &3, &4] produced four pointers all reading 4. */\n\
+    return &value;\n\
 }\n\
 template<typename T>\n\
 std::remove_reference_t<T>* addr_of_temp_mut(T&& value) {\n\
     if constexpr (std::is_lvalue_reference_v<T&&>) {\n\
         return &value;\n\
     } else {\n\
-        using Stored = std::remove_cv_t<std::remove_reference_t<T>>;\n\
-        thread_local std::optional<Stored> _addr_of_tmp_mut;\n\
-        _addr_of_tmp_mut.reset();\n\
-        _addr_of_tmp_mut.emplace(std::forward<T>(value));\n\
-        return &*_addr_of_tmp_mut;\n\
+        /* Same full-expression-lifetime rationale as addr_of_temp above. */\n\
+        return &value;\n\
     }\n\
 }\n\
 struct Cow_Borrowed {\n\
