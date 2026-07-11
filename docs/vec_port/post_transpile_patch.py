@@ -2377,10 +2377,65 @@ def patch_hint_assert_unchecked(cpp_out: Path) -> int:
         # fix it up — builtins take no namespace qualifier.
         text = text.replace("rusty::__builtin_assume(", "__builtin_assume(")
         text = text.replace("std::__builtin_assume(", "__builtin_assume(")
+        # `core::hint::unlikely/likely(cond)` are branch hints with no C++
+        # equivalent — drop to the bare parenthesized condition.
+        text = text.replace("std::hint::unlikely(", "(")
+        text = text.replace("std::hint::likely(", "(")
+        text = text.replace("rusty::hint::unlikely(", "(")
+        text = text.replace("rusty::hint::likely(", "(")
         if text != original:
             path.write_text(text)
             n += 1
     return n
+
+
+def patch_vec_cppm_residual_drift(cpp_out: Path) -> int:
+    """Remaining vec.cppm drift after the general (Option-C) collapse and the
+    self-Vec / aggregate_raw_ptr rules. Each matched against the vendored:
+      1. The Vec FORWARD decl lost its `A = rusty::alloc::Global` default, so
+         `Vec<T>` in from_elem etc. fails "too few template arguments". Add
+         the default to the forward decl ONLY (repeating it on the definition
+         is a redefinition error).
+      2. `IntoIter into_iter()` needs the explicit `<T, A>` (return-type
+         deduction isn't allowed).
+      3. A late-init binding the transpiler mis-scoped: `auto ret =
+         ptr::read(...)` sits in an inner `{}` that closes before
+         `return ... std::move(ret)`. Dissolve the redundant inner block so
+         `ret` survives (it's move-initialized, so non-default-constructible
+         T needs no hoist).
+    """
+    path = cpp_out / "vec_port.vec.cppm"
+    if not path.exists():
+        return 0
+    text = path.read_text()
+    original = text
+    # 1. Vec forward-decl default arg.
+    text = text.replace(
+        "export template<typename T, typename A>\n"
+        "    requires (rusty::alloc::Allocator<A>)\n"
+        "struct Vec;",
+        "export template<typename T, typename A = rusty::alloc::Global>\n"
+        "    requires (rusty::alloc::Allocator<A>)\n"
+        "struct Vec;",
+    )
+    # 2. IntoIter return type needs explicit args.
+    text = text.replace("IntoIter into_iter(", "IntoIter<T, A> into_iter(")
+    # 3. Dissolve the inner block around the late-init `ret`.
+    text = re.sub(
+        r"\n( +)\{\n"
+        r"( +const auto ptr_shadow1 = rusty::ptr::add\(.*?\n"
+        r" +auto ret = rusty::ptr::read\(ptr_shadow1\);\n"
+        r" +rusty::ptr::copy\(.*?\n)"
+        r" +\}\n"
+        r"( +this->set_len)",
+        r"\n\1\2\3",
+        text,
+        flags=re.DOTALL,
+    )
+    if text != original:
+        path.write_text(text)
+        return 1
+    return 0
 
 
 def patch_port_self_vec_qualification(cpp_out: Path) -> int:
@@ -2603,6 +2658,8 @@ def main(cpp_out: Path):
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
         ("rusty::intrinsics::{const_make_global,assume} → identity/builtin",
             patch_rusty_intrinsics_stubs),
+        ("vec.cppm residual drift (Vec default arg, IntoIter<T,A>, late-init ret block)",
+            patch_vec_cppm_residual_drift),
         ("port self-Vec qualification (rusty::Vec< -> Vec< inside the Vec port)",
             patch_port_self_vec_qualification),
         ("current-transpiler qualification drift (rusty::keyword / rusty::rusty:: / ptr::cast)",

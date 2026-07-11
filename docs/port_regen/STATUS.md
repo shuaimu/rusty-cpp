@@ -142,3 +142,31 @@ Port-local patcher rules added (validated 20→6→4 via rusty-target rebuild):
 
 Then: 4→0 → matrix-validate (vec+btree+indexmap+serde) → replace the 6
 vendored .cppm → commit = vec_port fully re-baselined (first port done).
+
+## vec_port COMPILES CLEAN (2026-07-11) — but interface-incompat with consumers
+
+All 4 residual errors fixed (patch_vec_cppm_residual_drift: Vec forward-decl
+default arg, IntoIter<T,A>, dissolve the mis-scoped late-init `ret` block;
+plus std::hint::unlikely/likely -> bare parens in the hint rule). Verified:
+vec_port's OWN error count = 0, all 5 vec_port .pcm built. The vec_port
+re-baseline COMPILE goal is DONE.
+
+**NEW BLOCKER for matrix validation:** building the full rusty module with the
+regen vec_port swapped in (vendored everything else) yields **53 errors in
+DOWNSTREAM consumers** — arc_port / linked_list_port / vec_deque_port
+(`no member named 'vec' in namespace 'rusty::port'`, `IntoIter requires
+template arguments`) and include/rusty/async.cppm (`no member named 'port'`,
+`new_in`). The earlier gate built the ALL-VENDORED port set fresh and passed,
+so the regen vec_port's exported interface (rusty::port::vec::{Vec, IntoIter,
+new_in, …}) differs from the vendored's in a consumer-breaking way — likely
+my IntoIter<T,A> / Vec-default changes altered a signature the consumers
+depend on, or the umbrella alias shape shifted.
+
+IMPLICATION: re-baselining a FOUNDATIONAL port (many consumers) is not just
+"make it self-compile" — the regen must stay interface-compatible with
+vendored consumers, OR the consumers get re-baselined in the same batch.
+Next: diff the regen vs vendored EXPORTED surface (rusty::port::vec members +
+IntoIter/Vec/new_in signatures) to find the specific delta; decide whether to
+constrain the regen to match or to re-baseline consumers together. A LEAF
+port (few/no consumers) would be a better first full re-baseline — reconsider
+port order (e.g. a *_tests_port or a leaf like cell_port/borrow_port first).
