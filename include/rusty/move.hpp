@@ -127,7 +127,13 @@ inline constexpr bool is_std_tuple_like_v = is_std_tuple_like<T>::value;
 // @safe
 template<typename T>
 constexpr T clone(const T& t) {
-    if constexpr (requires { { t.clone() } -> std::same_as<T>; }) {
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        // Rust `Clone` on a `Copy`-shaped type is definitionally the copy.
+        // Taking this tier FIRST keeps constant-evaluation alive where the
+        // emitted member clone() is non-constexpr (hashbrown's
+        // Group::static_empty initializer reads Tag::EMPTY through clone).
+        return t;
+    } else if constexpr (requires { { t.clone() } -> std::same_as<T>; }) {
         return t.clone();
     } else if constexpr (detail::is_std_tuple_like_v<T>) {
         // Rust derives Clone elementwise for tuples; std::tuple of
