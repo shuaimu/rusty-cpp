@@ -26349,7 +26349,16 @@ impl CodeGen {
                         if scrutinee_is_as_mut {
                             binding_lines.push(format!("auto& {} = *{};", cpp_name, unwrap_expr));
                         } else {
-                            binding_lines.push(format!("auto {} = {};", cpp_name, unwrap_expr));
+                            // decltype(auto): a reference-payload Option
+                            // (`while let Some(item) = iter.next()` yielding
+                            // &T) must keep the reference — plain `auto`
+                            // decayed to a copy and Intersection::next
+                            // returned Option<const T&> bound to the dying
+                            // local (dangling; set intersection read junk).
+                            binding_lines.push(format!(
+                                "decltype(auto) {} = {};",
+                                cpp_name, unwrap_expr
+                            ));
                         }
                     }
                 } else {

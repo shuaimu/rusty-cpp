@@ -19504,7 +19504,7 @@ fn test_leaf4154333333333_drop_while_let_lowers_without_unreachable_bool_conditi
     assert!(out.contains("while (true) {"));
     assert!(out.contains("auto&& _whilelet = this->next();"));
     assert!(out.contains("if (!(_whilelet.is_some())) { break; }"));
-    assert!(out.contains("auto v = _whilelet.unwrap();"));
+    assert!(out.contains("decltype(auto) v = _whilelet.unwrap();"));
     assert!(!out.contains("while (rusty::intrinsics::unreachable())"));
 }
 
