@@ -32003,14 +32003,21 @@ impl CodeGen {
                 arg_call_list
             );
         }
+        // MEMBER tier first: rustc resolves INHERENT methods before trait
+        // methods at each deref level. The trait free fn's requires-check
+        // only probes the SIGNATURE (an unconstrained template is always
+        // viable when the return type substitutes), so trying it first
+        // hijacked receivers with a same-named inherent method and
+        // hard-errored in the body — indexmap's `m.sorted_by(4-arg move
+        // closure)` (inherent) fell into Itertools_::sorted_by (2-arg cmp).
         format!(
             "([]({}) -> decltype(auto) {{ if constexpr (requires {{ {}; }}) {{ return {}; }} else if constexpr (requires {{ {}; }}) {{ return {}; }} else {{ return {}; }} }})({})",
             arg_param_list,
-            direct_call,
-            direct_call,
-            deref_call,
-            deref_call,
             member_call,
+            member_call,
+            direct_call,
+            direct_call,
+            deref_call,
             arg_call_list
         )
     }
@@ -53104,6 +53111,13 @@ fn is_consuming_method_name(method: &str) -> bool {
             | "map"
             | "filter_map"
     ) || method.starts_with("into_")
+        // `sorted*` adapters (itertools' trait defaults AND indexmap's
+        // inherent sorted_by/sorted_by_key/sorted_unstable_*) take self by
+        // value and return an owning iterator — the in-place siblings are
+        // spelled `sort*` (no trailing "ed"). A `const auto m` receiver
+        // emission made the member tier of the dispatch shim unviable, so
+        // the call fell into the trait free fn with the wrong closure arity.
+        || method.starts_with("sorted")
         // Methods that take `self` by value across multiple Rust
         // idioms — these names are sufficiently specific that
         // flagging them as consuming-self is safe even without

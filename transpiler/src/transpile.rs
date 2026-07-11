@@ -2564,13 +2564,22 @@ mod tests {
                 || on.contains(").hello();"),
             "flag-on shim must end in a member-call fallback `deref(__self).hello()`\nGot: {on}"
         );
-        // And it must be reached only after the two free-function branches:
-        // both qualified `requires { Greet_::hello(` guards still present
-        // (`hello` is owned by exactly one trait, so the free call is qualified).
+        // The member branch comes FIRST (rustc resolves inherent methods
+        // before trait methods; for a dyn receiver the virtual member routes
+        // through the adapter override to the same static impl), with the
+        // qualified free-call branches behind it: one guarded
+        // `requires { Greet_::hello(` tier plus the unconditional deref
+        // free-call tail (`hello` is owned by exactly one trait, so the free
+        // call is qualified).
         let guard_count = on.matches("requires { Greet_::hello(").count();
         assert!(
-            guard_count >= 2,
-            "flag-on shim must keep both free-call guards before the member fallback (got {guard_count})\nGot: {on}"
+            guard_count >= 1,
+            "flag-on shim must keep a qualified free-call guard (got {guard_count})\nGot: {on}"
+        );
+        let free_call_count = on.matches("Greet_::hello(").count();
+        assert!(
+            free_call_count >= 2,
+            "flag-on shim must keep both free-call branches (got {free_call_count})\nGot: {on}"
         );
 
     }
