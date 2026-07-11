@@ -37448,11 +37448,43 @@ impl CodeGen {
             format!("reinterpret_cast<{}>(rusty::addr_of_temp({}))", ty, expr)
         } else if target_is_pointer_type && !source_is_raw_pointer_type && !source_is_reference_like
         {
-            // The source's C++ carrier shape is unresolved here: an integer
-            // (usize-as-pointer) needs the uintptr_t round-trip, but an
-            // inference-missed pointer (`Box::into_raw(x) as *mut U`) must
-            // reinterpret directly — dispatch on the C++ side.
-            format!("rusty::detail::ptr_cast<{}>({})", ty, expr)
+            // `*e.key() as *const T` where the DEREF RESULT is itself a raw
+            // pointer: the C++ carrier of a `&K` accessor is already the K
+            // lvalue, so the emitted deref wrapper peels the raw pointer K
+            // one level too far and ptr_cast's integral arm turns the
+            // POINTEE into an address (occupied_entry_key compared 0x1).
+            // Hand ptr_cast the un-derefed carrier; its pointer arm
+            // reinterprets the value.
+            if let syn::Expr::Unary(u) = self.peel_paren_group_expr(&cast.expr)
+                && matches!(u.op, syn::UnOp::Deref(_))
+            {
+                let deref_result_is_pointer_like = self
+                    .infer_simple_expr_type(self.peel_paren_group_expr(&cast.expr))
+                    .is_some_and(|t| {
+                        matches!(
+                            self.peel_paren_group_type(&t),
+                            syn::Type::Ptr(_) | syn::Type::Reference(_)
+                        )
+                    });
+                let inner = self.emit_expr_to_string(&u.expr);
+                if deref_result_is_pointer_like {
+                    // The Rust value being cast is an address, and the C++
+                    // carrier of the UN-derefed operand already holds it
+                    // (references lower to pointer carriers) — the emitted
+                    // deref wrapper would peel one level too far.
+                    format!("rusty::detail::ptr_cast<{}>({})", ty, inner)
+                } else {
+                    // Unresolved deref result: dispatch peel-vs-identity on
+                    // the carrier shape C++-side.
+                    format!("rusty::detail::deref_ptr_cast<{}>({})", ty, inner)
+                }
+            } else {
+                // The source's C++ carrier shape is unresolved here: an integer
+                // (usize-as-pointer) needs the uintptr_t round-trip, but an
+                // inference-missed pointer (`Box::into_raw(x) as *mut U`) must
+                // reinterpret directly — dispatch on the C++ side.
+                format!("rusty::detail::ptr_cast<{}>({})", ty, expr)
+            }
         } else if target_is_numeric_scalar
             && (source_is_raw_pointer_type
                 || source_reference_to_pointer_like

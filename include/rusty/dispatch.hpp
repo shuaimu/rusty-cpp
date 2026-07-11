@@ -161,6 +161,37 @@ Target ptr_cast(V&& v) {
     }
 }
 
+/// @brief Rust `*expr as *T` where `expr`'s type did not resolve at
+/// transpile time. Receives the UN-derefed carrier: a blind C++-side deref
+/// of a pointer carrier is ambiguous — `int*` may carry `&i32` (peel) or
+/// BE the payload `&mut i32` of a `&K` accessor (identity; peeling read
+/// the pointee `1` and ptr_cast's integral arm minted address 0x1 —
+/// indexmap's occupied_entry_key). Rust only permits `usize` → pointer
+/// casts, so a pointee that is neither a pointer-sized unsigned integer
+/// nor itself a pointer CANNOT be the peel case.
+template<typename Target, typename V>
+Target deref_ptr_cast(V&& v) {
+    using Src = std::remove_cvref_t<V>;
+    if constexpr (std::is_pointer_v<Src>) {
+        using Pointee = std::remove_cv_t<std::remove_pointer_t<Src>>;
+        if constexpr ((std::is_integral_v<Pointee> && std::is_unsigned_v<Pointee>
+                       && sizeof(Pointee) == sizeof(std::uintptr_t))
+                      || std::is_pointer_v<Pointee>) {
+            // `&usize`/`&*mut T` behind a pointer carrier: the Rust deref
+            // yields the pointee.
+            return ptr_cast<Target>(*v);
+        } else {
+            // The carrier itself is the reference/pointer payload.
+            return reinterpret_cast<Target>(+v);
+        }
+    } else if constexpr (requires { *v; }) {
+        // Smart-wrapper carrier (Box<*mut T>): the deref is real.
+        return ptr_cast<Target>(*v);
+    } else {
+        return ptr_cast<Target>(static_cast<V&&>(v));
+    }
+}
+
 } // namespace detail
 
 /// @brief Universal deref-walking method dispatcher.
