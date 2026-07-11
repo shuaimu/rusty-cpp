@@ -2984,6 +2984,16 @@ impl CodeGen {
         // otherwise unnameable. Keyed on the transpiled sub-modules that exist
         // (see `transpiled/vec_port/`).
         self.output = inject_vec_port_member_imports(&self.output);
+        // Universal collapse of never-valid rusty-root mis/double-qualifications
+        // (rusty::rusty::, std::rusty::, core::rusty::, alloc::rusty::). The
+        // per-type collapse (used by map_type) only runs on type emission, so
+        // EXPRESSION-position occurrences leak — e.g. the port's
+        // `std::rusty::slice_ext::range(...)` / `std::rusty::iter_ext::zip(...)`
+        // calls. None of these prefixes is ever legal C++, so applying the
+        // collapse once over the whole TU is a no-op on already-correct output
+        // and only cleans up the broken cases (fixes the class across all crates
+        // and stdlib ports at once).
+        self.output = Self::collapse_duplicate_rusty_root_namespaces_in_type(&self.output);
         // Strict-auto backstop (unconditional): if any `auto` placeholder leaked
         // into a C++ template-argument position (e.g. `rusty::Vec<auto>::new_()`
         // from a `Vec::new()` whose element type could not be inferred), fail

@@ -2070,9 +2070,15 @@ def patch_hint_slice_iter_namespaces(cpp_out: Path) -> int:
         text = re.sub(r"hint::likely\(((?:[^()]|\([^()]*\))*)\)", r"(\1)", text)
         # iter::zip(...) → rusty::iter_ext::zip(...) — cannot use
         # rusty::iter:: because `rusty::iter` is a free function.
+        # NOTE: match the `std::`-qualified form FIRST — the transpiler now
+        # emits `std::iter::zip(` / `std::slice::range(`, and a bare
+        # `iter::zip(` replace matches inside them, leaving a bogus
+        # `std::rusty::iter_ext::zip(`.
+        text = text.replace("std::iter::zip(", "rusty::iter_ext::zip(")
         text = text.replace("iter::zip(", "rusty::iter_ext::zip(")
         # slice::range — `rusty::slice` is a free function in array.hpp,
         # so we cannot use `rusty::slice::range`. Use `rusty::slice_ext::range`.
+        text = text.replace("std::slice::range(", "rusty::slice_ext::range(")
         text = text.replace("rusty::slice::range(", "rusty::slice_ext::range(")
         text = text.replace("slice::range(", "rusty::slice_ext::range(")
         # ::slice::SpecCloneIntoVec / slice::SpecCloneIntoVec → bare
