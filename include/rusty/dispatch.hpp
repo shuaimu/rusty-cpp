@@ -116,6 +116,13 @@ constexpr decltype(auto) ref_capture(const T& v) {
     }
 }
 
+/// @brief The `&mut` flavor: writes through the capture must reach the
+/// referent, so a mutable reference binding always carries the address.
+template<typename T>
+constexpr T* ref_capture(T& v) {
+    return std::addressof(v);
+}
+
 /// @brief `expr as *T` for a source whose C++ carrier shape the transpiler
 /// could not resolve: pointers reinterpret directly, integers round-trip
 /// through uintptr_t (usize-as-pointer), lvalues decay to their address.

@@ -10935,6 +10935,58 @@ impl CodeGen {
         }
     }
 
+    /// Names bound with an explicit `ref` in a pattern (`Content::Seq(ref v)`)
+    /// ONLY — unlike collect_pattern_ref_binding_names, which collects every
+    /// binding for borrowed-iterable for-loops. A `ref` binding's C++ carrier
+    /// is a reference into the scrutinee; consuming-arg emission must not
+    /// `std::move` it (that moves the REFERENT where Rust copies the borrow —
+    /// serde's `Content::Seq(ref v)` arm passed as_slice(std::move(v))).
+    pub(super) fn collect_pattern_explicit_ref_binding_names(
+        &self,
+        pat: &syn::Pat,
+        out: &mut HashSet<String>,
+    ) {
+        match pat {
+            syn::Pat::Ident(pi) => {
+                if pi.by_ref.is_some() {
+                    out.insert(pi.ident.to_string());
+                }
+                if let Some((_, subpat)) = &pi.subpat {
+                    self.collect_pattern_explicit_ref_binding_names(subpat, out);
+                }
+            }
+            syn::Pat::Tuple(t) => {
+                for elem in &t.elems {
+                    self.collect_pattern_explicit_ref_binding_names(elem, out);
+                }
+            }
+            syn::Pat::TupleStruct(ts) => {
+                for elem in &ts.elems {
+                    self.collect_pattern_explicit_ref_binding_names(elem, out);
+                }
+            }
+            syn::Pat::Struct(ps) => {
+                for field in &ps.fields {
+                    self.collect_pattern_explicit_ref_binding_names(&field.pat, out);
+                }
+            }
+            syn::Pat::Reference(r) => self.collect_pattern_explicit_ref_binding_names(&r.pat, out),
+            syn::Pat::Type(pt) => self.collect_pattern_explicit_ref_binding_names(&pt.pat, out),
+            syn::Pat::Paren(pp) => self.collect_pattern_explicit_ref_binding_names(&pp.pat, out),
+            syn::Pat::Slice(sl) => {
+                for elem in &sl.elems {
+                    self.collect_pattern_explicit_ref_binding_names(elem, out);
+                }
+            }
+            syn::Pat::Or(or_pat) => {
+                for case in &or_pat.cases {
+                    self.collect_pattern_explicit_ref_binding_names(case, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(super) fn collect_pattern_binding_names(&self, pat: &syn::Pat, out: &mut HashSet<String>) {
         match pat {
             syn::Pat::Ident(pi) => {

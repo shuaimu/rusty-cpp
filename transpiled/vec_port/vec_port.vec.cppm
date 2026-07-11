@@ -4594,12 +4594,20 @@ struct Vec {
     size_t len_field;
     mutable bool _rusty_forgotten = false;
     Vec(RawVec<T, A> buf_init, size_t len_init) : buf(std::move(buf_init)), len_field(std::move(len_init)) {}
-    Vec(const Vec&) = default;
+    // Rust Vec is Clone, not Copy. The defaulted copy duplicated the
+    // owning RawVec pointer shallowly and double-freed on destruction
+    // (indexmap's shift_insert hasher closure freed the live entries
+    // buffer). C++ implicit-copy sites exist corpus-wide, so instead of
+    // deleting, copy DEEP by delegating to clone().
+    Vec(const Vec& other) : Vec(other.clone()) {}
     Vec(Vec&& other) noexcept : buf(std::move(other.buf)), len_field(std::move(other.len_field)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
     }
-    Vec& operator=(const Vec&) = default;
+    Vec& operator=(const Vec& other) {
+        if (this != &other) { *this = other.clone(); }
+        return *this;
+    }
     Vec& operator=(Vec&& other) noexcept {
         if (this == &other) {
             return *this;
@@ -5390,7 +5398,9 @@ return dst.write(rusty::clone(src));
         auto out = Vec<T, A>::with_capacity_in(this->len_field, std::move(alloc));
         auto src = rusty::as_slice(*this);
         for (size_t i = 0; i < src.size(); ++i) {
-            out.push(src[i]);
+            // rusty::clone: member clone() for Clone-but-not-Copy element
+            // types (serde's Content has a deleted copy constructor).
+            out.push(rusty::clone(src[i]));
         }
         return out;
     }

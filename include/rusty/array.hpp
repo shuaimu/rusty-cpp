@@ -1889,8 +1889,18 @@ requires (
     !std::is_lvalue_reference_v<Container&&> &&
     !detail::is_std_array_like_v<std::remove_cv_t<std::remove_reference_t<Container>>>)
 auto slice_full(Container&& container) {
-    return detail::owned_container_slice<std::remove_cv_t<std::remove_reference_t<Container>>>{
-        std::forward<Container>(container)};
+    if constexpr (std::is_const_v<std::remove_reference_t<Container>>) {
+        // A CONST rvalue (std::move of a `ref`-pattern binding) cannot be
+        // moved into owned storage, and copying an owning container may be
+        // impossible (move-only elements) or a hidden deep clone. Emissions
+        // only produce this shape for argument temporaries, which outlive
+        // the full expression — a view is safe.
+        return rusty::as_slice(container);
+    } else {
+        return detail::owned_container_slice<
+            std::remove_cv_t<std::remove_reference_t<Container>>>{
+            std::forward<Container>(container)};
+    }
 }
 
 template<typename Container>

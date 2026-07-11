@@ -1791,6 +1791,12 @@ impl CodeGen {
                 self.writeln(&stmt);
             }
 
+            let mut arm_ref_bindings = HashSet::new();
+            self.collect_pattern_explicit_ref_binding_names(&arm.pat, &mut arm_ref_bindings);
+            let pushed_arm_refs = !arm_ref_bindings.is_empty();
+            if pushed_arm_refs {
+                self.pattern_ref_bindings.push(arm_ref_bindings);
+            }
             let pushed_binding_scope = self
                 .push_local_cpp_binding_scope_with_types(&binding_map, Some(&arm_binding_types));
             if let Some((_, guard)) = &arm.guard {
@@ -1806,6 +1812,9 @@ impl CodeGen {
                 self.writeln("_m_matched = true;");
             }
             self.pop_local_cpp_binding_scope(pushed_binding_scope);
+            if pushed_arm_refs {
+                self.pattern_ref_bindings.pop();
+            }
 
             self.indent -= 1;
             self.writeln("}");
@@ -21542,11 +21551,26 @@ impl CodeGen {
                                     // value-capture fine.
                                     && self.map_type(&ty).trim_end().ends_with('&')
                             });
+                    // A local EMITTED as a C++ reference binding without a
+                    // declared Rust type (`let entries = &*self.entries;` →
+                    // `const auto& entries = ...`): `std::move` of the const
+                    // reference materializes a COPY of the referent — for an
+                    // owning type with a shallow copy that frees the live
+                    // buffer on closure destruction (indexmap's
+                    // shift_insert_unique hasher closure freed the map's
+                    // entries). Carry the borrow via ref_capture instead.
+                    let capture_local_ref_binding = !capture_ref
+                        && !capture_param_ptr
+                        && self
+                            .lookup_rust_binding_name_for_cpp_name(cpp_name)
+                            .is_some_and(|rust_name| {
+                                self.is_local_reference_binding_in_scope(&rust_name)
+                            });
                     if capture_ref {
                         // Capturing a reference-typed local by move can force a copy of
                         // the referent (`const T&&`), which fails for move-only payloads.
                         capture_parts.push(format!("&{}", cpp_name));
-                    } else if capture_param_ptr {
+                    } else if capture_param_ptr || capture_local_ref_binding {
                         capture_parts
                             .push(format!("{0} = rusty::detail::ref_capture({0})", cpp_name));
                     } else {

@@ -14,6 +14,7 @@
 /// This allows RustyCpp to track reference "moves" with Rust-like semantics,
 /// where moving a mutable reference invalidates that reference variable.
 
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -97,6 +98,17 @@ constexpr T copy(const T& t) noexcept(std::is_nothrow_copy_constructible_v<T>) {
 /// @brief Explicitly clone a value (mirrors Rust's `Clone::clone`)
 ///
 /// In Rust, `Clone::clone(&v)` creates a duplicate of `v`. For `Copy` types
+namespace detail {
+template<typename T>
+struct is_std_tuple_like : std::false_type {};
+template<typename... Ts>
+struct is_std_tuple_like<std::tuple<Ts...>> : std::true_type {};
+template<typename A, typename B>
+struct is_std_tuple_like<std::pair<A, B>> : std::true_type {};
+template<typename T>
+inline constexpr bool is_std_tuple_like_v = is_std_tuple_like<T>::value;
+} // namespace detail
+
 /// (trivially copyable enums, integers, etc.) this is identical to a copy.
 /// The rusty-cpp transpiler emits `rusty::clone(...)` defensively when it
 /// needs an owned value from a non-owned expression (e.g., when materializing
@@ -117,6 +129,12 @@ template<typename T>
 constexpr T clone(const T& t) {
     if constexpr (requires { { t.clone() } -> std::same_as<T>; }) {
         return t.clone();
+    } else if constexpr (detail::is_std_tuple_like_v<T>) {
+        // Rust derives Clone elementwise for tuples; std::tuple of
+        // Clone-but-not-Copy payloads (tuple<Content, Content> entries in
+        // a cloned Vec) has neither a .clone() member nor a copy ctor.
+        return std::apply(
+            [](const auto&... elems) { return T(rusty::clone(elems)...); }, t);
     } else {
         static_assert(
             std::is_copy_constructible_v<T>,

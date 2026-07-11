@@ -3971,7 +3971,8 @@ struct RawVec {
     rusty::PhantomData<T> _marker;
     mutable bool _rusty_forgotten = false;
     RawVec(RawVecInner<A> inner_init, rusty::PhantomData<T> _marker_init) : inner(std::move(inner_init)), _marker(std::move(_marker_init)) {}
-    RawVec(const RawVec&) = default;
+    // Owning allocation handle: shallow copies double-free (see Vec).
+    RawVec(const RawVec&) = delete;
     RawVec(RawVec&& other) noexcept : inner(std::move(other.inner)), _marker(std::move(other._marker)) {
         this->_rusty_forgotten = other._rusty_forgotten;
         other._rusty_forgotten = true;
