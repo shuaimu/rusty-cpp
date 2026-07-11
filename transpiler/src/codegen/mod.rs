@@ -43684,6 +43684,23 @@ impl CodeGen {
                 .iter()
                 .filter(|a| matches!(a, syn::GenericArgument::Type(_)))
                 .collect();
+            // Impl generics that are themselves bound at a self-type arg
+            // position (they name a host param, possibly under a different
+            // name). The others are FREE trait-side generics.
+            let bound_srcs: HashSet<String> = type_args
+                .iter()
+                .filter_map(|a| {
+                    if let syn::GenericArgument::Type(syn::Type::Path(ap)) = a
+                        && ap.qself.is_none()
+                        && ap.path.segments.len() == 1
+                    {
+                        let n = ap.path.segments[0].ident.to_string();
+                        impl_generics.contains(&n).then_some(n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             for (pos, host) in host_params.iter().enumerate() {
                 let Some(syn::GenericArgument::Type(syn::Type::Path(ap))) =
                     type_args.get(pos).copied()
@@ -43694,13 +43711,28 @@ impl CodeGen {
                     continue;
                 }
                 let src = ap.path.segments[0].ident.to_string();
-                if !impl_generics.contains(&src)
-                    || &src == host
-                    // Renaming to a name the impl ALSO declares would merge
-                    // two distinct params — skip.
-                    || impl_generics.contains(host)
-                {
+                if !impl_generics.contains(&src) || &src == host {
                     continue;
+                }
+                if impl_generics.contains(host) {
+                    // The impl ALSO declares a generic under the host
+                    // param's name. If that generic is itself bound at a
+                    // self-type position (swap shapes, `for Pair<B, A>`),
+                    // renaming would merge distinct params — skip as
+                    // before. If it is a FREE trait-side generic
+                    // (`impl<A, B, C, D> PartialEq<(A, B)> for Pair<C, D>`
+                    // against `struct Pair<A, B>`), move it aside instead:
+                    // visit_ident_mut applies the map as ONE simultaneous
+                    // substitution, so `A -> A__rusty_free` and `C -> A`
+                    // cannot cascade.
+                    if bound_srcs.contains(host) {
+                        continue;
+                    }
+                    let fresh = format!("{host}__rusty_free");
+                    if impl_generics.contains(&fresh) || renames.contains_key(host) {
+                        continue;
+                    }
+                    renames.insert(host.clone(), fresh);
                 }
                 if !sources_seen.insert(src.clone()) {
                     // Same impl generic at two host positions (Type<R, R>):
@@ -45016,6 +45048,13 @@ Ordering cmp(const A& a, const B& b) {\n\
         return Ordering::Equal;\n\
     }\n\
 }\n\
+// A char[N] operand is the C++ carrier of a Rust `str` LITERAL needle\n\
+// (`map.contains_key(\"a\")` with String keys): content semantics, no\n\
+// trailing NUL. No member/operator tier can take it (raw arrays have no\n\
+// members) and the elementwise tier would walk the NUL byte.\n\
+template<typename X>\n\
+concept str_literal_carrier = std::is_array_v<std::remove_cvref_t<X>>\n\
+    && std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_cvref_t<X>>>, char>;\n\
 // One side of an element-wise eq must be iterable in a shape rusty::for_in\n\
 // accepts — mirrors its tiers structurally (for_in itself static_asserts,\n\
 // so it can't be probed directly). Scalars fail this and keep the plain\n\
@@ -45039,6 +45078,16 @@ bool eq(const A& a, const B& b) {\n\
            delegates to the pointees. Raw pointer == compared ADDRESSES,\n\
            so `&mut 1` map keys never matched (occupied_entry_key). */\n\
         return eq(*a, *b);\n\
+    } else if constexpr ((str_literal_carrier<A>\n\
+        || str_literal_carrier<decltype(rusty::detail::deref_if_pointer_like(b))>)\n\
+        && requires {\n\
+            std::string_view(a);\n\
+            std::string_view(rusty::detail::deref_if_pointer_like(b));\n\
+        }) {\n\
+        /* str-literal needle vs a string-viewable partner: compare CONTENT\n\
+           (string_view drops the array's trailing NUL). */\n\
+        return std::string_view(a)\n\
+            == std::string_view(rusty::detail::deref_if_pointer_like(b));\n\
     } else if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {\n\
         return a.eq(rusty::detail::deref_if_pointer_like(b));\n\
     } else if constexpr (requires {\n\
@@ -48284,11 +48333,32 @@ template<typename T, typename State>\n\
 void hash(const T& value, State& state) {\n\
     if constexpr (requires { value.hash(state); }) {\n\
         value.hash(state);\n\
+    } else if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>\n\
+        && std::is_same_v<std::remove_cv_t<\n\
+               std::remove_pointer_t<std::remove_cvref_t<T>>>, char>) {\n\
+        /* Plain-char pointer = Rust str carrier (i8/u8 are signed/unsigned\n\
+           char; Rust char is char32_t): hash CONTENT like rusty::String,\n\
+           not the pointee char (Pair(\"a\", \"b\") vs (String, String) keys). */\n\
+        hash(std::string_view(value), state);\n\
     } else if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>) {\n\
         /* A pointer carrier is a lowered Rust REFERENCE: Hash delegates\n\
            to the pointee. Hashing the address made `&mut 1` map keys\n\
            miss each other (occupied_entry_key found Vacant). */\n\
         hash(*value, state);\n\
+    } else if constexpr (requires {\n\
+        std::tuple_size<std::remove_cvref_t<T>>::value;\n\
+    } && !requires { std::begin(value); }) {\n\
+        /* Rust derives Hash for tuples elementwise; the byte-FNV fallback\n\
+           hashed a tuple<String, String> key's HEAP POINTERS. */\n\
+        std::apply(\n\
+            [&state](const auto&... elems) { (hash(elems, state), ...); },\n\
+            value);\n\
+    } else if constexpr (std::is_array_v<std::remove_cvref_t<T>>\n\
+        && std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_cvref_t<T>>>, char>) {\n\
+        /* char[N] = Rust str-literal needle: hash CONTENT chars without\n\
+           the trailing NUL, matching rusty::String's range-tier per-char\n\
+           hashing (string_view recurses into the range tier below). */\n\
+        hash(std::string_view(value), state);\n\
     } else if constexpr (requires { std::begin(value); std::end(value); }) {\n\
         // Hash range-like containers by element value, not object bytes.\n\
         // This avoids pointer/address-based drift for owning containers.\n\
@@ -50862,6 +50932,25 @@ fn mark_consumed_local_from_value_expr(
         syn::Expr::Match(match_expr) => {
             for arm in &match_expr.arms {
                 mark_consumed_local_from_value_expr(&arm.body, result);
+            }
+        }
+        // `(entry.key, entry.value)` — a tail tuple/field read moves fields
+        // OUT of the base binding (Rust permits field moves from non-mut
+        // owned locals). A `const auto entry` emission would block the
+        // std::move the tuple construction emits (indexmap's
+        // swap_remove_finish deduced tuple<const String, ...> — no ctor).
+        syn::Expr::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                mark_consumed_local_from_value_expr(elem, result);
+            }
+        }
+        syn::Expr::Field(field) => {
+            let mut base = peel_paren_group_expr(&field.base);
+            while let syn::Expr::Field(inner) = base {
+                base = peel_paren_group_expr(&inner.base);
+            }
+            if let Some(name) = extract_simple_local_ident(base) {
+                result.insert(name);
             }
         }
         _ => {}

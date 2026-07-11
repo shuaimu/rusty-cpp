@@ -317,7 +317,17 @@ constexpr decltype(auto) deref_if_pointer(T&& value) {
 template<typename T>
 constexpr decltype(auto) deref_if_pointer_like(T&& value) {
     using value_type = std::remove_reference_t<T>;
-    if constexpr (std::is_pointer_v<value_type>) {
+    if constexpr (std::is_pointer_v<value_type>
+                  && std::is_same_v<
+                         std::remove_cv_t<std::remove_pointer_t<value_type>>, char>) {
+        // A plain-char pointer is a STR carrier (Rust `&str` lowers to
+        // const char*), never a reference-to-char: Rust has no plain-char
+        // type (i8 = signed char, u8 = unsigned char, char = char32_t).
+        // Peeling it read the FIRST CHARACTER — `Pair("a", "b") ==
+        // (String, String)` compared 'a' against a String. Content
+        // semantics live with the pointer itself.
+        return std::forward<T>(value);
+    } else if constexpr (std::is_pointer_v<value_type>) {
         return *std::forward<T>(value);
     } else if constexpr (requires {
                              typename std::remove_cv_t<
