@@ -44939,6 +44939,14 @@ bool less_than(const L& lhs, const R& rhs) {\n\
     if constexpr (requires { lhs < rhs; }) {\n\
         return lhs < rhs;\n\
     } else if constexpr (requires {\n\
+        rusty::detail::deref_if_pointer_like(lhs) < rusty::detail::deref_if_pointer_like(rhs);\n\
+    }) {\n\
+        /* Pointer-carried operand (addr_of_temp needle): peel and compare.\n\
+           Without this tier the permissive fallback returned false BOTH\n\
+           ways - cmp::cmp called everything Equal and binary_search found\n\
+           phantom matches. */\n\
+        return rusty::detail::deref_if_pointer_like(lhs) < rusty::detail::deref_if_pointer_like(rhs);\n\
+    } else if constexpr (requires {\n\
         std::begin(lhs); std::end(lhs); std::begin(rhs); std::end(rhs);\n\
         *std::begin(lhs) < *std::begin(rhs);\n\
         *std::begin(rhs) < *std::begin(lhs);\n\

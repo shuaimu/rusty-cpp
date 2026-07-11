@@ -30803,7 +30803,9 @@ fn test_leaf4154442_cmp_same_owner_ref_arg_skips_autoderef_wrapper() {
         "#,
     );
     assert!(
-        !out.contains("deref_if_pointer_like(rhs)"),
+        // Call-site shape only — the runtime prelude's less_than deref tier
+        // legitimately mentions deref_if_pointer_like(rhs) in its own text.
+        !out.contains("deref_if_pointer_like(rhs))"),
         "self.cmp(rhs) should pass rhs directly when expected type is &Self\nGot: {out}"
     );
 }
@@ -35208,3 +35210,4 @@ fn test_loop_rebind_match_arm_lowers_as_statement() {
     assert!(!out.contains("return v ="), "{out}");
     assert!(out.contains("while (true)"), "{out}");
 }
+
