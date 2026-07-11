@@ -3925,7 +3925,9 @@ fn test_field_access() {
 #[test]
 fn test_index_expr() {
     let out = transpile_str("fn f() { let x = arr[0]; }");
-    assert!(out.contains("arr[0]"));
+    // Bare integer-literal indices are positional usize in Rust; the cast
+    // keeps C++ overload resolution off templated Q-key subscripts.
+    assert!(out.contains("arr[static_cast<size_t>(0)]"), "{out}");
 }
 
 #[test]
@@ -5971,8 +5973,11 @@ fn test_leaf5120_tuple_match_reference_to_index_uses_as_ptr_bridge() {
         }
         "#,
     );
-    assert!(out.contains("auto _m0 = rusty::as_ref_ptr(v[0]);"), "{out}");
-    assert!(!out.contains("auto _m0 = &v[0];"), "{out}");
+    assert!(
+        out.contains("auto _m0 = rusty::as_ref_ptr(v[static_cast<size_t>(0)]);"),
+        "{out}"
+    );
+    assert!(!out.contains("auto _m0 = &v["), "{out}");
 }
 
 // ── Tuple and destructuring tests ───────────────────────────

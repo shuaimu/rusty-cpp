@@ -38019,7 +38019,20 @@ impl CodeGen {
         _expected_ty: Option<&syn::Type>,
     ) -> String {
         let base = self.emit_expr_to_string(&idx.expr);
-        let index = self.emit_expr_to_string(&idx.index);
+        let mut index = self.emit_expr_to_string(&idx.index);
+        // A bare integer-literal index is ALWAYS positional usize in Rust
+        // (integer Index impls are usize-only; key lookups arrive as
+        // references). Without the cast, C++ overload resolution prefers a
+        // map's templated Q-key operator[] (exact int match) over the
+        // size_t positional one — indexmap's `map[0]` did a KEY lookup and
+        // panicked "no entry found for key".
+        if matches!(
+            self.peel_paren_group_expr(&idx.index),
+            syn::Expr::Lit(l) if matches!(&l.lit, syn::Lit::Int(_))
+        ) && !index.starts_with("static_cast")
+        {
+            index = format!("static_cast<size_t>({})", index);
+        }
         if self.expr_indexes_fixed_array(&idx.expr) {
             format!("{}.at({})", base, index)
         } else {
