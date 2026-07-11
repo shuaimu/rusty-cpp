@@ -75,6 +75,21 @@ Proper fix (if Vec→VecDeque is ever needed) lives in vec_deque_port.
 - 1× each: `ret` undeclared, `IntoIter` return-type deduction, `std::hint`
 Same over-qualification family as raw_vec — a few more targeted patcher rules.
 
+**TRIAGE of the over-qualification errors (2026-07-11) — patcher vs transpiler:**
+- **OPTION C (general transpiler bug, do FIRST):** `std::rusty::` / `rusty::rusty::`
+  in EXPRESSION position (`std::rusty::slice_ext::range(...)`, `std::rusty::iter_ext::zip(...)`).
+  The transpiler ALREADY has `collapse_duplicate_rusty_root_namespaces_in_type`
+  (mod.rs:39385) that fixes these — but it's called from ONE type-emission site
+  (mod.rs:39356), so expression-position occurrences leak. FIX: make that collapse
+  a universal final pass. Low risk (matrix crates don't emit these in exprs or
+  they'd fail). Deletes this class from ALL 13 ports at once. Gate against full matrix.
+- **PATCHER (port-local):** `rusty::Vec` self-qual (Vec port qualifying its own Vec —
+  normal crates correctly want rusty::Vec); `aggregate_raw_ptr` (existing rule, anchor
+  drifted to new intrinsic name — update anchor).
+- **REVISIT at next port:** `rusty::`+keyword (reinterpret_cast/sizeof) — normal cast
+  path emits bare `reinterpret_cast` correctly (emit_expr.rs:8188/9103), so this is a
+  narrower path; patched port-local, promote to Option C only if it recurs.
+
 Then: get into_iter clean → **matrix-validate** (vec + btree + indexmap +
 serde all link vec_port; clear `.rusty-modules-cache` first) → replace the
 6 vendored `transpiled/vec_port/*.cppm` with the regen → commit.
