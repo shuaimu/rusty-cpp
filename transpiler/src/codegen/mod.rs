@@ -44992,7 +44992,13 @@ concept eq_elementwise_side = requires(std::remove_cvref_t<X>& x) { x.next(); }\
 // becomes addr_of_temp() in C++ emit).\n\
 template<typename A, typename B>\n\
 bool eq(const A& a, const B& b) {\n\
-    if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {\n\
+    if constexpr (std::is_pointer_v<std::remove_cvref_t<A>>\n\
+        && std::is_pointer_v<std::remove_cvref_t<B>>) {\n\
+        /* Two pointer carriers are lowered Rust REFERENCES: PartialEq\n\
+           delegates to the pointees. Raw pointer == compared ADDRESSES,\n\
+           so `&mut 1` map keys never matched (occupied_entry_key). */\n\
+        return eq(*a, *b);\n\
+    } else if constexpr (requires { a.eq(rusty::detail::deref_if_pointer_like(b)); }) {\n\
         return a.eq(rusty::detail::deref_if_pointer_like(b));\n\
     } else if constexpr (requires {\n\
         { a == rusty::detail::deref_if_pointer_like(b) } -> std::convertible_to<bool>;\n\
@@ -48237,6 +48243,11 @@ template<typename T, typename State>\n\
 void hash(const T& value, State& state) {\n\
     if constexpr (requires { value.hash(state); }) {\n\
         value.hash(state);\n\
+    } else if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>) {\n\
+        /* A pointer carrier is a lowered Rust REFERENCE: Hash delegates\n\
+           to the pointee. Hashing the address made `&mut 1` map keys\n\
+           miss each other (occupied_entry_key found Vacant). */\n\
+        hash(*value, state);\n\
     } else if constexpr (requires { std::begin(value); std::end(value); }) {\n\
         // Hash range-like containers by element value, not object bytes.\n\
         // This avoids pointer/address-based drift for owning containers.\n\
