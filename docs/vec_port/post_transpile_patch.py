@@ -499,6 +499,19 @@ def patch_aggregate_raw_ptr_to_span_ctor(cpp_out: Path) -> int:
             "rusty::intrinsics::aggregate_raw_ptr<std::add_pointer_t<std::span<T>>, auto, auto>",
             "std::span<T>",
         )
+        # Current transpiler drops the turbofish and emits a plain call
+        # `rusty::intrinsics::aggregate_raw_ptr(ptr, len)`. The wrapping
+        # lambda's return type already pins the span constness, and the
+        # const-ness of the pointer arg (as_ptr vs as_mut_ptr) selects it:
+        # rewrite the call head to the matching std::span ctor.
+        text = text.replace(
+            "rusty::intrinsics::aggregate_raw_ptr(rusty::as_ptr(",
+            "std::span<const T>(rusty::as_ptr(",
+        )
+        text = text.replace(
+            "rusty::intrinsics::aggregate_raw_ptr(rusty::as_mut_ptr(",
+            "std::span<T>(rusty::as_mut_ptr(",
+        )
         if text != original:
             path.write_text(text)
             n += 1
@@ -2370,6 +2383,24 @@ def patch_hint_assert_unchecked(cpp_out: Path) -> int:
     return n
 
 
+def patch_port_self_vec_qualification(cpp_out: Path) -> int:
+    """The Vec port DEFINES `Vec`, so references to its own type must be the
+    local `Vec`, not the umbrella alias `rusty::Vec` (which isn't in scope
+    inside the port module — "no template named 'Vec' in namespace 'rusty'").
+    A NORMAL crate correctly wants `rusty::Vec`, so this is strictly
+    port-local. The vendored port has ZERO code `rusty::Vec` (only comments).
+    Match `rusty::Vec<` specifically so `rusty::VecDeque<...>` is untouched.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        if "rusty::Vec<" not in text:
+            continue
+        path.write_text(text.replace("rusty::Vec<", "Vec<"))
+        n += 1
+    return n
+
+
 def patch_current_transpiler_qualification_drift(cpp_out: Path) -> int:
     """The CURRENT transpiler (vs the one that first vendored this port in
     May 2026) over-qualifies a few constructs into invalid or ambiguous
@@ -2572,6 +2603,8 @@ def main(cpp_out: Path):
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
         ("rusty::intrinsics::{const_make_global,assume} → identity/builtin",
             patch_rusty_intrinsics_stubs),
+        ("port self-Vec qualification (rusty::Vec< -> Vec< inside the Vec port)",
+            patch_port_self_vec_qualification),
         ("current-transpiler qualification drift (rusty::keyword / rusty::rusty:: / ptr::cast)",
             patch_current_transpiler_qualification_drift),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),

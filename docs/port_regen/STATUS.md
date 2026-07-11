@@ -108,3 +108,37 @@ build files into `transpiled/vec_port/`, `cmake --build .rusty-modules-cache/bui
 
 Harness currently configured for `vec_port` only; add each port's source
 subtree + prep invocation to the `case` in `regen_diff.sh` as it's taken on.
+
+## vec_port re-baseline — 20 → 4 errors (2026-07-11)
+
+Port-local patcher rules added (validated 20→6→4 via rusty-target rebuild):
+- `patch_port_self_vec_qualification`: `rusty::Vec<` → `Vec<` (the Vec port
+  can't use the umbrella alias for its own type; vendored has 0 code
+  `rusty::Vec`). Cleared 12 errors.
+- `patch_aggregate_raw_ptr_to_span_ctor`: added the no-turbofish call form
+  (`aggregate_raw_ptr(as_ptr(...), len)` → `std::span<const T>(...)`,
+  as_mut_ptr → `std::span<T>`). Cleared 2 errors.
+
+**REMAINING 4 (all vec.cppm, with vendored reference + analysis):**
+1. `4245` too few template args for `Vec` (`Vec<T> from_elem`): regen forward-
+   decls `template<typename T, typename A> struct Vec;` WITHOUT a default;
+   vendored has `typename A = rusty::alloc::Global`. FIX: add the default to
+   the FORWARD decl only (`...struct Vec;`), NOT the definition (`struct Vec {`)
+   — repeating a default arg is a redefinition error. Check the exact lines
+   4240-4242 for an intervening blank before anchoring.
+2. `5928` `IntoIter into_iter() const` needs `IntoIter<T, A> into_iter()`
+   (vendored: `IntoIter<T, A> into_iter()`). Simple: `IntoIter into_iter(` →
+   `IntoIter<T, A> into_iter(`.
+3. `5481` `ret` undeclared: transpiler mis-scoped a late-init binding —
+   `auto ret = ptr::read(...)` is emitted INSIDE a `{}` block that closes
+   before `return Option<T>(std::move(ret))`. Rust is `let ret; unsafe { ret =
+   ...; }` then `Some(ret)`. Vendored uses `__ret` hoisted before the block.
+   FIX: hoist the declaration (patcher: turn `auto ret =` into a pre-block
+   `T ret; ... ret =`), OR see existing late-init rule (cf. commit c296cae7
+   "materialize try_remove's late-init binding"). Trickiest of the 4.
+4. `5534` `std::hint::unlikely(` — no such thing; Rust branch hint. FIX: strip
+   to bare `(` (extend patch_hint_assert_unchecked with unlikely/likely).
+   `std::hint::unlikely(X)` → `(X)`.
+
+Then: 4→0 → matrix-validate (vec+btree+indexmap+serde) → replace the 6
+vendored .cppm → commit = vec_port fully re-baselined (first port done).
