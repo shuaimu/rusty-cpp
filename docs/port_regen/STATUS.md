@@ -59,13 +59,21 @@ all in `vec_port.vec.into_iter.cppm`. Patcher gained (this session):
 `rusty::rusty::`, `rusty::ptr::cast(p)`→`p.cast()`, drop the circular
 `import rusty;` from port modules).
 
-**Remaining 5 errors (into_iter.cppm), next session:**
-- `4271`, `4279`: `too many template arguments for class template 'VecDeque'`
-  — cross-port VecDeque arity drift (IntoIter references VecDeque).
-- `4410`: `use of undeclared identifier 'super'` + function-style-cast +
-  `no member named 'new_in'` — a `super::…::new_in(...)` construct that
-  didn't lower (one line; likely needs a targeted rule or an Option-C
-  transpiler look at `super` leakage).
+**into_iter.cppm: 5 errors RESOLVED** (both drifted stub anchors, now
+regex-tolerant): `into_vecdeque` (VecDeque arity — deliberate stub, see
+below) and the `super::Vec::new_in` Default (pre-existing single-site
+`super::` non-resolution — stubbed). NOTE on into_vecdeque: it backs the
+PUBLIC `VecDeque::from(vec)` conversion; the stub makes that abort. It is
+stubbed for a real reason — VecDeque depends on Vec (not vice versa), so
+vec_port can't construct a VecDeque without inverting the dep / cycling.
+Proper fix (if Vec→VecDeque is ever needed) lives in vec_deque_port.
+
+**vec.cppm: ~20 MORE drift errors (next, the real remaining grind):**
+- 9× `no template named 'Vec' in namespace 'rusty'` (rusty::Vec over-qual → `::Vec`/`Vec`)
+- 4× `std::rusty::…` (std:: mis-qualification)
+- 2× `rusty::intrinsics::aggregate_raw_ptr` missing
+- 1× each: `ret` undeclared, `IntoIter` return-type deduction, `std::hint`
+Same over-qualification family as raw_vec — a few more targeted patcher rules.
 
 Then: get into_iter clean → **matrix-validate** (vec + btree + indexmap +
 serde all link vec_port; clear `.rusty-modules-cache` first) → replace the

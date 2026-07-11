@@ -1585,19 +1585,21 @@ def patch_into_iter_more_fixes(cpp_out: Path) -> int:
             )
             text = text[:sidx] + stub + text[eidx + 7:]
 
-    # Fix 5: stub default_() — uses `super::rusty::Vec<auto>` (bogus path)
-    old_default = (
+    # Fix 5: stub default_() — the body calls `super::rusty::Vec<...>::new_in`
+    # and `super::` is a Rust keyword that the transpiler doesn't resolve
+    # here (pre-existing limitation; sole non-comment `super::` in the whole
+    # port corpus). Regex-match tolerates template-arg + default-expr drift
+    # (`<auto>` → `<decltype(...)>`, `A::default_()` → `default_like<A>()`).
+    text = re.sub(
+        r"    static IntoIter<T, A> default_\(\) \{\n"
+        r"        return rusty::iter\(super::rusty::Vec<.*>::new_in\(.*\)\);\n"
+        r"    \}",
         "    static IntoIter<T, A> default_() {\n"
-        "        return rusty::iter(super::rusty::Vec<auto>::new_in(A::default_()));\n"
-        "    }"
-    )
-    new_default = (
-        "    static IntoIter<T, A> default_() {\n"
-        "        // STUBBED: super::rusty::Vec<auto>::new_in path doesn't resolve\n"
+        "        // STUBBED: super::rusty::Vec::new_in path doesn't resolve\n"
         "        std::abort();\n"
-        "    }"
+        "    }",
+        text,
     )
-    text = text.replace(old_default, new_default)
 
     # Fix 6: stub clone() — uses span::to_vec_in (same blocker as Vec::clone)
     old_clone = (
@@ -1643,13 +1645,17 @@ def patch_into_iter_compile_errors(cpp_out: Path) -> int:
     text = path.read_text()
     original = text
 
-    # Fix 1: stub into_vecdeque body
-    old_vd = (
-        "    rusty::VecDeque<T, A> into_vecdeque() {\n"
-        "        auto this_ = rusty::mem::manually_drop_new(std::move((*this)));"
+    # Fix 1: stub into_vecdeque body (rusty::VecDeque is unary; the retired
+    # hand-written type can't take Rust's binary `VecDeque<T, A>`). Match the
+    # signature only, tolerating the transpiler's `const` qualifier drift and
+    # any body — the method-close search below is body-content-independent.
+    m_vd = re.search(
+        r"^    (?:rusty::VecDeque<T, A>|auto) into_vecdeque\(\)(?: const)? \{\n",
+        text,
+        re.MULTILINE,
     )
-    if old_vd in text:
-        idx = text.find(old_vd)
+    if m_vd:
+        idx = m_vd.start()
         # Find the closing `}` of the method
         end_idx = text.find("\n    }\n", idx)
         if end_idx != -1:
