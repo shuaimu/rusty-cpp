@@ -27,6 +27,8 @@
 /// `(*receiver).method(args)`. The dispatcher is the fallback for the
 /// "don't know" case.
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <type_traits>
@@ -54,6 +56,27 @@ consteval bool lambda_reachable_via_deref() {
         return false;
     }
 }
+
+/// @brief Rust `[T; 0]`: size 0, alignment of T. `std::array<T, 0>` has
+/// sizeof 1 (libstdc++ keeps a dummy member, so it is NOT an empty class
+/// and [[no_unique_address]] cannot collapse it) — as the leading member
+/// of Rust's `_align: [Group; 0]` alignment idiom it pushed the successor
+/// field to offset 1, permanently misaligning hashbrown's static-empty
+/// ctrl group. Truly empty + alignas restores Rust repr(C) layout.
+template<typename T>
+struct alignas(T) zero_length_array {
+    constexpr zero_length_array() noexcept = default;
+    // Emitted initializers still spell `std::array<T, 0>{}`.
+    constexpr zero_length_array(std::array<T, 0>) noexcept {}
+    constexpr T* data() noexcept { return nullptr; }
+    constexpr const T* data() const noexcept { return nullptr; }
+    constexpr std::size_t size() const noexcept { return 0; }
+    constexpr bool empty() const noexcept { return true; }
+    constexpr T* begin() noexcept { return nullptr; }
+    constexpr T* end() noexcept { return nullptr; }
+    constexpr const T* begin() const noexcept { return nullptr; }
+    constexpr const T* end() const noexcept { return nullptr; }
+};
 
 /// @brief A pointer from a Rust-reference-typed binding, whatever its C++
 /// carrier shape: identity (decayed to prvalue) when the binding already

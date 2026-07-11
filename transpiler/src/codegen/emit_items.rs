@@ -825,6 +825,27 @@ impl CodeGen {
         })
     }
 
+    /// Rust `[T; 0]` fields exist to force struct ALIGNMENT under repr(C)
+    /// with ZERO size. `std::array<T, 0>` delivers neither: it drops T's
+    /// alignment AND has sizeof 1 (libstdc++ dummy member — not an empty
+    /// class, so [[no_unique_address]] can't collapse it), pushing the
+    /// successor field to offset 1. hashbrown's AlignedTags static-empty
+    /// ctrl group was misaligned both ways. rusty::detail::zero_length_array
+    /// is truly empty and alignas(T)-qualified.
+    fn zero_len_array_field_type_override(&mut self, ty: &syn::Type) -> Option<String> {
+        if let syn::Type::Array(arr) = ty
+            && let syn::Expr::Lit(l) = &arr.len
+            && let syn::Lit::Int(i) = &l.lit
+            && i.base10_parse::<u64>().ok() == Some(0)
+        {
+            return Some(format!(
+                "[[no_unique_address]] rusty::detail::zero_length_array<{}>",
+                self.map_type(&arr.elem)
+            ));
+        }
+        None
+    }
+
     pub(super) fn emit_struct(&mut self, s: &syn::ItemStruct) {
         let name_str = s.ident.to_string();
         // Completeness tracking for method-body deferral: a type is COMPLETE once
@@ -1007,6 +1028,9 @@ impl CodeGen {
                             idx += 1;
                         }
                     }
+                    let field_type = self
+                        .zero_len_array_field_type_override(&field.ty)
+                        .unwrap_or(field_type);
                     self.writeln(&format!("{} {};", field_type, emitted_field_name));
                     used_member_names.insert(emitted_field_name.clone());
                     named_field_types.insert(field_name.clone(), field.ty.clone());
@@ -1032,6 +1056,9 @@ impl CodeGen {
                         field_type = format!("const {}&", field_type);
                     }
                     let emitted_field_name = escape_cpp_keyword(&field_name);
+                    let field_type = self
+                        .zero_len_array_field_type_override(&field.ty)
+                        .unwrap_or(field_type);
                     self.writeln(&format!("{} {};", field_type, emitted_field_name));
                     unnamed_field_types.insert(field_name.clone(), field.ty.clone());
                     unnamed_field_order.push(field_name.clone());
