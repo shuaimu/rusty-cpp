@@ -1,0 +1,15 @@
+# Pinned toolchain for REPRODUCIBLE stdlib-port regeneration.
+#
+# The vendored transpiled/*_port/*.cppm artifacts are generated from THIS
+# toolchain's rust-src (library/alloc, library/core, library/std). Before
+# this pin the ports were built from a moving `stable`, so a regen could
+# never reproduce them (source drift on top of transpiler + patcher drift).
+# See docs/port_regen/STATUS.md and memory port-regen-pipeline-bitrot.
+#
+# 1.95.0 is the version the ports were first vendored against (2026-05-30).
+# Bumping this channel means RE-BASELINING every port (regen -> update
+# patcher -> matrix-validate -> replace vendored .cppm); do it deliberately,
+# not incidentally.
+[toolchain]
+channel = "1.95.0"
+components = ["rust-src"]
