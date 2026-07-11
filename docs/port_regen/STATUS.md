@@ -49,11 +49,35 @@ patches for no benefit. So per port:
 6. Eventually: a CI guard running `regen_diff.sh` that fails if
    `only_vendored.txt` has real (non-prelude) content — prevents re-rot.
 
+## vec_port re-baseline — in progress (resume here)
+
+Recipe now takes the fresh regen from wildly-broken to **5 compile errors**,
+all in `vec_port.vec.into_iter.cppm`. Patcher gained (this session):
+`clone_into` real body; `std::hint::`/`std::__builtin_assume` handling in
+`patch_hint_assert_unchecked`; and `patch_current_transpiler_qualification_drift`
+(strip `rusty::`-qualified keywords `reinterpret_cast`/`sizeof`, collapse
+`rusty::rusty::`, `rusty::ptr::cast(p)`→`p.cast()`, drop the circular
+`import rusty;` from port modules).
+
+**Remaining 5 errors (into_iter.cppm), next session:**
+- `4271`, `4279`: `too many template arguments for class template 'VecDeque'`
+  — cross-port VecDeque arity drift (IntoIter references VecDeque).
+- `4410`: `use of undeclared identifier 'super'` + function-style-cast +
+  `no member named 'new_in'` — a `super::…::new_in(...)` construct that
+  didn't lower (one line; likely needs a targeted rule or an Option-C
+  transpiler look at `super` leakage).
+
+Then: get into_iter clean → **matrix-validate** (vec + btree + indexmap +
+serde all link vec_port; clear `.rusty-modules-cache` first) → replace the
+6 vendored `transpiled/vec_port/*.cppm` with the regen → commit.
+Reproduce with: `docs/port_regen/regen_diff.sh vec_port --keep`, copy the 6
+build files into `transpiled/vec_port/`, `cmake --build .rusty-modules-cache/build --target rusty`.
+
 ## Per-port status
 
 | port | patches | brought under harness | lost-fixes recovered | re-baselined |
 |---|---|---|---|---|
-| vec_port | 62 | ✅ | `clone_into` (56fc9428) | ⬜ (18-vs-6 merge + matrix pending) |
+| vec_port | 62 | ✅ | `clone_into` (56fc9428) | ⬜ 5 errs left (into_iter: VecDeque arity + `super`/new_in) then matrix |
 | btree_port | 4 | ⬜ | | ⬜ |
 | hashbrown_port | 54 | ⬜ | (b72cd879: "zero hand-fixes" — verify) | ⬜ |
 | string_port, rc_port, arc_port, core_slice_port, binary_heap_port, cell_port, linked_list_port, vec_deque_port, ascii_port, borrow_port | — | ⬜ | | ⬜ |

@@ -2343,11 +2343,51 @@ def patch_hint_assert_unchecked(cpp_out: Path) -> int:
         text = path.read_text()
         original = text
         # Order matters: longest prefix first so we don't leave dangling `rusty::__builtin_assume(`.
+        text = text.replace("std::hint::assert_unchecked(", "__builtin_assume(")
         text = text.replace("rusty::hint::assert_unchecked(", "__builtin_assume(")
         text = text.replace("core::hint::assert_unchecked(", "__builtin_assume(")
         text = text.replace("hint::assert_unchecked(", "__builtin_assume(")
-        # If a prior pass produced `rusty::__builtin_assume(`, fix it up.
+        # If a prior pass (or the current transpiler's std::hint mapping)
+        # produced `rusty::__builtin_assume(` / `std::__builtin_assume(`,
+        # fix it up — builtins take no namespace qualifier.
         text = text.replace("rusty::__builtin_assume(", "__builtin_assume(")
+        text = text.replace("std::__builtin_assume(", "__builtin_assume(")
+        if text != original:
+            path.write_text(text)
+            n += 1
+    return n
+
+
+def patch_current_transpiler_qualification_drift(cpp_out: Path) -> int:
+    """The CURRENT transpiler (vs the one that first vendored this port in
+    May 2026) over-qualifies a few constructs into invalid or ambiguous
+    C++. These are candidate Option-C transpiler bugs (see
+    docs/port_regen/STATUS.md); patched port-local here so the re-baseline
+    stays zero-blast-radius:
+
+      - `rusty::reinterpret_cast<...>` / `rusty::mem::sizeof(...)` — C++
+        keywords cannot be namespace-qualified ("expected unqualified-id").
+      - `rusty::rusty::from_raw_parts_mut` — double `rusty::` qualification.
+      - `rusty::ptr::cast(p)` — the transpiler now lowers a raw-pointer
+        `.cast()` to a free function; on a `Unique`/`NonNull` receiver that
+        makes `Unique::from(rusty::ptr::cast(p))` ambiguous. The vendored
+        form is the method call `p.cast()`.
+    """
+    n = 0
+    for path in cpp_out.glob("*.cppm"):
+        text = path.read_text()
+        original = text
+        text = text.replace("rusty::reinterpret_cast<", "reinterpret_cast<")
+        text = text.replace("rusty::mem::sizeof(", "sizeof(")
+        text = text.replace("rusty::rusty::", "rusty::")
+        # `rusty::ptr::cast(<simple-arg>)` -> `<simple-arg>.cast()`
+        text = re.sub(r"rusty::ptr::cast\(([^()]+)\)", r"\1.cast()", text)
+        # The port modules sit BELOW the `rusty` umbrella in the module
+        # graph (rusty imports vec_port), so a port module that
+        # `import rusty;` is circular ("module 'rusty' not found" when the
+        # umbrella target builds). The port already pulls rusty:: types in
+        # via the textual header includes, so drop the spurious import.
+        text = re.sub(r"^import rusty;\n", "", text, flags=re.MULTILINE)
         if text != original:
             path.write_text(text)
             n += 1
@@ -2520,6 +2560,8 @@ def main(cpp_out: Path):
         ("hint::assert_unchecked → __builtin_assume", patch_hint_assert_unchecked),
         ("rusty::intrinsics::{const_make_global,assume} → identity/builtin",
             patch_rusty_intrinsics_stubs),
+        ("current-transpiler qualification drift (rusty::keyword / rusty::rusty:: / ptr::cast)",
+            patch_current_transpiler_qualification_drift),
         ("trim CMakeLists to core 6", patch_trim_cmakelists),
     ]
     total = 0
