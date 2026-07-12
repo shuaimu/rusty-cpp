@@ -355,6 +355,16 @@ def _alloc_specific(cpp_out: Path):
             "if (T::IS_ZST) {",
             "if constexpr (requires { T::IS_ZST; } && false) {",
         )
+        # slice_ranges: `slice_ext::range(...)` returns std::pair<size_t,size_t>
+        # (slice.hpp:2400), so `.start`/`.end` must be `.first`/`.second`.
+        t = t.replace(
+            "rusty::detail::deref_if_pointer(_let_pat.start)",
+            "rusty::detail::deref_if_pointer(_let_pat.first)",
+        )
+        t = t.replace(
+            "rusty::detail::deref_if_pointer(_let_pat.end)",
+            "rusty::detail::deref_if_pointer(_let_pat.second)",
+        )
         # RawVec::non_null: `.cast()` yields a CastProxy that implicitly
         # converts to NonNull<T>; `.as_non_null_ptr()` forces it to NonNull<u8>
         # (wrong return type). Strip it (vendored raw_vec rule).
