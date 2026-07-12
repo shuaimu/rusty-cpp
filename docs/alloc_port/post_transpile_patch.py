@@ -65,18 +65,40 @@ def _alloc_specific(cpp_out: Path):
         t = t.replace("std::ub_checks::assert_unsafe_precondition", "rusty::intrinsics::noop")
         # Vec self-defines Vec; the umbrella alias isn't in scope here.
         t = t.replace("rusty::Vec<", "Vec<")
-        # Vec forward-decl needs a default allocator (Vec<T> in from_elem etc.).
-        t = t.replace(
-            "export template<typename T, typename A>\n"
-            "    requires (rusty::alloc::Allocator<A>)\n"
-            "struct Vec;",
-            "export template<typename T, typename A = rusty::alloc::Global>\n"
-            "    requires (rusty::alloc::Allocator<A>)\n"
-            "struct Vec;",
+        # The transpiler puts `requires (Allocator<A>)` on the Vec/VecDeque
+        # CLASS template but NOT on the out-of-line method DEFINITIONS, so they
+        # mismatch ("requires clause differs in template redeclaration").
+        # Strip it everywhere — consistent, and the constraint isn't
+        # load-bearing for compilation.
+        t = re.sub(r"\n\s*requires \(rusty::alloc::Allocator<A>\)", "", t)
+        # Vec/VecDeque forward decls then need a default allocator (Vec<T> in
+        # from_elem etc.). VecDeque already carries one; add it to Vec.
+        t = re.sub(
+            r"(export template<typename T, typename A)(>\n\s*struct Vec;)",
+            r"\1 = rusty::alloc::Global\2",
+            t,
         )
         t = t.replace("IntoIter into_iter(", "IntoIter<T, A> into_iter(")
         # std::hint branch hints have no C++ form.
         t = t.replace("std::hint::unlikely(", "(").replace("std::hint::likely(", "(")
+        # Spec* extension-trait stubs (real impls live in dropped spec_* modules
+        # in the per-port layout; here they're forward-declared). The per-port
+        # injection anchors on an import line we stripped, so inject directly at
+        # global scope before the first `namespace vec {`.
+        stubs = (
+            "struct SpecFromElem { template<typename T, typename A>"
+            " static auto from_elem(T elem, std::size_t n, A alloc); };\n"
+            "template<typename T, typename Iter> struct SpecFromIter"
+            " { template<typename I> static auto from_iter(I); };\n"
+            "template<typename T, typename Iter> struct SpecExtend"
+            " { template<typename V, typename I> static void spec_extend(V&, I) {} };\n"
+            "struct SpecCloneIntoVec { template<typename Src, typename Dst>"
+            " static void clone_into(Src src, Dst& dst) { auto s = rusty::as_slice(src);"
+            " dst.clear(); dst.reserve(s.size());"
+            " for (size_t i = 0; i < s.size(); ++i) dst.push(rusty::clone(s[i])); } };\n"
+        )
+        if "struct SpecFromElem {" not in t and "\nnamespace vec {" in t:
+            t = t.replace("\nnamespace vec {", "\n" + stubs + "\nnamespace vec {", 1)
         if t != o:
             path.write_text(t)
 

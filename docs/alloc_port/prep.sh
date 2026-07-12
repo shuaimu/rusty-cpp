@@ -45,4 +45,53 @@ find "$SRC" -name "*.rs" -exec sed -i \
   -e 's|use crate::string::|use std::string::|g' \
   -e 's|^const impl|impl|' \
   {} \;
+
+# raw_vec's Cap = rustc-internal niche-optimized usize → plain usize (drops
+# the Option<Cap> niche optimization; functionality preserved).
+find "$SRC" -name "*.rs" -exec sed -i \
+  -e 's|core::num::niche_types::UsizeNoHighBit|usize|g' \
+  -e 's|num::niche_types::UsizeNoHighBit|usize|g' \
+  -e 's|unsafe { Cap::new_unchecked(\([^)]*\)) }|\1|g' \
+  -e 's|Cap::new_unchecked(\([^)]*\))|\1|g' \
+  -e 's|Cap::ZERO|0usize|g' \
+  -e 's|const ZERO_CAP: Cap = 0;|const ZERO_CAP: Cap = 0usize;|g' \
+  {} \;
+
+RV="$SRC/raw_vec/mod.rs"
+if [[ -f "$RV" ]]; then
+  # nightly provenance APIs → the older Unique::new_unchecked form.
+  sed -i 's|let ptr = Unique::from_non_null(NonNull::without_provenance(align.as_nonzero()));|let ptr = unsafe { Unique::new_unchecked(ptr::without_provenance_mut(align.as_usize())) };|' "$RV"
+  # finish_grow's `if let Some((ptr, old_layout))` tuple-destructure → explicit
+  # match (the transpiler emits the destructure without binding the components).
+  python3 - "$RV" <<'PYEOF'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+old = """        let memory = if let Some((ptr, old_layout)) = unsafe { self.current_memory(elem_layout) } {
+            // FIXME(const-hack): switch to `debug_assert_eq`
+            debug_assert!(old_layout.align() == new_layout.align());
+            unsafe {
+                // The allocator checks for alignment equality
+                hint::assert_unchecked(old_layout.align() == new_layout.align());
+                self.alloc.grow(ptr, old_layout, new_layout)
+            }
+        } else {
+            self.alloc.allocate(new_layout)
+        };"""
+new = """        let _curmem = unsafe { self.current_memory(elem_layout) };
+        let memory = if _curmem.is_some() {
+            let _pair = _curmem.unwrap();
+            let ptr = _pair.0;
+            let old_layout = _pair.1;
+            debug_assert!(old_layout.align() == new_layout.align());
+            unsafe {
+                hint::assert_unchecked(old_layout.align() == new_layout.align());
+                self.alloc.grow(ptr, old_layout, new_layout)
+            }
+        } else {
+            self.alloc.allocate(new_layout)
+        };"""
+if old in s and new not in s:
+    p.write_text(s.replace(old, new)); print("  rewrote finish_grow if-let-tuple-destructure")
+PYEOF
+fi
 echo "prep.sh complete: $SRC"
